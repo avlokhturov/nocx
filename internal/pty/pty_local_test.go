@@ -1,8 +1,10 @@
 package pty
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -200,5 +202,102 @@ func TestScrubLauncherSession(t *testing.T) {
 		if !found {
 			t.Errorf("scrub removed something it should have kept: %q", wanted)
 		}
+	}
+}
+
+// resolveShell is the one place that decides which shell a local session runs,
+// and the reason it is a function rather than four lines inside NewLocal is
+// that the decision has to be observable.
+//
+// It was not. `SHELL` was read straight from the environment and nothing
+// recorded the answer, so the shell a run drove was whatever the host had
+// exported and no artifact said which. That is not cosmetic here: nocx.bash
+// emits the OSC 636 command snapshot and nocx.zsh does not, so the shell
+// decides whether tab completion ever learns a command name. Reading one CI
+// failure on 2026-08-07 meant downloading trace artifacts and guessing the
+// shell from which dotfiles appeared in a file tree, and the guess was still
+// not conclusive (nocx-z9s9.9).
+func TestResolveShell(t *testing.T) {
+	const nixos = "/run/current-system/sw/bin/bash"
+
+	tests := []struct {
+		name       string
+		env        map[string]string
+		present    map[string]bool
+		wantShell  string
+		wantSource shellSource
+	}{
+		{
+			name:       "SHELL wins when the environment states one",
+			env:        map[string]string{"SHELL": "/usr/bin/zsh"},
+			present:    map[string]bool{"/bin/bash": true},
+			wantShell:  "/usr/bin/zsh",
+			wantSource: shellFromEnv,
+		},
+		{
+			name:       "no SHELL: the first candidate that exists",
+			present:    map[string]bool{nixos: false, "/bin/bash": true},
+			wantShell:  "/bin/bash",
+			wantSource: shellFromDetected,
+		},
+		{
+			name:       "no SHELL: candidate order is honoured",
+			present:    map[string]bool{nixos: true, "/bin/bash": true},
+			wantShell:  nixos,
+			wantSource: shellFromDetected,
+		},
+		{
+			name:       "a stripped-down container has neither",
+			present:    map[string]bool{},
+			wantShell:  "/bin/sh",
+			wantSource: shellFromFallback,
+		},
+		{
+			name:       "an empty SHELL is not a statement",
+			env:        map[string]string{"SHELL": ""},
+			present:    map[string]bool{"/bin/bash": true},
+			wantShell:  "/bin/bash",
+			wantSource: shellFromDetected,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			shell, source := resolveShell(
+				func(k string) string { return tt.env[k] },
+				func(p string) bool { return tt.present[p] },
+			)
+			if shell != tt.wantShell {
+				t.Errorf("shell = %q, want %q", shell, tt.wantShell)
+			}
+			if source != tt.wantSource {
+				t.Errorf("source = %q, want %q", source, tt.wantSource)
+			}
+		})
+	}
+}
+
+// And the paired assertion AGENTS.md asks for: on an ordinary machine the
+// decision is not merely correct, it reaches the log. A resolver nobody can
+// read the output of is the arrangement this bead exists to remove.
+func TestNewLocal_LogsTheShellItResolved(t *testing.T) {
+	var buf bytes.Buffer
+	lp, err := NewLocal(
+		log.NewSlogAdapter(slog.New(slog.NewTextHandler(&buf, nil))),
+		Config{Cols: 80, Rows: 24},
+	)
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	defer func() { _ = lp.Close() }()
+
+	line := buf.String()
+	if !strings.Contains(line, "local pty shell resolved") {
+		t.Fatalf("no resolved-shell line in the log:\n%s", line)
+	}
+	// The path and where it came from, both: "bash" without "SHELL said so"
+	// leaves the next reader doing exactly the inference this removes.
+	if !strings.Contains(line, "shell=") || !strings.Contains(line, "source=") {
+		t.Errorf("the line names neither the shell nor its source:\n%s", line)
 	}
 }

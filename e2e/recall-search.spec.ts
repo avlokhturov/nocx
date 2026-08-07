@@ -39,13 +39,15 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { readStand } from './stand'
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness-srch'
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. */
+const devharnessBin = () => readStand().devharness
 
 // Outside the ranges used by `wails dev` (34115), the e2e suite default
 // (9876), `dev-web.sh` (9880/5180), `npm run dev` (5173), and the other
 // history/vault specs (19876-19879), so the suites can run in parallel.
-const PORT = 19880
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -99,7 +101,7 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
         secretRefs: {},
       }),
     )
-    backend = new VaultBackend(DEVHARNESS_BIN, asXdgDirs(xdg), true)
+    backend = new VaultBackend(devharnessBin(), asXdgDirs(xdg), true)
   })
 
   test.afterAll(() => {
@@ -115,7 +117,7 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
     const gamma = `echo gamma-${marker}`
 
     // ── Phase 1: launch, run three commands ─────────────────────────────
-    const ep = await backend.start(PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })

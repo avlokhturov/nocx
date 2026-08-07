@@ -35,15 +35,16 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { readStand } from './stand'
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. */
+const devharnessBin = () => readStand().devharness
 
 // Two distinct ports so restart never conflicts with the first instance's
 // TIME_WAIT. Outside the ranges used by `wails dev` (34115), the e2e suite
 // default (9876), `dev-web.sh` (9880/5180), and `npm run dev` (5173).
 // Distinct from vault.spec's 19876/19877 so the suites can run in parallel.
-const FIRST_PORT = 19878
-const SECOND_PORT = 19879
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -108,7 +109,7 @@ test.describe('history: a command survives a restart and recall answers from the
     )
     // `true` = no Secret Service for this backend, regardless of the
     // session the suite runs in — the derived-key branch is the point.
-    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
+    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
   })
 
   test.afterAll(() => {
@@ -119,7 +120,7 @@ test.describe('history: a command survives a restart and recall answers from the
     const marker = `echo history-e2e-${Date.now()}`
 
     // ── Phase 1: first launch, run a command ─────────────────────────────
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
@@ -141,7 +142,7 @@ test.describe('history: a command survives a restart and recall answers from the
     await page.waitForTimeout(800)
 
     // ── Phase 2: restart the backend (fresh launch, fresh token) ────────
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })

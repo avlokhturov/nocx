@@ -11,6 +11,53 @@ async function waitForPrompt(page: import('@playwright/test').Page) {
   })
 }
 
+/**
+ * Where a word of the command line actually is, in page coordinates.
+ *
+ * The editor's content is text inside a contenteditable, so a word is not an
+ * element and no locator can name one. A Range can: walk the text nodes CM6
+ * rendered, map the word's offset into whichever node holds it, and measure it.
+ * That is the anchor — the coordinate is derived from it rather than assumed.
+ *
+ * CM6 splits a line across several text nodes when it decorates the syntax, so
+ * this walks nodes and accumulates rather than reading `textContent` once.
+ */
+async function wordCenter(
+  page: import('@playwright/test').Page,
+  word: string,
+): Promise<{ x: number; y: number }> {
+  const rect = await page.evaluate((needle) => {
+    const input = document.querySelector('.nocx-editor-input')
+    if (input === null) throw new Error('editor input not in the document')
+
+    const walker = document.createTreeWalker(input, NodeFilter.SHOW_TEXT)
+    let consumed = 0
+    const start = (input.textContent ?? '').indexOf(needle)
+    if (start < 0) throw new Error(`the editor does not contain ${needle}`)
+
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      const len = node.textContent?.length ?? 0
+      // The word has to sit inside ONE text node for a Range to measure it;
+      // a word split across two would mean CM6 decorated part of it, and
+      // silently measuring the fragment is how a fragile test comes back.
+      if (start >= consumed && start + needle.length <= consumed + len) {
+        const range = document.createRange()
+        range.setStart(node, start - consumed)
+        range.setEnd(node, start - consumed + needle.length)
+        const r = range.getBoundingClientRect()
+        return { x: r.x, y: r.y, width: r.width, height: r.height }
+      }
+      consumed += len
+    }
+    throw new Error(`${needle} spans more than one text node — cannot measure it`)
+  }, word)
+
+  if (rect.width === 0 || rect.height === 0) {
+    throw new Error(`${word} measured zero — the editor is not laid out yet`)
+  }
+  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }
+}
+
 test.describe('command editor (nocx-4ff)', () => {
   // A clean local prompt owns input immediately — the editor must not wait for a
   // command to run first. Regression for the spurious OSC 133 C emitted while
@@ -59,8 +106,21 @@ test.describe('command editor (nocx-4ff)', () => {
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 8000 })
     await page.locator(INPUT).fill('echo hello world foobar')
 
-    const box = (await page.locator(INPUT).boundingBox())!
-    await page.mouse.dblclick(box.x + 120, box.y + box.height / 2)
+    // Aim at the word, not at a number.
+    //
+    // This used to double-click `box.x + 120` and accept any of the four words
+    // back. 120px from the left edge is a claim about the terminal FONT: on the
+    // author's Mac it lands inside `world`, and in the e2e container it lands on
+    // the space before it, so the selection came back as " " and the test failed
+    // on a product that was working (nocx-z9s9.10).
+    //
+    // A double-click is inherently positional — a user does put the pointer
+    // somewhere — so the coordinate stays. What changes is where it comes from:
+    // a Range over the word itself, measured in the page at run time. Whatever
+    // the font, the point is inside `world`, and the assertion can then be the
+    // one the product actually owes — that word and no other.
+    const target = await wordCenter(page, 'world')
+    await page.mouse.dblclick(target.x, target.y)
 
     // CM6 keeps the native DOM selection in sync with the editor selection,
     // so the picked word is observable via getSelection(). The textarea's
@@ -75,9 +135,8 @@ test.describe('command editor (nocx-4ff)', () => {
     })
     // The selection must live in the editor, not in the terminal behind it.
     expect(sel.insideEditor).toBe(true)
-    // And it must be a word — double-click selects exactly one word of the
-    // command, never a partial or cross-word range.
-    expect(sel.text.length).toBeGreaterThan(0)
-    expect(['echo', 'hello', 'world', 'foobar']).toContain(sel.text)
+    // And it is exactly the word that was clicked — never a partial range, a
+    // neighbouring word, or the whitespace between two.
+    expect(sel.text).toBe('world')
   })
 })

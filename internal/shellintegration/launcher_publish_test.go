@@ -4,11 +4,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// versionPlus offsets the current script version and returns it as a string.
+//
+// The publish tests are about a RELATION — an older generation must not
+// displace a newer one — and they used to spell it with the literals "11" and
+// "12", which were "one behind" and "current" on the day they were written.
+// The next bump made "12" one BEHIND the installed version, so the
+// no-downgrade test began publishing an older generation where it meant to
+// publish a newer one and asserting the outcome of a case it was no longer
+// exercising. It failed loudly here, which is the good outcome; the same shape
+// passing quietly is the one to fear (nocx-z9s9.18).
+func versionPlus(t *testing.T, delta int) string {
+	t.Helper()
+	n, err := strconv.Atoi(version)
+	if err != nil {
+		t.Fatalf("script version %q is not an integer; these tests derive their generations from it: %v", version, err)
+	}
+	if n+delta < 1 {
+		t.Fatalf("version %q offset by %d is not a publishable generation", version, delta)
+	}
+	return strconv.Itoa(n + delta)
+}
 
 // The full launcher's publish is proven in three layers: unit (env block,
 // prelude shape, bundle contract), one-direction conformance (the sh publish
@@ -154,19 +177,21 @@ func TestShPublish_IdempotentAndNoDowngrade(t *testing.T) {
 		t.Error("same-version publish rewrote the manifest")
 	}
 
-	// A newer installed generation is not downgraded: Go publishes v12
-	// (the next app version), the sh publisher carrying v11 must leave it.
+	// A newer installed generation is not downgraded: the Go writer publishes
+	// the current version, and an sh publisher carrying the one before it must
+	// leave that alone.
+	newer, older := version, versionPlus(t, -1)
 	root := filepath.Join(home, dirName)
-	if _, pubErr := NewPublisher(testLogger(), NewOSFS(), root).Publish(testBundle("12")); pubErr != nil {
-		t.Fatalf("go publish v12: %v", pubErr)
+	if _, pubErr := NewPublisher(testLogger(), NewOSFS(), root).Publish(testBundle(newer)); pubErr != nil {
+		t.Fatalf("go publish v%s: %v", newer, pubErr)
 	}
-	runShPublish(t, "11", home)
+	runShPublish(t, older, home)
 	vr, err := NewPublisher(testLogger(), NewOSFS(), root).Verify()
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
-	if vr.Version != "12" {
-		t.Errorf("sh publish downgraded the installed generation: %+v, want version 12", vr)
+	if vr.Version != newer {
+		t.Errorf("sh publish carrying v%s downgraded the installed generation: %+v, want version %s", older, vr, newer)
 	}
 }
 
@@ -342,14 +367,17 @@ func TestShPublish_InterruptedLeavesActivationAndConverges(t *testing.T) {
 	}
 
 	// Convergence: obstacles gone (and any stale lock stale-broken by the
-	// next attempt's bounded wait), the publish completes and verifies.
-	runShPublish(t, "12", home)
+	// next attempt's bounded wait), the publish completes and verifies. The
+	// generation must be NEWER than the baseline above, or "converged" and
+	// "correctly refused as a downgrade" would look identical here.
+	converged := versionPlus(t, +1)
+	runShPublish(t, converged, home)
 	vr, err := NewPublisher(testLogger(), NewOSFS(), root).Verify()
 	if err != nil {
 		t.Fatalf("verify after convergence: %v", err)
 	}
-	if !vr.Installed || vr.Version != "12" {
-		t.Errorf("Verify after convergence = %+v, want installed version 12", vr)
+	if !vr.Installed || vr.Version != converged {
+		t.Errorf("Verify after convergence = %+v, want installed version %s", vr, converged)
 	}
 }
 

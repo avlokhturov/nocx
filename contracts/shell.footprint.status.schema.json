@@ -13,7 +13,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["identity", "generation", "path", "protocolVersion", "scriptVersion", "lastObservedAt", "removableProfileId"],
+        "required": [
+          "identity",
+          "generation",
+          "path",
+          "protocolVersion",
+          "scriptVersion",
+          "lastObservedAt",
+          "removableProfileId"
+        ],
         "properties": {
           "identity": {
             "description": "The resolved destination key (user@host:port) the fact is stored under — the same key two typed lines that resolve to the same destination share.",

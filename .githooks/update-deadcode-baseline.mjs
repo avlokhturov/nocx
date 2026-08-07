@@ -41,7 +41,6 @@ try {
 }
 
 // ─── Growth guard: every new violation must match an old baseline entry ────
-const currentKeys = new Set(violations.map(violationKey))
 const growth = violations.filter((v) => !oldBaseline.has(violationKey(v)))
 
 if (growth.length > 0) {

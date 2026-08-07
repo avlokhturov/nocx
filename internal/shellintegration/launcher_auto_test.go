@@ -201,6 +201,46 @@ func TestAutoCommand_UnderCap(t *testing.T) {
 	}
 }
 
+// TestFullLauncherStaysUnderArgLimit watches the MARGIN, not the ceiling.
+//
+// TestAutoCommand_UnderCap above asks whether the command fits, and the answer
+// stayed yes while the headroom went from 15 KB to 2 KB — so the first thing
+// anyone learned about the erosion was every remote launch refusing at once,
+// after a 2 KB script edit (nocx-z9s9.18). "Under the cap" is a moment; what
+// matters is the interval between the command and the hard limit it can never
+// approach, because MAX_ARG_STRLEN is the kernel's and cannot be raised.
+//
+// A failure here is not "make the number bigger": at 128 KiB there is nowhere
+// left to go. It means the payload must shrink — the scripts ship ~22 KB of
+// comments the remote host never reads (nocx-z9s9.17).
+func TestFullLauncherStaysUnderArgLimit(t *testing.T) {
+	// Linux MAX_ARG_STRLEN: 32 pages, and the whole remote command is one
+	// argv word. macOS is looser; this is the binding one.
+	const maxArgStrLen = 128 * 1024
+	// Enough room for a few script edits before anyone has to think about it.
+	const wantMargin = 8 * 1024
+
+	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
+		Enhanced:  true,
+		SessionID: "auto-margin-test",
+	})
+	if !ok {
+		t.Fatal("ShellAuto launcher refused")
+	}
+	if margin := maxArgStrLen - len(cmd); margin < wantMargin {
+		t.Errorf("auto command is %d bytes, leaving %d under MAX_ARG_STRLEN (%d) — want at least %d.\n"+
+			"The cap cannot absorb this: MAX_ARG_STRLEN is the kernel's. Shrink the payload instead\n"+
+			"— the three scripts ship ~22 KB of comments the far host never reads (nocx-z9s9.17).",
+			len(cmd), margin, maxArgStrLen, wantMargin)
+	}
+	// The configured cap must itself respect the kernel bound, or it would
+	// authorise a command that cannot exec.
+	if maxFullLauncherLen+wantMargin > maxArgStrLen {
+		t.Errorf("maxFullLauncherLen %d + margin %d exceeds MAX_ARG_STRLEN %d",
+			maxFullLauncherLen, wantMargin, maxArgStrLen)
+	}
+}
+
 // TestAutoCommand_RefusesOverCap lowers the full launcher cap to prove the
 // refusal path: a launcher that would outgrow the remote limits must refuse,
 // not emit a command the far host cannot exec.

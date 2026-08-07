@@ -1,4 +1,4 @@
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, clickIntoEditor } from './harness'
 
 // Regression guard for the shared half of nocx-d1f: with one tab, clicking the
 // window left the terminal unable to take input.
@@ -21,7 +21,6 @@ import { test, expect, promptReady } from './harness'
 // (ADR-0010), which keeps the class — not .xterm-helper-textarea (the raw
 // terminal grid). The path itself is identical.
 
-const PANE = '.pane.active'
 const INPUT = '.nocx-editor-input'
 
 test('a click into the pane leaves the terminal taking keystrokes', async ({ page }) => {
@@ -38,16 +37,14 @@ test('a click into the pane leaves the terminal taking keystrokes', async ({ pag
   await page.locator('[aria-label="New tab"]').focus()
   await expect(page.locator('[aria-label="New tab"]')).toBeFocused()
 
-  // Click near the bottom of the pane where the editor lives.  The centre
-  // of the pane lands on the xterm area and its hidden textarea steals focus;
-  // the focus-bounce handler bails when focus is already inside the xterm
-  // container, so it never redirects — this exercises the editor's own
-  // click-to-focus handler instead of the bounce path.  That path is itself
-  // the subject of a separate fix: the bounce handler needs a mousedown
-  // listener that focuses the editor when visible regardless of where focus
-  // lands inside the pane.
-  const box = await page.locator(PANE).boundingBox()
-  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height - 30)
+  // Click the editor.  The centre of the pane lands on the xterm area and its
+  // hidden textarea steals focus; the focus-bounce handler bails when focus is
+  // already inside the xterm container, so it never redirects — this exercises
+  // the editor's own click-to-focus handler instead of the bounce path.  That
+  // path is itself the subject of a separate fix: the bounce handler needs a
+  // mousedown listener that focuses the editor when visible regardless of where
+  // focus lands inside the pane.
+  await clickIntoEditor(page)
 
   await expect(page.locator(INPUT)).toBeFocused()
 

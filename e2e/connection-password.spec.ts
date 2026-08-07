@@ -22,22 +22,23 @@
  * One serial test: the second open MUST observe state the first open
  * installed, not an independent fixture.
  */
-import { test as base, expect } from '@playwright/test'
+import { test as base, expect, type Page } from '@playwright/test'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, documentDir } from './harness'
+import { readStand } from './stand'
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. */
+const devharnessBin = () => readStand().devharness
 const FIXTURE_PASSWORD = 'e2e-password-42'
 const PROFILE_NAME = 'Password Proof'
 const PROFILE_ID = 'ssh:password-proof'
-const FIXTURE_PORT = 19901
 const HOST_KEY_PROFILE_NAME = 'Host Key Proof'
 const HOST_KEY_PROFILE_ID = 'ssh:host-key-proof'
-const HOST_KEY_FIXTURE_PORT = 19902
 
 const TAB_TITLE = '.nocx-tab-title'
 const PROMPT = '.ui-prompt'
@@ -81,7 +82,10 @@ function seedProfile(isolatedHome: string, fixtureAddr: number): string {
 /** Seed a key-auth profile, so a spec can reach the host-key gate without
  *  a password prompt standing in front of it. */
 function seedPublicKeyProfile(isolatedHome: string, fixtureAddr: number, keyPath: string): void {
-  const dir = join(isolatedHome, '.config', 'nocx-dev')
+  // documentDir, not a hand-spelled path: the store is under
+  // Library/Application Support on darwin and .config elsewhere, and the two
+  // spellings agree on every platform except the one CI runs (nocx-z9s9.3).
+  const dir = documentDir(isolatedHome)
   mkdirSync(dir, { recursive: true })
   writeFileSync(
     join(dir, 'profiles.json'),
@@ -180,7 +184,7 @@ test.describe('connection password ask: first open prompts, remembered second op
   test.beforeAll(async () => {
     root = createDisposableRoot()
     fixture = await startSshd(FIXTURE_PASSWORD)
-    backend = new VaultBackend(DEVHARNESS_BIN, { root }, true)
+    backend = new VaultBackend(devharnessBin(), { root }, true)
   })
 
   test.afterAll(() => {
@@ -191,8 +195,8 @@ test.describe('connection password ask: first open prompts, remembered second op
   test('first open prompts and connects; after remembering, the second open does not prompt', async ({
     page,
   }) => {
-    const ep = await backend.start(FIXTURE_PORT)
-    const backendLog = join(root, `devharness-${FIXTURE_PORT}.log`)
+    const ep = await backend.start()
+    const backendLog = backend.logFile
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
@@ -284,7 +288,7 @@ test.describe('open-time host key consent', () => {
   test.beforeAll(async () => {
     root = createDisposableRoot()
     fixture = await startSshd()
-    backend = new VaultBackend(DEVHARNESS_BIN, { root }, true)
+    backend = new VaultBackend(devharnessBin(), { root }, true)
   })
 
   test.afterAll(() => {
@@ -295,7 +299,7 @@ test.describe('open-time host key consent', () => {
   test('an unknown key asks once, records consent, and retries the failed open', async ({
     page,
   }) => {
-    const ep = await backend.start(HOST_KEY_FIXTURE_PORT)
+    const ep = await backend.start()
     seedPublicKeyProfile(backend.isolatedHome, fixture.addr, fixture.userKey)
     await bindEndpoint(page, ep)
     await page.goto('/')
@@ -308,7 +312,7 @@ test.describe('open-time host key consent', () => {
     const dialog = page.getByRole('dialog').filter({ hasText: 'Unknown host key' })
     await expect(dialog).toBeVisible({ timeout: 15_000 })
     await expect(dialog).toContainText('Offered fingerprint')
-    const backendLog = join(root, `devharness-${HOST_KEY_FIXTURE_PORT}.log`)
+    const backendLog = backend.logFile
     expect(readFileSync(backendLog, 'utf8')).not.toContain(`profile_id=${HOST_KEY_PROFILE_ID}`)
 
     await dialog.getByRole('button', { name: 'Trust host key' }).click()

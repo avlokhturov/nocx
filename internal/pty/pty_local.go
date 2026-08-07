@@ -103,31 +103,59 @@ func resolveCwd(cwd string) string {
 	return ""
 }
 
+// shellSource names where the shell a local session runs came from. It exists
+// so the log line can distinguish "the environment asked for this one" from
+// "we went looking and this is what the machine had" — two answers that need
+// different fixes when a run drove a shell nobody expected.
+type shellSource string
+
+const (
+	shellFromEnv      shellSource = "SHELL"
+	shellFromDetected shellSource = "detected"
+	shellFromFallback shellSource = "fallback"
+)
+
+// Prefer bash for shell integration (OSC 133 markers, and the OSC 636 command
+// snapshot only it emits). Fall back through common paths; on stripped-down
+// containers none may exist, so keep /bin/sh as the last resort.
+var shellCandidates = []string{
+	"/run/current-system/sw/bin/bash", // NixOS
+	"/bin/bash",
+	"/usr/bin/bash",
+	"/usr/local/bin/bash",
+}
+
+// resolveShell decides which shell a local session runs, and says where the
+// answer came from. Both lookups are injected so the decision can be tested
+// without a machine that happens to have the right binaries.
+func resolveShell(lookupEnv func(string) string, exists func(string) bool) (string, shellSource) {
+	if shell := lookupEnv("SHELL"); shell != "" {
+		return shell, shellFromEnv
+	}
+	for _, candidate := range shellCandidates {
+		if exists(candidate) {
+			return candidate, shellFromDetected
+		}
+	}
+	return "/bin/sh", shellFromFallback
+}
+
 func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) {
 	for _, opt := range opts {
 		opt(&cfg)
 	}
 
-	// Prefer bash for shell integration (OSC 133 markers).  Fall back through
-	// common paths; on stripped-down containers none may exist, so keep /bin/sh
-	// as the last resort.
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		for _, candidate := range []string{
-			"/run/current-system/sw/bin/bash", // NixOS
-			"/bin/bash",
-			"/usr/bin/bash",
-			"/usr/local/bin/bash",
-		} {
-			if _, err := os.Stat(candidate); err == nil {
-				shell = candidate
-				break
-			}
-		}
-	}
-	if shell == "" {
-		shell = "/bin/sh"
-	}
+	shell, shellFrom := resolveShell(os.Getenv, func(p string) bool {
+		_, err := os.Stat(p)
+		return err == nil
+	})
+	// Logged, not merely decided. Which shell a session runs is the single
+	// biggest thing that varies between two machines running the same code:
+	// nocx.bash emits the OSC 636 command snapshot and nocx.zsh does not, so
+	// the shell decides whether tab completion ever learns a command name. This
+	// line is what lets a run's account answer that without inference
+	// (nocx-z9s9.9).
+	logger.Info("local pty shell resolved", "shell", shell, "source", string(shellFrom))
 
 	cmd := exec.Command(shell, "-i") //nolint:gosec // shell is from detected path
 	cmd.Dir = resolveCwd(cfg.Cwd)

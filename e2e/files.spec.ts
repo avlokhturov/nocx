@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, expect } from './harness'
+import { readStand } from './stand'
 import { promptReady } from './harness'
 import type { Page } from '@playwright/test'
 //   From a cold start the Files icon is FIRST in the activity bar, present
@@ -46,7 +46,12 @@ let fixtureBasename: string
 test.beforeAll(() => {
   // Created by the test under the isolated HOME when the suite declares one
   // (headless path), else under the system tmp dir (wails path).
-  const base = process.env.NOCX_E2E_HOME_DIR ?? tmpdir()
+  // Under the stand's home, asked of the stand: NOCX_E2E_HOME_DIR is the
+  // backend's variable, not this process's, so reading it here answered
+  // undefined and the fixture landed in the system tmp dir — where a shared
+  // runner keeps everybody else's, which is what made a row count read 55
+  // instead of 50 (nocx-z9s9.5).
+  const base = readStand().home
   fixtureRoot = mkdtempSync(join(base, 'nocx-files-e2e-'))
   fixtureBasename = fixtureRoot.split('/').pop() as string
   writeFileSync(join(fixtureRoot, 'notes.md'), 'hello from the fixture\n')
@@ -74,8 +79,9 @@ const TREE_ROW = '.ui-tree-row'
 /** Make the active tab's origin the fixture: cd there (OSC 7 makes the cwd
  *  verified). The panel — open on Files from cold start — REVEALS the new
  *  cwd through the origin-change notification: no tab switch, no click,
- *  which is the behaviour under test. The fixture's own row lands selected;
- *  expand it so its children (bigdir, notes.md) are rows the tests act on. */
+ *  which is the behaviour under test. The fixture's own row lands selected
+ *  AND expanded, so its children (bigdir, notes.md) are already rows the
+ *  other tests act on — the reveal is what puts them there, not a click. */
 async function openFilesAtFixture(page: Page) {
   await page.goto('/')
   await promptReady(page)
@@ -93,11 +99,14 @@ async function openFilesAtFixture(page: Page) {
     timeout: 20_000,
   })
   // The reveal landed: the fixture's row is selected (the walk expanded
-  // the chain from / down to it).
+  // the chain from / down to it) and the target itself is OPEN — finishReveal
+  // expands it and lists its first page, so arriving somewhere shows you what
+  // is there. Asserted, not clicked: a click on `Expand <fixture>` waits for a
+  // control that never exists (the disclosure reads `Collapse <fixture>` from
+  // the moment the walk lands), which is a 60s timeout per spec (nocx-z9s9.1).
   const fixtureRow = page.locator(TREE_ROW, { hasText: fixtureBasename })
   await expect(fixtureRow).toHaveAttribute('data-selected', 'true', { timeout: 20_000 })
-  // Expand the fixture so its children are rows the other tests click on.
-  await fixtureRow.getByRole('button', { name: `Expand ${fixtureBasename}` }).click()
+  await expect(fixtureRow).toHaveAttribute('data-disclosure', 'expanded', { timeout: 20_000 })
   await expect(page.locator('.ui-tree-row__name').filter({ hasText: 'bigdir' })).toBeVisible()
 }
 test('cold start: the Files icon is first in the activity bar, present and enabled; the panel is open on Files', async ({
@@ -178,14 +187,28 @@ test('expanding a directory lists a page and "show next" reveals the rest', asyn
   // kit row). The fixture sits under the revealed chain from / (its depth
   // is its path's segment count minus the root), so bigdir's children sit
   // one deeper than the fixture's row.
-  const childrenDepth = fixtureRoot.split('/').filter(Boolean).length + 1
   await page.locator('button[aria-label="Expand bigdir"]').click()
 
-  // A page of the directory: PAGE_SIZE depth-N rows and a "show next"
-  // button naming the remainder.
-  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(PAGE_SIZE)
-  // The show-more button of the level being paged: the reveal expanded
-  // /tmp too, whose own show-more button would match an unscoped locator.
+  // Counted by PARENT, not by depth. A depth counts every row at that level in
+  // the whole tree, and the reveal walked here through directories with
+  // neighbours of their own — on macOS the fixture lives under
+  // /var/folders/<x>/<y>/T/, which a shared runner fills with other tests'
+  // fixtures. The count then reads 55 or 56 where the directory holds 50, and
+  // the number depends on who else is running (nocx-z9s9.5). A path prefix
+  // names the children of this directory and nothing else.
+  const bigdir = `${fixtureRoot}/bigdir`
+  const children = page.locator(`.files-row[data-path^="${bigdir}/"] ${TREE_ROW}`)
+
+  // A page of the directory: PAGE_SIZE rows and a "show next" button naming
+  // the remainder.
+  await expect(children).toHaveCount(PAGE_SIZE)
+  // The show-more button of the level being paged: the reveal expanded the
+  // fixture's parent too, whose own show-more would match an unscoped locator.
+  // The show-more row carries no data-path (files-view.tsx renders it with a
+  // depth and nothing else), so this one is scoped by depth — which is enough
+  // here for the reason the count was not: the fixture's PARENT was expanded
+  // too, and its own show-more sits one level shallower.
+  const childrenDepth = fixtureRoot.split('/').filter(Boolean).length + 1
   const showMore = page.locator(
     `.files-row[data-depth="${childrenDepth}"] [data-testid="files-show-more"]`,
   )
@@ -193,14 +216,12 @@ test('expanding a directory lists a page and "show next" reveals the rest', asyn
 
   // First "show next": another page lands, the remainder shrinks.
   await showMore.click()
-  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(
-    PAGE_SIZE * 2,
-  )
+  await expect(children).toHaveCount(PAGE_SIZE * 2)
   await expect(showMore).toHaveText(`Show next ${BIGDIR_COUNT - PAGE_SIZE * 2}`)
 
   // Second "show next": the rest lands and the button is gone.
   await showMore.click()
-  await expect(page.locator(`${TREE_ROW}[data-depth="${childrenDepth}"]`)).toHaveCount(BIGDIR_COUNT)
+  await expect(children).toHaveCount(BIGDIR_COUNT)
   await expect(showMore).toHaveCount(0)
 
   // The whole directory is present, nothing duplicated or skipped (D10
@@ -231,13 +252,16 @@ test('clicking a file opens a tab whose content matches the file and whose title
   await expect(page.locator(TAB_TITLE).filter({ hasText: '·' })).toHaveCount(0)
 })
 
-test('right-clicking a row copies the relative and the absolute path', async ({
-  page,
-  context,
-}) => {
-  // The copy rides the app's clipboard seam, which on this headless path
-  // is navigator.clipboard — reading it back needs the read permission.
-  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+// The right-click is split from the read-back on purpose. Reading the
+// clipboard needs the `clipboard-read`/`clipboard-write` permissions, and
+// WebKit knows neither — granting them THROWS ("Unknown permission:
+// clipboard-write") before the test does anything, which is what made this
+// spec red on webkit (nocx-z9s9.2). Skipping the whole thing would also stop
+// watching the menu on the engine the app actually ships in, and a context
+// menu is exactly the kind of surface that differs between engines. So the
+// menu is asserted on both, and only the read-back is Chromium-only —
+// the same guard, with the same stated reason, as clipboard.spec.ts:41.
+test('right-clicking a row offers both copy entries', async ({ page }) => {
   await openFilesAtFixture(page)
 
   // The user's seam is the right-click; the menu appears with both copy
@@ -248,24 +272,42 @@ test('right-clicking a row copies the relative and the absolute path', async ({
   await expect(menu.getByRole('menuitem', { name: 'Copy Relative Path' })).toBeVisible()
   await expect(menu.getByRole('menuitem', { name: 'Copy Absolute Path' })).toBeVisible()
   await expect(menu.getByRole('menuitem', { name: 'Show in Finder' })).toBeVisible()
+})
 
-  // Relative: as spelled from the tree root — the tree is rooted at the
-  // filesystem root, so the fixture's file is spelled from / (no leading
-  // slash: "the path in this tree").
-  await menu.getByRole('menuitem', { name: 'Copy Relative Path' }).click()
-  await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(join(fixtureRoot, 'notes.md').slice(1))
+test.describe('the copy entries put the path on the clipboard', () => {
+  test.skip(
+    ({ browserName }) => browserName !== 'chromium',
+    'clipboard-read permission is Chromium-only; WebKit must be checked manually',
+  )
 
-  // Absolute: the lexical absolute path of the row the user clicked.
-  await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
-  await page
-    .locator('[data-testid="files-context-menu"]')
-    .getByRole('menuitem', { name: 'Copy Absolute Path' })
-    .click()
-  await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(join(fixtureRoot, 'notes.md'))
+  test('relative and absolute', async ({ page, context }) => {
+    // The copy rides the app's clipboard seam, which on this headless path
+    // is navigator.clipboard — reading it back needs the read permission.
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+    await openFilesAtFixture(page)
+
+    await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
+    const menu = page.locator('[data-testid="files-context-menu"]')
+    await expect(menu).toBeVisible()
+
+    // Relative: as spelled from the tree root — the tree is rooted at the
+    // filesystem root, so the fixture's file is spelled from / (no leading
+    // slash: "the path in this tree").
+    await menu.getByRole('menuitem', { name: 'Copy Relative Path' }).click()
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(join(fixtureRoot, 'notes.md').slice(1))
+
+    // Absolute: the lexical absolute path of the row the user clicked.
+    await page.locator('.files-row').filter({ hasText: 'notes.md' }).click({ button: 'right' })
+    await page
+      .locator('[data-testid="files-context-menu"]')
+      .getByRole('menuitem', { name: 'Copy Absolute Path' })
+      .click()
+    await expect
+      .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(join(fixtureRoot, 'notes.md'))
+  })
 })
 
 test('writing to the file from outside nocx makes the row update without anyone pressing anything', async ({

@@ -24,21 +24,21 @@
 // Output:
 //
 //	ADDR=127.0.0.1:<port>
-//	USERKEY=<path to the user private key PEM>
+//	USERKEY=<path to the user private key, in the OpenSSH encoding>
 //	KNOWNHOSTS=<one known_hosts line for the host key>
 //	CONN=<client address>   printed once per client, when its first userauth
-//	                        attempt (the publickey offer) reaches the server:
-//	                        key exchange is done and the client is one
-//	                        response from rendering the password prompt. The
-//	                        journey waits for this line before typing the
-//	                        password, so the run is deterministic, not timed.
+//	                        attempt of a real method (publickey or password —
+//	                        never the "none" probe) reaches the server. Key
+//	                        exchange is done and the client is one response from
+//	                        rendering the password prompt. The journey waits for
+//	                        this line before typing the password, so the run is
+//	                        deterministic, not timed.
 //	READY
 package main
 
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -46,6 +46,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/creack/pty"
@@ -113,9 +114,8 @@ func run() error {
 }
 
 // buildConfig assembles the ServerConfig for one connection. onAuthAttempt
-// fires on the client's publickey offer — the first userauth message that
-// engages a callback (gossh answers "none" itself), after key exchange and
-// before the password prompt.
+// fires on the client's first userauth attempt by any method, after key
+// exchange and before the password prompt.
 func buildConfig(userSigner, hostSigner gossh.Signer, banner, password string, onAuthAttempt func()) *gossh.ServerConfig {
 	config := &gossh.ServerConfig{}
 	if password != "" {
@@ -131,12 +131,10 @@ func buildConfig(userSigner, hostSigner gossh.Signer, banner, password string, o
 			return nil, fmt.Errorf("e2e-sshd: wrong password")
 		}
 		config.PublicKeyCallback = func(_ gossh.ConnMetadata, _ gossh.PublicKey) (*gossh.Permissions, error) {
-			onAuthAttempt()
 			return nil, fmt.Errorf("e2e-sshd: public key auth disabled")
 		}
 	} else {
 		config.PublicKeyCallback = func(_ gossh.ConnMetadata, key gossh.PublicKey) (*gossh.Permissions, error) {
-			onAuthAttempt()
 			// Compare the wire blob (algorithm + key), not the raw key: the
 			// client sends key.Marshal(), which for ed25519 carries the
 			// algorithm string ahead of the 32-byte key.
@@ -145,6 +143,35 @@ func buildConfig(userSigner, hostSigner gossh.Signer, banner, password string, o
 			}
 			return nil, fmt.Errorf("e2e-sshd: unknown public key")
 		}
+	}
+	// The CONN= signal, from ONE place and for every authentication method.
+	//
+	// It used to hang off PublicKeyCallback, which made it a statement about
+	// how the client chose to authenticate rather than about whether it
+	// arrived. A client that offers no key — because its key would not load,
+	// because it has none, because it was told not to — connected, authenticated
+	// by password and completed the whole session while the fixture stayed
+	// silent, and the waiting spec reported "saw 0/1 CONN= lines in 30000ms":
+	// a timeout naming the signal instead of the cause (nocx-z9s9.12).
+	//
+	// "none" is excluded deliberately, and that exclusion is the timing
+	// contract. Every OpenSSH client opens with a `none` probe purely to learn
+	// which methods exist; firing on it would signal roughly a whole round trip
+	// before the client has rendered anything, and the journey types its
+	// password the moment this line arrives. Measured: firing on `none` got the
+	// journey past its old timeout and then failed it at the SECOND connection
+	// with two entered blocks instead of three — a password typed into a prompt
+	// that was not up yet.
+	//
+	// The first attempt of a real method is what the old publickey callback
+	// happened to catch, and it is what the waiter actually needs: key exchange
+	// done, the server's method list delivered, the client one response away
+	// from a prompt.
+	config.AuthLogCallback = func(_ gossh.ConnMetadata, method string, _ error) {
+		if method == "none" {
+			return
+		}
+		onAuthAttempt()
 	}
 	if banner != "" {
 		b := banner
@@ -176,11 +203,18 @@ func writeUserKey(priv ed25519.PrivateKey) (string, error) {
 		return "", fmt.Errorf("temp dir: %w", err)
 	}
 	path := dir + "/id_e2e"
-	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	// The OpenSSH encoding, because the reader is the OpenSSH CLIENT.
+	//
+	// This used to write PKCS#8, which OpenSSH cannot load for ed25519 at all:
+	// `ssh -i` reports `Load key "…": invalid format`, offers no key, and then
+	// authenticates by password as though nothing were wrong. Go's own
+	// ssh.ParsePrivateKey reads both encodings, so every Go-side check of this
+	// file passed throughout (nocx-z9s9.12).
+	block, err := gossh.MarshalPrivateKey(priv, "")
 	if err != nil {
 		return "", fmt.Errorf("marshal key: %w", err)
 	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
 		return "", fmt.Errorf("write key: %w", err)
 	}
 	return path, nil
@@ -297,6 +331,35 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 // child alone holds the slave, so its exit propagates EOF to the master and
 // the channel closes. stderr of the child is echoed to the fixture's stderr
 // so a spawn failure is observable instead of a silent dead session.
+// sessionEnv is the environment a session gets, and SHELL is why it exists.
+//
+// A real sshd sets SHELL from the account's passwd entry, and nocx's installed
+// launcher carrier reads exactly that to choose its script:
+//
+//	case "${SHELL:-/bin/sh}" in */bash) … */zsh) … *) … posix
+//
+// This used to pass os.Environ() straight through, so SHELL was whatever had
+// leaked in from whoever started the fixture — and in the e2e container nothing
+// sets it. Every connection over the installed launcher therefore took the POSIX
+// fallback and reported `tier=minimal`, while the first connection's argv-borne
+// launcher — which the backend picks, not the remote — reported `tier=enhanced`.
+// One host, two answers to "which shell is this", depending only on which path
+// asked (nocx-z9s9.13).
+//
+// Set explicitly rather than inherited: this fixture already decides the login
+// shell by exec'ing bash, and a decision it makes is a decision it should
+// publish.
+func sessionEnv(shell string) []string {
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "SHELL=") || strings.HasPrefix(kv, "TERM=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "SHELL="+shell, "TERM=xterm-256color")
+}
+
 func startCommand(ch gossh.Channel, st *sessionState, command string) {
 	st.mu.Lock()
 	if st.started {
@@ -326,7 +389,7 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 	}
 	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
 	cmd := exec.Command(bash, "-c", command)
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	cmd.Env = sessionEnv(bash)
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave

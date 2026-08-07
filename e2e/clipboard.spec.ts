@@ -1,4 +1,4 @@
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, clickIntoEditor } from './harness'
 
 // Terminal clipboard e2e: copy-on-select, right-click paste.
 //
@@ -17,7 +17,6 @@ import { test, expect, promptReady } from './harness'
 // Honest outcome: all tests are Chromium-only. WebKit must be checked by
 // hand in a packaged build.
 
-const PANE = '.pane.active'
 const INPUT = '.nocx-editor-input'
 
 async function disableWailsRuntime(page: import('@playwright/test').Page) {
@@ -110,14 +109,10 @@ test.describe('paste', () => {
       await navigator.clipboard.writeText(command)
     }, pastedCommand)
 
-    // Right-click near the bottom of the pane where the editor lives.
-    // The contextmenu handler on the pane pastes to the editor when it is
-    // visible; clicking the xterm area may have its own handler.
-    const box = await page.locator(PANE).boundingBox()
-    if (!box) throw new Error('pane not found')
-    await page.mouse.click(box.x + box.width / 2, box.y + box.height - 30, {
-      button: 'right',
-    })
+    // Right-click the editor. The contextmenu handler on the pane pastes to the
+    // editor when it is visible, and a contextmenu on the editor bubbles to it;
+    // clicking the xterm area may have its own handler.
+    await clickIntoEditor(page, { button: 'right' })
 
     // Wait for the paste to land in the editor. The input surface is CM6's
     // contenteditable contentDOM (ADR-0010), so the text is read back from the

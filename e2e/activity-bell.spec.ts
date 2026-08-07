@@ -1,4 +1,8 @@
-import { test, expect } from './harness'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+
+import { test, expect, promptReady } from './harness'
 
 const TAB = '.nocx-tab'
 const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
@@ -10,38 +14,70 @@ const ACTIVITY = '.nocx-tab-indicator[data-activity="true"]'
 // you back. If this fails, a background agent is silent and the feature is
 // useless in the case it was built for.
 test('a bell lights the indicator from inside the alternate buffer', async ({ page }) => {
-  await page.goto('/')
-  await expect(page.locator(TAB)).toHaveCount(1)
+  // The shell blocks on THIS file, and the test creates it only once the tab
+  // is demonstrably in the background (nocx-z9s9.15).
+  const gate = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nocx-e2e-bell-')), 'go')
 
-  // Enter the alternate screen, wait, ring the bell, then block forever.
-  // The shell `sleep 3` is a genuine ordering constraint that cannot be
-  // expressed as a Playwright condition: the bell must fire AFTER the tab
-  // is backgrounded, but the bell is part of the same shell command and
-  // keystrokes route to the active tab.  `cat` replaces the original
-  // `sleep 30` — it blocks indefinitely instead of for a fixed duration,
-  // so the test never races a deadline.
-  await page.keyboard.type("printf '\\033[?1049h'; sleep 3; printf '\\a'; cat")
-  await page.keyboard.press('Enter')
+  try {
+    await page.goto('/')
+    await expect(page.locator(TAB)).toHaveCount(1)
 
-  // Wait for alt-screen to be active before backgrounding (replaces
-  // waitForTimeout(2000)).
-  //
-  // Asked of the PANE, not of `#app`. `#app.alt-screen` is gone: it existed to
-  // empty the window chrome so a viewport-sized fullscreen xterm would not
-  // paint through it, and nocx-6w4z moved the fullscreen region inside the pane
-  // precisely so the chrome could stay. The class went with it, and this wait
-  // silently became a 5s timeout on a class nothing sets any more (nocx-42lb).
-  // `live-fullscreen` is what `enterFullscreen()` writes, on the alt-screen
-  // path, so it states the same condition against the code that survived.
-  await expect(page.locator('.pane.active .xterm-live-container')).toHaveClass(/live-fullscreen/, {
-    timeout: 5000,
-  })
+    // The precondition this test was missing, and the one that actually broke
+    // it on CI. Having a `.nocx-tab` says a tab exists, not that the editor
+    // owns the keyboard — so on a slow runner the keystrokes below were typed
+    // into nothing, the shell never received `printf '\033[?1049h'`, and the
+    // pane stayed `live-idle` through the whole 5s budget. The failure looked
+    // like a broken alternate-screen transition and was a lost first character.
+    //
+    // It also explains the finding recorded against this bead: that swapping
+    // the old `sleep 3` for a wait-loop made the alt screen stop registering
+    // EVERY run, which read as a renderer defect. Both spellings were racing
+    // the same missing wait; the loop is simply the longer line, so it lost
+    // more often. Nothing is wrong with a compound `while` command.
+    await promptReady(page)
 
-  await page.keyboard.press('Meta+t')
-  await expect(page.locator(TAB)).toHaveCount(2)
-  await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
+    // Enter the alternate screen, block until the test opens the gate, ring
+    // the bell, then block forever on `cat` so nothing races a deadline.
+    //
+    // The ordering that matters — the bell fires AFTER the tab is backgrounded
+    // — used to be bought with `sleep 3`, whose clock starts at Enter rather
+    // than at the moment the second tab exists. That is a bet on how long
+    // opening a tab takes, and on a cold runner it is lost (the same defect
+    // nocx-z9s9.14 fixed in activity.spec.ts). The gate makes it a fact.
+    await page.keyboard.type(
+      `printf '\\033[?1049h'; while [ ! -e ${gate} ]; do sleep 0.1; done; printf '\\a'; cat`,
+    )
+    await page.keyboard.press('Enter')
 
-  // Wait for the activity indicator — replaces waitForTimeout(6000).
-  // Playwright's expect polls every ~100ms until found.
-  await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 10000 })
+    // Asked of the PANE, not of `#app`. `#app.alt-screen` is gone: it existed
+    // to empty the window chrome so a viewport-sized fullscreen xterm would not
+    // paint through it, and nocx-6w4z moved the fullscreen region inside the
+    // pane precisely so the chrome could stay. The class went with it, and this
+    // wait silently became a 5s timeout on a class nothing sets any more
+    // (nocx-42lb). `live-fullscreen` is what `enterFullscreen()` writes, on the
+    // alt-screen path, so it states the same condition against the code that
+    // survived.
+    await expect(page.locator('.pane.active .xterm-live-container')).toHaveClass(
+      /live-fullscreen/,
+      { timeout: 10_000 },
+    )
+
+    await page.keyboard.press('Meta+t')
+    await expect(page.locator(TAB)).toHaveCount(2)
+    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'false')
+
+    // Backgrounded, and only now may the bell ring. Nothing before this line
+    // can have lit the indicator, which is the property the test is about.
+    //
+    // One bell is enough, unlike activity.spec's repeating echo: that one has
+    // to out-wait the 400ms resize-echo suppression a new tab triggers, and the
+    // bell does not go through it — onBell calls requestAttention()
+    // unconditionally (terminal-content.ts:1899). Suppressing a bell is exactly
+    // what the escape hatch forbids.
+    fs.writeFileSync(gate, '')
+
+    await expect(page.locator(TAB).first().locator(ACTIVITY)).toBeAttached({ timeout: 10_000 })
+  } finally {
+    fs.rmSync(path.dirname(gate), { recursive: true, force: true })
+  }
 })
