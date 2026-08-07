@@ -275,6 +275,12 @@ export function GitPanel(props: GitPanelProps) {
       <FileStatusRow
         path={row.entry.path}
         status={letter}
+        // The wire's counts pass straight through: the panel decides
+        // nothing about them. Absent means "no count exists" (untracked,
+        // binary, conflicted, bounded-out read) and the kit renders
+        // nothing — never +0 −0 (brief nocx-i4ki).
+        added={row.entry.added}
+        deleted={row.entry.deleted}
         onActivate={activatable ? () => openDiff(row) : undefined}
         actions={rowAction(row)}
       />

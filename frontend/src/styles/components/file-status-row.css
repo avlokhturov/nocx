@@ -49,6 +49,26 @@
   color: var(--color-accent);
 }
 
+/* The line counts: +N −N, the answer to "how much did it change" (brief
+   nocx-i4ki). Rendered only when a count exists — an untracked, binary or
+   conflicted row, or one whose count read was bounded out (design D9), has
+   none and draws nothing, never +0 −0. The tones are fixed by meaning: an
+   addition is success, a removal danger; they never vary, so unlike the
+   status letter there is no tone table for a surface to name. Tabular
+   numerals keep a column of counts aligned as they change. */
+.ui-file-status-row__counts {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.ui-file-status-row__added {
+  color: var(--color-success);
+}
+
+.ui-file-status-row__deleted {
+  color: var(--color-danger);
+}
+
 /* The file-type glyph: every record this row renders is a file path (design
    §4: --untracked-files=all lists files, not directories), so the kit
    renders the file glyph and a surface cannot supply one. Decorative. */

@@ -65,7 +65,7 @@ export interface Status {
    */
   total: number
   /**
-   * ONE discriminator for how much of the repository's status the lists hold. The panel switches on it first: a traversal stopped by the work ceiling after 100 records must not look complete (design D9).
+   * ONE discriminator for how much of the repository's status the lists hold. The panel switches on it first: a traversal stopped by the work ceiling after 100 records must not look complete (design D9). 'cut' also covers a count read that was stopped or failed: the lists are then complete and total exact, but no entry carries counts — counts are all-or-nothing, because a partial count set makes rows past the cut look like rows with nothing to count (brief nocx-i4ki).
    */
   completeness: 'complete' | 'capped' | 'cut'
 }
@@ -82,4 +82,12 @@ export interface Entry {
    * The porcelain v2 worktree-side status column ('.' when that side is clean, '?' for an untracked file, 'U' for a conflicted one).
    */
   y: string
+  /**
+   * Lines added to this file on this side, from git diff --numstat. Absent means no count exists — the file is untracked or binary, the entry is conflicted, or the count read was bounded out (design D9, brief nocx-i4ki). Absent is NOT zero: a real 0/0 answer (a pure rename, an empty file) arrives as 0.
+   */
+  added?: number
+  /**
+   * Lines deleted from this file on this side, from git diff --numstat. Absent means no count exists, exactly as for added.
+   */
+  deleted?: number
 }

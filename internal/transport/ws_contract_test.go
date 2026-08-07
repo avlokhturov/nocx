@@ -3201,14 +3201,26 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 
 func TestGitStatus_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "git.status.schema.json")
+	three, one := 3, 1
 	cases := map[string]gitStatusWire{
 		"populated": {
 			Branch: "main", Detached: false, Unborn: false, Head: "abc1234",
 			Upstream: "origin/main", Ahead: 1, Behind: 2,
 			Staged:     []gitEntryWire{{Path: "staged.txt", X: "M", Y: "."}},
-			Unstaged:   []gitEntryWire{{Path: "unstaged.txt", X: ".", Y: "M"}},
+			Unstaged:   []gitEntryWire{{Path: "unstaged.txt", X: ".", Y: "M", Added: &three, Deleted: &one}},
 			Conflicted: []gitEntryWire{},
 			Total:      2, Completeness: "complete",
+		},
+		// The counts are the brief's acceptance shape: +3 −1 rides the
+		// entry, and its ABSENCE (untracked, binary, conflicted, bounded
+		// out) is the wire's "no count exists" — never a 0 the panel
+		// would have to second-guess.
+		"counts are optional": {
+			Branch: "main", Head: "abc1234",
+			Staged:     []gitEntryWire{{Path: "new.txt", X: "?", Y: "?"}},
+			Unstaged:   []gitEntryWire{},
+			Conflicted: []gitEntryWire{},
+			Total:      1, Completeness: "complete",
 		},
 		"unborn": {
 			Branch: "master", Unborn: true,
