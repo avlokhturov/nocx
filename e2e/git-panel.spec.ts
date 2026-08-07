@@ -488,6 +488,110 @@ test('the disclosure is keyboard-operable — focus, Enter, Space', async ({ pag
   }
 })
 
+// ── The filter (nocx-52by) ───────────────────────────────────────────────
+
+test('typing part of a path leaves only the matching rows in both lists, and clearing restores them', async ({
+  page,
+}) => {
+  const repo = createRepo()
+  try {
+    // Three more files, one under a directory: several rows to filter, and
+    // a directory component to match (the row renders the file NAME first
+    // and its directory second — nocx-uf0p).
+    mkdirSync(path.join(repo.root, 'src'), { recursive: true })
+    writeFileSync(path.join(repo.root, 'alpha.txt'), 'alpha\n')
+    writeFileSync(path.join(repo.root, 'src', 'beta.ts'), 'beta\n')
+    writeFileSync(path.join(repo.root, 'gamma.md'), 'gamma\n')
+    git(repo.root, 'add', 'alpha.txt')
+    await openGitPanelAt(page, repo.root, repo.basename)
+
+    const filter = page.getByRole('searchbox', { name: 'Filter changed files' })
+    await expect(filter).toBeVisible()
+    await expect(page.locator(STAGED).locator(ROW)).toHaveCount(1, { timeout: 20_000 })
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(2)
+
+    // A directory component matches: the filter is over the whole path, so
+    // "src" finds src/beta.ts while the file name is what the row leads with.
+    await filter.fill('src')
+    await expect(page.locator(STAGED).locator(ROW)).toHaveCount(0, { timeout: 20_000 })
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(1)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toContainText('beta.ts')
+    await expect(page.locator(UNSTAGED).locator('.ui-file-status-row__dir')).toHaveText('src')
+    // The heading counts what the list shows, so it never lies about the
+    // list it heads; the header keeps the repository's total.
+    await expect(page.getByText('Unstaged (1)')).toBeVisible()
+    await expect(page.locator(COUNT)).toHaveText('3 changed')
+
+    // A staged path matches too — the filter narrows BOTH lists.
+    await filter.fill('alpha')
+    await expect(page.locator(STAGED).locator(ROW)).toHaveCount(1)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(0)
+
+    // Clearing brings everything back.
+    await filter.fill('')
+    await expect(page.locator(STAGED).locator(ROW)).toHaveCount(1)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(2)
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
+test('a filter that matches nothing is a state, not a blank panel — and Clear filter recovers', async ({
+  page,
+}) => {
+  const repo = createRepo()
+  try {
+    writeFileSync(path.join(repo.root, 'alpha.txt'), 'alpha\n')
+    writeFileSync(path.join(repo.root, 'beta.txt'), 'beta\n')
+    await openGitPanelAt(page, repo.root, repo.basename)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(2, { timeout: 20_000 })
+
+    const filter = page.getByRole('searchbox', { name: 'Filter changed files' })
+    await filter.fill('no-such-file')
+    // Each list says what happened; a panel showing nothing at all would be
+    // indistinguishable from a panel that broke.
+    await expect(page.getByText('No staged files match')).toBeVisible()
+    await expect(page.getByText('No unstaged files match')).toBeVisible()
+    await expect(page.locator(STAGED).locator(ROW)).toHaveCount(0)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(0)
+
+    // The empty state's one recovery: drop the filter, rows return.
+    await page.getByRole('button', { name: 'Clear filter' }).first().click()
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(2)
+    await expect(page.getByText('No unstaged files match')).toBeHidden()
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
+test('a filter survives a view switch — the store outlives the panel (design §5.5)', async ({
+  page,
+}) => {
+  const repo = createRepo()
+  try {
+    writeFileSync(path.join(repo.root, 'alpha.txt'), 'alpha\n')
+    writeFileSync(path.join(repo.root, 'beta.txt'), 'beta\n')
+    await openGitPanelAt(page, repo.root, repo.basename)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(2, { timeout: 20_000 })
+
+    const filter = page.getByRole('searchbox', { name: 'Filter changed files' })
+    await filter.fill('beta')
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(1)
+
+    // Away to the Files view, and back: the filter is still there, still
+    // applied — the store outlives the panel, the way the commit form and
+    // the section collapses do.
+    await page.locator('button[data-view="files"]').click()
+    await expect(page.locator(VIEW_GIT)).toBeVisible()
+    await page.locator(VIEW_GIT).click()
+    await expect(filter).toHaveValue('beta')
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(1, { timeout: 20_000 })
+    await expect(page.locator(UNSTAGED).locator(ROW)).toContainText('beta.txt')
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
 // ── The remote refusal (design D3, D14; §7) ────────────────────────────────
 
 /** The disposable home the backend was launched with (headless path exports

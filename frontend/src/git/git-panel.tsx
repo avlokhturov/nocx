@@ -48,6 +48,8 @@ import { Section } from '../ui/section'
 import { Spinner } from '../ui/spinner'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
+import { SearchField } from '../ui/search-field'
+import { matchesPathFilter } from './git-filter'
 import { showToast } from '../ui/toast'
 import type { FileStatus } from '../ui/file-status-row'
 import { FileStatusRow } from '../ui/file-status-row'
@@ -188,6 +190,35 @@ export function GitPanel(props: GitPanelProps) {
       list: 'conflicted' as const,
     })),
   )
+
+  // ── The path filter (nocx-52by) ───────────────────────────────────────
+  // One predicate in one place (git-filter.ts): case-insensitive substring
+  // over the repository-relative path, so a directory name matches a row
+  // that renders the file name first (nocx-uf0p). Renderer-side over the
+  // status the store already holds — typing never issues a request, so it
+  // cannot churn the D17 scope or the D13 poll. The filter applies to ALL
+  // three lists (staged, unstaged, conflicted): it is one rule, and a
+  // conflicted row that does not match is no more "matching" than any
+  // other row.
+  const filter = createMemo(() => props.store.filter())
+  const filterActive = createMemo(() => filter().trim() !== '')
+  const filteredStaged = createMemo<GitRow[]>(() =>
+    stagedRows().filter((row) => matchesPathFilter(row.entry.path, filter())),
+  )
+  const filteredUnstaged = createMemo<GitRow[]>(() =>
+    unstagedRows().filter((row) => matchesPathFilter(row.entry.path, filter())),
+  )
+  const filteredConflicted = createMemo<GitRow[]>(() =>
+    conflictedRows().filter((row) => matchesPathFilter(row.entry.path, filter())),
+  )
+  // The section headings count the rows ON SCREEN — what matches the
+  // filter — so a heading never lies about the list it heads. With no
+  // filter that equals what exists; with one, the visible filter box above
+  // explains the difference, and the header's "N changed" stays the wire's
+  // total (the repository's word, not the list's).
+  const stagedEmptyState = createMemo(() => filterActive() && filteredStaged().length === 0)
+  const unstagedEmptyState = createMemo(() => filterActive() && filteredUnstaged().length === 0)
+  const conflictedEmptyState = createMemo(() => filterActive() && filteredConflicted().length === 0)
 
   /** Distinct files on screen — the "first M" of the capped banner (D9):
    *  a file in both lists is one record shown twice. */
@@ -440,6 +471,16 @@ export function GitPanel(props: GitPanelProps) {
     return `More than ${lg.total} commits`
   })
 
+  /** The one action an empty filtered list offers: drop the filter. A
+   *  FUNCTION, not an element — Solid mounts a JSX expression once, and the
+   *  same element instance cannot sit in two sections at once; each empty
+   *  section must own its button. Three sections, one recovery. */
+  const clearFilterAction = () => (
+    <Button size="sm" data-testid="git-filter-clear" onClick={() => props.store.setFilter('')}>
+      Clear filter
+    </Button>
+  )
+
   const mutationBusy = () => props.store.mutationInFlight()
 
   return (
@@ -636,49 +677,92 @@ export function GitPanel(props: GitPanelProps) {
               is resolved.
             </p>
           </Show>
+          {/* ── The filter (nocx-52by): the kit's SearchField, placed and
+               never repainted (ADR-0014). Renderer-side: typing narrows the
+               rows already in the store and issues no request. A collapsed
+               section stays collapsed — the filter narrows lists, the
+               disclosure hides them, and the two compose independently; a
+               filter never silently expands a section the user folded
+               (nocx-nak2). Escape drops the filter and keeps focus, the
+               settings search's pattern. */}
+          <div class="git-filter" data-testid="git-filter">
+            <SearchField
+              value={filter()}
+              onInput={(v) => props.store.setFilter(v)}
+              placeholder="Filter files…"
+              ariaLabel="Filter changed files"
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && filter() !== '') {
+                  e.stopPropagation()
+                  props.store.setFilter('')
+                }
+              }}
+            />
+          </div>
           {/* ── The two lists ─────────────────────────────────────────── */}
           <Section
-            title={`Staged (${stagedRows().length})`}
+            title={`Staged (${filteredStaged().length})`}
             dense
             collapsible
             open={props.store.sectionOpen('staged')}
             onToggle={() => props.store.toggleSection('staged')}
           >
-            <div
-              class="git-list"
-              role="list"
-              aria-label="Staged changes"
-              data-testid="git-staged-list"
-            >
-              <For each={stagedRows()}>{(row) => renderRow(row)}</For>
-            </div>
+            <Show when={stagedEmptyState()}>
+              {/* A filter that matches nothing is a state, never a blank:
+                  the section says so, and offers the one recovery. */}
+              <EmptyState title="No staged files match" action={clearFilterAction()} />
+            </Show>
+            <Show when={!stagedEmptyState()}>
+              <div
+                class="git-list"
+                role="list"
+                aria-label="Staged changes"
+                data-testid="git-staged-list"
+              >
+                <For each={filteredStaged()}>{(row) => renderRow(row)}</For>
+              </div>
+            </Show>
           </Section>
           <Section
-            title={`Unstaged (${unstagedRows().length})`}
+            title={`Unstaged (${filteredUnstaged().length})`}
             dense
             collapsible
             open={props.store.sectionOpen('unstaged')}
             onToggle={() => props.store.toggleSection('unstaged')}
           >
-            <div
-              class="git-list"
-              role="list"
-              aria-label="Unstaged changes"
-              data-testid="git-unstaged-list"
-            >
-              <For each={unstagedRows()}>{(row) => renderRow(row)}</For>
-            </div>
-          </Section>
-          <Show when={conflictedRows().length > 0}>
-            <Section title={`Conflicted (${conflictedRows().length})`} dense>
+            <Show when={unstagedEmptyState()}>
+              <EmptyState title="No unstaged files match" action={clearFilterAction()} />
+            </Show>
+            <Show when={!unstagedEmptyState()}>
               <div
                 class="git-list"
                 role="list"
-                aria-label="Conflicted files"
-                data-testid="git-conflicted-list"
+                aria-label="Unstaged changes"
+                data-testid="git-unstaged-list"
               >
-                <For each={conflictedRows()}>{(row) => renderRow(row)}</For>
+                <For each={filteredUnstaged()}>{(row) => renderRow(row)}</For>
               </div>
+            </Show>
+          </Section>
+          <Show when={conflictedRows().length > 0}>
+            {/* The section stays when a conflict exists even if the filter
+                hides its rows — a conflict is a state that must stay in
+                sight (nocx-nak2) — while the filter still applies to it
+                like any other list. */}
+            <Section title={`Conflicted (${filteredConflicted().length})`} dense>
+              <Show when={conflictedEmptyState()}>
+                <EmptyState title="No conflicted files match" action={clearFilterAction()} />
+              </Show>
+              <Show when={!conflictedEmptyState()}>
+                <div
+                  class="git-list"
+                  role="list"
+                  aria-label="Conflicted files"
+                  data-testid="git-conflicted-list"
+                >
+                  <For each={filteredConflicted()}>{(row) => renderRow(row)}</For>
+                </div>
+              </Show>
             </Section>
           </Show>
           {/* ── The commit form (design §5.4, D11, D6) ─────────────────── */}

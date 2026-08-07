@@ -866,3 +866,235 @@ describe('copy the branch and open on hosting (brief, nocx-hc0m)', () => {
     expect(panel.querySelector('[data-testid="git-copy-branch"]')).not.toBeNull()
   })
 })
+
+// ── The path filter (nocx-52by) ─────────────────────────────────────────
+
+/** The search input of the panel's filter — the control a user types into. */
+function filterInput(panel: HTMLElement): HTMLInputElement {
+  const input = panel.querySelector<HTMLInputElement>('.ui-search-field__input')
+  if (input === null) throw new Error('no filter input')
+  return input
+}
+
+function typeFilter(panel: HTMLElement, value: string): void {
+  fireEvent.input(filterInput(panel), { target: { value } })
+}
+
+const severalFiles = statusFixture({
+  staged: [
+    { path: 'staged/a.txt', x: 'A', y: '.', added: 1, deleted: 0 },
+    { path: 'staged/b.txt', x: 'A', y: '.', added: 1, deleted: 0 },
+  ],
+  unstaged: [
+    { path: 'src/git-panel.tsx', x: '.', y: 'M', added: 5, deleted: 2 },
+    { path: 'docs/guide.md', x: '.', y: 'M', added: 3, deleted: 1 },
+    { path: 'notes.txt', x: '.', y: 'M', added: 1, deleted: 0 },
+  ],
+  total: 5,
+})
+
+describe('the path filter (nocx-52by)', () => {
+  it('typing part of a path leaves only the matching rows in BOTH lists, and clearing restores them', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    const stagedList = () => panel.querySelector('[data-testid="git-staged-list"]')
+    const unstagedList = () => panel.querySelector('[data-testid="git-unstaged-list"]')
+    expect(stagedList()?.querySelectorAll('[role="listitem"]')).toHaveLength(2)
+    expect(unstagedList()?.querySelectorAll('[role="listitem"]')).toHaveLength(3)
+
+    // A directory component matches: the row renders the file name first and
+    // its directory second (nocx-uf0p), so "git" must find src/git-panel.tsx.
+    typeFilter(panel, 'git')
+    await settle()
+    // Staged has no match: the list is REPLACED by its empty state — a
+    // filter that matches nothing is a state, never a blank.
+    expect(stagedList()).toBeNull()
+    expect(unstagedList()?.querySelectorAll('[role="listitem"]')).toHaveLength(1)
+    // The row renders the name first and the directory second as SEPARATE
+    // spans (nocx-uf0p); the filter matched the directory part of the path.
+    expect(unstagedList()?.querySelector('.ui-file-status-row__name')?.textContent).toBe(
+      'git-panel.tsx',
+    )
+    expect(unstagedList()?.querySelector('.ui-file-status-row__dir')?.textContent).toBe('src')
+
+    // Case-insensitive: "A.TXT" finds the staged a.txt rows.
+    typeFilter(panel, 'A.TXT')
+    await settle()
+    expect(stagedList()?.querySelectorAll('[role="listitem"]')).toHaveLength(1)
+    expect(stagedList()?.textContent).toContain('a.txt')
+    // No unstaged file contains "a.txt": its list is the empty state.
+    expect(unstagedList()).toBeNull()
+
+    // Clearing restores every row.
+    typeFilter(panel, '')
+    await settle()
+    expect(stagedList()?.querySelectorAll('[role="listitem"]')).toHaveLength(2)
+    expect(unstagedList()?.querySelectorAll('[role="listitem"]')).toHaveLength(3)
+  })
+
+  it('the section headings count the rows on screen — what matches, never the repository total', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    expect(panel.textContent).toContain('Staged (2)')
+    expect(panel.textContent).toContain('Unstaged (3)')
+    typeFilter(panel, 'git')
+    await settle()
+    expect(panel.textContent).toContain('Unstaged (1)')
+    expect(panel.textContent).not.toContain('Unstaged (3)')
+    // The header keeps the wire's total — the repository's word, not the
+    // list's — so a user still sees that 5 files are changed.
+    expect(panel.textContent).toContain('5 changed')
+  })
+
+  it('filtering is renderer-side: typing never issues a scoped request per keystroke', async () => {
+    const status = vi.fn().mockResolvedValue({ status: severalFiles })
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+      status,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    const callsBefore = status.mock.calls.length
+
+    typeFilter(panel, 'gi')
+    typeFilter(panel, 'git')
+    typeFilter(panel, 'git-')
+    typeFilter(panel, '')
+    await settle()
+
+    // The open carried one status; the visible poll runs on a 5 s timer that
+    // never fires in this test. Four keystrokes, zero extra requests.
+    expect(status.mock.calls.length).toBe(callsBefore)
+  })
+
+  it('an empty result is a state, never a blank: each section says so and offers the one recovery', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    typeFilter(panel, 'no-such-path')
+    await settle()
+    // The lists are gone; the sections say what happened instead.
+    expect(panel.querySelector('[data-testid="git-staged-list"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="git-unstaged-list"]')).toBeNull()
+    expect(panel.textContent).toContain('No staged files match')
+    expect(panel.textContent).toContain('No unstaged files match')
+
+    // The recovery is one click: clear the filter and the rows come back.
+    const clearButtons = panel.querySelectorAll<HTMLElement>('[data-testid="git-filter-clear"]')
+    expect(clearButtons.length).toBe(2)
+    fireEvent.click(clearButtons[0])
+    await settle()
+    expect(panel.querySelector('[data-testid="git-staged-list"]')).not.toBeNull()
+    expect(panel.textContent).not.toContain('No staged files match')
+    expect(panel.textContent).toContain('Staged (2)')
+  })
+
+  it('a collapse and a filter compose: the filter never silently expands a section the user folded', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(sectionDisclosure(panel, 'Unstaged'))
+    await settle()
+    expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('false')
+
+    // A filter that matches rows inside the folded section changes nothing:
+    // the section stays folded, and its heading shows the matching count.
+    typeFilter(panel, 'git-panel')
+    await settle()
+    expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('false')
+    expect(panel.textContent).toContain('Unstaged (1)')
+    expect(panel.querySelector('[data-testid="git-unstaged-list"]')).toBeNull()
+  })
+
+  it('Escape clears the filter and keeps the focus', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    typeFilter(panel, 'git')
+    await settle()
+    expect(filterInput(panel).value).toBe('git')
+    // The user is IN the field when they press Escape.
+    filterInput(panel).focus()
+    fireEvent.keyDown(filterInput(panel), { key: 'Escape' })
+    await settle()
+    expect(filterInput(panel).value).toBe('')
+    expect(unstagedListText(panel)).toContain('notes.txt')
+    // Escape dropped the filter, not the field: focus stays so the user can
+    // keep typing.
+    expect(document.activeElement).toBe(filterInput(panel))
+  })
+
+  it('a filter survives a view switch — the store outlives the panel (design §5.5)', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: severalFiles })),
+      // The visibility effect polls the moment the panel is seen again; the
+      // fixture repository has not changed, so the poll answers the same.
+      status: vi.fn().mockResolvedValue({ status: severalFiles }),
+    })
+    const store = createGitStore(services)
+    const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(null)
+
+    const first = mountApp(services, { store, origin: [activeOrigin, setActiveOrigin] })
+    first.setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    typeFilter(first.panel, 'git')
+    await settle()
+    expect(first.panel.textContent).toContain('Unstaged (1)')
+
+    // The view switch: the panel unmounts; the store lives on.
+    first.handle.destroy()
+    const second = mountApp(services, { store, origin: [activeOrigin, setActiveOrigin] })
+    await settle()
+    expect(filterInput(second.panel).value).toBe('git')
+    expect(second.panel.textContent).toContain('Unstaged (1)')
+    expect(second.panel.textContent).not.toContain('notes.txt')
+  })
+
+  it('a filter never crosses repositories: adopting a new binding clears it', async () => {
+    const services = fakeServices({
+      open: vi
+        .fn()
+        .mockResolvedValueOnce(openOk({ status: severalFiles })) // repo A
+        .mockResolvedValueOnce(openOk({ bindingId: 'b2', toplevel: '/home/dev/other' })), // repo B
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    typeFilter(panel, 'git')
+    await settle()
+    expect(filterInput(panel).value).toBe('git')
+
+    // The shell moves to another repository: the panel re-binds, and the
+    // query typed against repo A must not hide repo B's files.
+    setActiveOrigin(OTHER_ORIGIN)
+    await settle()
+    expect(filterInput(panel).value).toBe('')
+  })
+})
+
+/** The unstaged list's text — the assertion the row-level tests reuse. */
+function unstagedListText(panel: HTMLElement): string {
+  return panel.querySelector('[data-testid="git-unstaged-list"]')?.textContent ?? ''
+}
