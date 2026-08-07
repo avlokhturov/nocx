@@ -963,6 +963,69 @@ func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 	}
 }
 
+// TestBashSnapshotEncodesHostileNames pins the payload encoder byte for byte.
+//
+// The encoder is the snapshot's escaping layer: `;` separates names and `\`
+// starts an escape, so a name carrying either must not be able to forge a
+// boundary or a second field. It had no test of its own — every existing
+// assertion looked for `;pwd;` in a payload of ordinary names, which the
+// identity function would also satisfy.
+//
+// That gap became urgent when the encoder gained a fast path for names needing
+// no escaping (nocx-z9s9.16 — it was ~85ms of the ~104ms snapshot pipeline, in
+// front of a 250ms grace that has no second chance). A fast path is only safe
+// while it is a strict subset of the slow one, and "I read it carefully" is not
+// how that gets established. Both paths are exercised here: the first two cases
+// take the fast path, every other case must fall through to the loop.
+func TestBashSnapshotEncodesHostileNames(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Sourcing emits the hello on stdout; send it away and mark the payload so
+	// the assertion reads exactly what the encoder produced.
+	prog := `
+export NOCX_SHELL_INTEGRATION=1
+source "$1" >/dev/null 2>&1
+{
+  printf 'plain\n'
+  printf 'with space\n'
+  printf 'semi;colon\n'
+  printf 'back\\slash\n'
+  printf 'ctl\001x\n'
+  printf 'del\177x\n'
+  printf 'c1\202x\n'
+  printf 'utf\303\251\n'
+} | __nocx_snapshot_build > /tmp/nocx-enc-payload
+printf 'START'
+cat /tmp/nocx-enc-payload
+printf 'END'
+`
+	out := runShellProg(t, bash, prog, script)
+	start := strings.Index(out, "START")
+	end := strings.LastIndex(out, "END")
+	if start < 0 || end < start {
+		t.Fatalf("could not delimit the payload in %q", out)
+	}
+	got := out[start+len("START") : end]
+
+	// Each name is followed by ';'. Printable ASCII passes through unchanged;
+	// a literal backslash doubles; a literal ';' becomes \x3b so it can never
+	// be read as a separator; C0, DEL and C1 (127..159) are hex-escaped; and
+	// bytes >= 0xa0 pass through raw, because the terminal decodes UTF-8 and
+	// escaping it would double the payload for no safety.
+	want := "plain;" +
+		"with space;" +
+		`semi\x3bcolon;` +
+		`back\\slash;` +
+		`ctl\x01x;` +
+		`del\x7fx;` +
+		`c1\x82x;` +
+		"utf\xc3\xa9;"
+	if got != want {
+		t.Errorf("encoded payload mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
 // countMarkers counts markers of one kind.
 func countMarkers(ms []oscMarker, kind string) int {
 	n := 0

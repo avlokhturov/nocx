@@ -44,6 +44,12 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// rather than by a count of sleeps whose real cost it could not see
 		// (nocx-0ije).
 		"12": "7cc1e5d1f4af02ffa13b8654804e94efc19c51627471668ee204e72605a52655",
+		// v13: the payload encoder gained a fast path for names needing no
+		// escaping. It was ~85ms of the ~104ms snapshot pipeline, in front of a
+		// 250ms grace that a fresh tab gets exactly one shot at — a shell idle
+		// in readline runs no traps, so a job that misses it waits for a prompt
+		// the user may never produce (nocx-z9s9.16).
+		"13": "00383f333efb2633efb5b039302b36d834ffba9364dfb3b3406f4779d2cd3041",
 	}
 
 	h := sha256.New()
