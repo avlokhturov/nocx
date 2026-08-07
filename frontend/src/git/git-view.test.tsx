@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSignal } from 'solid-js'
 import { cleanup, fireEvent } from '@solidjs/testing-library'
-import { mountSidebar } from '../sidebar'
+import { mountSidebar, type SidebarHandle } from '../sidebar'
 import { createGitView } from './git-view'
 import { createGitStore, type GitStore } from './git-store'
 import type { GitPanelServices } from './git-client'
@@ -131,25 +131,36 @@ interface Mounted {
   setActiveOrigin: (o: ActiveOrigin | null) => void
   services: GitPanelServices
   store: GitStore
+  handle: SidebarHandle
 }
 
 const stores: GitStore[] = []
 
-function mountApp(services: GitPanelServices): Mounted {
-  const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(null)
+/** The pieces a second mount must share with the first — the shape the real
+ *  app has: ONE store and ONE origin accessor, with the panel mounting and
+ *  unmounting on top of them (design §5.5). */
+interface SharedMount {
+  store: GitStore
+  origin: [() => ActiveOrigin | null, (o: ActiveOrigin | null) => void]
+}
+
+function mountApp(services: GitPanelServices, shared?: SharedMount): Mounted {
   const open = vi.fn()
-  const store = createGitStore(services)
-  stores.push(store)
+  const store = shared?.store ?? createGitStore(services)
+  if (!stores.includes(store)) stores.push(store)
+  // The rule cannot see through a conditional source; the createSignal call
+  // IS array-destructured, and the shared branch re-uses the first mount's
+  // pair — the app's one-origin, one-store shape (design §5.5).
+  const [activeOrigin, setActiveOrigin] =
+    // eslint-disable-next-line solid/reactivity -- conditional destructure source
+    shared === undefined ? createSignal<ActiveOrigin | null>(null) : shared.origin
   const git = createGitView({ services, store, opener: { open }, activeOrigin })
   const bar = document.createElement('div')
   bar.id = 'activitybar'
   const panel = document.createElement('div')
   panel.id = 'sidebar'
   document.body.append(bar, panel)
-  /* eslint-disable solid/reactivity -- mountSidebar consumes this accessor
-     reactively (SidebarViewProps.activeOrigin); the reads happen inside the
-     view's tracked scopes, the same shape as main.tsx's own disable. */
-  mountSidebar(
+  const handle = mountSidebar(
     bar,
     panel,
     [git],
@@ -158,8 +169,7 @@ function mountApp(services: GitPanelServices): Mounted {
     () => null,
     () => activeOrigin(),
   )
-  /* eslint-enable solid/reactivity */
-  return { panel, open, setActiveOrigin, services, store }
+  return { panel, open, setActiveOrigin, services, store, handle }
 }
 
 afterEach(() => {
@@ -167,6 +177,19 @@ afterEach(() => {
   stores.length = 0
   cleanup()
 })
+
+/** The disclosure button of the section whose title contains `title` — the
+ *  control a user clicks to fold a section's rows away (nocx-nak2). */
+function sectionDisclosure(panel: HTMLElement, title: string): HTMLButtonElement {
+  const sections = panel.querySelectorAll<HTMLElement>('.ui-section')
+  for (const section of sections) {
+    if (section.textContent?.includes(title)) {
+      const button = section.querySelector<HTMLButtonElement>('.ui-section__disclosure')
+      if (button !== null) return button
+    }
+  }
+  throw new Error(`no disclosure for section ${title}`)
+}
 
 /** The listitem whose text contains `path` — the row a user clicks. */
 function rowNamed(panel: HTMLElement, path: string): HTMLElement {
@@ -544,5 +567,101 @@ describe('the Commits section', () => {
     expect(panel.querySelector('[data-testid="git-log-retry"]')).not.toBeNull()
     // The status half is untouched by a failed commits read.
     expect(panel.querySelector('[data-testid="git-branch"]')?.textContent).toContain('main')
+  })
+})
+
+// ── The collapsible sections (nocx-nak2) ──────────────────────────────────
+
+describe('the collapsible sections', () => {
+  it('clicking a disclosure folds the rows away and keeps the heading and count; clicking again restores them', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    const disclosure = sectionDisclosure(panel, 'Unstaged')
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true')
+    expect(panel.querySelector('[data-testid="git-unstaged-list"]')).not.toBeNull()
+
+    fireEvent.click(disclosure)
+    await settle()
+    // The rows are gone; the heading and its count remain.
+    expect(panel.querySelector('[data-testid="git-unstaged-list"]')).toBeNull()
+    expect(panel.textContent).toContain('Unstaged (1)')
+    expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('false')
+
+    fireEvent.click(sectionDisclosure(panel, 'Unstaged'))
+    await settle()
+    expect(panel.querySelector('[data-testid="git-unstaged-list"]')).not.toBeNull()
+    expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('a collapse is driven by the store — the panel passes the state and reports toggles through it', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+    })
+    const { panel, setActiveOrigin, store } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    expect(store.sectionOpen('unstaged')).toBe(true)
+    fireEvent.click(sectionDisclosure(panel, 'Unstaged'))
+    await settle()
+    expect(store.sectionOpen('unstaged')).toBe(false)
+    // The disclosure renders what the store says: aria-expanded tracks it.
+    expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('a collapse survives the panel unmounting and remounting — the state lives in the store, not the component', async () => {
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      // The visibility effect polls the moment the panel is seen again; the
+      // fixture repository has not changed, so the poll must answer the
+      // same status (the fake's default answers an empty one).
+      status: vi.fn().mockResolvedValue({ status: unstagedFile }),
+    })
+    const store = createGitStore(services)
+    const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(null)
+
+    const first = mountApp(services, { store, origin: [activeOrigin, setActiveOrigin] })
+    first.setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    fireEvent.click(sectionDisclosure(first.panel, 'Unstaged'))
+    await settle()
+    expect(first.panel.querySelector('[data-testid="git-unstaged-list"]')).toBeNull()
+
+    // The view switch: the panel unmounts; the store lives on (design §5.5).
+    first.handle.destroy()
+
+    // Back to the view: a fresh mount over the SAME store and origin.
+    const second = mountApp(services, { store, origin: [activeOrigin, setActiveOrigin] })
+    await settle()
+    expect(sectionDisclosure(second.panel, 'Unstaged').getAttribute('aria-expanded')).toBe('false')
+    expect(second.panel.querySelector('[data-testid="git-unstaged-list"]')).toBeNull()
+    expect(second.panel.textContent).toContain('Unstaged (1)')
+  })
+
+  it('a collapse does not leak across a repository re-bind — it belongs to one repository', async () => {
+    const services = fakeServices({
+      open: vi
+        .fn()
+        .mockResolvedValueOnce(openOk({ status: unstagedFile })) // repo A
+        .mockResolvedValueOnce(openOk({ bindingId: 'b2', toplevel: '/home/dev/other' })), // repo B
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(sectionDisclosure(panel, 'Unstaged'))
+    await settle()
+    expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('false')
+
+    // The shell moves to another repository: the panel re-binds, and the
+    // collapse must not follow it there.
+    setActiveOrigin(OTHER_ORIGIN)
+    await settle()
+    expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('true')
   })
 })

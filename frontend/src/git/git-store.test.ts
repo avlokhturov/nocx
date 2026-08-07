@@ -882,3 +882,36 @@ describe('the commits read', () => {
     expect(store.logState()).toBe('idle')
   })
 })
+
+// ── The collapsible sections (nocx-nak2) ──────────────────────────────────
+
+describe('the collapsible sections', () => {
+  it('a collapse survives a same-repository re-scope — the keep path (a view switch)', async () => {
+    const { store } = await openStore()
+    store.toggleSection('commits')
+    expect(store.sectionOpen('commits')).toBe(false)
+    // Same session, same verified cwd, live binding: rescope keeps
+    // everything, collapse state included (design §5.5).
+    store.rescope({ ...LOCAL_ORIGIN, tabId: 2 })
+    await settle()
+    expect(store.sectionOpen('commits')).toBe(false)
+  })
+
+  it('adopting a different repository resets the collapse — it never leaks across a re-bind', async () => {
+    const services = makeServices({
+      open: vi
+        .fn()
+        .mockResolvedValueOnce(openOk({ status: statusFixture({ total: 0 }) })) // repo A
+        .mockResolvedValueOnce(openOk({ bindingId: 'b2', toplevel: '/home/dev/other' })), // repo B
+    })
+    const store = track(createGitStore(services))
+    store.rescope(LOCAL_ORIGIN)
+    await settle()
+    store.toggleSection('unstaged')
+    expect(store.sectionOpen('unstaged')).toBe(false)
+
+    store.rescope(OTHER_ORIGIN)
+    await settle()
+    expect(store.sectionOpen('unstaged')).toBe(true)
+  })
+})

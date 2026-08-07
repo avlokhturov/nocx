@@ -502,7 +502,13 @@ export function GitPanel(props: GitPanelProps) {
             </p>
           </Show>
           {/* ── The two lists ─────────────────────────────────────────── */}
-          <Section title={`Staged (${stagedRows().length})`} dense>
+          <Section
+            title={`Staged (${stagedRows().length})`}
+            dense
+            collapsible
+            open={props.store.sectionOpen('staged')}
+            onToggle={() => props.store.toggleSection('staged')}
+          >
             <div
               class="git-list"
               role="list"
@@ -512,7 +518,13 @@ export function GitPanel(props: GitPanelProps) {
               <For each={stagedRows()}>{(row) => renderRow(row)}</For>
             </div>
           </Section>
-          <Section title={`Unstaged (${unstagedRows().length})`} dense>
+          <Section
+            title={`Unstaged (${unstagedRows().length})`}
+            dense
+            collapsible
+            open={props.store.sectionOpen('unstaged')}
+            onToggle={() => props.store.toggleSection('unstaged')}
+          >
             <div
               class="git-list"
               role="list"
@@ -593,7 +605,13 @@ export function GitPanel(props: GitPanelProps) {
                first, so a user confirms the commit they just made without
                leaving the panel. Read when the panel opens, on refresh and
                after a commit — never on the poll (D13). ─────────────── */}
-          <Section title="Commits" dense>
+          <Section
+            title="Commits"
+            dense
+            collapsible
+            open={props.store.sectionOpen('commits')}
+            onToggle={() => props.store.toggleSection('commits')}
+          >
             <div class="git-log" role="list" aria-label="Recent commits" data-testid="git-log">
               <Show when={props.store.logState() === 'loading'}>
                 <p class="git-log__state" data-testid="git-log-loading">

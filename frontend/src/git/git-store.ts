@@ -88,6 +88,13 @@ type GitPanelState =
   | 'ready'
   | 'tooManyChanges'
 
+/** The panel's collapsible sections (nocx-nak2). The Conflicted section and
+ *  the commit form deliberately are not in the set: a conflict is a state
+ *  that must stay in sight, and the form is what a collapse is for reaching.
+ *  Not exported on purpose: it is the store's own vocabulary, and the panel
+ *  addresses the sections by these literals at the call site. */
+type GitSection = 'staged' | 'unstaged' | 'commits'
+
 /** The binding the panel holds: the backend-issued id every call echoes,
  *  plus the resolved worktree root — the answer, not the path (D4). */
 interface GitBinding {
@@ -165,6 +172,13 @@ export interface GitStore {
   /** True while any entry is conflicted — the visible reason the stage-all
    *  and unstage-all controls refuse. */
   conflictsPresent(): boolean
+  /** Whether a collapsible section of the panel is open. The state lives
+   *  HERE, not in the component: the panel mounts and unmounts with the
+   *  view while the store outlives it (design §5.5), so a collapse
+   *  survives a view switch. It belongs to one repository, like the commit
+   *  form: adopting a new binding resets it (nocx-nak2). */
+  sectionOpen(section: GitSection): boolean
+  toggleSection(section: GitSection): void
   // ── The commit form — lives in the store PER BINDING (design §5.4): it
   // survives a view switch, never crosses to another repository, and is
   // never persisted. ─────────────────────────────────────────────────────
@@ -266,6 +280,13 @@ export function createGitStore(
   const [statusStale, setStatusStale] = createSignal(false)
   const [logState, setLogState] = createSignal<'idle' | 'loading' | 'loaded' | 'failed'>('idle')
   const [log, setLog] = createSignal<GitLogResult['log'] | null>(null)
+  /** The collapsible sections' open state (nocx-nak2). A Record so one
+   *  toggle flips one key and the panel's three reads share one signal. */
+  const [sectionsOpen, setSectionsOpen] = createSignal<Record<GitSection, boolean>>({
+    staged: true,
+    unstaged: true,
+    commits: true,
+  })
   const [logError, setLogError] = createSignal<string | null>(null)
   const [openError, setOpenError] = createSignal<string | null>(null)
   const [gitVersion, setGitVersion] = createSignal<string | null>(null)
@@ -488,7 +509,7 @@ export function createGitStore(
           setEnvReason(res.envReason ?? null)
           setStatus(null)
           setStatusStale(false)
-          resetCommitForm()
+          resetRepositoryState()
           setPhase('ready')
           return
         }
@@ -517,7 +538,7 @@ export function createGitStore(
           setBinding({ bindingId: res.bindingId, toplevel: res.toplevel })
           setStatus(null)
           setStatusStale(false)
-          resetCommitForm()
+          resetRepositoryState()
         }
         setOpenState('ok')
         setGitVersion(res.gitVersion ?? null)
@@ -553,6 +574,28 @@ export function createGitStore(
     setCommitOutput(null)
   }
 
+  /** The public half of the collapse state (nocx-nak2): the panel renders
+   *  a section's open state from these. Reads are reactive — the panel
+   *  reads the accessor inside its JSX — and a toggle flips one key in
+   *  place, so the other two sections' state objects are preserved. */
+  function sectionOpen(section: GitSection): boolean {
+    return sectionsOpen()[section]
+  }
+
+  function toggleSection(section: GitSection): void {
+    setSectionsOpen((prev) => ({ ...prev, [section]: !prev[section] }))
+  }
+
+  /** One repository context is gone or replaced: the commit draft and the
+   *  section collapses both belong to the repository the panel was showing,
+   *  and neither may leak into the next (design §5.4; nocx-nak2). NOT the
+   *  post-commit clear — that one only empties the form and calls
+   *  resetCommitForm directly. */
+  function resetRepositoryState(): void {
+    resetCommitForm()
+    setSectionsOpen({ staged: true, unstaged: true, commits: true })
+  }
+
   function rescope(next: ActiveOrigin | null): void {
     // A frozen origin (a diff tab) has no opinion: activating it must
     // never re-bind the panel to a cwd snapshot that may be stale (design
@@ -567,7 +610,7 @@ export function createGitStore(
       setOpenState(null)
       setStatus(null)
       setStatusStale(false)
-      resetCommitForm()
+      resetRepositoryState()
       setOrigin(null)
       setPhase('no-origin')
       resetLog()
@@ -582,7 +625,7 @@ export function createGitStore(
       setOpenState(next.kind === 'ssh' ? 'remoteUnsupported' : 'noCwd')
       setStatus(null)
       setStatusStale(false)
-      resetCommitForm()
+      resetRepositoryState()
       setOrigin(next)
       setPhase('ready')
       resetLog()
@@ -847,7 +890,7 @@ export function createGitStore(
     setOpenState(null)
     setStatus(null)
     setStatusStale(false)
-    resetCommitForm()
+    resetRepositoryState()
     resetLog()
   })
 
@@ -886,7 +929,7 @@ export function createGitStore(
     setOpenState(null)
     setStatus(null)
     setStatusStale(false)
-    resetCommitForm()
+    resetRepositoryState()
     resetLog()
   }
 
@@ -914,6 +957,8 @@ export function createGitStore(
     stageAll,
     unstageAll,
     conflictsPresent,
+    sectionOpen,
+    toggleSection,
     commitSubject,
     commitBody,
     setCommitSubject,

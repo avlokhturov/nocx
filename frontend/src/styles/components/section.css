@@ -55,3 +55,63 @@
   margin: 0;
   padding-bottom: var(--space-1);
 }
+
+/* ── Collapsible variant (nocx-nak2) ─────────────────────────────────────
+   The heading becomes the disclosure: a native button filling the h2's row,
+   carrying the section's title after the kit's chevron — the same gesture
+   tree-row uses (pointing down when open, right when collapsed). The
+   section keeps its heading and its rule; only the body folds away. The
+   button inherits the heading's type so the section keeps reading as a
+   heading, and the chevron sizes itself to that type. */
+.ui-section__disclosure {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--control-radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  /* A button does not inherit type by default; this one is the heading. */
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ui-section__disclosure:hover {
+  color: var(--color-text);
+}
+
+.ui-section__disclosure:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
+.ui-section__disclosure-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  transition: transform 0.12s ease;
+}
+
+.ui-section__disclosure-icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+/* The kit's chevron points down; a collapsed section turns it right. The
+   rotation lives on the icon wrapper, never on the button, so the hit area
+   and hover stay square. */
+.ui-section[data-disclosure='collapsed'] .ui-section__disclosure-icon {
+  transform: rotate(-90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-section__disclosure-icon {
+    transition: none;
+  }
+}

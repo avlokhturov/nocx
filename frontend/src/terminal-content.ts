@@ -1619,6 +1619,19 @@ export class TerminalContent extends BaseTabContent {
         // the shell. Whitelisting the editor and the grid was not enough, because
         // any control OUTSIDE the terminal is equally not ours.
         if (isTextEntry(active)) return
+        // A control the user deliberately focused keeps its keys. The rescue
+        // is for a click on the pane followed by typing; a focusable control
+        // — something a user could have TABBED to — is the opposite of a pane
+        // click, and stealing its keys breaks the control: Space on a focused
+        // button must activate the button, never type into the prompt
+        // (nocx-nak2 — the Section disclosure's Space, and every button's,
+        // was being eaten; the disclosure is operable with Enter and Space
+        // only because this stands down).
+        if (
+          active !== null &&
+          active.matches('button, select, a[href], [role="button"], [tabindex]')
+        )
+          return
         // Focus-only, deliberately. The keydown's target was fixed when it was
         // dispatched — this keystroke started outside the editor, so the event
         // never reaches the editor's own keydown listener. The design contract

@@ -419,6 +419,78 @@ test("a failing commit shows git's own output and keeps the typed message", asyn
   }
 })
 
+// ── Collapse (nocx-nak2) ──────────────────────────────────────────────────
+
+test('a user collapses Unstaged and the commit form is reachable; the heading and count stay', async ({
+  page,
+}) => {
+  const repo = createRepo()
+  try {
+    // A tall Unstaged list pushes the commit form below the fold — the
+    // situation the owner asked about (17 unstaged files). One staged
+    // change keeps the commit button enabled from the start.
+    for (let i = 0; i < 8; i++) writeFileSync(path.join(repo.root, `bulk-${i}.txt`), `${i}\n`)
+    appendFileSync(path.join(repo.root, repo.file), 'second line\n')
+    git(repo.root, 'add', repo.file)
+
+    await openGitPanelAt(page, repo.root, repo.basename)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(8, { timeout: 20_000 })
+
+    const panel = page.locator(PANEL)
+    const scrollBefore = await panel.evaluate((el) => el.scrollHeight)
+    const unstagedSection = page.locator('.ui-section', { hasText: 'Unstaged' })
+    const disclosure = unstagedSection.locator('.ui-section__disclosure')
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+
+    // Collapse Unstaged from its heading's disclosure: the rows fold away,
+    // the heading and its count stay.
+    await disclosure.click()
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(0)
+    await expect(unstagedSection).toContainText('Unstaged (8)')
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+
+    // The fold moved up: the panel needs less scrolling, and the commit
+    // form — the part the collapse exists to reach — is usable.
+    const scrollAfter = await panel.evaluate((el) => el.scrollHeight)
+    expect(scrollAfter).toBeLessThan(scrollBefore)
+    await page.locator(SUBJECT).fill('collapse test')
+    await expect(page.locator(COMMIT)).toBeEnabled()
+
+    // Expanding restores the rows.
+    await disclosure.click()
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(8)
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
+test('the disclosure is keyboard-operable — focus, Enter, Space', async ({ page }) => {
+  const repo = createRepo()
+  try {
+    // One unstaged change so a collapse is observable.
+    appendFileSync(path.join(repo.root, repo.file), 'second line\n')
+
+    await openGitPanelAt(page, repo.root, repo.basename)
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(1, { timeout: 20_000 })
+    const unstagedSection = page.locator('.ui-section', { hasText: 'Unstaged' })
+    const disclosure = unstagedSection.locator('.ui-section__disclosure')
+
+    // Enter on the focused disclosure collapses; Space expands again. The
+    // heading stays in the DOM, so focus survives the fold.
+    await disclosure.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(0)
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+
+    await page.keyboard.press('Space')
+    await expect(page.locator(UNSTAGED).locator(ROW)).toHaveCount(1)
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
 // ── The remote refusal (design D3, D14; §7) ────────────────────────────────
 
 /** The disposable home the backend was launched with (headless path exports
