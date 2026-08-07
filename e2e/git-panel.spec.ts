@@ -23,7 +23,6 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, writeFileSync } from 
 import path from 'node:path'
 import type { ChildProcess } from 'node:child_process'
 import type { Page } from './harness'
-import { HEADLESS } from './base-url'
 import { createRepo, createUnbornRepo, cleanupRepo, git, gitAllow } from './git-fixture'
 
 // ── Selectors (read from frontend/src/git/git-panel.tsx — not invented) ──
@@ -671,7 +670,7 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
     fixture.proc.kill('SIGKILL')
   }
 })
-// ── Copy the branch name, and open the repo on its hosting (brief, nocx-hc0m) ──
+// ── Copy the branch name, and open the repo on its hosting (brief, nocx-hc0m; nocx-0ybp) ──
 
 // The clipboard lives behind the one seam (AD-8): createClipboardAccess
 // picks the Wails runtime when present, else navigator.clipboard. This spec
@@ -679,6 +678,40 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
 // exactly like e2e/clipboard.spec.ts — and grants the two clipboard
 // permissions, which are Chromium-only in Playwright; WebKit is checked by
 // hand in a packaged build.
+//
+// Opening a link is the same class of thing behind its own seam
+// (frontend/src/open-url.ts): on web — the only environment e2e runs in,
+// devharness has no Wails runtime — the click calls window.open
+// synchronously with noopener,noreferrer; in the packaged app it goes
+// through shell.openUrl. The specs below assert AT THE SEAM on purpose: a
+// spec must not actually navigate away or spawn tabs it cannot clean up,
+// so window.open is stubbed by an init script that records the call, and
+// the record is the assertion. The native path is unit-tested
+// (open-url.test.ts) — e2e never has a Wails runtime to exercise it with.
+/** Stub window.open to record what the click asked for instead of opening
+ *  a real tab. The record is the assertion; a real open would escape the
+ *  test's control. */
+async function stubWindowOpen(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const opened: Array<{ url: string; target: string; features: string }> = []
+    // The record rides on the real window so the spec can read it back
+    // through page.evaluate; the cast is the DOM-boundary kind — window is
+    // a well-known node, and the record is this page's own property.
+    const recordHost = window as unknown as { __nocxOpened: typeof opened }
+    recordHost.__nocxOpened = opened
+    window.open = ((url?: string | URL, target?: string, features?: string) => {
+      opened.push({ url: String(url), target: target ?? '', features: features ?? '' })
+      return {} as Window
+    }) as typeof window.open
+  })
+}
+
+/** Stub window.open to refuse — the popup blocker's answer. */
+async function stubWindowOpenBlocked(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    window.open = () => null
+  })
+}
 async function disableWailsRuntime(page: Page): Promise<void> {
   await page.addInitScript(() => {
     Object.defineProperty(window, 'runtime', {
@@ -719,7 +752,7 @@ test('copying the branch name copies it and the panel confirms', async ({ page, 
   }
 })
 
-test('a recognised remote draws the open links, and clicking one reaches the shell seam', async ({
+test('a recognised remote draws the open links, and clicking one opens a new tab (web path)', async ({
   page,
 }) => {
   const repo = createRepo()
@@ -730,24 +763,17 @@ test('a recognised remote draws the open links, and clicking one reaches the she
   git(repo.root, 'config', 'branch.main.remote', 'origin')
   git(repo.root, 'config', 'branch.main.merge', 'refs/heads/main')
 
-  // Watch the control plane for the shell.openUrl call. Opening a real
-  // browser is not something an e2e can do — the harness has no browser-open
-  // runtime at all — so the assertion stops at the seam: the request left
-  // this renderer over the real socket, carrying exactly the derived URL.
-  // Both directions: framesent carries the OUTGOING JSON-RPC request
-  // (shell.openUrl), framereceived the backend's answers (git.remote's
-  // state:none) — a method frame is never a received frame.
-  const wireFrames: string[] = []
+  // The web path must not round-trip the backend: the click opens the tab
+  // right here in the renderer, so no shell.openUrl frame may go over the
+  // real socket. This is the regression guard for the platform split.
+  const shellFrames: string[] = []
   page.on('websocket', (ws) => {
     ws.on('framesent', (e) => {
       const p = e.payload
-      if (typeof p === 'string') wireFrames.push(p)
-    })
-    ws.on('framereceived', (e) => {
-      const p = e.payload
-      if (typeof p === 'string') wireFrames.push(p)
+      if (typeof p === 'string' && p.includes('"method":"shell.openUrl"')) shellFrames.push(p)
     })
   })
+  await stubWindowOpen(page)
 
   try {
     await openGitPanelAt(page, repo.root, repo.basename)
@@ -761,21 +787,50 @@ test('a recognised remote draws the open links, and clicking one reaches the she
 
     await page.locator(OPEN_BRANCH).click()
 
-    // The seam: a frame named shell.openUrl went out over the real socket,
-    // and it carried the URL the panel derived — never one it invented. On
-    // the headless path the backend has no Wails runtime to open a browser
-    // with, answers -32601, and the panel says so out loud: that toast is
-    // the visible half of "the call reached the seam".
-    await expect
-      .poll(() => wireFrames.some((f) => f.includes('"method":"shell.openUrl"')))
-      .toBe(true)
-    const frame = wireFrames.find((f) => f.includes('"method":"shell.openUrl"'))!
-    expect(frame).toContain('https://github.com/shady2k/nocx/tree/main')
-    if (HEADLESS) {
-      await expect(page.locator(TOAST_MESSAGE)).toContainText(
-        "Couldn't open the link in your browser",
-      )
-    }
+    // The seam: window.open was called synchronously from the click with
+    // exactly the URL the panel derived — never one it invented — and the
+    // noopener,noreferrer features, so a tab opened from the panel can
+    // never get a handle back on the app's window. The record is the
+    // assertion: the spec must not actually spawn tabs it cannot clean
+    // up, so the stub records what a real browser would have opened.
+    const opened = await page.evaluate(() => {
+      const recordHost = window as unknown as {
+        __nocxOpened?: Array<{ url: string; target: string; features: string }>
+      }
+      return recordHost.__nocxOpened ?? []
+    })
+    expect(opened).toEqual([
+      {
+        url: 'https://github.com/shady2k/nocx/tree/main',
+        target: '_blank',
+        features: 'noopener,noreferrer',
+      },
+    ])
+    // And nothing went over the socket: the web path opens in-renderer.
+    expect(shellFrames).toEqual([])
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
+test('a popup-blocked open is told, never silent (web path failure)', async ({ page }) => {
+  const repo = createRepo()
+  git(repo.root, 'remote', 'add', 'origin', 'https://github.com/shady2k/nocx.git')
+  git(repo.root, 'config', 'branch.main.remote', 'origin')
+  git(repo.root, 'config', 'branch.main.merge', 'refs/heads/main')
+  await stubWindowOpenBlocked(page)
+
+  try {
+    await openGitPanelAt(page, repo.root, repo.basename)
+    await expect(page.locator(OPEN_BRANCH)).toBeVisible()
+
+    await page.locator(OPEN_BRANCH).click()
+    // The blocker refused the tab; the refusal is a toast, never a
+    // silence — and on the next click, with the blocker gone, the same
+    // link would open (the success path is the test above).
+    await expect(page.locator(TOAST_MESSAGE)).toContainText(
+      "Couldn't open the link in your browser",
+    )
   } finally {
     cleanupRepo(repo)
   }

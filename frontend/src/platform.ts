@@ -1,16 +1,29 @@
 /**
  * Host platform, published to CSS as `data-platform` on the root element.
  *
- * Exists for one reason so far and it is a real one: the tab bar reserves 78px
- * on its leading edge for the macOS traffic lights. macOS is the only platform
- * that puts window controls there — on Linux and in a browser that reservation
- * is just an empty notch the user has to look at.
+ * The module owns TWO facts, both resolved at startup and both read
+ * synchronously — no consumer may re-derive either (AD-8):
+ *
+ * 1. The CHROME platform — what `bootstrapPlatform` stamps on the root
+ *    element. Exists for one reason so far and it is a real one: the tab
+ *    bar reserves 78px on its leading edge for the macOS traffic lights.
+ *    macOS is the only platform that puts window controls there — on Linux
+ *    and in a browser that reservation is just an empty notch the user has
+ *    to look at.
+ * 2. The RUNTIME platform — `currentPlatform()`, what capabilities consult
+ *    for synchronous path decisions (open-url.ts: web vs native). It is
+ *    the GOOS when the Wails runtime is present, `'web'` when it is not.
+ *    This is NOT the stamped value: the two can differ — a macOS browser
+ *    gets `darwin` from the user-agent fallback (traffic-light chrome is
+ *    wanted there) while its runtime platform stays `'web'`, because a
+ *    browser has no Wails runtime to open a system browser with.
  *
  * Resolution order:
- *   1. The Wails runtime's Environment(), which reports the Go GOOS and is the
- *      authority inside the packaged app.
- *   2. The user agent, for the plain-browser dev path where no runtime exists.
- *      Only ever used where there is no window chrome to match anyway.
+ *   1. The Wails runtime's Environment(), which reports the Go GOOS and is
+ *      the authority inside the packaged app.
+ *   2. The user agent, for the plain-browser dev path where no runtime
+ *      exists. Only ever used where there is no window chrome to match
+ *      anyway.
  */
 
 import { Environment } from '../wailsjs/runtime/runtime'
@@ -41,6 +54,22 @@ export function platformFromUserAgent(userAgent: string): Platform {
 }
 
 /**
+ * The runtime platform resolved so far. Starts `'web'` — the safe default
+ * before the Wails runtime has answered — and is set once by
+ * `bootstrapPlatform`: the GOOS when the runtime exists, `'web'` when it
+ * does not. See the module comment for why this is a separate fact from
+ * the value stamped on the root element.
+ */
+let current: Platform = 'web'
+
+/** The platform right now, synchronously. A capability whose path choice
+ *  must happen inside a user gesture (open-url.ts) reads THIS — never an
+ *  async probe of the runtime, which would lose the gesture. */
+export function currentPlatform(): Platform {
+  return current
+}
+
+/**
  * Resolve the platform and stamp it on `document.documentElement`.
  *
  * Never rejects: a failure to identify the platform must not stop the app from
@@ -53,8 +82,10 @@ export async function bootstrapPlatform(
   try {
     const env = await Environment()
     platform = normalizePlatform(env.platform)
+    current = platform
   } catch {
     platform = platformFromUserAgent(navigator.userAgent)
+    current = 'web'
     log.info('nocx: no Wails runtime, platform guessed from user agent', { platform })
   }
   root.setAttribute('data-platform', platform)

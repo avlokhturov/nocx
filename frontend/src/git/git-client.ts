@@ -117,9 +117,11 @@ class GitClient {
   }
 
   /** Ask the backend (which owns the Wails runtime) to open a URL in the
-   *  system browser. The backend refuses anything that is not an http(s)
-   *  URL before the browser sees it, and reports itself unavailable in the
-   *  dev-web harness — the panel toasts that rather than failing. */
+   *  system browser — the NATIVE half of the url-opener capability
+   *  (open-url.ts); the web path opens the tab in-renderer and never
+   *  reaches this method. The backend refuses anything that is not an
+   *  http(s) URL before the browser sees it, and reports itself
+   *  unavailable when no native runtime exists — the panel says so. */
   openUrl(url: string): Promise<ShellOpenUrl> {
     return this.dispatcher.call<ShellOpenUrl>('shell.openUrl', { url })
   }
