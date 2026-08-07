@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { VaultBackend } from './harness'
+import { readStand } from './stand'
 import { assertResolvedIsolatedHome, createHomeIsolation } from './home-isolation'
 
 /**
@@ -25,7 +26,9 @@ import { assertResolvedIsolatedHome, createHomeIsolation } from './home-isolatio
  * home, and its absence from the real one is proof it did not resolve that.
  */
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. */
+const devharnessBin = () => readStand().devharness
 const PORT = 19878
 
 /** mtime of the real ~/.nocx, or null when it does not exist. */
@@ -38,17 +41,18 @@ function realShellIntegrationStamp(): number | null {
 }
 
 test.describe('the e2e home boundary is obeyed, not just handed over', () => {
-  test.skip(
-    !existsSync(DEVHARNESS_BIN),
-    `devharness binary not found at ${DEVHARNESS_BIN} — build it with ` +
-      `\`go build -o ${DEVHARNESS_BIN} ./cmd/devharness\` or set NOCX_VAULT_BIN`,
-  )
+  // No "is the binary there" guard any more. It was asked at collection time,
+  // which is before the stand exists, and it was guarding against a binary
+  // nobody built — the failure mode of the old arrangement, where the runner
+  // and CI each had to remember. The stand builds devharness on its way up, so
+  // a missing binary now means the stand failed, and that fails the run rather
+  // than quietly skipping this file (nocx-z9s9.7).
 
   test('a backend given the boundary installs into it and leaves the real home alone', async () => {
     const root = mkdtempSync(join(tmpdir(), 'nocx-e2e-live-home-'))
     const before = realShellIntegrationStamp()
 
-    const backend = new VaultBackend(DEVHARNESS_BIN, { root }, true)
+    const backend = new VaultBackend(devharnessBin(), { root }, true)
     try {
       await backend.start(PORT)
 

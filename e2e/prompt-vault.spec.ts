@@ -34,8 +34,11 @@ import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { readStand } from './stand'
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness-vault'
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. */
+const devharnessBin = () => readStand().devharness
 
 // Two distinct ports so restart never conflicts with the first instance's
 // TIME_WAIT. Both are outside the ranges used by the rest of the suite
@@ -83,7 +86,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     // `true` = no Secret Service for this backend: the passphrase path is the
     // deterministic one (setup always prompts, unseal always needs the
     // passphrase), exactly like vault.spec.ts's cases 1-2.
-    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
+    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
   })
 
   test.afterAll(() => {

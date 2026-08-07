@@ -24,4 +24,7 @@ echo "=== npm ci (root + frontend) ==="
 npm ci --silent
 (cd frontend && npm ci --silent)
 
-exec /work/e2e/headless-run.sh "$@"
+# `npx playwright test` is the whole command — the same one a developer runs
+# and the same one CI runs. The stand (backend + vite) is Playwright's, so
+# nothing here starts or knows about it.
+exec npx playwright test "$@"

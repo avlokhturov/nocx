@@ -1,6 +1,7 @@
 import { test as base, expect as baseExpect, type Page } from '@playwright/test'
 
-import { BASE_URL, HEADLESS } from './base-url'
+import { BASE_URL } from './base-url'
+import { readStand } from './stand'
 
 export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
@@ -24,28 +25,26 @@ export async function promptReady(page: Page): Promise<void> {
   await baseExpect(input).toBeFocused({ timeout: 10_000 })
 }
 
-// Shared e2e harness. When the suite runs against the headless
-// vite + devharness shim (NOCX_WS_PORT set) instead of `wails dev`, inject the
-// Wails GetWSPort binding the frontend expects before any app code runs. Under
-// `wails dev` the real binding is present and NOCX_WS_PORT is unset, so this is
-// a no-op — the same specs run unchanged in CI.
+// vite serves the page alone, so nothing installs the wails runtime — the
+// frontend reads window.go at startup and would find nothing. This supplies it,
+// pointed at the stand Playwright started.
+//
+// Read from the stand's manifest rather than from environment variables. The
+// backend mints its token at startup, and a process cannot put a value back
+// into its parent's environment, so a token that travelled by env had to be
+// exported by whatever shell script started the backend — which is precisely
+// the second entry point this arrangement removed.
+//
+// A spec that needs its OWN backend overrides this afterwards with
+// bindEndpoint(); init scripts apply in order, so the later one wins.
 async function injectWailsShim(page: Page): Promise<void> {
-  const port = process.env.NOCX_WS_PORT
-  const token = process.env.NOCX_WS_TOKEN
-  if (!port) return
-  if (!token) {
-    throw new Error(
-      'NOCX_WS_PORT set but NOCX_WS_TOKEN is missing; ' +
-        'the token is the auth gate and an empty string is rejected. ' +
-        'Export both or use `wails dev`.',
-    )
-  }
+  const stand = readStand()
   await page.addInitScript(
-    (opts: { p: string; t: string }) => {
+    (opts: { p: number; t: string }) => {
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {
-            GetWSPort: () => Promise.resolve(Number(opts.p)),
+            GetWSPort: () => Promise.resolve(opts.p),
             GetWSToken: () => Promise.resolve(opts.t),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
@@ -54,7 +53,7 @@ async function injectWailsShim(page: Page): Promise<void> {
         },
       }
     },
-    { p: port, t: token },
+    { p: stand.port, t: stand.token },
   )
 }
 
@@ -207,32 +206,20 @@ export function documentDir(isolatedHome: string): string {
  * touched, while the devharness each of them started logged its port and never
  * saw a single client (nocx-w4vy).
  *
+ * That refusal used to live here as a thrown error, because the suite had a
+ * second arrangement this call was illegal on. It has one now — vite serves
+ * the page alone and nothing overwrites the stub — so the branch is gone
+ * rather than kept as a condition that can never be true. What remains true is
+ * the reason it existed: a spec that quietly measures the wrong backend is a
+ * green run about nothing, so a spec using this should assert, after binding,
+ * that the page reports the port it meant to reach.
+ *
  * The specs that need this need it because they RESTART their backend
  * mid-test — vault surviving a restart is the thing under test — and `wails
  * dev` owns exactly one backend whose lifecycle Playwright cannot touch. The
  * requirement was never "override the bindings"; it was "run headless".
  */
 export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
-  if (!HEADLESS) {
-    throw new Error(
-      [
-        'bindEndpoint: refusing to override the wails bindings on the `wails dev` path.',
-        '',
-        'This spec starts its own devharness backend, which only works when the',
-        'page is served by vite alone. Under `wails dev` the injected window.go',
-        'is replaced by the real one before the app reads it, and the spec would',
-        'silently drive the shared backend on 34115 instead (nocx-w4vy).',
-        '',
-        'Run it on the headless path:',
-        '',
-        '  e2e/run-in-container.sh e2e/<this>.spec.ts    # or',
-        '  e2e/headless-run.sh e2e/<this>.spec.ts',
-        '',
-        'playwright.config.ts excludes these specs from the `wails dev` run, so',
-        'reaching this error means one was added back without being listed there.',
-      ].join('\n'),
-    )
-  }
   await page.context().addInitScript(
     (opts: { p: number; t: string }) => {
       const w = window as unknown as { go?: Record<string, unknown> }

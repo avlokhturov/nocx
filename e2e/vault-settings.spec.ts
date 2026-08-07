@@ -17,8 +17,11 @@ import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { readStand } from './stand'
 
-const DEVHARNESS_BIN = process.env.NOCX_VAULT_BIN ?? '/tmp/nocx-devharness'
+/** Lazily, not at module scope: the stand is started by globalSetup, which
+ *  runs after Playwright has collected this file. */
+const devharnessBin = () => readStand().devharness
 
 const FIRST_PORT = 19880
 const SECOND_PORT = 19881
@@ -198,7 +201,7 @@ test.describe('Vault settings — change passphrase', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
+    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
   })
 
   test.afterAll(() => {
@@ -301,7 +304,7 @@ test.describe('Vault settings — reissue recovery code', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(DEVHARNESS_BIN, asDisposableRoot(xdg), true)
+    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
   })
 
   test.afterAll(() => {
