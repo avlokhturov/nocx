@@ -55,9 +55,17 @@
    none and draws nothing, never +0 −0. The tones are fixed by meaning: an
    addition is success, a removal danger; they never vary, so unlike the
    status letter there is no tone table for a surface to name. Tabular
-   numerals keep a column of counts aligned as they change. */
+   numerals keep a column of counts aligned as they change.
+
+   Last in the row and pushed to its trailing edge: the counts are a
+   fixed-width thing, and anywhere before the path that width is taken from
+   the file name, which is what the row exists to show (nocx-uf0p). The
+   auto margin also keeps them aligned down the list whatever each path
+   measures. */
 .ui-file-status-row__counts {
   flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: var(--space-2);
   font-variant-numeric: tabular-nums;
 }
 

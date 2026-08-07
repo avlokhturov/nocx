@@ -3418,6 +3418,53 @@ func TestGitHeadMessage_DTOConformsToContract(t *testing.T) {
 	}
 }
 
+func TestGitLog_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.log.schema.json")
+	cases := map[string]gitLogResult{
+		"populated": {
+			Log: gitLogWire{
+				Entries: []gitLogEntryWire{{
+					Hash:       "5738d62b66777a78af894c0708d3a7e8798a4d8d",
+					ShortHash:  "5738d62",
+					Subject:    "third",
+					AuthorName: "Test Author",
+					AuthoredAt: "2026-08-07T12:52:40+03:00",
+					Refs:       []string{"main", "v1.0"},
+				}},
+				Total:        1,
+				Completeness: "complete",
+			},
+		},
+		"empty": {
+			Log: gitLogWire{
+				Entries:      []gitLogEntryWire{},
+				Total:        0,
+				Completeness: "complete",
+			},
+		},
+		"capped": {
+			Log: gitLogWire{
+				Entries: []gitLogEntryWire{{
+					Hash: "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111", ShortHash: "aaaa111",
+					Subject: "one", AuthorName: "A", AuthoredAt: "2026-08-07T12:52:40+03:00",
+					Refs: []string{},
+				}},
+				Total:        51,
+				Completeness: "capped",
+			},
+		},
+	}
+	for name, r := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.log DTO")
+		})
+	}
+}
+
 func TestGitClose_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "git.close.schema.json")
 	raw, err := json.Marshal(gitCloseResult{Closed: true})
@@ -3578,6 +3625,15 @@ func TestGitHeadMessage_OverTheWireConformsToContract(t *testing.T) {
 	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
 	raw := gitWireCall(t, e, "git.headMessage", map[string]any{"bindingId": bid}, 3)
 	validateJSON(t, schema, raw, "git.headMessage result (real socket)")
+}
+
+func TestGitLog_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.log.schema.json")
+	e := gitContractEnv(t, newStubGitRepo())
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.log", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.log result (real socket)")
 }
 
 func TestGitClose_OverTheWireConformsToContract(t *testing.T) {

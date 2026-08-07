@@ -34,6 +34,8 @@ type options struct {
 	statusBytes   int64
 	statusWall    time.Duration
 	statusEntries int
+	logBytes      int64
+	logWall       time.Duration
 }
 
 // NewFactory builds a local factory. The environment is resolved once, in
@@ -54,6 +56,8 @@ func NewFactory(opts ...Option) *Factory {
 		statusBytes:   git.MaxStatusBytes,
 		statusWall:    git.MaxStatusWallClock,
 		statusEntries: git.MaxStatusEntries,
+		logBytes:      git.MaxLogBytes,
+		logWall:       git.MaxLogWallClock,
 	}
 	if o.statusBytes > 0 {
 		c.statusBytes = o.statusBytes
@@ -63,6 +67,12 @@ func NewFactory(opts ...Option) *Factory {
 	}
 	if o.statusEntries > 0 {
 		c.statusEntries = o.statusEntries
+	}
+	if o.logBytes > 0 {
+		c.logBytes = o.logBytes
+	}
+	if o.logWall > 0 {
+		c.logWall = o.logWall
 	}
 	f := &Factory{
 		env:      newEnvCache(o.shell, o.envTimeout, o.envMaxOutput),

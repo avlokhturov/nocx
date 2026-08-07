@@ -45,6 +45,7 @@ package git
 
 import (
 	"context"
+	"time"
 
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -62,6 +63,7 @@ import (
 type Repo interface {
 	Status(ctx context.Context) (Status, error)
 	Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error)
+	Log(ctx context.Context, max int) (Log, error)
 	Stage(ctx context.Context, paths []string) (Status, error)
 	Unstage(ctx context.Context, paths []string) (Status, error)
 	StageAll(ctx context.Context) (Status, error)
@@ -296,4 +298,35 @@ const (
 type HeadMessage struct {
 	State   HeadMessageState
 	Message string
+}
+
+// LogEntry is one commit of the branch's recent history (brief, git.log).
+// Refs are the decorations git attaches to the commit — branch names, tags,
+// and HEAD when the commit is HEAD — in git's own order, with git's
+// decoration prefixes ("HEAD -> ", "tag: ") stripped: the wire carries what
+// the panel shows, and the decoration grammar is git vocabulary the relay
+// would otherwise have to reproduce. Refs is never nil — an empty set
+// marshals as [], not null.
+type LogEntry struct {
+	Hash       string    // the full object id
+	ShortHash  string    // git's own abbreviation (%h)
+	Subject    string    // the first line of the message (%s)
+	AuthorName string    // the author's name (%an)
+	AuthoredAt time.Time // the author date (%aI)
+	Refs       []string  // decorations; empty when the commit carries none
+}
+
+// Log is the bounded answer to "what has happened on this branch": the
+// first max commits of HEAD, newest first. A log is unbounded by nature, so
+// it is bounded by contract (D9): the caller names max, the implementation
+// asks git for max+1, and Completeness says which of the two answers it is.
+// Total is exact when complete — the branch has at most max commits, all of
+// them in Entries. When capped, Total is max+1 — the extra record is how
+// "more than max exist" is known (D9) — and Entries holds the first max.
+// When cut, Total is the records observed before the work ceiling stopped
+// the stream, a lower bound.
+type Log struct {
+	Entries      []LogEntry // never nil
+	Total        int        // commits observed; exact unless cut
+	Completeness Completeness
 }

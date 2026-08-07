@@ -12,6 +12,7 @@ package spawn
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/shady2k/nocx/internal/git"
 )
@@ -93,6 +94,28 @@ func HeadArgs() []string {
 // Amend prefill.
 func HeadMessageArgs() []string {
 	return []string{"log", "-1", "--format=%B"}
+}
+
+// LogArgs asks for the first max+1 commits of HEAD, newest first (brief,
+// git.log; D9's "ask for one more than you will return" — the extra record
+// is how the caller knows it was capped). -z and %x00 keep every field
+// NUL-delimited because a subject may contain a newline or a tab, and a
+// line-based parser is a defect waiting for a commit message to find it
+// (measured: the tab survives into the stream verbatim). The format is six
+// values per commit — %H, %h, %s, %an, %aI, %D — and the -z flag emits the
+// record terminator, so the parser counts seven fields per record.
+//
+// --no-optional-locks, the same flag StatusArgs documents: this is a read
+// the panel makes while an agent runs git in the terminal beside it, and a
+// reader that rewrites .git/index as a side effect is interference, not
+// observation.
+func LogArgs(max int) []string {
+	return []string{
+		"--no-optional-locks",
+		"log", "-z",
+		"--format=%H%x00%h%x00%s%x00%an%x00%aI%x00%D",
+		"-n", strconv.Itoa(max + 1),
+	}
 }
 
 // DiffArgs builds the invocation for one side of one file (spec §5.1

@@ -48,6 +48,8 @@ type ceilings struct {
 	statusBytes   int64
 	statusWall    time.Duration
 	statusEntries int
+	logBytes      int64
+	logWall       time.Duration
 }
 
 // Close releases nothing: the local Repo owns no persistent resource — every
@@ -580,7 +582,7 @@ func (r *Repo) numstat(ctx context.Context, cached bool) (map[string]spawn.Numst
 		// working in the same repository.
 		argv:     append([]string{r.gitPath}, spawn.NumstatArgs(cached)...),
 		dir:      r.toplevel,
-		env:      append(append([]string{}, r.env...), "GIT_OPTIONAL_LOCKS=0"),
+		env:      append(append([]string{}, r.envSettled()...), "GIT_OPTIONAL_LOCKS=0"),
 		sink:     &statusSink{p: p, maxBytes: r.ceilings.statusBytes},
 		deadline: time.Now().Add(r.ceilings.statusWall),
 	})

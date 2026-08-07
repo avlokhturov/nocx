@@ -34,6 +34,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/session"
@@ -178,6 +179,43 @@ type gitStatusWire struct {
 	Completeness string         `json:"completeness"`
 }
 
+type gitLogEntryWire struct {
+	Hash       string   `json:"hash"`
+	ShortHash  string   `json:"shortHash"`
+	Subject    string   `json:"subject"`
+	AuthorName string   `json:"authorName"`
+	AuthoredAt string   `json:"authoredAt"`
+	Refs       []string `json:"refs"`
+}
+
+type gitLogWire struct {
+	Entries      []gitLogEntryWire `json:"entries"`
+	Total        int               `json:"total"`
+	Completeness string            `json:"completeness"`
+}
+
+type gitLogResult struct {
+	Log gitLogWire `json:"log"`
+}
+
+// wireGitLog maps the domain Log onto the contracted wire shape. Entries
+// start non-nil in the domain; a regression there is exactly what the
+// contract test is designed to catch.
+func wireGitLog(lg git.Log) gitLogWire {
+	entries := make([]gitLogEntryWire, 0, len(lg.Entries))
+	for _, e := range lg.Entries {
+		entries = append(entries, gitLogEntryWire{
+			Hash:       e.Hash,
+			ShortHash:  e.ShortHash,
+			Subject:    e.Subject,
+			AuthorName: e.AuthorName,
+			AuthoredAt: e.AuthoredAt.Format(time.RFC3339),
+			Refs:       e.Refs,
+		})
+	}
+	return gitLogWire{Entries: entries, Total: lg.Total, Completeness: string(lg.Completeness)}
+}
+
 // wireGitStatus maps the domain Status onto the contracted wire shape. The
 // mapping is deliberately pure: the domain guarantees the lists are never
 // nil (git.go), and a regression there is exactly what the contract test
@@ -242,6 +280,8 @@ func (s *WSServer) handleGitMethod(wconn *wsConn, state *connState, req jsonrpcR
 		s.handleGitCommit(wconn, state, req)
 	case "git.headMessage":
 		s.handleGitHeadMessage(wconn, state, req)
+	case "git.log":
+		s.handleGitLog(wconn, state, req)
 	case "git.close":
 		s.handleGitClose(wconn, state, req)
 	}
@@ -609,6 +649,33 @@ func (s *WSServer) handleGitHeadMessage(wconn *wsConn, state *connState, req jso
 		State:   string(hm.State),
 		Message: hm.Message,
 	})))
+}
+
+// handleGitLog answers "what has happened on this branch": the first
+// MaxLogEntries commits of HEAD, newest first (brief, git.log). History
+// does not change under the user the way the working tree does, so the
+// panel reads it when it opens, on manual refresh and after a commit —
+// never on the poll (D13). The bound is policy: the implementation asks
+// git for one more than the cap, so the answer can say capped rather than
+// implying the branch has exactly N commits (D9).
+func (s *WSServer) handleGitLog(wconn *wsConn, state *connState, req jsonrpcRequest) {
+	var params gitBindingParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		return
+	}
+	h, release, err := s.git.Acquire(params.BindingID, state)
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		return
+	}
+	defer release()
+	lg, err := h.Log(context.Background(), git.MaxLogEntries)
+	if err != nil {
+		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		return
+	}
+	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)})))
 }
 
 // handleGitClose closes the binding: its repository released, the use-guard

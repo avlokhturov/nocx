@@ -115,21 +115,6 @@ export function FileStatusRow(props: FileStatusRowProps) {
           <span class="ui-file-status-row__status" data-tone={STATUS_TONE[props.status]}>
             {props.status}
           </span>
-          <Show when={hasCounts()}>
-            {/* The counts: +N −N, the answer to "how much did it change".
-                The minus is U+2212, the glyph the reference source-control
-                panels render; an ASCII hyphen reads as a dash in the same
-                row as the plus. The tones are fixed by meaning — an
-                addition is success, a removal danger — so unlike the
-                status letter there is no tone table for a caller to name;
-                the component owns it. The literal space keeps the two
-                numbers readable in the DOM (the css gap alone would leave
-                "+3−1" to a text assert). */}
-            <span class="ui-file-status-row__counts" data-counts="present">
-              <span class="ui-file-status-row__added">+{props.added}</span>{' '}
-              <span class="ui-file-status-row__deleted">−{props.deleted}</span>
-            </span>
-          </Show>
           <span class="ui-file-status-row__type-icon" aria-hidden="true">
             <FileIcon />
           </span>
@@ -146,6 +131,25 @@ export function FileStatusRow(props: FileStatusRowProps) {
               <span class="ui-file-status-row__dir">{parts().dir}</span>
             </Show>
           </span>
+          <Show when={hasCounts()}>
+            {/* The counts sit at the END of the row, pushed to its trailing
+                edge — the position both reference products give them, and
+                the one that costs the file name nothing. Placed before the
+                path they are a fixed-width column between the status and
+                the name, and in a rail that width comes straight out of the
+                name, which is the part the row exists to show (nocx-uf0p).
+                The minus is U+2212, the glyph a source-control panel
+                renders; an ASCII hyphen reads as a dash beside the plus.
+                The tones are fixed by meaning — an addition is success, a
+                removal danger — so unlike the status letter there is no
+                tone table for a caller to name; the component owns it. The
+                literal space keeps the two numbers readable in the DOM (the
+                css gap alone would leave "+3−1" to a text assert). */}
+            <span class="ui-file-status-row__counts" data-counts="present">
+              <span class="ui-file-status-row__added">+{props.added}</span>{' '}
+              <span class="ui-file-status-row__deleted">−{props.deleted}</span>
+            </span>
+          </Show>
         </span>
       }
       actions={props.actions}

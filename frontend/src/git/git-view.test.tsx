@@ -20,6 +20,7 @@ import type { GitPanelServices } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
 import type { Status } from '../generated/git.status'
 import type { GitOpenResult } from '../generated/git.open'
+import type { GitLogResult } from '../generated/git.log'
 import type { ActiveOrigin } from '../tab-content'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -79,11 +80,35 @@ const openOk = (over: Partial<GitOpenResult & { state: 'ok' }> = {}): GitOpenRes
   ...over,
 })
 
+const logFixture = (over: Partial<GitLogResult['log']> = {}): GitLogResult['log'] => ({
+  entries: [
+    {
+      hash: '5738d62b66777a78af894c0708d3a7e8798a4d8d',
+      shortHash: '5738d62',
+      subject: 'third',
+      authorName: 'Test Author',
+      authoredAt: '2020-01-01T00:00:00Z',
+      refs: ['main'],
+    },
+    {
+      hash: '98c56f29de7a461cbbb7bc3a208a292972265b76',
+      shortHash: '98c56f2',
+      subject: 'second subject',
+      authorName: 'Test Author',
+      authoredAt: '2020-01-02T00:00:00Z',
+      refs: ['HEAD', 'v1.0'],
+    },
+  ],
+  total: 2,
+  completeness: 'complete',
+  ...over,
+})
 function fakeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
   return {
     open: vi.fn().mockResolvedValue(openOk()),
     status: vi.fn().mockResolvedValue({ status: statusFixture() }),
     diff: vi.fn().mockResolvedValue({ state: 'ok', text: '', truncated: false }),
+    log: vi.fn().mockResolvedValue({ log: logFixture() }),
     stage: vi.fn().mockResolvedValue({ status: statusFixture() }),
     unstage: vi.fn().mockResolvedValue({ status: statusFixture() }),
     stageAll: vi.fn().mockResolvedValue({ status: statusFixture() }),
@@ -455,5 +480,69 @@ describe('row actions', () => {
     fireEvent.click(rowNamed(panel, 'a.txt'))
     const target = open.mock.calls[0][0] as GitDiffTarget
     expect(target.side).toBe('staged')
+  })
+})
+
+// ── The Commits section (brief, git.log) ──────────────────────────────────
+
+describe('the Commits section', () => {
+  it('lists the branch commits newest first, with subject, hash, relative time and refs', async () => {
+    const { panel, setActiveOrigin } = mountApp(fakeServices())
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    const log = panel.querySelector('[data-testid="git-log"]')
+    expect(log).not.toBeNull()
+    const rows = panel.querySelectorAll('[data-testid="git-log-row"]')
+    // Newest first: the fixture's stream order is the render order.
+    expect(rows[0]?.textContent).toContain('third')
+    expect(rows[0]?.textContent).toContain('5738d62')
+    expect(rows[1]?.textContent).toContain('second subject')
+    // The refs are the kit's chips; a bare HEAD is the detached marker.
+    const refs = panel.querySelectorAll('[data-testid="git-log-ref"]')
+    expect(refs[0]?.textContent).toContain('main')
+    expect(refs[1]?.textContent).toContain('HEAD')
+    expect(refs[2]?.textContent).toContain('v1.0')
+  })
+
+  it('an unborn branch renders "No commits yet" — the empty list is a state, not a failure', async () => {
+    const services = fakeServices({
+      log: vi.fn().mockResolvedValue({ log: logFixture({ entries: [], total: 0 }) }),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    expect(panel.querySelector('[data-testid="git-log-empty"]')?.textContent).toContain(
+      'No commits yet',
+    )
+  })
+
+  it('a capped log says so — the bounded read must not look complete (D9)', async () => {
+    const services = fakeServices({
+      log: vi.fn().mockResolvedValue({
+        log: logFixture({ entries: logFixture().entries, total: 51, completeness: 'capped' }),
+      }),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    expect(panel.querySelector('[data-testid="git-log-capped"]')?.textContent).toContain(
+      'More than 2 commits',
+    )
+  })
+
+  it('a failed read renders the failure with Retry, and the rest of the panel stays live', async () => {
+    const services = fakeServices({
+      log: vi.fn().mockRejectedValue(new Error('git log: exit 128: fatal: bad object HEAD')),
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    expect(panel.querySelector('[data-testid="git-log-failed"]')?.textContent).toContain(
+      'bad object HEAD',
+    )
+    expect(panel.querySelector('[data-testid="git-log-retry"]')).not.toBeNull()
+    // The status half is untouched by a failed commits read.
+    expect(panel.querySelector('[data-testid="git-branch"]')?.textContent).toContain('main')
   })
 })

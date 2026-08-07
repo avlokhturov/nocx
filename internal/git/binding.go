@@ -45,6 +45,7 @@ func (b *Binding) SessionID() session.ID { return b.sessionID }
 type Handle interface {
 	Status(ctx context.Context) (Status, error)
 	Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error)
+	Log(ctx context.Context, max int) (Log, error)
 	Stage(ctx context.Context, paths []string) (Status, error)
 	Unstage(ctx context.Context, paths []string) (Status, error)
 	StageAll(ctx context.Context) (Status, error)
@@ -233,6 +234,15 @@ func (h *handle) Diff(ctx context.Context, path string, side Side, maxBytes int6
 	}
 	defer release()
 	return h.b.repo.Diff(ctx, path, side, maxBytes)
+}
+
+func (h *handle) Log(ctx context.Context, max int) (Log, error) {
+	release, err := h.begin()
+	if err != nil {
+		return Log{}, err
+	}
+	defer release()
+	return h.b.repo.Log(ctx, max)
 }
 
 func (h *handle) Stage(ctx context.Context, paths []string) (Status, error) {
