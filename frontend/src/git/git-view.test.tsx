@@ -12,7 +12,7 @@
 // D14 absence (mutation controls ABSENT from an SSH tab's DOM, not disabled).
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createSignal } from 'solid-js'
-import { cleanup, fireEvent } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
 import { createGitView } from './git-view'
 import { createGitStore, type GitStore } from './git-store'
@@ -22,6 +22,8 @@ import type { Status } from '../generated/git.status'
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitLogResult } from '../generated/git.log'
 import type { ActiveOrigin } from '../tab-content'
+import type { ClipboardAccess } from '../clipboard'
+import { ToastHost, clearToasts } from '../ui/toast'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -115,6 +117,11 @@ function fakeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
     unstageAll: vi.fn().mockResolvedValue({ status: statusFixture() }),
     commit: vi.fn().mockResolvedValue({ state: 'ok', outputTruncated: false }),
     headMessage: vi.fn().mockResolvedValue({ state: 'ok', message: 'head' }),
+    // none by default: no recognised remote means no open-link affordance
+    // (D14), which is the DOM every pre-existing test expects. Tests that
+    // exercise the links override with an ok remote.
+    remote: vi.fn().mockResolvedValue({ state: 'none' }),
+    openUrl: vi.fn().mockResolvedValue({}),
     close: vi.fn().mockResolvedValue({ closed: true }),
     subscribeGitChanged: vi.fn().mockReturnValue(() => {}),
     ...over,
@@ -144,7 +151,11 @@ interface SharedMount {
   origin: [() => ActiveOrigin | null, (o: ActiveOrigin | null) => void]
 }
 
-function mountApp(services: GitPanelServices, shared?: SharedMount): Mounted {
+function mountApp(
+  services: GitPanelServices,
+  shared?: SharedMount,
+  clipboard?: ClipboardAccess,
+): Mounted {
   const open = vi.fn()
   const store = shared?.store ?? createGitStore(services)
   if (!stores.includes(store)) stores.push(store)
@@ -154,7 +165,7 @@ function mountApp(services: GitPanelServices, shared?: SharedMount): Mounted {
   const [activeOrigin, setActiveOrigin] =
     // eslint-disable-next-line solid/reactivity -- conditional destructure source
     shared === undefined ? createSignal<ActiveOrigin | null>(null) : shared.origin
-  const git = createGitView({ services, store, opener: { open }, activeOrigin })
+  const git = createGitView({ services, store, opener: { open }, activeOrigin, clipboard })
   const bar = document.createElement('div')
   bar.id = 'activitybar'
   const panel = document.createElement('div')
@@ -169,10 +180,15 @@ function mountApp(services: GitPanelServices, shared?: SharedMount): Mounted {
     () => null,
     () => activeOrigin(),
   )
+  // A ToastHost so action outcomes (copied branch, refused browser open) are
+  // ASSERTABLE as rendered toasts, the way a user sees them — the files
+  // pattern.
+  render(() => <ToastHost />)
   return { panel, open, setActiveOrigin, services, store, handle }
 }
 
 afterEach(() => {
+  clearToasts()
   for (const s of stores) s.dispose()
   stores.length = 0
   cleanup()
@@ -663,5 +679,143 @@ describe('the collapsible sections', () => {
     setActiveOrigin(OTHER_ORIGIN)
     await settle()
     expect(sectionDisclosure(panel, 'Unstaged').getAttribute('aria-expanded')).toBe('true')
+  })
+})
+
+// ── Copy the branch, open on hosting (brief, nocx-hc0m) ─────────────────
+
+/** A clipboard recorder for the success path: writes are observable. */
+function recorderClipboard(): ClipboardAccess & { writes: string[] } {
+  const writes: string[] = []
+  return {
+    writes,
+    readText: vi.fn().mockResolvedValue(''),
+    writeText: vi.fn().mockImplementation((t: string) => {
+      writes.push(t)
+      return Promise.resolve()
+    }),
+  }
+}
+/** A clipboard that refuses every write — the platform-rejection path. */
+const refusingClipboard: ClipboardAccess = {
+  readText: () => Promise.reject(new Error('refused')),
+  writeText: () => Promise.reject(new Error('refused')),
+}
+
+/** A recognised GitHub remote, for the open-on-hosting cases. */
+const githubRemote = (over: Partial<GitPanelServices> = {}) =>
+  fakeServices({
+    remote: vi.fn().mockResolvedValue({ state: 'ok', url: 'git@github.com:shady2k/nocx.git' }),
+    ...over,
+  })
+
+describe('copy the branch and open on hosting (brief, nocx-hc0m)', () => {
+  it('copy: one click writes the branch name through the seam and the panel confirms', async () => {
+    const services = githubRemote()
+    const clip = recorderClipboard()
+    const { panel, setActiveOrigin } = mountApp(services, undefined, clip)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    const copy = panel.querySelector<HTMLElement>('[data-testid="git-copy-branch"]')
+    expect(copy).not.toBeNull()
+    copy!.click()
+    await settle()
+
+    // The one action copied the REAL branch name — never the "no commits
+    // yet" label — and the confirmation is the panel's own toast.
+    expect(clip.writes).toEqual(['main'])
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'Branch name copied',
+    )
+  })
+
+  it('a refused clipboard write is told, never swallowed', async () => {
+    const services = fakeServices()
+    const { panel, setActiveOrigin } = mountApp(services, undefined, refusingClipboard)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    panel.querySelector<HTMLElement>('[data-testid="git-copy-branch"]')!.click()
+    await settle()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      "Couldn't copy the branch name",
+    )
+  })
+
+  it('a detached HEAD has no branch name, so the copy affordance is absent (D14)', async () => {
+    const services = fakeServices({
+      open: vi
+        .fn()
+        .mockResolvedValue(
+          openOk({ status: statusFixture({ detached: true, branch: '', head: 'abc1234' }) }),
+        ),
+    })
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    expect(panel.querySelector('[data-testid="git-copy-branch"]')).toBeNull()
+  })
+
+  it('open branch: the link is drawn for a recognised remote and clicks through to the seam', async () => {
+    const openUrl = vi.fn().mockResolvedValue({})
+    const services = githubRemote({ openUrl })
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    const open = panel.querySelector<HTMLElement>('[data-testid="git-open-branch"]')
+    expect(open).not.toBeNull()
+    open!.click()
+    await settle()
+
+    // The URL the panel derived — git's own remote spelling, converted —
+    // is exactly what reaches the shell.openUrl seam.
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/shady2k/nocx/tree/main')
+  })
+
+  it('open commit: a commit row carries the link and it clicks through the same seam', async () => {
+    const openUrl = vi.fn().mockResolvedValue({})
+    const services = githubRemote({ openUrl })
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    const open = panel.querySelector<HTMLElement>('[data-testid="git-open-commit"]')
+    expect(open).not.toBeNull()
+    open!.click()
+    await settle()
+
+    expect(openUrl).toHaveBeenCalledWith(
+      'https://github.com/shady2k/nocx/commit/5738d62b66777a78af894c0708d3a7e8798a4d8d',
+    )
+  })
+
+  it('a shell open failure toasts the refusal, never a silent no-op', async () => {
+    const services = githubRemote({
+      openUrl: vi.fn().mockRejectedValue(new Error('unavailable')),
+    })
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    panel.querySelector<HTMLElement>('[data-testid="git-open-branch"]')!.click()
+    await settle()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      "Couldn't open the link in your browser",
+    )
+  })
+
+  it('D14: with no recognised remote the open links are absent, never disabled', async () => {
+    const services = fakeServices() // remote: none by default
+    const { panel, setActiveOrigin } = mountApp(services, undefined, recorderClipboard())
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    expect(panel.querySelector('[data-testid="git-open-branch"]')).toBeNull()
+    expect(panel.querySelector('[data-testid="git-open-commit"]')).toBeNull()
+    // The copy affordance is unrelated to the remote: a branch name exists.
+    expect(panel.querySelector('[data-testid="git-copy-branch"]')).not.toBeNull()
   })
 })

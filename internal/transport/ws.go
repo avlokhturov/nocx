@@ -93,6 +93,12 @@ type WSServer struct {
 	// handler may read it while startup assigns it.
 	dialogMu      sync.RWMutex
 	dialogService DialogService
+	// Native URL-open capability (shell.openUrl). When nil, the method
+	// returns -32601: the dev-web harness has no Wails runtime to open a
+	// browser with. Set post-construction from main.go's WailsApp.startup,
+	// guarded like the dialog service.
+	urlMu     sync.RWMutex
+	urlOpener UrlOpener
 
 	// Profile resolver maps profile IDs to SSH connect configs.
 	resolver ProfileResolver
@@ -1029,7 +1035,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleProfileMethod(wconn, req)
 	case "git.open", "git.status", "git.diff", "git.stage", "git.unstage",
 		"git.stageAll", "git.unstageAll", "git.commit", "git.headMessage",
-		"git.log", "git.close":
+		"git.log", "git.remote", "git.close":
 		s.handleGitMethod(wconn, state, req)
 	case "profiles.importTabby":
 		s.handleImportTabby(wconn, req)
@@ -1084,6 +1090,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleDialogOpenFile(wconn, req)
 	case "shell.environmentObserved":
 		s.handleShellEnvironmentObserved(wconn, req)
+	case "shell.openUrl":
+		s.handleShellOpenUrl(wconn, req)
 	case "history.query":
 		s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":

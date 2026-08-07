@@ -1627,9 +1627,19 @@ export class TerminalContent extends BaseTabContent {
         // (nocx-nak2 — the Section disclosure's Space, and every button's,
         // was being eaten; the disclosure is operable with Enter and Space
         // only because this stands down).
+        // `[tabindex]:not([tabindex="-1"])` is this repository's existing
+        // spelling of "focusable by the user" — page.tsx, prompt.tsx and
+        // dialog.tsx all use it, and AD-8 says the concept gets one owner.
+        // A bare `[tabindex]` would also match tabindex="-1", which is
+        // programmatically focusable and NOT tabbable: the tab strip's
+        // roving items and CollectionRow's inactive rows carry it, and
+        // matching them would stand the rescue down exactly when a user
+        // clicked a tab and started typing — the case it exists for.
         if (
           active !== null &&
-          active.matches('button, select, a[href], [role="button"], [tabindex]')
+          active.matches(
+            'button, select, a[href], [role="button"], [tabindex]:not([tabindex="-1"])',
+          )
         )
           return
         // Focus-only, deliberately. The keydown's target was fixed when it was

@@ -592,6 +592,45 @@ func TestDialogOpenFile_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "dialog.openFile result")
 }
 
+// ── shell.openUrl (brief, nocx-hc0m) ────────────────────────────────────
+
+// The DTO's own conformance: the result is the empty object, exactly like
+// files.reveal — the browser either opened or the method failed.
+func TestShellOpenUrl_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.openUrl.schema.json")
+	raw, err := json.Marshal(struct{}{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.openUrl DTO")
+}
+
+// The real method through the real socket, with the fake opener standing in
+// for the Wails runtime: the opener receives exactly the URL the renderer
+// asked to open, and the result satisfies the contract.
+func TestShellOpenUrl_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.openUrl.schema.json")
+	h := newInventoryHarness(t)
+	opener := &fakeUrlOpener{}
+	h.ws.SetUrlOpener(opener)
+
+	resp := jsonrpcCall(t, h.conn, "shell.openUrl", map[string]any{"url": "https://github.com/shady2k/nocx"})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("shell.openUrl: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "shell.openUrl result (real socket)")
+	if got := opener.opened(); len(got) != 1 || got[0] != "https://github.com/shady2k/nocx" {
+		t.Fatalf("opener received %v, want the one URL", got)
+	}
+}
+
 // ── secrets.saveKeyMaterial ─────────────────────────────────────────────
 
 // The DTO's own conformance: the mint result has row + fingerprint +
@@ -3463,6 +3502,59 @@ func TestGitLog_DTOConformsToContract(t *testing.T) {
 			validateJSON(t, schema, raw, "git.log DTO")
 		})
 	}
+}
+
+// git.remote (brief, nocx-hc0m): the DTO must marshal to a schema-valid
+// result in both states — ok with the remote's URL, and none, which is the
+// ordinary "nothing to open" answer and never an error.
+func TestGitRemote_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.remote.schema.json")
+	for name, dto := range map[string]gitRemoteResult{
+		"ok":   {State: "ok", URL: "git@github.com:shady2k/nocx.git"},
+		"none": {State: "none"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "git.remote DTO ("+name+")")
+		})
+	}
+}
+
+// The real method through the real socket: a branch tracking a remote
+// answers the remote's own URL, and the none state stays a result.
+func TestGitRemote_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.remote.schema.json")
+	repo := newStubGitRepo()
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.remote", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.remote result (real socket)")
+	var got struct {
+		State string `json:"state"`
+		URL   string `json:"url"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("git.remote: decode: %v", err)
+	}
+	if got.State != "ok" || got.URL != "git@github.com:shady2k/nocx.git" {
+		t.Fatalf("git.remote = %+v, want ok with the remote's URL", got)
+	}
+}
+
+// The none state over the real socket: the no-remote answer must arrive as
+// a RESULT the schema accepts, never a transport error.
+func TestGitRemote_NoneOverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "git.remote.schema.json")
+	repo := &stubGitRepo{status: stubStatus(), remoteErr: &git.ErrNoRemote{}}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+	raw := gitWireCall(t, e, "git.remote", map[string]any{"bindingId": bid}, 3)
+	validateJSON(t, schema, raw, "git.remote none result (real socket)")
 }
 
 func TestGitClose_DTOConformsToContract(t *testing.T) {

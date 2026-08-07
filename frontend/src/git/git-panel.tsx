@@ -42,16 +42,19 @@ import { Button } from '../ui/button'
 import { Checkbox } from '../ui/checkbox'
 import { CollectionRow } from '../ui/collection-view'
 import { EmptyState } from '../ui/empty-state'
-import { PlusIcon, ResetIcon } from '../ui/icons'
+import { CopyIcon, ExternalLinkIcon, PlusIcon, ResetIcon } from '../ui/icons'
 import { IconButton } from '../ui/icon-button'
 import { Section } from '../ui/section'
 import { Spinner } from '../ui/spinner'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
+import { showToast } from '../ui/toast'
 import type { FileStatus } from '../ui/file-status-row'
 import { FileStatusRow } from '../ui/file-status-row'
 import type { Entry } from '../generated/git.status'
 import type { LogEntry as GitLogEntry } from '../generated/git.log'
+import type { ClipboardAccess } from '../clipboard'
+import { branchUrl, commitUrl } from './git-remote-url'
 import type { GitDiffSide } from './git-client'
 import type { GitDiffTarget } from './git-diff/open-git-diff'
 import type { GitStore } from './git-store'
@@ -69,6 +72,14 @@ export interface GitPanelProps {
   /** The diff-tab opener (the seam agreed with worker G; tests substitute
    *  a recorder). */
   opener: GitDiffOpener
+  /** The clipboard seam (AD-8: one owner per behaviour — the same
+   *  ClipboardAccess the Files panel copies with). The write rejects when
+   *  the platform refused, and the panel says so; it never swallows. */
+  clipboard: ClipboardAccess
+  /** The browser-open seam: the panel computes the URL and hands it over;
+   *  the view wires the shell.openUrl control-plane call. Rejects when no
+   *  native runtime exists (the dev-web harness) and the panel toasts. */
+  openExternalUrl: (url: string) => Promise<void>
   /** The ACTIVE tab's origin — a reactive accessor, never a capture. */
   activeOrigin: () => ActiveOrigin | null
   /** True while this view is on screen and the panel is expanded. */
@@ -199,6 +210,91 @@ export function GitPanel(props: GitPanelProps) {
     if (st === null || st.upstream === '') return ''
     return `${st.upstream} \u2191${st.ahead} \u2193${st.behind}`
   })
+
+  /** The branch name a copy produces: the real branch, never the
+   *  "no commits yet" label and never a detached HEAD (which has no
+   *  branch name — the porcelain carries none, and D14 says what the
+   *  panel cannot do, it does not draw). On an unborn branch the branch
+   *  IS copyable: it is the name git will create. */
+  const branchToCopy = createMemo(() => {
+    const st = props.store.status()
+    if (st === null || st.detached) return null
+    return st.branch === '' ? null : st.branch
+  })
+
+  /** The branch's hosting URL, or null when the remote is not a
+   *  recognised web host. This is the D14 gate for BOTH open
+   *  affordances: an absent link is absent from the DOM, never a
+   *  disabled control advertising a capability the surface does not
+   *  have. */
+  const branchOpenUrl = createMemo(() => {
+    const st = props.store.status()
+    const remote = props.store.remoteUrl()
+    if (st === null || remote === null) return null
+    return branchUrl(remote, st.branch)
+  })
+
+  /** The one browser-open path: the URL is already derived and
+   *  recognised (branchUrl/commitUrl returned it), so the only failure
+   *  left is the shell's — no Wails runtime in the dev-web harness, a
+   *  browser that refuses — and the panel says so out loud. */
+  const openExternal = (url: string): void => {
+    props.openExternalUrl(url).catch(() => {
+      showToast({ level: 'danger', message: "Couldn't open the link in your browser" })
+    })
+  }
+
+  /** Copy the branch name in one action, confirming with a toast — the
+   *  clipboard write is the seam's (AD-8), and a refused write is told,
+   *  never swallowed. */
+  const copyBranch = (): void => {
+    const name = branchToCopy()
+    if (name === null) return
+    props.clipboard.writeText(name).then(
+      () => showToast({ level: 'success', message: 'Branch name copied' }),
+      () => showToast({ level: 'danger', message: "Couldn't copy the branch name" }),
+    )
+  }
+
+  /** Open the current branch on its hosting, derived from the remote git
+   *  reported — never a URL the panel invented. */
+  const openBranch = (): void => {
+    const st = props.store.status()
+    const remote = props.store.remoteUrl()
+    if (st === null || remote === null) return
+    const url = branchUrl(remote, st.branch)
+    if (url === null) return
+    openExternal(url)
+  }
+
+  /** Open one commit on its hosting, the same way. */
+  const openCommit = (hash: string): void => {
+    const remote = props.store.remoteUrl()
+    if (remote === null) return
+    const url = commitUrl(remote, hash)
+    if (url === null) return
+    openExternal(url)
+  }
+
+  /** The commit row's actions: the open-on-hosting link, absent from the
+   *  DOM when no recognised remote exists (D14) — never disabled. */
+  const commitActions = (entry: GitLogEntry) => {
+    if (props.store.remoteUrl() === null) return undefined
+    return (
+      <IconButton
+        size="xs"
+        data-testid="git-open-commit"
+        ariaLabel={`Open commit ${entry.shortHash} on its hosting`}
+        title="Open commit on its hosting"
+        onClick={(e: MouseEvent) => {
+          e.stopPropagation()
+          openCommit(entry.hash)
+        }}
+      >
+        <ExternalLinkIcon />
+      </IconButton>
+    )
+  }
   const capBanner = createMemo(() => {
     const st = props.store.status()
     if (st === null || st.completeness === 'complete') return null
@@ -294,11 +390,13 @@ export function GitPanel(props: GitPanelProps) {
    *  pointing at it. The row is the kit's CollectionRow in its dense
    *  variant; the refs are the kit's Badge — the surface composes kit
    *  parts and repaints none of them. A bare HEAD ref is a detached HEAD,
-   *  and the info tone is what says it out loud. */
+   *  and the info tone is what says it out loud. The actions slot holds
+   *  the open-on-hosting link when the remote is recognised, and nothing
+   *  at all when it is not (D14). */
   const renderCommit = (entry: GitLogEntry) => (
     <CollectionRow
       density="dense"
-      actions={undefined}
+      actions={commitActions(entry)}
       info={
         <div class="git-log-row" data-testid="git-log-row">
           <span class="git-log-row__subject" title={entry.subject}>
@@ -410,32 +508,62 @@ export function GitPanel(props: GitPanelProps) {
         <Match when={props.store.state() === 'ready' || props.store.state() === 'tooManyChanges'}>
           {/* ── Header: branch, upstream, changed count ───────────────── */}
           <Show when={status() !== null}>
-            {/* Two lines, the way orca reads: what I am on, then where it
-                tracks. On one line in a rail the upstream is the part that
-                gets squeezed, and `origin…` answers nothing — it is the
-                remote branch NAME that carries the information. */}
             {/* One line each, in that order: the branch, its upstream, then
                 the count. The branch is TEXT, not a chip — a badge is a fixed
                 little shape for a short word, and a branch name is neither
                 short nor bounded, so `fix/e2e-files-reveal-and-container`
                 filled the header three lines deep before the kit was taught
-                that a chip is one line. And nothing shares the branch's line:
-                the count sitting beside it took a fixed 80px out of the one
-                string in this header that deserves the width, which is how a
-                branch clipped at `fix/e2e-files-revea…` while its own row was
-                half empty. */}
+                that a chip is one line. And nothing shares the branch's line
+                but its own copy control: the count sitting beside it took a
+                fixed ~80px out of the one string in this header that has to
+                be read in full, which is how a branch clipped at
+                `fix/e2e-files-revea…` while its own row was half empty. */}
             <div class="git-header" data-testid="git-header">
-              <span class="git-header__branch" data-testid="git-branch" title={branchLabel()}>
-                {branchLabel()}
-              </span>
-              <Show when={upstreamLabel() !== ''}>
-                <span
-                  class="git-header__upstream"
-                  data-testid="git-upstream"
-                  title={upstreamLabel()}
-                >
-                  {upstreamLabel()}
+              <div class="git-header__line">
+                <span class="git-header__branch" data-testid="git-branch" title={branchLabel()}>
+                  {branchLabel()}
                 </span>
+                {/* The copy affordance, on the branch, the way orca draws
+                    it. Absent when there is no branch name to copy — a
+                    detached HEAD has none (D14). */}
+                <Show when={branchToCopy() !== null}>
+                  <IconButton
+                    size="xs"
+                    data-testid="git-copy-branch"
+                    ariaLabel="Copy branch name"
+                    title="Copy branch name"
+                    onClick={copyBranch}
+                  >
+                    <CopyIcon />
+                  </IconButton>
+                </Show>
+              </div>
+              <Show when={upstreamLabel() !== ''}>
+                <div class="git-header__line">
+                  <span
+                    class="git-header__upstream"
+                    data-testid="git-upstream"
+                    title={upstreamLabel()}
+                  >
+                    {upstreamLabel()}
+                  </span>
+                  {/* The open-on-hosting link, beside the upstream, the way
+                      orca draws it. Absent — never disabled — when the
+                      remote is not a recognised web host (D14): a
+                      local-path remote and an unknown host produce no
+                      link, because the panel does not guess URLs. */}
+                  <Show when={branchOpenUrl() !== null}>
+                    <IconButton
+                      size="xs"
+                      data-testid="git-open-branch"
+                      ariaLabel="Open branch on its hosting"
+                      title="Open branch on its hosting"
+                      onClick={openBranch}
+                    >
+                      <ExternalLinkIcon />
+                    </IconButton>
+                  </Show>
+                </div>
               </Show>
               <span class="git-header__count" data-testid="git-changed-count">
                 {status()!.total} changed

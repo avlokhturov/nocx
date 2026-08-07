@@ -205,6 +205,43 @@ case "$1" in
       fail) echo "fatal: bad config" >&2; exit 128 ;;
       *) exit 0 ;;
     esac ;;
+  symbolic-ref)
+    # RemoteURL's first read: the current branch, from HEAD. A non-zero
+    # exit is the detached-HEAD answer, which is DATA ("no remote"), so
+    # the fake's FAIL mode is an exit-1 refusal, not a flood.
+    if [ "${FAKE_SYMBOLIC_REF:-main}" = "FAIL" ]; then
+      echo "fatal: ref HEAD is not a symbolic ref" >&2
+      exit 1
+    fi
+    echo "${FAKE_SYMBOLIC_REF:-main}"
+    exit 0 ;;
+  for-each-ref)
+    # FAKE_SELF_DELETE removes the script itself so the NEXT spawn cannot
+    # start — the read-2/read-3 process-start failure path (reads 1–3 all
+    # share run()'s exec).
+    if [ "${FAKE_SELF_DELETE:-0}" = "1" ]; then
+      rm -f "$0"
+    fi
+    # RemoteURL's second read: %(upstream:remotename) for the branch. The
+    # real git prints an empty line for "no upstream" and "." for a LOCAL
+    # upstream — both are the none answer. FAKE_UPSTREAM_REMOTE="-" is
+    # the explicit empty-value override; FAIL is a hard invocation
+    # failure, which for-each-ref never uses to say "no upstream".
+    if [ "${FAKE_UPSTREAM_REMOTE:-origin}" = "FAIL" ]; then
+      echo "fatal: bad revision" >&2
+      exit 1
+    fi
+    if [ "${FAKE_UPSTREAM_REMOTE:-origin}" != "-" ]; then
+      echo "${FAKE_UPSTREAM_REMOTE:-origin}"
+    fi
+    exit 0 ;;
+  remote)
+    # RemoteURL's third read: git remote get-url <name>. A non-zero exit
+    # is data too — the tracked remote was deleted.
+    case "${FAKE_REMOTE_URL:-git@github.com:shady2k/nocx.git}" in
+      FAIL) echo "error: No such remote 'origin'" >&2; exit 128 ;;
+      *) echo "${FAKE_REMOTE_URL:-git@github.com:shady2k/nocx.git}"; exit 0 ;;
+    esac ;;
   *) exit 0 ;;
 esac
 `

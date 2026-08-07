@@ -23,14 +23,8 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, writeFileSync } from 
 import path from 'node:path'
 import type { ChildProcess } from 'node:child_process'
 import type { Page } from './harness'
-import {
-  createRepo,
-  createUnbornRepo,
-  cleanupRepo,
-  git,
-  gitAllow,
-  type GitRepo,
-} from './git-fixture'
+import { HEADLESS } from './base-url'
+import { createRepo, createUnbornRepo, cleanupRepo, git, gitAllow } from './git-fixture'
 
 // ── Selectors (read from frontend/src/git/git-panel.tsx — not invented) ──
 
@@ -53,6 +47,10 @@ const LOG_ROW = '[data-testid="git-log-row"]'
 const ROW = '.ui-collection-row'
 const TAB = '.nocx-tab'
 const TAB_TITLE = '.nocx-tab-title'
+const COPY_BRANCH = '[data-testid="git-copy-branch"]'
+const OPEN_BRANCH = '[data-testid="git-open-branch"]'
+const OPEN_COMMIT = '[data-testid="git-open-commit"]'
+const TOAST_MESSAGE = '.ui-toast__message'
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /** Bring the app up, park the shell in `root` (OSC 7 makes the cwd verified
@@ -671,5 +669,148 @@ test('on an SSH tab the mutation controls are absent from the DOM, not merely di
     }
   } finally {
     fixture.proc.kill('SIGKILL')
+  }
+})
+// ── Copy the branch name, and open the repo on its hosting (brief, nocx-hc0m) ──
+
+// The clipboard lives behind the one seam (AD-8): createClipboardAccess
+// picks the Wails runtime when present, else navigator.clipboard. This spec
+// pins the browser path — the Wails runtime is disabled via init script,
+// exactly like e2e/clipboard.spec.ts — and grants the two clipboard
+// permissions, which are Chromium-only in Playwright; WebKit is checked by
+// hand in a packaged build.
+async function disableWailsRuntime(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'runtime', {
+      get() {
+        return undefined
+      },
+      set(_value: unknown) {
+        void _value /* swallowed */
+      },
+      configurable: true,
+      enumerable: true,
+    })
+  })
+}
+
+test('copying the branch name copies it and the panel confirms', async ({ page, browserName }) => {
+  test.skip(
+    browserName !== 'chromium',
+    'clipboard-read/write permissions are Chromium-only; WebKit by hand',
+  )
+  await disableWailsRuntime(page)
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  const repo = createRepo()
+  try {
+    await openGitPanelAt(page, repo.root, repo.basename)
+    await expect(page.locator(BRANCH)).toHaveText('main')
+
+    // One action: the copy affordance beside the branch. The confirmation
+    // is the panel's own word — the toast — not a guess at the clipboard.
+    await page.locator(COPY_BRANCH).click()
+    await expect(page.locator(TOAST_MESSAGE)).toContainText('Branch name copied')
+
+    // And the clipboard really holds the branch name, not a toast's echo.
+    const copied = await page.evaluate(() => navigator.clipboard.readText())
+    expect(copied).toBe('main')
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
+test('a recognised remote draws the open links, and clicking one reaches the shell seam', async ({
+  page,
+}) => {
+  const repo = createRepo()
+  // A disposable repo with a tracked remote, configured directly — a fixture
+  // has no origin/main ref, and %(upstream:remotename) answers from
+  // branch.<name>.remote/.merge, not from the ref.
+  git(repo.root, 'remote', 'add', 'origin', 'https://github.com/shady2k/nocx.git')
+  git(repo.root, 'config', 'branch.main.remote', 'origin')
+  git(repo.root, 'config', 'branch.main.merge', 'refs/heads/main')
+
+  // Watch the control plane for the shell.openUrl call. Opening a real
+  // browser is not something an e2e can do — the harness has no browser-open
+  // runtime at all — so the assertion stops at the seam: the request left
+  // this renderer over the real socket, carrying exactly the derived URL.
+  // Both directions: framesent carries the OUTGOING JSON-RPC request
+  // (shell.openUrl), framereceived the backend's answers (git.remote's
+  // state:none) — a method frame is never a received frame.
+  const wireFrames: string[] = []
+  page.on('websocket', (ws) => {
+    ws.on('framesent', (e) => {
+      const p = e.payload
+      if (typeof p === 'string') wireFrames.push(p)
+    })
+    ws.on('framereceived', (e) => {
+      const p = e.payload
+      if (typeof p === 'string') wireFrames.push(p)
+    })
+  })
+
+  try {
+    await openGitPanelAt(page, repo.root, repo.basename)
+
+    // The branch link is drawn because the remote is a recognised web host
+    // (D14: what the panel can do, it draws). The commit rows carry the
+    // same affordance, one per row.
+    await expect(page.locator(OPEN_BRANCH)).toBeVisible()
+    await expect(page.locator(LOG_ROW).first()).toBeVisible()
+    await expect(page.locator(OPEN_COMMIT).first()).toBeVisible()
+
+    await page.locator(OPEN_BRANCH).click()
+
+    // The seam: a frame named shell.openUrl went out over the real socket,
+    // and it carried the URL the panel derived — never one it invented. On
+    // the headless path the backend has no Wails runtime to open a browser
+    // with, answers -32601, and the panel says so out loud: that toast is
+    // the visible half of "the call reached the seam".
+    await expect
+      .poll(() => wireFrames.some((f) => f.includes('"method":"shell.openUrl"')))
+      .toBe(true)
+    const frame = wireFrames.find((f) => f.includes('"method":"shell.openUrl"'))!
+    expect(frame).toContain('https://github.com/shady2k/nocx/tree/main')
+    if (HEADLESS) {
+      await expect(page.locator(TOAST_MESSAGE)).toContainText(
+        "Couldn't open the link in your browser",
+      )
+    }
+  } finally {
+    cleanupRepo(repo)
+  }
+})
+
+test('without a recognised remote the open links are absent, not disabled (D14)', async ({
+  page,
+}) => {
+  const repo = createRepo() // no remote at all — the common case
+  // framesent for the outgoing git.remote request, framereceived for the
+  // backend's state:none answer — the request is never a received frame.
+  const wireFrames: string[] = []
+  page.on('websocket', (ws) => {
+    ws.on('framesent', (e) => {
+      const p = e.payload
+      if (typeof p === 'string') wireFrames.push(p)
+    })
+    ws.on('framereceived', (e) => {
+      const p = e.payload
+      if (typeof p === 'string') wireFrames.push(p)
+    })
+  })
+  try {
+    await openGitPanelAt(page, repo.root, repo.basename)
+
+    // The remote read is issued with the log on open; wait for the none
+    // answer ON THE WIRE — a DOM assertion alone could pass vacuously before
+    // the read resolved. Then the affordances must be absent entirely: a
+    // disabled control would advertise a capability the surface does not
+    // have.
+    await expect.poll(() => wireFrames.some((f) => f.includes('"method":"git.remote"'))).toBe(true)
+    await expect.poll(() => wireFrames.some((f) => f.includes('"state":"none"'))).toBe(true)
+    await expect(page.locator(OPEN_BRANCH)).toHaveCount(0)
+    await expect(page.locator(OPEN_COMMIT)).toHaveCount(0)
+  } finally {
+    cleanupRepo(repo)
   }
 })

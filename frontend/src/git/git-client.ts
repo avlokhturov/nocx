@@ -16,8 +16,10 @@ import type { GitUnstageAllResult } from '../generated/git.unstageAll'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitHeadMessageResult } from '../generated/git.headMessage'
 import type { GitLogResult } from '../generated/git.log'
+import type { GitRemoteResult } from '../generated/git.remote'
 import type { GitCloseResult } from '../generated/git.close'
 import type { GitChangedNotification } from '../generated/git.changed'
+import type { ShellOpenUrl } from '../generated/shell.openUrl'
 
 /** The sides of a diff are a closed set — the schema says so, and the panel
  *  switches on the row's list to pick one. */
@@ -107,6 +109,20 @@ class GitClient {
     return this.dispatcher.call<GitLogResult>('git.log', { bindingId })
   }
 
+  /** The raw URL of the remote the current branch tracks (brief,
+   *  nocx-hc0m). The conversion to a web page is the renderer's — this
+   *  method carries what git said, verbatim. */
+  remote(bindingId: string): Promise<GitRemoteResult> {
+    return this.dispatcher.call<GitRemoteResult>('git.remote', { bindingId })
+  }
+
+  /** Ask the backend (which owns the Wails runtime) to open a URL in the
+   *  system browser. The backend refuses anything that is not an http(s)
+   *  URL before the browser sees it, and reports itself unavailable in the
+   *  dev-web harness — the panel toasts that rather than failing. */
+  openUrl(url: string): Promise<ShellOpenUrl> {
+    return this.dispatcher.call<ShellOpenUrl>('shell.openUrl', { url })
+  }
   /** Release a binding. Also the repair for a stale open: a successful open
    *  the store has already superseded has registered a live repository on the
    *  backend, so dropping the response without this leaks it. */
@@ -140,6 +156,8 @@ export interface GitPanelServices {
   unstageAll(bindingId: string): Promise<GitUnstageAllResult>
   commit(bindingId: string, message: string, amend: boolean): Promise<GitCommitResult>
   headMessage(bindingId: string): Promise<GitHeadMessageResult>
+  remote(bindingId: string): Promise<GitRemoteResult>
+  openUrl(url: string): Promise<ShellOpenUrl>
   close(bindingId: string): Promise<GitCloseResult>
   subscribeGitChanged(handler: (params: GitChangedNotification) => void): () => void
 }
@@ -161,6 +179,8 @@ export function createGitPanelServices(dispatcher: Dispatcher): GitPanelServices
     unstageAll: (bindingId) => client.unstageAll(bindingId),
     commit: (bindingId, message, amend) => client.commit(bindingId, message, amend),
     headMessage: (bindingId) => client.headMessage(bindingId),
+    remote: (bindingId) => client.remote(bindingId),
+    openUrl: (url) => client.openUrl(url),
     close: (bindingId) => client.close(bindingId),
     subscribeGitChanged: (handler) => client.subscribeGitChanged(handler),
   }

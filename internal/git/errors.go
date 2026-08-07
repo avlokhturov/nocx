@@ -71,3 +71,12 @@ type ErrConflicted struct {
 func (e *ErrConflicted) Error() string {
 	return fmt.Sprintf("git: cannot stage or unstage all while %q is conflicted", e.Path)
 }
+
+// ErrNoRemote — RemoteURL found nothing to open: the branch is detached,
+// has no upstream, or tracks a remote that does not exist. This is the
+// ordinary "the panel draws no link" case (design D14), never an error: the
+// transport maps it to the result state "none", the same way ErrConflicted
+// maps to a renderable refusal rather than a wire error.
+type ErrNoRemote struct{}
+
+func (e *ErrNoRemote) Error() string { return "git: no remote to open" }
