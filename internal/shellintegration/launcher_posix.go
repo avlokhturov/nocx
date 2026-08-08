@@ -79,7 +79,12 @@ ENV="$d/env" exec "${SHELL:-/bin/sh}" -l
 // generation file for the launch carrier).
 func posixEnvFile(envBlock, scriptSource string) string {
 	env := strings.ReplaceAll(posixEnvFileTemplate, "@ENV@", envBlock)
-	return strings.ReplaceAll(env, "@NOCX_POSIX@", scriptSource)
+	env = strings.ReplaceAll(env, "@NOCX_POSIX@", scriptSource)
+	// Comment-stripped like the generation scripts: the ENV file ships
+	// inside the bootstrap payload, and the far shell never reads the
+	// template's prose (nocx-z9s9.17). Stripping the rendered text also
+	// covers the substituted bodies.
+	return stripShellComments(env)
 }
 
 // posixArgFor wraps a rendered ENV file in the minimal tier's pinned

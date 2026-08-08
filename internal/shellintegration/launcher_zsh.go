@@ -156,7 +156,12 @@ exec zsh -l
 func zshRcfile(envBlock, scriptSource, capability string) string {
 	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", envBlock)
 	rc = strings.ReplaceAll(rc, "@CAP@", capability)
-	return strings.ReplaceAll(rc, "@NOCX_ZSH@", scriptSource)
+	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", scriptSource)
+	// Comment-stripped like the generation scripts: the generated .zshrc
+	// ships inside the bootstrap payload, and the far shell never reads
+	// the template's prose (nocx-z9s9.17). Stripping the rendered text
+	// also covers the substituted bodies.
+	return stripShellComments(rc)
 }
 
 // zshArgFor wraps a rendered .zshrc in the zsh tier's pinned transport: the

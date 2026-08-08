@@ -211,7 +211,8 @@ func printfBEscape(s string) string {
 // So the number moved, and TestFullLauncherStaysUnderArgLimit now asserts the
 // MARGIN rather than the ceiling — erosion is the failure mode, and only a
 // test that watches the gap can report it while there is still room to act.
-// The real fix is smaller payloads: 62% of nocx.bash is comments, ~22 KB of
-// prose across the three scripts that the remote host is sent and never
-// reads (nocx-z9s9.17).
+// The real fix landed with nocx-z9s9.17: the shipped payloads are
+// comment-stripped at embed time (stripShellComments), so the remote host
+// receives the code and none of the ~22 KB of prose the three scripts used
+// to carry — every tier now sits ~64 KB under this cap.
 var maxFullLauncherLen = 120 * 1024

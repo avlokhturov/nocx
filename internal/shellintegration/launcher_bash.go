@@ -134,7 +134,12 @@ unset __nocx_old_opts
 func bashRcfile(envBlock, scriptSource, capability string) string {
 	rc := strings.ReplaceAll(bashRcfileTemplate, "@ENV@", envBlock)
 	rc = strings.ReplaceAll(rc, "@CAP@", capability)
-	return strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
+	rc = strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
+	// The rendered rcfile ships inside the bootstrap payload, so its
+	// template comments are stripped like the generation scripts'
+	// (nocx-z9s9.17): the far shell never reads them. The strip runs on
+	// the rendered text so the substituted bodies are covered too.
+	return stripShellComments(rc)
 }
 
 // bashOuterScript is the bash tier's transport: write the rcfile to a real

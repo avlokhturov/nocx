@@ -201,43 +201,75 @@ func TestAutoCommand_UnderCap(t *testing.T) {
 	}
 }
 
-// TestFullLauncherStaysUnderArgLimit watches the MARGIN, not the ceiling.
+// TestFullLauncherStaysUnderArgLimit watches the MARGIN, not the ceiling,
+// for EVERY tier including ShellAuto.
 //
-// TestAutoCommand_UnderCap above asks whether the command fits, and the answer
-// stayed yes while the headroom went from 15 KB to 2 KB — so the first thing
-// anyone learned about the erosion was every remote launch refusing at once,
-// after a 2 KB script edit (nocx-z9s9.18). "Under the cap" is a moment; what
-// matters is the interval between the command and the hard limit it can never
-// approach, because MAX_ARG_STRLEN is the kernel's and cannot be raised.
+// TestAutoCommand_UnderCap above asks whether the command fits, and the
+// answer stayed yes while the headroom went from 15 KB to 2 KB — so the
+// first thing anyone learned about the erosion was every remote launch
+// refusing at once, after a 2 KB script edit (nocx-z9s9.18). "Under the
+// cap" is a moment; what matters is the interval between the command and
+// the hard limit it can never approach, because MAX_ARG_STRLEN is the
+// kernel's and cannot be raised.
 //
-// A failure here is not "make the number bigger": at 128 KiB there is nowhere
-// left to go. It means the payload must shrink — the scripts ship ~22 KB of
-// comments the remote host never reads (nocx-z9s9.17).
+// The first version of this test still failed to catch the ShellAuto
+// refusal that opened nocx-z9s9.17 (measured 123,013 bytes against the
+// 122,880 cap — refused, and the test green). Three blind spots: it
+// measured only ShellAuto; it measured the margin to MAX_ARG_STRLEN, but
+// the refusal happens at maxFullLauncherLen, and the 8 KiB between the two
+// is exactly the margin the test demanded, so a command sitting 2 KB under
+// the refusal cap still passed; and the 8 KiB margin itself was too small
+// — the pre-strip baseline (comments shipped) leaves ShellAuto 15,919
+// bytes under this fixture's cap, so a 16 KiB margin makes this test fail
+// on exactly the tier that broke, while the stripped payload leaves
+// ~63 KB and passes with room to spare.
+//
+// This version measures every tier, against the cap the launcher actually
+// refuses at, with the launch options a real session carries (internal/ssh
+// RemoteLifecycleLaunch shapes: the 32-hex session id, an environment id,
+// the lifecycle lane/domain/epoch/port and the 64-hex capability).
+//
+// A failure here is not "make the number bigger": at 128 KiB there is
+// nowhere left to go. It means the payload must shrink — the scripts used
+// to ship ~22 KB of comments the remote host never reads, and they no
+// longer do (nocx-z9s9.17).
 func TestFullLauncherStaysUnderArgLimit(t *testing.T) {
 	// Linux MAX_ARG_STRLEN: 32 pages, and the whole remote command is one
 	// argv word. macOS is looser; this is the binding one.
 	const maxArgStrLen = 128 * 1024
-	// Enough room for a few script edits before anyone has to think about it.
-	const wantMargin = 8 * 1024
+	// 16 KiB of room to act: the pre-strip baseline (comments shipped)
+	// fails this margin on ShellAuto while every stripped tier clears it
+	// by ~63 KB, so erosion trips the guard long before a refusal.
+	const wantMargin = 16 * 1024
 
-	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellAuto, LaunchOptions{
-		Enhanced:  true,
-		SessionID: "auto-margin-test",
-	})
-	if !ok {
-		t.Fatal("ShellAuto launcher refused")
+	opts := LaunchOptions{
+		SessionID:     "0123456789abcdef0123456789abcdef",
+		Enhanced:      true,
+		EnvironmentID: "env-0123456789abcdef",
+		Lane:          "lane-01234567",
+		Domain:        "dom-01234567",
+		Epoch:         42,
+		LifecyclePort: 65432,
+		Capability:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}
-	if margin := maxArgStrLen - len(cmd); margin < wantMargin {
-		t.Errorf("auto command is %d bytes, leaving %d under MAX_ARG_STRLEN (%d) — want at least %d.\n"+
-			"The cap cannot absorb this: MAX_ARG_STRLEN is the kernel's. Shrink the payload instead\n"+
-			"— the three scripts ship ~22 KB of comments the far host never reads (nocx-z9s9.17).",
-			len(cmd), margin, maxArgStrLen, wantMargin)
+	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown, ShellAuto} {
+		cmd, _, ok := NewRemoteLauncher().StartCommand(kind, opts)
+		if !ok {
+			t.Fatalf("%s launcher refused", kind)
+		}
+		if margin := maxFullLauncherLen - len(cmd); margin < wantMargin {
+			t.Errorf("%s command is %d bytes, leaving %d under the %d-byte cap — want at least %d.\n"+
+				"The cap cannot absorb this: MAX_ARG_STRLEN is the kernel's. Shrink the payload instead\n"+
+				"— the three scripts used to ship ~22 KB of comments the far host never reads (nocx-z9s9.17).",
+				kind, len(cmd), margin, maxFullLauncherLen, wantMargin)
+		}
 	}
 	// The configured cap must itself respect the kernel bound, or it would
-	// authorise a command that cannot exec.
-	if maxFullLauncherLen+wantMargin > maxArgStrLen {
-		t.Errorf("maxFullLauncherLen %d + margin %d exceeds MAX_ARG_STRLEN %d",
-			maxFullLauncherLen, wantMargin, maxArgStrLen)
+	// authorise a command that cannot exec. (The margin is asserted against
+	// the cap above; this check is only about the cap's own ceiling.)
+	if maxFullLauncherLen > maxArgStrLen {
+		t.Errorf("maxFullLauncherLen %d exceeds MAX_ARG_STRLEN %d",
+			maxFullLauncherLen, maxArgStrLen)
 	}
 }
 

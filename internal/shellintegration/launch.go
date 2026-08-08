@@ -100,6 +100,13 @@ func launchSourceLine(name string) string {
 // payloads substituted. The payloads are the same pinned transports the argv
 // launchers use, but the rcfile bodies source the INSTALLED generation files
 // instead of embedding the scripts — a stable carrier over a changing bundle.
+// The rendered text is comment-stripped like the generation scripts: the
+// carrier ships inside the bootstrap payload on every launch (and to every
+// install), and the far side never reads the prose (nocx-z9s9.17). The
+// template keeps its comments — the carrier is a FILE, authored multi-line
+// for the humans who read the source — and only the shipped bytes shrink.
+// The shebang survives the strip, so `exec "$HOME/.nocx/launch"` keeps
+// working.
 func launchCarrier() string {
 	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@",
 		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"), "")))
@@ -107,7 +114,7 @@ func launchCarrier() string {
 		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"), "")))
 	s = strings.ReplaceAll(s, "@POSIX_ARG@",
 		posixArgFor(posixEnvFile("", launchSourceLine("nocx.posix"))))
-	return s
+	return stripShellComments(s)
 }
 
 // launchBundle assembles the bundle descriptor both carriers publish (AD-8):

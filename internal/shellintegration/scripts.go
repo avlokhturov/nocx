@@ -2,21 +2,40 @@ package shellintegration
 
 import _ "embed"
 
+// The embedded scripts are the AUTHORED forms, comments and all — the
+// reasoning they carry is why the repo keeps them (nocx-z9s9.17). What ships
+// is the stripped form: the remote host is sent the bootstrap payload on
+// every launch and never reads a comment, and 62% of nocx.bash was measured
+// to be prose. One strip at embed time means every carrier — the argv
+// prelude, the Go publisher's bundle, the local install and the inband
+// payload — ships the SAME bytes, so the manifest hashes, the publisher's
+// byte-identity and the version digest all describe exactly what the far
+// side receives.
+//
 //go:embed scripts/nocx.zsh
-var zshScript string
+var zshScriptRaw string
 
 //go:embed scripts/nocx.bash
-var bashScript string
+var bashScriptRaw string
 
 //go:embed scripts/nocx.posix
-var posixScript string
+var posixScriptRaw string
+
+var (
+	zshScript   = stripShellComments(zshScriptRaw)
+	bashScript  = stripShellComments(bashScriptRaw)
+	posixScript = stripShellComments(posixScriptRaw)
+)
 
 // version is the integration script version. Bump when scripts change;
 // EnsureInstalled/EnsureInstalledRemote compare this against the installed
 // VERSION file and rewrite scripts when they differ. nocx-6b3x: an edited
 // script without a bump reaches no shell — every existing install keeps
 // sourcing the copy installed the last time the number changed.
-const version = "17"
+//
+// 18: the shipped scripts are comment-stripped at embed time (nocx-z9s9.17)
+// — same code, no prose — so every install rewrites to the smaller bytes.
+const version = "18"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

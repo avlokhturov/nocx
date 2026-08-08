@@ -100,8 +100,12 @@ func TestBashLauncher_WholeRcfileExecutes(t *testing.T) {
 	target := maxFullLauncherLen - 16*1024
 
 	var b strings.Builder
+	// The filler is CODE, not comments: the shipped rcfile is
+	// comment-stripped (nocx-z9s9.17), so a '#' filler would collapse to
+	// nothing and the payload would stop exceeding pipe capacity. A no-op
+	// ':' command per line pads the body just as well.
 	for i := 0; b.Len() < target; i++ {
-		fmt.Fprintf(&b, "# filler line %d: padding the rcfile past a pipe capacity\n", i)
+		fmt.Fprintf(&b, ": filler line %d: padding the rcfile past a pipe capacity\n", i)
 	}
 	b.WriteString("printf 'RCFILE_TAIL_RAN\\n'\n")
 

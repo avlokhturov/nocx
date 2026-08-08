@@ -74,6 +74,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// another domain's shell minted a colliding id and the kernel
 		// rejected the second domain's first command (nocx-u7uh.19).
 		"17": "5edf9b249dd194fc3c43cd21cbb2a2608378afebd0f2f318928a7448f8671779",
+		// v18: the shipped scripts are comment-stripped at embed time
+		// (nocx-z9s9.17) — same code, no prose — so every install rewrites
+		// to the smaller bytes and the version test hashes exactly what
+		// ships.
+		"18": "7e6cac4c22db022dd78434c5d6ac911dc12b8651b6db527de8df57ab82bfe06f",
 	}
 
 	h := sha256.New()
