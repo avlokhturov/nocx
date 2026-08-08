@@ -84,6 +84,12 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// visible native prompt, and emits the one-shot recovery fence
 		// (nocx-u7uh.15).
 		"19": "008bf5b8f7a80a8be10c30eedc1c1e3eb4e269f30427c0fd3651254d51dcd84c",
+		// v20: __nocx_snapshot_wait_ms is declared once per shell rather than
+		// once per source. The rcfile re-sources the script on purpose, and a
+		// readonly can be neither unset nor re-declared, so every local
+		// enhanced session printed "readonly variable" as its first line
+		// (nocx-u7uh.22).
+		"20": "4171ef459ec928439c0268ec98e6204d89ee0f05c53d4effc67048509faa7ba0",
 	}
 
 	h := sha256.New()

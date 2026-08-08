@@ -39,7 +39,11 @@ var (
 // 19: the recovery seam (ADR-0024 decision 8) — a failed lifecycle send at a
 // prompt boundary clears the active latch, restores a visible native prompt,
 // and emits the one-shot recovery fence (nocx-u7uh.15).
-const version = "19"
+//
+// 20: __nocx_snapshot_wait_ms is declared once per shell, not once per
+// source, so the rcfile's deliberate re-source over an installer-era install
+// no longer errors (nocx-u7uh.22).
+const version = "20"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

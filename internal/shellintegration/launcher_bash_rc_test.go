@@ -179,3 +179,58 @@ func firstN(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// TestBashLauncher_UserRcAlreadySourcedAnInstall: the local enhanced session
+// is the case where the user's ~/.bashrc has ALWAYS already sourced an
+// installed copy of nocx.bash, because the app installs that gate line itself
+// (App.Start -> EnsureInstalled). The rcfile then deliberately unsets
+// __nocx_loaded so THIS session's authenticated copy installs over the
+// installer-era one — which means the script body runs twice in one shell,
+// by design.
+//
+// A `readonly` declaration cannot survive that: it cannot be unset and it
+// cannot be re-declared, so the second source aborts the line with
+// "bash: __nocx_snapshot_wait_ms: readonly variable" printed into the user's
+// terminal as the first thing they see (nocx-u7uh.22). The remote tier never
+// showed it because a far host's rc rarely carries the gate; the local tier
+// added by nocx-u7uh.21 hits it every single time.
+func TestBashLauncher_UserRcAlreadySourcedAnInstall(t *testing.T) {
+	requireBinBash(t)
+	tmp := t.TempDir()
+
+	// A fixture HOME shaped like a real one: an installed generation plus the
+	// gate line the installer writes.
+	home := writeBashFixtureHome(t, "")
+	installed := filepath.Join(home, ".nocx")
+	if err := os.MkdirAll(installed, 0o700); err != nil {
+		t.Fatalf("mkdir .nocx: %v", err)
+	}
+	script := filepath.Join(installed, "shell-integration.bash")
+	if err := os.WriteFile(script, []byte(bashScript), 0o600); err != nil {
+		t.Fatalf("write installed script: %v", err)
+	}
+	rcPath := filepath.Join(home, ".bashrc")
+	gate := "\n[[ -n \"$NOCX_SHELL_INTEGRATION\" ]] && source \"" + script + "\"\n"
+	//nolint:gosec // rcPath is this test's own t.TempDir() fixture home.
+	f, err := os.OpenFile(rcPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open fixture rc: %v", err)
+	}
+	if _, err := f.WriteString(gate); err != nil {
+		t.Fatalf("append gate to fixture rc: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close fixture rc: %v", err)
+	}
+
+	arg := bashArgFor(bashRcfile(launcherEnvBlock(LaunchOptions{
+		SessionID: "sess-dbl", Enhanced: true, EnvironmentID: "dbl-env",
+	}), bashScript, "cap-double-source", "recovery-double-source"))
+
+	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+shellQuote(arg),
+		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
+
+	if strings.Contains(out, "readonly variable") {
+		t.Errorf("re-sourcing over an installer-era install printed a readonly error into the user's terminal; output:\n%s", firstN(out, 1200))
+	}
+}

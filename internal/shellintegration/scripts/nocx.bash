@@ -692,10 +692,22 @@ __nocx_snapshot_done=0
 # override lets such a test state a budget of its own and go on testing the
 # mechanism. A non-numeric value falls back to the default rather than
 # breaking the arithmetic in someone's prompt.
-if [[ "${NOCX_SNAPSHOT_WAIT_MS:-}" =~ ^[0-9]+$ ]]; then
-    readonly __nocx_snapshot_wait_ms="$NOCX_SNAPSHOT_WAIT_MS"
-else
-    readonly __nocx_snapshot_wait_ms=250
+#
+# Declared once per shell, not once per source. The launcher rcfile
+# deliberately unsets __nocx_loaded and sources this script again so a
+# session's authenticated copy installs over an installer-era one the user's
+# ~/.bashrc already sourced — which is EVERY local enhanced session, because
+# the app writes that gate line itself. A readonly cannot be unset and cannot
+# be re-declared, so re-declaring printed "__nocx_snapshot_wait_ms: readonly
+# variable" into the user's terminal as the first thing they saw
+# (nocx-u7uh.22). The value is identical on both passes, so keeping the first
+# is not a compromise; readonly still holds for the rest of the session.
+if [[ -z "${__nocx_snapshot_wait_ms:-}" ]]; then
+    if [[ "${NOCX_SNAPSHOT_WAIT_MS:-}" =~ ^[0-9]+$ ]]; then
+        readonly __nocx_snapshot_wait_ms="$NOCX_SNAPSHOT_WAIT_MS"
+    else
+        readonly __nocx_snapshot_wait_ms=250
+    fi
 fi
 
 # Nothing may survive the shell: a session that exits before the snapshot was
