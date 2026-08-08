@@ -10,13 +10,13 @@
     "Three entries added BY HAND on 2026-08-06 (nocx-708q). The update script",
     "refuses to grow the baseline for you, on purpose; these are reasoned.",
     "",
-    "  src/generated/files.{changed,watch}.ts — the wire shapes of the watching",
+    "  src/generated/files.{changed,watch}.ts \u2014 the wire shapes of the watching",
     "  wave. The backend already sends files.changed; the renderer subscribes when",
     "  fsnotify and SFTP polling land. Generated from a contract that IS exercised",
-    "  by the Go over-the-wire conformance tests, so the shape is not unverified —",
+    "  by the Go over-the-wire conformance tests, so the shape is not unverified \u2014",
     "  only the renderer half is pending.",
     "",
-    "  src/generated/files.reveal.ts — files.reveal answers -32601 until the Wails",
+    "  src/generated/files.reveal.ts \u2014 files.reveal answers -32601 until the Wails",
     "  seam exists. Declared here so the contract is written down once rather than",
     "  invented twice when it arrives.",
     "",
@@ -26,23 +26,24 @@
     "Twelve entries added BY HAND on 2026-08-07 (the git panel). Same rule as",
     "above: the update script refuses to grow the baseline, so these are reasoned.",
     "",
-    "  src/generated/git.{open,commit,stage,stageAll,unstage,unstageAll}.ts —",
+    "  src/generated/git.{open,commit,stage,stageAll,unstage,unstageAll}.ts \u2014",
     "  Status and Entry. The git.* contracts declare the status shape ONCE, in",
     "  git.status.schema.json, and the six results that carry it reference it",
-    "  cross-file — the first contract in this repository to do so. The",
+    "  cross-file \u2014 the first contract in this repository to do so. The",
     "  alternative was seven copies of one shape and six chances for five of them",
     "  to be right. json-schema-to-typescript resolves that $ref by INLINING the",
     "  referenced definitions into every output file, so each of the six declares",
     "  its own Status and Entry while consumers import the canonical pair from",
     "  git.status.ts. Measured, not assumed: setting declareExternallyReferenced",
-    "  to false suppresses the duplicates and breaks the output — every",
+    "  to false suppresses the duplicates and breaks the output \u2014 every",
     "  referencing file then names an undeclared type, including the existing",
     "  files.list and fs.complete contracts. So this is the cost of declaring the",
     "  shape once, and it is paid in generated code no human edits.",
     "",
     "  These shrink out of this list only if the generator learns to emit imports",
     "  for cross-file refs. If a NON-generated file ever appears in this group, it",
-    "  is not this exemption and should be deleted instead."
+    "  is not this exemption and should be deleted instead.",
+    "TEMPORARY, nocx-sfv6.8: src/generated/control.saturated.notification.ts has no consumer because the server does not emit control.saturated yet \u2014 the notification is raised for refused work with no id, which only exists once nocx-sfv6.5 wires the executor into handleControlFrame. A subscriber added now would be dead code pretending to be a feature. Removing this entry is an acceptance criterion of nocx-sfv6.5."
   ],
   "violations": [
     {
@@ -309,6 +310,11 @@
       "kind": "exports",
       "file": "src/unresolved-redactions.ts",
       "symbol": "hasUnresolved"
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/control.saturated.notification.ts",
+      "symbol": ""
     },
     {
       "kind": "files",

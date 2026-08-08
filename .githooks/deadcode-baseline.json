@@ -49,7 +49,8 @@
     "  that forgets to isolate must not reach the developer's real profile \u2014",
     "  paths.go names it in the panic it raises. Same category as the vaulttest",
     "  package and ws_test_helper.go already below.",
-    "TEMPORARY, nocx-sfv6.3: the 12 internal/transport/control entries are a contract-first package whose consumer is nocx-sfv6.5 (handleControlFrame submitting work). Added by hand because the updater refuses growth on purpose. They MUST be gone before nocx-sfv6 closes \u2014 removing them is an acceptance criterion of nocx-sfv6.5, so a package that is never wired cannot be quietly shipped the way nocx-rtg0's ContentDB.Add was."
+    "TEMPORARY, nocx-sfv6.3: the 12 internal/transport/control entries are a contract-first package whose consumer is nocx-sfv6.5 (handleControlFrame submitting work). Added by hand because the updater refuses growth on purpose. They MUST be gone before nocx-sfv6 closes \u2014 removing them is an acceptance criterion of nocx-sfv6.5, so a package that is never wired cannot be quietly shipped the way nocx-rtg0's ContentDB.Add was.",
+    "TEMPORARY, nocx-sfv6.8: the two internal/transport/ws_saturation.go entries build the refusal's wire form; their caller is nocx-sfv6.5, which submits work to the executor and answers a *control.Rejection with them. Same obligation as the control package entries \u2014 gone before nocx-sfv6 closes."
   ],
   "violations": [
     {
@@ -359,6 +360,14 @@
     {
       "file": "internal/transport/ws_auth.go",
       "func": "WithTokenSource"
+    },
+    {
+      "file": "internal/transport/ws_saturation.go",
+      "func": "saturatedNotificationParamsFor"
+    },
+    {
+      "file": "internal/transport/ws_saturation.go",
+      "func": "saturationErrorFor"
     },
     {
       "file": "internal/transport/ws_test_helper.go",
