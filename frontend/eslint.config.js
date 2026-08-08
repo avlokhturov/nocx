@@ -758,15 +758,110 @@ const nocxPlugin = {
   },
 }
 
+// ─── Rule 9 — lifecycle/renderer boundary (ADR-0024 §1, §7) ─────────────────────────
+// Terminal output is render-only: no sequence parsed from the byte stream may grant
+// input ownership, open or complete an attempt, persist history, activate an
+// environment, or enable integration-sensitive rewriting. The rule has to hold in
+// the code too, and in both directions:
+//
+//  - renderers/ parse bytes. They must not import the modules that turn facts into
+//    authority (input ownership, the ledger, history persistence) or the lifecycle
+//    state the ADR commits us to. `src/lifecycle/` does not exist yet — it is
+//    forward-declared here as the home of the two-axis reducer, ExecutionAttempt and
+//    the accepted-domain projection (ADR-0024 §5, §6, §7), so the boundary is in
+//    place when they land. A renderer that imports lifecycle state can hand
+//    stream-derived values to an authority surface, which is the exact path this
+//    ADR deletes.
+//  - lifecycle modules (today: the ownership/ledger/persistence/environment state;
+//    later: `src/lifecycle/`) must not import the OSC parsing surface — renderers/,
+//    CommandMarker, or the OSC 636 passport parser. A lifecycle module that reads
+//    the parser can mint authority out of terminal bytes; it consumes published
+//    facts, never the stream.
+//
+// Expressed with the stock rule, same as Rule 8. Exported separately so the
+// negative-fixture test (src/eslint-fixture-gate.test.ts) lints the exact fragment
+// production wires in — a weakened rule fails that test even if nothing else does.
+export const lifecycleBoundaryBlocks = [
+  {
+    files: ['src/renderers/**/*.{ts,tsx}'],
+    ignores: ['src/renderers/**/*.test.{ts,tsx}'],
+    languageOptions: { parser: tseslint.parser },
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['../input-state*', '../command-ledger*', '../history-client*'],
+              message:
+                'renderers/ parse bytes and may not import lifecycle, ledger, ownership or persistence state — the stream is render-only, and these modules are where stream-derived facts become authority (ADR-0024 §1). Route through the authenticated published-fact seam.',
+            },
+            {
+              group: ['../lifecycle', '../lifecycle/**'],
+              message:
+                'renderers/ may not import the lifecycle reducer, ExecutionAttempt or the accepted-domain projection — forward-declared in src/lifecycle/ (ADR-0024 §5, §6). Stream-derived values must never reach an authority surface; the lifecycle consumes published facts only.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: [
+      'src/input-state.ts',
+      'src/command-ledger.ts',
+      'src/history-client.ts',
+      'src/environment-passport.ts',
+      'src/lifecycle/**/*.{ts,tsx}',
+    ],
+    ignores: ['src/lifecycle/**/*.test.{ts,tsx}'],
+    languageOptions: { parser: tseslint.parser },
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['./renderers', './renderers/**', '../renderers', '../renderers/**'],
+              message:
+                'lifecycle/authority modules consume published facts, never the parsing surface: CommandMarker and the OSC 133 parser are rendering facts, and reading authority out of them is how the stream-derived vulnerability returns (ADR-0024 §1).',
+            },
+            {
+              group: [
+                './environment-passport',
+                './environment-passport.ts',
+                '../environment-passport',
+                '../environment-passport.ts',
+              ],
+              message:
+                'lifecycle modules may not import the OSC 636 passport parser/tracker: a passport is tty bytes and cannot activate a domain; the domain stack transitions only on authenticated events (ADR-0024 §2, §6).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+]
+
 // ─── Config export ─────────────────────────────────────────────────────────────────
 export default tseslint.config(
   // lint-fixtures/ holds the negative fixtures for eslint-plugin-solid and the
   // nocx/no-raw-controls fixture. They are excluded here and linted explicitly
   // by lint-fixtures/gate.sh with --no-ignore, which asserts each required rule fires.
+  // eslint-fixtures/ holds the Rule 9 negative fixtures; they are linted explicitly
+  // by src/eslint-fixture-gate.test.ts with the shared fragment below.
   // `src/generated/**` is produced by `npm run contracts` from contracts/*.schema.json.
   // Linting it would be linting the generator's output style, and any fix would be
   // overwritten on the next run — the schema is the file to change.
-  { ignores: ['dist/**', 'wailsjs/**', 'lint-fixtures/**', 'src/generated/**'] },
+  {
+    ignores: [
+      'dist/**',
+      'wailsjs/**',
+      'lint-fixtures/**',
+      'eslint-fixtures/**',
+      'src/generated/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
@@ -870,5 +965,8 @@ export default tseslint.config(
     plugins: { nocx: nocxPlugin },
     rules: { 'nocx/no-inline-markup': 'error' },
   },
+  // Rule 9 — lifecycle/renderer boundary (ADR-0024). Defined above as
+  // lifecycleBoundaryBlocks so the fixture gate lints the exact same fragment.
+  ...lifecycleBoundaryBlocks,
   prettier,
 )
