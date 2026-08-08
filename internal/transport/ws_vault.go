@@ -256,9 +256,11 @@ func (s *WSServer) handleVaultSetup(wconn *wsConn, req jsonrpcRequest) {
 		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
 		return
 	}
-
-	s.broadcastVaultChanged()
-
+	// Response first, notification second: the caller that requested the
+	// setup must learn its own outcome before any peer hears the change
+	// the outcome caused. A vault.changed that precedes the announcing
+	// response lets a listener act on a commit it has not yet been told
+	// succeeded.
 	var resp any = struct{}{}
 	if result.RecoveryCode != "" {
 		resp = struct {
@@ -266,6 +268,8 @@ func (s *WSServer) handleVaultSetup(wconn *wsConn, req jsonrpcRequest) {
 		}{RecoveryCode: result.RecoveryCode}
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+
+	s.broadcastVaultChanged()
 }
 
 func (s *WSServer) handleVaultUnseal(wconn *wsConn, req jsonrpcRequest) {

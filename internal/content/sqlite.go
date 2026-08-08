@@ -102,16 +102,18 @@ type writeOp int
 const (
 	opAdd writeOp = iota
 	opRewrite
+	opRestore
 )
 
 // writeReq is one mutation on the serialized write path. The writer answers
 // on done with the outcome: the assigned row id (opAdd) and any error.
 type writeReq struct {
-	ctx    context.Context
-	op     writeOp
-	record CommandRecord  // opAdd
-	rew    rewriteRequest // opRewrite
-	done   chan writeOutcome
+	ctx     context.Context
+	op      writeOp
+	record  CommandRecord  // opAdd
+	rew     rewriteRequest // opRewrite
+	restore restoreRequest // opRestore
+	done    chan writeOutcome
 }
 
 // rewriteRequest is the opRewrite payload: address the row by its stable
@@ -121,6 +123,13 @@ type rewriteRequest struct {
 	id        int64
 	span      Redaction
 	reference string
+}
+
+// restoreRequest is the opRestore payload: one private-content block to
+// apply atomically.
+type restoreRequest struct {
+	conversations []Conversation
+	history       []CommandRecord
 }
 
 // writeOutcome is the writer's answer to one writeReq.
@@ -347,25 +356,77 @@ func enforceFileModes(path string) {
 
 // ── writer goroutine (design §5.3) ───────────────────────────────────────
 
+// process executes one accepted mutation and answers its caller. A request
+// that reached process is owed an answer, whatever happens next: a caller
+// waiting for its outcome must never hang, and a committed outcome must
+// never be replaced by a proxy error.
+func (s *sqliteContent) process(req writeReq) {
+	switch req.op {
+	case opAdd:
+		id, err := s.doAdd(req.ctx, req.record)
+		req.done <- writeOutcome{id: id, err: err}
+	case opRewrite:
+		req.done <- writeOutcome{err: s.doRewrite(req.ctx, req.rew)}
+	case opRestore:
+		req.done <- writeOutcome{err: s.doRestore(req.ctx, req.restore)}
+	}
+}
+
 func (s *sqliteContent) writer() {
 	defer s.wg.Done()
 	for {
 		select {
 		case req := <-s.writeCh:
-			switch req.op {
-			case opAdd:
-				id, err := s.doAdd(req.ctx, req.record)
-				req.done <- writeOutcome{id: id, err: err}
-			case opRewrite:
-				req.done <- writeOutcome{err: s.doRewrite(req.ctx, req.rew)}
-			}
+			s.process(req)
 		case <-s.stop:
-			return
+			// Answer everything already queued before exiting (see
+			// process): a request accepted before Close must learn its
+			// outcome, not hang. The final default leaves only the
+			// microscopic race of a send landing after this drain, which
+			// no ordering in the app can produce — Close is teardown.
+			for {
+				select {
+				case req := <-s.writeCh:
+					s.process(req)
+				default:
+					// One blocking peek: a sender that won the send race
+					// against the drain above still gets its answer.
+					select {
+					case req := <-s.writeCh:
+						s.process(req)
+					default:
+						return
+					}
+				}
+			}
 		}
 	}
 }
 
 func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) (int64, error) {
+	id, err := insertRecord(ctx, s.db, r)
+	if err != nil {
+		return 0, err
+	}
+	enforceFileModes(s.path)
+
+	// Age-based retention, run in the same writer turn: completed commands
+	// older than the limit are removed from nocx. Deletion is a short
+	// autocommit transaction and uses the ended_at index; a crash between
+	// the insert and the sweep only delays the sweep.
+	if days := s.policy.RetentionDays(); days > 0 {
+		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
+		if sweepErr := s.sweep(ctx, cutoff); sweepErr != nil {
+			s.log.Warn("retention sweep failed", "error", sweepErr)
+		}
+	}
+	return id, nil
+}
+
+// insertRecord executes one command-history INSERT through the given
+// executor — the pool (single-row path) or a restore transaction. Shared so
+// the two write paths cannot drift on the row shape.
+func insertRecord(ctx context.Context, ex execer, r CommandRecord) (int64, error) {
 	kinds := r.MaskedKinds
 	if kinds == nil {
 		kinds = []string{}
@@ -383,30 +444,60 @@ func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) (int64, erro
 		return 0, err
 	}
 	// One INSERT, one autocommit transaction: short, atomic, replay-safe.
-	res, err := s.db.ExecContext(ctx, `INSERT INTO command_history
+	res, err := ex.ExecContext(ctx, `INSERT INTO command_history
 		(command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds, redactions)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted, r.MaskedCount, string(kindsJSON), string(redactionsJSON))
 	if err != nil {
 		return 0, err
 	}
+	return res.LastInsertId()
+}
+
+// doRestore applies one private-content block in a single transaction:
+// either every history row is durable or none is. A caller that restored
+// rows one by one could be interrupted between rows, and a partial restore
+// cannot be unwound through the repository surface — the store owns the
+// atomicity (the export restore operation relies on it).
+//
+// Conversations are stubbed until agent mode (design §5.1): a block that
+// carries them is refused, exactly as ConversationRepository.Save refuses.
+func (s *sqliteContent) doRestore(ctx context.Context, r restoreRequest) error {
+	if len(r.conversations) > 0 {
+		return ErrNotImplemented
+	}
+	if len(r.history) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("restore private content: %w", err)
+	}
+	for _, rec := range r.history {
+		if _, err := insertRecord(ctx, tx, rec); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("restore private content: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("restore private content: %w", err)
+	}
 	enforceFileModes(s.path)
 
-	// Age-based retention, run in the same writer turn: completed commands
-	// older than the limit are removed from nocx. Deletion is a short
-	// autocommit transaction and uses the ended_at index; a crash between
-	// the insert and the sweep only delays the sweep.
+	// Retention at the batch level: restored rows older than the limit are
+	// removed, matching the per-write path. Best-effort, as in doAdd.
 	if days := s.policy.RetentionDays(); days > 0 {
 		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
 		if sweepErr := s.sweep(ctx, cutoff); sweepErr != nil {
 			s.log.Warn("retention sweep failed", "error", sweepErr)
 		}
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
+	return nil
+}
+
+// execer is the ExecContext surface shared by *sql.DB and *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // Add serializes the insert through the single writer goroutine and returns
@@ -437,6 +528,51 @@ func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) (int64, e
 	case <-s.stop:
 		return 0, ErrClosed
 	}
+}
+
+// RestorePrivate applies one private-content block atomically through the
+// single writer. The caller's context governs the transaction: a
+// cancellation before the writer accepts the request does nothing, and a
+// cancellation INSIDE the transaction aborts it (the insert path observes
+// ctx). A cancellation AFTER the transaction committed must not surface as
+// an error — the restore is committed, and reporting failure would send the
+// export restore operation into a rollback that splits the stores — so once
+// the writer accepts the request the caller waits for its outcome, which is
+// authoritative. The writer drains its queue on Close, so an accepted
+// request is always answered.
+func (s *sqliteContent) RestorePrivate(ctx context.Context, conversations []Conversation, history []CommandRecord) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	if len(conversations) > 0 {
+		// The SQLite backing has no conversation table yet; the stub is
+		// the honest surface (agent mode, design §5.1). Refuse rather
+		// than drop.
+		return ErrNotImplemented
+	}
+	if !s.policy.Enabled() {
+		// History off: the single-row path's Add stores nothing and
+		// succeeds, and the restore matches it exactly.
+		return nil
+	}
+	req := writeReq{
+		ctx:     ctx,
+		op:      opRestore,
+		restore: restoreRequest{history: history},
+		done:    make(chan writeOutcome, 1),
+	}
+	select {
+	case s.writeCh <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.stop:
+		return ErrClosed
+	}
+	// Accepted: the writer owns the outcome. Deliberately no ctx.Done or
+	// stop case here — either could win after the transaction committed and
+	// report failure for a committed restore (see the doc comment).
+	out := <-req.done
+	return out.err
 }
 
 // RewriteRedaction replaces the redaction segment at span in the row's

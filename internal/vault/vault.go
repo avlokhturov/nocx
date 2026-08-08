@@ -146,6 +146,31 @@ func (v *Vault) stateLocked() State {
 //
 // When req.Passphrase is non-empty, a passphrase envelope and a recovery
 // code are created and stored in the document.
+//
+// # Exclusion and the commit-point interval
+//
+// Initialisation owns its own exclusion: the first caller to take the
+// document lock observes StateUninitialized and marks the vault
+// initializing; every concurrent Setup then fails with "vault is already
+// initialized" without minting anything — the losing call can never
+// observe the same state the winner did, and can never leave an orphan key
+// or metadata behind, because it fails before it mints.
+//
+// The commit point is the document write (saveDocument). The invariant has
+// two ends: BEFORE that write, a failure (a provider that refuses the OS
+// key, a cancelled context observed by a provider call) rolls the in-memory
+// document and any half-initialised providers back and returns an error —
+// the vault is left StateUninitialized, exactly where it started, and the
+// OS key, when one was already stored, is deleted (best effort by design:
+// the keychain refuses deletes only when it is unreachable, and an
+// unreachable keychain cannot hand the key out either). FROM that write ON,
+// Setup performs no further failing work and no provider calls: it returns
+// success, and a context cancelled after the commit point cannot abandon
+// half-applied state, because the operation has already completed. The
+// closing event of the interval is Setup's return.
+//
+// The exclusion is in-memory and per-instance: two Vault instances over the
+// same store are outside its scope (the composition root wires exactly one).
 func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error) {
 	v.mu.Lock()
 	if v.stateLocked() != StateUninitialized || v.initializing {

@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/export"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 // --- test helpers ---
@@ -118,13 +120,24 @@ func (p *staticPaths) ConfigDir() string { return p.config }
 func (p *staticPaths) DataDir() string   { return p.data }
 func (p *staticPaths) CacheDir() string  { return p.cache }
 
-// fakeSettingsSink records applied values and can fail on demand.
+// fakeSettingsSink records applied values and can fail on demand. failOnce
+// fails only the NEXT Apply — the restore operation's rollback re-applies
+// the old settings through the SAME sink, so a test that wants the import
+// apply to fail and the rollback to succeed needs one-shot failure.
 type fakeSettingsSink struct {
-	applied map[string]any
-	err     error
+	applied    map[string]any
+	err        error // fail every Apply
+	failOnce   error // fail the next Apply only
+	applyCalls int   // counts every Apply, including a rollback's
 }
 
 func (s *fakeSettingsSink) Apply(values map[string]any) error {
+	s.applyCalls++
+	if s.failOnce != nil {
+		e := s.failOnce
+		s.failOnce = nil
+		return e
+	}
 	if s.err != nil {
 		return s.err
 	}
@@ -150,72 +163,90 @@ func (p *fakeSettingsProvider) All() (map[string]any, error) {
 	return p.values, nil
 }
 
-// fakeContentDB is an in-memory ContentDB whose write seams record calls
-// and can fail on demand. The repositories are separate types, exactly as
-// in the real store, so each can carry the methods its interface names.
+// fakeContentDB is an in-memory ContentDB whose restore seam records the
+// block and can fail on demand. The store-level atomicity (all-or-nothing)
+// is the real store's contract, so the fake lands the whole block or fails
+// — exactly what the restore operation is allowed to assume.
 type fakeContentDB struct {
-	savedConvs   []content.Conversation
-	addedHistory []content.CommandRecord
-	saveErr      error
-	addErr       error
+	restoredConvs   []content.Conversation
+	restoredHistory []content.CommandRecord
+	restoreErr      error
+	restoreHook     func() // fires inside RestorePrivate, before the error/success
+	calls           int
+}
+
+func (f *fakeContentDB) RestorePrivate(_ context.Context, conversations []content.Conversation, history []content.CommandRecord) error {
+	f.calls++
+	if f.restoreHook != nil {
+		f.restoreHook()
+	}
+	if f.restoreErr != nil {
+		return f.restoreErr
+	}
+	f.restoredConvs = append(f.restoredConvs, conversations...)
+	f.restoredHistory = append(f.restoredHistory, history...)
+	return nil
 }
 
 func (f *fakeContentDB) Conversations() content.ConversationRepository {
-	return &fakeConvRepo{db: f}
+	return nilConversationRepo{}
 }
 
 func (f *fakeContentDB) CommandHistory() content.CommandHistoryRepository {
-	return &fakeHistRepo{db: f}
+	return nilHistoryRepo{}
 }
 func (f *fakeContentDB) Backup(context.Context, string) error { return nil }
 func (f *fakeContentDB) Close() error                         { return nil }
 
-type fakeConvRepo struct{ db *fakeContentDB }
+// nilConversationRepo and nilHistoryRepo are unreachable stubs: the restore
+// path goes through RestorePrivate, never the per-row repositories, and the
+// fake's other methods exist only to satisfy the ContentDB shape.
+type nilConversationRepo struct{}
 
-func (r *fakeConvRepo) Save(_ context.Context, c content.Conversation) error {
-	if r.db.saveErr != nil {
-		return r.db.saveErr
-	}
-	r.db.savedConvs = append(r.db.savedConvs, c)
+func (nilConversationRepo) Save(context.Context, content.Conversation) error { return nil }
+func (nilConversationRepo) GetByID(context.Context, string) (*content.Conversation, error) {
+	return nil, nil
+}
+
+func (nilConversationRepo) List(context.Context, int) ([]content.Conversation, error) {
+	return nil, nil
+}
+
+type nilHistoryRepo struct{}
+
+func (nilHistoryRepo) Add(context.Context, content.CommandRecord) (int64, error) { return 0, nil }
+func (nilHistoryRepo) List(context.Context, int) ([]content.CommandRecord, error) {
+	return nil, nil
+}
+
+func (nilHistoryRepo) GetByID(context.Context, int64) (*content.CommandRecord, error) {
+	return nil, nil
+}
+
+func (nilHistoryRepo) FindByPrefix(context.Context, string, int) ([]content.CommandRecord, error) {
+	return nil, nil
+}
+
+func (nilHistoryRepo) RewriteRedaction(context.Context, int64, content.Redaction, string) error {
 	return nil
 }
 
-func (r *fakeConvRepo) GetByID(context.Context, string) (*content.Conversation, error) {
-	return nil, nil
-}
-
-func (r *fakeConvRepo) List(context.Context, int) ([]content.Conversation, error) {
-	return nil, nil
-}
-
-type fakeHistRepo struct{ db *fakeContentDB }
-
-func (r *fakeHistRepo) Add(_ context.Context, rec content.CommandRecord) (int64, error) {
-	if r.db.addErr != nil {
-		return 0, r.db.addErr
-	}
-	r.db.addedHistory = append(r.db.addedHistory, rec)
-	return 0, nil
-}
-
-func (r *fakeHistRepo) RewriteRedaction(_ context.Context, _ int64, _ content.Redaction, _ string) error {
-	return nil
-}
-
-func (r *fakeHistRepo) GetByID(context.Context, int64) (*content.CommandRecord, error) {
-	return nil, nil
-}
-
-func (r *fakeHistRepo) List(context.Context, int) ([]content.CommandRecord, error) {
-	return nil, nil
-}
-
-func (r *fakeHistRepo) FindByPrefix(context.Context, string, int) ([]content.CommandRecord, error) {
-	return nil, nil
-}
-
-func (r *fakeHistRepo) Query(context.Context, content.Scope, string, string, int, *int64, string) (content.HistoryPage, error) {
+func (nilHistoryRepo) Query(context.Context, content.Scope, string, string, int, *int64, string) (content.HistoryPage, error) {
 	return content.HistoryPage{}, nil
+}
+
+// flippingDocStore fails every Write once armed — the rollback-failure
+// injection for the restore operation's honest error reporting.
+type flippingDocStore struct {
+	storage.DocumentStore
+	fail atomic.Bool
+}
+
+func (s *flippingDocStore) Write(name string, doc any) error {
+	if s.fail.Load() {
+		return errors.New("injected write failure")
+	}
+	return s.DocumentStore.Write(name, doc)
 }
 
 // =========================================================================
@@ -850,102 +881,363 @@ func TestImportConfiguration_SettingsSinkFailureFailsImport(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
-// Private content restore
+// RestoreImport — the whole profiles + groups + settings + content restore
 // -------------------------------------------------------------------------
 
-func TestRestorePrivateContent_NoopWhenNothingCarried(t *testing.T) {
-	db := &fakeContentDB{}
-	if err := export.RestorePrivateContent(db, nil); err != nil {
-		t.Fatalf("nil private block: %v", err)
+// newRestoreProfileService builds a profile service over a real JSON store
+// rooted in a temp dir, and returns both — the service is what the restore
+// operation writes through, the store is what the tests assert on.
+func newRestoreProfileService(t *testing.T) (*profile.ProfileService, *profile.JSONStore) {
+	t.Helper()
+	store := profile.NewJSONStore(filepath.Join(t.TempDir(), "p.json"))
+	return profile.NewProfileService(store), store
+}
+
+// seedOldGeneration plants one profile, one group and one setting so the
+// tests have a pre-restore generation to compare against.
+func seedOldGeneration(t *testing.T, svc *profile.ProfileService, sink *fakeSettingsSink) {
+	t.Helper()
+	if err := svc.SaveProfile(makeProfile("ssh:old:0001", "old", "old.example.com")); err != nil {
+		t.Fatalf("SaveProfile: %v", err)
 	}
-	if err := export.RestorePrivateContent(db, &export.PrivateContent{Available: false}); err != nil {
-		t.Fatalf("unavailable private block: %v", err)
+	if err := svc.SaveGroup(makeGroup("group-1", "Work")); err != nil {
+		t.Fatalf("SaveGroup: %v", err)
 	}
-	if len(db.savedConvs) != 0 || len(db.addedHistory) != 0 {
-		t.Errorf("store was written despite nothing to restore: convs=%d history=%d",
-			len(db.savedConvs), len(db.addedHistory))
+	if err := sink.Apply(map[string]any{"history.enabled": true}); err != nil {
+		t.Fatalf("Apply old settings: %v", err)
 	}
 }
 
-func TestRestorePrivateContent_AvailableRestoresBothSlices(t *testing.T) {
-	db := &fakeContentDB{}
+// newGeneration returns an import payload that overwrites the seeded
+// profile, adds a profile that did not exist before, keeps the group, and
+// flips the setting.
+func newGeneration() *export.ConfigExport {
+	return &export.ConfigExport{
+		Profiles: []profile.SSHProfile{
+			makeProfile("ssh:old:0001", "new-name", "new.example.com"),
+			makeProfile("ssh:imported:0001", "imported", "imported.example.com"),
+		},
+		Groups:   []profile.ProfileGroup{makeGroup("group-1", "Work")},
+		Settings: map[string]any{"history.enabled": false},
+	}
+}
+
+// The headline acceptance: a failure injected between the configuration
+// commit and the content restore must leave ALL stores at one generation —
+// here, the OLD one, because the failure aborts the restore. Asserted on
+// the stores, never on a log line: the imported-only profile is GONE, the
+// overwritten profile is RESTORED, and the settings are back to the old
+// value.
+func TestRestoreImport_FailureBetweenConfigAndContentLeavesAllStoresAtOneGeneration(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+	contentDB := &fakeContentDB{restoreErr: errors.New("disk full")}
+
+	deps := export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    contentDB,
+	}
+	priv := &export.PrivateContent{
+		Available:      true,
+		CommandHistory: []content.CommandRecord{{Command: "ssh prod"}},
+	}
+	_, err := export.RestoreImport(context.Background(), deps, newGeneration(), priv)
+	if err == nil {
+		t.Fatal("restore with a failing content store succeeded, want error")
+	}
+
+	// Profiles: back at the OLD generation — the overwritten profile is
+	// restored and the imported-only one is gone.
+	profiles, lerr := store.LoadProfiles()
+	if lerr != nil {
+		t.Fatalf("LoadProfiles: %v", lerr)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("profiles = %d, want 1 (imported profile must be gone): %+v", len(profiles), profiles)
+	}
+	if profiles[0].Name != "old" {
+		t.Errorf("profile name = %q, want %q (overwritten profile must be restored)", profiles[0].Name, "old")
+	}
+	groups, gerr := store.LoadGroups()
+	if gerr != nil {
+		t.Fatalf("LoadGroups: %v", gerr)
+	}
+	if len(groups) != 1 || groups[0].Name != "Work" {
+		t.Errorf("groups = %+v, want the old generation group", groups)
+	}
+	// Settings: rolled back to the old value.
+	if sink.applied == nil || sink.applied["history.enabled"] != true {
+		t.Errorf("settings after failed restore = %+v, want history.enabled=true", sink.applied)
+	}
+}
+
+// Cancellation BEFORE the commit point changes nothing on disk: no profile,
+// no group, no setting, no content write.
+func TestRestoreImport_CancelledBeforeCommitChangesNothing(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+	contentDB := &fakeContentDB{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := export.RestoreImport(ctx, export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    contentDB,
+	}, newGeneration(), &export.PrivateContent{
+		Available:      true,
+		CommandHistory: []content.CommandRecord{{Command: "ssh prod"}},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	profiles, _ := store.LoadProfiles()
+	if len(profiles) != 1 || profiles[0].Name != "old" {
+		t.Errorf("profiles changed by a cancelled restore: %+v", profiles)
+	}
+	if len(sink.applied) != 1 || sink.applied["history.enabled"] != true {
+		t.Errorf("settings changed by a cancelled restore: %+v", sink.applied)
+	}
+	if contentDB.calls != 0 {
+		t.Errorf("content store was touched by a cancelled restore: %d calls", contentDB.calls)
+	}
+}
+
+// Cancellation AFTER the commit point (observed by the store mid-restore)
+// still returns with the invariant restored: the operation does not abandon
+// half-applied state because its context died. The store aborts its atomic
+// restore (modelled here by the fake returning context.Canceled) and the
+// configuration is rolled back — every store at the OLD generation.
+func TestRestoreImport_CancellationDuringContentRestoreRollsBack(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+	contentDB := &fakeContentDB{restoreErr: context.Canceled}
+
+	_, err := export.RestoreImport(context.Background(), export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    contentDB,
+	}, newGeneration(), &export.PrivateContent{
+		Available:      true,
+		CommandHistory: []content.CommandRecord{{Command: "ssh prod"}},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	// Both halves of the configuration are at the OLD generation, asserted
+	// independently — a wrong setting must not be hidden by a profile
+	// failure, and vice versa.
+	profiles, _ := store.LoadProfiles()
+	if len(profiles) != 1 || profiles[0].Name != "old" {
+		t.Errorf("profiles after cancelled restore = %+v, want the old generation", profiles)
+	}
+	if sink.applied["history.enabled"] != true {
+		t.Errorf("settings after cancelled restore = %+v, want history.enabled=true", sink.applied)
+	}
+}
+
+// A failing settings sink (the import's settings apply fails) rolls the
+// profiles back: the configuration must not be left at the new generation
+// when part of it did not commit.
+func TestRestoreImport_SettingsApplyFailureRollsBackProfiles(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+	// Arm the one-shot failure AFTER seeding: the seed itself applies the
+	// old settings through the same sink.
+	sink.failOnce = errors.New("settings registry boom")
+
+	_, err := export.RestoreImport(context.Background(), export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    &fakeContentDB{},
+	}, newGeneration(), nil)
+	if err == nil {
+		t.Fatal("import with a failing settings sink succeeded, want error")
+	}
+
+	profiles, _ := store.LoadProfiles()
+	if len(profiles) != 1 || profiles[0].Name != "old" {
+		t.Errorf("profiles after failed settings apply = %+v, want the old generation", profiles)
+	}
+	// The rollback itself reapplied the old settings.
+	if sink.applied == nil || sink.applied["history.enabled"] != true {
+		t.Errorf("settings after rollback = %+v, want history.enabled=true", sink.applied)
+	}
+}
+
+// A settings-carrying export imported with no sink fails AND rolls the
+// profiles back — the old two-phase shape left them at the new generation.
+func TestRestoreImport_SettingsCarriedWithoutSinkFailsAndRollsBack(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+
+	_, err := export.RestoreImport(context.Background(), export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       nil,
+		Content:    &fakeContentDB{},
+	}, newGeneration(), nil)
+	if err == nil {
+		t.Fatal("settings-carrying import without a sink succeeded, want error")
+	}
+	profiles, _ := store.LoadProfiles()
+	if len(profiles) != 1 || profiles[0].Name != "old" {
+		t.Errorf("profiles = %+v, want the old generation (profiles must roll back with the failed settings)", profiles)
+	}
+}
+
+// Carried private content with no content database is an error — success
+// would be the lie that a silent drop is (nocx-ojxa) — and the error leaves
+// the configuration at the OLD generation.
+func TestRestoreImport_CarriedContentWithoutStoreFailsAndRollsBack(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+
+	_, err := export.RestoreImport(context.Background(), export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    nil,
+	}, newGeneration(), &export.PrivateContent{
+		Available:      true,
+		CommandHistory: []content.CommandRecord{{Command: "ssh prod"}},
+	})
+	if err == nil {
+		t.Fatal("carried content with no content database succeeded, want error")
+	}
+	profiles, _ := store.LoadProfiles()
+	if len(profiles) != 1 || profiles[0].Name != "old" {
+		t.Errorf("profiles = %+v, want the old generation", profiles)
+	}
+}
+
+// When the rollback itself fails (the store's disk died between the commit
+// and the rollback), the operation reports BOTH failures: the invariant
+// could not be restored and the caller must know, not be told a clean
+// single cause.
+func TestRestoreImport_RollbackFailureIsReportedNotHidden(t *testing.T) {
+	flip := &flippingDocStore{DocumentStore: storage.NewDocumentStore(t.TempDir())}
+	store := profile.NewJSONStoreWithDocStore(flip, "p.json")
+	svc := profile.NewProfileService(store)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+
+	contentDB := &fakeContentDB{
+		restoreErr: errors.New("content boom"),
+		restoreHook: func() {
+			flip.fail.Store(true)
+		},
+	}
+	_, err := export.RestoreImport(context.Background(), export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    contentDB,
+	}, newGeneration(), &export.PrivateContent{
+		Available:      true,
+		CommandHistory: []content.CommandRecord{{Command: "ssh prod"}},
+	})
+	if err == nil {
+		t.Fatal("restore succeeded despite a failing rollback, want error")
+	}
+	if !strings.Contains(err.Error(), "content boom") || !strings.Contains(err.Error(), "rollback failed") {
+		t.Errorf("error hides one of the two failures: %v", err)
+	}
+}
+
+// A normal machine: the whole restore succeeds, every store lands at the
+// NEW generation, and the counts and payloads are what the archive carried.
+func TestRestoreImport_SuccessOnNormalMachine(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+	contentDB := &fakeContentDB{}
 	started := int64(1700000000000)
-	ended := int64(1700000001000)
-	pc := &export.PrivateContent{
+
+	cfg := newGeneration()
+	priv := &export.PrivateContent{
 		Available: true,
-		Conversations: []content.Conversation{
-			{
-				ID: "conv-1", Title: "Debugging ssh", CreatedAt: started,
-				Messages: []content.Message{
-					{Role: "user", Content: "why is this slow", Timestamp: started},
-				},
-			},
-		},
-		CommandHistory: []content.CommandRecord{
-			{
-				ID: 42, Command: "ssh prod", Cwd: "/home/dev", Host: "local",
-				Status: content.StatusSuccess, ExitCode: &[]int{0}[0],
-				StartedAt: &started, EndedAt: &ended, Trusted: true,
-			},
-		},
+		Conversations: []content.Conversation{{
+			ID: "conv-1", Title: "Debugging", CreatedAt: started,
+			Messages: []content.Message{{Role: "user", Content: "why slow", Timestamp: started}},
+		}},
+		CommandHistory: []content.CommandRecord{{Command: "ssh prod", Cwd: "/home/dev", Host: "local"}},
 	}
-	if err := export.RestorePrivateContent(db, pc); err != nil {
-		t.Fatalf("RestorePrivateContent: %v", err)
+	result, err := export.RestoreImport(context.Background(), export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    contentDB,
+	}, cfg, priv)
+	if err != nil {
+		t.Fatalf("RestoreImport: %v", err)
 	}
-	if len(db.savedConvs) != 1 {
-		t.Fatalf("saved conversations = %d, want 1", len(db.savedConvs))
+	if result.ProfilesImported != 2 {
+		t.Errorf("ProfilesImported = %d, want 2", result.ProfilesImported)
 	}
-	saved := db.savedConvs[0]
-	if saved.ID != "conv-1" || saved.Title != "Debugging ssh" || saved.CreatedAt != started {
-		t.Errorf("conversation identity not preserved: %+v", saved)
+
+	// All stores at the NEW generation.
+	profiles, _ := store.LoadProfiles()
+	if len(profiles) != 2 {
+		t.Fatalf("profiles = %d, want 2", len(profiles))
 	}
-	if len(saved.Messages) != 1 || saved.Messages[0].Content != "why is this slow" {
-		t.Errorf("conversation messages not preserved: %+v", saved.Messages)
+	got := map[string]string{}
+	for _, p := range profiles {
+		got[p.ID] = p.Name
 	}
-	if len(db.addedHistory) != 1 {
-		t.Fatalf("added history = %d, want 1", len(db.addedHistory))
+	if got["ssh:old:0001"] != "new-name" || got["ssh:imported:0001"] != "imported" {
+		t.Errorf("profiles = %+v, want overwritten old + imported", got)
 	}
-	rec := db.addedHistory[0]
-	if rec.Command != "ssh prod" || rec.Cwd != "/home/dev" || rec.Host != "local" {
-		t.Errorf("history command fields not preserved: %+v", rec)
+	if sink.applied == nil || sink.applied["history.enabled"] != false {
+		t.Errorf("settings = %+v, want history.enabled=false", sink.applied)
 	}
-	if rec.StartedAt == nil || *rec.StartedAt != started || rec.EndedAt == nil || *rec.EndedAt != ended {
-		t.Errorf("history timestamps not preserved: %+v", rec)
+	if len(contentDB.restoredConvs) != 1 || contentDB.restoredConvs[0].ID != "conv-1" {
+		t.Errorf("conversations restored = %+v, want conv-1", contentDB.restoredConvs)
 	}
-	if rec.Status != content.StatusSuccess {
-		t.Errorf("history status = %q, want %q", rec.Status, content.StatusSuccess)
+	if len(contentDB.restoredHistory) != 1 || contentDB.restoredHistory[0].Command != "ssh prod" {
+		t.Errorf("history restored = %+v, want ssh prod", contentDB.restoredHistory)
 	}
 }
 
-func TestRestorePrivateContent_ConversationSaveFailureFailsImport(t *testing.T) {
-	db := &fakeContentDB{saveErr: errors.New("disk full")}
-	pc := &export.PrivateContent{
-		Available:     true,
-		Conversations: []content.Conversation{{ID: "conv-1", Title: "t"}},
-	}
-	if err := export.RestorePrivateContent(db, pc); err == nil {
-		t.Fatal("conversation save failure reported as success, want error")
-	}
-}
+// A payload that carries no private content never touches the content
+// store — the operation restores the configuration and stops.
+func TestRestoreImport_NoPrivateContentNeverTouchesContentStore(t *testing.T) {
+	svc, store := newRestoreProfileService(t)
+	sink := &fakeSettingsSink{}
+	seedOldGeneration(t, svc, sink)
+	contentDB := &fakeContentDB{}
 
-func TestRestorePrivateContent_HistoryAddFailureFailsImport(t *testing.T) {
-	db := &fakeContentDB{addErr: errors.New("disk full")}
-	pc := &export.PrivateContent{
-		Available:      true,
-		CommandHistory: []content.CommandRecord{{Command: "ssh prod"}},
+	result, err := export.RestoreImport(context.Background(), export.RestoreDeps{
+		ProfileSvc: svc,
+		Settings:   &fakeSettingsProvider{values: map[string]any{"history.enabled": true}},
+		Sink:       sink,
+		Content:    contentDB,
+	}, newGeneration(), nil)
+	if err != nil {
+		t.Fatalf("RestoreImport: %v", err)
 	}
-	if err := export.RestorePrivateContent(db, pc); err == nil {
-		t.Fatal("history add failure reported as success, want error")
+	if contentDB.calls != 0 {
+		t.Errorf("content store touched by a config-only restore: %d calls", contentDB.calls)
 	}
-}
-
-func TestRestorePrivateContent_NoDBWithCarriedContentFails(t *testing.T) {
-	pc := &export.PrivateContent{
-		Available:      true,
-		CommandHistory: []content.CommandRecord{{Command: "ssh prod"}},
+	profiles, _ := store.LoadProfiles()
+	if len(profiles) != 2 {
+		t.Errorf("profiles = %d, want 2 (import succeeded)", len(profiles))
 	}
-	if err := export.RestorePrivateContent(nil, pc); err == nil {
-		t.Fatal("carried content with no content database reported as success, want error")
+	if result.ProfilesImported != 2 {
+		t.Errorf("ProfilesImported = %d, want 2", result.ProfilesImported)
 	}
 }
 

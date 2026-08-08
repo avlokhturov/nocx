@@ -91,6 +91,12 @@ func (s *Stub) Backup(_ context.Context, destPath string) error {
 	return ErrNotImplemented
 }
 
+// RestorePrivate returns ErrNotImplemented: the stub stores nothing.
+func (s *Stub) RestorePrivate(_ context.Context, conversations []Conversation, history []CommandRecord) error {
+	s.log.Info("content stub: RestorePrivate called (no-op)", "conversations", len(conversations), "history", len(history))
+	return ErrNotImplemented
+}
+
 // Close is a no-op.
 func (s *Stub) Close() error {
 	s.log.Info("content stub: Close called (no-op)")

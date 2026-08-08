@@ -158,9 +158,10 @@ func (s *WSServer) handleExportImport(wconn *wsConn, req jsonrpcRequest) {
 		return
 	}
 
-	// Domain service path: atomic import, then restore the settings the
-	// export carried (nocx-ojxa — import used to drop them silently).
-	result, err := export.ImportConfigurationWithService(s.profileSvc, &data, s.buildSettingsSink())
+	// Domain restore operation: profiles, groups and settings commit as one
+	// operation with a defined rollback; the transport never sequences the
+	// stores itself.
+	result, err := export.RestoreImport(context.Background(), s.buildRestoreDeps(), &data, nil)
 	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
@@ -194,29 +195,34 @@ func (s *WSServer) handleExportImportPortable(wconn *wsConn, req jsonrpcRequest)
 		return
 	}
 
-	// Domain service path: atomic import of the configuration, then restore
-	// the settings and private content the backup carried (nocx-ojxa — both
-	// used to be dropped at the import end).
-	result, impErr := export.ImportConfigurationWithService(s.profileSvc, &plain.Config, s.buildSettingsSink())
-	if impErr != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, impErr.Error()))
-		return
-	}
-	if err := export.RestorePrivateContent(s.exportContentDB, plain.Private); err != nil {
+	// Domain restore operation: profiles, groups, settings and private
+	// content commit as ONE operation with a defined rollback. The
+	// transport does not sequence the stores — a failure between two
+	// independently sequenced phases would leave them at different
+	// generations.
+	result, err := export.RestoreImport(context.Background(), s.buildRestoreDeps(), &plain.Config, plain.Private)
+	if err != nil {
 		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
 		return
 	}
 	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
 }
 
-// buildSettingsSink returns the settings sink when a registry is wired,
-// else nil. It mirrors buildConfigExportDeps: provider and sink come from
-// the same registry, so what export writes is what import can restore.
-func (s *WSServer) buildSettingsSink() export.SettingsSink {
-	if s.settings == nil {
-		return nil
+// buildRestoreDeps assembles the restore operation's dependencies: the
+// profile service for the atomic configuration write and its rollback, the
+// settings provider+sink pair from the same registry, and the content
+// database for the private block. The secret store is deliberately absent —
+// no import mode may resolve a secret (ADR-0011 §2, §7).
+func (s *WSServer) buildRestoreDeps() export.RestoreDeps {
+	deps := export.RestoreDeps{
+		ProfileSvc: s.profileSvc,
+		Content:    s.exportContentDB,
 	}
-	return &settingsSinkAdapter{reg: s.settings}
+	if s.settings != nil {
+		deps.Settings = &settingsProviderAdapter{reg: s.settings}
+		deps.Sink = &settingsSinkAdapter{reg: s.settings}
+	}
+	return deps
 }
 
 // buildConfigExportDeps assembles a ConfigExportDeps from the wired
