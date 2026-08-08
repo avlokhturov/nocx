@@ -339,13 +339,21 @@ jobs:
           retention-days: 7
 
   # Separate from build so the signing key is never present in a job that runs
-  # build tooling (§5). Publishing is git/manifest work, so it runs on ubuntu.
-  publish:
+  # build tooling (§5). Manifest work, so it runs on ubuntu.
+  #
+  # Deliberately NOT gated on a tag. This job holds the one check nocx-1d54
+  # exists for — that RELEASE_SIGNING_KEY's public half is in the keyring the
+  # artefact ships — and while it lived inside the tag-gated publish job that
+  # check had never once run: every dry run reported publish "skipped" while
+  # the file's own header claimed a manual run "builds, signs and verifies
+  # everything and publishes nothing". The first execution would have been the
+  # release (nocx-94kl).
+  #
+  # Only `contents: write` and `gh release create` need the tag, and they stay
+  # behind it in the job below. This job keeps the workflow's read-only default.
+  sign:
     needs: [validate, build-macos, build-linux]
-    if: needs.validate.outputs.release == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
@@ -421,6 +429,43 @@ jobs:
       # the same commit that produced the artefacts (nocx-1d54).
       - name: Verify the signature against the keyring the release ships
         run: go run ./cmd/manifest-sign -verify -in dist/manifest.json -sig dist/manifest.json.sig
+
+      # Carried to publish rather than regenerated there: the bytes that were
+      # verified above must be the bytes that get uploaded, or the verification
+      # attested to a different file.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manifest
+          path: |
+            dist/manifest.json
+            dist/manifest.json.sig
+          retention-days: 7
+
+  # The only tag-gated job, and the only one holding contents: write. It runs no
+  # build tooling and no signing — it uploads what the jobs above produced.
+  publish:
+    needs: [validate, build-macos, build-linux, sign]
+    if: needs.validate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-universal
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-amd64
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: manifest
+          path: dist
 
       - name: Create release
         env:
