@@ -67,6 +67,10 @@ fi
 __nocx_lc_active=0
 __nocx_lc_seq=0
 __nocx_lc_attempt_open=0
+__nocx_lc_attempt_n=0
+__nocx_lc_attempt_id=''
+__nocx_lc_last_completed_id=''
+__nocx_lc_last_completed_code=''
 __nocx_lc_desynced=0
 __nocx_lc_frame=''
 __nocx_lc_lane_esc=''
@@ -154,15 +158,17 @@ __nocx_lc_read_frame() {
 # traps (nocx-z9s9.16) — so the poll is prompt-boundary. It is non-blocking
 # in the common case (`read -t 0` probes, consuming nothing): no frame
 # pending, the prompt costs nothing.
-#
-# The snapshot names no attempt: the shell never learns attempt ids (the app
-# mints them and no outbound envelope carries one back — protocol §8), so it
-# cannot report active_attempt or last_completed. The kernel reconciles open
-# attempts it is not told about as unknown — never success — which is the
-# safe direction (decision 7). shell_state is at_prompt because this runs
-# from a prompt; next_seq is the shell's next sequence, strictly greater
-# than the snapshot's own (the kernel rejects `next_seq <= seq`).
-#
+# The shell names its own attempts: it mints an id per command at start —
+# the app mints its own and no outbound envelope carries one back
+# (protocol §8) — and the kernel learns the shell's id at attach, resolving
+# it as a per-attempt alias. The snapshot reports last_completed — the
+# attempt the shell just finished, with the REAL exit status — whenever one
+# exists, so a completion the gap swallowed still reconciles to its real
+# status instead of to unknown. active_attempt is never reported: the shell
+# answers only from a prompt, where nothing is running. shell_state is
+# at_prompt because this runs from a prompt; next_seq is the shell's next
+# sequence, strictly greater than the snapshot's own (the kernel rejects
+# `next_seq <= seq`).
 # On success restores a visible prompt: a Desynchronized domain is not live
 # (decision 9), and the marker-only suppression would leave an invisible
 # prompt taking raw input. The shell cannot observe the snapshot's
@@ -189,7 +195,17 @@ __nocx_lc_ans_refresh() {
     # The snapshot's own seq is seq+1 after this call; next_seq must be
     # strictly greater than it, and is the sequence the NEXT envelope will
     # carry — so it is seq+2 in pre-send terms.
-    __nocx_lc_send snapshot ',"request":"'"$__rid"'","shell_state":"at_prompt","next_seq":'"$(( __nocx_lc_seq + 2 ))"
+    #
+    # last_completed is the shell's own view (its id + the real exit
+    # status), recorded by __nocx_prompt_command before the refresh can
+    # preempt the complete. When no command just finished — the shell
+    # genuinely has nothing to report — the field is omitted and the kernel
+    # reconciles open attempts as unknown, never success.
+    if [[ -n "${__nocx_lc_last_completed_id:-}" ]]; then
+        __nocx_lc_send snapshot ',"request":"'"$__rid"'","shell_state":"at_prompt","last_completed":{"attempt":"'"$__nocx_lc_last_completed_id"'","exit_code":'"$__nocx_lc_last_completed_code"'},"next_seq":'"$(( __nocx_lc_seq + 2 ))"
+    else
+        __nocx_lc_send snapshot ',"request":"'"$__rid"'","shell_state":"at_prompt","next_seq":'"$(( __nocx_lc_seq + 2 ))"
+    fi
     __nocx_lc_desynced=1
     return 0
 }
@@ -335,15 +351,25 @@ __nocx_preexec() {
     # current command, not the user's.
     __nocx_marker C
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
-        # Shell-originated start, WITHOUT an attempt id: the kernel attaches
-        # to a pending app attempt or mints a shell-originated one, and
-        # resolves the completion by context (protocol doc §7-§8). The
-        # command text is truncated to the kernel's command budget (4096
-        # bytes); a longer line loses its tail, never its frame.
+        # Shell-originated start, named with the shell's own attempt id: the
+        # shell mints one per command because it never learns the app-minted
+        # id (protocol §8 — no outbound envelope carries one back), and its
+        # id is the only name it can report in a snapshot. The kernel
+        # attaches to a pending app attempt (recording the id as a
+        # per-attempt alias) or creates a shell-originated attempt under
+        # this id. The id carries the domain (s-<dom>-<counter>): PID spaces
+        # are not shared across domains, so s-$$-<n> collides whenever a
+        # docker exec / ssh shell shares a low PID with another domain's
+        # shell, and the kernel's global id table would reject the second
+        # domain's first command. The domain is the disambiguator; the
+        # per-shell counter keeps ids unique within it. The command text is
+        # truncated to the kernel's command budget (4096 bytes); a longer
+        # line loses its tail, never its frame.
         local __cmd="${1:-}" LC_ALL=C
         __cmd="${__cmd:0:4000}"
         __nocx_lc_json_escape "$__cmd"
-        __nocx_lc_send start ',"command":"'"$__nocx_lc_json_escaped"'"'
+        __nocx_lc_attempt_id="s-$__nocx_lc_dom-$(( __nocx_lc_attempt_n++ ))"
+        __nocx_lc_send start ',"attempt":"'"$__nocx_lc_attempt_id"'","command":"'"$__nocx_lc_json_escaped"'"'
         __nocx_lc_attempt_open=1
     fi
 }
@@ -360,14 +386,20 @@ __nocx_prompt_command() {
     __nocx_in_prompt_command=1
     # --- Authenticated channel: refresh, complete, fence, prompt_ready ---
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+        # Record the just-finished command's completion BEFORE the refresh
+        # can preempt the complete: the snapshot reports what the shell
+        # actually knows — its own attempt id and the real exit status — so
+        # a completion the gap swallowed reconciles to its real status
+        # rather than to unknown.
+        if [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
+            __nocx_lc_last_completed_id="$__nocx_lc_attempt_id"
+            __nocx_lc_last_completed_code="$__nocx_exit"
+        fi
         # A framing gap may have desynchronized the domain while the shell
         # was busy; the kernel's refresh_request is buffered. Answer it
         # FIRST — only a snapshot answering it restores authority (decision
         # 7), and while the domain is desynchronized the complete and
-        # prompt_ready below would be quarantined anyway. The snapshot
-        # reports the shell's state (at a prompt, no attempt it can name),
-        # so the open attempt — if the just-finished command had one — is
-        # reconciled by the kernel as unknown, never success.
+        # prompt_ready below would be quarantined anyway.
         if __nocx_lc_ans_refresh; then
             # The refresh was answered; the desync also ended the marker-only
             # suppression (decision 9), so PS1 below takes the visible arm.

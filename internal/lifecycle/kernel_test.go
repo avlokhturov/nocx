@@ -291,6 +291,289 @@ func TestSnapshotValidationPrecedesMutation(t *testing.T) {
 	}
 }
 
+// The payoff (brief criterion 2): a completion lost inside the gap is
+// recovered by the snapshot when the shell names the attempt it just
+// completed — the shell's own id, resolved through the alias recorded at
+// attach. The exit status the user sees is the real one.
+func TestSnapshotRecoversLostCompletionViaShellAlias(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local")
+	shellID := AttemptID("s-7-0")
+	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make"))) // attach + alias
+
+	p.reset()
+	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	// The complete (exit 2) was swallowed by the gap; the shell reports the
+	// attempt it just finished under its own id with the real status.
+	last := &CompletedRef{AttemptID: shellID, ExitCode: intPtr(2)}
+	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
+	got, ok := k.Attempt(att.ID)
+	if !ok || got.State != AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 2 {
+		t.Fatalf("lost completion must reconcile to its real status via the shell alias, got %+v", got)
+	}
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecyclePromptReady {
+		t.Fatalf("lane must return to a ready prompt, got %v", st.Lifecycle)
+	}
+}
+
+// The safety direction of the same rule: the shell reports a completion for
+// an id that does not resolve to the domain's open attempt (a later command
+// completed in the gap, or the complete was for something the kernel never
+// saw). The open attempt reconciles to unknown and no exit code is invented.
+func TestSnapshotUnknownShellIDNeverInventsSuccess(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local")
+	shellID := AttemptID("s-7-0")
+	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make")))
+
+	p.reset()
+	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	// A second command's id: it never attached, so the snapshot cannot
+	// connect it to the open attempt.
+	last := &CompletedRef{AttemptID: "s-8-0", ExitCode: intPtr(0)}
+	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
+	if got, _ := k.Attempt(att.ID); got.State != AttemptUnknown || got.ExitCode != nil {
+		t.Fatalf("unconnected completion must reconcile unknown with no code, got %+v", got)
+	}
+}
+
+// active_attempt resolves through the alias too: the shell reports the
+// running attempt under its own id, and it stays open under the app id —
+// the identity the lane and the published facts expose (constraint b).
+func TestSnapshotActiveAttemptResolvesViaShellAlias(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/work", "local")
+	shellID := AttemptID("s-7-0")
+	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make")))
+
+	p.reset()
+	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &shellID, nil, 4)))
+	st := mustState(t, k, "L")
+	assertState(t, st, LifecycleRunning, h.Domain, att.ID, []DomainID{h.Domain})
+	if got, _ := k.Attempt(att.ID); got.State != AttemptOpen {
+		t.Fatalf("snapshot-named active attempt must stay open under the app id, got %+v", got)
+	}
+}
+
+// Constraint (a), second direction: a snapshot can name an alias the kernel
+// already learned but never create one. An unknown active_attempt is created
+// shell-originated with that id — the existing rule — and carries no alias,
+// and an app attempt the snapshot could not connect to still reconciles
+// unknown rather than attaching by position.
+func TestSnapshotNeverCreatesAnAlias(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	// An app attempt whose start was lost entirely: no alias was recorded.
+	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
+
+	p.reset()
+	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	ghost := AttemptID("s-9-0")
+	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &ghost, nil, 4)))
+	if got, _ := k.Attempt(ghost); got.State != AttemptOpen || got.shellID != "" {
+		t.Fatalf("snapshot-created attempt must carry no alias, got %+v", got)
+	}
+	if got, _ := k.Attempt(att.ID); got.State != AttemptUnknown {
+		t.Fatalf("app attempt with no alias must reconcile unknown, got %v", got.State)
+	}
+}
+
+// Constraint (c): aliases are per-domain. Two domains can mint the same
+// shell id (independent shells); each domain's snapshot resolves only its
+// own alias, and never touches the other domain's attempt.
+func TestSnapshotAliasResolutionIsPerDomain(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	hA := establish(t, k, "T", p, "LA", nil)
+	hB := establish(t, k, "T", p, "LB", nil)
+	shared := AttemptID("s-1-0")
+	attA, _ := k.SubmitAttempt(hA.Domain, "a", "/", "local")
+	mustIngest(t, k, "T", env("LA", hA, 2, startEvt(&shared, "a")))
+	attB, _ := k.SubmitAttempt(hB.Domain, "b", "/", "local")
+	mustIngest(t, k, "T", env("LB", hB, 2, startEvt(&shared, "b")))
+
+	p.reset()
+	if err := k.NotifyGap("T", hA.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	last := &CompletedRef{AttemptID: shared, ExitCode: intPtr(3)}
+	mustIngest(t, k, "T", env("LA", hA, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
+	if got, _ := k.Attempt(attA.ID); got.State != AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 3 {
+		t.Fatalf("domain A's snapshot must resolve its own alias, got %+v", got)
+	}
+	if got, _ := k.Attempt(attB.ID); got.State != AttemptOpen {
+		t.Fatalf("domain B's attempt must be untouched by A's snapshot, got %v", got.State)
+	}
+}
+
+// Constraint (e), stated as an interval with both ends named: from the
+// moment the alias is recorded — the authenticated start's acceptance — until
+// the domain ends, the shell id resolves to the app attempt; after the domain
+// ends the resolution gate is the domain-state check itself, so no snapshot
+// can reach the alias at all.
+func TestShellAliasLivesUntilTheDomainEnds(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	att, _ := k.SubmitAttempt(h.Domain, "make", "/", "local")
+	shellID := AttemptID("s-4-0")
+	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make"))) // interval opens
+	if got, _ := k.Attempt(att.ID); got.shellID != shellID {
+		t.Fatalf("alias must be recorded at the authenticated start, got %q", got.shellID)
+	}
+
+	// Still within the domain's life: the alias resolves through a desync.
+	p.reset()
+	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	last := &CompletedRef{AttemptID: shellID, ExitCode: intPtr(1)}
+	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
+	if got, _ := k.Attempt(att.ID); got.State != AttemptCompleted || got.shellID != shellID {
+		t.Fatalf("alias must resolve and persist on the record, got %+v", got)
+	}
+
+	// The domain ends: its alias dies with it — no snapshot can reach it.
+	mustIngest(t, k, "T", env("L", h, 4, closeEvt()))
+	if err := k.Ingest("T", env("L", h, 5, snapshotEvt(rid, ShellAtPrompt, nil, last, 6))); !errors.Is(err, ErrSnapshotUnexpected) {
+		t.Fatalf("snapshot for a closed domain must be rejected, got %v", err)
+	}
+}
+
+// Brief defect 1, second face: a snapshot from domain B naming B's OWN id
+// resolves to B's attempt while an identically-numbered attempt (same
+// per-shell counter, different domain) exists under domain A — and does not
+// produce ErrSnapshotConflict. With the mint carrying the domain the ids
+// differ by construction; before that fix both domains minted s-$$-0 and the
+// exact-match arm of resolveAttempt resolved cross-domain into a rejection.
+func TestSnapshotResolvesOwnDomainIDWithSameCounterElsewhere(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	hA := establish(t, k, "T", p, "LA", nil)
+	hB := establish(t, k, "T", p, "LB", nil)
+	// Both shells at counter 0: distinct ids, identical numbers.
+	idA := AttemptID("s-" + string(hA.Domain) + "-0")
+	idB := AttemptID("s-" + string(hB.Domain) + "-0")
+	mustIngest(t, k, "T", env("LA", hA, 2, startEvt(&idA, "a")))
+	mustIngest(t, k, "T", env("LA", hA, 3, completeEvt(idA, 0, fence(0x01))))
+	mustIngest(t, k, "T", env("LA", hA, 4, promptReadyEvt()))
+	mustIngest(t, k, "T", env("LB", hB, 2, startEvt(&idB, "b")))
+
+	p.reset()
+	if err := k.NotifyGap("T", hB.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	last := &CompletedRef{AttemptID: idB, ExitCode: intPtr(2)}
+	mustIngest(t, k, "T", env("LB", hB, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
+	if got, _ := k.Attempt(idB); got.State != AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 2 {
+		t.Fatalf("domain B's snapshot must resolve B's own attempt, got %+v", got)
+	}
+	if got, _ := k.Attempt(idA); got.State != AttemptCompleted || got.ExitCode == nil || *got.ExitCode != 0 {
+		t.Fatalf("domain A's identically-numbered attempt must be untouched, got %+v", got)
+	}
+}
+
+// The cross-domain check keeps its value once ids are unique: a shell that
+// GENUINELY names another domain's attempt id (misconfiguration, or a
+// hostile shell) still resolves cross-domain and is rejected as a
+// contradiction — it is not silently treated as an unknown id.
+func TestSnapshotCrossDomainIDStillConflict(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	hA := establish(t, k, "T", p, "LA", nil)
+	hB := establish(t, k, "T", p, "LB", nil)
+	idA := AttemptID("s-" + string(hA.Domain) + "-0")
+	mustIngest(t, k, "T", env("LA", hA, 2, startEvt(&idA, "a")))
+	mustIngest(t, k, "T", env("LA", hA, 3, completeEvt(idA, 0, fence(0x01))))
+	mustIngest(t, k, "T", env("LA", hA, 4, promptReadyEvt()))
+
+	p.reset()
+	if err := k.NotifyGap("T", hB.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	// B's shell names A's attempt id: a contradiction, not an unknown id.
+	last := &CompletedRef{AttemptID: idA, ExitCode: intPtr(9)}
+	if err := k.Ingest("T", env("LB", hB, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4))); !errors.Is(err, ErrSnapshotConflict) {
+		t.Fatalf("snapshot naming another domain's attempt id must conflict, got %v", err)
+	}
+	if got, _ := k.Attempt(idA); got.ExitCode != nil && *got.ExitCode == 9 {
+		t.Fatalf("domain A's attempt must be untouched by B's rejected snapshot, got %+v", got)
+	}
+}
+
+// Constraint (c), parent-restored face: a stale child alias must not resolve
+// after the parent is restored. The child attached an app attempt under the
+// alias s-<child>-0 and closed; the parent resumes and its snapshot names
+// that alias. Resolution is scoped to the parent's domain, so the child's
+// record stays exactly as the close left it — unknown, no invented status.
+func TestStaleChildAliasNeverResolvesAfterParentRestored(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	hA := establish(t, k, "T", p, "L", nil)
+	mustIngest(t, k, "T", env("L", hA, 2, suspendEvt()))
+	hB := establish(t, k, "T", p, "L", &hA.Domain)
+	attB, _ := k.SubmitAttempt(hB.Domain, "child make", "/", "local")
+	childAlias := AttemptID("s-" + string(hB.Domain) + "-0")
+	mustIngest(t, k, "T", env("L", hB, 2, startEvt(&childAlias, "child make")))
+	if got, _ := k.Attempt(attB.ID); got.shellID != childAlias {
+		t.Fatalf("child alias must be recorded at attach, got %q", got.shellID)
+	}
+	// The child shell exits: its domain closes and the open attempt becomes
+	// unknown — the state the parent must never be able to resurrect.
+	mustIngest(t, k, "T", env("L", hB, 3, closeEvt()))
+	if got, _ := k.Attempt(attB.ID); got.State != AttemptUnknown {
+		t.Fatalf("child's open attempt must reconcile unknown on close, got %v", got.State)
+	}
+	mustIngest(t, k, "T", env("L", hA, 3, activateEvt()))
+
+	p.reset()
+	if err := k.NotifyGap("T", hA.Domain, 64, 1); err != nil {
+		t.Fatal(err)
+	}
+	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
+	last := &CompletedRef{AttemptID: childAlias, ExitCode: intPtr(5)}
+	mustIngest(t, k, "T", env("L", hA, 4, snapshotEvt(rid, ShellAtPrompt, nil, last, 5)))
+	if got, _ := k.Attempt(attB.ID); got.State != AttemptUnknown || got.ExitCode != nil {
+		t.Fatalf("the stale child alias must never resolve in the parent: child attempt got %+v", got)
+	}
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecyclePromptReady {
+		t.Fatalf("parent's snapshot must restore the lane to a ready prompt, got %v", st.Lifecycle)
+	}
+}
+
 func TestDesyncBudgetExhaustionRevokesDomain(t *testing.T) {
 	// Episode budget of one: the second gap revokes the domain outright.
 	k, _, _ := newTestKernel(Options{Budgets: Budgets{MaxDesyncEpisodes: 1}})
@@ -421,28 +704,78 @@ func TestStartAttachRules(t *testing.T) {
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
 
-	// A start naming a mismatched attempt over a pending app attempt is
-	// rejected; the anonymous start attaches.
+	// A start naming the attempt in the shell's own namespace over a pending
+	// app attempt attaches and records the shell id as a per-attempt alias:
+	// the shell never learns the app-minted id (protocol §8 — no outbound
+	// envelope carries one), so its own id is the only name it can later
+	// report in a snapshot. The app id stays authoritative (constraint b):
+	// the attempt keeps its id and app-owned text, and no attempt appears
+	// under the shell id.
 	att, _ := k.SubmitAttempt(h.Domain, "app cmd", "/", "local")
-	other := AttemptID("att-other")
-	if err := k.Ingest("T", env("L", h, 2, startEvt(&other, "evil"))); !errors.Is(err, ErrAttemptMismatch) {
-		t.Fatalf("mismatched explicit start must be rejected, got %v", err)
+	shellID := AttemptID("s-1-0")
+	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "evil")))
+	if got, _ := k.Attempt(att.ID); !got.Started || got.Command != "app cmd" || got.shellID != shellID {
+		t.Fatalf("shell-named start must attach with the alias recorded, got %+v", got)
 	}
-	mustIngest(t, k, "T", env("L", h, 3, startEvt(nil, "evil")))
-	if got, _ := k.Attempt(att.ID); !got.Started || got.Command != "app cmd" {
-		t.Fatalf("anonymous start must attach to the app attempt, got %+v", got)
-	}
-	if _, exists := k.Attempt(other); exists {
-		t.Fatal("the mismatched id must never become an attempt")
+	if _, exists := k.Attempt(shellID); exists {
+		t.Fatal("the shell id must never become an attempt's identity")
 	}
 
-	// A second start while the attempt runs is a violation — with an
-	// explicit id and without.
-	if err := k.Ingest("T", env("L", h, 4, startEvt(&att.ID, "again"))); !errors.Is(err, ErrAttemptOpen) {
+	// A second start while the attempt runs is still a violation — the
+	// attach window admits exactly one start, because Started flips and the
+	// next start hits ErrAttemptOpen (constraint d) — with an explicit id
+	// and without.
+	if err := k.Ingest("T", env("L", h, 3, startEvt(&att.ID, "again"))); !errors.Is(err, ErrAttemptOpen) {
 		t.Fatalf("start while running must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", env("L", h, 5, startEvt(nil, "again"))); !errors.Is(err, ErrAttemptOpen) {
+	if err := k.Ingest("T", env("L", h, 4, startEvt(nil, "again"))); !errors.Is(err, ErrAttemptOpen) {
 		t.Fatalf("anonymous start while running must be rejected, got %v", err)
+	}
+
+	// The anonymous start still attaches to the next app attempt.
+	mustIngest(t, k, "T", env("L", h, 5, completeEvt(att.ID, 0, fence(0x01))))
+	mustIngest(t, k, "T", env("L", h, 6, promptReadyEvt()))
+	att2, _ := k.SubmitAttempt(h.Domain, "app cmd 2", "/", "local")
+	mustIngest(t, k, "T", env("L", h, 7, startEvt(nil, "evil2")))
+	if got, _ := k.Attempt(att2.ID); !got.Started || got.Command != "app cmd 2" {
+		t.Fatalf("anonymous start must attach to the app attempt, got %+v", got)
+	}
+}
+
+// The regression that matters (brief defect 1): two domains in one lane —
+// a docker-exec/ssh child over its parent — each with a shell-originated
+// start whose per-shell counter is at the same value. The minted id carries
+// the domain (s-<dom>-<n>), so equal counters are distinct ids and BOTH
+// starts succeed. Before that fix the mint was s-$$-<n>: PID spaces are not
+// shared across domains, two shells routinely share a low PID, and the
+// kernel's global k.attempts lookup rejected the second domain's first
+// command with ErrAttemptIDExists.
+func TestShellOriginatedStartsSameCounterAcrossDomains(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	hA := establish(t, k, "T", p, "L", nil)
+	// The parent shell's first command: shell-originated, counter 0.
+	idA := AttemptID("s-" + string(hA.Domain) + "-0")
+	mustIngest(t, k, "T", env("L", hA, 2, startEvt(&idA, "parent-cmd")))
+	if got, ok := k.Attempt(idA); !ok || !got.Started || got.Origin != OriginShell {
+		t.Fatalf("parent's shell-originated attempt must exist under its own id, got %+v ok=%v", got, ok)
+	}
+	mustIngest(t, k, "T", env("L", hA, 3, completeEvt(idA, 0, fence(0x01))))
+	mustIngest(t, k, "T", env("L", hA, 4, promptReadyEvt()))
+
+	// The nested shell (sudo/su/ssh/docker) suspends the parent and gets its
+	// own authenticated domain in the same lane.
+	mustIngest(t, k, "T", env("L", hA, 5, suspendEvt()))
+	hB := establish(t, k, "T", p, "L", &hA.Domain)
+	// The child shell is also at counter 0 — under the pre-fix mint its id
+	idB := AttemptID("s-" + string(hB.Domain) + "-0")
+	mustIngest(t, k, "T", env("L", hB, 2, startEvt(&idB, "child-cmd")))
+	if got, ok := k.Attempt(idB); !ok || !got.Started || got.Origin != OriginShell {
+		t.Fatalf("child's shell-originated attempt must exist under its own id, got %+v ok=%v", got, ok)
+	}
+	if got, _ := k.Attempt(idA); got.State != AttemptCompleted {
+		t.Fatalf("parent's attempt must be untouched by the child's start, got %v", got.State)
 	}
 }
 

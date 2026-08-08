@@ -455,7 +455,28 @@ func (k *Kernel) applyStart(d *Domain, ls *laneState, env Envelope) ([]outbound,
 	switch {
 	case open != nil && !open.Started:
 		if env.Event.Start.AttemptID != nil && *env.Event.Start.AttemptID != open.ID {
-			return nil, ErrAttemptMismatch // a second top-level attempt over a pending one
+			// The shell names the attempt in its own namespace: it never
+			// learns the app-minted id (protocol §8 — no outbound envelope
+			// carries one), so its id is the only name it can report in a
+			// snapshot. Record it as a per-attempt alias and attach. The app
+			// id stays authoritative — the attempt keeps its id, command
+			// text, cwd, host and secrets (decision 5) — and the alias is
+			// learnable only here, downstream of requireActive above, never
+			// from a snapshot (ADR-0024 constraint a). A second top-level
+			// attempt over a pending one is still impossible: the attach
+			// window admits exactly one start, because Started flips and the
+			// next start hits ErrAttemptOpen (constraint d).
+			// No collision check here (the default branch's
+			// ErrAttemptIDExists guard does not apply): this id becomes an
+			// alias on an existing record, never a map key, and an honest
+			// shell mints s-<dom>-<counter> — which cannot equal any
+			// existing attempt id: app-minted ids are att-<hex>, foreign
+			// shells carry their own domain prefix, and this shell's
+			// counter never re-mints a value. The default branch keeps its
+			// check because there the id becomes the attempt's identity (a
+			// map key), so a shell naming an id that is not its own must be
+			// rejected rather than allowed to overwrite the record.
+			open.shellID = *env.Event.Start.AttemptID
 		}
 		open.Started = true // attach: id, command text, cwd, host and secrets stay app-owned
 		k.setLifecycle(ls, LifecycleRunning, d.ID, open.ID)
@@ -467,6 +488,10 @@ func (k *Kernel) applyStart(d *Domain, ls *laneState, env Envelope) ([]outbound,
 			return nil, ErrNotPromptReady // no prompt yet: completion pending, or lane lost/native
 		}
 		if env.Event.Start.AttemptID != nil {
+			// The id becomes this attempt's identity (a map key): a global
+			// id must stay unique. The domain-scoped mint makes an honest
+			// collision impossible; this check is the guard for a shell that
+			// names an id that is not its own.
 			if _, exists := k.attempts[*env.Event.Start.AttemptID]; exists {
 				return nil, ErrAttemptIDExists
 			}
@@ -586,47 +611,54 @@ func (k *Kernel) applySnapshot(d *Domain, ls *laneState, env Envelope) ([]outbou
 	if s.ActiveAttemptID != nil && s.LastCompleted != nil && *s.ActiveAttemptID == s.LastCompleted.AttemptID {
 		return nil, ErrSnapshotConflict
 	}
+	// Resolution phase: map the shell-named ids to THIS domain's attempts —
+	// exact id first (a shell-originated attempt's id IS the kernel's
+	// record), then the per-attempt alias recorded from an authenticated
+	// start. A snapshot may name an alias the kernel already learned, never
+	// create one (constraint a), and aliases are per-domain: the alias scan
+	// is scoped to this domain, so a child's or sibling's alias never
+	// resolves here (constraint c).
+	var active, completed *ExecutionAttempt
+	var activeOwned, completedOwned bool
+	if s.ActiveAttemptID != nil {
+		active, activeOwned = k.resolveAttempt(d, *s.ActiveAttemptID)
+	}
+	if s.LastCompleted != nil {
+		completed, completedOwned = k.resolveAttempt(d, s.LastCompleted.AttemptID)
+	}
 	// Validation phase: every reference in the snapshot must agree with the
 	// kernel's records before anything mutates (decision 7: invalid events
-	// mutate nothing). An unknown active attempt is fine — it will be
-	// created from the snapshot (its start was lost in the gap) — and an
-	// unknown last-completed attempt is fine — there is nothing open to
-	// reconcile against it.
-	if s.ActiveAttemptID != nil {
-		if att, exists := k.attempts[*s.ActiveAttemptID]; exists {
-			if att.Domain != d.ID {
-				return nil, ErrSnapshotConflict
-			}
-			if att.State != AttemptOpen {
-				return nil, ErrSnapshotConflict // shell claims running; we have it terminal
-			}
+	// mutate nothing). A named id that exists under a DIFFERENT domain is a
+	// contradiction, not an unknown id — resolveAttempt's bool is the single
+	// owner of that "does this attempt belong to the domain" question, and
+	// both call sites consume it. An unknown active attempt is fine — it
+	// will be created from the snapshot (its start was lost in the gap) —
+	// and an unknown last-completed attempt is fine — there is nothing open
+	// to reconcile against it.
+	if active != nil {
+		if !activeOwned {
+			return nil, ErrSnapshotConflict
+		}
+		if active.State != AttemptOpen {
+			return nil, ErrSnapshotConflict // shell claims running; we have it terminal
 		}
 	}
-	if s.LastCompleted != nil {
-		if att, exists := k.attempts[s.LastCompleted.AttemptID]; exists {
-			if att.Domain != d.ID {
-				return nil, ErrSnapshotConflict
-			}
-		}
+	if completed != nil && !completedOwned {
+		return nil, ErrSnapshotConflict
 	}
 	// Apply phase: all validation passed, so every mutation below is final.
-	if s.ActiveAttemptID != nil {
-		if _, exists := k.attempts[*s.ActiveAttemptID]; !exists {
-			k.createAttempt(d, *s.ActiveAttemptID, OriginShell, true, "", "", "", k.now())
-		}
+	if s.ActiveAttemptID != nil && active == nil {
+		active = k.createAttempt(d, *s.ActiveAttemptID, OriginShell, true, "", "", "", k.now())
 	}
-	if s.LastCompleted != nil {
-		if att, exists := k.attempts[s.LastCompleted.AttemptID]; exists && att.State == AttemptOpen {
-			now := k.now()
-			att.State = AttemptCompleted
-			att.ExitCode = s.LastCompleted.ExitCode
-			att.CompletedAt = &now
-		}
-		// Already terminal: nothing to reconcile.
+	if s.LastCompleted != nil && completed != nil && completed.State == AttemptOpen {
+		now := k.now()
+		completed.State = AttemptCompleted
+		completed.ExitCode = s.LastCompleted.ExitCode
+		completed.CompletedAt = &now
 	}
+	// Already terminal: nothing to reconcile.
 	for _, att := range k.attempts {
-		if att.Domain == d.ID && att.State == AttemptOpen &&
-			(s.ActiveAttemptID == nil || *s.ActiveAttemptID != att.ID) {
+		if att.Domain == d.ID && att.State == AttemptOpen && att != active {
 			att.State = AttemptUnknown // open, but the shell is not running it
 		}
 	}
@@ -635,12 +667,33 @@ func (k *Kernel) applySnapshot(d *Domain, ls *laneState, env Envelope) ([]outbou
 	d.desyncBytes, d.desyncFrames = 0, 0
 	if ls.top() == d.ID {
 		if s.ActiveAttemptID != nil {
-			k.setLifecycle(ls, LifecycleRunning, d.ID, *s.ActiveAttemptID)
+			k.setLifecycle(ls, LifecycleRunning, d.ID, active.ID)
 		} else {
 			k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
 		}
 	}
 	return nil, nil
+}
+
+// resolveAttempt maps a shell-named attempt id to a kernel attempt of this
+// domain: exact id first — a shell-originated attempt's id IS the kernel's
+// record — then the per-attempt alias recorded from an authenticated start
+// (constraint a: a snapshot may name an alias the kernel already learned,
+// never create one). Aliases are per-domain (constraint c): the alias scan
+// is scoped to this domain, so a child's or sibling's alias never resolves
+// here. The bool reports whether the found attempt belongs to the domain: a
+// named id that exists under a different domain is a contradiction for the
+// caller, not an unknown id.
+func (k *Kernel) resolveAttempt(d *Domain, id AttemptID) (*ExecutionAttempt, bool) {
+	if att, ok := k.attempts[id]; ok {
+		return att, att.Domain == d.ID
+	}
+	for _, att := range k.attempts {
+		if att.Domain == d.ID && att.shellID == id {
+			return att, true
+		}
+	}
+	return nil, false
 }
 
 // --- helpers ---------------------------------------------------------------

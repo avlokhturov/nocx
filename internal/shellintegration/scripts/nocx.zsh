@@ -65,6 +65,11 @@ fi
 __nocx_lc_active=0
 __nocx_lc_seq=0
 __nocx_lc_attempt_open=0
+__nocx_lc_attempt_n=0
+__nocx_lc_attempt_id=''
+__nocx_lc_last_completed_id=''
+__nocx_lc_last_completed_code=''
+__nocx_lc_desynced=0
 __nocx_lc_frame=''
 __nocx_lc_lane_esc=''
 __nocx_lc_dom_esc=''
@@ -119,17 +124,80 @@ __nocx_lc_send() {
 # directly; the length bytes are parsed through od. Any framing failure
 # (EOF, garbage, oversize) returns non-zero and the caller fails open.
 __nocx_lc_read_frame() {
-    local __hdr __hex __len LC_ALL=C
-    if ! read -t "$__nocx_lc_timeout_s" -k 4 -u "$__nocx_lc_fd" __hdr 2>/dev/null; then
+    # $1, when given, is the per-read timeout in seconds (the refresh poll
+    # bounds the prompt); it defaults to the handshake timeout.
+    local __t="${1:-$__nocx_lc_timeout_s}" __hdr __hex __len LC_ALL=C
+    if ! read -t "$__t" -k 4 -u "$__nocx_lc_fd" __hdr 2>/dev/null; then
         return 1
     fi
     __hex=$(printf %s "$__hdr" | od -An -tx1 | tr -d ' \n')
     [[ "$__hex" =~ ^[0-9a-f]{8}$ ]] || return 1
     __len=$(( 16#$__hex ))
     (( __len > 0 && __len <= 65536 )) || return 1
-    if ! read -t "$__nocx_lc_timeout_s" -k "$__len" -u "$__nocx_lc_fd" __nocx_lc_frame 2>/dev/null; then
+    if ! read -t "$__t" -k "$__len" -u "$__nocx_lc_fd" __nocx_lc_frame 2>/dev/null; then
         return 1
     fi
+    return 0
+}
+
+# Answer a pending refresh_request with an authenticated snapshot (protocol
+# doc §10, ADR-0024 decision 7) — the zsh twin of the bash tier's
+# __nocx_lc_ans_refresh. The kernel demands this when a framing gap
+# desynchronized the domain; ONLY a snapshot answering the request restores
+# authority, so this runs at every prompt and must not lose the request.
+#
+# The poll is prompt-boundary. It is non-blocking in the common case: zsh's
+# `read` cannot probe without consuming a byte (unlike bash's `read -N 0`),
+# so the readiness check is zselect -r, which consumes nothing. When
+# zsh/zselect is unavailable the poll degrades to the bounded frame read
+# below — a stall guard, not a working budget.
+#
+# The shell names its own attempts: it mints an id per command at start —
+# the app mints its own and no outbound envelope carries one back (protocol
+# §8) — and the kernel learns the shell's id at attach, resolving it as a
+# per-attempt alias. The snapshot reports last_completed — the attempt the
+# shell just finished, with the REAL exit status — whenever one exists, so a
+# completion the gap swallowed still reconciles to its real status instead
+# of to unknown. active_attempt is never reported: the shell answers only
+# from a prompt, where nothing is running. shell_state is at_prompt because
+# this runs from a prompt; next_seq is the shell's next sequence, strictly
+# greater than the snapshot's own (the kernel rejects `next_seq <= seq`).
+#
+# On success marks the domain desynced: the prompt-boundary arm restores a
+# visible prompt (decision 9) — a suppressed marker-only prompt over a
+# Desynchronized domain would be invisible raw input.
+__nocx_lc_ans_refresh() {
+    local __rid
+    if zmodload zsh/zselect 2>/dev/null; then
+        zselect -t 0 -r "$__nocx_lc_fd" 2>/dev/null || return 1
+    fi
+    # A frame is buffered (the kernel writes each envelope in one write);
+    # the short bound is a stall guard, not a working budget.
+    __nocx_lc_read_frame 1 || return 1
+    case "$__nocx_lc_frame" in
+        *'"evt":"refresh_request"'*) : ;;
+        *) return 1 ;; # not a refresh; leave it buffered for the next prompt
+    esac
+    __rid="${__nocx_lc_frame#*\"request\":\"}"
+    __rid="${__rid%%\"*}"
+    # Kernel-minted shape: req-<16 hex>. Anything else is not a request we
+    # can answer — quoting it into the JSON would forge one.
+    [[ "$__rid" =~ ^req-[0-9a-f]{16}$ ]] || return 1
+    # The snapshot's own seq is seq+1 after this call; next_seq must be
+    # strictly greater than it, and is the sequence the NEXT envelope will
+    # carry — so it is seq+2 in pre-send terms.
+    #
+    # last_completed is the shell's own view (its id + the real exit
+    # status), recorded by __nocx_precmd before the refresh can preempt the
+    # complete. When no command just finished — the shell genuinely has
+    # nothing to report — the field is omitted and the kernel reconciles
+    # open attempts as unknown, never success.
+    if [[ -n "${__nocx_lc_last_completed_id:-}" ]]; then
+        __nocx_lc_send snapshot ',"request":"'"$__rid"'","shell_state":"at_prompt","last_completed":{"attempt":"'"$__nocx_lc_last_completed_id"'","exit_code":'"$__nocx_lc_last_completed_code"'},"next_seq":'"$(( __nocx_lc_seq + 2 ))"
+    else
+        __nocx_lc_send snapshot ',"request":"'"$__rid"'","shell_state":"at_prompt","next_seq":'"$(( __nocx_lc_seq + 2 ))"
+    fi
+    __nocx_lc_desynced=1
     return 0
 }
 
@@ -252,13 +320,29 @@ __nocx_marker() {
 }
 
 __nocx_precmd() {
-    # Authenticated channel first: complete (with the exit status and a
-    # fresh fence nonce), write the SAME nonce to the pty after the command's
-    # output (the render-order rendezvous, decision 1 carve-out), then
-    # prompt_ready. The complete carries no attempt id; the kernel resolves
-    # the domain's single open attempt.
+    # Authenticated channel first: refresh, complete (with the exit status
+    # and a fresh fence nonce), write the SAME nonce to the pty after the
+    # command's output (the render-order rendezvous, decision 1 carve-out),
+    # then prompt_ready. The complete carries no attempt id; the kernel
+    # resolves the domain's single open attempt.
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+        # Record the just-finished command's completion BEFORE the refresh
+        # can preempt the complete: the snapshot reports what the shell
+        # actually knows — its own attempt id and the real exit status — so
+        # a completion the gap swallowed reconciles to its real status
+        # rather than to unknown.
         if [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
+            __nocx_lc_last_completed_id="$__nocx_lc_attempt_id"
+            __nocx_lc_last_completed_code="$__nocx_exit_code"
+        fi
+        # A framing gap may have desynchronized the domain while the shell
+        # was busy; the kernel's refresh_request is buffered. Answer it
+        # FIRST — only a snapshot answering it restores authority (decision
+        # 7), and while the domain is desynchronized the complete and
+        # prompt_ready below would be quarantined anyway.
+        if __nocx_lc_ans_refresh; then
+            __nocx_lc_attempt_open=0
+        elif [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
             if __nocx_lc_fence; then
                 __nocx_lc_send complete ',"exit_code":'"$__nocx_exit_code"',"fence":"'"$__nocx_lc_fence_hex"'"'
                 builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
@@ -281,15 +365,25 @@ __nocx_preexec() {
     # zsh's preexec hook receives the full command line as $1.
     __nocx_marker C
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
-        # Shell-originated start, WITHOUT an attempt id: the kernel attaches
-        # to a pending app attempt or mints a shell-originated one, and
-        # resolves the completion by context (protocol doc §7-§8). The
-        # command text is truncated to the kernel's command budget (4096
-        # bytes); a longer line loses its tail, never its frame.
+        # Shell-originated start, named with the shell's own attempt id: the
+        # shell mints one per command because it never learns the app-minted
+        # id (protocol §8 — no outbound envelope carries one back), and its
+        # id is the only name it can report in a snapshot. The kernel
+        # attaches to a pending app attempt (recording the id as a
+        # per-attempt alias) or creates a shell-originated attempt under
+        # this id. The id carries the domain (s-<dom>-<counter>): PID spaces
+        # are not shared across domains, so s-$$-<n> collides whenever a
+        # docker exec / ssh shell shares a low PID with another domain's
+        # shell, and the kernel's global id table would reject the second
+        # domain's first command. The domain is the disambiguator; the
+        # per-shell counter keeps ids unique within it. The command text is
+        # truncated to the kernel's command budget (4096 bytes); a longer
+        # line loses its tail, never its frame.
         local __cmd="${1:-}" LC_ALL=C
         __cmd="${__cmd:0:4000}"
         __nocx_lc_json_escape "$__cmd"
-        __nocx_lc_send start ',"command":"'"$__nocx_lc_json_escaped"'"'
+        __nocx_lc_attempt_id="s-$__nocx_lc_dom-$(( __nocx_lc_attempt_n++ ))"
+        __nocx_lc_send start ',"attempt":"'"$__nocx_lc_attempt_id"'","command":"'"$__nocx_lc_json_escaped"'"'
         __nocx_lc_attempt_open=1
     fi
 }

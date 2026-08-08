@@ -15,6 +15,9 @@
 # (the exit status is only observable inside a forked PS1 expansion that
 # cannot carry state back), no bounded binary read (read -t and read -N are
 # not portable), and no way to hold a monotonic sequence across prompts.
+# A `refresh_request` is unanswered by design: answering one needs a bounded
+# binary read, a monotonic `next_seq` and attempt state across prompts —
+# exactly what this tier lacks (the omission is decided, not missed).
 # A POSIX sh that cannot speak the protocol keeps a conventional terminal —
 # the honest, ADR-compliant state for an environment without a channel.
 # If a POSIX host must be integrated, the answer is the Tier-B helper

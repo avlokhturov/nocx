@@ -61,6 +61,19 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// nocx-u7uh.9). The snapshot names no attempt — the shell never
 		// learns attempt ids — so open attempts reconcile as unknown.
 		"15": "462c239042f18b149f94d8349bce08d5354595869eba785965dbb7037346ce7a",
+		// v16: the snapshot names the shell's own attempts — the shell mints
+		// an id per command at start, the kernel learns it at attach and
+		// resolves it as a per-attempt alias, and a completion lost inside a
+		// corrupted region reconciles to its real status instead of to
+		// unknown; zsh answers refresh_request the way bash does; POSIX sh
+		// documents the omission as decided (nocx-u7uh.19).
+		"16": "d706a17d13634c274fcb0618dfd22c4eacd4427744d9848e23a5aa38a81a22a1",
+		// v17: the shell-minted attempt id carries the domain (s-<dom>-<n>)
+		// instead of the PID (s-$$-<n>): PID spaces are not shared across
+		// domains, so a docker exec / ssh shell sharing a low PID with
+		// another domain's shell minted a colliding id and the kernel
+		// rejected the second domain's first command (nocx-u7uh.19).
+		"17": "5edf9b249dd194fc3c43cd21cbb2a2608378afebd0f2f318928a7448f8671779",
 	}
 
 	h := sha256.New()

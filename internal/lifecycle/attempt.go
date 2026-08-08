@@ -43,4 +43,12 @@ type ExecutionAttempt struct {
 	ExitCode    *int // set exactly once, only by an authenticated completion
 	CompletedAt *time.Time
 	Fence       FenceNonce // the completion's render fence
+	// shellID is the id the shell itself mints for this attempt and names in
+	// its start and snapshot envelopes (the shell never learns the app-minted
+	// id — protocol §8 — so its own id is the only name it can report). It is
+	// set exactly once, only when an authenticated start attaches to a
+	// pending app attempt, and is deliberately unexported: it resolves TO the
+	// app id and must never become the attempt's identity, never appear in a
+	// published fact, and never cross JSON-RPC (ADR-0024 constraint b).
+	shellID AttemptID
 }

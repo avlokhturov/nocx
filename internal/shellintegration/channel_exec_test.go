@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -455,6 +456,16 @@ func TestBashChannel_HandshakeAndLifecycle(t *testing.T) {
 		t.Errorf("start must carry the command line, got %v", start.Body)
 	}
 
+	// The shell mints its own attempt id per command, and the id carries the
+	// domain (nocx-u7uh.19): s-<dom>-<n>. PID spaces are not shared across
+	// domains — a docker exec shell and its parent routinely share a low
+	// PID — so an id minted from $$ alone collides across domains and the
+	// kernel rejects the second domain's first command. The domain is the
+	// disambiguator; the per-shell counter keeps ids unique within it.
+	if id, ok := start.Body["attempt"].(string); !ok || !regexp.MustCompile(`^s-dom-test-\d+$`).MatchString(id) {
+		t.Errorf("start must carry a domain-scoped attempt id, got %v", start.Body["attempt"])
+	}
+
 	// The complete carries the exit status and the fence; the fence bytes
 	// reach the pty after the command's output (the render rendezvous).
 	code, ok := complete.Body["exit_code"].(float64)
@@ -487,9 +498,13 @@ func TestBashChannel_HandshakeAndLifecycle(t *testing.T) {
 // desync recovery (ADR-0024 decision 7, protocol §10): the kernel
 // desynchronizes the domain (a framing gap) and sends refresh_request; at
 // the next prompt the shell answers with an authenticated snapshot carrying
-// the request id, its state (at_prompt) and its next sequence — and
-// restores a visible prompt (decision 9: a Desynchronized domain is not
-// live, and the suppressed marker-only prompt would be invisible raw input).
+// the request id, its state (at_prompt), its next sequence, and — the point
+// of this epic's shell work — last_completed: the attempt the shell just
+// finished, under the shell's own id, with the REAL exit status, so a
+// completion the gap swallowed reconciles to its real status rather than to
+// unknown. It also restores a visible prompt (decision 9: a Desynchronized
+// domain is not live, and the suppressed marker-only prompt would be
+// invisible raw input).
 func TestBashChannel_AnswersRefreshWithSnapshot(t *testing.T) {
 	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
 	defer s.close()
@@ -500,8 +515,14 @@ func TestBashChannel_AnswersRefreshWithSnapshot(t *testing.T) {
 	s.kernel.sendRefresh(rid)
 
 	// An idle shell in readline runs no traps (nocx-z9s9.16): the answer
-	// lands at the next prompt boundary. Type a command to reach it.
-	if _, err := s.ptmx.Write([]byte("echo AFTER-REFRESH\n")); err != nil {
+	// lands at the next prompt boundary. Type a command with a
+	// distinguishable exit status to reach it — the completion is then
+	// swallowed by the refresh path (the snapshot preempts the complete),
+	// and the snapshot must report what the shell actually knows: the
+	// attempt it just finished, under the shell's own id, with the real
+	// status. `false` exits 1 and, unlike a `( ... )` subshell command,
+	// fires the DEBUG trap — the shell's start hook runs.
+	if _, err := s.ptmx.Write([]byte("false\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	s.waitForAccepted("snapshot")
@@ -525,14 +546,24 @@ func TestBashChannel_AnswersRefreshWithSnapshot(t *testing.T) {
 	if ns, ok := snap.Body["next_seq"].(float64); !ok || ns <= float64(snap.Seq) {
 		t.Errorf("snapshot next_seq = %v, want strictly greater than its own seq %d", snap.Body["next_seq"], snap.Seq)
 	}
-	// The shell cannot name attempts (protocol §8 — no outbound envelope
-	// carries an attempt id): the snapshot carries neither, and the kernel
-	// reconciles open attempts as unknown, never success.
-	if _, ok := snap.Body["active_attempt"]; ok {
-		t.Errorf("snapshot must not carry active_attempt the shell cannot know: %v", snap.Body)
+	// The shell names its own attempts (it mints an id per command at
+	// start; the kernel learns it at attach and resolves it as a per-attempt
+	// alias), so the snapshot carries last_completed — the attempt the shell
+	// just finished, with the REAL exit status. active_attempt is never
+	// reported: the shell answers only from a prompt, where nothing is
+	// running.
+	lc, ok := snap.Body["last_completed"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot must carry last_completed with the shell's own view, got %v", snap.Body)
 	}
-	if _, ok := snap.Body["last_completed"]; ok {
-		t.Errorf("snapshot must not carry last_completed the shell cannot know: %v", snap.Body)
+	if id, _ := lc["attempt"].(string); !regexp.MustCompile(`^s-dom-test-\d+$`).MatchString(id) {
+		t.Errorf("last_completed must carry the shell-minted attempt id, got %v", lc)
+	}
+	if code, _ := lc["exit_code"].(float64); code != 1 {
+		t.Errorf("last_completed must carry the real exit status (1), got %v", lc)
+	}
+	if _, ok := snap.Body["active_attempt"]; ok {
+		t.Errorf("snapshot must not carry active_attempt at a prompt: %v", snap.Body)
 	}
 
 	// decision 9: the marker-only suppression ended. The desynced PS1 is
@@ -910,6 +941,64 @@ func TestZshChannel_HandshakeAndLifecycle(t *testing.T) {
 	// The zsh start carries the full command line.
 	if cmd, ok := start.Body["command"].(string); !ok || !strings.Contains(cmd, "echo ZSH-CHANNEL-OK") {
 		t.Errorf("zsh start must carry the command line, got %v", start.Body)
+	}
+}
+
+// TestZshChannel_AnswersRefreshWithSnapshot is the zsh half of the desync
+// recovery (ADR-0024 decision 7, protocol §10): the kernel desynchronizes
+// the domain and sends refresh_request; at the next prompt the shell answers
+// with an authenticated snapshot carrying the request id, its state
+// (at_prompt), its next sequence, and last_completed — the attempt it just
+// finished, under the shell's own id, with the real exit status. The zsh
+// tier now answers refresh the way the bash tier does (nocx-u7uh.19).
+func TestZshChannel_AnswersRefreshWithSnapshot(t *testing.T) {
+	s := startChannelShell(t, "zsh", "nocx.zsh", zshScript)
+	defer s.close()
+
+	rid := "req-" + strings.Repeat("cd", 8)
+	s.kernel.sendRefresh(rid)
+
+	// An idle zsh runs no precmd until the next prompt: type a command with
+	// a distinguishable exit status to reach it. The completion is then
+	// swallowed by the refresh path, and the snapshot reports what the
+	// shell actually knows: the attempt it just finished, under its own id,
+	// with the real status.
+	if _, err := s.ptmx.Write([]byte("false\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s.waitForAccepted("snapshot")
+
+	events := s.kernel.events()
+	var snap *kernelEvent
+	for i := range events {
+		if events[i].Evt == "snapshot" {
+			snap = &events[i]
+		}
+	}
+	if snap == nil {
+		t.Fatalf("no snapshot accepted; events=%v", events)
+	}
+	if got, _ := snap.Body["request"].(string); got != rid {
+		t.Errorf("snapshot must echo the refresh request id, got %v", snap.Body)
+	}
+	if st, ok := snap.Body["shell_state"].(string); !ok || st != "at_prompt" {
+		t.Errorf("snapshot shell_state = %v, want at_prompt", snap.Body["shell_state"])
+	}
+	if ns, ok := snap.Body["next_seq"].(float64); !ok || ns <= float64(snap.Seq) {
+		t.Errorf("snapshot next_seq = %v, want strictly greater than its own seq %d", snap.Body["next_seq"], snap.Seq)
+	}
+	lc, ok := snap.Body["last_completed"].(map[string]any)
+	if !ok {
+		t.Fatalf("snapshot must carry last_completed with the shell's own view, got %v", snap.Body)
+	}
+	if id, _ := lc["attempt"].(string); !regexp.MustCompile(`^s-dom-test-\d+$`).MatchString(id) {
+		t.Errorf("last_completed must carry the shell-minted attempt id, got %v", lc)
+	}
+	if code, _ := lc["exit_code"].(float64); code != 1 {
+		t.Errorf("last_completed must carry the real exit status (1), got %v", lc)
+	}
+	if _, ok := snap.Body["active_attempt"]; ok {
+		t.Errorf("snapshot must not carry active_attempt at a prompt: %v", snap.Body)
 	}
 }
 
