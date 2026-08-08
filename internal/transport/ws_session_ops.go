@@ -89,6 +89,12 @@ type sessionLane struct {
 }
 
 func newSessionLane(sess session.Session) *sessionLane {
+	// Lane-owned lifetime: the lane context is the session's own and is
+	// deliberately derived from Background — its owner is the per-session
+	// resize lane, and its closing event is closeLane's admission (see the
+	// package comment's invariant 2: the worker's exit after the cancelled
+	// resize returns). It must NOT die with any one connection: a session
+	// is resized by whichever connection is attached (AD-9).
 	ctx, cancel := context.WithCancel(context.Background())
 	return &sessionLane{
 		ctx:    ctx,

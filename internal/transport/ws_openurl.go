@@ -54,7 +54,7 @@ type shellOpenUrlParams struct {
 // not a URL this panel may ever send a user to, and the renderer's
 // conversion module only ever emits https for a recognised host. The result
 // is the empty object, exactly like files.reveal.
-func (s *WSServer) handleShellOpenUrl(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleShellOpenUrl(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params shellOpenUrlParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.URL == "" {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: url required"})
@@ -72,7 +72,7 @@ func (s *WSServer) handleShellOpenUrl(wconn Responder, req jsonrpcRequest) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "shell.openUrl not available"})
 		return
 	}
-	if err := uo.OpenURL(context.Background(), u.String()); err != nil {
+	if err := uo.OpenURL(ctx, u.String()); err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "shell.openUrl: ", err))
 		return
 	}

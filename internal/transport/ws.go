@@ -31,6 +31,7 @@ import (
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
@@ -185,6 +186,25 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
+	// probeSub admits and runs connections.test probes off the read loop
+	// (ws_control.go): a 30-second SSH probe must never freeze the socket
+	// that feeds every other tab. Capacity one; a second probe is refused
+	// with the control-saturated error, and the permit frees when the task
+	// returns, cancelled or not — that is what releases the admission slot
+	// for the next connection.
+	probeSub control.Submission
+	// dialogSub admits and runs dialog.openFile off the read loop. Capacity
+	// one: while a dialog is open the native capability is busy, and a
+	// second dialog.openFile from any connection is refused rather than
+	// stacking a second picker over the first.
+	dialogSub control.Submission
+	// inflight tracks admitted off-loop tasks so Stop cancels them and
+	// waits, bounded, for them to drain (see Stop's documented maximum).
+	inflight inflight
+	// controlDrainTimeout is how long Stop waits for in-flight off-loop
+	// control work to finish after cancelling it. Work that ignores
+	// cancellation is abandoned at this bound.
+	controlDrainTimeout time.Duration
 
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
@@ -587,18 +607,21 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			// call handles origin/host policy before the upgrade.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rx:                make(map[session.ID]*sessionRx),
-		conns:             make(map[*wsConn]struct{}),
-		outboundBudget:    outbound.NewBudget(outboundBudgetBytes),
-		tunnels:           make(map[string]*tunnel.Tunnel),
-		ownerTunnels:      make(map[*wsConn]map[string]struct{}),
-		origins:           LoopbackOriginPolicy{},
-		filesBindings:     make(map[string]*filesBinding),
-		lanes:             make(map[session.ID]*sessionLane),
-		filesBySession:    make(map[session.ID]map[string]struct{}),
-		filesPollInterval: defaultFilesPollInterval,
-		gitBindings:       make(map[string]*gitBinding),
-		gitBySession:      make(map[session.ID]map[string]struct{}),
+		rx:                  make(map[session.ID]*sessionRx),
+		conns:               make(map[*wsConn]struct{}),
+		outboundBudget:      outbound.NewBudget(outboundBudgetBytes),
+		tunnels:             make(map[string]*tunnel.Tunnel),
+		ownerTunnels:        make(map[*wsConn]map[string]struct{}),
+		origins:             LoopbackOriginPolicy{},
+		filesBindings:       make(map[string]*filesBinding),
+		lanes:               make(map[session.ID]*sessionLane),
+		filesBySession:      make(map[session.ID]map[string]struct{}),
+		filesPollInterval:   defaultFilesPollInterval,
+		probeSub:            control.NewBoundedSubmission(control.NewSemaphore("probe", 1)),
+		dialogSub:           control.NewBoundedSubmission(control.NewSemaphore("dialog", 1)),
+		controlDrainTimeout: defaultControlDrainTimeout,
+		gitBindings:         make(map[string]*gitBinding),
+		gitBySession:        make(map[session.ID]map[string]struct{}),
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
@@ -664,6 +687,17 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Lock()
 	s.stopped = true
 	s.ringsMu.Unlock()
+	// Cancel and drain in-flight off-loop control work (probes, dialogs).
+	// Cancellation makes cooperative tasks return promptly; waitDrained
+	// bounds the wait at controlDrainTimeout (the documented maximum, see
+	// ws_control.go) and ABANDONS whatever ignores cancellation — the
+	// forced-abandonment policy for work outside a commit interval. Stop
+	// therefore terminates within the documented maximum against any
+	// dependency, cooperative or not.
+	s.inflight.stop()
+	if !s.inflight.waitDrained(s.controlDrainTimeout) {
+		s.log.Warn("abandoning in-flight control work at shutdown", "maxWait", s.controlDrainTimeout)
+	}
 
 	// Shutdown stops accepting new connections but hijacked WebSocket
 	// handlers can still run after it returns. That is why the stopped
@@ -1404,32 +1438,32 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleAck(req)
 	case "profiles.list", "profiles.create", "profiles.update", "profiles.delete",
 		"profiles.effective", "profiles.patch":
-		s.handleProfileMethod(wconn, req)
+		s.handleProfileMethod(ctx, wconn, req)
 	case "git.open", "git.status", "git.diff", "git.stage", "git.unstage",
 		"git.stageAll", "git.unstageAll", "git.commit", "git.headMessage",
 		"git.log", "git.remote", "git.close":
-		s.handleGitMethod(wconn, state, req)
+		s.handleGitMethod(ctx, wconn, state, req)
 	case "profiles.importTabby":
-		s.handleImportTabby(wconn, req)
+		s.handleImportTabby(ctx, wconn, req)
 	case "profiles.tabbyPreview":
-		s.handleTabbyPreview(wconn, req)
+		s.handleTabbyPreview(ctx, wconn, req)
 	case "profiles.tabbyExecute":
-		s.handleTabbyExecute(wconn, req)
+		s.handleTabbyExecute(ctx, wconn, req)
 	case "profiles.moveImpact":
 		s.handleProfileMoveImpact(wconn, req)
 	case "secrets.usage":
-		s.handleSecretUsageMethod(wconn, req)
+		s.handleSecretUsageMethod(ctx, wconn, req)
 	case "secrets.savePassword", "secrets.saveKeyMaterial", "secrets.saveKeyPassphrase":
-		s.handleSecretMintMethod(wconn, req)
+		s.handleSecretMintMethod(ctx, wconn, req)
 	case "secrets.detect":
 		s.handleSecretsDetect(wconn, req)
 	case "secrets.captureSave":
-		s.handleCaptureSave(wconn, req)
+		s.handleCaptureSave(ctx, wconn, req)
 	case "secrets.captureDismiss":
-		s.handleCaptureDismiss(wconn, req)
+		s.handleCaptureDismiss(ctx, wconn, req)
 	case "files.open", "files.list", "files.read", "files.watch",
 		"files.close", "files.reveal":
-		s.handleFilesMethod(wconn, state, req)
+		s.handleFilesMethod(ctx, wconn, state, req)
 	case "groups.impact":
 		s.handleGroupImpact(wconn, req)
 	case "groups.apply":
@@ -1445,13 +1479,13 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		"export.backup", "export.import", "export.importPortable":
 		s.handleExportMethod(ctx, wconn, req)
 	case "connections.test":
-		s.handleConnectionsTest(wconn, req)
+		s.handleConnectionsTest(ctx, wconn, req)
 	case "connections.trustHostKey":
-		s.handleConnectionsTrustHostKey(wconn, req)
+		s.handleConnectionsTrustHostKey(ctx, wconn, req)
 	case "sshConfig.aliases":
-		s.handleSSHConfigAliases(wconn, req)
+		s.handleSSHConfigAliases(ctx, wconn, req)
 	case "sshConfig.path":
-		s.handleSSHConfigPath(wconn, req)
+		s.handleSSHConfigPath(ctx, wconn, req)
 	case "tunnel.open":
 		s.handleTunnelOpen(ctx, wconn, req)
 	case "tunnel.stop":
@@ -1459,11 +1493,11 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "ports.status", "ports.sample", "ports.pause", "ports.visible":
 		s.handlePortsMethod(wconn, req)
 	case "dialog.openFile":
-		s.handleDialogOpenFile(wconn, req)
+		s.handleDialogOpenFile(ctx, wconn, req)
 	case "shell.environmentObserved":
-		s.handleShellEnvironmentObserved(wconn, req)
+		s.handleShellEnvironmentObserved(ctx, wconn, req)
 	case "shell.openUrl":
-		s.handleShellOpenUrl(wconn, req)
+		s.handleShellOpenUrl(ctx, wconn, req)
 	case "history.query":
 		s.handleHistoryQuery(ctx, wconn, req)
 	case "history.record":
@@ -1471,28 +1505,28 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	case "fs.complete":
 		s.handleFsComplete(wconn, req)
 	case "shell.footprint.status":
-		s.handleShellFootprintStatus(wconn, req)
+		s.handleShellFootprintStatus(ctx, wconn, req)
 	case "shell.footprint.uninstall":
-		s.handleShellFootprintUninstall(wconn, req)
+		s.handleShellFootprintUninstall(ctx, wconn, req)
 	case "shell.complete":
 		s.handleShellComplete(ctx, wconn, req)
 	case "shell.integrate":
 		s.handleShellIntegrate(wconn, req)
 	case "shell.launcherCommand":
-		s.handleShellLauncherCommand(wconn, req)
+		s.handleShellLauncherCommand(ctx, wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",
 		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret",
 		"vault.deleteSecret", "vault.resolveLine":
-		s.handleVaultMethod(wconn, req)
+		s.handleVaultMethod(ctx, wconn, req)
 	// Not routed through handleVaultMethod: that gate refuses when the vault
 	// lifecycle is absent, and a reset must work on a vault that is broken or
 	// half-built — which is the only state it is ever wanted in.
 	case "vault.resetPreview":
-		s.handleVaultResetPreview(wconn, req)
+		s.handleVaultResetPreview(ctx, wconn, req)
 	case "vault.reset":
-		s.handleVaultReset(wconn, req)
+		s.handleVaultReset(ctx, wconn, req)
 	case "vault.unlockResolved":
 		s.handleUnlockResolved(wconn, req)
 	case "connections.passwordResolved":
@@ -1762,7 +1796,12 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	// AD-7: the ack must precede the session's own traffic in both
 	// directions, otherwise the first prompt races the open result and
 	// the client drops it (its sessionId is still null).
-	// Uses background context so the pump outlives the connection (AD-9).
+	// Background is deliberate — server/session-owned, the canonical member
+	// of that class. Owner: the session and its replay ring, which outlive
+	// every WebSocket (AD-9); the pump must survive a disconnect so the
+	// session's output keeps flowing into the ring for the next reattach.
+	// Closing event: session teardown — closeSession's registry.Close, which
+	// ends StartOutput and lets the pump return.
 	go s.pumpToRing(context.Background(), sess, rx.ring)
 
 	// Start exactly one monitorExit goroutine per session (DEFECT 2).
@@ -1807,6 +1846,13 @@ func (s *WSServer) replayStoredForwards(profileID, host string, cfg *ssh.Connect
 	if len(forwards) == 0 {
 		return
 	}
+	// Background is deliberate — connection-owned rows, not request work:
+	// the forwards a user configured on a profile must come up even if this
+	// WebSocket dies mid-replay (spec §7.3: closing the tab leaves them
+	// running). Owner: the stored-forward rows (connection-owned, tracked in
+	// the tunnel ledger). Closing event: connectfwd.Replay returning after
+	// every row was started or refused — the tunnels it starts outlive this
+	// goroutine and end at server shutdown or their own stop.
 	// The forward's connection is the profile's own: the WHOLE resolved
 	// config — credentials, jump route, authorized endpoints — rides one
 	// option that copies it into the connector's ConnectConfig, so the
@@ -2274,7 +2320,7 @@ func (s *WSServer) closeSession(sid session.ID) {
 // plane). Each returns a JSON-RPC error (-32601) when the relevant store is
 // not wired (WithProfileRepository/WithGroupRepository not called).
 
-func (s *WSServer) handleProfileMethod(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleProfileMethod(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
@@ -2642,7 +2688,7 @@ type tabbyExecuteParams struct {
 // supplied), and plans every profile, group, and secret WITHOUT writing
 // anything. Returns the full importPlan for execution and a preview response
 // for the renderer. The plan is stored server-side by the returned token.
-func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, *TabbyPreviewResponse, error) {
+func (s *WSServer) planTabbyImport(ctx context.Context, configYAML, passphrase string) (*importPlan, *TabbyPreviewResponse, error) {
 	cfg, err := importer.ParseTabbyConfig([]byte(configYAML))
 	if err != nil {
 		return nil, nil, err
@@ -2839,7 +2885,7 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 	}
 
 	// Determine secret provider.
-	preview.SecretProvider = s.secretProviderName()
+	preview.SecretProvider = s.secretProviderName(ctx)
 
 	// Build the plan and store it.
 	plan := &importPlan{
@@ -2858,11 +2904,11 @@ func (s *WSServer) planTabbyImport(configYAML, passphrase string) (*importPlan, 
 
 // secretProviderName returns a human-readable name for where secrets would be
 // stored. Uses the vault lifecycle if wired, otherwise returns "secret store".
-func (s *WSServer) secretProviderName() string {
+func (s *WSServer) secretProviderName(ctx context.Context) string {
 	if s.vaultLifecycle == nil {
 		return "secret store"
 	}
-	snap := s.vaultLifecycle.Snapshot(context.Background())
+	snap := s.vaultLifecycle.Snapshot(ctx)
 	for _, p := range snap.Providers {
 		if string(p.ID) == "system" && p.Writable && p.Ready {
 			return "OS keychain"
@@ -2874,7 +2920,7 @@ func (s *WSServer) secretProviderName() string {
 // handleTabbyPreview parses a Tabby config and returns a preview of what
 // would be imported, without writing anything. Uses planTabbyImport for the
 // shared planning logic.
-func (s *WSServer) handleTabbyPreview(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleTabbyPreview(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
@@ -2888,7 +2934,7 @@ func (s *WSServer) handleTabbyPreview(wconn Responder, req jsonrpcRequest) {
 		return
 	}
 
-	plan, preview, err := s.planTabbyImport(params.Config, params.Passphrase)
+	plan, preview, err := s.planTabbyImport(ctx, params.Config, params.Passphrase)
 	if err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Tabby preview: ", err))
 		return
@@ -2899,7 +2945,7 @@ func (s *WSServer) handleTabbyPreview(wconn Responder, req jsonrpcRequest) {
 
 // handleTabbyExecute executes a previously previewed Tabby import plan.
 // Takes the plan token from the preview response.
-func (s *WSServer) handleTabbyExecute(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleTabbyExecute(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil || s.credentials == nil || s.profileSvc == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "import not available"})
 		return
@@ -2929,7 +2975,6 @@ func (s *WSServer) handleTabbyExecute(wconn Responder, req jsonrpcRequest) {
 	// match the target the tabby vault keyed it to (ADR-0017 §1). Passphrases
 	// are minted as unbound rows: a passphrase belongs to a private key the
 	// import cannot fingerprint, and the connection editor binds it.
-	ctx := context.Background()
 	for _, cp := range plan.creds {
 		kind := vault.KindPassword
 		if cp.isPassphrase {
@@ -2982,7 +3027,7 @@ func privateKeyLabel(hash string) string {
 	return "Tabby key " + short
 }
 
-func (s *WSServer) handleImportTabby(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleImportTabby(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
@@ -3098,7 +3143,6 @@ func (s *WSServer) handleImportTabby(wconn Responder, req jsonrpcRequest) {
 		// All secrets validated. Create each one in the SecretStore, carrying
 		// the name the credential will bear (ADR-0016: the secret owns its
 		// name, and an import mints both together).
-		ctx := context.Background()
 		for _, p := range plans {
 			name := p.keyName
 			kind := vault.KindKeyPassphrase

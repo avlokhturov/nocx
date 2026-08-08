@@ -204,7 +204,7 @@ func wireEffectiveSecretFields(dto *profile.EffectiveProfileDTO) {
 // effective secret is this one). The renderer addresses the secret by its
 // row handle; the reference never leaves the backend. An unknown row or an
 // unused secret answers an empty profile list.
-func (s *WSServer) handleSecretUsageMethod(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleSecretUsageMethod(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		Row string `json:"row"`
 	}
@@ -262,7 +262,7 @@ type secretMintResult struct {
 	Row string `json:"row"`
 }
 
-func (s *WSServer) handleSecretMintMethod(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleSecretMintMethod(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	switch req.Method {
 	case "secrets.savePassword":
 		var params struct {
@@ -273,7 +273,7 @@ func (s *WSServer) handleSecretMintMethod(wconn Responder, req jsonrpcRequest) {
 			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: password required"})
 			return
 		}
-		id, err := s.createSecret(context.Background(), credential.NewSecret(params.Password),
+		id, err := s.createSecret(ctx, credential.NewSecret(params.Password),
 			vault.SecretMeta{Name: params.Name, Kind: vault.KindPassword})
 		if err != nil {
 			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store password: ", err))
@@ -304,7 +304,7 @@ func (s *WSServer) handleSecretMintMethod(wconn Responder, req jsonrpcRequest) {
 			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store key material: ", err))
 			return
 		}
-		id, err := s.createSecret(context.Background(), credential.NewSecret(params.KeyText),
+		id, err := s.createSecret(ctx, credential.NewSecret(params.KeyText),
 			vault.SecretMeta{Name: params.Name, Kind: vault.KindPrivateKey})
 		if err != nil {
 			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store key material: ", err))
@@ -335,7 +335,7 @@ func (s *WSServer) handleSecretMintMethod(wconn Responder, req jsonrpcRequest) {
 			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
 			return
 		}
-		if verr := s.verifyPassphraseAgainst(credential.SecretID(keyRef), []byte(params.Passphrase)); verr != nil {
+		if verr := s.verifyPassphraseAgainst(ctx, credential.SecretID(keyRef), []byte(params.Passphrase)); verr != nil {
 			var invalidPass *errInvalidKeyPassphrase
 			if errors.As(verr, &invalidPass) {
 				_ = wconn.TryError(req.ID, RPCError{
@@ -348,7 +348,7 @@ func (s *WSServer) handleSecretMintMethod(wconn Responder, req jsonrpcRequest) {
 			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", verr))
 			return
 		}
-		id, err := s.createSecret(context.Background(), credential.NewSecret(params.Passphrase),
+		id, err := s.createSecret(ctx, credential.NewSecret(params.Passphrase),
 			vault.SecretMeta{Name: params.Name, Kind: vault.KindKeyPassphrase})
 		if err != nil {
 			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", err))
@@ -360,14 +360,14 @@ func (s *WSServer) handleSecretMintMethod(wconn Responder, req jsonrpcRequest) {
 
 // verifyPassphraseAgainst answers whether the passphrase opens the stored key
 // material behind the reference. Refuses when it does not (nocx-dze3).
-func (s *WSServer) verifyPassphraseAgainst(keyRef credential.SecretID, passphrase []byte) error {
+func (s *WSServer) verifyPassphraseAgainst(ctx context.Context, keyRef credential.SecretID, passphrase []byte) error {
 	if s.credentials == nil {
 		return &errInvalidKeyPassphrase{msg: "secret store not available"}
 	}
 	if keyRef == "" {
 		return &errInvalidKeyPassphrase{msg: "no stored key to verify against"}
 	}
-	secret, err := s.credentials.Get(context.Background(), keyRef)
+	secret, err := s.credentials.Get(ctx, keyRef)
 	if err != nil {
 		return fmt.Errorf("load key material: %w", err)
 	}

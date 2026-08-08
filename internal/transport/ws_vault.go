@@ -129,7 +129,7 @@ func rpcErrorFor(fallback int, msgPrefix string, err error) RPCError {
 
 // handleVaultMethod dispatches vault.* RPCs. Returns -32601 when the vault
 // lifecycle is not wired.
-func (s *WSServer) handleVaultMethod(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultMethod(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.vaultLifecycle == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault not available"})
 		return
@@ -137,35 +137,35 @@ func (s *WSServer) handleVaultMethod(wconn Responder, req jsonrpcRequest) {
 
 	switch req.Method {
 	case "vault.status":
-		s.handleVaultStatus(wconn, req)
+		s.handleVaultStatus(ctx, wconn, req)
 	case "vault.setup":
-		s.handleVaultSetup(wconn, req)
+		s.handleVaultSetup(ctx, wconn, req)
 	case "vault.unseal":
-		s.handleVaultUnseal(wconn, req)
+		s.handleVaultUnseal(ctx, wconn, req)
 	case "vault.seal":
-		s.handleVaultSeal(wconn, req)
+		s.handleVaultSeal(ctx, wconn, req)
 	case "vault.changePassphrase":
-		s.handleVaultChangePassphrase(wconn, req)
+		s.handleVaultChangePassphrase(ctx, wconn, req)
 	case "vault.regenerateRecovery":
-		s.handleVaultRegenerateRecovery(wconn, req)
+		s.handleVaultRegenerateRecovery(ctx, wconn, req)
 	case "vault.setDefaultProvider":
-		s.handleVaultSetDefaultProvider(wconn, req)
+		s.handleVaultSetDefaultProvider(ctx, wconn, req)
 	case "vault.setAutoSeal":
-		s.handleVaultSetAutoSeal(wconn, req)
+		s.handleVaultSetAutoSeal(ctx, wconn, req)
 	case "vault.activity":
-		s.handleVaultActivity(wconn, req)
+		s.handleVaultActivity(ctx, wconn, req)
 	case "vault.inventory":
-		s.handleVaultInventory(wconn, req)
+		s.handleVaultInventory(ctx, wconn, req)
 	case "vault.createSecret":
-		s.handleVaultCreateSecret(wconn, req)
+		s.handleVaultCreateSecret(ctx, wconn, req)
 	case "vault.renameSecret":
-		s.handleVaultRenameSecret(wconn, req)
+		s.handleVaultRenameSecret(ctx, wconn, req)
 	case "vault.replaceSecret":
-		s.handleVaultReplaceSecret(wconn, req)
+		s.handleVaultReplaceSecret(ctx, wconn, req)
 	case "vault.deleteSecret":
-		s.handleVaultDeleteSecret(wconn, req)
+		s.handleVaultDeleteSecret(ctx, wconn, req)
 	case "vault.resolveLine":
-		s.handleVaultResolveLine(wconn, req)
+		s.handleVaultResolveLine(ctx, wconn, req)
 	}
 }
 
@@ -222,14 +222,13 @@ func vaultSnapToStatus(snap vault.Snapshot) vaultStatusResponse {
 	return resp
 }
 
-func (s *WSServer) handleVaultStatus(wconn Responder, req jsonrpcRequest) {
-	ctx := context.Background()
+func (s *WSServer) handleVaultStatus(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	snap := s.vaultLifecycle.Snapshot(ctx)
 	resp := vaultSnapToStatus(snap)
 	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
-func (s *WSServer) handleVaultSetup(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSetup(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params vaultSetupParams
 	if !isJSONObject(req.Params) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -241,6 +240,11 @@ func (s *WSServer) handleVaultSetup(wconn Responder, req jsonrpcRequest) {
 	}
 
 	vreq := vault.SetupRequest{Passphrase: params.Passphrase}
+	// Background is deliberate — domain-owned commit interval: vault Setup
+	// documents its commit point and rolls back pre-commit failures itself
+	// (owner: the initialization operation; see internal/vault/vault.go).
+	// The transport never cancels across that boundary. Closing event:
+	// Setup returning after commit-or-rollback.
 	result, err := s.vaultLifecycle.Setup(context.Background(), vreq)
 	if err != nil {
 		code := vaultErrorCode(err, -32603)
@@ -263,7 +267,7 @@ func (s *WSServer) handleVaultSetup(wconn Responder, req jsonrpcRequest) {
 	s.broadcastVaultChanged()
 }
 
-func (s *WSServer) handleVaultUnseal(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultUnseal(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params vaultUnsealParams
 	if !isJSONObject(req.Params) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -294,7 +298,7 @@ func (s *WSServer) handleVaultUnseal(wconn Responder, req jsonrpcRequest) {
 		return
 	}
 
-	if err := s.vaultLifecycle.Unseal(context.Background(), vreq); err != nil {
+	if err := s.vaultLifecycle.Unseal(ctx, vreq); err != nil {
 		code := vaultErrorCode(err, -32603)
 		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
@@ -304,7 +308,7 @@ func (s *WSServer) handleVaultUnseal(wconn Responder, req jsonrpcRequest) {
 	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultSeal(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSeal(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	s.vaultLifecycle.Seal()
 	// Vault seal destroys every pending capture: the offer's plaintext
 	// must not outlive the lock it was offered under (the capture
@@ -331,7 +335,7 @@ type vaultSetDefaultProviderParams struct {
 	Provider string `json:"provider"`
 }
 
-func (s *WSServer) handleVaultChangePassphrase(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultChangePassphrase(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params vaultChangePassphraseParams
 	if !isJSONObject(req.Params) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -347,7 +351,7 @@ func (s *WSServer) handleVaultChangePassphrase(wconn Responder, req jsonrpcReque
 		RecoveryCode:  params.RecoveryCode,
 		NewPassphrase: params.NewPassphrase,
 	}
-	if err := s.vaultLifecycle.ChangePassphrase(context.Background(), vreq); err != nil {
+	if err := s.vaultLifecycle.ChangePassphrase(ctx, vreq); err != nil {
 		code := vaultErrorCode(err, -32603)
 		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
@@ -357,7 +361,7 @@ func (s *WSServer) handleVaultChangePassphrase(wconn Responder, req jsonrpcReque
 	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultRegenerateRecovery(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultRegenerateRecovery(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params vaultRegenerateRecoveryParams
 	if !isJSONObject(req.Params) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -369,7 +373,7 @@ func (s *WSServer) handleVaultRegenerateRecovery(wconn Responder, req jsonrpcReq
 	}
 
 	vreq := vault.RegenerateRequest{Passphrase: params.Passphrase}
-	recoveryCode, err := s.vaultLifecycle.RegenerateRecovery(context.Background(), vreq)
+	recoveryCode, err := s.vaultLifecycle.RegenerateRecovery(ctx, vreq)
 	if err != nil {
 		errCode := vaultErrorCode(err, -32603)
 		_ = wconn.TryError(req.ID, RPCError{Code: errCode, Message: err.Error(), Data: reasonForError(err)})
@@ -383,7 +387,7 @@ func (s *WSServer) handleVaultRegenerateRecovery(wconn Responder, req jsonrpcReq
 	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
-func (s *WSServer) handleVaultSetDefaultProvider(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSetDefaultProvider(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params vaultSetDefaultProviderParams
 	if !isJSONObject(req.Params) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -395,7 +399,7 @@ func (s *WSServer) handleVaultSetDefaultProvider(wconn Responder, req jsonrpcReq
 	}
 
 	provID := vault.ProviderID(params.Provider)
-	if err := s.vaultLifecycle.SetDefaultProvider(context.Background(), provID); err != nil {
+	if err := s.vaultLifecycle.SetDefaultProvider(ctx, provID); err != nil {
 		code := vaultErrorCode(err, -32603)
 		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
@@ -409,7 +413,7 @@ type vaultSetAutoSealParams struct {
 	Minutes *int `json:"minutes"`
 }
 
-func (s *WSServer) handleVaultSetAutoSeal(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSetAutoSeal(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params vaultSetAutoSealParams
 	if !isJSONObject(req.Params) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -424,7 +428,7 @@ func (s *WSServer) handleVaultSetAutoSeal(wconn Responder, req jsonrpcRequest) {
 		return
 	}
 
-	if err := s.vaultLifecycle.SetAutoSeal(context.Background(), *params.Minutes); err != nil {
+	if err := s.vaultLifecycle.SetAutoSeal(ctx, *params.Minutes); err != nil {
 		code := vaultErrorCode(err, -32603)
 		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
@@ -434,12 +438,12 @@ func (s *WSServer) handleVaultSetAutoSeal(wconn Responder, req jsonrpcRequest) {
 	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultActivity(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultActivity(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	s.vaultLifecycle.Activity()
 	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultInventory(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultInventory(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.inventory not available"})
 		return
@@ -459,7 +463,7 @@ func (s *WSServer) handleVaultInventory(wconn Responder, req jsonrpcRequest) {
 
 	inputs := s.vaultInventoryInputs(profiles, groups)
 
-	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
+	entries, err := s.vaultLifecycle.BuildInventory(ctx, inputs)
 	if err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.inventory: ", err))
 		return
@@ -556,7 +560,7 @@ type vaultCreateSecretResponse struct {
 // time and stores the file's CONTENTS — never the path string, which is the
 // defect dcf566b fixed on the connection editor and must not be
 // reintroduced here.
-func (s *WSServer) handleVaultCreateSecret(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultCreateSecret(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params vaultCreateSecretParams
 	if !isJSONObject(req.Params) {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -583,7 +587,7 @@ func (s *WSServer) handleVaultCreateSecret(wconn Responder, req jsonrpcRequest) 
 
 	name := params.Name
 	if params.Resolve {
-		_, realName, err := s.vaultLifecycle.CreateNamedResolved(context.Background(), credential.NewSecret(value),
+		_, realName, err := s.vaultLifecycle.CreateNamedResolved(ctx, credential.NewSecret(value),
 			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
 		if err != nil {
 			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.createSecret: ", err))
@@ -591,7 +595,7 @@ func (s *WSServer) handleVaultCreateSecret(wconn Responder, req jsonrpcRequest) 
 		}
 		name = realName
 	} else {
-		_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(value),
+		_, err := s.vaultLifecycle.CreateNamed(ctx, credential.NewSecret(value),
 			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
 		if err != nil {
 			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.createSecret: ", err))
@@ -652,7 +656,7 @@ type vaultRenameSecretParams struct {
 // is never accepted from the renderer as an identifier (nocx-jb20.1). The
 // row set is the same one the inventory shows, so an unrecorded
 // (pre-ADR-0016) reference can be renamed too.
-func (s *WSServer) handleVaultRenameSecret(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultRenameSecret(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.renameSecret not available"})
 		return
@@ -687,7 +691,7 @@ func (s *WSServer) handleVaultRenameSecret(wconn Responder, req jsonrpcRequest) 
 	}
 	inputs := s.vaultInventoryInputs(profiles, groups)
 
-	if err := s.vaultLifecycle.RenameSecret(context.Background(), params.ID, params.Name, inputs); err != nil {
+	if err := s.vaultLifecycle.RenameSecret(ctx, params.ID, params.Name, inputs); err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.renameSecret: ", err))
 		return
 	}
@@ -712,7 +716,7 @@ type vaultReplaceSecretParams struct {
 // it out (ADR-0011 §2) — so the renderer only ever supplies the replacement.
 // Like create, a private key may be supplied by PATH, which the backend
 // dereferences to the file's contents.
-func (s *WSServer) handleVaultReplaceSecret(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultReplaceSecret(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.replaceSecret not available"})
 		return
@@ -753,7 +757,7 @@ func (s *WSServer) handleVaultReplaceSecret(wconn Responder, req jsonrpcRequest)
 	}
 	inputs := s.vaultInventoryInputs(profiles, groups)
 
-	if err := s.vaultLifecycle.ReplaceSecret(context.Background(), params.ID, credential.NewSecret(value), inputs); err != nil {
+	if err := s.vaultLifecycle.ReplaceSecret(ctx, params.ID, credential.NewSecret(value), inputs); err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.replaceSecret: ", err))
 		return
 	}
@@ -781,7 +785,7 @@ type vaultDeleteSecretParams struct {
 // in Vault.Delete's existing metadata-first sequence. A failed provider
 // delete therefore leaves a brief unreachable orphan (the journal retries
 // it), never a connection claiming a password that cannot exist.
-func (s *WSServer) handleVaultDeleteSecret(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultDeleteSecret(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.deleteSecret not available"})
 		return
@@ -840,7 +844,7 @@ func (s *WSServer) handleVaultDeleteSecret(wconn Responder, req jsonrpcRequest) 
 	// deletion in this file: the metadata removal stands regardless, and a
 	// failed provider delete is a brief unreachable orphan the journal
 	// reconciles — never a dangling row.
-	_ = s.credentials.Delete(context.Background(), id)
+	_ = s.credentials.Delete(ctx, id)
 
 	s.broadcastVaultChanged()
 	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
@@ -866,9 +870,13 @@ func (s *WSServer) broadcastVaultChanged() {
 	if s.vaultLifecycle == nil {
 		return
 	}
-
-	ctx := context.Background()
-	snap := s.vaultLifecycle.Snapshot(ctx)
+	// Background is deliberate here, and the owner is the notification
+	// fan-out, not any one request: vault.changed is addressed to EVERY
+	// connection, so no single connection's lifetime is the right owner
+	// (the mutating handler's own work is done by the time the snapshot
+	// runs). The closing event is the synchronous snapshot read completing
+	// within the caller's handler — bounded, in-memory, never awaited.
+	snap := s.vaultLifecycle.Snapshot(context.Background())
 	for _, wc := range conns {
 		_ = wc.TryNotify("vault.changed", mustMarshal(vaultSnapToStatus(snap)))
 	}

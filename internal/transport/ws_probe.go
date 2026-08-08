@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // ---------------------------------------------------------------------------
@@ -132,7 +133,7 @@ type connectionsTestHostKey struct {
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"host-key-unknown","detail":"unknown host key for 1.2.3.4:22: ecdsa-sha2-nistp256 SHA256:MKEj…","hostKey":{"host":"1.2.3.4:22","algorithm":"ecdsa-sha2-nistp256","fingerprint":"SHA256:MKEj…","key":"AAAAC…"}}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"host-key-changed","detail":"host key mismatch for 1.2.3.4:22: got SHA256:MKEj…, expected SHA256:OLd…","hostKey":{"host":"1.2.3.4:22","algorithm":"ecdsa-sha2-nistp256","fingerprint":"SHA256:MKEj…","storedFingerprint":"SHA256:OLd…","key":"AAAAC…"}}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"needs-interactive","detail":"private key requires passphrase"}}
-func (s *WSServer) handleConnectionsTest(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleConnectionsTest(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params connectionsTestParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -160,8 +161,35 @@ func (s *WSServer) handleConnectionsTest(wconn Responder, req jsonrpcRequest) {
 		return
 	}
 
+	// The probe runs OFF the read loop under the probe admission
+	// (ws_control.go): a 30-second SSH probe must not freeze the socket that
+	// feeds every other tab, and a disconnect must be able to cancel it. The
+	// task context derives from the connection context, so the disconnect
+	// cancels the probe; the admission permit is released when the task
+	// returns, cancelled or not — that frees the slot for the next
+	// connection. A refused submit (one probe already in flight) answers the
+	// control-saturated error.
+	tctx, _, release, ok := s.inflight.begin(ctx)
+	if !ok {
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "server shutting down"})
+		return
+	}
+	rej := s.probeSub.TrySubmit(tctx, control.Task{Run: func(pctx context.Context) {
+		defer release()
+		s.runProbe(pctx, wconn, req.ID, host, connectCfg)
+	}})
+	if rej != nil {
+		release()
+		_ = wconn.TryError(req.ID, saturationRPCError(rej))
+	}
+}
+
+// runProbe runs one probe and answers its request. It executes on the probe
+// task's goroutine, never the read loop; the Responder is safe from any
+// goroutine and silently drops the response when the connection died.
+func (s *WSServer) runProbe(ctx context.Context, wconn Responder, id json.RawMessage, host string, connectCfg *ssh.ConnectConfig) {
 	// Probe uses the same resolved parameters Connect would.
-	fingerprint, err := s.prober.ProbeWithResult(context.Background(), host, connectCfg)
+	fingerprint, err := s.prober.ProbeWithResult(ctx, host, connectCfg)
 	result := classifyProbeError(err)
 
 	// Record the probe result in the store for operational evidence.
@@ -176,11 +204,11 @@ func (s *WSServer) handleConnectionsTest(wconn Responder, req jsonrpcRequest) {
 	if result.err != nil {
 		// A sealed vault surfaces here too — the renderer needs the reason to
 		// offer the unlock prompt instead of showing an error.
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "probe config: ", result.err))
+		_ = wconn.TryError(id, rpcErrorFor(-32603, "probe config: ", result.err))
 		return
 	}
 
-	_ = wconn.TryResult(req.ID, mustMarshal(connectionsTestResult{
+	_ = wconn.TryResult(id, mustMarshal(connectionsTestResult{
 		Outcome: result.outcome,
 		Detail:  result.detail,
 		HostKey: hostKeyInfoFromError(err),
@@ -294,7 +322,7 @@ type connectionsTrustHostKeyResult struct {
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.trustHostKey","params":{"host":"1.2.3.4:22","key":"AAAAC…"}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…"}}
-func (s *WSServer) handleConnectionsTrustHostKey(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleConnectionsTrustHostKey(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params connectionsTrustHostKeyParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -315,7 +343,7 @@ func (s *WSServer) handleConnectionsTrustHostKey(wconn Responder, req jsonrpcReq
 		return
 	}
 
-	fingerprint, err := s.hostKeyTruster.TrustHostKey(context.Background(), params.Host, keyBlob)
+	fingerprint, err := s.hostKeyTruster.TrustHostKey(ctx, params.Host, keyBlob)
 	if err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Trust host key failed: " + err.Error()})
 		return

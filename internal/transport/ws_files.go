@@ -231,24 +231,24 @@ type filesChangedParams struct {
 // the read loop like handleResize and fs.complete: the provider operations
 // are bounded by the D14 caps, and a synchronous response keeps the wire
 // order the client's request stream expects.
-func (s *WSServer) handleFilesMethod(wconn Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesMethod(ctx context.Context, wconn Responder, state *connState, req jsonrpcRequest) {
 	if s.filesys == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
 		return
 	}
 	switch req.Method {
 	case "files.open":
-		s.handleFilesOpen(wconn, state, req)
+		s.handleFilesOpen(ctx, wconn, state, req)
 	case "files.list":
-		s.handleFilesList(wconn, state, req)
+		s.handleFilesList(ctx, wconn, state, req)
 	case "files.read":
-		s.handleFilesRead(wconn, state, req)
+		s.handleFilesRead(ctx, wconn, state, req)
 	case "files.watch":
-		s.handleFilesWatch(wconn, state, req)
+		s.handleFilesWatch(ctx, wconn, state, req)
 	case "files.close":
-		s.handleFilesClose(wconn, state, req)
+		s.handleFilesClose(ctx, wconn, state, req)
 	case "files.reveal":
-		s.handleFilesReveal(wconn, state, req)
+		s.handleFilesReveal(ctx, wconn, state, req)
 	}
 }
 
@@ -258,7 +258,7 @@ func (s *WSServer) handleFilesMethod(wconn Responder, state *connState, req json
 // and the authorisation is connState's, not the global registry's (D15):
 // the same gate handleResize applies, and a connection that learned
 // another connection's session id gets a refusal, not a filesystem.
-func (s *WSServer) handleFilesOpen(wconn Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesOpen(ctx context.Context, wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesOpenParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
@@ -319,7 +319,7 @@ func (s *WSServer) handleFilesOpen(wconn Responder, state *connState, req jsonrp
 		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
-	root, err := h.Root(context.Background())
+	root, err := h.Root(ctx)
 	release()
 	if err != nil {
 		s.dropFilesBinding(bid, sid)
@@ -346,7 +346,7 @@ func (s *WSServer) handleFilesOpen(wconn Responder, state *connState, req jsonrp
 // handleFilesList lists one page of one directory. The three D14 outcomes
 // are RESULT states, never errors: tooLarge and timedOut are refusals a
 // user can reason about, and the discriminated union is the contract.
-func (s *WSServer) handleFilesList(wconn Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesList(ctx context.Context, wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesListParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
@@ -358,7 +358,7 @@ func (s *WSServer) handleFilesList(wconn Responder, state *connState, req jsonrp
 		return
 	}
 	defer release()
-	listing, err := h.List(context.Background(), params.Path, filesystem.Page{Offset: params.Offset, Limit: params.Limit})
+	listing, err := h.List(ctx, params.Path, filesystem.Page{Offset: params.Offset, Limit: params.Limit})
 	if err != nil {
 		var tooLarge *filesystem.ErrTooLarge
 		var timedOut *filesystem.ErrTimedOut
@@ -408,7 +408,7 @@ func (s *WSServer) handleFilesList(wconn Responder, state *connState, req jsonrp
 // most min(requested, 2 MiB) plus one byte, so the memory guard holds for
 // a 40 GB file. Canonical is the identity the viewer's singletonKey is
 // built from.
-func (s *WSServer) handleFilesRead(wconn Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesRead(ctx context.Context, wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesReadParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
@@ -420,7 +420,7 @@ func (s *WSServer) handleFilesRead(wconn Responder, state *connState, req jsonrp
 		return
 	}
 	defer release()
-	content, err := h.Read(context.Background(), params.Path, params.MaxBytes)
+	content, err := h.Read(ctx, params.Path, params.MaxBytes)
 	if err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
@@ -448,7 +448,7 @@ func (s *WSServer) handleFilesRead(wconn Responder, state *connState, req jsonrp
 // taken synchronously inside the handler, before the response
 // (filesBaseline): from the instant the call returns every change is
 // delivered, and changes before it are not replayed — inotify semantics.
-func (s *WSServer) handleFilesWatch(wconn Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesWatch(ctx context.Context, wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesWatchParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and paths required"})
@@ -472,7 +472,7 @@ func (s *WSServer) handleFilesWatch(wconn Responder, state *connState, req jsonr
 		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
-	mode, err := h.Watch(context.Background(), params.Paths)
+	mode, err := h.Watch(ctx, params.Paths)
 	if err != nil {
 		var unavail *filesystem.ErrWatchUnavailable
 		if !errors.As(err, &unavail) {
@@ -567,7 +567,7 @@ func (s *WSServer) handleFilesWatch(wconn Responder, state *connState, req jsonr
 // closed by the connection that owns its session, not by whoever knows
 // its id. The watcher stops first so the use-guard drains before Close's
 // teardown.
-func (s *WSServer) handleFilesClose(wconn Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesClose(ctx context.Context, wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesCloseParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
@@ -608,7 +608,7 @@ func (s *WSServer) handleFilesClose(wconn Responder, state *connState, req jsonr
 // (spec §5.2). Without a wired revealer the method answers -32601 — the
 // Wails runtime seam is a later wave, and a reveal that did nothing would
 // be a silent lie.
-func (s *WSServer) handleFilesReveal(wconn Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesReveal(ctx context.Context, wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesRevealParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
@@ -772,6 +772,11 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 func (s *WSServer) filesBaseline(h filesystem.Handle, paths []string) map[string]string {
 	base := make(map[string]string, len(paths))
 	for _, p := range paths {
+		// The poll loop is binding-owned, never request-scoped: it runs for
+		// the life of the watch (owner: the files binding, bounded by its
+		// session per spec §5.1, never by a WebSocket), so it keeps a
+		// background context. The closing event is the binding teardown —
+		// stopFilesWatcher, filesSessionClosed or filesBindingClosed.
 		listing, err := h.List(context.Background(), p, filesystem.Page{Offset: 0, Limit: 1})
 		if err != nil {
 			s.log.Debug("files watch baseline failed", "path", p, "error", err)
@@ -816,6 +821,9 @@ func (s *WSServer) filesPollTick(w *filesWatcher) bool {
 // nobody saw). Returns false when the binding is gone and the loop must
 // stop.
 func (s *WSServer) filesPollPath(w *filesWatcher, h filesystem.Handle, path string) bool {
+	// Same owner and closing event as filesBaseline: the poll loop is
+	// binding-owned (spec §5.1) and outlives any connection, so it runs on
+	// a background context until the binding is torn down.
 	listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})
 	if err != nil {
 		var released *filesystem.ErrHandleReleased

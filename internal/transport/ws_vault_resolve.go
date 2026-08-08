@@ -57,7 +57,7 @@ type vaultResolveLineResponse struct {
 // password for user@host:22"), so the grammar is deliberately permissive.
 var resolveLineRefRE = regexp.MustCompile(`\{\{secret:(.+?)\}\}`)
 
-func (s *WSServer) handleVaultResolveLine(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultResolveLine(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var p vaultResolveLineParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
@@ -99,7 +99,7 @@ func (s *WSServer) handleVaultResolveLine(wconn Responder, req jsonrpcRequest) {
 	// A sealed vault fails here with the actionable -32001/vault-sealed —
 	// the caller has to be able to tell "unseal and retry" from "no such
 	// secret", and a generic -32603 would not let it.
-	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
+	entries, err := s.vaultLifecycle.BuildInventory(ctx, inputs)
 	if err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.resolveLine: ", err))
 		return
@@ -119,7 +119,7 @@ func (s *WSServer) handleVaultResolveLine(wconn Responder, req jsonrpcRequest) {
 	out = append(out, p.Line[:locs[0][0]]...)
 	for i, loc := range locs {
 		name := p.Line[loc[2]:loc[3]]
-		value, resolved, sealed := s.resolveVaultSecret(context.Background(), name, nameToRow, inputs)
+		value, resolved, sealed := s.resolveVaultSecret(ctx, name, nameToRow, inputs)
 		if sealed {
 			// The vault sealed between inventory and read: the response
 			// would be a lie, because a retry after unsealing resolves

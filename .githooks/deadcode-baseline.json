@@ -9,50 +9,8 @@
     "Machine-specific in one respect: build-tag-gated files (e.g.",
     "secretservice_linux.go) only appear on the OS they build for, so an entry",
     "that vanishes on another platform is a free shrink, not a violation.",
-    "",
-    "That cuts both ways, and only one direction was written down. The twin the",
-    "other OS compiles is a *new* file path, so the first run on that OS reports",
-    "it as a new violation rather than a free shrink. A per-OS pair therefore",
-    "needs BOTH halves listed, and this file is the union across the platforms",
-    "the gate runs on, not a snapshot of whichever one generated it. The update",
-    "script cannot do this for you: it sees one OS at a time, so the half it did",
-    "not compile looks like a shrink and it removes it.",
-    "",
-    "Two entries were added BY HAND on 2026-08-06 (nocx-708q), which the update",
-    "script refuses to do for you on purpose. Both are reasoned, not overlooked:",
-    "",
-    "  openability.go CanExpand \u2014 the expand half of the spec table. Its only",
-    "  callers are tests, which is the nocx-rtg0 shape and NOT acceptable long",
-    "  term: expansion is a UI act and the kit already decides it in",
-    "  ui/tree-row.tsx isExpandable, so the Go copy is a second answer to one",
-    "  question that will drift. Deleting it means rewriting three assertions in",
-    "  accepted packages, so it is filed rather than rushed.",
-    "",
-    "  ws.go WithFilesRevealer \u2014 the seam files.reveal needs from Wails, which",
-    "  does not exist yet; files.reveal answers -32601 until it does. Reachable",
-    "  the moment that wave lands.",
-    "",
-    "A fourth entry added BY HAND on 2026-08-07 (nocx-6lo9), the first time the",
-    "hook ran on macOS in this clone:",
-    "",
-    "  secretservice_other.go SecretServiceAvailable \u2014 the !linux half of the",
-    "  pair whose linux half is already listed below. Neither has a production",
-    "  caller on either OS; both are reached only from integration_test.go. The",
-    "  entry is the mirror image of an existing one, not a new concession.",
-    "",
-    "A third entry added BY HAND on 2026-08-06, when release/v0.1.0 merged in:",
-    "",
-    "  storagetest.go Isolate \u2014 a test-only helper in a non-_test file, which is",
-    "  what makes it unreachable from main(). It has to live outside _test.go so",
-    "  packages other than internal/storage can call it, and eleven test files do",
-    "  (internal/app, internal/storage). Its whole purpose is nocx-8ax9: a test",
-    "  that forgets to isolate must not reach the developer's real profile \u2014",
-    "  paths.go names it in the panic it raises. Same category as the vaulttest",
-    "  package and ws_test_helper.go already below.",
-    "TEMPORARY, nocx-sfv6.3: the 12 internal/transport/control entries are a contract-first package whose consumer is nocx-sfv6.5 (handleControlFrame submitting work). Added by hand because the updater refuses growth on purpose. They MUST be gone before nocx-sfv6 closes \u2014 removing them is an acceptance criterion of nocx-sfv6.5, so a package that is never wired cannot be quietly shipped the way nocx-rtg0's ContentDB.Add was.",
-    "TEMPORARY, nocx-sfv6.8: the two internal/transport/ws_saturation.go entries build the refusal's wire form; their caller is nocx-sfv6.5, which submits work to the executor and answers a *control.Rejection with them. Same obligation as the control package entries \u2014 gone before nocx-sfv6 closes.",
-    "TEMPORARY, nocx-sfv6.4 part 1: 139 internal/capability entries. The package is the typed operation layer; its consumers are the handlers, and the handler migration was deliberately split off because another worker was rewriting every outbound call site in the same files. THE CHECKABLE OBLIGATION: this baseline must return to exactly 104 violations before nocx-sfv6 closes. A number, not a promise \u2014 104 is the count after the control and ws_saturation entries and before internal/capability existed.",
-    "nocx-sfv6.1: five wedgedSocket entries in ws_test_helper.go. That file holds test helpers in a non-_test file, which is why deadcode sees them at all \u2014 the same reason memSecretStore.* and newTestStore are already here. Not part of the 104 obligation."
+    "nocx-sfv6.7: the two internal/vault/system entries are kept deliberately even though deadcode does not report them on Linux. They are behind build tags and reappear on macOS; an entry that is baselined but not currently violated is harmless (the ratchet only fails on NEW), while a missing one turns into a red gate on the other platform.",
+    "nocx-sfv6.7 progress on the 104 obligation: 7 control entries and saturationErrorFor became reachable when connections.test and dialog.openFile moved off the read loop. Still outstanding: composite.* and ImmediateSubmission.TrySubmit in control, saturatedNotificationParamsFor, and the 139 internal/capability entries \u2014 all of them waiting on the wiring bead nocx-sfv6.5."
   ],
   "violations": [
     {
@@ -852,36 +810,8 @@
       "func": "compositePermit.Release"
     },
     {
-      "file": "internal/transport/control/semaphore.go",
-      "func": "NewSemaphore"
-    },
-    {
-      "file": "internal/transport/control/semaphore.go",
-      "func": "semaphore.Name"
-    },
-    {
-      "file": "internal/transport/control/semaphore.go",
-      "func": "semaphore.TryAcquire"
-    },
-    {
-      "file": "internal/transport/control/semaphore.go",
-      "func": "semaphorePermit.Release"
-    },
-    {
       "file": "internal/transport/control/submission.go",
       "func": "ImmediateSubmission.TrySubmit"
-    },
-    {
-      "file": "internal/transport/control/submission.go",
-      "func": "NewBoundedSubmission"
-    },
-    {
-      "file": "internal/transport/control/submission.go",
-      "func": "boundedSubmission.TrySubmit"
-    },
-    {
-      "file": "internal/transport/control/submission.go",
-      "func": "runAndRelease"
     },
     {
       "file": "internal/transport/transport.go",
@@ -922,10 +852,6 @@
     {
       "file": "internal/transport/ws_saturation.go",
       "func": "saturatedNotificationParamsFor"
-    },
-    {
-      "file": "internal/transport/ws_saturation.go",
-      "func": "saturationErrorFor"
     },
     {
       "file": "internal/transport/ws_test_helper.go",

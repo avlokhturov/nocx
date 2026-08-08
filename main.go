@@ -163,6 +163,14 @@ func (w *WailsApp) startup(ctx context.Context) {
 // wailsDialogService opens the platform file picker through the Wails
 // runtime. The renderer never calls it directly; it is the backend of the
 // dialog.openFile control-plane method.
+//
+// The platform-adapter contract (transport.DialogService) permits observing
+// ctx and dismissing the dialog where the native API allows it. This adapter
+// is the case where it does NOT: runtime.OpenFileDialog has no cancel handle
+// once the picker is shown, so the transport's context is deliberately
+// ignored and the call returns only when the user acts. The transport keeps
+// the capability busy until then (see ws_dialog.go), so a reconnect never
+// stacks a second picker over this one.
 type wailsDialogService struct {
 	ctx context.Context
 }

@@ -158,9 +158,12 @@ func (s *WSServer) handleExportImport(wconn Responder, req jsonrpcRequest) {
 		return
 	}
 
-	// Domain restore operation: profiles, groups and settings commit as one
-	// operation with a defined rollback; the transport never sequences the
-	// stores itself.
+	// Domain restore operation — owner: the restore's own commit interval,
+	// not this connection (see internal/export/restore.go, which documents
+	// the commit point and its rollback). Profiles, groups and settings
+	// commit as one operation; the transport never sequences the stores
+	// itself, and never cancels across the boundary. Closing event:
+	// RestoreImport returning after commit-or-rollback.
 	result, err := export.RestoreImport(context.Background(), s.buildRestoreDeps(), &data, nil)
 	if err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
@@ -195,11 +198,13 @@ func (s *WSServer) handleExportImportPortable(wconn Responder, req jsonrpcReques
 		return
 	}
 
-	// Domain restore operation: profiles, groups, settings and private
-	// content commit as ONE operation with a defined rollback. The
+	// Domain restore operation — owner: the restore's own commit interval
+	// (see internal/export/restore.go). Profiles, groups, settings and
+	// private content commit as ONE operation with a defined rollback. The
 	// transport does not sequence the stores — a failure between two
 	// independently sequenced phases would leave them at different
-	// generations.
+	// generations — and never cancels across the commit point. The
+	// closing event is RestoreImport returning after commit-or-rollback.
 	result, err := export.RestoreImport(context.Background(), s.buildRestoreDeps(), &plain.Config, plain.Private)
 	if err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})

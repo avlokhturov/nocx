@@ -103,3 +103,12 @@ func saturatedNotificationParamsFor(methodClass, scope string) saturatedNotifica
 		Scope:       scope,
 	}
 }
+
+// saturationRPCError maps a control.Rejection to the RPCError a refused
+// control handler answers with. Handlers that refuse (probe admission,
+// dialog admission) send this instead of a generic error: the renderer
+// matches the fixed reason and shows the saturation surface.
+func saturationRPCError(r *control.Rejection) RPCError {
+	sat := saturationErrorFor(r)
+	return RPCError{Code: sat.Code, Message: sat.Message, Data: sat.Data}
+}

@@ -44,12 +44,12 @@ type vaultResetResponse struct {
 	Residue      []vaultResetResidueEntry `json:"residue"`
 }
 
-func (s *WSServer) handleVaultResetPreview(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultResetPreview(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.vaultReset == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
-	p, err := s.vaultReset.Preview(context.Background())
+	p, err := s.vaultReset.Preview(ctx)
 	if err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.resetPreview: ", err))
 		return
@@ -62,12 +62,12 @@ func (s *WSServer) handleVaultResetPreview(wconn Responder, req jsonrpcRequest) 
 	}))
 }
 
-func (s *WSServer) handleVaultReset(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleVaultReset(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.vaultReset == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
-	result, err := s.vaultReset.Execute(context.Background())
+	result, err := s.vaultReset.Execute(ctx)
 	if err != nil {
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.reset: ", err))
 		return

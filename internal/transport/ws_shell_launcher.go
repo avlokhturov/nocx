@@ -178,7 +178,7 @@ func oracleDestination(argv []string) string {
 //     environment id could not be minted).
 //   - "stage-failed": the launcher could not be written where the local
 //     shell can read it (no home, unwritable directory, full disk).
-func (s *WSServer) handleShellLauncherCommand(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleShellLauncherCommand(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		SessionID  string   `json:"sessionId"`
 		OracleArgv []string `json:"oracleArgv"`
@@ -221,7 +221,7 @@ func (s *WSServer) handleShellLauncherCommand(wconn Responder, req jsonrpcReques
 		s.refuseLauncherCommand(wconn, req, envID, "oracle-failed")
 		return
 	}
-	cfg, err := s.sshConfigResolver.ResolveArgv(context.Background(), params.OracleArgv)
+	cfg, err := s.sshConfigResolver.ResolveArgv(ctx, params.OracleArgv)
 	if err != nil {
 		// The verdict is typed fields only: the refusal reason as a value,
 		// never the argv or the oracle's stderr — those can carry command
@@ -382,7 +382,7 @@ type environmentObservedResult struct {
 // passport". Only an attempt this backend minted can change state, and the
 // first observation per attempt decides it — duplicates are idempotent and
 // can never regress a written fact.
-func (s *WSServer) handleShellEnvironmentObserved(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleShellEnvironmentObserved(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		EnvironmentID string            `json:"environmentId"`
 		Passport      *observedPassport `json:"passport"`

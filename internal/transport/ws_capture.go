@@ -61,7 +61,7 @@ type captureDismissParams struct {
 // of a settled capture returns the recorded name (and re-runs only the
 // owed rewrites); a save in flight blocks until it settles, so two
 // concurrent saves cannot mint two secrets.
-func (s *WSServer) handleCaptureSave(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleCaptureSave(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.captures == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureSave: capture registry unavailable"})
 		return
@@ -85,7 +85,7 @@ func (s *WSServer) handleCaptureSave(wconn Responder, req jsonrpcRequest) {
 	// An idempotent retry: the save already settled.
 	if h.Completed {
 		if h.RewritePending {
-			if rwErr := s.rewriteLinks(h.Links, h.Name); rwErr != nil {
+			if rwErr := s.rewriteLinks(ctx, h.Links, h.Name); rwErr != nil {
 				_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{
 					Name: h.Name, Partial: true, Error: rwErr.Error(),
 				}))
@@ -115,14 +115,14 @@ func (s *WSServer) handleCaptureSave(wconn Responder, req jsonrpcRequest) {
 			break
 		}
 	}
-	secretID, realName, err := s.vaultLifecycle.CreateNamedResolved(context.Background(), h.Value,
+	secretID, realName, err := s.vaultLifecycle.CreateNamedResolved(ctx, h.Value,
 		vault.SecretMeta{Name: name, Kind: kind})
 	if err != nil {
 		s.captures.Complete(h.CaptureID, "", "", false, err)
 		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "secrets.captureSave: ", err))
 		return
 	}
-	if rwErr := s.rewriteLinks(h.Links, "{{secret:"+realName+"}}"); rwErr != nil {
+	if rwErr := s.rewriteLinks(ctx, h.Links, "{{secret:"+realName+"}}"); rwErr != nil {
 		// Step 1 done, step 2 owed: report the partial result; a retry
 		// with the same capture completes the rewrite without a second
 		// secret (the registry records name + rewrite-owed).
@@ -138,7 +138,7 @@ func (s *WSServer) handleCaptureSave(wconn Responder, req jsonrpcRequest) {
 
 // handleCaptureDismiss destroys a pending capture and suppresses its
 // fingerprint for the rest of the application session. Idempotent.
-func (s *WSServer) handleCaptureDismiss(wconn Responder, req jsonrpcRequest) {
+func (s *WSServer) handleCaptureDismiss(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.captures == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureDismiss: capture registry unavailable"})
 		return
@@ -163,7 +163,7 @@ func (s *WSServer) handleCaptureDismiss(wconn Responder, req jsonrpcRequest) {
 // reference. The rows are addressed by their stable ids. A row the
 // retention sweep removed is skipped — the rewrite is moot, the secret
 // still exists; anything else fails the rewrite set.
-func (s *WSServer) rewriteLinks(links []credential.CaptureLink, reference string) error {
+func (s *WSServer) rewriteLinks(ctx context.Context, links []credential.CaptureLink, reference string) error {
 	if s.contentDB == nil {
 		return errors.New("history store unavailable")
 	}
@@ -181,7 +181,7 @@ func (s *WSServer) rewriteLinks(links []credential.CaptureLink, reference string
 			}
 			continue
 		}
-		if err := s.contentDB.CommandHistory().RewriteRedaction(context.Background(), id, l.Redaction, reference); err != nil {
+		if err := s.contentDB.CommandHistory().RewriteRedaction(ctx, id, l.Redaction, reference); err != nil {
 			if errors.Is(err, content.ErrNotFound) {
 				continue // swept away — nothing to rewrite
 			}
