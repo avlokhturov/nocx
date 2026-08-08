@@ -48,6 +48,25 @@ type Fact struct {
 	Domain    string   `json:"domain,omitempty"`
 	Epoch     uint64   `json:"epoch,omitempty"`
 	Attempt   *Attempt `json:"attempt,omitempty"`
+	// Recovery is present exactly when this lost fact opens a restoration
+	// episode (ADR-0024 decision 8): the one-shot fence the shell will
+	// write to the pty at its next prompt boundary, and the generation the
+	// renderer echoes back in the recovery ack. Both are the same minted
+	// nonce — one value, two uses. Absent on every other lifecycle, and
+	// stripped by the transport when the session is dead (no restoration
+	// claim over a dead connection).
+	Recovery *Recovery `json:"recovery,omitempty"`
+}
+
+// Recovery is the restoration-acknowledgement contract of a lost fact. The
+// fence is what the renderer matches in the render stream; the generation is
+// what it returns in lifecycle.recoverAck. A hostile program cannot forge
+// the fence (it never saw the pre-provisioned nonce), and the worst a forged
+// one could do is force a safe transition to native mode — an availability
+// loss the ADR already accepts.
+type Recovery struct {
+	Fence      string `json:"fence"`
+	Generation string `json:"generation"`
 }
 
 // Attempt is the projection of one ExecutionAttempt. Completion fields
@@ -108,6 +127,16 @@ func (p *Publisher) derive(lane lifecycle.LaneID) (Fact, bool) {
 		if att, ok := p.kernel.Attempt(st.Attempt); ok {
 			f.Attempt = attemptFact(att)
 		}
+	}
+	// A lost lane opens a restoration episode when it has a recovery nonce
+	// (the lane mirrors its most recent domain's). The renderer needs the
+	// expected fence to match the shell's restoration, and the generation to
+	// acknowledge it. The transport decides whether the episode is real —
+	// it strips the promise over a dead session (decision 8: no restoration
+	// claim when the shell is unreachable).
+	if f.Lifecycle == LifecycleLost && st.RecoveryNonce != (lifecycle.FenceNonce{}) {
+		nonce := hex.EncodeToString(st.RecoveryNonce[:])
+		f.Recovery = &Recovery{Fence: nonce, Generation: nonce}
 	}
 	return f, true
 }
@@ -185,6 +214,7 @@ type Kernel interface {
 	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error
 	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error
 	TransportLost(t lifecycle.TransportID) error
+	RecoverLane(lane lifecycle.LaneID) error
 	SubmitAttempt(domain lifecycle.DomainID, command, cwd, host string) (lifecycle.ExecutionAttempt, error)
 	AbandonAttempt(id lifecycle.AttemptID) error
 	State(lane lifecycle.LaneID) (lifecycle.LaneSnapshot, error)
@@ -338,6 +368,20 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 	for _, l := range lanes {
 		p.publishLane(l)
 	}
+	return nil
+}
+
+// RecoverLane forwards a restoration acknowledgement (decision 8's composite
+// ACK): the lane's Lost → Native transition, permitted only from Lost, and
+// published so the renderer sees the session become a usable conventional
+// terminal. The domain stays permanently Lost; any future integration is a
+// fresh epoch. Idempotent at the kernel (an already-Native lane is a no-op).
+func (p *Publisher) RecoverLane(lane lifecycle.LaneID) error {
+	err := p.kernel.RecoverLane(lane)
+	if err != nil {
+		return err
+	}
+	p.publishLane(lane)
 	return nil
 }
 

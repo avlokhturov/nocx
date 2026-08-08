@@ -145,19 +145,28 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		opt(&cfg)
 	}
 
-	shell, shellFrom := resolveShell(os.Getenv, func(p string) bool {
-		_, err := os.Stat(p)
-		return err == nil
-	})
-	// Logged, not merely decided. Which shell a session runs is the single
-	// biggest thing that varies between two machines running the same code:
-	// nocx.bash emits the OSC 636 command snapshot and nocx.zsh does not, so
-	// the shell decides whether tab completion ever learns a command name. This
-	// line is what lets a run's account answer that without inference
-	// (nocx-z9s9.9).
-	logger.Info("local pty shell resolved", "shell", shell, "source", string(shellFrom))
-
-	cmd := exec.Command(shell, "-i") //nolint:gosec // shell is from detected path
+	// The launcher may name an explicit command (e.g. a lifecycle bootstrap
+	// that must start bash with `--rcfile` so the per-epoch capability
+	// rides script text, never the environment — nocx-u7uh.21). When
+	// cfg.Command is empty the resolved interactive shell is used, exactly
+	// as before.
+	var cmd *exec.Cmd
+	if cfg.Command != "" {
+		cmd = exec.Command(cfg.Command, cfg.Args...) //nolint:gosec // the launcher names its own shell
+	} else {
+		shell, shellFrom := resolveShell(os.Getenv, func(p string) bool {
+			_, err := os.Stat(p)
+			return err == nil
+		})
+		// Logged, not merely decided. Which shell a session runs is the single
+		// biggest thing that varies between two machines running the same code:
+		// nocx.bash emits the OSC 636 command snapshot and nocx.zsh does not, so
+		// the shell decides whether tab completion ever learns a command name.
+		// This line is what lets a run's account answer that without inference
+		// (nocx-z9s9.9).
+		logger.Info("local pty shell resolved", "shell", shell, "source", string(shellFrom))
+		cmd = exec.Command(shell, "-i") //nolint:gosec // shell is from detected path
+	}
 	cmd.Dir = resolveCwd(cfg.Cwd)
 	env := withUTF8Locale(append(
 		scrubLauncherSession(os.Environ()),
@@ -199,6 +208,17 @@ func (lp *LocalPty) Read(p []byte) (int, error) {
 
 func (lp *LocalPty) Write(p []byte) (int, error) {
 	return lp.file.Write(p)
+}
+
+// Pid returns the spawned shell's process id, for callers that must
+// observe the child directly (e.g. asserting over the child's ACTUAL
+// environment that a bootstrap secret never reached it — nocx-u7uh.21).
+// Zero before the process starts or after it exits.
+func (lp *LocalPty) Pid() int {
+	if lp.cmd.Process == nil {
+		return 0
+	}
+	return lp.cmd.Process.Pid
 }
 
 func (lp *LocalPty) Close() error {

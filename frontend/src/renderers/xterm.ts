@@ -161,6 +161,21 @@ export function parseRenderFence(payload: string): { hex: string } | null {
   return { hex }
 }
 
+/** Parses an OSC 1337 payload into the recovery fence nonce (ADR-0024
+ *  decision 8). Returns null unless the payload is exactly
+ *  `NOCX_RECOVERY;<64 lowercase hex>`. The shell writes this to the pty at
+ *  the first prompt boundary after the lifecycle channel died, restoring a
+ *  visible native prompt; the consumer matches it against the pre-provisioned
+ *  nonce the backend published in the lost fact. Parse-and-report only: the
+ *  renderer never inspects the grid and never pattern-matches a prompt — it
+ *  matches this explicit fence, exactly as the completion fence. */
+export function parseRecoveryFence(payload: string): { hex: string } | null {
+  if (!payload.startsWith('NOCX_RECOVERY;')) return null
+  const hex = payload.slice('NOCX_RECOVERY;'.length)
+  if (!FENCE_HEX_RE.test(hex)) return null
+  return { hex }
+}
+
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
   private webgl?: WebglAddon
@@ -174,6 +189,7 @@ export class XtermRenderer implements TerminalRenderer {
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private fenceSubs: Array<(event: RenderFenceEvent) => void> = []
+  private recoverySubs: Array<(hex: string) => void> = []
   private fenceOscDisposable?: { dispose(): void }
   private snapshotOscDisposable?: { dispose(): void }
   private scrollDisposable?: { dispose(): void }
@@ -436,6 +452,15 @@ export class XtermRenderer implements TerminalRenderer {
 
   onRenderFence(cb: RenderFenceCallback): void {
     this.fenceSubs.push(cb)
+    this._ensureFenceOsc()
+  }
+
+  /** Subscribe to recovery-fence sightings: the shell wrote the one-shot
+   *  NOCX_RECOVERY OSC after restoring a visible native prompt (ADR-0024
+   *  decision 8). The consumer matches the hex against the nonce the lost
+   *  fact published and acknowledges the restoration. */
+  onRecoveryFence(cb: (hex: string) => void): void {
+    this.recoverySubs.push(cb)
     this._ensureFenceOsc()
   }
 

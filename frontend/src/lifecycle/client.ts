@@ -15,6 +15,7 @@
 
 import type { Dispatcher } from '../dispatcher'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import type { LifecycleRecoverAck } from '../generated/lifecycle.recoverAck'
 import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttempt'
 
 /** One lifecycle fact, delivered to a subscriber with its lane intact. The
@@ -59,5 +60,16 @@ export class LifecycleClient {
    *  kernel created it. */
   submitAttempt(params: LifecycleSubmitAttemptParams): Promise<LifecycleSubmitAttempt> {
     return this.dispatcher.call('lifecycle.submitAttempt', params)
+  }
+
+  /** Acknowledge a restoration (ADR-0024 decision 8): the renderer matched
+   *  the shell's one-shot recovery fence AND applied the conventional
+   *  presentation, so the lane may fall Lost → Native. The params are
+   *  deliberately narrow — session identity and the recovery generation the
+   *  lost fact carried; nothing else. The backend accepts only while the
+   *  session is recovery-pending and alive, and the transition permits only
+   *  Lost → Native. */
+  recoverAck(sessionId: string, generation: string): Promise<LifecycleRecoverAck> {
+    return this.dispatcher.call('lifecycle.recoverAck', { sessionId, generation })
   }
 }

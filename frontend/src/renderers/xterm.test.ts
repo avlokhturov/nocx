@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { parseOsc7, parseOsc133, parseRenderFence, XtermRenderer } from './xterm'
+import {
+  parseOsc7,
+  parseOsc133,
+  parseRecoveryFence,
+  parseRenderFence,
+  XtermRenderer,
+} from './xterm'
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -554,6 +560,23 @@ describe('parseRenderFence (OSC 1337 NOCX_FENCE — ADR-0024 §7 carve-out)', ()
     expect(parseRenderFence(`NOCX_FENCE;${'A'.repeat(64)}`)).toBeNull() // uppercase
     expect(parseRenderFence(`NOCX_FENCE;${FENCE}x`)).toBeNull() // 65 chars
     expect(parseRenderFence(`NOCX_FENCE;`)).toBeNull()
+  })
+})
+
+describe('parseRecoveryFence (OSC 1337 NOCX_RECOVERY — ADR-0024 decision 8)', () => {
+  const NONCE = 'ab'.repeat(32)
+
+  it('parses a well-formed recovery fence payload', () => {
+    expect(parseRecoveryFence(`NOCX_RECOVERY;${NONCE}`)).toEqual({ hex: NONCE })
+  })
+
+  it('rejects foreign OSC 1337 payloads and non-conforming nonces', () => {
+    expect(parseRecoveryFence(`File=name;size=42`)).toBeNull()
+    expect(parseRecoveryFence(`NOCX_FENCE;${NONCE}`)).toBeNull() // the completion fence is not a recovery
+    expect(parseRecoveryFence(`NOCX_RECOVERY;deadbeef`)).toBeNull()
+    expect(parseRecoveryFence(`NOCX_RECOVERY;${'g'.repeat(64)}`)).toBeNull()
+    expect(parseRecoveryFence(`NOCX_RECOVERY;${'A'.repeat(64)}`)).toBeNull()
+    expect(parseRecoveryFence('')).toBeNull()
   })
 })
 

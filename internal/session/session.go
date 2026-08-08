@@ -223,12 +223,13 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		}
 	} else {
 		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
-			Cwd:      cfg.Cwd,
-			Cols:     cfg.Cols,
-			Rows:     cfg.Rows,
-			XPixel:   cfg.XPixel,
-			YPixel:   cfg.YPixel,
-			Enhanced: cfg.Enhanced,
+			Cwd:       cfg.Cwd,
+			Cols:      cfg.Cols,
+			Rows:      cfg.Rows,
+			XPixel:    cfg.XPixel,
+			YPixel:    cfg.YPixel,
+			Enhanced:  cfg.Enhanced,
+			SessionID: string(id),
 		})
 		if perr != nil {
 			return nil, fmt.Errorf("open session: %w", perr)

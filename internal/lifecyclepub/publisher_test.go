@@ -1,6 +1,7 @@
 package lifecyclepub_test
 
 import (
+	"encoding/hex"
 	"sync"
 	"testing"
 	"time"
@@ -421,5 +422,51 @@ func TestPublisherForwardsErrors(t *testing.T) {
 	}
 	if got := len(r.all()); got != 0 {
 		t.Fatalf("failed mutations published %d facts, want 0", got)
+	}
+}
+
+// TestPublisherRecoveryProjection proves the publication half of decision 8:
+// a lost lane whose domain minted a recovery nonce publishes the recovery
+// contract (fence + generation), and RecoverLane — the ack — publishes the
+// native transition. The domain stays permanently lost.
+func TestPublisherRecoveryProjection(t *testing.T) {
+	k := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(k)
+	r := &recorder{}
+	pub.SetEmitter(r)
+	_ = pub.BindTransport("T", noopPort{})
+	h, _ := pub.RequestDomain("L", nil, "T")
+	mustIngest(t, pub, "T", env("L", h, 1, helloEvt()))
+
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+	facts := r.all()
+	lost := facts[len(facts)-1]
+	if lost.Lifecycle != lifecyclepub.LifecycleLost {
+		t.Fatalf("fact = %+v, want lost", lost)
+	}
+	wantNonce := hex.EncodeToString(h.Recovery[:])
+	if lost.Recovery == nil || lost.Recovery.Fence != wantNonce || lost.Recovery.Generation != wantNonce {
+		t.Fatalf("lost fact recovery = %+v, want fence+generation %s", lost.Recovery, wantNonce)
+	}
+
+	if err := pub.RecoverLane("L"); err != nil {
+		t.Fatalf("RecoverLane: %v", err)
+	}
+	facts = r.all()
+	native := facts[len(facts)-1]
+	if native.Lifecycle != lifecyclepub.LifecycleNative {
+		t.Fatalf("post-recover fact = %+v, want native", native)
+	}
+	if d, ok := pub.Domain(h.Domain); ok && d.State != lifecycle.DomainLost {
+		t.Fatalf("domain after recover = %v, want permanently DomainLost", d.State)
+	}
+	// A second recover is idempotent and publishes nothing new.
+	if err := pub.RecoverLane("L"); err != nil {
+		t.Fatalf("duplicate RecoverLane: %v", err)
+	}
+	if got := len(r.all()); got != len(facts) {
+		t.Fatalf("duplicate recover published %d facts, want %d", got, len(facts))
 	}
 }

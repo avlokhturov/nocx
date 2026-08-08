@@ -3470,6 +3470,16 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 		// A lane with no live domain: no domain, no epoch, no attempt.
 		"native lane": {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleNative},
 		"lost lane":   {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleLost},
+		// A lost lane opening a restoration episode (ADR-0024 decision 8):
+		// the recovery contract rides the fact, carrying both halves of the
+		// composite ack — the fence to match and the generation to echo.
+		"lost with recovery": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleLost,
+			Recovery: &lifecyclepub.Recovery{
+				Fence:      strings.Repeat("51", 32),
+				Generation: strings.Repeat("51", 32),
+			},
+		},
 	}
 	for name, params := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -3529,6 +3539,72 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	if params.Domain != string(h.Domain) || params.Epoch != h.Epoch {
 		t.Errorf("domain/epoch = %q/%d, want %q/%d", params.Domain, params.Epoch, h.Domain, h.Epoch)
 	}
+}
+
+// ── lifecycle.recoverAck (ADR-0024 decision 8) ───────────────────────────
+
+// The DTO's own conformance: the result is exactly {ok: true} — the schema
+// pins the key set and the value, so a future refactor that adds fields to
+// the acknowledgement (a domain, an epoch, an attempt, a status) fails here
+// before any renderer could depend on it. The params' narrowness (session
+// identity + generation, nothing else) is enforced by the handler's
+// rejection tests and by the over-the-wire call below.
+func TestLifecycleRecoverAck_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.recoverAck.schema.json")
+	raw, err := json.Marshal(map[string]bool{"ok": true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "lifecycle.recoverAck DTO")
+}
+
+// The real method through the real socket: a lost lane with a pending
+// restoration episode, the renderer's exact two-field payload, and the
+// actual result bytes validated against the schema.
+func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.recoverAck.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	var lost lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &lost); err != nil {
+		t.Fatalf("decode lost: %v", err)
+	}
+	if lost.Recovery == nil {
+		t.Fatal("a live session's lost fact must carry the recovery contract")
+	}
+
+	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.recoverAck", map[string]any{
+		"sessionId": sid, "generation": lost.Recovery.Generation,
+	}, 2)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("recoverAck: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if env.Error != nil {
+		t.Fatalf("recoverAck: %+v", env.Error)
+	}
+	validateJSON(t, schema, env.Result, "lifecycle.recoverAck result (real socket)")
 }
 
 // ── lifecycle.submitAttempt ────────────────────────────────────────────────

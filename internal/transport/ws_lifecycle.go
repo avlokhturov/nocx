@@ -91,6 +91,23 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		s.log.Debug("lifecycle.changed for unregistered lane", "lane", f.Lane)
 		return
 	}
+	// A lost fact with a recovery fence opens a restoration episode — but
+	// only while the session is alive AND someone is there to receive the
+	// promise. The session coordinator's call (decision 8 / AC4): the
+	// kernel cannot tell "channel died, pty lives" from "connection dead",
+	// and must not try. A dead session gets the lost fact with NO recovery
+	// promise (no restoration claim), and its episode — if one existed —
+	// is cancelled; session death wins. An episode without a subscriber is
+	// not opened: the next attach replays the fact, and the episode opens
+	// then, when the ack can actually come back.
+	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
+		if _, err := s.registry.Get(sid); err != nil {
+			s.cancelRecovery(sid)
+			stripped := f
+			stripped.Recovery = nil
+			f = stripped
+		}
+	}
 	rx := s.getRx(sid)
 	if rx == nil {
 		return
@@ -98,6 +115,9 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	wconn, _ := rx.getSubscriber()
 	if wconn == nil {
 		return
+	}
+	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
+		s.openRecovery(sid, f)
 	}
 	n := lifecycleChangedNotification{
 		JSONRPC: "2.0",

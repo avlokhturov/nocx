@@ -25,6 +25,12 @@ type laneState struct {
 	lifecycleDomain  DomainID
 	lifecycleAttempt AttemptID
 	helloFailures    []time.Time // failed-handshake timestamps (rate limit)
+	// recoveryNonce is the recovery fence of the lane's most recent domain:
+	// minted at RequestDomain, mirroring the domain record, and surviving
+	// the domain's loss so the lost lane can still publish the expected
+	// recovery fence to the renderer. A new establishment mints a new
+	// nonce, which is what makes a late ack from an old episode reject.
+	recoveryNonce FenceNonce
 }
 
 // top returns the top of the stack, or "" if empty.
@@ -45,4 +51,9 @@ type LaneSnapshot struct {
 	Attempt      AttemptID   // the attempt Running refers to
 	Stack        []DomainID  // bottom → top; top is active when Established
 	OpenAttempts []AttemptID // sorted, for determinism
+	// RecoveryNonce is the recovery fence of the lane's most recent domain;
+	// zero when no domain was ever minted on the lane. The publisher
+	// attaches it to a lost fact so the renderer can match the shell's
+	// one-shot restoration fence (decision 8).
+	RecoveryNonce FenceNonce
 }

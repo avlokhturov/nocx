@@ -78,6 +78,10 @@ type liveSshd struct {
 	client  *ssh.RealClient // the pooled client, for the connection-loss proof
 	cmd     *exec.Cmd
 	logBuf  *lockedBuffer
+	// registeredLanes records the lane→session bindings the provider
+	// reported (the production RegisterLifecycleLane wiring); the tests
+	// assert the minted lane reached the session it belongs to.
+	registeredLanes []string
 }
 
 // sshdBinary returns the sshd path, failing (not skipping) when absent.
@@ -440,7 +444,14 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 	t.Cleanup(func() { _ = client.Close() })
 	fx.client = client
 
-	provider := &remoteLifecycleProvider{client: client, kernel: kernel, logger: logger}
+	provider := &remoteLifecycleProvider{
+		client: client,
+		kernel: kernel,
+		logger: logger,
+		registerLane: func(lane lifecycle.LaneID, sid string) {
+			fx.registeredLanes = append(fx.registeredLanes, string(lane)+"->"+sid)
+		},
+	}
 	launcher := &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}
 
 	ch, err := client.Connect(context.Background(), fx.addr,
@@ -538,6 +549,13 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 		d, ok := kernel.Domain(kernel.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
+
+	// The minted lane reached the session that owns it: the production
+	// RegisterLifecycleLane wiring (without it, every published fact is
+	// dropped at the transport and enhanced mode never engages).
+	if len(fx.registeredLanes) != 1 || !strings.HasSuffix(fx.registeredLanes[0], "->sid-live-sshd") {
+		t.Fatalf("registered lanes = %v, want exactly one lane bound to sid-live-sshd", fx.registeredLanes)
+	}
 
 	// Line 1: print a sentinel and stay open long enough for the test to
 	// observe the open attempt.

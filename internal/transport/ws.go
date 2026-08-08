@@ -281,12 +281,15 @@ type WSServer struct {
 	// conventional. Wired by WithLifecyclePublisher at the composition
 	// root; the shell-spawn path reads it to create adapters, and this
 	// server is bound as the publisher's emitter after construction.
-	lifecyclePub *lifecyclepub.Publisher
-	// lifecycleMu guards lifecycleLanes: the lane → session registry the
-	// lifecycle.changed routing resolves at emit time. Registered by the
-	// shell spawn path, cleared when a session closes.
+	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// recoveryMu guards recoveries: the per-session restoration episodes
+	// (ADR-0024 decision 8). The episode opens when a lost fact with a
+	// recovery fence routes to a live session, and is cancelled when the
+	// session closes — a late ack is rejected (session death wins).
+	recoveryMu sync.Mutex
+	recoveries map[session.ID]*recoveryState
 }
 
 // ── Tabby import plan store (server-side, never reaches renderer) ─────────
@@ -1138,6 +1141,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleShellIntegrate(wconn, req)
 	case "lifecycle.submitAttempt":
 		s.handleLifecycleSubmitAttempt(wconn, state, req)
+	case "lifecycle.recoverAck":
+		s.handleLifecycleRecoverAck(wconn, state, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",
@@ -1905,6 +1910,10 @@ func (s *WSServer) closeSession(sid session.ID) {
 		rx.ring.close()
 	}
 	s.removeRx(sid)
+	// Session death wins (decision 8): cancel any pending restoration
+	// episode BEFORE the registry entry goes, so a late ack is rejected
+	// and no recovery is promised over a dead connection.
+	s.cancelRecovery(sid)
 	_ = s.registry.Close(sid)
 	s.filesSessionClosed(sid)
 	s.gitSessionClosed(sid, wconn)

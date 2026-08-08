@@ -651,7 +651,7 @@ func TestZshLauncher_TransientDirRemovedDespiteAForeignFile(t *testing.T) {
 	if err := os.MkdirAll(bootstrap, 0o700); err != nil {
 		t.Fatalf("mkdir bootstrap: %v", err)
 	}
-	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript, "")
+	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript, "", "")
 	if err := os.WriteFile(filepath.Join(bootstrap, ".zshrc"), []byte(rc), 0o600); err != nil {
 		t.Fatalf("write bootstrap rc: %v", err)
 	}

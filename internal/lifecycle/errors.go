@@ -34,6 +34,7 @@ var (
 	ErrParentActive         = errors.New("lifecycle: parent domain must be suspended before the child establishes")
 	ErrParentNotTop         = errors.New("lifecycle: parent domain is not the top of the lane stack")
 	ErrNotSuspended         = errors.New("lifecycle: domain is not suspended")
+	ErrNotLost              = errors.New("lifecycle: lane is not lost; only a lost lane may be recovered")
 
 	// Handshake (decision 3).
 	ErrHandshakeRateLimited = errors.New("lifecycle: too many failed handshakes on this lane")

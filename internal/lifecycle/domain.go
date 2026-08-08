@@ -34,7 +34,8 @@ type Domain struct {
 	State     DomainState
 
 	capability     Capability
-	lastSeq        uint64 // last accepted inbound sequence
+	recovery       FenceNonce // the one-shot recovery fence, minted with the capability
+	lastSeq        uint64     // last accepted inbound sequence
 	desyncBytes    int
 	desyncFrames   int
 	desyncSince    time.Time
@@ -42,13 +43,22 @@ type Domain struct {
 	refreshRequest *RequestID // outstanding refresh, if any
 }
 
-// DomainHandle is what an establishment request returns: the id, epoch and the
-// capability the adapter must substitute into the integration script. The
-// capability is the bearer; it is never exported to the environment.
+// DomainHandle is what an establishment request returns: the id, epoch, the
+// capability the adapter must substitute into the integration script, and
+// the one-shot recovery fence. The capability is the bearer; neither it nor
+// the recovery fence is ever exported to the environment — both ride the
+// bootstrap script text. The recovery fence is handed to the shell while the
+// channel is alive and used exactly once, if the channel dies mid-session:
+// the shell writes it to the pty at the next prompt boundary, and nocx
+// matches it as the restoration acknowledgement (ADR-0024 decision 8; see
+// docs/lifecycle-protocol.md §12). A hostile program cannot forge what it
+// never saw; the worst a forged fence can do is force a safe transition to
+// native mode, which the ADR's availability bound already accepts.
 type DomainHandle struct {
 	Domain     DomainID
 	Epoch      uint64
 	Capability Capability
+	Recovery   FenceNonce
 }
 
 // DomainRegistry stores domains and their transport bindings. It is keyed by

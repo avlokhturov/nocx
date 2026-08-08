@@ -557,9 +557,8 @@ func New(opts ...Option) (*App, error) {
 	// (AD-4), and refusal (the remote sshd will not forward) leaves the
 	// session conventional. Before this line the remote adapter was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
-	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(
-		&remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger},
-	))
+	remoteLifecycle := &remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger}
+	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
@@ -592,6 +591,19 @@ func New(opts ...Option) (*App, error) {
 	// direct-host opens (no profile, no resolver) never publish. Before
 	// this line the carrier was reachable from its own tests and nowhere
 	// else (AGENTS.md check 5).
+
+	// The lane-registration callback binds a minted lifecycle lane to the
+	// session that owns it, so published facts route to the right
+	// subscriber. One owner for the decision (AD-8): the local pty factory
+	// and the remote provider share this closure, and it can only exist
+	// once the server (which holds the lane→session registry) is built.
+	registerLane := func(lane lifecycle.LaneID, sid string) {
+		if sid != "" {
+			tp.RegisterLifecycleLane(lane, session.ID(sid))
+		}
+	}
+	remoteLifecycle.registerLane = registerLane
+	ptf.registerLane = registerLane
 	resolver := connection.NewResolver(
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
@@ -787,6 +799,13 @@ type localPTYFactory struct {
 	log    log.Logger
 	shint  shellintegration.ShellIntegration
 	kernel lifecyclechannel.Kernel
+	// registerLane binds a minted lifecycle lane to the session that owns
+	// it, so published facts route to the right subscriber. Wired at the
+	// composition root once the transport exists; nil (tests, or a server
+	// without lifecycle wiring) leaves facts unrouted, which is the safe
+	// direction — the renderer keys enhanced mode on the fact, and an
+	// unregistered lane is a conventional terminal.
+	registerLane func(lane lifecycle.LaneID, sid string)
 }
 
 // lifecyclePTY is an enhanced session's pty plus the lifecycle channel whose
@@ -822,13 +841,55 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	if err != nil {
 		return nil, err
 	}
+	// The local bootstrap (nocx-u7uh.21): bash starts with a transient
+	// --rcfile carrying THIS session's capability and recovery fence in its
+	// text — never in the environment (ADR-0024 decision 2) — and the
+	// non-secret addressing as NOCX_LIFECYCLE_* env, exactly the way the
+	// remote tier learns them (shellintegration.LaunchOptions is the single
+	launch := ch.Launch()
+	rc, rerr := shellintegration.LocalBashRcfile(shellintegration.LaunchOptions{
+		SessionID:   cfg.SessionID,
+		Enhanced:    true,
+		Capability:  launch.Capability,
+		Recovery:    launch.Recovery,
+		Lane:        string(launch.Lane),
+		Domain:      string(launch.Domain),
+		Epoch:       launch.Epoch,
+		LifecycleFD: 3, // the child end of the socketpair, via ExtraFiles
+	})
+	rcPath := ""
+	if rerr == nil {
+		rcPath, rerr = shellintegration.WriteLocalRcfile(rc)
+	}
+	if rerr != nil {
+		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
+			"error", rerr)
+		_ = ch.Close()
+		_ = child.Close()
+		// No channel, no rcfile: a plain enhanced pty, whose shell keeps a
+		// visible native prompt (the script's init bails without config).
+		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+	}
+	// Bash is the integration-first shell for the local tier (the same
+	// preference the pty resolver applies when $SHELL is unset); a
+	// non-bash $SHELL on an enhanced local session is a reported follow-up.
+	cfg.Command = "bash"
+	cfg.Args = []string{"--rcfile", rcPath, "-i"}
 	p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env), pty.WithExtraFiles(child))
 	// The child end is the shell's once the fork has happened; this process
 	// keeps no reference either way.
 	_ = child.Close()
 	if err != nil {
 		_ = ch.Close()
+		_ = os.Remove(rcPath)
 		return nil, err
+	}
+	// Bind the lane to the session that will receive its facts. Without
+	// this, published lifecycle facts are dropped (the transport routes by
+	// lane registration) and enhanced mode never engages — the whole
+	// lifecycle stack reachable only from its own tests (AGENTS.md check 5).
+	if cfg.SessionID != "" && f.registerLane != nil {
+		f.registerLane(ch.Lane(), cfg.SessionID)
 	}
 	return &lifecyclePTY{Pty: p, ch: ch}, nil
 }
@@ -950,6 +1011,7 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 			// rcfile's @CAP@. Empty when no channel was established — the
 			// session is conventional and the launch carries nothing.
 			Capability:    opts.Capability,
+			Recovery:      opts.Recovery,
 			Lane:          opts.Lane,
 			Domain:        opts.Domain,
 			Epoch:         opts.Epoch,
@@ -1010,6 +1072,12 @@ type remoteLifecycleProvider struct {
 	client *ssh.RealClient
 	kernel lifecyclechannel.Kernel
 	logger log.Logger
+	// registerLane binds the minted lane to the session that owns it
+	// (RegisterLifecycleLane at the transport), so the published facts of
+	// this remote domain route to the right subscriber. Wired at the
+	// composition root once the server exists; nil leaves facts unrouted,
+	// the safe direction.
+	registerLane func(lane lifecycle.LaneID, sid string)
 }
 
 // Establish implements ssh.RemoteLifecycle.
@@ -1030,11 +1098,23 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 		_ = tc.Close()
 		return ssh.RemoteLifecycleLaunch{}, nil, err
 	}
+	// The session id rides the connect options (ssh.WithSessionID); apply
+	// them to a scratch config to read it back — the lane must be bound to
+	// the session that will receive its facts, or the whole remote
+	// lifecycle publication is dropped at the transport.
+	scratch := &ssh.ConnectConfig{}
+	for _, opt := range opts {
+		opt(scratch)
+	}
+	if scratch.SessionID != "" && p.registerLane != nil {
+		p.registerLane(cfg.Lane, scratch.SessionID)
+	}
 	return ssh.RemoteLifecycleLaunch{
 		Lane:       string(cfg.Lane),
 		Domain:     string(cfg.Domain),
 		Epoch:      cfg.Epoch,
 		Port:       cfg.Port,
 		Capability: cfg.Capability,
+		Recovery:   cfg.Recovery,
 	}, adapter, nil
 }

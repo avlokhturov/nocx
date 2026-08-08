@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -374,6 +375,76 @@ func TestLifecycleChanged_ReplayOnAttach(t *testing.T) {
 	}
 }
 
+// TestLifecycleChanged_ReplayOnAttachAfterLoss is the revoke branch of
+// protocol §12's reconnect rule ("either resume the existing domain or
+// report ambiguity and revoke it"): when the transport died while the
+// frontend was away, a reattach replays the CURRENT projection — the lost
+// fact — so the frontend revokes its domains. The replay is a delivery of
+// what the kernel concluded, never a resurrection: no new epoch is minted,
+// no accept is answered, and the domain stays permanently Lost.
+func TestLifecycleChanged_ReplayOnAttachAfterLoss(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+
+	// The SSH transport dies while the frontend is detached. The lost fact
+	// is published (and consumed here); the domain is permanently lost.
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+	lost := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	var lostParams lifecyclepub.Fact
+	if err := json.Unmarshal(lost, &lostParams); err != nil {
+		t.Fatalf("decode lost: %v", err)
+	}
+	if lostParams.Lifecycle != lifecyclepub.LifecycleLost {
+		t.Fatalf("fact after loss = %+v, want lost", lostParams)
+	}
+
+	// Detach and reattach: the replay must re-emit the LOST projection.
+	e.ws.getRx(session.ID(sid)).setSubscriber(nil, nil)
+	connB := connectWS(t, e.ws)
+	defer func() { _ = connB.Close() }()
+	at := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 2)
+	var atEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(at, &atEnv); err != nil {
+		t.Fatalf("attach: unmarshal: %v", err)
+	}
+	if atEnv.Error != nil {
+		t.Fatalf("attach: %+v", atEnv.Error)
+	}
+	raw := readNotification(t, connB, "lifecycle.changed", 5*time.Second)
+	if err := json.Unmarshal(raw, &lostParams); err != nil {
+		t.Fatalf("decode replay: %v", err)
+	}
+	if lostParams.Lifecycle != lifecyclepub.LifecycleLost {
+		t.Fatalf("replayed fact after loss = %+v, want lost (revoke, never resume)", lostParams)
+	}
+	// No resurrection: the domain is still the same permanently-lost one,
+	// with its epoch untouched — the reattach minted nothing.
+	if d, ok := pub.Domain(h.Domain); !ok || d.State != lifecycle.DomainLost {
+		t.Fatalf("domain after loss+reattach = %+v (ok=%v), want DomainLost", d, ok)
+	}
+	if d, ok := pub.Domain(h.Domain); ok && d.Epoch != h.Epoch {
+		t.Fatalf("epoch changed on reattach: %d != %d", d.Epoch, h.Epoch)
+	}
+}
+
 // ── lifecycle.submitAttempt (ADR-0024 decision 5) ─────────────────────────
 
 // decodeSubmitAttemptResult decodes the raw result of a lifecycle.submitAttempt
@@ -593,5 +664,347 @@ func TestLifecycleSubmitAttempt_NotWiredFailsClosed(t *testing.T) {
 	}, 41)
 	if errObj.Code != -32601 {
 		t.Fatalf("unwired code = %d, want -32601", errObj.Code)
+	}
+}
+
+// ── lifecycle.recoverAck (ADR-0024 decision 8) ────────────────────────────
+
+// recoverEnv boots a publisher + server, establishes a live domain on a
+// registered lane, kills the transport, and consumes the lost fact. Returns
+// the env, the session id and the lost fact (carrying the recovery
+// contract). The composite-ack happy path is the caller's to drive.
+func recoverEnv(t *testing.T) (*lifecycleTestEnv, *lifecyclepub.Publisher, string, lifecyclepub.Fact) {
+	t.Helper()
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	var lost lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &lost); err != nil {
+		t.Fatalf("decode lost: %v", err)
+	}
+	if lost.Recovery == nil {
+		t.Fatal("a live session's lost fact must carry the recovery contract")
+	}
+	return e, pub, sid, lost
+}
+
+func recoverAckErr(t *testing.T, conn *websocket.Conn, sid, generation string, id int) *jsonrpcErrorObj {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, conn, "lifecycle.recoverAck", map[string]any{
+		"sessionId": sid, "generation": generation,
+	}, id)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("recoverAck: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if env.Error == nil {
+		t.Fatalf("recoverAck: expected an error, got %s", resp)
+	}
+	return env.Error
+}
+
+// TestLifecycleRecoverAck_CompositeFlow is decision 8's interval, both ends:
+// the lane is Lost from the moment the transport dies (never authenticated),
+// and only the composite acknowledgement — the renderer matching the
+// shell's one-shot recovery fence and applying the conventional presentation
+// — moves it to Native. Until the ack lands, the lane is neither
+// authenticated nor a usable conventional terminal: it stays Lost.
+func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
+	e, pub, sid, lost := recoverEnv(t)
+	if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleLost {
+		t.Fatalf("lane before ack = %v, want Lost throughout the span", st.Lifecycle)
+	}
+	// The ack carries session identity and the generation — nothing else.
+	// The native transition is published DURING the ack (RecoverLane
+	// publishes before the response is written), so it is collected from
+	// the same read loop instead of being consumed as a skipped
+	// notification by a separate call.
+	req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "lifecycle.recoverAck", "params": map[string]any{
+		"sessionId": sid, "generation": lost.Recovery.Generation,
+	}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := e.conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write ack: %v", err)
+	}
+	var nativeFact *lifecyclepub.Fact
+	ackSeen := false
+	for !ackSeen {
+		_ = e.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, raw, rerr := e.conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("read: %v", rerr)
+		}
+		var check struct {
+			ID     *json.RawMessage `json:"id"`
+			Method string           `json:"method"`
+			Error  *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &check); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if check.ID != nil {
+			if check.Error != nil {
+				t.Fatalf("recoverAck: %+v", check.Error)
+			}
+			ackSeen = true
+			continue
+		}
+		if check.Method == "lifecycle.changed" {
+			var f lifecyclepub.Fact
+			var notif struct {
+				Params json.RawMessage `json:"params"`
+			}
+			if err := json.Unmarshal(raw, &notif); err == nil {
+				if err := json.Unmarshal(notif.Params, &f); err == nil {
+					nativeFact = &f
+				}
+			}
+		}
+	}
+	if nativeFact == nil || nativeFact.Lifecycle != lifecyclepub.LifecycleNative {
+		t.Fatalf("post-ack fact = %+v, want native (the published transition)", nativeFact)
+	}
+	// The lane is a usable conventional terminal now, and the domain stays
+	// permanently lost.
+	if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleNative {
+		t.Fatalf("lane after ack = %v, want Native", st.Lifecycle)
+	}
+	if d, ok := pub.Domain(lifecycle.DomainID(lost.Domain)); ok && d.State != lifecycle.DomainLost {
+		t.Fatalf("domain after ack = %v, want permanently DomainLost", d.State)
+	}
+}
+
+// TestLifecycleRecoverAck_Rejections is one test per acceptance rule of the
+// DECIDED ack contract, written as REJECTIONS (a)-(d):
+//   - (a) the params are narrow: a missing sessionId or generation is
+//     invalid params;
+//   - (b) a generation with no pending episode is refused (never promised,
+//     or superseded by a fresh domain);
+//   - (c) a lane that is no longer Lost is refused — the ack permits only
+//     Lost → Native, it can never revoke a live domain;
+//   - (d) a duplicate ack succeeds idempotently, and an ack after the
+//     session died is refused.
+func TestLifecycleRecoverAck_Rejections(t *testing.T) {
+	t.Run("(a) narrow params: missing generation", func(t *testing.T) {
+		e, _, sid, _ := recoverEnv(t)
+		resp := jsonrpcCallWithID(t, e.conn, "lifecycle.recoverAck", map[string]any{
+			"sessionId": sid,
+		}, 2)
+		var env struct {
+			Error *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(resp, &env); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if env.Error == nil || env.Error.Code != -32602 {
+			t.Fatalf("missing generation: want -32602, got %+v", env.Error)
+		}
+	})
+
+	t.Run("(b) no pending episode", func(t *testing.T) {
+		// No loss ever happened: nothing is pending, nothing may be acked.
+		kernel := lifecycle.New(lifecycle.Options{})
+		pub := lifecyclepub.New(kernel)
+		e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+		pub.SetEmitter(e.ws)
+		sid := e.openSession(t, 1)
+		errObj := recoverAckErr(t, e.conn, sid, strings.Repeat("11", 32), 2)
+		if errObj.Code == 0 {
+			t.Fatalf("ack with no episode must be refused, got %+v", errObj)
+		}
+	})
+
+	t.Run("(b) generation mismatch", func(t *testing.T) {
+		e, _, sid, _ := recoverEnv(t)
+		// A forged or stale generation: the backend only acks what it
+		// promised, so this is refused even though the session is alive.
+		errObj := recoverAckErr(t, e.conn, sid, strings.Repeat("22", 32), 2)
+		if errObj.Code == 0 {
+			t.Fatalf("mismatched generation must be refused, got %+v", errObj)
+		}
+	})
+
+	t.Run("(c) lane no longer lost refuses the ack", func(t *testing.T) {
+		e, pub, sid, lost := recoverEnv(t)
+		// While the frontend was away, a NEW domain established on the lane
+		// (a fresh epoch — the stack was emptied by the loss). The stale ack
+		// must not revoke it: RecoverLane permits only Lost → Native.
+		if err := pub.BindTransport("T2", noopPort{}); err != nil {
+			t.Fatal(err)
+		}
+		h2, err := pub.RequestDomain(lifecycle.LaneID(lost.Lane), nil, "T2")
+		if err != nil {
+			t.Fatalf("RequestDomain after loss: %v", err)
+		}
+		mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lifecycle.LaneID(lost.Lane), h2, 1, lifecycleHelloEvt()))
+		_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready (fresh domain)
+		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.Generation, 2)
+		if errObj.Code == 0 {
+			t.Fatalf("an ack over a live lane must be refused, got %+v", errObj)
+		}
+	})
+
+	t.Run("(d) idempotent duplicate ack", func(t *testing.T) {
+		e, pub, sid, lost := recoverEnv(t)
+		ack := func(id int) *jsonrpcErrorObj {
+			resp := jsonrpcCallWithID(t, e.conn, "lifecycle.recoverAck", map[string]any{
+				"sessionId": sid, "generation": lost.Recovery.Generation,
+			}, id)
+			var env struct {
+				Error *jsonrpcErrorObj `json:"error"`
+			}
+			if err := json.Unmarshal(resp, &env); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			return env.Error
+		}
+		if errObj := ack(2); errObj != nil {
+			t.Fatalf("first ack: %+v", errObj)
+		}
+		if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleNative {
+			t.Fatalf("lane after first ack = %v, want Native", st.Lifecycle)
+		}
+		if errObj := ack(3); errObj != nil {
+			t.Fatalf("duplicate ack must be idempotent, got %+v", errObj)
+		}
+	})
+
+	t.Run("(d) late ack after session death is refused", func(t *testing.T) {
+		e, pub, sid, lost := recoverEnv(t)
+		// The session dies (its channel is gone) before the ack lands:
+		// session death wins, the episode is cancelled, and the late ack is
+		// refused. Closing through the registry directly models the death
+		// race — closeSession cancels the episode before the registry entry
+		// goes, and this order (registry first) is the strictest: the lane
+		// is still registered, so the ack's session lookup must fail.
+		_ = e.ws.registry.Close(session.ID(sid))
+		e.ws.cancelRecovery(session.ID(sid))
+		_ = pub
+		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.Generation, 2)
+		if errObj.Code == 0 {
+			t.Fatalf("a late ack after session death must be refused, got %+v", errObj)
+		}
+	})
+}
+
+// TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim is AC4's negative
+// branch at the routing seam: when the session is dead, the lost fact is
+// delivered WITHOUT the recovery contract — no restoration is claimed over a
+// dead connection — and no episode is opened, so no ack can land.
+func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+
+	// The session channel is dead; the lane registration outlives it for a
+	// moment (the strictest race — the strip path must not depend on the
+	// registration having been cleaned up).
+	_ = e.ws.registry.Close(session.ID(sid))
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	var lost lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &lost); err != nil {
+		t.Fatalf("decode lost: %v", err)
+	}
+	if lost.Lifecycle != lifecyclepub.LifecycleLost {
+		t.Fatalf("fact = %+v, want lost", lost)
+	}
+	if lost.Recovery != nil {
+		t.Fatalf("a dead session must get NO recovery claim, got %+v", lost.Recovery)
+	}
+	// And no episode exists: a late ack is refused.
+	errObj := recoverAckErr(t, e.conn, sid, strings.Repeat("33", 32), 2)
+	if errObj.Code == 0 {
+		t.Fatalf("ack over a dead session must be refused, got %+v", errObj)
+	}
+}
+
+// TestLifecycleRecoverAck_DoubleAckLandsOnce proves the claim→recover→
+// resolve serialization from the renderer's side: two acknowledgements fired
+// back-to-back (a retry after a dropped response is the realistic shape —
+// one connection serializes writes, so this is the closest a single renderer
+// can come to a race) both succeed, and the transition lands exactly once:
+// the second ack observes the resolved episode and changes nothing.
+func TestLifecycleRecoverAck_DoubleAckLandsOnce(t *testing.T) {
+	e, pub, sid, lost := recoverEnv(t)
+	req := func(id int) []byte {
+		b, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "lifecycle.recoverAck", "params": map[string]any{
+			"sessionId": sid, "generation": lost.Recovery.Generation,
+		}})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+	if err := e.conn.WriteMessage(websocket.TextMessage, req(2)); err != nil {
+		t.Fatalf("write first ack: %v", err)
+	}
+	if err := e.conn.WriteMessage(websocket.TextMessage, req(3)); err != nil {
+		t.Fatalf("write second ack: %v", err)
+	}
+	responses := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for responses < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d ack responses arrived", responses)
+		}
+		_ = e.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, raw, rerr := e.conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("read: %v", rerr)
+		}
+		var check struct {
+			ID    *json.RawMessage `json:"id"`
+			Error *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &check); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if check.ID == nil {
+			continue // the native notification
+		}
+		if check.Error != nil {
+			t.Fatalf("double ack produced an error: %+v", check.Error)
+		}
+		responses++
+	}
+	if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleNative {
+		t.Fatalf("lane after double ack = %v, want Native", st.Lifecycle)
 	}
 }

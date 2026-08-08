@@ -69,6 +69,24 @@
           "pattern": "^[0-9a-f]{64}$"
         }
       }
+    },
+    "recovery": {
+      "description": "The restoration-acknowledgement contract (ADR-0024 decision 8), present exactly when lifecycle is lost AND the session coordinator opened a restoration episode (the shell is still reachable — channel died, pty lives). fence is the one-shot nonce the shell will write to the pty at its next prompt boundary; generation is the same nonce the renderer echoes back in lifecycle.recoverAck. Both are pre-provisioned to the shell in the authenticated bootstrap and never reused; a hostile program cannot forge what it never saw, and the worst a forged fence can do is force a safe transition to native mode — an availability loss the ADR accepts. Absent on a dead connection: no restoration claim is made when the shell is unreachable.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fence", "generation"],
+      "properties": {
+        "fence": {
+          "description": "The 64-hex one-shot recovery fence the renderer matches in the render stream.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "generation": {
+          "description": "The recovery generation the renderer returns in lifecycle.recoverAck — the same minted nonce.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
     }
   }
 }

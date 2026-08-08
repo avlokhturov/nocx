@@ -289,6 +289,17 @@ export class TerminalContent extends BaseTabContent {
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
+  /** The pending restoration episode (ADR-0024 decision 8): the fence the
+   *  shell must write to the pty and the generation to acknowledge, captured
+   *  from the lost fact. Non-null from the moment the channel is declared
+   *  dead until the acknowledgement lands — the span in which this tab is
+   *  neither an authenticated terminal nor advertised as a usable
+   *  conventional one. */
+  private _recovery: { fence: string; generation: string } | null = null
+  /** True while the acknowledgement is in flight: the one-shot fence can
+   *  be sighted more than once before the await resolves, and only the
+   *  first sighting may claim the episode. */
+  private _recoveryAcking = false
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -1016,11 +1027,33 @@ export class TerminalContent extends BaseTabContent {
       // the rest.
       this._lifecycleUnsub = new LifecycleClient(this.client.dispatcher).subscribeLifecycleChanged(
         (fact) => {
+          // ADR-0024 decision 8: a lost fact carrying a recovery contract
+          // opens a restoration episode — the channel died while the shell
+          // was reachable, and the shell will restore its visible native
+          // prompt at the next prompt boundary, writing the one-shot fence.
+          // From this instant until the acknowledgement lands, the session
+          // is neither an authenticated terminal nor advertised as a usable
+          // conventional one (the capability rail is suppressed below; the
+          // editor holds no authority and offers none). A native fact ends
+          // the episode.
+          if (fact.lifecycle === 'lost' && fact.recovery) {
+            this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+          } else if (fact.lifecycle === 'native') {
+            this._recovery = null
+          }
           // The kernel applies the fact and notifies onChange on a real
           // change; the ownership sync runs there, once.
           this.lifecycle.applyFact(fact)
         },
       )
+      // Match the shell's one-shot recovery fence in the render stream — an
+      // explicit rendezvous, never a grid inspection or a pattern-matched
+      // prompt (decision 1 carve-out). Only after BOTH the fence matched
+      // and the conventional presentation is applied (the lost fact already
+      // revoked authority and routed input raw) does the tab acknowledge.
+      renderer.onRecoveryFence((hex) => {
+        if (this._recovery && hex === this._recovery.fence) void this._ackRecovery()
+      })
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
         this._syncLifecycleOwnership()
         this._updateCapability()
@@ -1716,11 +1749,46 @@ export class TerminalContent extends BaseTabContent {
     this._renderRecovery()
   }
 
+  /** Acknowledge the restoration (ADR-0024 decision 8) once the shell's
+   *  one-shot recovery fence matched and the conventional presentation is
+   *  applied. The acknowledgement is deliberately narrow — session identity
+   *  and the generation; the backend validates it against the episode it
+   *  opened, and the transition permits only Lost → Native. Cleared on
+   *  success; a refusal (session died, episode superseded) is a fact about
+   *  the session, and the exit path closes the tab. */
+  private async _ackRecovery(): Promise<void> {
+    if (!this._recovery || this._recoveryAcking || !this.session || this._sessionExited) return
+    const rec = this._recovery
+    this._recoveryAcking = true // claim the episode: exactly one ack per fence
+    try {
+      await new LifecycleClient(this.client.dispatcher).recoverAck(
+        this.session.sessionId,
+        rec.generation,
+      )
+      this._recovery = null
+    } catch (e) {
+      // A refusal is a fact about the episode (session died, generation
+      // superseded, lane no longer lost): the pending guard stays, and the
+      // exit path closes the tab. Re-arming lets a replayed episode retry.
+      log.warn('nocx: recovery acknowledgement refused', { error: e })
+      this._recoveryAcking = false
+    }
+  }
+
   /** Update the editor's recovery chip: the single action when one exists,
    *  hidden when none apply. The chip IS the action — one click, no
    *  popover (nocx-atyf.2). */
   private _renderRecovery(): void {
     if (!this.editor) return
+    // ADR-0024 decision 8, the interval: while a restoration episode is
+    // pending — the channel died and nocx has not yet matched the shell's
+    // recovery fence — the session is neither an authenticated terminal nor
+    // advertised as a usable conventional one, and no editor is offered at
+    // any point inside the span.
+    if (this._recovery) {
+      this.editor.setRecoveryAction(null, () => {})
+      return
+    }
     const eligible = this.lifecycle.buffer === 'normal'
     const authorized = this._policy !== 'raw'
     const actions = deriveActions({

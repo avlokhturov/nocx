@@ -109,9 +109,9 @@ func launchSourceLine(name string) string {
 // working.
 func launchCarrier() string {
 	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@",
-		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"), "")))
+		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"), "", "")))
 	s = strings.ReplaceAll(s, "@ZSH_ARG@",
-		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"), "")))
+		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"), "", "")))
 	s = strings.ReplaceAll(s, "@POSIX_ARG@",
 		posixArgFor(posixEnvFile("", launchSourceLine("nocx.posix"))))
 	return stripShellComments(s)

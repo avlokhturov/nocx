@@ -340,6 +340,67 @@ Two losses, two code paths (decision 8):
 In one local transition nocx revokes ownership, exposes the terminal, marks open
 attempts `unknown`, and stops accepting events for the dead domain.
 
+### 12.1 Restoration: the composite acknowledgement
+
+Decision 8 distinguishes two losses, and the **session coordinator** (the
+transport, not the kernel) tells them apart by two independent signals:
+
+- the lifecycle adapter dies while the session channel's `Done()` is still
+  open → **restoration is pending**; the sequence below runs;
+- the pty/SSH channel `Done()` closes → the session is dead: emit `exit`,
+  cancel any pending restoration, reject late acknowledgements, report a
+  disconnected terminal, and make **no restoration claim**. If the two race,
+  session death wins.
+
+The kernel never distinguishes the two and never tries: on either signal the
+domain is `Lost` and the lane falls to `Lost` — the atomic local transition
+of decision 8 — and a new establishment is a fresh epoch.
+
+**Restoring the user's visible prompt is a protocol action, and it can only
+be promised while the shell is reachable.** Over a dead connection the
+promise is not made. Over a live one the sequence is:
+
+1. The channel dies, the pty lives. The lane is `Lost` (authority revoked at
+   that instant) and the session enters **RecoveryPending**.
+2. The renderer applies the conventional presentation: native input, live
+   region released, block model off, editor withdrawn — and offers no
+   editor anywhere inside the span.
+3. At the next prompt boundary the shell notices its send failed, clears its
+   active latch, restores the native `PS1`, and writes a **one-shot recovery
+   fence** to the pty immediately after the prompt bytes.
+4. The renderer matches that explicit fence. It does not inspect the grid,
+   pattern-match a prompt, or infer from silence.
+5. Only after **both** the fence matched and the presentation is applied
+   does the renderer acknowledge — the narrow `lifecycle.recoverAck`
+   carrying only session identity and the recovery generation — and the
+   lane may fall `Lost → Native`.
+6. The domain stays permanently `Lost`; any future integration is a fresh
+   epoch, never a resumption.
+
+**The fence.** Each domain mints, alongside its capability, a distinct
+**recovery nonce** (32 random bytes): pre-provisioned, one-shot, handed to
+the shell in the authenticated bootstrap while the channel was alive — never
+the capability, never reused. The shell writes it to the pty only when the
+channel died mid-session. This is the decision-1 carve-out, the same
+rendezvous the completion fence rides: a stream sequence may _locate_ an
+already-authenticated lifecycle event in render order, and may never create,
+authenticate, complete or assign status. The recovery fence locates the
+restoration — it does not create one, and it is not a new stream-derived
+authority edge: a hostile program cannot forge what it never saw, and the
+worst a forged fence could do is force a safe transition to native mode,
+which decision 10's availability bound already accepts ("a descendant that
+can write to the lifecycle transport may force a safe transition to native
+mode. It can never produce a validated event without the epoch's
+authenticator").
+
+**The acknowledgement** (`lifecycle.recoverAck`) is deliberately narrow:
+session identity and the recovery generation, nothing else. The backend
+accepts it only while that exact session is RecoveryPending and alive; it
+permits only `Lost → Native` (it can never revive a `DomainLost`, never
+grant ownership, never open or complete an attempt); it is idempotent; and
+it is invalidated by session exit — a late acknowledgement after the session
+died is rejected.
+
 ## 13. Security boundary
 
 This protocol defends against hostile bytes on the terminal from any source

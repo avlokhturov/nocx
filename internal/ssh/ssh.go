@@ -108,7 +108,10 @@ type LaunchOptions struct {
 	// channel: the session is conventional. Mirrors
 	// shellintegration.LaunchOptions field for field; the composition
 	// root maps the two at wiring time.
-	Capability    string
+	Capability string
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
+	// substituted into the rcfile text like the capability.
+	Recovery      string
 	Lane          string
 	Domain        string
 	Epoch         uint64
@@ -126,6 +129,9 @@ type RemoteLifecycleLaunch struct {
 	Epoch      uint64
 	Port       int
 	Capability string // 64 lowercase hex chars
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
+	// substituted into the rcfile text like the capability, never exported.
+	Recovery string // 64 lowercase hex chars
 }
 
 // RemoteLifecycle establishes the authenticated lifecycle channel for a

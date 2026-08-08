@@ -47,7 +47,14 @@ type LaunchOptions struct {
 	// local path) or a loopback TCP port (LifecyclePort, the remote path);
 	// zero means that side is absent. Empty Capability means no channel:
 	// the session is conventional.
-	Capability    string
+	Capability string
+	// Recovery is the per-domain one-shot recovery fence (ADR-0024 decision
+	// 8): substituted into the rcfile TEXT (@RECOVERY@) like the capability,
+	// never exported to the environment. The shell writes it to the pty at
+	// the next prompt boundary if the lifecycle channel dies mid-session;
+	// nocx matches it as the restoration acknowledgement. Empty means no
+	// recovery is offered.
+	Recovery      string
 	Lane          string
 	Domain        string
 	Epoch         uint64

@@ -374,6 +374,19 @@ __nocx_preexec() {
     fi
 }
 
+# The lifecycle channel died mid-session: a send failed at a prompt
+# boundary (local fd closed, or the forwarded socket broken). Clear the
+# active latch — the domain is lost and nothing more may be emitted over the
+# dead transport — and mark the session recovered so the prompt-boundary arm
+# restores a visible native prompt with the one-shot recovery fence (ADR-
+# 0024 decision 8). nocx matches that fence and acknowledges the
+# restoration; until it lands, the session is neither an authenticated
+# terminal nor a usable conventional one.
+__nocx_lc_recover() {
+    __nocx_lc_active=0
+    __nocx_lc_recovered=1
+}
+
 # In marker-only mode __nocx_prompt_command runs the user/framework
 # PROMPT_COMMAND first, then emits D/A/OSC 7, then sets PS1 to the
 # marker-only B prompt as the final action — so a hostile framework
@@ -411,14 +424,22 @@ __nocx_prompt_command() {
             # The complete carries no attempt id; the kernel resolves the
             # domain's single open attempt.
             if __nocx_lc_fence; then
-                __nocx_lc_send complete ',"exit_code":'"$__nocx_exit"',"fence":"'"$__nocx_lc_fence_hex"'"'
-                builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
+                if __nocx_lc_send complete ',"exit_code":'"$__nocx_exit"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
+                    builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
+                else
+                    __nocx_lc_recover
+                fi
             fi
             __nocx_lc_attempt_open=0
         fi
         # The editor may own keys only at a ready prompt; the kernel rejects
-        # prompt_ready while any attempt is open.
-        __nocx_lc_send prompt_ready
+        # prompt_ready while any attempt is open. A failed send means the
+        # transport is dead — the domain is lost, the visible native prompt
+        # must be restored (decision 8), and no further send is attempted
+        # this boundary (recover cleared the active latch).
+        if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+            __nocx_lc_send prompt_ready || __nocx_lc_recover
+        fi
     fi
     if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ "${__nocx_arm_marker_only:-}" == 1 ]]; then
         # Top-level session: arm the marker-only overlay.
@@ -451,6 +472,19 @@ __nocx_prompt_command() {
             else
                 PS1="$__nocx_b_marker"
             fi
+        elif [[ "${__nocx_lc_recovered:-0}" == 1 ]]; then
+            # The channel died mid-session (a send failed): a visible native
+            # prompt stands, never a suppressed one taking raw input
+            # (decision 8). The one-shot recovery fence rides exactly the
+            # FIRST prompt's bytes — nocx matches it and acknowledges the
+            # restoration; afterwards PS1 is rebuilt without it, so the
+            # nonce reaches the terminal once and is never reused.
+            __nocx_native_mode
+            if [[ "${__nocx_lc_recovery_emitted:-0}" != 1 ]] && [[ -n "${__nocx_lc_recovery:-}" ]]; then
+                PS1="${PS1}"'\[\e]1337;NOCX_RECOVERY;'"${__nocx_lc_recovery}"'\a\]'
+                __nocx_lc_recovery_emitted=1
+            fi
+            PS1="${PS1}${__nocx_b_marker}"
         else
             PS1="${PS1}${__nocx_b_marker}"
         fi
@@ -854,8 +888,14 @@ __nocx_passport_emit() {
         "$__nocx_script_version" "$__nocx_tier" "$__nocx_generation"
 }
 __nocx_passport_emit
-# Native-mode escape (nocx-4ff.9): restore a visible prompt.
+# Restore a visible native prompt. Real caller: the prompt-boundary arm's
+# recovered branch (ADR-0024 decision 8) — after the lifecycle channel dies
+# mid-session, the user must never be left at a suppressed prompt taking raw
+# input, which is the worst of both. The older nocx-4ff.9 "user hits escape"
+# attribution had no caller and is deleted: the escape surface it described
+# no longer exists. PS1 is rebuilt fresh here, so a framework PROMPT_COMMAND
+# that rewrote PS1 cannot win after a loss — the same ordering the
+# marker-only arm guarantees while live.
 __nocx_native_mode() {
-    unset NOCX_PROMPT_MODE
     PS1='\w \$ '
 }

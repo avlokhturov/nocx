@@ -64,6 +64,8 @@ export interface RendererMock extends TerminalRenderer {
   _fireClipboardWrite(text: string): void
   /** Fire an OSC 636 P readiness-passport disposition (P2). */
   _firePassport(d: PassportDisposition): void
+  /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
+  _fireRecoveryFence(hex: string): void
 }
 
 /**
@@ -74,6 +76,7 @@ export interface RendererMock extends TerminalRenderer {
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
   const passportSubs: Array<(d: PassportDisposition) => void> = []
+  const recoverySubs: Array<(hex: string) => void> = []
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -103,6 +106,9 @@ export function createRendererMock(): RendererMock {
     }),
     onBufferChange: vi.fn((cb: (type: 'normal' | 'alternate') => void) => {
       cbs.onBufferChange = cb
+    }),
+    onRecoveryFence: vi.fn((cb: (hex: string) => void) => {
+      recoverySubs.push(cb)
     }),
     onSelectionChange: vi.fn((cb: (text: string) => void) => {
       cbs.onSelectionChange = cb
@@ -160,6 +166,10 @@ export function createRendererMock(): RendererMock {
     },
     _firePassport(d: PassportDisposition) {
       for (const sub of passportSubs) sub(d)
+    },
+    /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
+    _fireRecoveryFence(hex: string) {
+      for (const sub of recoverySubs) sub(hex)
     },
   }
   return mock as unknown as RendererMock

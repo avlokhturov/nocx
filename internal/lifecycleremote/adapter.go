@@ -129,6 +129,7 @@ type Config struct {
 	Epoch      uint64
 	Port       int
 	Capability string // 64 lowercase hex chars
+	Recovery   string // 64 lowercase hex chars; the one-shot recovery fence
 }
 
 // Option configures an Adapter.
@@ -170,6 +171,7 @@ type Adapter struct {
 	domain     lifecycle.DomainID
 	epoch      uint64
 	capability lifecycle.Capability
+	recovery   lifecycle.FenceNonce
 	tc         TunnelConn
 	ln         net.Listener
 	port       int
@@ -262,6 +264,7 @@ func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Con
 	a.domain = h.Domain
 	a.epoch = h.Epoch
 	a.capability = h.Capability
+	a.recovery = h.Recovery
 	log.Info("lifecycle remote channel established",
 		"transport", a.id, "lane", a.lane, "domain", h.Domain, "epoch", h.Epoch, "port", port)
 
@@ -281,6 +284,7 @@ func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Con
 		Epoch:      a.epoch,
 		Port:       port,
 		Capability: hex.EncodeToString(a.capability[:]),
+		Recovery:   hex.EncodeToString(a.recovery[:]),
 	}, nil
 }
 
@@ -304,6 +308,10 @@ func portOf(addr net.Addr) int {
 // times out its handshake in the safe direction.
 func (a *Adapter) Send(env lifecycle.Envelope) error {
 	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return ErrClosed
+	}
 	var target net.Conn
 	if env.Event.Kind == lifecycle.KindAccept {
 		// The accept answers the hello the kernel just accepted: it must go

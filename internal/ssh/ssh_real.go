@@ -785,6 +785,7 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 			opts.Epoch = lc.launch.Epoch
 			opts.LifecyclePort = lc.launch.Port
 			opts.Capability = lc.launch.Capability
+			opts.Recovery = lc.launch.Recovery
 		}
 		cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, opts)
 		if ok && cmd != "" {

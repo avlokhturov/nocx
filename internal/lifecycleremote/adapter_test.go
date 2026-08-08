@@ -13,6 +13,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -76,6 +77,13 @@ func (f *fakeTunnel) Close() error {
 		close(f.done)
 	}
 	return nil
+}
+
+// isClosed reports whether the tunnel lease was released.
+func (f *fakeTunnel) isClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
 }
 
 // lastListenAddr returns the addr the fake was asked to bind.
@@ -421,6 +429,150 @@ func TestTunnelConnDoneRevokesDomainUnknownsAttempt(t *testing.T) {
 	}
 	if got.ExitCode != nil {
 		t.Fatalf("loss must never assign an exit code, got %v", *got.ExitCode)
+	}
+}
+
+// TestTunnelConnDoneStopsServing proves the loss path is terminal for the
+// adapter itself, not just for the kernel state: after TunnelConn.Done
+// closes, Send refuses, the listener is closed (no new candidate can be
+// served), and the kernel stays authoritative over the dead domain.
+func TestTunnelConnDoneStopsServing(t *testing.T) {
+	tunnel := newFakeTunnel()
+	k := newTestKernel()
+	a, cfg, err := New(log.NewSlogAdapter(nil), k, tunnel)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+	sh := establish(t, a, cfg, cfg.Domain, cfg.Epoch, cfg.Capability)
+	defer sh.close()
+	waitFor(t, "domain established", func() bool {
+		d, ok := k.Domain(cfg.Domain)
+		return ok && d.State == lifecycle.DomainEstablished
+	})
+
+	_ = tunnel.Close()
+	waitFor(t, "adapter closed after loss", func() bool {
+		return errors.Is(a.Send(lifecycle.Envelope{}), ErrClosed)
+	})
+	// The listener is gone: a new candidate cannot connect at all.
+	if c, derr := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(cfg.Port)); derr == nil {
+		_ = c.Close()
+		t.Fatal("listener must be closed after transport loss; a dial succeeded")
+	}
+	// The kernel stays authoritative: the domain is lost, and the old
+	// capability authenticates nothing further.
+	waitFor(t, "domain lost", func() bool {
+		d, ok := k.Domain(cfg.Domain)
+		return ok && d.State == lifecycle.DomainLost
+	})
+}
+
+// TestCloseRevokesMintedDomainAndReleasesLease proves the session-end
+// disposal path (decision 8, "in one local transition"): an explicit Close
+// — the caller's failure to spawn the shell, or the session ending — must
+// revoke the minted Pending/Established domain in the kernel, stop the
+// adapter from serving, and release the tunnel lease. A domain left live
+// with no adapter would hold the lane and accept nothing (protocol §5: the
+// first authenticated connection claims the epoch; nothing ever would).
+func TestCloseRevokesMintedDomainAndReleasesLease(t *testing.T) {
+	tunnel := newFakeTunnel()
+	k := newTestKernel()
+	a, cfg, err := New(log.NewSlogAdapter(nil), k, tunnel)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Close without ever establishing: the domain is still Pending. The
+	// disposal path must revoke it even so.
+	if err := a.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	waitFor(t, "minted domain revoked on close", func() bool {
+		d, ok := k.Domain(cfg.Domain)
+		return ok && d.State == lifecycle.DomainLost
+	})
+	if st, _ := k.State(cfg.Lane); st.Lifecycle != lifecycle.LifecycleLost {
+		t.Fatalf("lane must fall to Lost on close, got %v", st.Lifecycle)
+	}
+	// The adapter is closed: Send refuses, and the lease is released.
+	if err := a.Send(lifecycle.Envelope{}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Send after close = %v, want ErrClosed", err)
+	}
+	waitFor(t, "tunnel lease released", func() bool { return tunnel.isClosed() })
+	// A new candidate cannot be served: the listener is gone.
+	if c, derr := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(cfg.Port)); derr == nil {
+		_ = c.Close()
+		t.Fatal("listener must be closed after loss; a dial succeeded")
+	}
+}
+
+// failRequestKernel wraps a real kernel but fails RequestDomain — the
+// mid-New failure that leaves the transport already bound with no domain
+// minted (the only kernel mutation New performs before the domain exists).
+type failRequestKernel struct {
+	*lifecycle.Kernel
+}
+
+func (f *failRequestKernel) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
+	return lifecycle.DomainHandle{}, errors.New("simulated kernel failure")
+}
+
+// TestNewCleanupOnKernelFailureLeavesNoKernelState proves the partial-
+// failure invariant (AGENTS.md rule 3): when New fails after BindTransport
+// succeeded (RequestDomain refused), no domain is minted, no lane state is
+// created, the listener is closed and the tunnel lease is released — a live
+// kernel entry with no adapter must not be left behind. The kernel's bound
+// transport entry is documented as never unbound (BindTransport binds once);
+// the random transport id is unreachable by any later caller.
+func TestNewCleanupOnKernelFailureLeavesNoKernelState(t *testing.T) {
+	tunnel := newFakeTunnel()
+	k := &failRequestKernel{Kernel: newTestKernel()}
+	a, cfg, err := New(log.NewSlogAdapter(nil), k, tunnel)
+	if a != nil || cfg != (Config{}) {
+		t.Fatalf("failed New must return nil adapter and zero config, got %v %+v", a, cfg)
+	}
+	if err == nil {
+		t.Fatal("failed RequestDomain must surface as a New error")
+	}
+
+	// No domain and no lane state exist in the kernel: RequestDomain is the
+	// only path that mints either, and it failed. Any lane lookup errors.
+	if _, serr := k.State("any-lane"); !errors.Is(serr, lifecycle.ErrUnknownLane) {
+		t.Fatalf("a failed New must not create lane state, got %v", serr)
+	}
+	// The listener and the lease are released.
+	if !tunnel.isClosed() {
+		t.Fatal("failed New must release the tunnel lease")
+	}
+}
+
+// TestAdapterSeamCannotResume is the structural half of protocol §12's "two
+// losses, two code paths": the Kernel seam the adapter drives is the whole
+// reachable surface of the kernel from the SSH-loss path, and it must not
+// contain ReplayLane — the reconnect-resume entry point. A transport
+// adapter can lose a domain; it literally cannot resume one. The resume
+// path (publisher.ReplayLane, reached only from the attach handler) and the
+// loss path (kernel.TransportLost, reached from the adapters) share no
+// method, so a reconnect that resumes is structurally unreachable from the
+// SSH-loss path.
+func TestAdapterSeamCannotResume(t *testing.T) {
+	seam := reflect.TypeOf((*Kernel)(nil)).Elem()
+	found := map[string]bool{}
+	for i := range seam.NumMethod() {
+		found[seam.Method(i).Name] = true
+	}
+	if found["ReplayLane"] {
+		t.Fatal("the adapter Kernel seam must not expose ReplayLane: a reconnect that resumes must be unreachable from the SSH-loss path")
+	}
+	if !found["TransportLost"] {
+		t.Fatal("the adapter Kernel seam must expose TransportLost: loss is the adapter's one job")
+	}
+	// And the publisher's resume entry point must not be the loss entry:
+	// the publisher forwards TransportLost to the kernel and ReplayLane is
+	// a separate method; the loss method never calls it.
+	pubTyp := reflect.TypeOf((*lifecyclepub.Publisher)(nil))
+	if _, ok := pubTyp.MethodByName("ReplayLane"); !ok {
+		t.Fatal("publisher must expose ReplayLane for the attach handler")
 	}
 }
 

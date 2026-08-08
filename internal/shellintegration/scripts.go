@@ -35,7 +35,11 @@ var (
 //
 // 18: the shipped scripts are comment-stripped at embed time (nocx-z9s9.17)
 // — same code, no prose — so every install rewrites to the smaller bytes.
-const version = "18"
+//
+// 19: the recovery seam (ADR-0024 decision 8) — a failed lifecycle send at a
+// prompt boundary clears the active latch, restores a visible native prompt,
+// and emits the one-shot recovery fence (nocx-u7uh.15).
+const version = "19"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

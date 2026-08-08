@@ -1026,6 +1026,94 @@ describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
   })
 })
 
+describe('the restoration episode (ADR-0024 decision 8)', () => {
+  const LOST_WITH_RECOVERY = {
+    lane: 'lane-1',
+    lifecycle: 'lost',
+    recovery: { fence: 'ab'.repeat(32), generation: 'ab'.repeat(32) },
+  } as const
+  const WRONG_FENCE = 'cd'.repeat(32)
+
+  it('a lost fact with a recovery contract suppresses the restore-editor action across the whole span', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const setAction = vi.spyOn(ed, 'setRecoveryAction')
+
+      // The interval: from the lost fact until the acknowledgement lands,
+      // the session is neither an authenticated terminal nor advertised as
+      // a usable conventional one — no editor may be offered at any point
+      // inside it.
+      handler(LOST_WITH_RECOVERY)
+      const calls = setAction.mock.calls
+      const last = calls[calls.length - 1]
+      expect(last).toBeDefined()
+      expect(last[0]).toBeNull() // the action is suppressed, never offered
+      // A native fact ends the episode (the ack landed; the backend
+      // published the transition).
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('only the exact pre-provisioned fence is acknowledged, once, with the session id and generation', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const renderer = rendererOf(content)
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const call = client.dispatcher.call
+      handler(LOST_WITH_RECOVERY)
+
+      // A wrong fence — a hostile byte, a different episode — changes
+      // nothing: the renderer never pattern-matches, it matches the nonce.
+      renderer._fireRecoveryFence(WRONG_FENCE)
+      expect(call).not.toHaveBeenCalledWith('lifecycle.recoverAck', expect.anything())
+
+      // The shell's one-shot fence (the exact pre-provisioned nonce)
+      // triggers exactly one acknowledgement, carrying only the session id
+      // and the generation — nothing else.
+      renderer._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      renderer._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence) // a repeat sighting must not double-ack
+      const sid = client._sessions[0].sessionId
+      expect(call).toHaveBeenCalledTimes(1)
+      expect(call).toHaveBeenCalledWith('lifecycle.recoverAck', {
+        sessionId: sid,
+        generation: LOST_WITH_RECOVERY.recovery.generation,
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a refused acknowledgement keeps the pending guard: no editor is offered until the episode ends', async () => {
+    const client = makeClient()
+    client.dispatcher.call = vi.fn().mockRejectedValue(new Error('session is not open'))
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const setAction = vi.spyOn(ed, 'setRecoveryAction')
+      handler(LOST_WITH_RECOVERY)
+      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      await Promise.resolve()
+      await Promise.resolve()
+      // The refusal left the episode pending: the action stays suppressed.
+      const calls = setAction.mock.calls
+      const last = calls[calls.length - 1]
+      expect(last[0]).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
 /**
  * Extract the body of the first top-level rule whose selector contains
  * `className` as a whole class. Brace-matched, so nested blocks (media

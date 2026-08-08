@@ -79,6 +79,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// to the smaller bytes and the version test hashes exactly what
 		// ships.
 		"18": "7e6cac4c22db022dd78434c5d6ac911dc12b8651b6db527de8df57ab82bfe06f",
+		// v19: the recovery seam (ADR-0024 decision 8) — a failed lifecycle
+		// send at a prompt boundary clears the active latch, restores a
+		// visible native prompt, and emits the one-shot recovery fence
+		// (nocx-u7uh.15).
+		"19": "008bf5b8f7a80a8be10c30eedc1c1e3eb4e269f30427c0fd3651254d51dcd84c",
 	}
 
 	h := sha256.New()

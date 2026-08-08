@@ -103,6 +103,8 @@ unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session
 # conventional session.
 __nocx_cap='@CAP@'
 typeset +x __nocx_cap 2>/dev/null
+__nocx_lc_recovery='@RECOVERY@'
+typeset +x __nocx_lc_recovery 2>/dev/null
 @NOCX_ZSH@
 `
 
@@ -149,13 +151,14 @@ exec zsh -l
 // The umask is captured before the bootstrap and restored before every
 // exec: the session must inherit the user's umask, not the bootstrap's.
 // zshRcfile renders the generated .zshrc from its template: @ENV@ is the
-// session environment block, @CAP@ the per-epoch capability (substituted
-// into the script text, never the environment) and @NOCX_ZSH@ the nocx.zsh
-// body (embedded for the argv launchers, a source of the installed
-// generation file for the launch carrier).
-func zshRcfile(envBlock, scriptSource, capability string) string {
+// session environment block, @CAP@ the per-epoch capability and @RECOVERY@
+// the one-shot recovery fence (both substituted into the script text, never
+// the environment) and @NOCX_ZSH@ the nocx.zsh body (embedded for the argv
+// launchers, a source of the installed generation file for the carrier).
+func zshRcfile(envBlock, scriptSource, capability, recovery string) string {
 	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", envBlock)
 	rc = strings.ReplaceAll(rc, "@CAP@", capability)
+	rc = strings.ReplaceAll(rc, "@RECOVERY@", recovery)
 	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", scriptSource)
 	// Comment-stripped like the generation scripts: the generated .zshrc
 	// ships inside the bootstrap payload, and the far shell never reads
@@ -187,7 +190,7 @@ func (remoteLauncher) zshArg(opts LaunchOptions) (string, bool) {
 	// the bash tier (see launcher_bash.go bashArg): the publish prelude has
 	// already published the bundle, and a failed publish leaves a
 	// conventional terminal, never a partial integration.
-	return zshArgFor(zshRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.zsh"), opts.Capability)), true
+	return zshArgFor(zshRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.zsh"), opts.Capability, opts.Recovery)), true
 }
 
 // zshCommand builds the zsh remote command, sent when the far shell is

@@ -88,7 +88,8 @@ type Adapter struct {
 	domain     lifecycle.DomainID
 	epoch      uint64
 	capability lifecycle.Capability
-	conn       *os.File // parent end of the socketpair
+	recovery   lifecycle.FenceNonce // one-shot recovery fence
+	conn       *os.File             // parent end of the socketpair
 	dec        *lifecyclecodec.Decoder
 
 	helloTimeout time.Duration
@@ -142,6 +143,7 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 	a.domain = h.Domain
 	a.epoch = h.Epoch
 	a.capability = h.Capability
+	a.recovery = h.Recovery
 	log.Info("lifecycle channel established",
 		"transport", a.id, "lane", a.lane, "domain", h.Domain, "epoch", h.Epoch)
 
@@ -154,6 +156,42 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 	a.mu.Unlock()
 	go a.pump()
 	return a, child, nil
+}
+
+// Lane returns the adapter's own lane — the addressing tuple it minted and
+// bound to the kernel. The session/app wiring uses it to register the lane
+// against a session id so published facts route to the right subscriber.
+// It is the adapter's own identity, not a current-domain singleton: the
+// transport may carry several domains, and this is the one this adapter
+// established.
+func (a *Adapter) Lane() lifecycle.LaneID {
+	return a.lane
+}
+
+// Launch carries the addressing tuple the shell's bootstrap must embed: the
+// non-secret names (lane, domain, epoch, fd) travel as environment, and the
+// capability plus the one-shot recovery fence ride the rcfile TEXT — never
+// the environment (ADR-0024 decision 2; protocol §4).
+type Launch struct {
+	Lane       lifecycle.LaneID
+	Domain     lifecycle.DomainID
+	Epoch      uint64
+	Capability string // 64 lowercase hex chars
+	Recovery   string // 64 lowercase hex chars; the one-shot recovery fence
+}
+
+// Launch returns the adapter's own addressing tuple, for the session/app
+// wiring to build the shell's bootstrap (the local tier's rcfile). It is
+// the adapter's own identity, not a current-domain singleton: the transport
+// may carry several domains, and this is the one this adapter established.
+func (a *Adapter) Launch() Launch {
+	return Launch{
+		Lane:       a.lane,
+		Domain:     a.domain,
+		Epoch:      a.epoch,
+		Capability: hex.EncodeToString(a.capability[:]),
+		Recovery:   hex.EncodeToString(a.recovery[:]),
+	}
 }
 
 // Send implements lifecycle.Port: it frames one outbound envelope (accept,

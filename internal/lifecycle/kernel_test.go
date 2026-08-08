@@ -958,6 +958,51 @@ func TestTransportLossCascadesToDescendants(t *testing.T) {
 	}
 }
 
+// TestLossThenNewEstablishmentGetsFreshEpoch is the acceptance-literal form
+// of protocol §12: after a transport loss, a new session on a new transport
+// gets a FRESH epoch — strictly greater, never resumed, never reused — and
+// the dead domain's epoch and capability authenticate nothing on the new
+// domain. The assertion is on the epoch value, not merely on the existence
+// of a session.
+func TestLossThenNewEstablishmentGetsFreshEpoch(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p1 := &fakePort{}
+	_ = k.BindTransport("T1", p1)
+	h1 := establish(t, k, "T1", p1, "L", nil)
+
+	if err := k.TransportLost("T1"); err != nil {
+		t.Fatal(err)
+	}
+	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleLost {
+		t.Fatalf("lane must be lost, got %v", st.Lifecycle)
+	}
+
+	p2 := &fakePort{}
+	_ = k.BindTransport("T2", p2)
+	h2, err := k.RequestDomain("L", nil, "T2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h2.Epoch <= h1.Epoch {
+		t.Fatalf("new establishment must mint a strictly fresh epoch: %d <= %d", h2.Epoch, h1.Epoch)
+	}
+	if h2.Domain == h1.Domain {
+		t.Fatalf("new establishment must mint a new domain id, got %s", h2.Domain)
+	}
+	// The dead domain's authenticators are dead: the old epoch on the new
+	// domain, and the old capability on the new domain, are both rejected
+	// before any state is consulted.
+	if err := k.Ingest("T2", envRaw("L", h2.Domain, h1.Epoch, h2.Capability, 1, helloEvt("bash"))); !errors.Is(err, ErrStaleEpoch) {
+		t.Fatalf("stale epoch must be rejected, got %v", err)
+	}
+	if err := k.Ingest("T2", envRaw("L", h2.Domain, h2.Epoch, h1.Capability, 1, helloEvt("bash"))); !errors.Is(err, ErrBadCapability) {
+		t.Fatalf("dead domain's capability must be rejected, got %v", err)
+	}
+	// The fresh domain still establishes normally.
+	mustIngest(t, k, "T2", env("L", h2, 1, helloEvt("bash")))
+	mustAccept(t, p2)
+}
+
 // --- addressing and envelope validation ---------------------------------------
 
 func TestEnvelopeAddressingRejected(t *testing.T) {
@@ -1090,5 +1135,88 @@ func TestCompleteWithForeignAttemptIDRejected(t *testing.T) {
 	ev := Event{Kind: KindComplete, Complete: &Complete{AttemptID: &bogus, ExitCode: intPtr(0), Fence: fence(0x32)}}
 	if err := k.Ingest("T", env("L", h, 3, ev)); !errors.Is(err, ErrAttemptNotOpen) {
 		t.Fatalf("foreign attempt id must be rejected, got %v", err)
+	}
+}
+
+// --- restoration acknowledgement (decision 8) ------------------------------
+
+// TestRecoverLaneLostToNativeOnly is the kernel half of decision 8's
+// composite ACK: the ack moves a Lost lane to Native and nothing else. The
+// domain stays permanently Lost — any future integration is a fresh epoch —
+// and a lane with a live domain is refused (the ack can never revoke
+// authority). Idempotent: an already-Native lane is a no-op success.
+func TestRecoverLaneLostToNativeOnly(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+
+	// Not lost: refused.
+	if err := k.RecoverLane("L"); !errors.Is(err, ErrNotLost) {
+		t.Fatalf("recover over a live lane = %v, want ErrNotLost", err)
+	}
+	// Unknown lane: refused.
+	if err := k.RecoverLane("nope"); !errors.Is(err, ErrUnknownLane) {
+		t.Fatalf("recover over an unknown lane = %v, want ErrUnknownLane", err)
+	}
+
+	if err := k.TransportLost("T"); err != nil {
+		t.Fatal(err)
+	}
+	// The ack lands: Lost → Native.
+	if err := k.RecoverLane("L"); err != nil {
+		t.Fatalf("RecoverLane: %v", err)
+	}
+	st := mustState(t, k, "L")
+	if st.Lifecycle != LifecycleNative {
+		t.Fatalf("lane after recover = %v, want Native", st.Lifecycle)
+	}
+	// The domain stays permanently lost.
+	if d, _ := k.Domain(h.Domain); d.State != DomainLost {
+		t.Fatalf("domain after recover = %v, want permanently DomainLost", d.State)
+	}
+	// Idempotent: a duplicate ack is a no-op success.
+	if err := k.RecoverLane("L"); err != nil {
+		t.Fatalf("duplicate recover = %v, want idempotent no-op", err)
+	}
+}
+
+// TestRecoveryNonceMintedPerDomain proves the pre-provisioned one-shot fence
+// (decision 8): each domain mints a distinct recovery nonce alongside its
+// capability, the lane mirrors it and exposes it after loss (the read model
+// the publisher attaches to the lost fact), and a fresh establishment mints
+// a fresh nonce — a late ack from an old episode can never match.
+func TestRecoveryNonceMintedPerDomain(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h1 := establish(t, k, "T", p, "L", nil)
+	if h1.Recovery == (FenceNonce{}) {
+		t.Fatal("every domain must mint a one-shot recovery fence")
+	}
+	if FenceNonce(h1.Capability) == h1.Recovery {
+		t.Fatal("the recovery fence must be distinct from the capability")
+	}
+
+	if err := k.TransportLost("T"); err != nil {
+		t.Fatal(err)
+	}
+	st := mustState(t, k, "L")
+	if st.RecoveryNonce != h1.Recovery {
+		t.Fatal("the lost lane must still expose its domain's recovery nonce")
+	}
+
+	// A fresh establishment on a fresh transport mints a fresh nonce.
+	p2 := &fakePort{}
+	_ = k.BindTransport("T2", p2)
+	h2, err := k.RequestDomain("L", nil, "T2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h2.Recovery == h1.Recovery {
+		t.Fatal("a fresh domain must mint a fresh recovery fence — never reused")
+	}
+	if st2 := mustState(t, k, "L"); st2.RecoveryNonce != h2.Recovery {
+		t.Fatal("the lane must mirror the new domain's nonce")
 	}
 }

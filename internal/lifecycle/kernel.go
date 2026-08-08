@@ -112,9 +112,16 @@ func (k *Kernel) RequestDomain(lane LaneID, parent *DomainID, t TransportID) (Do
 		Transport:  t,
 		State:      DomainPending,
 		capability: k.randomCapability(),
+		recovery:   k.randomFence(),
 	}
 	k.registry.Register(d)
-	return DomainHandle{Domain: d.ID, Epoch: d.Epoch, Capability: d.capability}, nil
+	// The lane mirrors the domain's recovery fence: the domain dies on
+	// transport loss, and the lost lane must still be able to publish the
+	// expected recovery fence to the renderer (decision 8). A fresh
+	// establishment overwrites it — a new epoch, a new nonce, and a late
+	// ack from the old episode can no longer match.
+	ls.recoveryNonce = d.recovery
+	return DomainHandle{Domain: d.ID, Epoch: d.Epoch, Capability: d.capability, Recovery: d.recovery}, nil
 }
 
 // Ingest delivers one authenticated envelope from a transport. Validation
@@ -300,6 +307,32 @@ func (k *Kernel) TransportLost(t TransportID) error {
 	return nil
 }
 
+// RecoverLane completes a restoration acknowledgement — decision 8's
+// composite ACK, once the renderer has both matched the shell's one-shot
+// recovery fence on the pty and applied the conventional presentation. A
+// Lost lane falls to Native: the session becomes a usable conventional
+// terminal. The domain stays permanently Lost, and any future integration
+// is a fresh epoch — never a resumption. Idempotent: an already-Native lane
+// is a no-op success. It can never revoke a live domain: a lane with a
+// live domain is refused (the ack permits only Lost → Native).
+func (k *Kernel) RecoverLane(lane LaneID) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	ls, ok := k.lanes[lane]
+	if !ok {
+		return ErrUnknownLane
+	}
+	switch ls.lifecycle {
+	case LifecycleLost:
+		k.setLifecycle(ls, LifecycleNative, "", "")
+		return nil
+	case LifecycleNative:
+		return nil // idempotent: the recovery already landed
+	default:
+		return ErrNotLost
+	}
+}
+
 // SubmitAttempt synchronously creates an app-originated attempt — id,
 // app-owned command text, cwd, host, start time — before the bytes that could
 // cause the shell's own start are written to the pty (decision 5). It requires
@@ -352,11 +385,12 @@ func (k *Kernel) State(lane LaneID) (LaneSnapshot, error) {
 		return LaneSnapshot{}, ErrUnknownLane
 	}
 	snap := LaneSnapshot{
-		Lane:      lane,
-		Lifecycle: ls.lifecycle,
-		Domain:    ls.lifecycleDomain,
-		Attempt:   ls.lifecycleAttempt,
-		Stack:     append([]DomainID(nil), ls.stack...),
+		Lane:          lane,
+		Lifecycle:     ls.lifecycle,
+		Domain:        ls.lifecycleDomain,
+		Attempt:       ls.lifecycleAttempt,
+		Stack:         append([]DomainID(nil), ls.stack...),
+		RecoveryNonce: ls.recoveryNonce,
 	}
 	for _, att := range k.attempts {
 		if att.State != AttemptOpen {
@@ -834,6 +868,18 @@ func (k *Kernel) overHandshakeBudget(ls *laneState) bool {
 	}
 	ls.helloFailures = keep
 	return len(keep) >= k.budgets.HandshakeFailures
+}
+
+// randomFence mints the per-domain one-shot recovery fence: 32 random bytes,
+// distinct from the capability, handed to the shell in the bootstrap while
+// the channel is alive. Never reused: a fresh domain is a fresh nonce. A
+// failed random read mirrors randomCapability's tolerance and leaves a zero
+// fence — which the read model reads as "no recovery nonce", disabling the
+// recovery promise rather than shipping a forgeable one (the safe direction).
+func (k *Kernel) randomFence() FenceNonce {
+	var f FenceNonce
+	_, _ = io.ReadFull(k.rand, f[:])
+	return f
 }
 
 // recordAuthFailure charges one failed handshake to the lane (decision 3's

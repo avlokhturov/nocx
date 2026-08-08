@@ -319,6 +319,18 @@ __nocx_marker() {
     fi
 }
 
+# The lifecycle channel died mid-session: a send failed at a prompt
+# boundary. Clear the active latch — the domain is lost and nothing more may
+# be emitted over the dead transport — and mark the session recovered so the
+# marker-only prompt hook restores a visible native prompt with the one-shot
+# recovery fence (ADR-0024 decision 8). nocx matches that fence and
+# acknowledges the restoration; until it lands, the session is neither an
+# authenticated terminal nor a usable conventional one.
+__nocx_lc_recover() {
+    __nocx_lc_active=0
+    __nocx_lc_recovered=1
+}
+
 __nocx_precmd() {
     # Authenticated channel first: refresh, complete (with the exit status
     # and a fresh fence nonce), write the SAME nonce to the pty after the
@@ -344,12 +356,20 @@ __nocx_precmd() {
             __nocx_lc_attempt_open=0
         elif [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
             if __nocx_lc_fence; then
-                __nocx_lc_send complete ',"exit_code":'"$__nocx_exit_code"',"fence":"'"$__nocx_lc_fence_hex"'"'
-                builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
+                if __nocx_lc_send complete ',"exit_code":'"$__nocx_exit_code"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
+                    builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
+                else
+                    __nocx_lc_recover
+                fi
             fi
             __nocx_lc_attempt_open=0
         fi
-        __nocx_lc_send prompt_ready
+        # A failed send means the transport is dead — the domain is lost,
+        # the visible native prompt must be restored (decision 8), and no
+        # further send is attempted this boundary (recover cleared active).
+        if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+            __nocx_lc_send prompt_ready || __nocx_lc_recover
+        fi
     fi
     if [[ -n "$__nocx_first_prompt" ]]; then
         __nocx_marker D "$__nocx_exit_code"
@@ -430,6 +450,20 @@ if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
                 PROMPT="$__nocx_b_marker"
                 RPROMPT=''
                 RPS1=''
+            elif [[ "${__nocx_lc_recovered:-0}" == 1 ]]; then
+                # The channel died mid-session (a send failed): a visible
+                # native prompt stands, never a suppressed one taking raw
+                # input (decision 8). The one-shot recovery fence rides
+                # exactly the FIRST prompt's bytes — nocx matches it and
+                # acknowledges the restoration; afterwards PROMPT is rebuilt
+                # without it, so the nonce reaches the terminal once and is
+                # never reused.
+                __nocx_native_mode
+                if [[ "${__nocx_lc_recovery_emitted:-0}" != 1 ]] && [[ -n "${__nocx_lc_recovery:-}" ]]; then
+                    PROMPT="${PROMPT}"$'%{\e]1337;NOCX_RECOVERY;'"$__nocx_lc_recovery"$'\a%}'
+                    __nocx_lc_recovery_emitted=1
+                fi
+                PROMPT="${PROMPT}$__nocx_b_marker"
             else
                 # PROMPT and PS1 are the SAME parameter in zsh — assigning
                 # both would append the marker twice.
@@ -478,8 +512,12 @@ __nocx_passport_emit() {
 }
 __nocx_passport_emit
 
-# Native-mode escape (nocx-4ff.9): drop the marker-only overlay and restore a
-# visible prompt on the next precmd. Called by nocx when the user hits escape.
+# Restore a visible native prompt. Real caller: the marker-only prompt
+# hook's recovered branch (ADR-0024 decision 8) — after the lifecycle channel
+# dies mid-session, the user must never be left at a suppressed prompt taking
+# raw input, which is the worst of both. The older nocx-4ff.9 "user hits
+# escape" attribution had no caller and is deleted: the escape surface it
+# described no longer exists.
 __nocx_native_mode() {
     add-zsh-hook -d precmd __nocx_marker_only_prompt 2>/dev/null
     unset NOCX_PROMPT_MODE
