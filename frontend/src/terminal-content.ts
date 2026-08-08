@@ -666,6 +666,14 @@ export class TerminalContent extends BaseTabContent {
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => {
+            // The atomic handoff transfers input ownership to the grid at
+            // the moment the bytes go out — not when the running fact lands
+            // (an RPC round trip later). The editor already hid itself in
+            // commit; a grid still marked read-only drops keys typed into
+            // the gap, so a program waiting on stdin (read, ssh, less)
+            // starves with no editor and no input surface (nocx-u7uh.23).
+            // _syncLifecycleOwnership reconciles this on every fact.
+            this.renderer?.setReadOnly(false)
             const recordLine = plan?.recordLine ?? doc
             this._pendingCommand = recordLine
             // Where the command RUNS, captured before anything below can
@@ -1888,11 +1896,18 @@ export class TerminalContent extends BaseTabContent {
       shouldShowEditor(this.lifecycle.state) &&
       this.lifecycle.buffer === 'normal' &&
       !this.nativeMode
-    if (show && !editor.isVisible) {
-      editor.show()
+    // The grid's writability follows ownership, not the visibility
+    // transition: the editor hides ITSELF at submit (the atomic handoff),
+    // so by the time the running fact lands `editor.isVisible` is already
+    // false and a transition-gated setReadOnly(false) never runs — the grid
+    // stays read-only, typed input is dropped, and a program waiting on
+    // stdin (read, ssh, less) hangs with no editor and no input surface
+    // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
+    if (show) {
+      if (!editor.isVisible) editor.show()
       this.renderer?.setReadOnly(true)
-    } else if (!show && editor.isVisible) {
-      editor.hide()
+    } else {
+      if (editor.isVisible) editor.hide()
       this.renderer?.setReadOnly(false)
     }
   }

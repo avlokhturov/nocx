@@ -1550,6 +1550,72 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
+
+  it('the grid turns writable when the command starts — raw input is never dropped (nocx-u7uh.23)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      // The typed interface says setReadOnly(boolean); the mock clears its
+      // call history — reached through a cast, like the existing tests do.
+      const readOnlyMock = (renderer as unknown as { setReadOnly: ReturnType<typeof vi.fn> })
+        .setReadOnly
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(true)
+      readOnlyMock.mockClear()
+
+      // The atomic handoff: the editor hides ITSELF at commit, and the
+      // submit callback makes the grid writable in the SAME synchronous
+      // step the bytes go out — keys typed before the running fact lands
+      // must reach the pty, never be dropped (the u7uh.23 vanish).
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(ed.isVisible).toBe(false)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(false)
+
+      // The published attempt opens the running interval; the sync keeps
+      // the grid writable — a program waiting on stdin (read, ssh, less)
+      // is fed by raw keys with no editor and no input surface lost.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'read x' },
+      })
+      expect(ed.isVisible).toBe(false)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(false)
+      // The completion closes the interval, and back at the prompt the
+      // editor returns and the grid locks again.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(true)
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
 })
 
 describe('the editor submit opens the attempt before the pty write (ADR-0024 §5, nocx-u7uh.18)', () => {

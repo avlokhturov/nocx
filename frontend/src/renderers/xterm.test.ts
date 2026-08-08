@@ -50,6 +50,35 @@ describe('XtermRenderer setReadOnly', () => {
     expect(term!.options.disableStdin).toBe(false)
   })
 
+  it('paste delivers the document even while the grid is read-only (nocx-u7uh.23)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const term = (r as unknown as Record<string, unknown>).term as
+      { options: { disableStdin: boolean } } | undefined
+    expect(term).toBeDefined()
+
+    const received: string[] = []
+    r.onData((text) => received.push(text))
+
+    // The editor owns input, so the grid is read-only — exactly the state a
+    // submit is in. The submitted document must still reach the program: a
+    // paste dropped here is the editor vanishing after every command.
+    r.setReadOnly(true)
+    r.paste('echo hi')
+    expect(received).toEqual(['echo hi'])
+    // The read-only guard is restored: user input stays blocked afterwards.
+    expect(term!.options.disableStdin).toBe(true)
+
+    r.setReadOnly(false)
+    r.paste('echo again')
+    expect(received).toEqual(['echo hi', 'echo again'])
+  })
+
   it('uses the same word separator policy as the frozen block (parity by construction)', async () => {
     stubBrowser()
     const r = new XtermRenderer()
@@ -652,6 +681,42 @@ describe('XtermRenderer fence delivery through the real parser', () => {
     await marker
 
     expect(cb).not.toHaveBeenCalled()
+    r.dispose()
+  })
+
+  it('delivers a recovery fence through the OSC path — the same handler as the render fence (nocx-u7uh.24)', async () => {
+    const r = await mountRenderer()
+    const NONCE = 'ef'.repeat(32)
+    const seen: string[] = []
+    r.onRecoveryFence((hex) => seen.push(hex))
+
+    let markerDone: () => void
+    const marker = new Promise<void>((resolve) => {
+      markerDone = resolve
+    })
+    r.onCommandMarker(() => markerDone())
+
+    r.write(`\x1b]1337;NOCX_RECOVERY;${NONCE}\x07`)
+    r.write('\x1b]133;A\x07')
+    await marker
+
+    // The shell's one-shot recovery nonce reached the subscribers — the
+    // production path that previously parsed NOCX_RECOVERY nowhere.
+    expect(seen).toEqual([NONCE])
+
+    // The completion fence is a different payload kind on the same ident:
+    // it must NOT fan out to recovery subscribers.
+    seen.length = 0
+    r.onRenderFence(() => {})
+    let fenceMarkerDone: () => void
+    const fenceMarker = new Promise<void>((resolve) => {
+      fenceMarkerDone = resolve
+    })
+    r.onCommandMarker(() => fenceMarkerDone())
+    r.write(`\x1b]1337;NOCX_FENCE;${'ab'.repeat(32)}\x07`)
+    r.write('\x1b]133;A\x07')
+    await fenceMarker
+    expect(seen).toEqual([])
     r.dispose()
   })
 })

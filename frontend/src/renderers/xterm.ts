@@ -312,10 +312,16 @@ export class XtermRenderer implements TerminalRenderer {
         }
         for (const sub of this.fenceSubs) sub(event)
       }
+      // One handler owns OSC 1337 (ADR-8): the recovery fence is the same
+      // ident with a different payload kind, so it dispatches from here —
+      // a second handler for the same ident would fight for the sequence.
+      const recovery = parseRecoveryFence(data)
+      if (recovery) {
+        for (const sub of this.recoverySubs) sub(recovery.hex)
+      }
       return false
     })
   }
-
   /**
    * Fit the terminal grid to an explicit viewport from the presentation layer
    * (B.5). Computes cols/rows from real cell metrics and the given CSS-pixel
@@ -494,7 +500,21 @@ export class XtermRenderer implements TerminalRenderer {
   paste(text: string): void {
     // term.paste() owns bracketed-paste wrapping: when the running program
     // has enabled mode 2004, it wraps the payload in the escape sequences.
-    this.term?.paste(text)
+    const term = this.term
+    if (!term) return
+    // A submitted command must reach the program while the grid is
+    // read-only: disableStdin guards USER input (keystrokes land in the
+    // editor instead), and the editor's submit delivers its document
+    // through this same method. xterm's paste() is dropped when
+    // disableStdin is set, so lift the guard for the synchronous delivery
+    // and restore it (nocx-u7uh.23).
+    const wasDisabled = term.options.disableStdin
+    if (wasDisabled) term.options.disableStdin = false
+    try {
+      term.paste(text)
+    } finally {
+      term.options.disableStdin = wasDisabled
+    }
   }
 
   refreshAtlas(): void {
