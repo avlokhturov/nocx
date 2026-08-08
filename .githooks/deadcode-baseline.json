@@ -50,7 +50,8 @@
     "  paths.go names it in the panic it raises. Same category as the vaulttest",
     "  package and ws_test_helper.go already below.",
     "TEMPORARY, nocx-sfv6.3: the 12 internal/transport/control entries are a contract-first package whose consumer is nocx-sfv6.5 (handleControlFrame submitting work). Added by hand because the updater refuses growth on purpose. They MUST be gone before nocx-sfv6 closes \u2014 removing them is an acceptance criterion of nocx-sfv6.5, so a package that is never wired cannot be quietly shipped the way nocx-rtg0's ContentDB.Add was.",
-    "TEMPORARY, nocx-sfv6.8: the two internal/transport/ws_saturation.go entries build the refusal's wire form; their caller is nocx-sfv6.5, which submits work to the executor and answers a *control.Rejection with them. Same obligation as the control package entries \u2014 gone before nocx-sfv6 closes."
+    "TEMPORARY, nocx-sfv6.8: the two internal/transport/ws_saturation.go entries build the refusal's wire form; their caller is nocx-sfv6.5, which submits work to the executor and answers a *control.Rejection with them. Same obligation as the control package entries \u2014 gone before nocx-sfv6 closes.",
+    "TEMPORARY, nocx-sfv6.4 part 1: 139 internal/capability entries. The package is the typed operation layer; its consumers are the handlers, and the handler migration was deliberately split off because another worker was rewriting every outbound call site in the same files. THE CHECKABLE OBLIGATION: this baseline must return to exactly 104 violations before nocx-sfv6 closes. A number, not a promise \u2014 104 is the count after the control and ws_saturation entries and before internal/capability existed."
   ],
   "violations": [
     {
@@ -60,6 +61,562 @@
     {
       "file": "internal/app/app.go",
       "func": "WithLogFilePath"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "Gate"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "IsRefused"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "RefusedError.Error"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "guard.begin"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "guard.check"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "guard.end"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "guard.ok"
+    },
+    {
+      "file": "internal/capability/capability.go",
+      "func": "operation.Run"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "NewConfigOperation"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.ApplyGroups"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.AtomicImport"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.ClearSecretRefs"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.CreateGroup"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.CreateProfile"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.DeleteGroup"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.DeleteGroupAtomic"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.DeleteProfile"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.ListGroups"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.ListProfiles"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.PatchProfile"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.Settings"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.UpdateGroup"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.UpdateProfile"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.resolveGroup"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.resolveOptions"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.resolveSparse"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.rowToRef"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "configService.secretRowInputs"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "newConfigService"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "newOperation"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.Declarations"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.Descriptors"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.GetSnapshot"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.Reset"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.SecretDelete"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.SecretExists"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.SecretSet"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.SetBool"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.SetNumber"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.SetSelect"
+    },
+    {
+      "file": "internal/capability/config.go",
+      "func": "settingsService.SetString"
+    },
+    {
+      "file": "internal/capability/content.go",
+      "func": "NewContentOperation"
+    },
+    {
+      "file": "internal/capability/content.go",
+      "func": "contentService.QueryHistory"
+    },
+    {
+      "file": "internal/capability/content.go",
+      "func": "contentService.RecordCommand"
+    },
+    {
+      "file": "internal/capability/content.go",
+      "func": "contentService.RewriteRedaction"
+    },
+    {
+      "file": "internal/capability/content.go",
+      "func": "newContentService"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "NewCaptureSaveOperation"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "NewExportOperation"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "NewRestoreOperation"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "NewTabbyImportOperation"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "captureSaveService.CreateSecret"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "captureSaveService.RewriteRedaction"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "exportService.Backup"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "exportService.ConfigExport"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "exportService.Manifest"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "exportService.PortableEncrypted"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "newCaptureSaveService"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "newExportService"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "newRestoreService"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "newTabbyImportService"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "restoreService.Import"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "settingsProviderAdapter.All"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "settingsSinkAdapter.Apply"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "tabbyImportService.AtomicImport"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "tabbyImportService.CreateSecret"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "tabbyImportService.ListGroups"
+    },
+    {
+      "file": "internal/capability/export.go",
+      "func": "tabbyImportService.ListProfiles"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "NewFilesystemBindingOperation"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "NewFilesystemOpenOperation"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "filesystemBindingService.Acquire"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "filesystemBindingService.Close"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "filesystemBindingService.CloseSession"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "filesystemOpenService.Acquire"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "filesystemOpenService.Get"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "filesystemOpenService.OpenBinding"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "newFilesystemBindingService"
+    },
+    {
+      "file": "internal/capability/files.go",
+      "func": "newFilesystemOpenService"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "NewGitBindingOperation"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "NewGitOpenOperation"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "gitBindingService.Acquire"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "gitBindingService.Close"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "gitBindingService.CloseSession"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "gitOpenService.Acquire"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "gitOpenService.Get"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "gitOpenService.OpenBinding"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "newGitBindingService"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "newGitOpenService"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "openOutcomeCloseError.Error"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "openOutcomeCloseError.Unwrap"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "openOutcomeNilRepoError.Error"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "openRegisterError.Error"
+    },
+    {
+      "file": "internal/capability/git.go",
+      "func": "openRegisterError.Unwrap"
+    },
+    {
+      "file": "internal/capability/open.go",
+      "func": "NewOpenOperation"
+    },
+    {
+      "file": "internal/capability/open.go",
+      "func": "newOpenService"
+    },
+    {
+      "file": "internal/capability/open.go",
+      "func": "openService.Close"
+    },
+    {
+      "file": "internal/capability/open.go",
+      "func": "openService.Open"
+    },
+    {
+      "file": "internal/capability/open.go",
+      "func": "openService.Resolve"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "NewSecretOperation"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "NewSecretOperations"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "SecretOperations.ForSecret"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "inventoryInputs"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "newSecretService"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.CreateSecret"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.DeleteSecret"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.GetSecret"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.Inventory"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.RenameSecret"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.ReplaceSecret"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.ResolveLine"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.ResolveRow"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.Usage"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.inventoryInputs"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.loadConfig"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "secretService.resolveVaultSecret"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "NewSessionOperation"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "NewSessionOperations"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "SessionOperations.ForSession"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "newSessionService"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "sessionService.Close"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "sessionService.Get"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "sessionService.LastUsedForProfiles"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "sessionService.List"
+    },
+    {
+      "file": "internal/capability/session.go",
+      "func": "sessionService.Open"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "NewVaultOperation"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "NewVaultResetOperation"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "newVaultResetService"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "newVaultService"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultResetService.Execute"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultResetService.Preview"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.Activity"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.ChangePassphrase"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.RegenerateRecovery"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.Seal"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.SetAutoSeal"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.SetDefaultProvider"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.Setup"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.Snapshot"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.State"
+    },
+    {
+      "file": "internal/capability/vault.go",
+      "func": "vaultService.Unseal"
     },
     {
       "file": "internal/completion/ssh.go",
