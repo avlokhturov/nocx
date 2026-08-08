@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transport/outbound"
 )
 
 // filesLocalFactory is the composition-root shape the tests share: local
@@ -820,14 +821,13 @@ func TestFilesWatch_DegradesToPollingHonestly(t *testing.T) {
 }
 
 // TestFilesClose_DoesNotWaitOnABlockedNotificationWrite: a notification
-// write has no deadline (writeJSON is a raw gorilla write), so a
-// subscriber whose write path is wedged must never hold a close hostage.
-// The subscriber here is a wsConn whose write mutex is locked forever —
-// the deterministic stand-in for a socket with a full send buffer — and
-// files.close must still return promptly. This is the assertion that
-// fails if stopping the watcher ever waits for the loop to exit: the loop
-// parks on the wedged write holding no use-guard, and close drains the
-// guards and proceeds.
+// write is a non-blocking enqueue into the subscriber's outbound queue, so
+// a subscriber whose pump is wedged (the deterministic stand-in for a
+// socket with a full send buffer) must never hold a close hostage.
+// files.close must still return promptly. This is the assertion that fails
+// if stopping the watcher ever waits for the loop to exit: the loop parks
+// on the wedged write holding no use-guard, and close drains the guards
+// and proceeds.
 func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 	e := newFilesTestEnv(t)
 	sid := e.openSession(t, 1)
@@ -840,10 +840,12 @@ func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 		return w.paths[dir] != ""
 	})
 
-	// Wedge the subscriber's write path. The next notification write
-	// blocks forever, and the poll loop parks on it — holding no guard.
-	deadConn := newWSConn(nil, 0)
-	deadConn.mu.Lock()
+	// Wedge the subscriber's outbound pump mid-write. The next
+	// notification is a non-blocking enqueue, so the poll loop parks on
+	// the queue — holding no guard — never on a socket write.
+	wedge := newWedgedSocket()
+	deadConn := &wsConn{out: outbound.New(wedge, outbound.Config{}), id: 0}
+	t.Cleanup(func() { _ = wedge.Close() })
 	e.ws.getRx(session.ID(sid)).setSubscriber(deadConn, nil)
 
 	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("x"), 0o600); err != nil {

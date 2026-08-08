@@ -178,19 +178,19 @@ func oracleDestination(argv []string) string {
 //     environment id could not be minted).
 //   - "stage-failed": the launcher could not be written where the local
 //     shell can read it (no home, unwritable directory, full disk).
-func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleShellLauncherCommand(wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		SessionID  string   `json:"sessionId"`
 		OracleArgv []string `json:"oracleArgv"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || !validOracleArgv(params.OracleArgv) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and a well-formed oracleArgv required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId and a well-formed oracleArgv required"})
 		return
 	}
 
 	// Session id is server-authoritative (AD-7).
 	if _, err := s.registry.Get(session.ID(params.SessionID)); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
 
@@ -266,12 +266,12 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 				"environmentId", envID, "mode", launcherModeInstalled, "reason", "installed-fact",
 				"identity", identity)
 			s.registerAttempt(envID, identity, attemptExpectedInstalled)
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+			_ = wconn.TryResult(req.ID, mustMarshal(shellLauncherCommandResult{
 				Mode:          launcherModeInstalled,
 				EnvironmentID: envID,
 				LauncherPath:  nil,
 				Reason:        nil,
-			})))
+			}))
 			return
 		}
 	}
@@ -328,26 +328,26 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// generated, but a home directory with a quote or a space in it is an
 	// ordinary thing and must not break the rewrite.
 	quoted := shellQuote(path)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(shellLauncherCommandResult{
 		Mode:          launcherModeBootstrap,
 		EnvironmentID: envID,
 		LauncherPath:  &quoted,
 		Reason:        nil,
-	})))
+	}))
 }
 
 // refuseLauncherCommand answers with a stated refusal: no path, a reason the
 // renderer can log, and an original line that goes to the pty unchanged. The
 // attempt is registered as raw so a later observation for its environment id
 // can never touch the installed fact.
-func (s *WSServer) refuseLauncherCommand(wconn *wsConn, req jsonrpcRequest, envID, reason string) {
+func (s *WSServer) refuseLauncherCommand(wconn Responder, req jsonrpcRequest, envID, reason string) {
 	s.registerAttempt(envID, "", attemptExpectedRaw)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(shellLauncherCommandResult{
 		Mode:          launcherModeRaw,
 		EnvironmentID: envID,
 		LauncherPath:  nil,
 		Reason:        &reason,
-	})))
+	}))
 }
 
 // observedPassport is the passport the renderer accepted, crossing the
@@ -382,28 +382,28 @@ type environmentObservedResult struct {
 // passport". Only an attempt this backend minted can change state, and the
 // first observation per attempt decides it — duplicates are idempotent and
 // can never regress a written fact.
-func (s *WSServer) handleShellEnvironmentObserved(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleShellEnvironmentObserved(wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		EnvironmentID string            `json:"environmentId"`
 		Passport      *observedPassport `json:"passport"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.EnvironmentID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: environmentId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: environmentId required"})
 		return
 	}
 	if params.Passport != nil && params.Passport.EnvironmentID != params.EnvironmentID {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: passport environmentId does not match"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: passport environmentId does not match"})
 		return
 	}
 	if !validPassport(params.Passport) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: malformed passport"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: malformed passport"})
 		return
 	}
 	processed, updated := s.consumeObservation(params.EnvironmentID, params.Passport)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(environmentObservedResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(environmentObservedResult{
 		Processed:   processed,
 		FactUpdated: updated,
-	})))
+	}))
 }
 
 // consumeObservation applies one observation to the attempt registry under

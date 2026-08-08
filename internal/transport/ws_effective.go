@@ -26,26 +26,26 @@ type effectiveResponse struct {
 	Errors   []profileErrorEntry           `json:"errors,omitempty"`
 }
 
-func (s *WSServer) handleEffective(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleEffective(wconn Responder, req jsonrpcRequest) {
 	var params effectiveParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	if len(params.IDs) == 0 {
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(effectiveResponse{})))
+		_ = wconn.TryResult(req.ID, mustMarshal(effectiveResponse{}))
 		return
 	}
 
 	allProfiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load profiles: %v", err)))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load profiles: %v", err)})
 		return
 	}
 	allGroups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load groups: %v", err)))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load groups: %v", err)})
 		return
 	}
 	// Build lookups first.
@@ -82,10 +82,10 @@ func (s *WSServer) handleEffective(wconn *wsConn, req jsonrpcRequest) {
 		dtos = append(dtos, dto)
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(effectiveResponse{
+	_ = wconn.TryResult(req.ID, mustMarshal(effectiveResponse{
 		Profiles: dtos,
 		Errors:   errs,
-	})))
+	}))
 }
 
 // ---------------------------------------------------------------------------
@@ -123,26 +123,26 @@ func validatePatch(p patchParams) error {
 	return nil
 }
 
-func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handlePatch(wconn Responder, req jsonrpcRequest) {
 	var params patchParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	if err := validatePatch(params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
 
 	allProfiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load profiles: %v", err)))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load profiles: %v", err)})
 		return
 	}
 	allGroups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("load groups: %v", err)))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load groups: %v", err)})
 		return
 	}
 	// No credential layer exists (ADR-0017): identity lives inline on the
@@ -162,7 +162,7 @@ func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
 		}
 	}
 	if target == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, fmt.Sprintf("profile %q not found", params.ID)))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: fmt.Sprintf("profile %q not found", params.ID)})
 		return
 	}
 
@@ -175,12 +175,12 @@ func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
 		case "options.passwordSecret", "options.keySecret", "options.keyPassphraseSecret":
 			row, isStr := value.(string)
 			if !isStr {
-				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, path+" must be a string"))
+				_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: path + " must be a string"})
 				return
 			}
 			resolved, resolveErr := s.rowToSecretRef(row)
 			if resolveErr != nil {
-				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, resolveErr.Error()))
+				_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: resolveErr.Error()})
 				return
 			}
 			params.Set[path] = resolved
@@ -193,13 +193,13 @@ func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
 
 	// Validate: host is required and cannot be unset-made-empty.
 	if opts.Host == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "host is required and cannot be unset"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "host is required and cannot be unset"})
 		return
 	}
 
 	// Persist — UpdateProfile writes the presence-aware options directly.
 	if updateErr := s.profiles.UpdateProfile(*target); updateErr != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(updateErr), updateErr.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(updateErr), Message: updateErr.Error()})
 		return
 	}
 
@@ -208,11 +208,11 @@ func (s *WSServer) handlePatch(wconn *wsConn, req jsonrpcRequest) {
 	// and produces dense resolved values with provenance.
 	eff, err := profile.ResolveEffectiveProfile(*target, allGroups, profile.SparseSSHOptions{})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("resolve after patch: %v", err)))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("resolve after patch: %v", err)})
 		return
 	}
 
 	dto := profile.ToEffectiveDTO(eff, groupByID)
 	wireEffectiveSecretFields(&dto)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(dto)))
+	_ = wconn.TryResult(req.ID, mustMarshal(dto))
 }

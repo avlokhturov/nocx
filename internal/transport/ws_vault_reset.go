@@ -44,32 +44,32 @@ type vaultResetResponse struct {
 	Residue      []vaultResetResidueEntry `json:"residue"`
 }
 
-func (s *WSServer) handleVaultResetPreview(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultResetPreview(wconn Responder, req jsonrpcRequest) {
 	if s.vaultReset == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault reset not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
 	p, err := s.vaultReset.Preview(context.Background())
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.resetPreview: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.resetPreview: ", err))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResetPreviewResponse{
+	_ = wconn.TryResult(req.ID, mustMarshal(vaultResetPreviewResponse{
 		SecretCount:             p.Impact.SecretCount,
 		ProfileCount:            p.Impact.ProfileCount,
 		SystemKeychainReachable: p.SystemKeychainReachable,
 		VaultInitialized:        p.VaultInitialized,
-	})))
+	}))
 }
 
-func (s *WSServer) handleVaultReset(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultReset(wconn Responder, req jsonrpcRequest) {
 	if s.vaultReset == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault reset not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
 	result, err := s.vaultReset.Execute(context.Background())
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.reset: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.reset: ", err))
 		return
 	}
 
@@ -83,9 +83,9 @@ func (s *WSServer) handleVaultReset(wconn *wsConn, req jsonrpcRequest) {
 
 	s.broadcastVaultChanged()
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResetResponse{
+	_ = wconn.TryResult(req.ID, mustMarshal(vaultResetResponse{
 		SecretCount:  result.Impact.SecretCount,
 		ProfileCount: result.Impact.ProfileCount,
 		Residue:      residue,
-	})))
+	}))
 }

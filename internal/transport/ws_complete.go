@@ -49,16 +49,16 @@ type shellCompleteResponse struct {
 // completer (the backend's own filesystem); a KindRemote session
 // delegates to the SSH completer, which runs a second shell on the
 // remote host through the DiscoveryConn lane.
-func (s *WSServer) handleShellComplete(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleShellComplete(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	params, errMsg := parseShellCompleteParams(req)
 	if errMsg != "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: "+errMsg))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
 	}
 
 	sess, err := s.registry.Get(session.ID(params.SessionID))
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Session not found: "+params.SessionID))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Session not found: " + params.SessionID})
 		return
 	}
 
@@ -70,10 +70,10 @@ func (s *WSServer) handleShellComplete(ctx context.Context, wconn *wsConn, req j
 		comp = s.sshCompleter
 	}
 	if comp == nil {
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellCompleteResponse{
+		_ = wconn.TryResult(req.ID, mustMarshal(shellCompleteResponse{
 			Entries: []shellCompleteEntry{},
 			Reason:  "completion unavailable for this session kind",
-		})))
+		}))
 		return
 	}
 
@@ -88,15 +88,15 @@ func (s *WSServer) handleShellComplete(ctx context.Context, wconn *wsConn, req j
 
 	compResp, err := comp.Complete(ctx, compReq)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellCompleteResponse{
+		_ = wconn.TryResult(req.ID, mustMarshal(shellCompleteResponse{
 			Entries: []shellCompleteEntry{},
 			Reason:  "completion unavailable",
-		})))
+		}))
 		return
 	}
 
 	resp := toWireResponse(compResp)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
 // parseShellCompleteParams validates the request against the handler contract.

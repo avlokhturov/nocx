@@ -27,11 +27,11 @@ import (
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
-
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
@@ -266,10 +266,14 @@ type WSServer struct {
 	tunnelMu     sync.Mutex
 	tunnels      map[string]*tunnel.Tunnel
 	ownerTunnels map[*wsConn]map[string]struct{}
-
 	// connsMu protects conns. One entry per active WebSocket connection.
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
+
+	// outboundBudget is the process-wide cap on queued outbound bytes,
+	// shared by every connection's outbound queue (the per-connection
+	// queue depth is the primary bound; this is the additional one).
+	outboundBudget *outbound.Budget
 
 	// asks is the shared backend→renderer ask machinery (unlock requests,
 	// connection-password prompts): a pending registry keyed by
@@ -579,6 +583,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		},
 		rx:                make(map[session.ID]*sessionRx),
 		conns:             make(map[*wsConn]struct{}),
+		outboundBudget:    outbound.NewBudget(outboundBudgetBytes),
 		tunnels:           make(map[string]*tunnel.Tunnel),
 		ownerTunnels:      make(map[*wsConn]map[string]struct{}),
 		origins:           LoopbackOriginPolicy{},
@@ -722,44 +727,103 @@ func (s *WSServer) removeRx(id session.ID) {
 	delete(s.rx, id)
 }
 
-// --- WebSocket connection -------------------------------------------------
-
-// wsConn wraps a gorilla/websocket.Conn with a mutex to serialize writes.
-// The gorilla package does not support concurrent writes — callers must
-// serialize writes to a single *websocket.Conn. The mutex here provides that
-// serialization across ringToConn, monitorExit, and handleOpen/handleAttach.
+// Responder is the outbound capability handed to control-plane handlers:
+// every response is a non-blocking enqueue into the connection's outbound
+// queue. None of these methods may block — a full queue applies the
+// outbound stall policy (mark stalled, reserve one control-overload notice,
+// close as a last resort) and the frame is dropped. A handler that can
+// block on the socket is the defect this whole package boundary exists to
+// remove (nocx-o2le): the read loop must never wait behind a renderer.
 //
-// id is the per-connection (per-tab) identity the capture registry scopes
-// captures to: backend-assigned, monotonic, and never reused.
+// The exceptions that keep a *wsConn rather than a Responder are exactly
+// the ones that need the connection as an identity, not as a writer:
+// handleHistoryRecord (capture tab id), handleTunnelOpen (owner-tunnel map
+// key), handleOpen/handleAttach/setSubscriber (register the connection as
+// the session's subscriber), and the infrastructure (readLoop, the
+// handleControlFrame dispatcher, ringToConn, closeSession). None of them
+// can write to the socket: the only write path on *wsConn is the
+// Responder trio below.
+type Responder interface {
+	TryResult(id json.RawMessage, result json.RawMessage) error
+	TryError(id json.RawMessage, rpcErr RPCError) error
+	TryNotify(method string, params json.RawMessage) error
+}
+
+// RPCError is the payload of a JSON-RPC error response. Data is omitted
+// from the wire when nil (parity with jsonrpcErrorObj's omitempty).
+type RPCError struct {
+	Code    int
+	Message string
+	Data    any
+}
+
+// wsConn wraps a connection's outbound side (outbound.Conn — the socket,
+// the queue and the pump) together with the per-connection identity the
+// capture registry scopes captures to. It implements Responder; there is no
+// other write path. The raw *websocket.Conn lives in package outbound and
+// never leaves it, so reaching past the queue is not expressible from this
+// package, not merely discouraged.
+//
+// id is the per-connection (per-tab) identity: backend-assigned, monotonic,
+// and never reused.
 type wsConn struct {
-	mu   sync.Mutex
-	conn *websocket.Conn
-	id   uint64
+	out *outbound.Conn
+	id  uint64
 }
 
-// wsWriteDeadline bounds every WebSocket write. Without it, a slow/stuck
-// renderer (TCP buffer full, tab backgrounded) makes WriteMessage block
-// forever while holding wsConn.mu — and any control-frame response that
-// needs writeJSON blocks on the same mutex, stalling the readLoop and
-// freezing every tab (nocx-o2le).
-const wsWriteDeadline = 10 * time.Second
-
-func newWSConn(conn *websocket.Conn, id uint64) *wsConn {
-	return &wsConn{conn: conn, id: id}
+func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
+	return &wsConn{
+		out: outbound.New(outbound.NewWebSocket(conn, wsReadLimit), outbound.Config{
+			Budget: s.outboundBudget,
+			OnStall: func(stalled bool) {
+				if stalled {
+					s.log.Warn("connection outbound stalled", "conn", id)
+				} else {
+					s.log.Debug("connection outbound recovered", "conn", id)
+				}
+			},
+		}),
+		id: id,
+	}
 }
 
-func (w *wsConn) writeJSON(v any) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
-	return w.conn.WriteJSON(v)
+func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
+	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(newJSONRPCResult(id, result)))
 }
 
-func (w *wsConn) writeMessage(msgType int, data []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_ = w.conn.SetWriteDeadline(time.Now().Add(wsWriteDeadline))
-	return w.conn.WriteMessage(msgType, data)
+func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
+	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
+	if rpcErr.Data != nil {
+		obj.Data = rpcErr.Data
+	}
+	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(jsonrpcResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   obj,
+	}))
+}
+
+func (w *wsConn) TryNotify(method string, params json.RawMessage) error {
+	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	}))
+}
+
+// respond delivers a pre-built jsonrpcResponse through the Responder
+// capability. It is the migration seam for handlers that build a response
+// in a local variable before replying; the enqueue is non-blocking either
+// way, and the wire shape is byte-identical to the old direct write.
+func respond(r Responder, resp jsonrpcResponse) error {
+	if resp.Error != nil {
+		return r.TryError(resp.ID, RPCError{
+			Code:    resp.Error.Code,
+			Message: resp.Error.Message,
+			Data:    resp.Error.Data,
+		})
+	}
+	return r.TryResult(resp.ID, resp.Result)
 }
 
 // connState tracks sessions this connection is attached to (opened or
@@ -939,6 +1003,14 @@ type ackParams struct {
 // largest declared budget (8 MiB for document-carrying methods) plus
 // envelope and base64 overhead, so no legitimate frame can trip it.
 const wsReadLimit = 16 << 20 // 16 MiB
+
+// outboundBudgetBytes caps queued outbound bytes across all connections of
+// one server. The per-connection queue (outbound.DefaultQueueDepth frames,
+// up to ~2 MiB at the largest data frame) is the primary bound; this is the
+// process-wide additional bound the design calls for. 32 MiB tolerates
+// roughly a dozen saturated connections before the shared budget itself
+// trips the stall policy.
+const outboundBudgetBytes = 32 << 20 // 32 MiB
 
 // envelopeScanCap bounds how many bytes of a control frame the read loop
 // scans looking for the JSON-RPC envelope. The envelope of a legitimate
@@ -1171,12 +1243,10 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("ws upgrade", "error", err)
 		return
 	}
-	// Bound ingress at the protocol layer before anything else: a frame
-	// above wsReadLimit is refused with close code 1009 and never reaches
-	// the read loop.
-	conn.SetReadLimit(wsReadLimit)
-	defer func() { _ = conn.Close() }()
-
+	// The outbound constructor applies the ingress read limit and takes
+	// ownership of the socket: from here the pump is the only writer and
+	// out.Close() (below) is the only teardown. No other reference to the
+	// raw *websocket.Conn outlives this function.
 	// Derive a cancel context so that when handleSession returns,
 	// ringToConn goroutines blocked in waitForData receive ctx.Done()
 	// and exit. r.Context() is NOT reliably cancelled for hijacked
@@ -1184,11 +1254,14 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	wconn := newWSConn(conn, s.nextConnID.Add(1))
+	wconn := newWSConn(s, conn, s.nextConnID.Add(1))
 	s.registerConn(wconn)
 	defer s.unregisterConn(wconn)
+	// Closing the outbound side closes the socket and stops the pump. It
+	// also unblocks a pump write in flight, so teardown never waits on a
+	// stuck renderer.
+	defer wconn.out.Close()
 	state := newConnState()
-
 	readErr := make(chan error, 1)
 	go s.readLoop(ctx, wconn, state, readErr)
 
@@ -1216,7 +1289,7 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 		default:
 		}
 
-		msgType, data, err := wconn.conn.ReadMessage()
+		msgType, data, err := wconn.out.ReadMessage()
 		if err != nil {
 			return
 		}
@@ -1246,18 +1319,18 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 			errors.Is(err, errEnvelopeDuplicateMember):
 			s.log.Warn("jsonrpc invalid request", "len", len(data), "category", err.Error())
 			resp := newJSONRPCError(json.RawMessage("null"), -32600, "Invalid Request")
-			_ = wconn.writeJSON(resp)
+			_ = respond(wconn, resp)
 		default:
 			s.log.Warn("jsonrpc parse error", "len", len(data), "category", "syntax_error")
 			resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
-			_ = wconn.writeJSON(resp)
+			_ = respond(wconn, resp)
 		}
 		return
 	}
 
 	if req.JSONRPC != "2.0" || req.Method == "" {
 		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1269,7 +1342,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.log.Warn("jsonrpc params over budget", "method", req.Method, "len", len(data))
 		resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf(
 			"params exceed the size budget for method %s (%d bytes)", req.Method, budget))
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1279,7 +1352,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if err := json.Unmarshal(data, &req); err != nil {
 		s.log.Warn("jsonrpc parse error", "len", len(data), "category", "syntax_error")
 		resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 	// An explicit null id behaves exactly like an absent one: the response
@@ -1297,7 +1370,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if req.Method != budgetedMethod {
 		s.log.Warn("jsonrpc invalid request", "len", len(data), "category", "method_mismatch")
 		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1418,7 +1491,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handlePasswordResolved(wconn, req)
 	default:
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 	}
 }
 
@@ -1453,7 +1526,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	var params openParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1482,7 +1555,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			// credentials and jump hosts through the profile resolver.
 			if !s.resolverOK {
 				resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
-				_ = wconn.writeJSON(resp)
+				_ = respond(wconn, resp)
 				return
 			}
 
@@ -1492,8 +1565,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 				s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
 				// Resolving reads the stored password, so a sealed vault surfaces
 				// here — the renderer needs the reason to offer an unlock.
-				resp := rpcErrorFor(req.ID, -32603, "", err)
-				_ = wconn.writeJSON(resp)
+				_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
 				return
 			}
 
@@ -1523,7 +1595,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			// the config file — no stored profile involved.
 			if s.sshConfigResolver == nil {
 				resp := newJSONRPCError(req.ID, -32603, "SSH config resolver not available")
-				_ = wconn.writeJSON(resp)
+				_ = respond(wconn, resp)
 				return
 			}
 
@@ -1567,7 +1639,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			// does not record it.
 		} else {
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
-			_ = wconn.writeJSON(resp)
+			_ = respond(wconn, resp)
 			return
 		}
 		// Shell pin (nocx-pu4.1): the open may name the far shell the
@@ -1595,7 +1667,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		// so the vault-owned unlock prompt appears instead of an error
 		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
 		if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
 			return
 		}
 		// Classify the SSH error through the same taxonomy the probe uses
@@ -1615,7 +1687,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		if hk := hostKeyInfoFromError(err); hk != nil {
 			resp.Error.Data = hk
 		}
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1626,7 +1698,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 		state.remove(sess.ID())
 		_ = s.registry.Close(sess.ID())
 		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 	rx.setSubscriber(wconn, state)
@@ -1667,7 +1739,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
-	_ = wconn.writeJSON(resp)
+	_ = respond(wconn, resp)
 
 	// Stored forwards (nocx-wzc4.5): replay the profile's configured
 	// forwards onto the connection. Deliberately ASYNC and only after the
@@ -1760,51 +1832,51 @@ func (s *WSServer) trackTunnelConnectionOwned(t *tunnel.Tunnel) {
 	s.tunnelMu.Unlock()
 }
 
-func (s *WSServer) handleResize(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleResize(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params resizeParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || params.Cols == 0 || params.Rows == 0 {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId, cols, and rows required")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
 	sid := session.ID(params.SessionID)
 	if !state.has(sid) {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
 	sess, err := s.registry.Get(sid)
 	if err != nil {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
 	if err := sess.Resize(context.Background(), params.Cols, params.Rows, params.XPixel, params.YPixel); err != nil {
 		resp := newJSONRPCError(req.ID, -32603, "Internal error")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
 	result, _ := json.Marshal(map[string]any{})
 	resp := newJSONRPCResult(req.ID, result)
-	_ = wconn.writeJSON(resp)
+	_ = respond(wconn, resp)
 }
 
-func (s *WSServer) handleClose(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleClose(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params closeParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
 	sid := session.ID(params.SessionID)
 	if !state.has(sid) {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1814,7 +1886,7 @@ func (s *WSServer) handleClose(wconn *wsConn, state *connState, req jsonrpcReque
 
 	result, _ := json.Marshal(map[string]any{})
 	resp := newJSONRPCResult(req.ID, result)
-	_ = wconn.writeJSON(resp)
+	_ = respond(wconn, resp)
 }
 
 // handleAttach reattaches a connection to a session's output ring at the
@@ -1837,7 +1909,7 @@ func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connS
 	var params attachParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and offset required")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1846,7 +1918,7 @@ func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connS
 	sess, err := s.registry.Get(sid)
 	if err != nil {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1856,14 +1928,14 @@ func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connS
 	// another ringToConn, doubling every output byte for that subscriber.
 	if state.has(sid) {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: already attached to this session")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
 	rx := s.getRx(sid)
 	if rx == nil {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1875,7 +1947,7 @@ func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connS
 	w := rx.ring.writtenLocked()
 	if params.Offset > w {
 		resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf("Invalid params: offset %d exceeds written %d", params.Offset, w))
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 		return
 	}
 
@@ -1887,11 +1959,11 @@ func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connS
 	if needsReset {
 		respJSON, _ := json.Marshal(map[string]any{"reset": true, "from": from})
 		resp := newJSONRPCResult(req.ID, respJSON)
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 	} else {
 		respJSON, _ := json.Marshal(map[string]any{"resumed": true, "from": from})
 		resp := newJSONRPCResult(req.ID, respJSON)
-		_ = wconn.writeJSON(resp)
+		_ = respond(wconn, resp)
 	}
 
 	// Files (fm-w8): deliver the dirty paths the session's bindings
@@ -2032,8 +2104,8 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		}
 
 		// Cap each frame at FairChunk for cross-session fairness (AD-10).
-		// Splitting one PTY read (~32 KB) into ≤4 frames lets other
-		// sessions grab the wsConn mutex between chunks.
+		// Splitting one PTY read (~32 KB) into ≤4 frames keeps one
+		// flooding session from occupying the shared outbound queue.
 		chunk := pending
 		if len(chunk) > FairChunk {
 			chunk = chunk[:FairChunk]
@@ -2045,8 +2117,19 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 			SessionID: sidBytes,
 			Payload:   chunk,
 		}
-		if err := wconn.writeMessage(websocket.BinaryMessage, f.Encode()); err != nil {
-			return
+		// The enqueue is non-blocking; a full queue means the renderer is
+		// behind (the stall policy has already told it so). Wait for the
+		// pump to drain rather than dropping PTY output — the ring is the
+		// source of truth and pos advances only once the frame is queued,
+		// so a reconnect at the renderer's ack offset replays anything
+		// that never made it (AD-9).
+		for {
+			if err := wconn.out.TryEnqueue(websocket.BinaryMessage, f.Encode()); err == nil {
+				break
+			}
+			if werr := wconn.out.WaitForRoom(ctx); werr != nil {
+				return
+			}
 		}
 		pos += uint64(len(chunk))
 		pending = pending[len(chunk):]
@@ -2087,19 +2170,9 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		return
 	}
 
-	notif := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "exit",
-		"params": map[string]string{
-			"sessionId": string(sess.ID()),
-		},
-	}
-	notifJSON, err := json.Marshal(notif)
-	if err != nil {
-		s.log.Error("marshal exit notification", "error", err)
-		return
-	}
-	if err := wconn.writeMessage(websocket.TextMessage, notifJSON); err != nil {
+	if err := wconn.TryNotify("exit", mustMarshal(map[string]string{
+		"sessionId": string(sess.ID()),
+	})); err != nil {
 		s.log.Debug("write exit notification", "error", err)
 	}
 }
@@ -2122,19 +2195,9 @@ func (s *WSServer) notifyInputStalled(sid session.ID) {
 	if wconn == nil {
 		return
 	}
-	notif := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "inputStalled",
-		"params": map[string]string{
-			"sessionId": string(sid),
-		},
-	}
-	notifJSON, err := json.Marshal(notif)
-	if err != nil {
-		s.log.Error("marshal inputStalled notification", "error", err)
-		return
-	}
-	if err := wconn.writeMessage(websocket.TextMessage, notifJSON); err != nil {
+	if err := wconn.TryNotify("inputStalled", mustMarshal(map[string]string{
+		"sessionId": string(sid),
+	})); err != nil {
 		s.log.Debug("write inputStalled notification", "error", err)
 	}
 }
@@ -2169,27 +2232,27 @@ func (s *WSServer) closeSession(sid session.ID) {
 // plane). Each returns a JSON-RPC error (-32601) when the relevant store is
 // not wired (WithProfileRepository/WithGroupRepository not called).
 
-func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleProfileMethod(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
 	}
 	switch req.Method {
 	case "profiles.list":
 		profs, err := s.profiles.LoadProfiles()
 		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return
 		}
 		// Secret references stay backend-owned: hand the renderer row handles.
 		for i := range profs {
 			profs[i] = wireProfile(profs[i])
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(profs)))
+		_ = wconn.TryResult(req.ID, mustMarshal(profs))
 	case "profiles.create":
 		var p profile.SSHProfile
 		if err := json.Unmarshal(req.Params, &p); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
 		}
 		// Mint an ID when the renderer sends none.
@@ -2200,47 +2263,47 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 		// before storage.
 		var wireErr error
 		if p.Options, wireErr = s.optionsFromWire(p.Options); wireErr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, wireErr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: wireErr.Error()})
 			return
 		}
 		if err := s.profiles.CreateProfile(p); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireProfile(p))))
+		_ = wconn.TryResult(req.ID, mustMarshal(wireProfile(p)))
 	case "profiles.update":
 		var p profile.SSHProfile
 		if err := json.Unmarshal(req.Params, &p); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
 		}
 		if p.ID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "id required"})
 			return
 		}
 		var wireErr error
 		if p.Options, wireErr = s.optionsFromWire(p.Options); wireErr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, wireErr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: wireErr.Error()})
 			return
 		}
 		if err := s.profiles.UpdateProfile(p); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireProfile(p))))
+		_ = wconn.TryResult(req.ID, mustMarshal(wireProfile(p)))
 	case "profiles.delete":
 		var params struct {
 			ID string `json:"id"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
 		}
 		if err := s.profiles.DeleteProfile(params.ID); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+		_ = wconn.TryResult(req.ID, mustMarshal(true))
 	case "profiles.effective":
 		s.handleEffective(wconn, req)
 	case "profiles.patch":
@@ -2248,16 +2311,16 @@ func (s *WSServer) handleProfileMethod(wconn *wsConn, req jsonrpcRequest) {
 	}
 }
 
-func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleGroupMethod(wconn Responder, req jsonrpcRequest) {
 	if s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "groups not available"})
 		return
 	}
 	switch req.Method {
 	case "groups.list":
 		groups, err := s.groups.LoadGroups()
 		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 			return
 		}
 		// The renderer addresses secret bindings by row handle (ADR-0011 §2):
@@ -2265,11 +2328,11 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 		for i := range groups {
 			groups[i] = wireGroup(groups[i])
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
+		_ = wconn.TryResult(req.ID, mustMarshal(groups))
 	case "groups.create":
 		var g profile.ProfileGroup
 		if err := json.Unmarshal(req.Params, &g); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
 		}
 		// Mint an ID when the renderer sends none, as profiles.create does.
@@ -2280,30 +2343,30 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 		// so storage never holds a secrow handle.
 		wg, werr := s.groupFromWire(g)
 		if werr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})
 			return
 		}
 		g = wg
 		if err := s.groups.CreateGroup(g); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireGroup(g))))
+		_ = wconn.TryResult(req.ID, mustMarshal(wireGroup(g)))
 	case "groups.update":
 		var g profile.ProfileGroup
 		if err := json.Unmarshal(req.Params, &g); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
 		}
 		if g.ID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "id required"})
 			return
 		}
 		// Resolve the defaults' row handles before comparing against storage,
 		// or the guard below would see every secret binding as a change.
 		wg, werr := s.groupFromWire(g)
 		if werr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})
 			return
 		}
 		g = wg
@@ -2311,7 +2374,7 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 		// CRUD — the renderer MUST use groups.impact + groups.apply.
 		allGroups, loadErr := s.groups.LoadGroups()
 		if loadErr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, loadErr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: loadErr.Error()})
 			return
 		}
 		var stored *profile.ProfileGroup
@@ -2322,48 +2385,46 @@ func (s *WSServer) handleGroupMethod(wconn *wsConn, req jsonrpcRequest) {
 			}
 		}
 		if stored == nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "group not found"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "group not found"})
 			return
 		}
 		if g.ParentGroupID != stored.ParentGroupID {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
-				"ParentGroupId can only be changed through groups.apply, not groups.update"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "ParentGroupId can only be changed through groups.apply, not groups.update"})
 			return
 		}
 		if defaultsChanged(stored.Defaults, g.Defaults) {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
-				"Defaults can only be changed through groups.apply, not groups.update"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Defaults can only be changed through groups.apply, not groups.update"})
 			return
 		}
 		if err := s.groups.UpdateGroup(g); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(wireGroup(g))))
+		_ = wconn.TryResult(req.ID, mustMarshal(wireGroup(g)))
 	case "groups.delete":
 		var params struct {
 			ID string `json:"id"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 			return
 		}
 		if params.ID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "id required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "id required"})
 			return
 		}
 
 		// Use atomic delete (promotes children to root).
 		ad, ok := s.groups.(interface{ DeleteGroupAtomic(string) error })
 		if !ok {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "group store does not support atomic delete"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "group store does not support atomic delete"})
 			return
 		}
 		if err := ad.DeleteGroupAtomic(params.ID); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(true)))
+		_ = wconn.TryResult(req.ID, mustMarshal(true))
 	}
 }
 
@@ -2771,9 +2832,9 @@ func (s *WSServer) secretProviderName() string {
 // handleTabbyPreview parses a Tabby config and returns a preview of what
 // would be imported, without writing anything. Uses planTabbyImport for the
 // shared planning logic.
-func (s *WSServer) handleTabbyPreview(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleTabbyPreview(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
 	}
 	var params struct {
@@ -2781,36 +2842,36 @@ func (s *WSServer) handleTabbyPreview(wconn *wsConn, req jsonrpcRequest) {
 		Passphrase string `json:"passphrase,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: config (YAML string) required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: config (YAML string) required"})
 		return
 	}
 
 	plan, preview, err := s.planTabbyImport(params.Config, params.Passphrase)
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Tabby preview: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Tabby preview: ", err))
 		return
 	}
 	_ = plan // stored server-side by preview.PlanToken
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(preview)))
+	_ = wconn.TryResult(req.ID, mustMarshal(preview))
 }
 
 // handleTabbyExecute executes a previously previewed Tabby import plan.
 // Takes the plan token from the preview response.
-func (s *WSServer) handleTabbyExecute(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleTabbyExecute(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil || s.credentials == nil || s.profileSvc == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "import not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "import not available"})
 		return
 	}
 	var params tabbyExecuteParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.PlanToken == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: planToken required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: planToken required"})
 		return
 	}
 
 	// Claim the plan so concurrent calls for the same token are rejected.
 	plan := s.claimPlan(params.PlanToken)
 	if plan == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Plan not found, expired, or already in progress. Please preview again."))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Plan not found, expired, or already in progress. Please preview again."})
 		return
 	}
 
@@ -2835,7 +2896,7 @@ func (s *WSServer) handleTabbyExecute(wconn *wsConn, req jsonrpcRequest) {
 		secretID, err := s.createSecret(ctx, credential.NewSecret(cp.secret),
 			vault.SecretMeta{Name: cp.name, Kind: kind})
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Store secret: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", err))
 			return
 		}
 		if cp.isPassphrase {
@@ -2861,14 +2922,14 @@ func (s *WSServer) handleTabbyExecute(wconn *wsConn, req jsonrpcRequest) {
 	// No credential records are imported: the bindings live on the profiles.
 	result := s.profileSvc.AtomicImport(plan.profiles, plan.groups)
 	if len(result.ImportErrors) > 0 {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Import failed: " + result.ImportErrors[0]})
 		return
 	}
 
 	// All writes succeeded — remove the plan permanently.
 	s.finishPlan(params.PlanToken)
 	succeeded = true
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }
 
 func privateKeyLabel(hash string) string {
@@ -2879,9 +2940,9 @@ func privateKeyLabel(hash string) string {
 	return "Tabby key " + short
 }
 
-func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleImportTabby(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
 	}
 	var params struct {
@@ -2889,13 +2950,13 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 		Passphrase string `json:"passphrase,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: config (YAML string) required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: config (YAML string) required"})
 		return
 	}
 
 	cfg, err := importer.ParseTabbyConfig([]byte(params.Config))
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Parse Tabby config: "+err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Parse Tabby config: " + err.Error()})
 		return
 	}
 
@@ -2911,16 +2972,16 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 
 	if cfg.Vault != nil && cfg.Vault.Encrypted {
 		if s.credentials == nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Store secret: ", errors.New("credential store not available")))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", errors.New("credential store not available")))
 			return
 		}
 		if params.Passphrase == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Vault is encrypted: passphrase required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Vault is encrypted: passphrase required"})
 			return
 		}
 		vaultContents, err := importer.DecryptTabbyVault(cfg.Vault, params.Passphrase)
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Decrypt vault: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Decrypt vault: ", err))
 			return
 		}
 
@@ -3006,7 +3067,7 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 			secretID, err := s.createSecret(ctx, credential.NewSecret(p.val),
 				vault.SecretMeta{Name: name, Kind: kind})
 			if err != nil {
-				_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Store secret: ", err))
+				_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", err))
 				return
 			}
 			switch p.ts.Type {
@@ -3053,7 +3114,7 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 		if tg.Defaults != nil {
 			d, err := profile.DecodeDefaults(tg.Defaults)
 			if err != nil {
-				_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("Import failed: group %q defaults: %v", tg.Name, err)))
+				_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("Import failed: group %q defaults: %v", tg.Name, err)})
 				return
 			}
 			defaults = &d
@@ -3071,10 +3132,10 @@ func (s *WSServer) handleImportTabby(wconn *wsConn, req jsonrpcRequest) {
 
 	result := s.profileSvc.AtomicImport(profiles, groups)
 	if len(result.ImportErrors) > 0 {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Import failed: "+result.ImportErrors[0]))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Import failed: " + result.ImportErrors[0]})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result.ProfilesImported)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result.ProfilesImported))
 }
 
 // --- settings control-plane handlers -------------------------------------
@@ -3089,9 +3150,9 @@ func (s *WSServer) findDescriptor(key string) settings.Descriptor {
 }
 
 // handleSettingsMethod dispatches settings.* RPCs. Returns -32601 when the
-func (s *WSServer) handleSettingsMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSettingsMethod(wconn Responder, req jsonrpcRequest) {
 	if s.settings == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "Method not found"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "Method not found"})
 		return
 	}
 	switch req.Method {
@@ -3112,23 +3173,23 @@ func (s *WSServer) handleSettingsMethod(wconn *wsConn, req jsonrpcRequest) {
 	}
 }
 
-func (s *WSServer) handleSettingsDescribe(wconn *wsConn, req jsonrpcRequest) {
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]any{
+func (s *WSServer) handleSettingsDescribe(wconn Responder, req jsonrpcRequest) {
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]any{
 		"declarations": s.settings.Declarations(),
-	})))
+	}))
 }
 
-func (s *WSServer) handleSettingsGetSnapshot(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSettingsGetSnapshot(wconn Responder, req jsonrpcRequest) {
 	snap, err := s.settings.GetSnapshot()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.getSnapshot: "+err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "settings.getSnapshot: " + err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]any{
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]any{
 		"values":     snap.Values,
 		"overridden": snap.Overridden,
 		"revision":   snap.Revision,
-	})))
+	}))
 }
 
 // settingsSetParams carries the key and the untyped value.
@@ -3137,20 +3198,20 @@ type settingsSetParams struct {
 	Value json.RawMessage `json:"value"`
 }
 
-func (s *WSServer) handleSettingsSet(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSettingsSet(wconn Responder, req jsonrpcRequest) {
 	var p settingsSetParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	desc := s.findDescriptor(p.Key)
 	if desc == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Unknown setting: "+p.Key))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown setting: " + p.Key})
 		return
 	}
 	if desc.Control() == settings.ControlSecret {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Secret settings must use settings.secretSet"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Secret settings must use settings.secretSet"})
 		return
 	}
 
@@ -3159,48 +3220,48 @@ func (s *WSServer) handleSettingsSet(wconn *wsConn, req jsonrpcRequest) {
 	case settings.ControlToggle:
 		var b bool
 		if err := json.Unmarshal(p.Value, &b); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected boolean"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected boolean"})
 			return
 		}
 		bk, ok := desc.(*settings.Bool)
 		if !ok {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as a toggle but is not a Bool key"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as a toggle but is not a Bool key"})
 			return
 		}
 		setErr = s.settings.SetBool(bk, b)
 	case settings.ControlText:
 		var str string
 		if err := json.Unmarshal(p.Value, &str); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected string"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected string"})
 			return
 		}
 		sk, ok := desc.(*settings.String)
 		if !ok {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as text but is not a String key"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as text but is not a String key"})
 			return
 		}
 		setErr = s.settings.SetString(sk, str)
 	case settings.ControlNumber:
 		var n float64
 		if err := json.Unmarshal(p.Value, &n); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected number"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected number"})
 			return
 		}
 		nk, ok := desc.(*settings.Number)
 		if !ok {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as a number but is not a Number key"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as a number but is not a Number key"})
 			return
 		}
 		setErr = s.settings.SetNumber(nk, n)
 	case settings.ControlSelect:
 		var str string
 		if err := json.Unmarshal(p.Value, &str); err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid value: expected string"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected string"})
 			return
 		}
 		sk, ok := desc.(*settings.Select)
 		if !ok {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as a select but is not a Select key"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as a select but is not a Select key"})
 			return
 		}
 		setErr = s.settings.SetSelect(sk, str)
@@ -3208,14 +3269,14 @@ func (s *WSServer) handleSettingsSet(wconn *wsConn, req jsonrpcRequest) {
 
 	if setErr != nil {
 		if errors.Is(setErr, settings.ErrValidation) {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, setErr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: setErr.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, setErr.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: setErr.Error()})
 		return
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }
 
 // settingsResetParams carries the key to reset.
@@ -3223,28 +3284,28 @@ type settingsResetParams struct {
 	Key string `json:"key"`
 }
 
-func (s *WSServer) handleSettingsReset(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSettingsReset(wconn Responder, req jsonrpcRequest) {
 	var p settingsResetParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	desc := s.findDescriptor(p.Key)
 	if desc == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Unknown setting: "+p.Key))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown setting: " + p.Key})
 		return
 	}
 
 	if err := s.settings.Reset(desc); err != nil {
 		if errors.Is(err, settings.ErrValidation) {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.reset: "+err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "settings.reset: " + err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }
 
 // settingsSecretSetParams carries the key and the secret value.
@@ -3253,29 +3314,29 @@ type settingsSecretSetParams struct {
 	Value string `json:"value"`
 }
 
-func (s *WSServer) handleSettingsSecretSet(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSettingsSecretSet(wconn Responder, req jsonrpcRequest) {
 	var p settingsSecretSetParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	desc := s.findDescriptor(p.Key)
 	if desc == nil || desc.Control() != settings.ControlSecret {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Not a secret setting: "+p.Key))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Not a secret setting: " + p.Key})
 		return
 	}
 
 	sk, ok := desc.(*settings.Secret)
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as secret but is not a Secret key"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as secret but is not a Secret key"})
 		return
 	}
 	if err := s.settings.SecretSet(sk, p.Value); err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "settings.secretSet: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "settings.secretSet: ", err))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }
 
 // settingsSecretDeleteParams carries the key to delete.
@@ -3283,29 +3344,29 @@ type settingsSecretDeleteParams struct {
 	Key string `json:"key"`
 }
 
-func (s *WSServer) handleSettingsSecretDelete(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSettingsSecretDelete(wconn Responder, req jsonrpcRequest) {
 	var p settingsSecretDeleteParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	desc := s.findDescriptor(p.Key)
 	if desc == nil || desc.Control() != settings.ControlSecret {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Not a secret setting: "+p.Key))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Not a secret setting: " + p.Key})
 		return
 	}
 
 	sk, ok := desc.(*settings.Secret)
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as secret but is not a Secret key"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as secret but is not a Secret key"})
 		return
 	}
 	if err := s.settings.SecretDelete(sk); err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "settings.secretDelete: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "settings.secretDelete: ", err))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }
 
 // settingsSecretExistsParams carries the key to check.
@@ -3313,30 +3374,30 @@ type settingsSecretExistsParams struct {
 	Key string `json:"key"`
 }
 
-func (s *WSServer) handleSettingsSecretExists(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSettingsSecretExists(wconn Responder, req jsonrpcRequest) {
 	var p settingsSecretExistsParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	desc := s.findDescriptor(p.Key)
 	if desc == nil || desc.Control() != settings.ControlSecret {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Not a secret setting: "+p.Key))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Not a secret setting: " + p.Key})
 		return
 	}
 
 	sk, ok := desc.(*settings.Secret)
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Setting "+p.Key+" is declared as secret but is not a Secret key"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as secret but is not a Secret key"})
 		return
 	}
 	exists, err := s.settings.SecretExists(sk)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "settings.secretExists: "+err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "settings.secretExists: " + err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"exists": exists})))
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"exists": exists}))
 }
 
 // mustMarshal serializes v to JSON, panicking on error (only used for
@@ -3375,26 +3436,23 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 }
 
 // broadcastSettingsChanged sends a settings.changed notification to every
-// connected client. Best-effort: a write failure on one connection does not
-// prevent writes to others.
+// connected client. Best-effort and non-blocking: each notification is one
+// enqueue into the connection's outbound queue, so a slow renderer delays
+// its own connection only and never this domain callback.
 func (s *WSServer) broadcastSettingsChanged(revision int, keys []string) {
 	s.connsMu.Lock()
-	// Copy under lock so writes happen outside the critical section.
+	// Copy under lock so enqueues happen outside the critical section.
 	conns := make([]*wsConn, 0, len(s.conns))
 	for wc := range s.conns {
 		conns = append(conns, wc)
 	}
 	s.connsMu.Unlock()
 
-	msg := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "settings.changed",
-		"params": map[string]any{
-			"revision": revision,
-			"keys":     keys,
-		},
+	params := map[string]any{
+		"revision": revision,
+		"keys":     keys,
 	}
 	for _, wc := range conns {
-		_ = wc.writeJSON(msg)
+		_ = wc.TryNotify("settings.changed", mustMarshal(params))
 	}
 }

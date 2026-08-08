@@ -114,33 +114,24 @@ func reasonForError(err error) *vaultErrorData {
 	}
 }
 
-func newVaultError(id json.RawMessage, code int, msg string, err error) jsonrpcResponse {
-	data := reasonForError(err)
-	obj := jsonrpcErrorObj{Code: code, Message: msg}
-	if data != nil {
-		obj.Data = data
-	}
-	return jsonrpcResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Error:   &obj,
-	}
-}
-
-// rpcErrorFor wraps a vault-domain error in a JSON-RPC error with the reason
+// rpcErrorFor wraps a vault-domain error in an RPCError with the reason
 // attached. The renderer tells "the vault needs setting up" apart from a
 // genuine failure by reading data.reason; a bare -32603 with a prose message
 // is indistinguishable from a disk error, so the setup dialog never opens and
 // the user is shown a toast instead. That was the whole of nocx-25k9.7.
-func rpcErrorFor(id json.RawMessage, fallback int, msgPrefix string, err error) jsonrpcResponse {
-	return newVaultError(id, vaultErrorCode(err, fallback), msgPrefix+err.Error(), err)
+func rpcErrorFor(fallback int, msgPrefix string, err error) RPCError {
+	return RPCError{
+		Code:    vaultErrorCode(err, fallback),
+		Message: msgPrefix + err.Error(),
+		Data:    reasonForError(err),
+	}
 }
 
 // handleVaultMethod dispatches vault.* RPCs. Returns -32601 when the vault
 // lifecycle is not wired.
-func (s *WSServer) handleVaultMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultMethod(wconn Responder, req jsonrpcRequest) {
 	if s.vaultLifecycle == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault not available"})
 		return
 	}
 
@@ -231,21 +222,21 @@ func vaultSnapToStatus(snap vault.Snapshot) vaultStatusResponse {
 	return resp
 }
 
-func (s *WSServer) handleVaultStatus(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultStatus(wconn Responder, req jsonrpcRequest) {
 	ctx := context.Background()
 	snap := s.vaultLifecycle.Snapshot(ctx)
 	resp := vaultSnapToStatus(snap)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
-func (s *WSServer) handleVaultSetup(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSetup(wconn Responder, req jsonrpcRequest) {
 	var params vaultSetupParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
@@ -253,7 +244,7 @@ func (s *WSServer) handleVaultSetup(wconn *wsConn, req jsonrpcRequest) {
 	result, err := s.vaultLifecycle.Setup(context.Background(), vreq)
 	if err != nil {
 		code := vaultErrorCode(err, -32603)
-		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
 	}
 	// Response first, notification second: the caller that requested the
@@ -267,26 +258,26 @@ func (s *WSServer) handleVaultSetup(wconn *wsConn, req jsonrpcRequest) {
 			RecoveryCode string `json:"recoveryCode"`
 		}{RecoveryCode: result.RecoveryCode}
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 
 	s.broadcastVaultChanged()
 }
 
-func (s *WSServer) handleVaultUnseal(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultUnseal(wconn Responder, req jsonrpcRequest) {
 	var params vaultUnsealParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	// Reject secretId — the renderer never names a secret reference.
 	if params.SecretID != "" {
 		err := fmt.Errorf("secretId is backend-owned")
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
 
@@ -299,21 +290,21 @@ func (s *WSServer) handleVaultUnseal(wconn *wsConn, req jsonrpcRequest) {
 	case "recovery":
 		vreq.RecoveryCode = params.Secret
 	default:
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "invalid means: must be os, passphrase, or recovery"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "invalid means: must be os, passphrase, or recovery"})
 		return
 	}
 
 	if err := s.vaultLifecycle.Unseal(context.Background(), vreq); err != nil {
 		code := vaultErrorCode(err, -32603)
-		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultSeal(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSeal(wconn Responder, req jsonrpcRequest) {
 	s.vaultLifecycle.Seal()
 	// Vault seal destroys every pending capture: the offer's plaintext
 	// must not outlive the lock it was offered under (the capture
@@ -323,7 +314,7 @@ func (s *WSServer) handleVaultSeal(wconn *wsConn, req jsonrpcRequest) {
 		s.captures.DestroyAll()
 	}
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 type vaultChangePassphraseParams struct {
@@ -340,14 +331,14 @@ type vaultSetDefaultProviderParams struct {
 	Provider string `json:"provider"`
 }
 
-func (s *WSServer) handleVaultChangePassphrase(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultChangePassphrase(wconn Responder, req jsonrpcRequest) {
 	var params vaultChangePassphraseParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
@@ -358,22 +349,22 @@ func (s *WSServer) handleVaultChangePassphrase(wconn *wsConn, req jsonrpcRequest
 	}
 	if err := s.vaultLifecycle.ChangePassphrase(context.Background(), vreq); err != nil {
 		code := vaultErrorCode(err, -32603)
-		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultRegenerateRecovery(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultRegenerateRecovery(wconn Responder, req jsonrpcRequest) {
 	var params vaultRegenerateRecoveryParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
@@ -381,7 +372,7 @@ func (s *WSServer) handleVaultRegenerateRecovery(wconn *wsConn, req jsonrpcReque
 	recoveryCode, err := s.vaultLifecycle.RegenerateRecovery(context.Background(), vreq)
 	if err != nil {
 		errCode := vaultErrorCode(err, -32603)
-		_ = wconn.writeJSON(newVaultError(req.ID, errCode, err.Error(), err))
+		_ = wconn.TryError(req.ID, RPCError{Code: errCode, Message: err.Error(), Data: reasonForError(err)})
 		return
 	}
 
@@ -389,80 +380,80 @@ func (s *WSServer) handleVaultRegenerateRecovery(wconn *wsConn, req jsonrpcReque
 	resp := struct {
 		RecoveryCode string `json:"recoveryCode"`
 	}{RecoveryCode: recoveryCode}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
-func (s *WSServer) handleVaultSetDefaultProvider(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSetDefaultProvider(wconn Responder, req jsonrpcRequest) {
 	var params vaultSetDefaultProviderParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	provID := vault.ProviderID(params.Provider)
 	if err := s.vaultLifecycle.SetDefaultProvider(context.Background(), provID); err != nil {
 		code := vaultErrorCode(err, -32603)
-		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 type vaultSetAutoSealParams struct {
 	Minutes *int `json:"minutes"`
 }
 
-func (s *WSServer) handleVaultSetAutoSeal(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultSetAutoSeal(wconn Responder, req jsonrpcRequest) {
 	var params vaultSetAutoSealParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.Minutes == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: minutes is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: minutes is required"})
 		return
 	}
 
 	if err := s.vaultLifecycle.SetAutoSeal(context.Background(), *params.Minutes); err != nil {
 		code := vaultErrorCode(err, -32603)
-		_ = wconn.writeJSON(newVaultError(req.ID, code, err.Error(), err))
+		_ = wconn.TryError(req.ID, RPCError{Code: code, Message: err.Error(), Data: reasonForError(err)})
 		return
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultActivity(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultActivity(wconn Responder, req jsonrpcRequest) {
 	s.vaultLifecycle.Activity()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultInventory(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.inventory not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.inventory not available"})
 		return
 	}
 
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
 	groups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
@@ -470,7 +461,7 @@ func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
 
 	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.inventory: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.inventory: ", err))
 		return
 	}
 
@@ -478,7 +469,7 @@ func (s *WSServer) handleVaultInventory(wconn *wsConn, req jsonrpcRequest) {
 		Entries []vault.InventoryEntry `json:"entries"`
 	}{Entries: entries}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }
 
 // vaultInventoryInputs projects profile secret bindings into the vault's
@@ -565,18 +556,18 @@ type vaultCreateSecretResponse struct {
 // time and stores the file's CONTENTS — never the path string, which is the
 // defect dcf566b fixed on the connection editor and must not be
 // reintroduced here.
-func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultCreateSecret(wconn Responder, req jsonrpcRequest) {
 	var params vaultCreateSecretParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if strings.TrimSpace(params.Name) == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: name is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: name is required"})
 		return
 	}
 
@@ -584,7 +575,7 @@ func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 	if params.Path != "" {
 		contents, err := readKeyFile(params.Path)
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: read key file: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.createSecret: read key file: ", err))
 			return
 		}
 		value = contents
@@ -595,7 +586,7 @@ func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 		_, realName, err := s.vaultLifecycle.CreateNamedResolved(context.Background(), credential.NewSecret(value),
 			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.createSecret: ", err))
 			return
 		}
 		name = realName
@@ -603,13 +594,13 @@ func (s *WSServer) handleVaultCreateSecret(wconn *wsConn, req jsonrpcRequest) {
 		_, err := s.vaultLifecycle.CreateNamed(context.Background(), credential.NewSecret(value),
 			vault.SecretMeta{Name: params.Name, Kind: params.Kind})
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.createSecret: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.createSecret: ", err))
 			return
 		}
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultCreateSecretResponse{Name: name})))
+	_ = wconn.TryResult(req.ID, mustMarshal(vaultCreateSecretResponse{Name: name}))
 }
 
 // readKeyFile reads the file the user chose in Path mode. A leading ~ is
@@ -661,48 +652,48 @@ type vaultRenameSecretParams struct {
 // is never accepted from the renderer as an identifier (nocx-jb20.1). The
 // row set is the same one the inventory shows, so an unrecorded
 // (pre-ADR-0016) reference can be renamed too.
-func (s *WSServer) handleVaultRenameSecret(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultRenameSecret(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.renameSecret not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.renameSecret not available"})
 		return
 	}
 	var params vaultRenameSecretParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if strings.TrimSpace(params.Name) == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: name is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: name is required"})
 		return
 	}
 	if strings.TrimSpace(params.ID) == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: id is required"})
 		return
 	}
 
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	groups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	inputs := s.vaultInventoryInputs(profiles, groups)
 
 	if err := s.vaultLifecycle.RenameSecret(context.Background(), params.ID, params.Name, inputs); err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.renameSecret: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.renameSecret: ", err))
 		return
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 type vaultReplaceSecretParams struct {
@@ -721,22 +712,22 @@ type vaultReplaceSecretParams struct {
 // it out (ADR-0011 §2) — so the renderer only ever supplies the replacement.
 // Like create, a private key may be supplied by PATH, which the backend
 // dereferences to the file's contents.
-func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultReplaceSecret(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.replaceSecret not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.replaceSecret not available"})
 		return
 	}
 	var params vaultReplaceSecretParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if strings.TrimSpace(params.ID) == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: id is required"})
 		return
 	}
 
@@ -744,7 +735,7 @@ func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
 	if params.Path != "" {
 		contents, err := readKeyFile(params.Path)
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.replaceSecret: read key file: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.replaceSecret: read key file: ", err))
 			return
 		}
 		value = contents
@@ -752,23 +743,23 @@ func (s *WSServer) handleVaultReplaceSecret(wconn *wsConn, req jsonrpcRequest) {
 
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	groups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	inputs := s.vaultInventoryInputs(profiles, groups)
 
 	if err := s.vaultLifecycle.ReplaceSecret(context.Background(), params.ID, credential.NewSecret(value), inputs); err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.replaceSecret: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.replaceSecret: ", err))
 		return
 	}
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 type vaultDeleteSecretParams struct {
@@ -790,37 +781,37 @@ type vaultDeleteSecretParams struct {
 // in Vault.Delete's existing metadata-first sequence. A failed provider
 // delete therefore leaves a brief unreachable orphan (the journal retries
 // it), never a connection claiming a password that cannot exist.
-func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultDeleteSecret(wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.deleteSecret not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.deleteSecret not available"})
 		return
 	}
 	if s.vaultLifecycle == nil || s.credentials == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.deleteSecret not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.deleteSecret not available"})
 		return
 	}
 	var params vaultDeleteSecretParams
 	if !isJSONObject(req.Params) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if strings.TrimSpace(params.ID) == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: id is required"})
 		return
 	}
 
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	groups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	inputs := s.vaultInventoryInputs(profiles, groups)
@@ -829,7 +820,7 @@ func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
 	// reference must be found while the metadata still holds it.
 	id, ok := s.vaultLifecycle.ResolveRow(params.ID, inputs)
 	if !ok {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.deleteSecret: ", fmt.Errorf("unknown secret row %q", params.ID)))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.deleteSecret: ", fmt.Errorf("unknown secret row %q", params.ID)))
 		return
 	}
 
@@ -837,11 +828,11 @@ func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
 	// records — one atomic write. If this fails, nothing was deleted.
 	pc, ok := s.profiles.(interface{ ClearSecretRefs(string) error })
 	if !ok {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.deleteSecret: ", errors.New("profile store does not support reference clearing")))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.deleteSecret: ", errors.New("profile store does not support reference clearing")))
 		return
 	}
 	if err := pc.ClearSecretRefs(string(id)); err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.deleteSecret: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.deleteSecret: ", err))
 		return
 	}
 
@@ -852,12 +843,13 @@ func (s *WSServer) handleVaultDeleteSecret(wconn *wsConn, req jsonrpcRequest) {
 	_ = s.credentials.Delete(context.Background(), id)
 
 	s.broadcastVaultChanged()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 // broadcastVaultChanged sends a vault.changed notification to every connected
-// client. Best-effort: a write failure on one connection does not prevent
-// writes to others.
+// client. Best-effort and non-blocking: each notification is one enqueue
+// into the connection's outbound queue, so a slow renderer delays its own
+// connection only.
 func (s *WSServer) broadcastVaultChanged() {
 	s.connsMu.Lock()
 	conns := make([]*wsConn, 0, len(s.conns))
@@ -877,12 +869,7 @@ func (s *WSServer) broadcastVaultChanged() {
 
 	ctx := context.Background()
 	snap := s.vaultLifecycle.Snapshot(ctx)
-	msg := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "vault.changed",
-		"params":  vaultSnapToStatus(snap),
-	}
 	for _, wc := range conns {
-		_ = wc.writeJSON(msg)
+		_ = wc.TryNotify("vault.changed", mustMarshal(vaultSnapToStatus(snap)))
 	}
 }

@@ -67,16 +67,16 @@ type secretsDetectResponse struct {
 // handleSecretsDetect serves the secrets.detect method. Detection failure
 // (including a panic, which the safe wrapper converts) is an error — the
 // renderer shows nothing rather than a hint computed from a broken pass.
-func (s *WSServer) handleSecretsDetect(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSecretsDetect(wconn Responder, req jsonrpcRequest) {
 	var p secretsDetectParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 
 	findings, err := detectLineSafe(p.Line)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "secrets.detect: "+err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.detect: " + err.Error()})
 		return
 	}
 	resp := secretsDetectResponse{
@@ -95,7 +95,7 @@ func (s *WSServer) handleSecretsDetect(wconn *wsConn, req jsonrpcRequest) {
 			SuggestedName: secrets.SuggestName(p.Line, f),
 		})
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
 // detectLineSafe runs the detector and converts a panic into an error. The

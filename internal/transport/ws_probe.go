@@ -132,22 +132,22 @@ type connectionsTestHostKey struct {
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"host-key-unknown","detail":"unknown host key for 1.2.3.4:22: ecdsa-sha2-nistp256 SHA256:MKEj…","hostKey":{"host":"1.2.3.4:22","algorithm":"ecdsa-sha2-nistp256","fingerprint":"SHA256:MKEj…","key":"AAAAC…"}}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"host-key-changed","detail":"host key mismatch for 1.2.3.4:22: got SHA256:MKEj…, expected SHA256:OLd…","hostKey":{"host":"1.2.3.4:22","algorithm":"ecdsa-sha2-nistp256","fingerprint":"SHA256:MKEj…","storedFingerprint":"SHA256:OLd…","key":"AAAAC…"}}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"needs-interactive","detail":"private key requires passphrase"}}
-func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleConnectionsTest(wconn Responder, req jsonrpcRequest) {
 	var params connectionsTestParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.ProfileID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: profileId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 		return
 	}
 	if !s.resolverOK {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Probing not available (no profile resolver wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Probing not available (no profile resolver wired)"})
 		return
 	}
 	if s.prober == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Probing not available (no prober wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Probing not available (no prober wired)"})
 		return
 	}
 
@@ -156,7 +156,7 @@ func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
 		// Resolving reads the stored secret, so a sealed vault surfaces here —
 		// the renderer needs the reason to offer the unlock prompt (the vault
 		// owns it; no call site wraps its own vault calls).
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Resolve failed: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Resolve failed: ", err))
 		return
 	}
 
@@ -176,15 +176,15 @@ func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
 	if result.err != nil {
 		// A sealed vault surfaces here too — the renderer needs the reason to
 		// offer the unlock prompt instead of showing an error.
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "probe config: ", result.err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "probe config: ", result.err))
 		return
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(connectionsTestResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(connectionsTestResult{
 		Outcome: result.outcome,
 		Detail:  result.detail,
 		HostKey: hostKeyInfoFromError(err),
-	})))
+	}))
 }
 
 // hostKeyInfoFromError builds the wire host-key evidence from the probe
@@ -294,34 +294,34 @@ type connectionsTrustHostKeyResult struct {
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.trustHostKey","params":{"host":"1.2.3.4:22","key":"AAAAC…"}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…"}}
-func (s *WSServer) handleConnectionsTrustHostKey(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleConnectionsTrustHostKey(wconn Responder, req jsonrpcRequest) {
 	var params connectionsTrustHostKeyParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.Host == "" || params.Key == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: host and key required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: host and key required"})
 		return
 	}
 	if s.hostKeyTruster == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Host key trust not available (no truster wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Host key trust not available (no truster wired)"})
 		return
 	}
 
 	keyBlob, err := base64.StdEncoding.DecodeString(params.Key)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Invalid key: not base64: "+err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Invalid key: not base64: " + err.Error()})
 		return
 	}
 
 	fingerprint, err := s.hostKeyTruster.TrustHostKey(context.Background(), params.Host, keyBlob)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Trust host key failed: "+err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Trust host key failed: " + err.Error()})
 		return
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(connectionsTrustHostKeyResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(connectionsTrustHostKeyResult{
 		Fingerprint: fingerprint,
-	})))
+	}))
 }

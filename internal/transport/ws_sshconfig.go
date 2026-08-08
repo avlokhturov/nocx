@@ -39,12 +39,12 @@ type sshConfigPathResponse struct {
 // cheap on purpose: it stats nothing and resolves nothing, so a dialog may ask
 // merely to draw itself, which sshConfig.aliases (an `ssh -G` per host) is far
 // too expensive for.
-func (s *WSServer) handleSSHConfigPath(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSSHConfigPath(wconn Responder, req jsonrpcRequest) {
 	resp := sshConfigPathResponse{
 		Path:      s.sshConfigPath,
 		Available: s.sshConfigResolver != nil && s.sshConfigPath != "",
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
 // handleSSHConfigAliases returns SSH aliases from ~/.ssh/config with their
@@ -59,7 +59,7 @@ func (s *WSServer) handleSSHConfigPath(wconn *wsConn, req jsonrpcRequest) {
 // so the frontend can handle the condition uniformly.
 // When resolution fails, entries are returned with hostName=alias and
 // unavailable conveys the reason.
-func (s *WSServer) handleSSHConfigAliases(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSSHConfigAliases(wconn Responder, req jsonrpcRequest) {
 	if s.sshConfigResolver == nil || s.sshConfigPath == "" {
 		resp := sshConfigAliasesResponse{
 			Aliases: nil,
@@ -68,7 +68,7 @@ func (s *WSServer) handleSSHConfigAliases(wconn *wsConn, req jsonrpcRequest) {
 				Detail: "SSH config resolver not wired",
 			},
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		_ = wconn.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
@@ -82,7 +82,7 @@ func (s *WSServer) handleSSHConfigAliases(wconn *wsConn, req jsonrpcRequest) {
 				Detail: err.Error(),
 			},
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		_ = wconn.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
@@ -92,7 +92,7 @@ func (s *WSServer) handleSSHConfigAliases(wconn *wsConn, req jsonrpcRequest) {
 			Aliases:     []ssh.AliasEntry{},
 			Unavailable: nil,
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		_ = wconn.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
@@ -105,5 +105,5 @@ func (s *WSServer) handleSSHConfigAliases(wconn *wsConn, req jsonrpcRequest) {
 		Aliases:     resolved.Aliases,
 		Unavailable: resolved.Unavailable,
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }

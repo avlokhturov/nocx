@@ -204,27 +204,27 @@ func wireEffectiveSecretFields(dto *profile.EffectiveProfileDTO) {
 // effective secret is this one). The renderer addresses the secret by its
 // row handle; the reference never leaves the backend. An unknown row or an
 // unused secret answers an empty profile list.
-func (s *WSServer) handleSecretUsageMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSecretUsageMethod(wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		Row string `json:"row"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Row == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: row required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: row required"})
 		return
 	}
 	if s.vaultLifecycle == nil || s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "secrets.usage not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "secrets.usage not available"})
 		return
 	}
 
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	groups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
@@ -233,20 +233,20 @@ func (s *WSServer) handleSecretUsageMethod(wconn *wsConn, req jsonrpcRequest) {
 		Profiles []profile.ProfileRef `json:"profiles"`
 	}{Profiles: []profile.ProfileRef{}}
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(empty)))
+		_ = wconn.TryResult(req.ID, mustMarshal(empty))
 		return
 	}
 
 	usage := profile.ComputeSecretUsage(profiles, groups, profile.SparseSSHOptions{})
 	for _, u := range usage {
 		if u.SecretID == string(ref) {
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct {
+			_ = wconn.TryResult(req.ID, mustMarshal(struct {
 				Profiles []profile.ProfileRef `json:"profiles"`
-			}{Profiles: u.Profiles})))
+			}{Profiles: u.Profiles}))
 			return
 		}
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(empty)))
+	_ = wconn.TryResult(req.ID, mustMarshal(empty))
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ type secretMintResult struct {
 	Row string `json:"row"`
 }
 
-func (s *WSServer) handleSecretMintMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSecretMintMethod(wconn Responder, req jsonrpcRequest) {
 	switch req.Method {
 	case "secrets.savePassword":
 		var params struct {
@@ -270,16 +270,16 @@ func (s *WSServer) handleSecretMintMethod(wconn *wsConn, req jsonrpcRequest) {
 			Name     string `json:"name,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.Password == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: password required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: password required"})
 			return
 		}
 		id, err := s.createSecret(context.Background(), credential.NewSecret(params.Password),
 			vault.SecretMeta{Name: params.Name, Kind: vault.KindPassword})
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "store password: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store password: ", err))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(secretMintResult{Row: vault.RowFor(id)})))
+		_ = wconn.TryResult(req.ID, mustMarshal(secretMintResult{Row: vault.RowFor(id)}))
 
 	case "secrets.saveKeyMaterial":
 		var params struct {
@@ -287,34 +287,30 @@ func (s *WSServer) handleSecretMintMethod(wconn *wsConn, req jsonrpcRequest) {
 			Name    string `json:"name,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.KeyText == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: keyText required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: keyText required"})
 			return
 		}
 		fingerprint, passphraseWanted, err := parsePrivateKeyMaterial(params.KeyText)
 		if err != nil {
 			var invalidKey *errInvalidKeyMaterial
 			if errors.As(err, &invalidKey) {
-				_ = wconn.writeJSON(jsonrpcResponse{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Error: &jsonrpcErrorObj{
-						Code:    -32603,
-						Message: err.Error(),
-						Data:    &vaultErrorData{Reason: "invalid-key"},
-					},
+				_ = wconn.TryError(req.ID, RPCError{
+					Code:    -32603,
+					Message: err.Error(),
+					Data:    &vaultErrorData{Reason: "invalid-key"},
 				})
 				return
 			}
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "store key material: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store key material: ", err))
 			return
 		}
 		id, err := s.createSecret(context.Background(), credential.NewSecret(params.KeyText),
 			vault.SecretMeta{Name: params.Name, Kind: vault.KindPrivateKey})
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "store key material: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store key material: ", err))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct {
+		_ = wconn.TryResult(req.ID, mustMarshal(struct {
 			secretMintResult
 			Fingerprint      string `json:"fingerprint"`
 			PassphraseWanted bool   `json:"passphraseWanted"`
@@ -322,7 +318,7 @@ func (s *WSServer) handleSecretMintMethod(wconn *wsConn, req jsonrpcRequest) {
 			secretMintResult: secretMintResult{Row: vault.RowFor(id)},
 			Fingerprint:      fingerprint,
 			PassphraseWanted: passphraseWanted,
-		})))
+		}))
 
 	case "secrets.saveKeyPassphrase":
 		var params struct {
@@ -331,38 +327,34 @@ func (s *WSServer) handleSecretMintMethod(wconn *wsConn, req jsonrpcRequest) {
 			Name       string `json:"name,omitempty"`
 		}
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.KeyRow == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: keyRow required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: keyRow required"})
 			return
 		}
 		keyRef, err := s.rowToSecretRef(params.KeyRow)
 		if err != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
 			return
 		}
 		if verr := s.verifyPassphraseAgainst(credential.SecretID(keyRef), []byte(params.Passphrase)); verr != nil {
 			var invalidPass *errInvalidKeyPassphrase
 			if errors.As(verr, &invalidPass) {
-				_ = wconn.writeJSON(jsonrpcResponse{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Error: &jsonrpcErrorObj{
-						Code:    -32603,
-						Message: verr.Error(),
-						Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
-					},
+				_ = wconn.TryError(req.ID, RPCError{
+					Code:    -32603,
+					Message: verr.Error(),
+					Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
 				})
 				return
 			}
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "store passphrase: ", verr))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", verr))
 			return
 		}
 		id, err := s.createSecret(context.Background(), credential.NewSecret(params.Passphrase),
 			vault.SecretMeta{Name: params.Name, Kind: vault.KindKeyPassphrase})
 		if err != nil {
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "store passphrase: ", err))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", err))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(secretMintResult{Row: vault.RowFor(id)})))
+		_ = wconn.TryResult(req.ID, mustMarshal(secretMintResult{Row: vault.RowFor(id)}))
 	}
 }
 

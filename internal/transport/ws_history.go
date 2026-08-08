@@ -84,10 +84,10 @@ const maxHistoryPageLimit = 200
 // handleHistoryQuery serves the history.query method.
 //
 // Three behaviours carry the decisions the schema names:
-func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	scope, cwd, host, limit, before, text, errMsg := parseHistoryQueryParams(req)
 	if errMsg != "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: "+errMsg))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
 	}
 
@@ -102,13 +102,13 @@ func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn *wsConn, req js
 	}
 
 	if s.contentDB == nil {
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		_ = wconn.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
 	page, err := s.contentDB.CommandHistory().Query(ctx, scope, cwd, host, limit, before, text)
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "history.query: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "history.query: ", err))
 		return
 	}
 
@@ -143,7 +143,7 @@ func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn *wsConn, req js
 			Redactions:  reds,
 		})
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
 // parseHistoryQueryParams validates the request against the handler contract

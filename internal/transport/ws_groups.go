@@ -77,30 +77,30 @@ func isDangerousField(field string) bool {
 	return dangerousFields[field]
 }
 
-func (s *WSServer) handleGroupImpact(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleGroupImpact(wconn Responder, req jsonrpcRequest) {
 	if s.groups == nil || s.profiles == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "groups not available"})
 		return
 	}
 
 	var params groupImpactParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := params.validate(); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
 
 	allProfiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	allGroups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
@@ -110,14 +110,14 @@ func (s *WSServer) handleGroupImpact(wconn *wsConn, req jsonrpcRequest) {
 		// the proposed defaults would carry row handles into the diff.
 		proposed, werr := s.groupFromWire(*params.Group)
 		if werr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})
 			return
 		}
 		resp := computeGroupUpdateImpact(proposed, allProfiles, allGroups)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		_ = wconn.TryResult(req.ID, mustMarshal(resp))
 	} else {
 		resp := computeGroupDeleteImpact(params.DeleteGroupID, allProfiles, allGroups)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+		_ = wconn.TryResult(req.ID, mustMarshal(resp))
 	}
 }
 
@@ -405,35 +405,35 @@ func (p profileMoveImpactParams) validate() error {
 	return nil
 }
 
-func (s *WSServer) handleProfileMoveImpact(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleProfileMoveImpact(wconn Responder, req jsonrpcRequest) {
 	if s.groups == nil || s.profiles == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
 	}
 
 	var params profileMoveImpactParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if err := params.validate(); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
 		return
 	}
 
 	allProfiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	allGroups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
 	resp := computeProfileMoveImpact(params.ProfileIDs, params.TargetGroupID, allProfiles, allGroups)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
 // computeProfileMoveImpact computes the impact of moving one or more profiles
@@ -522,19 +522,19 @@ func computeProfileMoveImpact(
 // Unlike the old handler which called LoadGroups() → validate → UpdateGroup(g)
 // in three separate lock acquisitions, this handler delegates to the store's
 // ApplyGroups which loads, validates, and writes under a single lock.
-func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleGroupApply(wconn Responder, req jsonrpcRequest) {
 	if s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "groups not available"})
 		return
 	}
 
 	var groups []profile.ProfileGroup
 	if err := json.Unmarshal(req.Params, &groups); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if len(groups) == 0 {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "groups required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "groups required"})
 		return
 	}
 
@@ -543,7 +543,7 @@ func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
 	for i := range groups {
 		wg, werr := s.groupFromWire(groups[i])
 		if werr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})
 			return
 		}
 		groups[i] = wg
@@ -553,11 +553,11 @@ func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
 		ApplyGroups([]profile.ProfileGroup) error
 	})
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "group store does not support atomic apply"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "group store does not support atomic apply"})
 		return
 	}
 	if err := ag.ApplyGroups(groups); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
 		return
 	}
 
@@ -566,5 +566,5 @@ func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
 	for i := range groups {
 		groups[i] = wireGroup(groups[i])
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
+	_ = wconn.TryResult(req.ID, mustMarshal(groups))
 }

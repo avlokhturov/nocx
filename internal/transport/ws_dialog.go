@@ -28,23 +28,23 @@ func (s *WSServer) SetDialogService(ds DialogService) {
 	s.dialogService = ds
 }
 
-func (s *WSServer) handleDialogOpenFile(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleDialogOpenFile(wconn Responder, req jsonrpcRequest) {
 	s.dialogMu.RLock()
 	ds := s.dialogService
 	s.dialogMu.RUnlock()
 
 	if ds == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "dialog not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "dialog not available"})
 		return
 	}
 
 	path, err := ds.OpenFile(context.Background())
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "dialog.openFile: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "dialog.openFile: ", err))
 		return
 	}
 	resp := struct {
 		Path string `json:"path"`
 	}{Path: path}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }

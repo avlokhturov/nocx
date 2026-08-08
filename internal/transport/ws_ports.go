@@ -142,9 +142,9 @@ func orEmpty(s []string) []string {
 
 // handlePortsMethod dispatches the four ports.* methods. When the scheduler
 // is not wired the methods answer -32603, like tunnel.* without a connector.
-func (s *WSServer) handlePortsMethod(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handlePortsMethod(wconn Responder, req jsonrpcRequest) {
 	if s.discoverySched == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Port discovery not available (no discovery scheduler wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Port discovery not available (no discovery scheduler wired)"})
 		return
 	}
 	switch req.Method {
@@ -153,7 +153,7 @@ func (s *WSServer) handlePortsMethod(wconn *wsConn, req jsonrpcRequest) {
 		if !ok {
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(s.portsStatus(profileID))))
+		_ = wconn.TryResult(req.ID, mustMarshal(s.portsStatus(profileID)))
 	case "ports.sample":
 		profileID, ok := portsProfileParam(wconn, req)
 		if !ok {
@@ -161,30 +161,30 @@ func (s *WSServer) handlePortsMethod(wconn *wsConn, req jsonrpcRequest) {
 		}
 		// Retry semantics (spec §4): clear a terminal refusal, sample now.
 		s.discoverySched.SampleNow(profileID)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(s.portsStatus(profileID))))
+		_ = wconn.TryResult(req.ID, mustMarshal(s.portsStatus(profileID)))
 	case "ports.pause":
 		var params portsPauseParams
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: profileId required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 			return
 		}
 		s.discoverySched.SetPaused(params.ProfileID, params.Paused)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+		_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 	case "ports.visible":
 		var params portsPauseParams
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: profileId required"))
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 			return
 		}
 		s.discoverySched.SetVisible(params.ProfileID, params.Visible)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+		_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 	}
 }
 
-func portsProfileParam(wconn *wsConn, req jsonrpcRequest) (string, bool) {
+func portsProfileParam(wconn Responder, req jsonrpcRequest) (string, bool) {
 	var params portsProfileParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: profileId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 		return "", false
 	}
 	return params.ProfileID, true

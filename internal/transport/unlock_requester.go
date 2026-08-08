@@ -100,13 +100,10 @@ func (s *WSServer) broadcastAsk(method string, params map[string]any, noClientEr
 		return noClientErr
 	}
 
-	notif := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
-	}
+	// One enqueue per connection, never a blocking write: an ask to N
+	// renderers costs N channel sends, not N write deadlines.
 	for _, wc := range conns {
-		_ = wc.writeJSON(notif)
+		_ = wc.TryNotify(method, mustMarshal(params))
 	}
 	return nil
 }
@@ -164,19 +161,19 @@ func (s *WSServer) RequestUnlock(ctx context.Context, reason string) error {
 
 // handleUnlockResolved handles the vault.unlockResolved RPC from the
 // renderer: it looks up the pending request and signals its channel.
-func (s *WSServer) handleUnlockResolved(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleUnlockResolved(wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		RequestID string `json:"requestId"`
 		Outcome   string `json:"outcome"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
 	pa, ok := s.asks.consume(params.RequestID)
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Unknown request id"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown request id"})
 		return
 	}
 
@@ -189,5 +186,5 @@ func (s *WSServer) handleUnlockResolved(wconn *wsConn, req jsonrpcRequest) {
 		pa.ch <- askResolution{err: fmt.Errorf("unlock resolved with unknown outcome: %q", params.Outcome)}
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, json.RawMessage("{}")))
+	_ = wconn.TryResult(req.ID, json.RawMessage("{}"))
 }

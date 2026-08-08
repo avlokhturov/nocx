@@ -117,7 +117,7 @@ const epochFloor int64 = 1_577_836_800_000 // 2020-01-01T00:00:00Z
 func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
 	var p historyRecordParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 
@@ -128,7 +128,7 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 	// never from the renderer-reported host.
 	s.discoveryPromptHint(state)
 	if msg := validateHistoryRecord(p); msg != "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: "+msg))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 		return
 	}
 
@@ -144,7 +144,7 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		if s.captures != nil {
 			s.captures.DestroyTab(tabID(wconn))
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "history.record: detection failed; command not recorded"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: detection failed; command not recorded"})
 		return
 	}
 
@@ -229,7 +229,7 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		// recorded nowhere; history.query answers source=session in the
 		// same state. Without a row there is no entry id for a capture to
 		// rewrite, so no offer is made either.
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(ack)))
+		_ = wconn.TryResult(req.ID, mustMarshal(ack))
 		return
 	}
 
@@ -255,7 +255,7 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		if s.captures != nil {
 			s.captures.DestroyTab(tabID(wconn))
 		}
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "history.record: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "history.record: ", err))
 		return
 	}
 	if id > 0 {
@@ -295,7 +295,7 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		}
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(ack)))
+	_ = wconn.TryResult(req.ID, mustMarshal(ack))
 }
 
 // tabID is the per-connection identity captures are scoped to, in the

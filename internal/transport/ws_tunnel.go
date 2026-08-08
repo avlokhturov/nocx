@@ -110,27 +110,27 @@ func tunnelRecordFrom(t *tunnel.Tunnel) tunnelRecord {
 func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
 	var params tunnelOpenParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.ProfileID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: profileId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 		return
 	}
 	if params.Destination == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: destination required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: destination required"})
 		return
 	}
 	if params.Port < 0 {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: port must not be negative"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: port must not be negative"})
 		return
 	}
 	if s.tunnelConnector == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Forwarding not available (no tunnel connector wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no tunnel connector wired)"})
 		return
 	}
 	if !s.resolverOK {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Forwarding not available (no profile resolver wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no profile resolver wired)"})
 		return
 	}
 
@@ -138,7 +138,7 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 	if err != nil {
 		// Resolving reads the stored secret, so a sealed vault surfaces
 		// here — the renderer needs the reason to offer the unlock prompt.
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Resolve failed: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Resolve failed: ", err))
 		return
 	}
 
@@ -150,7 +150,7 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 		Provenance:  tunnel.ProvenanceManual,
 	}, s.tunnelConnector)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
@@ -163,12 +163,12 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 	// connection.
 	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
 	if err := t.Start(ctx, host, opts...); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
 	s.trackTunnel(wconn, t)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(tunnelRecordFrom(t))))
+	_ = wconn.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
 }
 
 // handleTunnelStop stops one forward by its backend id and reports the
@@ -177,27 +177,27 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 //
 //	--> {"jsonrpc":"2.0","id":2,"method":"tunnel.stop","params":{"id":"ab12…"}}
 //	<-- {"jsonrpc":"2.0","id":2,"result":{"id":"ab12…","direction":"local",…,"state":"stopped","stopReason":"user","error":null}}
-func (s *WSServer) handleTunnelStop(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleTunnelStop(wconn Responder, req jsonrpcRequest) {
 	var params tunnelStopParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.ID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: id required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: id required"})
 		return
 	}
 	if s.tunnelConnector == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Forwarding not available (no tunnel connector wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no tunnel connector wired)"})
 		return
 	}
 
 	t := s.stopTunnelByID(params.ID)
 	if t == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "tunnel not found: "+params.ID))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "tunnel not found: " + params.ID})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(tunnelRecordFrom(t))))
+	_ = wconn.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
 }
 
 // ---------------------------------------------------------------------------

@@ -159,16 +159,6 @@ type gitRemoteResult struct {
 	URL   string `json:"url,omitempty"`
 }
 
-// gitChangedNotification is the server-initiated git.changed frame —
-// contracted like the methods because an unsolicited notification is
-// exactly where an addressing defect hides (spec §5.3). Its schema covers
-// the params object only, exactly as files.changed's does.
-type gitChangedNotification struct {
-	JSONRPC string           `json:"jsonrpc"`
-	Method  string           `json:"method"`
-	Params  gitChangedParams `json:"params"`
-}
-
 type gitChangedParams struct {
 	BindingID string `json:"bindingId"`
 	Reason    string `json:"reason"` // exactly one value: "sessionClosed"
@@ -282,9 +272,9 @@ func wireGitStatus(st git.Status) gitStatusWire {
 // read loop like the files.* handlers: the git operations are bounded by
 // the internal/git work ceilings, and a synchronous response keeps the
 // wire order the client's request stream expects.
-func (s *WSServer) handleGitMethod(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitMethod(wconn Responder, state *connState, req jsonrpcRequest) {
 	if s.git == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "git not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
 		return
 	}
 	switch req.Method {
@@ -325,34 +315,34 @@ func (s *WSServer) handleGitMethod(wconn *wsConn, state *connState, req jsonrpcR
 // notARepository, gitUnavailable or gitTooOld (spec §5.1). The remote
 // refusal is a RESULT state, not an error: on an SSH tab the panel shows
 // one honest state and offers nothing (D3, D14).
-func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitOpen(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitOpenParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
 	if !state.has(sid) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
 	sess, err := s.registry.Get(sid)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
 	if sess.Kind() != session.KindLocal {
 		// D3: the remote case waits for the relay (nocx-if6 phase B).
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)})))
+		_ = wconn.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)}))
 		return
 	}
 	if params.Cwd == "" {
 		// No verified OSC 7 cwd to resolve from (D2).
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenNoCwd)})))
+		_ = wconn.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenNoCwd)}))
 		return
 	}
 	if s.gitFactory == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "git.open not available (no repo factory wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "git.open not available (no repo factory wired)"})
 		return
 	}
 	// The ownership-transfer rule (spec §5.1): Open can return a live Repo
@@ -369,7 +359,7 @@ func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcReq
 	//  4. after Register succeeds the registry owns it.
 	repo, outcome, err := s.gitFactory.Open(context.Background(), params.Cwd)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	if outcome.State != git.OpenOK {
@@ -380,15 +370,15 @@ func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcReq
 				s.log.Warn("git.open: close repo after refusing outcome", "error", cerr)
 			}
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{
+		_ = wconn.TryResult(req.ID, mustMarshal(gitOpenResult{
 			State:      string(outcome.State),
 			GitVersion: outcome.GitVersion,
-		})))
+		}))
 		return
 	}
 	if repo == nil {
 		// The other direction of the same lie: ok with no repository.
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "git.open: factory answered ok without a repository"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "git.open: factory answered ok without a repository"})
 		return
 	}
 	bid, err := s.git.Register(repo, sid)
@@ -396,7 +386,7 @@ func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcReq
 		if cerr := repo.Close(); cerr != nil {
 			s.log.Warn("git.open: close repo after register failure", "error", cerr)
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("git.open: %v", err)))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("git.open: %v", err)})
 		return
 	}
 	s.gitMu.Lock()
@@ -425,7 +415,7 @@ func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcReq
 			s.log.Debug("git.open: inline status failed", "binding_id", bid, "error", serr)
 		}
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(gitOpenResult{
 		State:      string(git.OpenOK),
 		BindingID:  bid,
 		Toplevel:   outcome.Toplevel,
@@ -433,7 +423,7 @@ func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcReq
 		EnvState:   string(outcome.EnvState),
 		EnvReason:  outcome.EnvReason,
 		Status:     st,
-	})))
+	}))
 }
 
 // handleGitStatus answers "what changed in this repository" — the poll the
@@ -441,21 +431,21 @@ func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcReq
 // already-closed binding answers the unknownBinding error, never a panic:
 // Acquire either finds the binding and takes the use-guard, or returns the
 // domain error, and the handler maps it onto the wire.
-func (s *WSServer) handleGitStatus(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitStatus(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	status, err := h.Status(context.Background())
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	// The environment fact rides the poll (nocx-69ey): the panel switches
@@ -463,11 +453,11 @@ func (s *WSServer) handleGitStatus(wconn *wsConn, state *connState, req jsonrpcR
 	// showed for the pre-settle window. The domain answers — never the
 	// shell (D16).
 	envState, envReason := h.EnvState()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusPollResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(gitStatusPollResult{
 		Status:    wireGitStatus(status),
 		EnvState:  string(envState),
 		EnvReason: envReason,
-	})))
+	}))
 }
 
 // handleGitDiff diffs one file on one side. side is a closed enum — the
@@ -475,47 +465,47 @@ func (s *WSServer) handleGitStatus(wconn *wsConn, state *connState, req jsonrpcR
 // RESULT states, never an error: a row can be clicked in the same second
 // an agent reverts the file (empty, gone), a binary file has nothing to
 // render (binary), and the byte bound is a state, not a failure (tooLarge).
-func (s *WSServer) handleGitDiff(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitDiff(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitDiffParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
 	if params.Side != string(git.SideStaged) && params.Side != string(git.SideUnstaged) && params.Side != string(git.SideUntracked) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: side must be staged, unstaged or untracked"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: side must be staged, unstaged or untracked"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	d, err := h.Diff(context.Background(), params.Path, git.Side(params.Side), params.MaxBytes)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitDiffResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(gitDiffResult{
 		State:     string(d.State),
 		Text:      d.Text,
 		Truncated: d.Truncated,
-	})))
+	}))
 }
 
 // handleGitStage stages exactly the given paths (D8: paths ride stdin as a
 // pathspec stream, never argv) and returns the fresh status (D12). paths[]
 // never means "all": an empty array is a no-op that still returns the
 // current status, and "all" is git.stageAll (D19).
-func (s *WSServer) handleGitStage(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitStage(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitStageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
@@ -526,10 +516,10 @@ func (s *WSServer) handleGitStage(wconn *wsConn, state *connState, req jsonrpcRe
 		status, err = h.Stage(context.Background(), params.Paths)
 	}
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)})))
+	_ = wconn.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
 }
 
 // handleGitUnstage unstages exactly the given paths. It is the one
@@ -541,15 +531,15 @@ func (s *WSServer) handleGitStage(wconn *wsConn, state *connState, req jsonrpcRe
 // (D11): when the unstage fails and a fresh status says the branch is
 // unborn, the answer is state "unborn" with that fresh status, and the
 // panel repaints and stops offering the control.
-func (s *WSServer) handleGitUnstage(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitUnstage(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitStageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
@@ -562,19 +552,19 @@ func (s *WSServer) handleGitUnstage(wconn *wsConn, state *connState, req jsonrpc
 	if err != nil {
 		st, serr := h.Status(context.Background())
 		if serr == nil && st.Unborn {
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitUnstageResult{
+			_ = wconn.TryResult(req.ID, mustMarshal(gitUnstageResult{
 				State:  "unborn",
 				Status: wireGitStatus(st),
-			})))
+			}))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitUnstageResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(gitUnstageResult{
 		State:  "ok",
 		Status: wireGitStatus(status),
-	})))
+	}))
 }
 
 // handleGitStageAll stages everything (git add -A, D19) and returns the
@@ -582,69 +572,69 @@ func (s *WSServer) handleGitUnstage(wconn *wsConn, state *connState, req jsonrpc
 // ErrConflicted domain error, which the panel renders as a visible refusal
 // with the reason (a button that resolved conflicts by accident is the
 // measured hazard D19 exists to prevent).
-func (s *WSServer) handleGitStageAll(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitStageAll(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	status, err := h.StageAll(context.Background())
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)})))
+	_ = wconn.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
 }
 
 // handleGitUnstageAll unstages everything — bare git reset, no HEAD, no
 // pathspec — which is what makes it work on an unborn branch (D19,
 // measured; no special unborn path is needed or built). It is refused
 // while any entry is conflicted, like stage-all.
-func (s *WSServer) handleGitUnstageAll(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitUnstageAll(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	status, err := h.UnstageAll(context.Background())
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)})))
+	_ = wconn.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
 }
 
 // handleGitCommit commits with the message on stdin (-F -, D8) and returns
 // the outcome: ok with the new head and the fresh status, or failed with
 // git's own account (D11 — we do not classify why). Hooks always run;
 // there is no --no-verify.
-func (s *WSServer) handleGitCommit(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitCommit(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitCommitParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	outcome, err := h.Commit(context.Background(), params.Message, params.Amend)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	res := gitCommitResult{
@@ -658,34 +648,34 @@ func (s *WSServer) handleGitCommit(wconn *wsConn, state *connState, req jsonrpcR
 		wire := wireGitStatus(outcome.Status)
 		res.Status = &wire
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(res)))
+	_ = wconn.TryResult(req.ID, mustMarshal(res))
 }
 
 // handleGitHeadMessage is the Amend prefill (spec §5.2): the full HEAD
 // message, fetched once when the box is ticked. An unborn branch has no
 // HEAD message to amend — that is the "none" state, not an error (local
 // maps it); an invocation that cannot be made is the error.
-func (s *WSServer) handleGitHeadMessage(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitHeadMessage(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	hm, err := h.HeadMessage(context.Background())
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitHeadMessageResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(gitHeadMessageResult{
 		State:   string(hm.State),
 		Message: hm.Message,
-	})))
+	}))
 }
 
 // handleGitLog answers "what has happened on this branch": the first
@@ -695,24 +685,24 @@ func (s *WSServer) handleGitHeadMessage(wconn *wsConn, state *connState, req jso
 // never on the poll (D13). The bound is policy: the implementation asks
 // git for one more than the cap, so the answer can say capped rather than
 // implying the branch has exactly N commits (D9).
-func (s *WSServer) handleGitLog(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitLog(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	lg, err := h.Log(context.Background(), git.MaxLogEntries)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)})))
+	_ = wconn.TryResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)}))
 }
 
 // handleGitRemote answers "what URL does the branch I am on track"
@@ -724,15 +714,15 @@ func (s *WSServer) handleGitLog(wconn *wsConn, state *connState, req jsonrpcRequ
 // The URL conversion to a host's web page is the renderer's, in one module
 // with its own tests: the wire carries what git said, not a URL the backend
 // invented for a host it may not know.
-func (s *WSServer) handleGitRemote(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitRemote(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	h, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
@@ -740,28 +730,28 @@ func (s *WSServer) handleGitRemote(wconn *wsConn, state *connState, req jsonrpcR
 	if err != nil {
 		var noRemote *git.ErrNoRemote
 		if errors.As(err, &noRemote) {
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitRemoteResult{State: "none"})))
+			_ = wconn.TryResult(req.ID, mustMarshal(gitRemoteResult{State: "none"}))
 			return
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitRemoteResult{State: "ok", URL: url})))
+	_ = wconn.TryResult(req.ID, mustMarshal(gitRemoteResult{State: "ok", URL: url}))
 }
 
 // handleGitClose closes the binding: its repository released, the use-guard
 // drained. Ownership is re-checked like every call (D15) — a binding is
 // closed by the connection that owns its session, not by whoever knows its
 // id.
-func (s *WSServer) handleGitClose(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleGitClose(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	_, release, err := s.git.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
 	release()
@@ -779,23 +769,11 @@ func (s *WSServer) handleGitClose(wconn *wsConn, state *connState, req jsonrpcRe
 	}
 	s.gitMu.Unlock()
 	if err := s.git.Close(params.BindingID); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitCloseResult{Closed: true})))
+	_ = wconn.TryResult(req.ID, mustMarshal(gitCloseResult{Closed: true}))
 }
-
-// ── notification delivery ─────────────────────────────────────────────────
-
-func gitChangedMessage(bindingID, reason string) gitChangedNotification {
-	return gitChangedNotification{
-		JSONRPC: "2.0",
-		Method:  "git.changed",
-		Params:  gitChangedParams{BindingID: bindingID, Reason: reason},
-	}
-}
-
-// ── lifecycle ─────────────────────────────────────────────────────────────
 
 // gitSessionClosed tears down every git binding of a session and tells that
 // session's subscriber the bindings are gone — closing the terminal closes
@@ -820,11 +798,18 @@ func gitChangedMessage(bindingID, reason string) gitChangedNotification {
 // flight (D18), and an in-flight call that loses the race answers
 // unknownBinding, which is the correct answer.
 //
-// The write is asynchronous, deliberately: writeJSON has no deadline, and
-// a subscriber that stopped reading while its socket stays open would hang
-// whatever wrote it — which on the explicit-close path is the READ LOOP.
-// The blocked-write goroutine is the same best-effort hazard ringToConn
-// already has; it exits when the subscriber's socket dies.
+// The write is asynchronous and non-blocking, deliberately: a subscriber
+// that stopped reading while its socket stays open must not hang whatever
+// wrote it — which on the explicit-close path is the READ LOOP. The
+// enqueue is one channel send (the outbound pump owns the socket); the
+// frame is dropped if the connection is stalled or closed.
+// The subscriber stays a *wsConn rather than a Responder, and that is not an
+// oversight left over from the migration. Both callers get it from
+// rx.getSubscriber(), which returns a nil *wsConn when nobody is attached —
+// and a nil *wsConn stored in an interface is NOT equal to nil, so the guard
+// below silently passed and TryNotify dereferenced a nil receiver. The
+// parameter that can legitimately be absent keeps the concrete type, so
+// "absent" stays expressible as nil.
 func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 	s.gitMu.Lock()
 	ids := make([]string, 0, len(s.gitBySession[sid]))
@@ -844,7 +829,10 @@ func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 	}
 	go func() {
 		for _, id := range ids {
-			if err := wconn.writeJSON(gitChangedMessage(id, "sessionClosed")); err != nil {
+			if err := wconn.TryNotify("git.changed", mustMarshal(gitChangedParams{
+				BindingID: id,
+				Reason:    "sessionClosed",
+			})); err != nil {
 				s.log.Debug("write git.changed", "binding_id", id, "error", err)
 				return
 			}

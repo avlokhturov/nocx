@@ -38,10 +38,10 @@ type profileSessionStatus struct {
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"sessions.status","params":{"profileIds":["ssh:p1:1","ssh:p2:2"]}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"statuses":{"ssh:p1:1":{"live":true,"lastUsed":"2026-07-29T12:00:00Z"},"ssh:p2:2":{"live":false,"lastUsed":"2026-07-29T11:30:00Z"}}}}
-func (s *WSServer) handleSessionsStatus(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleSessionsStatus(wconn Responder, req jsonrpcRequest) {
 	var params sessionsStatusParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
@@ -79,5 +79,5 @@ func (s *WSServer) handleSessionsStatus(wconn *wsConn, req jsonrpcRequest) {
 		result.Statuses[pid] = st
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }

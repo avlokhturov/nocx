@@ -61,24 +61,24 @@ type captureDismissParams struct {
 // of a settled capture returns the recorded name (and re-runs only the
 // owed rewrites); a save in flight blocks until it settles, so two
 // concurrent saves cannot mint two secrets.
-func (s *WSServer) handleCaptureSave(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleCaptureSave(wconn Responder, req jsonrpcRequest) {
 	if s.captures == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "secrets.captureSave: capture registry unavailable"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureSave: capture registry unavailable"})
 		return
 	}
 	var p captureSaveParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 	if p.CaptureID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: captureId is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: captureId is required"})
 		return
 	}
 
 	h, err := s.captures.Reserve(credential.CaptureID(p.CaptureID))
 	if err != nil {
-		_ = wconn.writeJSON(captureErrorFor(req.ID, err))
+		_ = wconn.TryError(req.ID, captureErrorFor(err))
 		return
 	}
 
@@ -86,14 +86,14 @@ func (s *WSServer) handleCaptureSave(wconn *wsConn, req jsonrpcRequest) {
 	if h.Completed {
 		if h.RewritePending {
 			if rwErr := s.rewriteLinks(h.Links, h.Name); rwErr != nil {
-				_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(captureSaveResponse{
+				_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{
 					Name: h.Name, Partial: true, Error: rwErr.Error(),
-				})))
+				}))
 				return
 			}
 			s.captures.Complete(h.CaptureID, h.Name, h.SecretID, false, nil)
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(captureSaveResponse{Name: h.Name})))
+		_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{Name: h.Name}))
 		return
 	}
 
@@ -101,7 +101,7 @@ func (s *WSServer) handleCaptureSave(wconn *wsConn, req jsonrpcRequest) {
 	// capture straight into the vault create.
 	if s.vaultLifecycle == nil {
 		s.captures.Complete(h.CaptureID, "", "", false, errors.New("vault unavailable"))
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "secrets.captureSave: vault unavailable"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureSave: vault unavailable"})
 		return
 	}
 	name := h.SuggestedName
@@ -119,7 +119,7 @@ func (s *WSServer) handleCaptureSave(wconn *wsConn, req jsonrpcRequest) {
 		vault.SecretMeta{Name: name, Kind: kind})
 	if err != nil {
 		s.captures.Complete(h.CaptureID, "", "", false, err)
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "secrets.captureSave: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "secrets.captureSave: ", err))
 		return
 	}
 	if rwErr := s.rewriteLinks(h.Links, "{{secret:"+realName+"}}"); rwErr != nil {
@@ -127,36 +127,36 @@ func (s *WSServer) handleCaptureSave(wconn *wsConn, req jsonrpcRequest) {
 		// with the same capture completes the rewrite without a second
 		// secret (the registry records name + rewrite-owed).
 		s.captures.Complete(h.CaptureID, realName, secretID, true, nil)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(captureSaveResponse{
+		_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{
 			Name: realName, Partial: true, Error: rwErr.Error(),
-		})))
+		}))
 		return
 	}
 	s.captures.Complete(h.CaptureID, realName, secretID, false, nil)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(captureSaveResponse{Name: realName})))
+	_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{Name: realName}))
 }
 
 // handleCaptureDismiss destroys a pending capture and suppresses its
 // fingerprint for the rest of the application session. Idempotent.
-func (s *WSServer) handleCaptureDismiss(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleCaptureDismiss(wconn Responder, req jsonrpcRequest) {
 	if s.captures == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "secrets.captureDismiss: capture registry unavailable"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureDismiss: capture registry unavailable"})
 		return
 	}
 	var p captureDismissParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 	if p.CaptureID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: captureId is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: captureId is required"})
 		return
 	}
 	if err := s.captures.Dismiss(credential.CaptureID(p.CaptureID)); err != nil {
-		_ = wconn.writeJSON(captureErrorFor(req.ID, err))
+		_ = wconn.TryError(req.ID, captureErrorFor(err))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 // rewriteLinks rewrites every linked history row's redaction segment to the
@@ -205,7 +205,7 @@ func sanitizeCaptureName(name string) string {
 // with a machine-readable reason, the way the vault errors carry theirs —
 // the renderer must tell "expired" from "already consumed" from "the save
 // failed earlier" apart, or it cannot decide what to show.
-func captureErrorFor(id json.RawMessage, err error) jsonrpcResponse {
+func captureErrorFor(err error) RPCError {
 	reason := "capture-error"
 	code := -32603
 	switch {
@@ -216,9 +216,9 @@ func captureErrorFor(id json.RawMessage, err error) jsonrpcResponse {
 	case errors.Is(err, credential.ErrCaptureSaveFailed):
 		code, reason = -32012, "capture-save-failed"
 	}
-	obj := jsonrpcErrorObj{Code: code, Message: err.Error()}
+	rpcErr := RPCError{Code: code, Message: err.Error()}
 	if reason != "capture-error" {
-		obj.Data = json.RawMessage(`{"reason":"` + reason + `"}`)
+		rpcErr.Data = json.RawMessage(`{"reason":"` + reason + `"}`)
 	}
-	return jsonrpcResponse{JSONRPC: "2.0", ID: id, Error: &obj}
+	return rpcErr
 }

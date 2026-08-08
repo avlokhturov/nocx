@@ -219,16 +219,6 @@ type filesRevealParams struct {
 	Path      string `json:"path"`
 }
 
-// filesChangedNotification is the server-initiated files.changed frame —
-// the seventh wire shape of the files.* namespace, contracted like the
-// methods because an unsolicited notification is exactly where an
-// addressing defect hides (spec §5.3).
-type filesChangedNotification struct {
-	JSONRPC string             `json:"jsonrpc"`
-	Method  string             `json:"method"`
-	Params  filesChangedParams `json:"params"`
-}
-
 type filesChangedParams struct {
 	BindingID string `json:"bindingId"`
 	Path      string `json:"path"`
@@ -241,9 +231,9 @@ type filesChangedParams struct {
 // the read loop like handleResize and fs.complete: the provider operations
 // are bounded by the D14 caps, and a synchronous response keeps the wire
 // order the client's request stream expects.
-func (s *WSServer) handleFilesMethod(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesMethod(wconn Responder, state *connState, req jsonrpcRequest) {
 	if s.filesys == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "files not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
 		return
 	}
 	switch req.Method {
@@ -268,29 +258,29 @@ func (s *WSServer) handleFilesMethod(wconn *wsConn, state *connState, req jsonrp
 // and the authorisation is connState's, not the global registry's (D15):
 // the same gate handleResize applies, and a connection that learned
 // another connection's session id gets a refusal, not a filesystem.
-func (s *WSServer) handleFilesOpen(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesOpen(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesOpenParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
 	if !state.has(sid) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
 	sess, err := s.registry.Get(sid)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
 	if s.filesProviderFor == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "files.open not available (no provider factory wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "files.open not available (no provider factory wired)"})
 		return
 	}
 	p, err := s.filesProviderFor(sess, params.RootPath)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	// The endpoint attestation (spec §5.1): local providers carry none —
@@ -306,7 +296,7 @@ func (s *WSServer) handleFilesOpen(wconn *wsConn, state *connState, req jsonrpcR
 	}
 	bid, err := s.filesys.Register(p, sid, endpointID)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	s.filesMu.Lock()
@@ -326,14 +316,14 @@ func (s *WSServer) handleFilesOpen(wconn *wsConn, state *connState, req jsonrpcR
 	h, release, err := s.filesys.Acquire(bid, state)
 	if err != nil {
 		s.dropFilesBinding(bid, sid)
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
 	root, err := h.Root(context.Background())
 	release()
 	if err != nil {
 		s.dropFilesBinding(bid, sid)
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
 
@@ -341,7 +331,7 @@ func (s *WSServer) handleFilesOpen(wconn *wsConn, state *connState, req jsonrpcR
 	if endpointID != "" {
 		ep = &endpointID
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesOpenResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(filesOpenResult{
 		BindingID:  bid,
 		EndpointID: ep,
 		Root: filesRootResult{
@@ -350,21 +340,21 @@ func (s *WSServer) handleFilesOpen(wconn *wsConn, state *connState, req jsonrpcR
 			Inferred:       root.Inferred,
 			InferredReason: root.InferredReason,
 		},
-	})))
+	}))
 }
 
 // handleFilesList lists one page of one directory. The three D14 outcomes
 // are RESULT states, never errors: tooLarge and timedOut are refusals a
 // user can reason about, and the discriminated union is the contract.
-func (s *WSServer) handleFilesList(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesList(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesListParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
 	h, release, err := s.filesys.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
@@ -374,18 +364,18 @@ func (s *WSServer) handleFilesList(wconn *wsConn, state *connState, req jsonrpcR
 		var timedOut *filesystem.ErrTimedOut
 		switch {
 		case errors.As(err, &tooLarge):
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesListTooLarge{
+			_ = wconn.TryResult(req.ID, mustMarshal(filesListTooLarge{
 				State:         "tooLarge",
 				ObservedCount: tooLarge.ObservedCount,
 				Limit:         tooLarge.Limit,
-			})))
+			}))
 		case errors.As(err, &timedOut):
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesListTimedOut{
+			_ = wconn.TryResult(req.ID, mustMarshal(filesListTimedOut{
 				State:   "timedOut",
 				Timeout: timedOut.Timeout.Milliseconds(),
-			})))
+			}))
 		default:
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		}
 		return
 	}
@@ -402,7 +392,7 @@ func (s *WSServer) handleFilesList(wconn *wsConn, state *connState, req jsonrpcR
 			Mode:       e.Mode,
 		})
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesListOK{
+	_ = wconn.TryResult(req.ID, mustMarshal(filesListOK{
 		State:     "ok",
 		Path:      listing.Path,
 		Canonical: listing.Canonical,
@@ -411,31 +401,31 @@ func (s *WSServer) handleFilesList(wconn *wsConn, state *connState, req jsonrpcR
 		Total:     listing.Total,
 		HasMore:   listing.HasMore,
 		Rev:       listing.Rev,
-	})))
+	}))
 }
 
 // handleFilesRead reads one file, bounded and streamed (spec §5.1): at
 // most min(requested, 2 MiB) plus one byte, so the memory guard holds for
 // a 40 GB file. Canonical is the identity the viewer's singletonKey is
 // built from.
-func (s *WSServer) handleFilesRead(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesRead(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesReadParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
 	h, release, err := s.filesys.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
 	defer release()
 	content, err := h.Read(context.Background(), params.Path, params.MaxBytes)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesReadResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(filesReadResult{
 		Path:      content.Path,
 		Canonical: content.Canonical,
 		Text:      content.Text,
@@ -445,7 +435,7 @@ func (s *WSServer) handleFilesRead(wconn *wsConn, state *connState, req jsonrpcR
 		Binary:    content.Binary,
 		Lossy:     content.Lossy,
 		Changed:   content.Changed,
-	})))
+	}))
 }
 
 // handleFilesWatch replaces the binding's watch set (spec §5.2): the
@@ -458,10 +448,10 @@ func (s *WSServer) handleFilesRead(wconn *wsConn, state *connState, req jsonrpcR
 // taken synchronously inside the handler, before the response
 // (filesBaseline): from the instant the call returns every change is
 // delivered, and changes before it are not replayed — inotify semantics.
-func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesWatch(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesWatchParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and paths required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and paths required"})
 		return
 	}
 	// The binding must be one this transport issued: the notification
@@ -471,7 +461,7 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 	b := s.filesBindings[params.BindingID]
 	s.filesMu.Unlock()
 	if b == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown bindingId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
 		return
 	}
 	// Authorisation: Acquire re-checks that THIS connection owns the
@@ -479,7 +469,7 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 	// an id ever reaches a log, a screenshot or a crash report.
 	h, release, err := s.filesys.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
 	mode, err := h.Watch(context.Background(), params.Paths)
@@ -487,7 +477,7 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 		var unavail *filesystem.ErrWatchUnavailable
 		if !errors.As(err, &unavail) {
 			release()
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+			_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return
 		}
 		// No reason: ErrWatchUnavailable says the watching wave (nocx-rkk9)
@@ -515,7 +505,7 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 		} else {
 			s.filesMu.Unlock()
 		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesWatchResultOf(mode))))
+		_ = wconn.TryResult(req.ID, mustMarshal(filesWatchResultOf(mode)))
 		return
 	}
 
@@ -534,7 +524,7 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 		// Raced with files.close; the binding is gone.
 		s.filesMu.Unlock()
 		release()
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown bindingId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
 		return
 	}
 	if b.watcher == nil {
@@ -569,7 +559,7 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 		s.filesMu.Unlock()
 		release()
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesWatchResultOf(mode))))
+	_ = wconn.TryResult(req.ID, mustMarshal(filesWatchResultOf(mode)))
 }
 
 // handleFilesClose closes the binding: its provider released, its watches
@@ -577,15 +567,15 @@ func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpc
 // closed by the connection that owns its session, not by whoever knows
 // its id. The watcher stops first so the use-guard drains before Close's
 // teardown.
-func (s *WSServer) handleFilesClose(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesClose(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesCloseParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
 	_, release, err := s.filesys.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
 	release()
@@ -606,10 +596,10 @@ func (s *WSServer) handleFilesClose(wconn *wsConn, state *connState, req jsonrpc
 		s.stopFilesWatcher(b.watcher)
 	}
 	if err := s.filesys.Close(params.BindingID); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 // handleFilesReveal shows a path in the OS file manager. Local bindings
@@ -618,15 +608,15 @@ func (s *WSServer) handleFilesClose(wconn *wsConn, state *connState, req jsonrpc
 // (spec §5.2). Without a wired revealer the method answers -32601 — the
 // Wails runtime seam is a later wave, and a reveal that did nothing would
 // be a silent lie.
-func (s *WSServer) handleFilesReveal(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleFilesReveal(wconn Responder, state *connState, req jsonrpcRequest) {
 	var params filesRevealParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
 	_, release, err := s.filesys.Acquire(params.BindingID, state)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 		return
 	}
 	release()
@@ -635,22 +625,22 @@ func (s *WSServer) handleFilesReveal(wconn *wsConn, state *connState, req jsonrp
 	b := s.filesBindings[params.BindingID]
 	s.filesMu.Unlock()
 	if b == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown bindingId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
 		return
 	}
 	if b.endpointID != "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "files.reveal: remote bindings cannot be revealed"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "files.reveal: remote bindings cannot be revealed"})
 		return
 	}
 	if s.revealer == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "files.reveal not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "files.reveal not available"})
 		return
 	}
 	if err := s.revealer.Reveal(params.Path); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 // ── notification delivery ─────────────────────────────────────────────────
@@ -675,7 +665,11 @@ func (s *WSServer) emitFilesChanged(w *filesWatcher, path, rev string) {
 		w.mu.Unlock()
 		return
 	}
-	if err := wconn.writeJSON(filesChangedMessage(w.bindingID, path, rev)); err != nil {
+	if err := wconn.TryNotify("files.changed", mustMarshal(filesChangedParams{
+		BindingID: w.bindingID,
+		Path:      path,
+		Rev:       rev,
+	})); err != nil {
 		// The subscriber's socket is going down; the change must not be
 		// lost with it. Keep the path dirty for the next attach.
 		w.mu.Lock()
@@ -694,7 +688,7 @@ func (s *WSServer) emitFilesChanged(w *filesWatcher, path, rev string) {
 // accumulation was a set, so a burst that meant one change delivers once
 // (spec §5.2). Called from handleAttach after setSubscriber, so the
 // notifications resolve to the new connection.
-func (s *WSServer) flushFilesChanged(sid session.ID, wconn *wsConn) {
+func (s *WSServer) flushFilesChanged(sid session.ID, wconn Responder) {
 	s.filesMu.Lock()
 	ids := make([]string, 0, len(s.filesBySession[sid]))
 	for id := range s.filesBySession[sid] {
@@ -715,25 +709,17 @@ func (s *WSServer) flushFilesChanged(sid session.ID, wconn *wsConn) {
 		}
 		w.mu.Unlock()
 		for p, rev := range dirty {
-			if err := wconn.writeJSON(filesChangedMessage(w.bindingID, p, rev)); err != nil {
+			if err := wconn.TryNotify("files.changed", mustMarshal(filesChangedParams{
+				BindingID: w.bindingID,
+				Path:      p,
+				Rev:       rev,
+			})); err != nil {
 				return // the socket is dying; whatever remains stays dirty
 			}
 			w.mu.Lock()
 			delete(w.dirty, p)
 			w.mu.Unlock()
 		}
-	}
-}
-
-func filesChangedMessage(bindingID, path, rev string) filesChangedNotification {
-	return filesChangedNotification{
-		JSONRPC: "2.0",
-		Method:  "files.changed",
-		Params: filesChangedParams{
-			BindingID: bindingID,
-			Path:      path,
-			Rev:       rev,
-		},
 	}
 }
 
@@ -895,12 +881,11 @@ func (s *WSServer) filesPollPath(w *filesWatcher, h filesystem.Handle, path stri
 // their guards, and Close waits for the guards, not for the loop. So the
 // loop's next List after the release errors and stops it, and the registry
 // close never sees a guard held by the watcher. Waiting instead would let
-// a notification write hold a close path hostage forever: writeJSON has
-// no deadline, and a subscriber that stopped reading while its socket
-// stays open would hang <-w.done. The blocked-write goroutine itself is
-// the same best-effort hazard ringToConn already has (it exits when the
-// subscriber's socket dies); it just never blocks a close. w.done closes
-// when the loop exits; nothing waits on it.
+// a notification write hold a close path hostage forever. The enqueue is
+// non-blocking (the outbound pump owns the socket), and a subscriber that
+// stopped reading while its socket stays open cannot hang the poll loop —
+// the frame is dropped and the path stays dirty for the next attach. w.done
+// closes when the loop exits; nothing waits on it.
 func (s *WSServer) stopFilesWatcher(w *filesWatcher) {
 	w.stopOnce.Do(func() { close(w.stop) })
 	w.mu.Lock()

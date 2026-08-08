@@ -44,9 +44,9 @@ func (a *settingsSinkAdapter) Apply(values map[string]any) error {
 // All export modes work purely through the profile/group repositories and
 // storage paths — the credential.CredentialStore is never consulted, so no
 // mode can resolve a secret (ADR-0011 §2, §7).
-func (s *WSServer) handleExportMethod(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportMethod(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
 		return
 	}
 
@@ -64,7 +64,7 @@ func (s *WSServer) handleExportMethod(ctx context.Context, wconn *wsConn, req js
 	case "export.importPortable":
 		s.handleExportImportPortable(wconn, req)
 	default:
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "Method not found"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "Method not found"})
 	}
 }
 
@@ -74,26 +74,26 @@ type exportManifestParams struct {
 	Mode string `json:"mode"`
 }
 
-func (s *WSServer) handleExportManifest(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportManifest(wconn Responder, req jsonrpcRequest) {
 	var params exportManifestParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Mode == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: mode required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: mode required"})
 		return
 	}
 	m := export.ManifestFor(export.Mode(params.Mode))
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(m)))
+	_ = wconn.TryResult(req.ID, mustMarshal(m))
 }
 
 // --- export.configExport -----------------------------------------------
 
-func (s *WSServer) handleExportConfig(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportConfig(wconn Responder, req jsonrpcRequest) {
 	deps := s.buildConfigExportDeps()
 	result, err := export.ExportConfiguration(deps)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }
 
 // --- export.portableEncrypted ------------------------------------------
@@ -103,10 +103,10 @@ type exportPortableEncryptedParams struct {
 	IncludePrivateContent bool   `json:"includePrivateContent,omitempty"`
 }
 
-func (s *WSServer) handleExportPortableEncrypted(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportPortableEncrypted(wconn Responder, req jsonrpcRequest) {
 	var params exportPortableEncryptedParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Passphrase == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: passphrase required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: passphrase required"})
 		return
 	}
 
@@ -117,26 +117,26 @@ func (s *WSServer) handleExportPortableEncrypted(wconn *wsConn, req jsonrpcReque
 
 	result, err := export.ExportPortableEncrypted(deps, params.Passphrase, params.IncludePrivateContent)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }
 
 // --- export.backup -----------------------------------------------------
 
-func (s *WSServer) handleExportBackup(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportBackup(ctx context.Context, wconn Responder, req jsonrpcRequest) {
 	if s.exportPaths == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "backup not available (paths not wired)"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "backup not available (paths not wired)"})
 		return
 	}
 	deps := export.BackupDeps{Paths: s.exportPaths, ContentDB: s.exportContentDB}
 	result, err := export.Backup(ctx, deps)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }
 
 // --- export.import -----------------------------------------------------
@@ -145,16 +145,16 @@ type exportImportParams struct {
 	Data json.RawMessage `json:"data"`
 }
 
-func (s *WSServer) handleExportImport(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportImport(wconn Responder, req jsonrpcRequest) {
 	var params exportImportParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: data required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: data required"})
 		return
 	}
 
 	var data export.ConfigExport
 	if err := json.Unmarshal(params.Data, &data); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: data must be a ConfigExport"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: data must be a ConfigExport"})
 		return
 	}
 
@@ -163,10 +163,10 @@ func (s *WSServer) handleExportImport(wconn *wsConn, req jsonrpcRequest) {
 	// stores itself.
 	result, err := export.RestoreImport(context.Background(), s.buildRestoreDeps(), &data, nil)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }
 
 // exportImportPortableParams is decoded from the export.importPortable RPC payload.
@@ -175,23 +175,23 @@ type exportImportPortableParams struct {
 	Passphrase string `json:"passphrase"`
 }
 
-func (s *WSServer) handleExportImportPortable(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleExportImportPortable(wconn Responder, req jsonrpcRequest) {
 	var params exportImportPortableParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Payload == "" || params.Passphrase == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: payload (base64) and passphrase required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: payload (base64) and passphrase required"})
 		return
 	}
 
 	payload, err := base64.StdEncoding.DecodeString(params.Payload)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: payload must be base64"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: payload must be base64"})
 		return
 	}
 
 	enc := &export.PortableEncryptedExport{Payload: payload}
 	plain, err := export.DecryptPortableExport(enc, params.Passphrase)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Decryption failed: wrong passphrase or corrupted data"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Decryption failed: wrong passphrase or corrupted data"})
 		return
 	}
 
@@ -202,10 +202,10 @@ func (s *WSServer) handleExportImportPortable(wconn *wsConn, req jsonrpcRequest)
 	// generations.
 	result, err := export.RestoreImport(context.Background(), s.buildRestoreDeps(), &plain.Config, plain.Private)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }
 
 // buildRestoreDeps assembles the restore operation's dependencies: the

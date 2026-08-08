@@ -54,27 +54,27 @@ type shellOpenUrlParams struct {
 // not a URL this panel may ever send a user to, and the renderer's
 // conversion module only ever emits https for a recognised host. The result
 // is the empty object, exactly like files.reveal.
-func (s *WSServer) handleShellOpenUrl(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleShellOpenUrl(wconn Responder, req jsonrpcRequest) {
 	var params shellOpenUrlParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.URL == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: url required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: url required"})
 		return
 	}
 	u, err := url.Parse(params.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: only http(s) URLs can be opened"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: only http(s) URLs can be opened"})
 		return
 	}
 	s.urlMu.RLock()
 	uo := s.urlOpener
 	s.urlMu.RUnlock()
 	if uo == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "shell.openUrl not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "shell.openUrl not available"})
 		return
 	}
 	if err := uo.OpenURL(context.Background(), u.String()); err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "shell.openUrl: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "shell.openUrl: ", err))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
 }

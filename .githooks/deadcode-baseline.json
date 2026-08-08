@@ -51,7 +51,8 @@
     "  package and ws_test_helper.go already below.",
     "TEMPORARY, nocx-sfv6.3: the 12 internal/transport/control entries are a contract-first package whose consumer is nocx-sfv6.5 (handleControlFrame submitting work). Added by hand because the updater refuses growth on purpose. They MUST be gone before nocx-sfv6 closes \u2014 removing them is an acceptance criterion of nocx-sfv6.5, so a package that is never wired cannot be quietly shipped the way nocx-rtg0's ContentDB.Add was.",
     "TEMPORARY, nocx-sfv6.8: the two internal/transport/ws_saturation.go entries build the refusal's wire form; their caller is nocx-sfv6.5, which submits work to the executor and answers a *control.Rejection with them. Same obligation as the control package entries \u2014 gone before nocx-sfv6 closes.",
-    "TEMPORARY, nocx-sfv6.4 part 1: 139 internal/capability entries. The package is the typed operation layer; its consumers are the handlers, and the handler migration was deliberately split off because another worker was rewriting every outbound call site in the same files. THE CHECKABLE OBLIGATION: this baseline must return to exactly 104 violations before nocx-sfv6 closes. A number, not a promise \u2014 104 is the count after the control and ws_saturation entries and before internal/capability existed."
+    "TEMPORARY, nocx-sfv6.4 part 1: 139 internal/capability entries. The package is the typed operation layer; its consumers are the handlers, and the handler migration was deliberately split off because another worker was rewriting every outbound call site in the same files. THE CHECKABLE OBLIGATION: this baseline must return to exactly 104 violations before nocx-sfv6 closes. A number, not a promise \u2014 104 is the count after the control and ws_saturation entries and before internal/capability existed.",
+    "nocx-sfv6.1: five wedgedSocket entries in ws_test_helper.go. That file holds test helpers in a non-_test file, which is why deadcode sees them at all \u2014 the same reason memSecretStore.* and newTestStore are already here. Not part of the 104 obligation."
   ],
   "violations": [
     {
@@ -945,6 +946,26 @@
     {
       "file": "internal/transport/ws_test_helper.go",
       "func": "newTestStore"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "newWedgedSocket"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.Close"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.ReadMessage"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.SetWriteDeadline"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.WriteMessage"
     },
     {
       "file": "internal/vault/inventory.go",

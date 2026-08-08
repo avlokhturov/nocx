@@ -111,7 +111,7 @@ type shellFootprintUninstallResult struct {
 // marks nothing removable: we could not prove the mapping, and the surface
 // says removal needs a saved connection rather than offering a button that
 // would fail at click time.
-func (s *WSServer) handleShellFootprintStatus(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleShellFootprintStatus(wconn Responder, req jsonrpcRequest) {
 	destinations := make([]shellFootprintDestination, 0)
 	if s.installedFacts != nil {
 		removable := s.removableProfiles()
@@ -127,9 +127,9 @@ func (s *WSServer) handleShellFootprintStatus(wconn *wsConn, req jsonrpcRequest)
 			})
 		}
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellFootprintStatusResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(shellFootprintStatusResult{
 		Destinations: destinations,
-	})))
+	}))
 }
 
 // removableProfiles maps resolved destination identity → saved profile id,
@@ -189,22 +189,22 @@ func profileOracleArgv(host, user string, port int) []string {
 // A direct-host destination is refused with a profile error; the surface
 // never offers this button for one, because the status call reports
 // removableProfileId only when a profile resolves to the destination.
-func (s *WSServer) handleShellFootprintUninstall(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleShellFootprintUninstall(wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		ProfileID string `json:"profileId"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "profileId is required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "profileId is required"})
 		return
 	}
 	if s.resolver == nil || s.remoteUninstaller == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "uninstall is not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "uninstall is not available"})
 		return
 	}
 
 	host, cfg, err := s.resolver.Resolve(params.ProfileID)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "unknown profile"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "unknown profile"})
 		return
 	}
 
@@ -215,7 +215,7 @@ func (s *WSServer) handleShellFootprintUninstall(wconn *wsConn, req jsonrpcReque
 	removed, conflicts, err := s.remoteUninstaller.UninstallIntegration(context.Background(), host, opts...)
 	if err != nil {
 		s.log.Warn("shell.footprint.uninstall failed", "profileId", params.ProfileID, "error", err)
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "uninstall failed"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "uninstall failed"})
 		return
 	}
 	if removed == nil {
@@ -224,8 +224,8 @@ func (s *WSServer) handleShellFootprintUninstall(wconn *wsConn, req jsonrpcReque
 	if conflicts == nil {
 		conflicts = []string{}
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellFootprintUninstallResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(shellFootprintUninstallResult{
 		Removed:   removed,
 		Conflicts: conflicts,
-	})))
+	}))
 }

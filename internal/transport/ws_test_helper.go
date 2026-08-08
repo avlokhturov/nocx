@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 )
@@ -62,4 +65,46 @@ func (s *memSecretStore) Exists(_ context.Context, id credential.SecretID) (bool
 	defer s.mu.Unlock()
 	_, ok := s.m[id]
 	return ok, nil
+}
+
+// wedgedSocket is an outbound.Socket whose WriteMessage blocks until
+// release is closed — the deterministic stand-in for a socket with a full
+// send buffer. It lets a test wedge a connection's outbound pump mid-write.
+// started (buffered 1) fires on entry to WriteMessage, so a test can wait
+// until the pump is genuinely blocked; writes counts completed
+// (post-release) writes, so a test can assert a frame was never delivered.
+type wedgedSocket struct {
+	mu      sync.Mutex
+	release chan struct{}
+	closed  bool
+	started chan struct{}
+	writes  atomic.Int64
+}
+
+func newWedgedSocket() *wedgedSocket {
+	return &wedgedSocket{release: make(chan struct{}), started: make(chan struct{}, 1)}
+}
+
+func (s *wedgedSocket) WriteMessage(int, []byte) error {
+	select {
+	case s.started <- struct{}{}:
+	default:
+	}
+	<-s.release
+	s.writes.Add(1)
+	return nil
+}
+
+func (s *wedgedSocket) SetWriteDeadline(time.Time) error { return nil }
+
+func (s *wedgedSocket) ReadMessage() (int, []byte, error) { return 0, nil, io.EOF }
+
+func (s *wedgedSocket) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.closed = true
+		close(s.release)
+	}
+	return nil
 }

@@ -48,26 +48,26 @@ type shellIntegrateResult struct {
 // The session id is server-authoritative (AD-7): the session must be live in
 // the registry or the plan is refused, so a stale or forged id can never
 // anchor NOCX_SESSION_ID in a payload typed into a shell.
-func (s *WSServer) handleShellIntegrate(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleShellIntegrate(wconn Responder, req jsonrpcRequest) {
 	var params struct {
 		SessionID string `json:"sessionId"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
 	if _, err := s.registry.Get(sid); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
 	if s.inBand == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "shell.integrate: in-band bootstrap not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "shell.integrate: in-band bootstrap not available"})
 		return
 	}
 	plan, err := s.inBand.InBandBootstrap(params.SessionID)
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "shell.integrate: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "shell.integrate: ", err))
 		return
 	}
 	result := shellIntegrateResult{
@@ -75,5 +75,5 @@ func (s *WSServer) handleShellIntegrate(wconn *wsConn, req jsonrpcRequest) {
 		Payload:    plan.Payload,
 		Terminator: plan.Terminator,
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(result)))
+	_ = wconn.TryResult(req.ID, mustMarshal(result))
 }

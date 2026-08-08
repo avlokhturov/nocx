@@ -57,15 +57,15 @@ type vaultResolveLineResponse struct {
 // password for user@host:22"), so the grammar is deliberately permissive.
 var resolveLineRefRE = regexp.MustCompile(`\{\{secret:(.+?)\}\}`)
 
-func (s *WSServer) handleVaultResolveLine(wconn *wsConn, req jsonrpcRequest) {
+func (s *WSServer) handleVaultResolveLine(wconn Responder, req jsonrpcRequest) {
 	var p vaultResolveLineParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 
 	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.resolveLine not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "vault.resolveLine not available"})
 		return
 	}
 
@@ -73,21 +73,21 @@ func (s *WSServer) handleVaultResolveLine(wconn *wsConn, req jsonrpcRequest) {
 	// vault is not consulted for it.
 	locs := resolveLineRefRE.FindAllStringSubmatchIndex(p.Line, -1)
 	if len(locs) == 0 {
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResolveLineResponse{
+		_ = wconn.TryResult(req.ID, mustMarshal(vaultResolveLineResponse{
 			Line: p.Line,
 			Refs: []vaultResolveLineRef{},
-		})))
+		}))
 		return
 	}
 
 	profiles, err := s.profiles.LoadProfiles()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	groups, err := s.groups.LoadGroups()
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 
@@ -101,7 +101,7 @@ func (s *WSServer) handleVaultResolveLine(wconn *wsConn, req jsonrpcRequest) {
 	// secret", and a generic -32603 would not let it.
 	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.resolveLine: ", err))
+		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.resolveLine: ", err))
 		return
 	}
 	nameToRow := make(map[string]string, len(entries))
@@ -124,7 +124,7 @@ func (s *WSServer) handleVaultResolveLine(wconn *wsConn, req jsonrpcRequest) {
 			// The vault sealed between inventory and read: the response
 			// would be a lie, because a retry after unsealing resolves
 			// differently. Surface the actionable error instead.
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.resolveLine: ", vault.ErrVaultSealed))
+			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "vault.resolveLine: ", vault.ErrVaultSealed))
 			return
 		}
 		refs = append(refs, vaultResolveLineRef{Name: name, Resolved: resolved})
@@ -140,10 +140,10 @@ func (s *WSServer) handleVaultResolveLine(wconn *wsConn, req jsonrpcRequest) {
 		}
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResolveLineResponse{
+	_ = wconn.TryResult(req.ID, mustMarshal(vaultResolveLineResponse{
 		Line: string(out),
 		Refs: refs,
-	})))
+	}))
 }
 
 // resolveVaultSecret maps name → row handle → SecretID → value. sealed is
