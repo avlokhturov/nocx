@@ -34,6 +34,20 @@ type Admission interface {
 	TryAcquire(context.Context) (Permit, *Rejection)
 }
 
+// NonblockingAdmission is an Admission whose TryAcquire never blocks: it
+// either returns a Permit immediately or a *Rejection. It is the only
+// admission a bounded Submission may hold, because a Submission's TrySubmit
+// is called by the read loop, which must never block on admission.
+//
+// The marker method is unexported, so only types in this package satisfy the
+// interface: NewSemaphore and NewCompositeNonblocking produce values of it,
+// and NewWaitingSemaphore deliberately does not. A waiting admission wired
+// into a Submission is a compile error, not a runtime surprise (ADR-0024).
+type NonblockingAdmission interface {
+	Admission
+	nonblocking()
+}
+
 // Permit is a held slice of an Admission's capacity. Release returns it.
 //
 // Release MUST be idempotent: the second and later calls give nothing further

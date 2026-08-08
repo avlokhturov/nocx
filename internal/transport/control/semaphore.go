@@ -13,14 +13,20 @@ type semaphore struct {
 	ch   chan struct{}
 }
 
-// NewSemaphore returns an Admission with the given capacity. A capacity of 0
-// refuses every acquire; a negative capacity is a programming error.
-func NewSemaphore(name string, capacity int) Admission {
+// NewSemaphore returns a NonblockingAdmission with the given capacity. Its
+// TryAcquire never blocks: a full channel is a refusal, which is exactly the
+// class of admission a bounded Submission may hold (NonblockingAdmission). A
+// capacity of 0 refuses every acquire; a negative capacity is a programming
+// error.
+func NewSemaphore(name string, capacity int) NonblockingAdmission {
 	if capacity < 0 {
 		panic("control: negative capacity for semaphore " + name)
 	}
 	return &semaphore{name: name, ch: make(chan struct{}, capacity)}
 }
+
+// nonblocking seals the interface: only this package's types satisfy it.
+func (s *semaphore) nonblocking() {}
 
 func (s *semaphore) Name() string { return s.name }
 

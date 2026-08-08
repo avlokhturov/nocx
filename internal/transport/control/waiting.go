@@ -27,10 +27,15 @@ import (
 // Only exhausting a bound is a refusal. Within the bounds a conflicting
 // request waits for the gate, exactly like a queue of length two.
 //
-// TryAcquire may block (up to waitTimeout). Callers that must never block
-// (the read loop's synchronous path) must not call it; the composition root
-// places this admission inside the task goroutine's acquisition (operation
-// Run), never in a submission's TrySubmit.
+// TryAcquire may block (up to waitTimeout). That is why
+// NewWaitingSemaphore deliberately does NOT satisfy NonblockingAdmission: a
+// waiting admission can never be wired into a bounded Submission, whose
+// TrySubmit the read loop calls. Callers that must never block (the read
+// loop's synchronous path) must not call it; the composition root places this
+// admission inside the task goroutine's acquisition (operation Run), never in
+// a submission's TrySubmit. The two admission classes and the reason they
+// differ are ADR-0024 item 4.
+
 type waitingSemaphore struct {
 	name     string
 	ch       chan struct{} // capacity tokens; one buffered token per permit
@@ -40,14 +45,6 @@ type waitingSemaphore struct {
 	timeout  time.Duration
 }
 
-// NewWaitingSemaphore returns an Admission of the given capacity that waits
-// (bounded) for a free slot instead of refusing instantly.
-//
-// maxQueue bounds concurrent registered waiters; a caller beyond it is
-// refused immediately. waitTimeout bounds how long a waiter waits; a waiter
-// that exhausts it is refused. A waitTimeout of 0 refuses immediately when
-// the capacity is exhausted (the old non-blocking behavior); negative
-// maxQueue or waitTimeout is a programming error.
 func NewWaitingSemaphore(name string, capacity, maxQueue int, waitTimeout time.Duration) Admission {
 	if capacity < 0 {
 		panic("control: negative capacity for waiting semaphore " + name)

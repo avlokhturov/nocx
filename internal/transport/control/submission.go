@@ -18,11 +18,16 @@ type boundedSubmission struct {
 }
 
 // NewBoundedSubmission returns a Submission that acquires a Permit from the
-// given Admission, runs the task on its own goroutine, and releases the
-// Permit when the task returns. If the Admission refuses, the task is NOT run
-// and the rejection is returned without blocking — the read loop may submit
-// and move on either way.
-func NewBoundedSubmission(a Admission) Submission {
+// given NON-BLOCKING admission, runs the task on its own goroutine, and
+// releases the Permit when the task returns. If the Admission refuses, the
+// task is NOT run and the rejection is returned without blocking — the read
+// loop may submit and move on either way.
+//
+// The parameter type is the guard: only a NonblockingAdmission can be wired
+// here, so a waiting admission (NewWaitingSemaphore — TryAcquire may block up
+// to its wait timeout) cannot reach a Submission's TrySubmit, which the read
+// loop calls. The miswiring is a compile error (ADR-0024).
+func NewBoundedSubmission(a NonblockingAdmission) Submission {
 	return &boundedSubmission{admission: a}
 }
 

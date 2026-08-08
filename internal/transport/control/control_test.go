@@ -1,8 +1,8 @@
 // Package control_test exercises the scheduling contract through its public
-// surface only. The third Admission implementation below is defined in this
-// test file and consumed by the package's own constructors unchanged — the
-// AD-8 proof that variation is expressed by the interface, never by a fork
-// inside the package.
+// surface only. The third-Admission AD-8 proof lives in
+// third_admission_test.go (package control, internal): the NonblockingAdmission
+// marker is unexported by design (ADR-0024), so only the package itself — its
+// internal tests included — may define a submission-path admission.
 package control_test
 
 import (
@@ -85,7 +85,7 @@ func TestTrySubmitRejectsPromptlyWhenResourcesExhausted(t *testing.T) {
 func TestSaturatingOneAdmissionLeavesAnotherUntouched(t *testing.T) {
 	conflict := control.NewSemaphore("conflict", 1)
 	exec := control.NewSemaphore("exec", 1)
-	sub := control.NewBoundedSubmission(control.NewComposite(conflict, exec))
+	sub := control.NewBoundedSubmission(control.NewCompositeNonblocking(conflict, exec))
 
 	// Saturate the conflict admission directly; the composite refuses at the
 	// first gate and must never consume the execution permit.
@@ -119,63 +119,6 @@ func TestSaturatingOneAdmissionLeavesAnotherUntouched(t *testing.T) {
 		p.Release()
 	}
 	execPermit.Release()
-}
-
-// --- acceptance 3: a third Admission, defined in the test file, is used -------
-
-// oneShotAdmission is the THIRD Admission implementation, defined here in the
-// test file and wired through the package's own constructors with zero edits
-// to its source. It is the AD-8 proof: the executor can add a new kind of
-// resource by constructing another Admission.
-type oneShotAdmission struct {
-	name string
-
-	mu   sync.Mutex
-	used bool
-}
-
-func (o *oneShotAdmission) Name() string { return o.name }
-
-func (o *oneShotAdmission) TryAcquire(context.Context) (control.Permit, *control.Rejection) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.used {
-		return nil, &control.Rejection{Reason: "already used", Scope: o.name}
-	}
-	o.used = true
-	return oneShotPermit{}, nil
-}
-
-type oneShotPermit struct{}
-
-func (oneShotPermit) Release() {}
-
-func TestThirdAdmissionDefinedInTestFileIsUsedUnchanged(t *testing.T) {
-	sub := control.NewBoundedSubmission(&oneShotAdmission{name: "oneshot"})
-
-	ran := make(chan struct{})
-	if rej := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { close(ran) }}); rej != nil {
-		t.Fatalf("first submit through the third admission was rejected: %+v", rej)
-	}
-	<-ran
-
-	if rej := sub.TrySubmit(context.Background(), control.Task{Run: func(context.Context) { t.Error("must not run") }}); rej == nil {
-		t.Fatal("second submit must be refused by the exhausted third admission")
-	}
-
-	// It also composes with the package's own semaphore: when the foreign
-	// admission refuses, the semaphore permit acquired before it is released.
-	sem := control.NewSemaphore("exec", 1)
-	comp := control.NewComposite(&oneShotAdmission{name: "oneshot2"}, sem)
-	if p, rej := comp.TryAcquire(context.Background()); rej != nil {
-		t.Fatalf("first composite acquire refused: %+v", rej)
-	} else {
-		p.Release()
-	}
-	if _, rej := comp.TryAcquire(context.Background()); rej == nil {
-		t.Fatal("second composite acquire must be refused at the foreign admission")
-	}
-	waitAcquirable(t, sem, "semaphore after a failed composite acquire")
 }
 
 // --- acceptance 4: permits are released on every exit path -------------------
@@ -225,7 +168,7 @@ func TestConflictingWorkDoesNotStarveUnrelatedWork(t *testing.T) {
 	// gate never occupies a worker permit.
 	conflict := control.NewSemaphore("conflict", 1)
 	exec := control.NewSemaphore("exec", 2)
-	sub := control.NewBoundedSubmission(control.NewComposite(conflict, exec))
+	sub := control.NewBoundedSubmission(control.NewCompositeNonblocking(conflict, exec))
 
 	// Conflicting task A: takes the conflict slot and one worker, then blocks.
 	releaseA := make(chan struct{})

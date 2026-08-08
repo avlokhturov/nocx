@@ -779,9 +779,9 @@ func (s *WSServer) buildControlPlane() {
 	// composed with the lane (canonical order: resource before execution
 	// permit): a second probe or dialog is refused even while the lane has
 	// free permits, and every task still occupies one lane permit.
-	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewComposite(
+	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("probe", 1), lane))}
-	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewComposite(
+	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("dialog", 1), lane))}
 
 	gates := s.domainGates()
