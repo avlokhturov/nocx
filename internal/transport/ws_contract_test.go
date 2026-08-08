@@ -18,6 +18,8 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -3861,5 +3863,132 @@ func TestGitChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if params.Reason != "sessionClosed" {
 		t.Errorf("reason = %q, want sessionClosed", params.Reason)
+	}
+}
+
+// ── lifecycle.changed ─────────────────────────────────────────────────────
+
+// The lifecycle.changed notification gets the same three checks as a method
+// (AGENTS.md rule 5; ADR-0024 decision 7). It is the published fact of the
+// authenticated lifecycle protocol — what the kernel concluded, projected by
+// internal/lifecyclepub — and an unsolicited notification is exactly where an
+// addressing or shape defect hides. Its schema covers the params object only,
+// exactly as files.changed's and git.changed's do.
+
+func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.changed.schema.json")
+	started := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	completed := started.Add(2 * time.Second)
+	code := 0
+	code3 := 3
+	fence := strings.Repeat("51", 32)
+	cases := map[string]lifecyclepub.Fact{
+		// The handshake's product: PromptReady(domain), carrying the domain
+		// and its epoch — the fact the frontend keys enhanced mode on.
+		"prompt ready": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecyclePromptReady,
+			Domain: "dom-1", Epoch: 3,
+		},
+		// An app-originated attempt awaiting its authenticated start.
+		"running open attempt": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptOpen,
+				Command: "make", Origin: lifecyclepub.OriginApp, StartedAt: started,
+			},
+		},
+		// The completion: exit status, completion timestamp and the render
+		// fence present exactly when the attempt completed.
+		"completed attempt": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptCompleted,
+				Command: "make", Origin: lifecyclepub.OriginApp,
+				StartedAt: started, ExitCode: &code, CompletedAt: &completed, Fence: fence,
+			},
+		},
+		// A non-zero exit status must survive the wire.
+		"completed with nonzero exit": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptCompleted,
+				Command: "false", Origin: lifecyclepub.OriginShell,
+				StartedAt: started, ExitCode: &code3, CompletedAt: &completed, Fence: fence,
+			},
+		},
+		// Abandoned: the lane stays running, the attempt is unknown, and no
+		// exit status is invented.
+		"abandoned attempt": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptUnknown,
+				Command: "sleep 1000", Origin: lifecyclepub.OriginShell, StartedAt: started,
+			},
+		},
+		// A lane with no live domain: no domain, no epoch, no attempt.
+		"native lane": {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleNative},
+		"lost lane":   {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleLost},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			n := lifecycleChangedNotification{
+				JSONRPC: "2.0",
+				Method:  "lifecycle.changed",
+				Params:  params,
+			}
+			raw, err := json.Marshal(n)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var frame struct {
+				Params json.RawMessage `json:"params"`
+			}
+			if err := json.Unmarshal(raw, &frame); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			validateJSON(t, schema, frame.Params, "lifecycle.changed DTO")
+		})
+	}
+}
+
+// The over-the-wire notification test: the real publisher, the real server,
+// the real socket. The publisher is driven with authenticated envelopes
+// exactly as a lifecycle adapter would (the kernel's own test seam — the
+// adapter is proven separately in internal/lifecyclechannel); everything from
+// the projection to the writeJSON frame is the production code path. This is
+// the test that catches the server not sending what the DTO could have.
+func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.changed.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t)
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	validateJSON(t, schema, raw, "lifecycle.changed params (real socket)")
+	var params lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if params.Lifecycle != lifecyclepub.LifecyclePromptReady {
+		t.Errorf("lifecycle = %q, want prompt_ready", params.Lifecycle)
+	}
+	if params.Domain != string(h.Domain) || params.Epoch != h.Epoch {
+		t.Errorf("domain/epoch = %q/%d, want %q/%d", params.Domain, params.Epoch, h.Domain, h.Epoch)
 	}
 }

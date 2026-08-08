@@ -166,6 +166,7 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	))
 	env = append(env, cfg.Env...)
 	cmd.Env = env
+	cmd.ExtraFiles = cfg.ExtraFiles
 
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{
 		Cols: cfg.Cols,

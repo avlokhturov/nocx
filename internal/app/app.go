@@ -23,6 +23,9 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
 	"github.com/shady2k/nocx/internal/git"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
@@ -537,6 +540,24 @@ func New(opts ...Option) (*App, error) {
 		// in New can fail, so the factory needs no earlier-return cleanup.
 		transport.WithGitRepoFactory(gitFactory),
 	}
+	// The lifecycle publication boundary (ADR-0024 decision 7, bead
+	// nocx-u7uh.5): one kernel, one publisher, and the transport as its
+	// emitter. The kernel authenticates; only schema-checked facts cross
+	// the control plane. The publisher wraps the kernel so every mutation
+	// an adapter drives is projected into a published fact, and it is what
+	// the shell-spawn path creates lifecycle adapters against (read from
+	// the transport via WithLifecyclePublisher). Before this line the whole
+	// lifecycle stack was reachable from its own tests and nowhere else
+	// (AGENTS.md check 5); the adapter creation itself lands with the
+	// shell-spawn wiring in internal/transport/ws_shell.go.
+	lifecycleKernel := lifecycle.New(lifecycle.Options{})
+	lifecyclePub := lifecyclepub.New(lifecycleKernel)
+	// The pty factory drives the channel against the PUBLISHER, not the raw
+	// kernel: every mutation an adapter causes must reach the renderer as a
+	// published fact, and the publisher is the only thing that projects them.
+	ptf.kernel = lifecyclePub
+	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
+
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
 	// and ignored and the listener always took an ephemeral port. The dev stand
 	// pins 9880 precisely so the SSH forward survives a restart; instead every
@@ -546,6 +567,11 @@ func New(opts ...Option) (*App, error) {
 		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
 	}
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	// The transport is the publisher's emitter: facts route to the lane's
+	// session's current subscriber. Bound post-construction because the
+	// server is built above; the window before this line is empty (no
+	// session can have spawned a shell yet).
+	lifecyclePub.SetEmitter(tp)
 
 	// One resolver, one consumer family: connections.test probes and
 	// ordinary connects resolve identically. Created after tp so the
@@ -754,13 +780,53 @@ func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
 }
 
 type localPTYFactory struct {
-	log   log.Logger
-	shint shellintegration.ShellIntegration
+	log    log.Logger
+	shint  shellintegration.ShellIntegration
+	kernel lifecyclechannel.Kernel
+}
+
+// lifecyclePTY is an enhanced session's pty plus the lifecycle channel whose
+// descriptor the shell inherited. It exists so the channel dies with the
+// session that owns it: a conventional session is a bare pty and carries no
+// channel at all, which is the observable difference ADR-0024 decision 4 is
+// about.
+type lifecyclePTY struct {
+	pty.Pty
+	ch *lifecyclechannel.Adapter
+}
+
+func (p *lifecyclePTY) Close() error {
+	err := p.Pty.Close()
+	_ = p.ch.Close()
+	return err
 }
 
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	env := f.shint.ActivationEnv(cfg.Enhanced)
-	return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+	if !cfg.Enhanced || f.kernel == nil {
+		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+	}
+	// Enhanced: the shell reports its lifecycle over a descriptor that is not
+	// the tty (ADR-0024 decision 2). The child end goes in as fd 3; the parent
+	// end stays here and is pumped by the adapter.
+	// The handshake bound is set here rather than left to the adapter's
+	// default: how long a shell may take to prove itself before the session
+	// falls back to conventional is a product decision, and the composition
+	// root is where product decisions belong.
+	ch, child, err := lifecyclechannel.New(f.log, f.kernel,
+		lifecyclechannel.WithHelloTimeout(lifecycle.HelloTimeout))
+	if err != nil {
+		return nil, err
+	}
+	p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env), pty.WithExtraFiles(child))
+	// The child end is the shell's once the fork has happened; this process
+	// keeps no reference either way.
+	_ = child.Close()
+	if err != nil {
+		_ = ch.Close()
+		return nil, err
+	}
+	return &lifecyclePTY{Pty: p, ch: ch}, nil
 }
 
 func (a *App) Start(ctx context.Context) error {

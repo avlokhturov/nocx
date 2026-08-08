@@ -3,6 +3,7 @@ package pty
 import (
 	"context"
 	"io"
+	"os"
 
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -27,6 +28,10 @@ type Config struct {
 	YPixel uint16
 	// Enhanced requests the marker-only prompt env (ADR-0006) for this session.
 	Enhanced bool
+	// ExtraFiles are inherited by the shell as fds 3, 4, … via
+	// exec.Cmd.ExtraFiles. The lifecycle channel descriptor is the first
+	// one, so it is fd 3 in the shell.
+	ExtraFiles []*os.File
 }
 
 // Option configures a Config before PTY creation.
@@ -36,6 +41,15 @@ type Option func(*Config)
 func WithExtraEnv(env []string) Option {
 	return func(cfg *Config) {
 		cfg.Env = append(cfg.Env, env...)
+	}
+}
+
+// WithExtraFiles appends open files the child shell inherits as fds 3, 4, …
+// via exec.Cmd.ExtraFiles — the lifecycle channel descriptor is the first
+// one, so it is fd 3 in the shell.
+func WithExtraFiles(files ...*os.File) Option {
+	return func(cfg *Config) {
+		cfg.ExtraFiles = append(cfg.ExtraFiles, files...)
 	}
 }
 

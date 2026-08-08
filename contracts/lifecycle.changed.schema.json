@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/lifecycle.changed.schema.json",
+  "title": "LifecycleChanged",
+  "description": "The lifecycle.changed JSON-RPC notification: the published fact of the authenticated lifecycle protocol (ADR-0024 decision 7, docs/lifecycle-protocol.md). Server-initiated and unsolicited, so it has no request to correlate against and no caller checking its shape — which is exactly where an addressing or shape defect would hide, and why it gets the same three checks as a method. Authentication terminates in the backend: this is what the kernel concluded, projected from its read model by the publication layer (internal/lifecyclepub). It therefore never carries the per-epoch capability, a raw channel frame, or the channel's sequence counter — a future refactor that adds any of those fails the no-capability/no-raw-frame wire test, and this schema would reject them anyway. The destination is resolved at emit time — the lane's session's current subscriber — never stored, which is what survives an AD-9 reconnect.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lane", "lifecycle"],
+  "properties": {
+    "lane": {
+      "description": "The input-routing lane the fact is about — one terminal tab. The renderer filters nothing: a fact is routed to the lane's own session, and the lane id is what lets the projection attach it to the right tab's state machine.",
+      "type": "string"
+    },
+    "lifecycle": {
+      "description": "The per-lane authority axis (ADR-0024 decision 6): Native | PromptReady(domain) | Running(attempt) | Desynchronized(domain) | Lost. The buffer axis is deliberately absent — it belongs to the renderer, never to the kernel or this fact.",
+      "type": "string",
+      "enum": ["native", "prompt_ready", "running", "desynchronized", "lost"]
+    },
+    "domain": {
+      "description": "The domain the lifecycle refers to, present exactly when the lifecycle names one (prompt_ready, running, desynchronized). Absent for native and lost, where the lane has no live domain. A domain id is an opaque string, never an alias for a transport.",
+      "type": "string"
+    },
+    "epoch": {
+      "description": "The generation of that domain — monotonic per kernel instance, never reused, never resumed. A new establishment is a new domain with a new epoch, which is how the renderer knows its projection is stale. Present exactly when domain is.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "attempt": {
+      "description": "The attempt the lifecycle refers to, present when lifecycle is running. One attempt record per domain; the renderer keys the block model on its id and state. Completion fields (exitCode, completedAt, fence) are present exactly when the attempt completed — the kernel sets an exit status exactly once, only from an authenticated completion. fence is the render-ordering rendezvous of decision 7's carve-out: the shell writes the same 32 random bytes to the pty after the command's output, and the visual freeze waits for both this event and the matching fence bytes. A fence with no authenticated event behind it does nothing at all — it carries no authority, which is why it is publishable where the capability is not.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "state"],
+      "properties": {
+        "id": {
+          "description": "The attempt id. Server-assigned for app-originated attempts (editor submit mints it before the bytes that could cause the shell's own start are written to the pty); shell-supplied for shell-originated ones.",
+          "type": "string"
+        },
+        "state": {
+          "description": "The attempt's status. open: running or awaiting its authenticated start. completed: an authenticated same-domain completion set the exit status exactly once. unknown: abandoned (native-mode escape), lost with its domain, or unrecoverable by an authenticated snapshot — nothing may mark an attempt successful and nothing may assign it an exit code it did not report (decision 5).",
+          "type": "string",
+          "enum": ["open", "completed", "unknown"]
+        },
+        "command": {
+          "description": "The command text. For an attached app attempt this is the app-owned text carrying references — the shell's wire line, which may carry vault-resolved secrets, is ignored outright (decision 5's privacy rule). For a shell-originated attempt it is the shell's line. Either way it is already visible to the renderer through the pty stream, so publishing it widens nothing.",
+          "type": "string"
+        },
+        "origin": {
+          "description": "Where the attempt came from: app (editor submit, synchronously before the pty bytes) or shell (an authenticated start with nothing pending). Both origins are legitimate and equally attributable.",
+          "type": "string",
+          "enum": ["app", "shell"]
+        },
+        "startedAt": {
+          "description": "When the attempt was created, RFC 3339 with sub-second precision. The block model derives duration from startedAt and completedAt.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "exitCode": {
+          "description": "The exit status, present exactly when state is completed. Set exactly once, only by an authenticated completion.",
+          "type": "integer"
+        },
+        "completedAt": {
+          "description": "When the authenticated completion landed in the kernel, RFC 3339 with sub-second precision. Present exactly when state is completed.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "fence": {
+          "description": "The completion's render fence: 32 random bytes as 64 lowercase hex chars, written to the pty by the shell after the command's output and carried here for the render-order rendezvous. Present exactly when state is completed. Format-identical to the capability on purpose — the wire test discriminates on value: the capability minted for the domain must never appear in any serialized fact, and a future refactor that confuses the two fails it.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

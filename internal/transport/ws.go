@@ -24,6 +24,8 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/importer"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 
@@ -280,6 +282,19 @@ type WSServer struct {
 	// opaque token, stored server-side so secrets never reach the renderer.
 	planMu    sync.Mutex
 	planStore map[string]*planEntry
+
+	// lifecyclePub is the lifecycle publication boundary (ADR-0024 decision
+	// 7, bead nocx-u7uh.5). When nil, no lifecycle adapters can be created
+	// and no lifecycle.changed facts are routed — sessions stay
+	// conventional. Wired by WithLifecyclePublisher at the composition
+	// root; the shell-spawn path reads it to create adapters, and this
+	// server is bound as the publisher's emitter after construction.
+	lifecyclePub *lifecyclepub.Publisher
+	// lifecycleMu guards lifecycleLanes: the lane → session registry the
+	// lifecycle.changed routing resolves at emit time. Registered by the
+	// shell spawn path, cleared when a session closes.
+	lifecycleMu    sync.Mutex
+	lifecycleLanes map[lifecycle.LaneID]session.ID
 }
 
 // ── Tabby import plan store (server-side, never reaches renderer) ─────────
@@ -1626,6 +1641,14 @@ func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connS
 	// made).
 	s.flushFilesChanged(sid, wconn)
 
+	// Lifecycle (ADR-0024 decision 8): a reattached frontend must resume the
+	// existing domain, so its current projection is re-emitted to THIS
+	// connection — after the attach response and after setSubscriber, like
+	// the files flush above. The publisher's ReplayLane bypasses the
+	// change-dedupe on purpose: the renderer needs the current state even
+	// when no transition happened since it last saw this session.
+	s.replayLifecycleFacts(sid)
+
 	sidBytes, _ := session.IDToBytes(sid)
 	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, from)
 }
@@ -1884,6 +1907,7 @@ func (s *WSServer) closeSession(sid session.ID) {
 	_ = s.registry.Close(sid)
 	s.filesSessionClosed(sid)
 	s.gitSessionClosed(sid, wconn)
+	s.unregisterLifecycleLanes(sid)
 	s.discoverySessionClosed(sess)
 }
 

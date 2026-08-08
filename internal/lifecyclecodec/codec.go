@@ -344,7 +344,7 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 			ShellState:      lifecycle.ShellState(str(w.ShellState)),
 			ActiveAttemptID: attemptIDPtr(w.ActiveAttempt),
 			LastCompleted:   decodeCompletedRef(w.LastCompleted),
-			NextSequence:    u64(w.NextSeq),
+			NextSequence:    derefU64(w.NextSeq),
 		}
 	case lifecycle.KindDomainEstablished:
 		env.Event.DomainEstablished = &lifecycle.DomainEstablishedEvent{}
@@ -442,7 +442,10 @@ func attemptIDPtr(p *string) *lifecycle.AttemptID {
 	return &id
 }
 
-func u64(p *uint64) uint64 {
+// derefU64 reads an optional wire integer. Named for what it does rather than
+// for its type so that the deadcode ratchet's report is legible when a caller
+// chain moves (nocx-u7uh.5).
+func derefU64(p *uint64) uint64 {
 	if p == nil {
 		return 0
 	}

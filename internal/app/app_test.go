@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
@@ -243,4 +244,45 @@ func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
 	if got := a.LogFilePath(); got != "" {
 		t.Errorf("LogFilePath() = %q, want \"\" when the file could not be opened", got)
 	}
+}
+
+// TestLifecycleChannelWiring proves the composition root constructs the
+// lifecycle kernel and wires one descriptor transport per enhanced session:
+// an enhanced pty gets a channel that closes with it; a conventional pty
+// gets none (ADR-0024 decision 4: no channel, conventional session).
+func TestLifecycleChannelWiring(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	f, ok := a.Pty.(*localPTYFactory)
+	if !ok {
+		t.Fatalf("Pty factory is %T, want *localPTYFactory", a.Pty)
+	}
+	if f.kernel == nil {
+		t.Fatal("lifecycle kernel was not constructed at the composition root")
+	}
+
+	enhanced, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24, Enhanced: true})
+	if err != nil {
+		t.Fatalf("NewPTY(enhanced): %v", err)
+	}
+	wrapped, ok := enhanced.(*lifecyclePTY)
+	if !ok {
+		t.Fatalf("enhanced pty is %T, want *lifecyclePTY", enhanced)
+	}
+	if wrapped.ch == nil {
+		t.Fatal("enhanced session got no lifecycle channel")
+	}
+	_ = wrapped.Close()
+
+	plain, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("NewPTY(conventional): %v", err)
+	}
+	if _, ok := plain.(*lifecyclePTY); ok {
+		t.Fatal("conventional session must not carry a lifecycle channel")
+	}
+	_ = plain.Close()
 }
