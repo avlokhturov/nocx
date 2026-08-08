@@ -161,13 +161,33 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 			return nil, fmt.Errorf("agent-forward setup: %w", fwdErr)
 		}
 	}
+	// The authenticated lifecycle channel (ADR-0024 decision 2 "Over SSH"):
+	// establish it before the start command is built, so the allocated
+	// loopback port and the per-epoch capability are substituted into the
+	// launch text. Refusal — the remote sshd will not forward — is
+	// detectable synchronously and NOT distinguishable; the session then
+	// opens as a conventional terminal with a visible native prompt, and
+	// no diagnostic names a policy. Established only for enhanced sessions
+	// with a launcher: without the channel the shell keeps its native
+	// prompt (ADR-0024 decision 9).
+	var lc *lifecycleHandle
+	if acq.cfg.Enhanced && acq.cfg.RemoteLifecycle != nil && acq.cfg.RemoteLauncher != nil {
+		launch, closer, lerr := acq.cfg.RemoteLifecycle.Establish(ctx, host, opts...)
+		if lerr != nil {
+			rc.log.Warn("ssh: lifecycle channel refused; session stays conventional",
+				"host", host, "error", lerr)
+		} else {
+			lc = &lifecycleHandle{launch: launch, closer: closer}
+		}
+	}
 
-	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) })
+	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc)
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
 		// failed Connect path leaks a pooled ref (and a jump transport)
 		// for the process life.
+		lc.close()
 		rc.pool.Release(acq.handle)
 		return nil, err
 	}
@@ -720,7 +740,7 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //     absolute, no failure path may suppress it.
 //  5. No launcher wired: the installer's own start command (the §3.3
 //     far-side guard) when one is, else a plain shell, reason none.
-func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig) (string, RefusalReason) {
+func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, lc *lifecycleHandle) (string, RefusalReason) {
 	if resolved.remoteCommand != "" {
 		return resolved.remoteCommand, ReasonRemoteCommand
 	}
@@ -751,22 +771,34 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		if shell == "" {
 			shell = ShellAuto
 		}
-		cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, LaunchOptions{
+		opts := LaunchOptions{
 			SessionID: cfg.SessionID,
 			Enhanced:  cfg.Enhanced,
-		})
+		}
+		// The lifecycle channel config rides the launch text: the port
+		// becomes NOCX_LIFECYCLE_PORT and the capability the rcfile's
+		// @CAP@. lc is nil when establishment was refused — the launch
+		// then carries no channel config and the shell stays conventional.
+		if lc != nil {
+			opts.Lane = lc.launch.Lane
+			opts.Domain = lc.launch.Domain
+			opts.Epoch = lc.launch.Epoch
+			opts.LifecyclePort = lc.launch.Port
+			opts.Capability = lc.launch.Capability
+		}
+		cmd, reason, ok := cfg.RemoteLauncher.StartCommand(shell, opts)
 		if ok && cmd != "" {
 			return cmd, ReasonNone
 		}
 		// Decline or degenerate result: fall back to a plain shell. Normalize
 		// a missing reason so the degrade stays visible in the product
-		// (AGENTS.md: a soft degrade must never be log-only).
+		// (AGENTS.md: a soft degrade must never be log-only). The lifecycle
+		// channel is not used by a plain shell; openShell closes lc.
 		if reason == "" {
 			reason = ReasonUnsupportedShell
 		}
 		return "", reason
 	}
-
 	if cfg.RemoteInstaller != nil {
 		return cfg.RemoteInstaller.RemoteStartCommand(), ReasonNone
 	}
@@ -780,12 +812,15 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 // BEFORE the session watcher starts, so the watcher can never observe the
 // field unset (a race the old assign-after-openShell shape had: a session
 // dying in the window left Close reading a nil callback or racing the
-// write).
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func()) (*RealChannel, error) {
-	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg)
+// write). lc is the established lifecycle channel, or nil (refused or not
+// wired); it is closed on every path that does not hand the shell a
+// channel-using start command, and otherwise transferred to the channel.
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle) (*RealChannel, error) {
+	startCmd, reason := rc.shellStartCommand(ctx, gclient, resolved, cfg, lc)
 
 	session, err := gclient.NewSession()
 	if err != nil {
+		lc.close()
 		return nil, fmt.Errorf("new session: %w", err)
 	}
 
@@ -799,6 +834,7 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 	}
 	_, err = session.SendRequest("pty-req", true, gossh.Marshal(&ptyReq))
 	if err != nil {
+		lc.close()
 		_ = session.Close()
 		return nil, fmt.Errorf("pty-req: %w", err)
 	}
@@ -809,28 +845,44 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		// side can open auth-agent@openssh.com channels. agent.RequestAgentForwarding
 		// uses wantReply=true, so a server refusal surfaces as an error.
 		if reqErr := agent.RequestAgentForwarding(session); reqErr != nil {
+			lc.close()
 			_ = session.Close()
 			return nil, fmt.Errorf("agent-forward request: %w", reqErr)
 		}
 	}
 	stdin, err := session.StdinPipe()
 	if err != nil {
+		lc.close()
 		_ = session.Close()
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
 	stdout, err := session.StdoutPipe()
 	if err != nil {
+		lc.close()
 		_ = session.Close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 
+	// A start command that does not use the lifecycle channel — the
+	// launcher declined, the destination ran a configured remote command,
+	// or no integration happened at all — leaves the channel unclaimed: a
+	// plain shell (or a configured command) never connects to the
+	// forwarded port, and holding the lease open would keep the pooled
+	// connection (and its remote listener) alive for the process life.
+	// Close it here, before the shell starts.
+	if startCmd == "" || reason == ReasonRemoteCommand || !modeAllowsIntegration(cfg.DesiredMode) {
+		lc.close()
+	}
+
 	if startCmd != "" {
 		if err := session.Start(startCmd); err != nil {
+			lc.close()
 			_ = session.Close()
 			return nil, fmt.Errorf("shell start: %w", err)
 		}
 	} else {
 		if err := session.Shell(); err != nil {
+			lc.close()
 			_ = session.Close()
 			return nil, fmt.Errorf("shell: %w", err)
 		}
@@ -847,6 +899,7 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 			_ = session.Close()
 		},
 		releasePoolRef: releaseRef,
+		lifecycleClose: lc.close,
 	}
 
 	// The watcher starts AFTER releasePoolRef is set (above), so a session

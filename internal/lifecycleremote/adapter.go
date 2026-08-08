@@ -1,0 +1,594 @@
+// Package lifecycleremote implements the remote transport of the
+// authenticated lifecycle protocol (docs/lifecycle-protocol.md §1, "Remote";
+// ADR-0024 decision 2 "Over SSH"): the backend asks the remote sshd for a
+// loopback listener via TunnelConn.Listen (the -R strategy on the pooled
+// connection AD-5 multiplexes), the shell's hook connects to that port
+// (bash: exec {fd}<>/dev/tcp/127.0.0.1/<port>), and envelopes come back over
+// the same SSH connection the session already uses. Nothing is installed on
+// the remote host.
+//
+// The adapter is a pipe, not a policy — the sibling of
+// internal/lifecyclechannel (which carries the local descriptor). Same
+// lifecycle.Port contract, different pipe. It mints one lane and one Pending
+// domain on the kernel, frames inbound bytes with the shared codec, delivers
+// every mapped envelope to Kernel.Ingest, and reports loss to
+// Kernel.TransportLost. It has no CurrentDomain accessor and assumes nothing
+// about how many domains its transport carries: outbound routing is keyed by
+// the envelope's own domain (the kernel's registry is the authority — the
+// future relay is a third adapter, not a protocol rewrite).
+//
+// The port is not the authenticator; the capability is. Any local user on
+// the remote host can open the forwarded socket, so candidate connections
+// are bounded and each must prove the domain's per-epoch capability before
+// it can deliver an accepted event, report a gap or receive an outbound
+// envelope (protocol §4). The bind is the literal 127.0.0.1, never a
+// hostname: a hostname bind is resolved by the server and cannot be verified
+// locally (internal/ssh/ssh_tunnel.go records this).
+//
+// Refusal — AllowTcpForwarding off, or a bind outside PermitListen — is
+// detectable synchronously (New returns an error and the caller spawns the
+// shell without a channel) but is NOT distinguishable: the adapter promises
+// no diagnostic naming a policy, only a conventional terminal with a visible
+// native prompt (ADR-0024 decision 4).
+//
+// The launch configuration the caller must embed — port and capability —
+// is described in the Config doc: only the capability is never exported;
+// the port travels as the non-secret NOCX_LIFECYCLE_PORT name, exactly as
+// the local path's launch block exports its non-secret names.
+package lifecycleremote
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecodec"
+	"github.com/shady2k/nocx/internal/log"
+)
+
+// ErrClosed is returned by Send once the adapter has been closed or lost.
+var ErrClosed = errors.New("lifecycleremote: adapter closed")
+
+// ErrForwardingRefused is returned by New when the remote sshd refused the
+// forwarded listener. Detectable synchronously, NOT distinguishable: a
+// refused bind (AllowTcpForwarding off), a bind outside PermitListen and a
+// server-side failure all arrive as the same request failure, and the
+// adapter promises no diagnostic naming a policy.
+var ErrForwardingRefused = errors.New("lifecycleremote: remote forwarding refused")
+
+// writeTimeout bounds one outbound envelope write. The kernel's outbound
+// sends are best-effort (the shell times out its handshake and the session
+// stays conventional — the safe direction), so a shell that has stopped
+// reading must never wedge the kernel's flush.
+const writeTimeout = 5 * time.Second
+
+// bindAddr is the literal loopback bind the adapter requests on the remote
+// sshd. Never a hostname: a hostname bind is resolved by the server and
+// cannot be verified locally (internal/ssh/ssh_tunnel.go). Port 0 asks the
+// server to allocate; the allocated port is read from the listener's Addr.
+const bindAddr = "127.0.0.1:0"
+
+// defaultMaxCandidates bounds how many candidate connections the adapter
+// serves at once. Any local user on the remote host can open the forwarded
+// socket; the bound keeps a connection flood from exhausting the adapter,
+// and the capability — not the port — is what authenticates (protocol §4).
+const defaultMaxCandidates = 8
+
+// DefaultMaxCandidates is the default bound on concurrent candidate
+// connections (see WithMaxCandidates). Exported so the composition root can
+// name the bound it chooses explicitly — the product decision belongs there
+// (same reason the local path's hello timeout is set at the composition
+// root).
+const DefaultMaxCandidates = defaultMaxCandidates
+
+// Kernel is the slice of the lifecycle kernel the adapter drives. The
+// concrete *lifecycle.Kernel (or the lifecyclepub.Publisher wrapping it)
+// satisfies it; the seam exists so the adapter is testable and the
+// composition root decides the kernel. It is the same seam
+// lifecyclechannel.Kernel declares; the publisher satisfies both.
+type Kernel interface {
+	BindTransport(t lifecycle.TransportID, port lifecycle.Port) error
+	RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error)
+	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error
+	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error
+	TransportLost(t lifecycle.TransportID) error
+	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
+}
+
+// TunnelConn is the lease surface the adapter drives. The concrete value
+// comes from internal/ssh (RealClient.TunnelConn, the -R seam AD-5
+// multiplexes); the interface exists so the adapter is testable without a
+// live connection, the same reason lifecyclechannel declares its Kernel
+// seam. Only the slice the adapter needs is declared: Listen (the remote
+// listener), Done/LostErr (the connection-loss contract) and Close (lease
+// release).
+type TunnelConn interface {
+	Listen(addr string) (net.Listener, error)
+	Done() <-chan struct{}
+	LostErr() error
+	Close() error
+}
+
+// Config is what the caller substitutes into the integration script text —
+// the same mechanism the local path uses (shellintegration.LaunchOptions):
+// lane, domain and epoch are names (NOCX_LIFECYCLE_* env); the port is the
+// loopback port the shell connects to (NOCX_LIFECYCLE_PORT); the capability
+// is the per-epoch bearer (@CAP@ in the rcfile text). Only the capability is
+// never exported to the environment: it rides the script text, and a value
+// in /proc/<pid>/environ would leak the authenticator to every child. The
+// port is a name, not a secret, and is not the authenticator.
+type Config struct {
+	Lane       lifecycle.LaneID
+	Domain     lifecycle.DomainID
+	Epoch      uint64
+	Port       int
+	Capability string // 64 lowercase hex chars
+}
+
+// Option configures an Adapter.
+type Option func(*options)
+
+type options struct {
+	helloTimeout  time.Duration
+	maxCandidates int
+}
+
+// WithHelloTimeout bounds the handshake: unless an authenticated hello is
+// accepted within the window, the domain is abandoned (TransportLost) and
+// the session stays conventional (protocol §5). Zero uses
+// lifecycle.HelloTimeout. Test-only in practice; the default is the
+// protocol constant.
+func WithHelloTimeout(d time.Duration) Option {
+	return func(o *options) { o.helloTimeout = d }
+}
+
+// WithMaxCandidates bounds the number of candidate connections served
+// concurrently. Beyond the bound, new connections are closed immediately.
+// Defaults to defaultMaxCandidates.
+func WithMaxCandidates(n int) Option {
+	return func(o *options) {
+		if n > 0 {
+			o.maxCandidates = n
+		}
+	}
+}
+
+// Adapter is one remote forwarded-port transport. It implements
+// lifecycle.Port (the outbound half the kernel sends accept and
+// refresh_request over) and drives the inbound half through the kernel.
+type Adapter struct {
+	log        log.Logger
+	kernel     Kernel
+	id         lifecycle.TransportID
+	lane       lifecycle.LaneID
+	domain     lifecycle.DomainID
+	epoch      uint64
+	capability lifecycle.Capability
+	tc         TunnelConn
+	ln         net.Listener
+	port       int
+
+	helloTimeout  time.Duration
+	maxCandidates int
+
+	// slots bounds concurrent candidate connections (the accept loop parks
+	// one token per served connection).
+	slots chan struct{}
+
+	// helloMu serializes hello ingestion: only one candidate may be inside
+	// the claim → Ingest → settle window at a time. The kernel answers an
+	// accepted hello with a synchronous accept (flushed inside Ingest), so
+	// this serialization is what guarantees the accept routes to the
+	// connection whose hello was accepted — a concurrent hostile claim
+	// cannot steal it. Non-hello frames do not take helloMu.
+	helloMu sync.Mutex
+
+	mu sync.Mutex
+	// claim maps a domain to the connection currently attempting its
+	// handshake (set before Ingest, settled after). Send(accept) routes
+	// here; Send(refresh_request) never does — an unauthenticated claimant
+	// must not receive an outbound envelope it cannot answer.
+	claim map[lifecycle.DomainID]net.Conn
+	// speakers maps a domain to the connection that owns it: the one whose
+	// authenticated hello the kernel accepted. Send routes outbound here.
+	speakers map[lifecycle.DomainID]net.Conn
+	// conns tracks every live candidate connection so lose() can close them
+	// all at once.
+	conns map[net.Conn]struct{}
+
+	closed bool
+	loss   sync.Once
+	timer  *time.Timer
+}
+
+// New establishes the remote transport: ask the remote sshd for a loopback
+// listener (the literal 127.0.0.1), bind a transport and mint the domain on
+// the kernel, and start serving candidates. The returned Config carries
+// what the caller must substitute into the integration script text — port
+// and capability included (see the Config doc for which of the two is
+// exportable).
+//
+// Failure to establish the transport leaves the session conventional: New
+// returns an error and the caller spawns the shell without a channel. A
+// refused bind is ErrForwardingRefused, detectable synchronously and NOT
+// distinguishable — no diagnostic names a policy.
+func New(log log.Logger, k Kernel, tc TunnelConn, opts ...Option) (*Adapter, Config, error) {
+	o := options{helloTimeout: lifecycle.HelloTimeout, maxCandidates: defaultMaxCandidates}
+	for _, opt := range opts {
+		opt(&o)
+	}
+
+	ln, err := tc.Listen(bindAddr)
+	if err != nil {
+		return nil, Config{}, fmt.Errorf("%w: %v", ErrForwardingRefused, err)
+	}
+	port := portOf(ln.Addr())
+
+	a := &Adapter{
+		log:           log,
+		kernel:        k,
+		id:            lifecycle.TransportID("tpt-" + randHex(8)),
+		lane:          lifecycle.LaneID("lane-" + randHex(8)),
+		tc:            tc,
+		ln:            ln,
+		port:          port,
+		helloTimeout:  o.helloTimeout,
+		maxCandidates: o.maxCandidates,
+		slots:         make(chan struct{}, o.maxCandidates),
+		claim:         map[lifecycle.DomainID]net.Conn{},
+		speakers:      map[lifecycle.DomainID]net.Conn{},
+		conns:         map[net.Conn]struct{}{},
+	}
+
+	cleanup := func() {
+		_ = ln.Close()
+		_ = tc.Close()
+	}
+	if berr := k.BindTransport(a.id, a); berr != nil {
+		cleanup()
+		return nil, Config{}, fmt.Errorf("bind lifecycle transport: %w", berr)
+	}
+	h, err := k.RequestDomain(a.lane, nil, a.id)
+	if err != nil {
+		cleanup()
+		return nil, Config{}, fmt.Errorf("request lifecycle domain: %w", err)
+	}
+	a.domain = h.Domain
+	a.epoch = h.Epoch
+	a.capability = h.Capability
+	log.Info("lifecycle remote channel established",
+		"transport", a.id, "lane", a.lane, "domain", h.Domain, "epoch", h.Epoch, "port", port)
+
+	// The timer may fire before New returns (a short hello timeout), so the
+	// field is stored under the same mutex stopHelloTimer reads: the
+	// callback's read is then ordered against this write and never races.
+	t := time.AfterFunc(a.helloTimeout, a.lose)
+	a.mu.Lock()
+	a.timer = t
+	a.mu.Unlock()
+
+	go a.acceptLoop()
+	go a.watchLoss()
+	return a, Config{
+		Lane:       a.lane,
+		Domain:     a.domain,
+		Epoch:      a.epoch,
+		Port:       port,
+		Capability: hex.EncodeToString(a.capability[:]),
+	}, nil
+}
+
+// portOf extracts the allocated port from a remote listener's Addr. The
+// tunnel doc promises the listener reports the address the server actually
+// allocated (a requested port 0 is resolved by the server), so a
+// non-TCP addr is a programming error, not a runtime possibility.
+func portOf(addr net.Addr) int {
+	tcp, ok := addr.(*net.TCPAddr)
+	if !ok || tcp == nil {
+		panic(fmt.Sprintf("lifecycleremote: remote listener addr is not *net.TCPAddr: %T %v", addr, addr))
+	}
+	return tcp.Port
+}
+
+// Send implements lifecycle.Port: it routes one outbound envelope (accept,
+// refresh_request — the only two kinds the kernel sends) to the connection
+// that owns the addressed domain. accept routes to the handshake claimant
+// (its hello was accepted); refresh_request routes to the authenticated
+// speaker. Failures are best-effort: the kernel ignores them and the shell
+// times out its handshake in the safe direction.
+func (a *Adapter) Send(env lifecycle.Envelope) error {
+	a.mu.Lock()
+	var target net.Conn
+	if env.Event.Kind == lifecycle.KindAccept {
+		// The accept answers the hello the kernel just accepted: it must go
+		// to the claimant — the connection whose hello is in flight — even
+		// when the domain already has a speaker (a reconnect within the
+		// epoch: the fresh accept belongs to the NEW connection, and the
+		// kernel supersedes the old speaker).
+		target = a.claim[env.Domain]
+	}
+	if target == nil {
+		target = a.speakers[env.Domain]
+	}
+	a.mu.Unlock()
+	if target == nil {
+		// accept with no claimant or refresh_request with no speaker: the
+		// envelope has nowhere to go. Best-effort drop — the shell times
+		// out in the safe direction.
+		a.log.Debug("lifecycle outbound dropped: no speaker",
+			"domain", env.Domain, "kind", env.Event.Kind)
+		return nil
+	}
+	_ = target.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if _, err := lifecyclecodec.Encode(target, env); err != nil {
+		a.log.Debug("lifecycle outbound send failed", "kind", env.Event.Kind, "error", err)
+		return err
+	}
+	return nil
+}
+
+// Close tears the transport down: the domain ends (TransportLost), the hello
+// timer stops, the listener and every candidate connection close, and the
+// tunnel lease is released. It is the session-end disposal path.
+func (a *Adapter) Close() error {
+	a.lose()
+	return nil
+}
+
+// lose is the single loss path, executed once: notify the kernel, mark the
+// adapter closed, stop accepting, close every live connection and release
+// the tunnel lease. Idempotent under concurrent callers (pump EOF, hello
+// timeout, Done watcher, explicit Close).
+func (a *Adapter) lose() {
+	a.loss.Do(func() {
+		a.stopHelloTimer()
+		if err := a.kernel.TransportLost(a.id); err != nil {
+			a.log.Warn("lifecycle transport lost notification failed", "error", err)
+		}
+		a.mu.Lock()
+		a.closed = true
+		conns := make([]net.Conn, 0, len(a.conns))
+		for c := range a.conns {
+			conns = append(conns, c)
+		}
+		a.conns = map[net.Conn]struct{}{}
+		a.mu.Unlock()
+		for _, c := range conns {
+			_ = c.Close()
+		}
+		_ = a.ln.Close()
+		_ = a.tc.Close()
+	})
+}
+
+func (a *Adapter) stopHelloTimer() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.timer != nil {
+		a.timer.Stop()
+		a.timer = nil
+	}
+}
+
+// watchLoss reports transport loss: TunnelConn.Done closes when the
+// underlying SSH connection shuts down. Every domain bound to the transport
+// is lost (protocol §12) — open attempts become unknown, never successful —
+// and the adapter stops serving. The lease releases its own pooled reference
+// on loss; lose()'s tc.Close is a no-op after it.
+func (a *Adapter) watchLoss() {
+	<-a.tc.Done()
+	a.log.Info("lifecycle remote transport lost", "transport", a.id, "error", a.tc.LostErr())
+	a.lose()
+}
+
+// acceptLoop serves candidate connections from the remote listener until the
+// adapter closes. Each candidate is bounded: at most maxCandidates are
+// served concurrently, and an over-bound connection is refused outright —
+// any local user on the remote host can open this socket, and the capability
+// is the authenticator, so the bound is the only thing a flood can consume.
+func (a *Adapter) acceptLoop() {
+	for {
+		c, err := a.ln.Accept()
+		if err != nil {
+			// Listener closed (lose) or the transport broke. The loss path
+			// owns the kernel notification; this loop just ends.
+			return
+		}
+		select {
+		case a.slots <- struct{}{}:
+		default:
+			a.log.Debug("lifecycle remote candidate over bound; refusing", "max", a.maxCandidates)
+			_ = c.Close()
+			continue
+		}
+		a.mu.Lock()
+		if a.closed {
+			a.mu.Unlock()
+			<-a.slots
+			_ = c.Close()
+			return
+		}
+		a.conns[c] = struct{}{}
+		a.mu.Unlock()
+		go a.serveCandidate(c)
+	}
+}
+
+// serveCandidate pumps one candidate connection into the kernel until the
+// stream ends or the candidate is rejected. It is the remote analog of the
+// local adapter's pump: read frames, deliver authenticated envelopes to the
+// kernel, report the handshake and the end-of-stream policy.
+//
+// An unauthenticated candidate can neither revoke nor preempt a live domain:
+// its gap sink reports nothing (garbage is scanned with the codec's budgets
+// and discarded), its hello is validated by the kernel before any state is
+// touched, and outbound envelopes never route to it except the accept for
+// its own accepted hello.
+func (a *Adapter) serveCandidate(c net.Conn) {
+	defer func() {
+		<-a.slots
+		a.mu.Lock()
+		delete(a.conns, c)
+		a.mu.Unlock()
+		_ = c.Close()
+	}()
+
+	// Handshake bound: a candidate that cannot prove the capability within
+	// the window is closed. The bound is cleared once the hello is accepted.
+	_ = c.SetReadDeadline(time.Now().Add(a.helloTimeout))
+
+	dec := lifecyclecodec.NewDecoder(c, lifecyclecodec.Config{}, a.gapSink(c))
+	for {
+		env, err := dec.ReadFrame()
+		if err == nil {
+			if env.Event.Kind == lifecycle.KindHello {
+				// Serialize hello ingestion: the kernel answers accept
+				// synchronously inside Ingest, and the claim must be
+				// unambiguous while that flush runs (see Send).
+				a.helloMu.Lock()
+				a.mu.Lock()
+				a.claim[env.Domain] = c
+				a.mu.Unlock()
+				ierr := a.kernel.Ingest(a.id, env)
+				a.mu.Lock()
+				accepted := ierr == nil
+				if accepted {
+					// Accepted: this connection now owns the domain. The
+					// accept was already routed to it via the claim during
+					// Ingest. Clear the handshake bound.
+					a.speakers[env.Domain] = c
+					delete(a.claim, env.Domain)
+					_ = c.SetReadDeadline(time.Time{})
+				} else if a.claim[env.Domain] == c {
+					// Rejected candidate: unauthenticated, can neither
+					// mutate nor preempt. Drop the claim and close it.
+					delete(a.claim, env.Domain)
+				}
+				a.mu.Unlock()
+				a.helloMu.Unlock()
+				if accepted {
+					// The handshake succeeded; the hello timeout is done.
+					// Deliberately outside the mutex: stopHelloTimer takes
+					// a.mu, and this branch just released it.
+					a.stopHelloTimer()
+					continue
+				}
+				a.log.Debug("lifecycle hello rejected",
+					"domain", env.Domain, "error", ierr)
+				return
+			}
+			if ierr := a.kernel.Ingest(a.id, env); ierr != nil {
+				// Quarantine (a Desynchronized domain), a rejected event,
+				// an illegal kind: the kernel mutates nothing and this
+				// adapter records nothing but the fact.
+				a.log.Debug("lifecycle envelope rejected",
+					"domain", env.Domain, "kind", env.Event.Kind, "error", ierr)
+				continue
+			}
+			continue
+		}
+		switch {
+		case errors.Is(err, io.EOF):
+			// The candidate closed its end. A clean exit sends
+			// domain_closed first; the kernel's read model is the authority
+			// on whether the domain ended.
+			a.endOfStream(c)
+			return
+		case errors.Is(err, lifecyclecodec.ErrScanBudgetExhausted):
+			// The kernel revoked the domain (the final gap report crossed a
+			// budget) — or an unauthenticated candidate exhausted the scan
+			// budgets on its own stream. Drain so the sender never blocks on
+			// a full buffer; the end-of-stream policy applies when it closes.
+			_, _ = io.Copy(io.Discard, c)
+			a.endOfStream(c)
+			return
+		default:
+			// A read error (including the handshake deadline): the stream
+			// broke. An unauthenticated candidate simply goes away; a
+			// speaker that died is end-of-stream.
+			if a.isSpeaker(c) {
+				a.endOfStream(c)
+			}
+			return
+		}
+	}
+}
+
+// isSpeaker reports whether c currently owns a domain on this transport.
+func (a *Adapter) isSpeaker(c net.Conn) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, owner := range a.speakers {
+		if owner == c {
+			return true
+		}
+	}
+	return false
+}
+
+// domainOf returns the domain c owns, or "" when it owns none.
+func (a *Adapter) domainOf(c net.Conn) lifecycle.DomainID {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for d, owner := range a.speakers {
+		if owner == c {
+			return d
+		}
+	}
+	return ""
+}
+
+// gapSink is the codec's gap sink for one candidate connection. A gap is
+// reported to the kernel ONLY when this connection is the authenticated
+// speaker of a domain: garbage from an unauthenticated candidate must never
+// desynchronize a live domain — that would be a preemption, and the budgets
+// it would charge belong to nobody. The codec's own scan budgets still bound
+// how much garbage an unauthenticated candidate can make the adapter scan.
+func (a *Adapter) gapSink(c net.Conn) lifecyclecodec.GapSink {
+	return func(bytes, frames int) {
+		d := a.domainOf(c)
+		if d == "" {
+			return // unauthenticated candidate garbage: discarded, not reported
+		}
+		if err := a.kernel.NotifyGap(a.id, d, bytes, frames); err != nil {
+			a.log.Debug("lifecycle gap notification rejected",
+				"domain", d, "bytes", bytes, "frames", frames, "error", err)
+		}
+	}
+}
+
+// endOfStream applies the end-of-stream policy for one connection: a domain
+// whose speaker closed cleanly (domain_closed, or a superseded reconnect)
+// ends cleanly; a domain still live whose speaker vanished without saying
+// goodbye lost its voice, so the kernel marks it Lost and its open attempts
+// unknown — never successful (protocol §12).
+func (a *Adapter) endOfStream(c net.Conn) {
+	d := a.domainOf(c)
+	if d == "" {
+		// A candidate or a superseded connection ended: nothing to do — the
+		// domain's fate belongs to its current speaker.
+		return
+	}
+	dom, ok := a.kernel.Domain(d)
+	if ok {
+		switch dom.State {
+		case lifecycle.DomainClosed, lifecycle.DomainLost:
+			a.log.Info("lifecycle transport ended cleanly", "domain", d)
+			return
+		}
+	}
+	a.log.Info("lifecycle transport ended with a live domain; marking lost", "domain", d)
+	a.lose()
+}
+
+func randHex(n int) string {
+	b := make([]byte, n)
+	_, _ = io.ReadFull(rand.Reader, b)
+	return hex.EncodeToString(b)
+}

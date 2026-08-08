@@ -227,6 +227,14 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
 // ═══════════════════════════════════════════════════════════════════════════
 // WSClient fake
 // ═══════════════════════════════════════════════════════════════════════════
+/** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
+ *  subscribe(method, handler) returns the unsubscribe, and tests capture
+ *  the handler to deliver published facts (lifecycle.changed). Not
+ *  exported — it is a shape of ClientFake, never named by consumers. */
+interface DispatcherFake {
+  subscribe: ReturnType<typeof vi.fn>
+}
+
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
   openSession: ReturnType<typeof vi.fn>
@@ -246,6 +254,10 @@ export interface ClientFake {
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
+  /** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
+   *  subscribe(method, handler) returns the unsubscribe, and tests capture
+   *  the handler to deliver published facts (lifecycle.changed). */
+  dispatcher: DispatcherFake
 }
 /**
  * Create a fake WSClient whose openSession() returns a new makeSession()
@@ -270,6 +282,9 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
+    dispatcher: {
+      subscribe: vi.fn(() => () => undefined),
+    },
     call: vi.fn().mockRejectedValue(new Error('no store wired (fake)')),
     get connected() {
       return true

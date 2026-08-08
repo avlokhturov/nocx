@@ -414,6 +414,9 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.RemoteLauncher != nil {
 		opts = append(opts, ssh.WithRemoteLauncher(cfg.RemoteLauncher))
 	}
+	if cfg.RemoteLifecycle != nil {
+		opts = append(opts, ssh.WithRemoteLifecycle(cfg.RemoteLifecycle))
+	}
 	// The resolved destination mode rides the same path (nocx-mlm7):
 	// without this the profile's effective desiredMode dies here and every
 	// profile — raw or relay included — would integrate at open. A field

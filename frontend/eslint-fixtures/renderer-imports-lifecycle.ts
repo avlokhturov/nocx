@@ -4,19 +4,19 @@
 // through the shared lifecycleBoundaryBlocks fragment with a src/renderers/
 // filename), and excluded from the normal lint, typecheck and prettier runs.
 //
-// Every import below must be reported as no-restricted-imports: the first
-// three are today's authority modules, the last two are the forward-declared
-// lifecycle state the ADR commits us to.
-import { InputStateController } from '../input-state'
+// Every import below must be reported as no-restricted-imports: the first two
+// are today's authority modules, the last three are the lifecycle state the
+// ADR commits us to (src/lifecycle/).
 import { CommandLedger } from '../command-ledger'
 import { recordCommand } from '../history-client'
 import { shouldShowEditor } from '../lifecycle/state'
 import { activateDomain } from '../lifecycle/domains'
+import { LifecycleKernel } from '../lifecycle/state'
 
 export function fixtureRenderer(): void {
-  void InputStateController
   void CommandLedger
   void recordCommand
   void shouldShowEditor
   void activateDomain
+  void LifecycleKernel
 }

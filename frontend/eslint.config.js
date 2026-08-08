@@ -766,14 +766,12 @@ const nocxPlugin = {
 //
 //  - renderers/ parse bytes. They must not import the modules that turn facts into
 //    authority (input ownership, the ledger, history persistence) or the lifecycle
-//    state the ADR commits us to. `src/lifecycle/` does not exist yet — it is
-//    forward-declared here as the home of the two-axis reducer, ExecutionAttempt and
-//    the accepted-domain projection (ADR-0024 §5, §6, §7), so the boundary is in
-//    place when they land. A renderer that imports lifecycle state can hand
-//    stream-derived values to an authority surface, which is the exact path this
-//    ADR deletes.
-//  - lifecycle modules (today: the ownership/ledger/persistence/environment state;
-//    later: `src/lifecycle/`) must not import the OSC parsing surface — renderers/,
+//    state the ADR commits us to. `src/lifecycle/` is the home of the two-axis
+//    reducer, ExecutionAttempt and the accepted-domain projection (ADR-0024
+//    §5, §6, §7). A renderer that imports lifecycle state can hand stream-derived
+//    values to an authority surface, which is the exact path this ADR deletes.
+//  - lifecycle modules (`src/lifecycle/`, and the ownership/ledger/persistence/
+//    environment state) must not import the OSC parsing surface — renderers/,
 //    CommandMarker, or the OSC 636 passport parser. A lifecycle module that reads
 //    the parser can mint authority out of terminal bytes; it consumes published
 //    facts, never the stream.
@@ -799,7 +797,7 @@ export const lifecycleBoundaryBlocks = [
             {
               group: ['../lifecycle', '../lifecycle/**'],
               message:
-                'renderers/ may not import the lifecycle reducer, ExecutionAttempt or the accepted-domain projection — forward-declared in src/lifecycle/ (ADR-0024 §5, §6). Stream-derived values must never reach an authority surface; the lifecycle consumes published facts only.',
+                'renderers/ may not import the lifecycle reducer, ExecutionAttempt or the accepted-domain projection — the two-axis state machine lives in src/lifecycle/ (ADR-0024 §5, §6). Stream-derived values must never reach an authority surface; the lifecycle consumes published facts only.',
             },
           ],
         },
@@ -808,7 +806,6 @@ export const lifecycleBoundaryBlocks = [
   },
   {
     files: [
-      'src/input-state.ts',
       'src/command-ledger.ts',
       'src/history-client.ts',
       'src/environment-passport.ts',

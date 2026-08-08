@@ -228,7 +228,7 @@ export class WSClient {
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
 
-  constructor(private dispatcher: Dispatcher) {
+  constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
       const ws = this.dispatcher.socket!
@@ -304,6 +304,14 @@ export class WSClient {
       if (typeof sid !== 'string') return
       this.sessions.get(sid)?.inputStalledCallback?.()
     })
+  }
+
+  /** The shared control-plane dispatcher (the sealed-access seam installed
+   *  at the app root). Exposed for server-initiated notification
+   *  subscriptions (lifecycle.changed) that ride the same socket; RPC stays
+   *  behind the typed methods above. */
+  get dispatcher(): Dispatcher {
+    return this.dispatcherImpl
   }
 
   // connect resolves when the WebSocket handshake completes. Sessions are

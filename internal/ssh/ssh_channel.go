@@ -25,11 +25,40 @@ type RealChannel struct {
 
 	closeOnce sync.Once
 	closeCb   func()
+	// lifecycleClose releases the session's authenticated lifecycle
+	// channel (ADR-0024 decision 2 "Over SSH"): its tunnel lease and the
+	// remote listener. Closed exactly once, from Close, after closeOnce
+	// fires; nil for channels without a channel (plain shells, non-ssh
+	// transports). The lifecycle channel is established by Connect and
+	// transferred here on the shell-open path; every path that opens a
+	// plain shell closes it instead.
+	lifecycleClose func()
 	// releasePoolRef drops this channel's reference to the pooled ssh.Client.
 	// Set by RealClient.Connect; invoked once from Close (after closeOnce
 	// fires) so the connection closes when the last referencing tab closes,
 	// including the jump transport (AD-4). Nil for non-pooled channels.
 	releasePoolRef func()
+}
+
+// lifecycleHandle carries an established remote lifecycle channel from
+// Connect to the RealChannel that owns it: the launch config the launcher
+// substitutes into the start command, and the closer that releases the
+// tunnel lease and ends the domain when the session ends. close is
+// idempotent: the shell-open path and RealChannel.Close both call it, and
+// whichever runs first wins.
+type lifecycleHandle struct {
+	launch RemoteLifecycleLaunch
+	closer io.Closer
+	once   sync.Once
+}
+
+func (h *lifecycleHandle) close() {
+	if h == nil || h.closer == nil {
+		return
+	}
+	h.once.Do(func() {
+		_ = h.closer.Close()
+	})
 }
 
 func (c *RealChannel) Read(p []byte) (int, error) {
@@ -62,6 +91,9 @@ func (c *RealChannel) Close() error {
 		close(c.done)
 		if c.closeCb != nil {
 			c.closeCb()
+		}
+		if c.lifecycleClose != nil {
+			c.lifecycleClose()
 		}
 		if c.releasePoolRef != nil {
 			c.releasePoolRef()

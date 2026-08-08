@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/lifecycleremote"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
@@ -549,6 +550,16 @@ func New(opts ...Option) (*App, error) {
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
 	ptf.kernel = lifecyclePub
+	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
+	// bead nocx-u7uh.4): the composition root implements the ssh layer's
+	// RemoteLifecycle seam with the lifecycle kernel and the ssh client —
+	// the channel rides the SAME pooled connection the session uses
+	// (AD-4), and refusal (the remote sshd will not forward) leaves the
+	// session conventional. Before this line the remote adapter was
+	// reachable from its own tests and nowhere else (AGENTS.md check 5).
+	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(
+		&remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger},
+	))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
 	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
@@ -934,6 +945,15 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 			SessionID:     opts.SessionID,
 			Enhanced:      opts.Enhanced,
 			EnvironmentID: opts.EnvironmentID,
+			// The lifecycle channel (ADR-0024 decision 2 "Over SSH"): the
+			// port becomes NOCX_LIFECYCLE_PORT and the capability the
+			// rcfile's @CAP@. Empty when no channel was established — the
+			// session is conventional and the launch carries nothing.
+			Capability:    opts.Capability,
+			Lane:          opts.Lane,
+			Domain:        opts.Domain,
+			Epoch:         opts.Epoch,
+			LifecyclePort: opts.LifecyclePort,
 		},
 	)
 	if !ok {
@@ -974,4 +994,47 @@ func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReaso
 			"reason", r)
 		return ssh.ReasonUnknown
 	}
+}
+
+// remoteLifecycleProvider implements ssh.RemoteLifecycle with the lifecycle
+// kernel and the ssh client (ADR-0024 decision 2 "Over SSH"; bead
+// nocx-u7uh.4). Establish acquires a tunnel lease on the SAME pooled
+// connection the session uses (AD-4: same pool key, same connection —
+// envelopes come back over the connection the session already has), asks
+// the remote sshd to listen on loopback via lifecycleremote.New, and mints
+// the domain. Refusal — AllowTcpForwarding off, or a bind outside
+// PermitListen — surfaces as ErrForwardingRefused, detectable synchronously
+// and NOT distinguishable: the ssh layer then opens a conventional terminal
+// and no diagnostic names a policy.
+type remoteLifecycleProvider struct {
+	client *ssh.RealClient
+	kernel lifecyclechannel.Kernel
+	logger log.Logger
+}
+
+// Establish implements ssh.RemoteLifecycle.
+func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.RemoteLifecycleLaunch, io.Closer, error) {
+	tc, err := p.client.TunnelConn(ctx, host, opts...)
+	if err != nil {
+		return ssh.RemoteLifecycleLaunch{}, nil, fmt.Errorf("lifecycle tunnel lease: %w", err)
+	}
+	// The product decisions land here, not in the adapter: how long a
+	// shell may take to prove itself (the protocol constant) and how many
+	// candidate connections the adapter serves at once — the same reason
+	// the local path passes its hello timeout at the composition root.
+	adapter, cfg, err := lifecycleremote.New(p.logger, p.kernel, tc,
+		lifecycleremote.WithHelloTimeout(lifecycle.HelloTimeout),
+		lifecycleremote.WithMaxCandidates(lifecycleremote.DefaultMaxCandidates),
+	)
+	if err != nil {
+		_ = tc.Close()
+		return ssh.RemoteLifecycleLaunch{}, nil, err
+	}
+	return ssh.RemoteLifecycleLaunch{
+		Lane:       string(cfg.Lane),
+		Domain:     string(cfg.Domain),
+		Epoch:      cfg.Epoch,
+		Port:       cfg.Port,
+		Capability: cfg.Capability,
+	}, adapter, nil
 }

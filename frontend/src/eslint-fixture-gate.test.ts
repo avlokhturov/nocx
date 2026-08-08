@@ -51,7 +51,7 @@ function lintFixture(file: string, virtualPath: string): Linter.LintMessage[] {
 
 const MESSAGE = {
   rendererToLifecycle: 'the stream is render-only',
-  rendererToForwardDeclared: 'forward-declared in src/lifecycle/',
+  rendererToForwardDeclared: 'the two-axis state machine lives in src/lifecycle/',
   lifecycleToParser: 'never the parsing surface',
   lifecycleToPassport: 'cannot activate a domain',
 } as const
@@ -96,7 +96,7 @@ describe('Rule 9 dependency direction — negative fixtures fire', () => {
     // …and the same banned import outside the globs is none of this rule's
     // business (the orchestrator seam consumes both sides today).
     const outside = linter.verify(
-      "import { InputStateController } from './input-state'",
+      "import { LifecycleKernel } from './lifecycle/state'",
       boundaryBlocks as Linter.FlatConfig[],
       { filename: resolve(FRONTEND_ROOT, 'src/terminal-content.ts') },
     )
@@ -109,7 +109,6 @@ describe('Rule 9 dependency direction — negative fixtures fire', () => {
 describe('Rule 9 — the production config carries the tested fragment', () => {
   const rendererFiles = ['src/renderers/**/*.{ts,tsx}']
   const lifecycleFiles = [
-    'src/input-state.ts',
     'src/command-ledger.ts',
     'src/history-client.ts',
     'src/environment-passport.ts',

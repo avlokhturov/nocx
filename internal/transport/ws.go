@@ -133,6 +133,12 @@ type WSServer struct {
 	// plain shell and report reason none.
 	remoteLauncher ssh.RemoteLauncher
 
+	// remoteLifecycle establishes the authenticated lifecycle channel for
+	// remote sessions (ADR-0024 decision 2 "Over SSH"), stamped onto every
+	// ConnectConfig alongside the launcher. Wired through
+	// WithRemoteLifecycle; when nil, remote sessions open without a
+	// channel and stay conventional.
+	remoteLifecycle ssh.RemoteLifecycle
 	// installedFacts is the backend-owned, persisted memory of which
 	// resolved destinations carry a committed, protocol-compatible
 	// integration (§5.4). Wired through WithInstalledFactStore; when nil,
@@ -425,6 +431,16 @@ func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSSer
 // transport default.
 func WithRemoteLauncher(l ssh.RemoteLauncher) WSServerOption {
 	return func(s *WSServer) { s.remoteLauncher = l }
+}
+
+// WithRemoteLifecycle attaches the lifecycle-channel establisher that
+// remote sessions consult (ADR-0024 decision 2 "Over SSH"), stamped onto
+// every ConnectConfig alongside the launcher. The composition root
+// implements it with the lifecycle kernel and the ssh client. When not
+// wired, remote sessions open without a channel and stay conventional —
+// the same opt-in-per-connection shape as the launcher.
+func WithRemoteLifecycle(l ssh.RemoteLifecycle) WSServerOption {
+	return func(s *WSServer) { s.remoteLifecycle = l }
 }
 
 // WithCompleters attaches the completion sources for shell.complete
@@ -1197,6 +1213,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	if params.Kind == "ssh" {
 		var host string
 		var remote *ssh.ConnectConfig
+		var err error
 
 		if params.ProfileID != "" {
 			// Profile-based resolution: look up the stored profile, resolve
@@ -1206,8 +1223,6 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 				_ = wconn.writeJSON(resp)
 				return
 			}
-
-			var err error
 			host, remote, err = s.resolver.Resolve(params.ProfileID)
 			if err != nil {
 				s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
@@ -1223,6 +1238,7 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 			remote.XPixel = params.XPixel
 			remote.YPixel = params.YPixel
 			remote.RemoteLauncher = s.remoteLauncher
+			remote.RemoteLifecycle = s.remoteLifecycle
 
 			s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
 
@@ -1262,21 +1278,22 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 				port = resolved.Port
 			}
 			remoteHost := params.Host
-			if resolved != nil && resolved.HostName != "" {
-				remoteHost = resolved.HostName
-			}
 
 			var keyFile string
 			if resolved != nil {
 				keyFile = resolved.IdentityFile
 			}
 			remote = &ssh.ConnectConfig{
-				User:           user,
-				Port:           port,
-				KeyFile:        keyFile,
-				Cols:           params.Cols,
-				Rows:           params.Rows,
-				RemoteLauncher: s.remoteLauncher,
+				User:            user,
+				Port:            port,
+				KeyFile:         keyFile,
+				Cols:            params.Cols,
+				Rows:            params.Rows,
+				RemoteLauncher:  s.remoteLauncher,
+				RemoteLifecycle: s.remoteLifecycle,
+			}
+			if resolved != nil && resolved.HostName != "" {
+				remoteHost = resolved.HostName
 			}
 
 			s.log.Info("SSH open via direct host", "host", params.Host, "resolvedHost", remoteHost, "user", user)

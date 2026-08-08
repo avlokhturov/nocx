@@ -1,19 +1,23 @@
 // The assembled-session seam for the stream-adversary harness. One interface,
 // two implementations in spirit: `assembleTodaySession` wires the modules that
-// exist after the ADR-0024 severance (the buffer-axis input machine, the
-// app-owned command ledger, the passport tracker), and the migration bead
-// replaces its internals with the lifecycle reducer + published-fact
-// projections without touching the projection contract below. That is what
-// makes the corpus reusable: the snapshot shape is the contract the later
-// bead tests against.
+// exist after the ADR-0024 severance (the two-axis lifecycle kernel, the
+// app-owned command ledger, the passport tracker), and the projection bead
+// replaces its internals with the published-fact projections WITHOUT touching
+// the projection contract below. That is what makes the corpus reusable: the
+// snapshot shape is the contract the later bead tests against.
 //
 // SEVERED (ADR-0024 §1): OSC 133 markers are render-only. The seam parses
 // them and records the event (delivery proof) but feeds nothing — no input
 // state, no ledger, no blocks, no history. OSC 636 passports remain inert
 // observation against the app-minted expected id. OSC 7 keeps its validated
-// location role. The buffer axis is the only input-state transition left.
+// location role. The buffer axis — fed by the alt-buffer CSI sequence, a
+// renderer-owned presentation fact — drives the kernel's buffer axis; the
+// kernel's lifecycle axis is fed ONLY by published facts, and the hostile
+// corpus carries none, so the authority projections stay at their
+// post-severance verdicts: Native, raw input, no domain, no rewrite, no
+// rerun.
 import { CommandLedger } from '../../command-ledger'
-import { InputStateController } from '../../input-state'
+import { LifecycleKernel } from '../../lifecycle/state'
 import { EnvironmentPassportTracker } from '../../environment-passport'
 import { parseOsc133, parseOsc7 } from '../../renderers/xterm'
 import type { CorpusFrame } from './corpus'
@@ -21,9 +25,10 @@ import type { CorpusFrame } from './corpus'
 /** The nine security-sensitive projections, captured before and after each
  *  case. Plain data — deep-cloned by the harness, never shared by reference. */
 export interface SessionProjection {
-  /** Lifecycle axis. Post-severance: the InputState enum (Native |
-   *  ALT_SCREEN). Under ADR-0024 §6: the two-axis LifecycleState (Native |
-   *  PromptReady(domain) | Running(attempt) | Desynchronized(domain) | Lost). */
+  /** Lifecycle axis. Post-severance: the buffer axis reported through the
+   *  InputState label (Native | ALT_SCREEN). Under ADR-0024 §6: the
+   *  two-axis LifecycleState (Native | PromptReady(domain) |
+   *  Running(attempt) | Desynchronized(domain) | Lost). */
   lifecycle: string
   /** Who owns keyboard input: 'editor' or 'raw'. Post-severance: always
    *  'raw' — no stream sequence may grant DOM keyboard ownership. */
@@ -50,10 +55,7 @@ export interface SessionProjection {
 
 /** The seam the harness replays against. One instance per corpus case. */
 export interface SessionAssembly {
-  /** Observable delivery log — every dispatched frame appends here, so the
-   *  conformance test can prove a case reached the session and was not
-   *  silently dropped. */
-  readonly events: string[]
+  events: string[]
   dispatch(frame: CorpusFrame): void
   snapshot(): SessionProjection
 }
@@ -64,9 +66,10 @@ const INBAND_READY = '1337;NOCX_IB_READY'
  * Wires the severed modules the way terminal-content does, minus the DOM:
  * OSC 133 markers are parsed and logged but drive nothing (ADR-0024 §1),
  * OSC 636 passports feed the tracker as inert observation, OSC 7 updates
- * cwd, and the alt-buffer CSI sequence drives the buffer axis. 'app' frames
- * model the editor submit that synchronously creates the attempt before any
- * bytes are written (ADR-0024 §5) and the app-minted environment id.
+ * cwd, and the alt-buffer CSI sequence drives the buffer axis of the
+ * two-axis lifecycle kernel. 'app' frames model the editor submit that
+ * synchronously creates the attempt before any bytes are written
+ * (ADR-0024 §5) and the app-minted environment id.
  *
  * All state is real module state — no mocks, no hand-rolled reducer. The
  * ledger's persistence seam is gone with the marker cycle: nothing completes
@@ -74,7 +77,7 @@ const INBAND_READY = '1337;NOCX_IB_READY'
  * always zero.
  */
 export function assembleTodaySession(): SessionAssembly {
-  const input = new InputStateController()
+  const lifecycle = new LifecycleKernel()
   const passport = new EnvironmentPassportTracker()
   const events: string[] = []
 
@@ -135,10 +138,10 @@ export function assembleTodaySession(): SessionAssembly {
       }
       case 'csi': {
         if (frame.payload === '?1049h') {
-          input.dispatch({ type: 'buffer', buffer: 'alternate' })
+          lifecycle.setBuffer('alternate')
           events.push('buffer:alternate')
         } else if (frame.payload === '?1049l') {
-          input.dispatch({ type: 'buffer', buffer: 'normal' })
+          lifecycle.setBuffer('normal')
           events.push('buffer:normal')
         } else {
           events.push(`csi:ignored:${frame.payload}`)
@@ -163,7 +166,10 @@ export function assembleTodaySession(): SessionAssembly {
     const last = records[records.length - 1]
     const running = records.some((r) => r.status === 'running') ? 1 : 0
     return {
-      lifecycle: input.state,
+      // The projection contract reports the buffer through the lifecycle
+      // label today (the kernel's lifecycle axis carries no facts in the
+      // corpus); the projection bead reconnects it to the two-axis model.
+      lifecycle: lifecycle.buffer === 'alternate' ? 'ALT_SCREEN' : 'Native',
       keyboardRoute: 'raw',
       activeDomain: acceptedDomain,
       attemptState:

@@ -5,7 +5,8 @@
 
 import { XtermRenderer } from './renderers/xterm'
 import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
-import { InputStateController } from './input-state'
+import { LifecycleClient } from './lifecycle/client'
+import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { CommandEditor } from './editor'
 import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
@@ -236,7 +237,7 @@ function keyLabel(e: KeyboardEvent): string {
 
 /**
  * TerminalContent owns the renderer, session, editor, scrollback, command
- * ledger, input-state machine, and PTY resize policy. It receives geometry
+ * ledger, lifecycle kernel, and PTY resize policy. It receives geometry
  * through viewportChanged() — it NEVER interprets container geometry itself.
  */
 export class TerminalContent extends BaseTabContent {
@@ -280,7 +281,9 @@ export class TerminalContent extends BaseTabContent {
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
-  private inputState = new InputStateController()
+  private lifecycle = new LifecycleKernel()
+  private _lifecycleUnsub: (() => void) | null = null
+  private _lifecycleChangeUnsub: (() => void) | null = null
   private _markers = new Map<number, MarkerAdapter>()
   private _pendingCommand = ''
   private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
@@ -940,7 +943,11 @@ export class TerminalContent extends BaseTabContent {
 
       renderer.onBufferChange((type) => {
         this._bufferType = type
-        this.inputState.dispatch({ type: 'buffer', buffer: type })
+        // The buffer is its own axis (ADR-0024 §6): a renderer-owned
+        // presentation fact, never an authority. The kernel tracks it
+        // independently of the lifecycle, so entering or leaving the
+        // alternate buffer can never restore ownership.
+        this.lifecycle.setBuffer(type)
         if (type === 'alternate') {
           this.scrollback?.enterFullscreen()
         } else {
@@ -952,22 +959,30 @@ export class TerminalContent extends BaseTabContent {
           this.scrollback?.setUnstructured()
         }
       })
-      this.inputState.onChange((m) => {
-        // SEVERED (ADR-0024 §1): no stream sequence grants ownership, so the
-        // editor never shows and input is always native. The only transitions
-        // left are the buffer axis and reset/exit; the terminal stays
-        // unstructured either way.
-        console.debug('nocx: input-state', m.state)
+
+      // ── The authenticated lifecycle (ADR-0024 §6, decision 7) ──────────
+      // The published fact is the ONLY input to the lifecycle kernel: no
+      // stream sequence reaches it, and the eslint Rule 9 boundary forbids
+      // the import that would create a path. The backend routes facts to
+      // this session's lane; the kernel adopts the first lane and rejects
+      // the rest.
+      this._lifecycleUnsub = new LifecycleClient(this.client.dispatcher).subscribeLifecycleChanged(
+        (fact) => {
+          // The kernel applies the fact and notifies onChange on a real
+          // change; the ownership sync runs there, once.
+          this.lifecycle.applyFact(fact)
+        },
+      )
+      this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
+        this._syncLifecycleOwnership()
         this._updateCapability()
-        this.editor!.hide()
-        renderer.setReadOnly(false)
-        renderer.focus()
         this.scrollback?.setUnstructured()
       })
 
-      // The input-state machine starts Native and onChange may not fire for
-      // the initial state: present the session with the terminal visible
-      // from the first byte.
+      // The kernel starts Native and onChange may not fire for the initial
+      // state: present the session with the terminal visible from the first
+      // byte, and the editor hidden (a conventional terminal, no ownership).
+      this._syncLifecycleOwnership()
       this.scrollback?.setUnstructured()
 
       // ── Focus bounce (P0-4) ────────────────────────────────────────────
@@ -1255,7 +1270,7 @@ export class TerminalContent extends BaseTabContent {
         // that no longer exists (B.9).
         this._sessionExited = true
         this.hooks.onActiveOriginChange?.()
-        this.inputState.dispatch({ type: 'exit' })
+        this.lifecycle.reset()
         this._disposeAllMarkers()
         host.requestClose()
       })
@@ -1271,7 +1286,7 @@ export class TerminalContent extends BaseTabContent {
       })
       session.onReset(() => {
         renderer.reset()
-        this.inputState.dispatch({ type: 'reset' })
+        this.lifecycle.reset()
         this._disposeAllMarkers()
       })
 
@@ -1539,7 +1554,7 @@ export class TerminalContent extends BaseTabContent {
    * Focus whichever surface owns input right now.
    *
    * At the prompt that is the editor, and the grid is deliberately read-only
-   * while the editor is up (`setReadOnly(true)` on the input-state change). So
+   * while the editor is up (`setReadOnly(true)` on the lifecycle change). So
    * focusing the renderer unconditionally parked the caret in a widget that
    * drops every keystroke — and neither focus-bounce path rescues it, because
    * both stand down when the focus is already inside the live xterm container,
@@ -1607,7 +1622,7 @@ export class TerminalContent extends BaseTabContent {
    *  popover (nocx-atyf.2). */
   private _renderRecovery(): void {
     if (!this.editor) return
-    const eligible = this.inputState.state !== 'ALT_SCREEN'
+    const eligible = this.lifecycle.buffer === 'normal'
     const authorized = this._policy !== 'raw'
     const actions = deriveActions({
       shellState: this._shellState,
@@ -1690,9 +1705,31 @@ export class TerminalContent extends BaseTabContent {
     this._updateCapability()
   }
 
+  /** The editor owns keys because the lifecycle axis says PromptReady
+   *  (ADR-0024 §6): shouldShowEditor reads the axis, and the buffer axis
+   *  gates presentation only — it can never restore authority. While the
+   *  editor is up the grid is read-only, so keys land in the composed
+   *  command, not the (disabled) grid. */
+  private _syncLifecycleOwnership(): void {
+    const editor = this.editor
+    if (editor === null) return
+    const show = shouldShowEditor(this.lifecycle.state) && this.lifecycle.buffer === 'normal'
+    if (show && !editor.isVisible) {
+      editor.show()
+      this.renderer?.setReadOnly(true)
+    } else if (!show && editor.isVisible) {
+      editor.hide()
+      this.renderer?.setReadOnly(false)
+    }
+  }
+
   dispose(): void {
     this._disposed = true
     this.mountAbortController?.abort()
+    this._lifecycleUnsub?.()
+    this._lifecycleUnsub = null
+    this._lifecycleChangeUnsub?.()
+    this._lifecycleChangeUnsub = null
     if (this._globalKeydown) {
       document.removeEventListener('keydown', this._globalKeydown)
       this._globalKeydown = null

@@ -45,7 +45,7 @@ import { CommandEditor } from './editor'
 import { TerminalContent, type TerminalContentHooks } from './terminal-content'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
-import { reduce, initialMachine } from './input-state'
+import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import type { WSClient } from './ipc'
@@ -950,34 +950,78 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   })
 })
 
-// Regression table for input-state.ts transitions (ADR-0024 severed). The
-// machine has one axis left — the buffer — and no stream marker, submit or
-// passport event can reach it. This table pins every transition the machine
+// Regression table for the two-axis lifecycle kernel (ADR-0024 §6). The
+// authority axis moves only on published facts; the buffer axis is a
+// renderer-owned presentation fact; no stream marker, submit or passport
+// event can reach the reducer. This table pins every transition the kernel
 // is allowed to make, so a state or event change must extend it
 // deliberately.
-describe('input-state.ts transition table (ADR-0024 severed)', () => {
-  it('every allowed machine transition is pinned in the table', () => {
+describe('lifecycle kernel transition table (ADR-0024 §6)', () => {
+  const promptReady = { lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
+
+  it('every allowed kernel transition is pinned in the table', () => {
+    const k = new LifecycleKernel()
     // Native: a conventional terminal, raw input, no ownership.
-    expect(initialMachine()).toEqual({ state: 'Native' })
+    expect(k.state.kind).toBe('native')
+    expect(shouldShowEditor(k.state)).toBe(false)
 
-    // buffer alternate → ALT_SCREEN (the buffer axis, never ownership)
-    const alt = reduce(initialMachine(), { type: 'buffer', buffer: 'alternate' })
-    expect(alt).toEqual({ state: 'ALT_SCREEN' })
+    // buffer alternate → the buffer axis moves; ownership never follows.
+    k.setBuffer('alternate')
+    expect(k.buffer).toBe('alternate')
+    expect(k.state.kind).toBe('native')
+    expect(shouldShowEditor(k.state)).toBe(false)
 
-    // buffer normal → Native
-    expect(reduce(alt, { type: 'buffer', buffer: 'normal' })).toEqual({ state: 'Native' })
+    // buffer normal → back; still no ownership.
+    k.setBuffer('normal')
+    expect(k.buffer).toBe('normal')
+    expect(k.state.kind).toBe('native')
 
-    // reset/exit → Native from any state
-    expect(reduce(alt, { type: 'reset' })).toEqual({ state: 'Native' })
-    expect(reduce(alt, { type: 'exit' })).toEqual({ state: 'Native' })
+    // reset → Native from any state, buffer restored.
+    k.setBuffer('alternate')
+    k.applyFact(promptReady)
+    expect(shouldShowEditor(k.state)).toBe(true)
+    k.reset()
+    expect(k.state.kind).toBe('native')
+    expect(k.buffer).toBe('normal')
+    expect(shouldShowEditor(k.state)).toBe(false)
 
-    // No marker, submit or passport event exists on the machine (compile-time).
-    // @ts-expect-error ADR-0024 §1: the marker event is deleted.
-    reduce(initialMachine(), { type: 'marker', kind: 'A' })
-    // @ts-expect-error ADR-0024 §1: the submit event is deleted.
-    reduce(initialMachine(), { type: 'submit' })
-    // @ts-expect-error ADR-0024 §1: the passport event is deleted.
-    reduce(initialMachine(), { type: 'passport' })
+    // No marker, submit or passport event exists on the kernel
+    // (compile-time proof; never invoked, so the @ts-expect-error is the
+    // point and no runtime TypeError follows).
+    const noStreamPath = (): void => {
+      // @ts-expect-error ADR-0024 §1: the marker event is deleted.
+      k.applyMarker('A') // eslint-disable-line @typescript-eslint/no-unsafe-call -- ADR-0024 §1: no stream input exists
+      // @ts-expect-error ADR-0024 §1: the submit event is deleted.
+      k.submit('echo hi') // eslint-disable-line @typescript-eslint/no-unsafe-call -- ADR-0024 §1
+      // @ts-expect-error ADR-0024 §1: the passport event is deleted.
+      k.applyPassport('636;...') // eslint-disable-line @typescript-eslint/no-unsafe-call -- ADR-0024 §1
+    }
+    void noStreamPath
+  })
+})
+
+describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
+  it('a prompt_ready fact shows the editor and a native fact hides it — through the dispatcher seam', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      // The kernel starts Native: a conventional terminal, editor hidden.
+      expect(ed.isVisible).toBe(false)
+      // The LifecycleClient subscribed through the fake dispatcher.
+      const subscribe = client.dispatcher.subscribe
+      expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      // An authenticated prompt_ready fact for a live domain gives the
+      // editor the keyboard.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      // A native fact revokes it again.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      expect(ed.isVisible).toBe(false)
+    } finally {
+      teardown()
+    }
   })
 })
 
