@@ -3,8 +3,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"net"
 	"testing"
 	"time"
 
@@ -179,14 +177,27 @@ func TestSlowRendererOnOneConnectionDoesNotDelayAnother(t *testing.T) {
 }
 
 // TestSessionInputFlowsWhileOutboundSaturated: over the real socket, input
-// to a live session keeps flowing while a connection's outbound queue is
-// saturated. One connection stops reading and floods the control plane
-// without bound: its TCP window fills, the pump blocks, the queue
-// saturates, the stall notice is reserved, and the connection is closed
-// when even that cannot be delivered — the terminal policy, end to end.
-// The session is connection-independent (AD-9): a second connection
-// attaches and types, and the input must reach the session's channel while
-// the first connection is wedged.
+// to a live session keeps flowing while another connection has stopped
+// reading and is flooding the control plane. The session is
+// connection-independent (AD-9): a second connection attaches and types, and
+// the input reaches the session's channel while the first is wedged.
+//
+// This test deliberately does NOT assert that the stall policy closes the
+// wedged connection, and the reason is worth keeping. Driving the policy
+// from out here is a race between two buffers — the client's send buffer and
+// the server's outbound queue — and which one fills first depends on socket
+// sizing and CPU speed. It filled server-side on a developer machine and
+// client-side on CI Linux, where the flood goroutine blocked on its own
+// write, the server drained, and no stall ever occurred: a green local run
+// and a red CI run for one unchanged product.
+//
+// The close path is not left unproven. It is covered deterministically where
+// the queue can be driven directly, in internal/transport/outbound:
+// TestQueueFullMarksStalledAndDropsFrame, TestOverflowBeyondReservedSlotCloses,
+// TestStallClearsWhenQueueAcceptsAgain and TestBudgetExhaustionTripsStallPolicy.
+// What only a real socket can show is the property asserted here — that one
+// connection's congestion does not reach another's session — so that is what
+// this test keeps.
 func TestSessionInputFlowsWhileOutboundSaturated(t *testing.T) {
 	live := newLiveChannel()
 	ws := stallServer(t, live)
@@ -215,15 +226,21 @@ func TestSessionInputFlowsWhileOutboundSaturated(t *testing.T) {
 		t.Fatalf("attach before the flood failed: %+v", attachEnv.Error)
 	}
 
-	// connA's renderer stops reading and floods the control plane without
-	// bound. The flood can only end when the server closes the connection
-	// (its writes start failing), which is exactly the close we wait for:
-	// the flood's end IS the stall policy's close.
+	// connA's renderer stops reading and floods the control plane. It runs
+	// until told to stop rather than until its writes fail: the flood is the
+	// congestion this test needs beside the live session, not a probe for
+	// the close.
+	stopFlood := make(chan struct{})
 	floodDone := make(chan struct{})
 	go func() {
 		defer close(floodDone)
 		id := 100
 		for {
+			select {
+			case <-stopFlood:
+				return
+			default:
+			}
 			id++
 			req, err := json.Marshal(map[string]any{
 				"jsonrpc": "2.0", "id": id, "method": "profiles.list",
@@ -254,24 +271,10 @@ func TestSessionInputFlowsWhileOutboundSaturated(t *testing.T) {
 		}
 	}
 
-	// The saturated connection must be closed by the stall policy: the
-	// flood ends only when its writes fail, which happens when the server
-	// closes the socket.
-	select {
-	case <-floodDone:
-	case <-time.After(30 * time.Second):
-		t.Fatal("the saturated connection was never closed by the stall policy: no stall, or the close path is dead")
-	}
-	// Drain whatever was delivered before the close: the close itself must
-	// surface as a connection error, not a timeout.
-	_ = connA.SetReadDeadline(time.Now().Add(10 * time.Second))
-	for {
-		if _, _, err := connA.ReadMessage(); err != nil {
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				t.Fatal("the saturated connection closed server-side but the close never surfaced")
-			}
-			return // genuine close
-		}
-	}
+	// Stop the flood and let the connection go. Whether the stall policy
+	// closed it is not asserted here — see the note on this test: which
+	// buffer fills first is environment-dependent, and the close path has
+	// deterministic cover in internal/transport/outbound.
+	close(stopFlood)
+	<-floodDone
 }
