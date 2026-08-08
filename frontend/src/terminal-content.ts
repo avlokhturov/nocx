@@ -1065,7 +1065,18 @@ export class TerminalContent extends BaseTabContent {
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
         this._syncLifecycleOwnership()
         this._updateCapability()
-        this.scrollback?.setUnstructured()
+        // A conventional terminal stays unstructured: the scrollback-block
+        // model never takes over (ADR-0024 §4). Conventional means no live
+        // authenticated domain — Native, Lost, and a Desynchronized domain
+        // (decision 9: a desynchronized domain is not live; its terminal
+        // stays visible and its events are quarantined). With a live domain
+        // (prompt_ready / running) the command cycle owns the live region —
+        // beginBlock, freezeFromAttempt and the fullscreen path — and an
+        // unconditional setUnstructured here tore that layout down on every
+        // fact, so no block ever showed (nocx-u7uh.25).
+        if (shellStateFromLifecycle(this.lifecycle.state) !== 'integrated') {
+          this.scrollback?.setUnstructured()
+        }
       })
 
       // ── The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7) ──

@@ -1517,6 +1517,17 @@ describe('the projections consume the kernel through the composition root (ADR-0
         epoch: 1,
         attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
       })
+      // The published running fact must NOT tear the block model down: the
+      // pane stays in the running layout with the block visible. It used to
+      // call setUnstructured unconditionally here, which put the pane back
+      // into the full-pane conventional grid on every fact — the block was
+      // in the DOM but hidden (inner-fullscreen-mode), so a live session
+      // showed a flat stream with no block, no freeze, no exit status
+      // (nocx-u7uh.25).
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(
+        withScrollback.scrollback.scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
       handler({
         lane: 'lane-1',
         lifecycle: 'running',
@@ -1547,6 +1558,31 @@ describe('the projections consume the kernel through the composition root (ADR-0
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a desynchronized or lost domain keeps the conventional unstructured grid (ADR-0024 §4, §9)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      // The kernel starts Native: a conventional terminal, full-pane grid.
+      expect(withScrollback.scrollback.mode).toBe('unstructured')
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // A desynchronized domain is not live (decision 9): its terminal
+      // stays visible and the block model never takes over — the pane is
+      // the conventional unstructured grid, blocks hidden.
+      handler({ lane: 'lane-1', lifecycle: 'desynchronized', domain: 'd1', epoch: 1 })
+      expect(withScrollback.scrollback.mode).toBe('unstructured')
+      expect(
+        withScrollback.scrollback.scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(true)
+      // Loss is conventional too: the grid stays, the block model stays out.
+      handler({ lane: 'lane-1', lifecycle: 'lost' })
+      expect(withScrollback.scrollback.mode).toBe('unstructured')
+    } finally {
       teardown()
     }
   })
