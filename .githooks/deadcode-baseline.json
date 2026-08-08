@@ -35,7 +35,7 @@
     "A fourth entry added BY HAND on 2026-08-07 (nocx-6lo9), the first time the",
     "hook ran on macOS in this clone:",
     "",
-    "  secretservice_other.go SecretServiceAvailable — the !linux half of the",
+    "  secretservice_other.go SecretServiceAvailable \u2014 the !linux half of the",
     "  pair whose linux half is already listed below. Neither has a production",
     "  caller on either OS; both are reached only from integration_test.go. The",
     "  entry is the mirror image of an existing one, not a new concession.",
@@ -48,7 +48,8 @@
     "  (internal/app, internal/storage). Its whole purpose is nocx-8ax9: a test",
     "  that forgets to isolate must not reach the developer's real profile \u2014",
     "  paths.go names it in the panic it raises. Same category as the vaulttest",
-    "  package and ws_test_helper.go already below."
+    "  package and ws_test_helper.go already below.",
+    "TEMPORARY, nocx-sfv6.3: the 12 internal/transport/control entries are a contract-first package whose consumer is nocx-sfv6.5 (handleControlFrame submitting work). Added by hand because the updater refuses growth on purpose. They MUST be gone before nocx-sfv6 closes \u2014 removing them is an acceptance criterion of nocx-sfv6.5, so a package that is never wired cannot be quietly shipped the way nocx-rtg0's ContentDB.Add was."
   ],
   "violations": [
     {
@@ -276,6 +277,54 @@
       "func": "Isolate"
     },
     {
+      "file": "internal/transport/control/composite.go",
+      "func": "NewComposite"
+    },
+    {
+      "file": "internal/transport/control/composite.go",
+      "func": "composite.Name"
+    },
+    {
+      "file": "internal/transport/control/composite.go",
+      "func": "composite.TryAcquire"
+    },
+    {
+      "file": "internal/transport/control/composite.go",
+      "func": "compositePermit.Release"
+    },
+    {
+      "file": "internal/transport/control/semaphore.go",
+      "func": "NewSemaphore"
+    },
+    {
+      "file": "internal/transport/control/semaphore.go",
+      "func": "semaphore.Name"
+    },
+    {
+      "file": "internal/transport/control/semaphore.go",
+      "func": "semaphore.TryAcquire"
+    },
+    {
+      "file": "internal/transport/control/semaphore.go",
+      "func": "semaphorePermit.Release"
+    },
+    {
+      "file": "internal/transport/control/submission.go",
+      "func": "ImmediateSubmission.TrySubmit"
+    },
+    {
+      "file": "internal/transport/control/submission.go",
+      "func": "NewBoundedSubmission"
+    },
+    {
+      "file": "internal/transport/control/submission.go",
+      "func": "boundedSubmission.TrySubmit"
+    },
+    {
+      "file": "internal/transport/control/submission.go",
+      "func": "runAndRelease"
+    },
+    {
       "file": "internal/transport/transport.go",
       "func": "NewStub"
     },
@@ -344,12 +393,12 @@
       "func": "SecretServiceAvailable"
     },
     {
-      "file": "internal/vault/system/secretservice_other.go",
-      "func": "SecretServiceAvailable"
-    },
-    {
       "file": "internal/vault/system/secretservice_linux.go",
       "func": "secretServiceAvailableVia"
+    },
+    {
+      "file": "internal/vault/system/secretservice_other.go",
+      "func": "SecretServiceAvailable"
     },
     {
       "file": "internal/vault/system/system.go",
