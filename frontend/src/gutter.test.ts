@@ -16,7 +16,6 @@ function fakeRecord(
     exitCode: overrides.exitCode ?? 0,
     startedAt: overrides.startedAt ?? null,
     endedAt: overrides.endedAt ?? null,
-    trusted: overrides.trusted ?? true,
     lineOf: () => overrides.lineOfVal,
     disposed: overrides.disposed ?? false,
   }

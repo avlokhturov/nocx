@@ -1,34 +1,22 @@
-// Input-ownership state machine (ADR-0004 §1). nocx owns keyboard input ONLY in
-// PROMPT_READY; every other state routes keys raw to the PTY. Enhanced states are
-// reachable ONLY from OSC 133 markers and the xterm alt-buffer event — never
-// inferred from bytes/termios. Fail-open: anything unexpected falls back to RAW.
-export type InputState = 'RAW' | 'PROMPT_READY' | 'RUNNING_RAW' | 'ALT_SCREEN'
+// Input-ownership state (ADR-0024 §1, §6) — SEVERED. No sequence parsed from
+// the byte stream — standard OSC, private OSC, DCS, title, terminal mode —
+// may grant DOM keyboard ownership or declare prompt readiness. Every session
+// is a conventional terminal: raw input, a visible native prompt, lifecycle
+// always 'Native'. The only axis that remains is the buffer (ADR-0024 §6),
+// driven by the xterm alt-buffer event — a renderer-owned presentation fact,
+// never an authority. The lifecycle axis (PromptReady(domain) / Running /
+// Desynchronized / Lost) is the migration bead's work and lives elsewhere.
+export type InputState = 'Native' | 'ALT_SCREEN'
 
 export type InputEvent =
-  | { type: 'marker'; kind: 'A' | 'B' | 'C' | 'D' }
-  | { type: 'buffer'; buffer: 'normal' | 'alternate' }
-  | { type: 'submit' }
-  // A CONFIRMED environment transition (spec §5.3): the renderer accepted
-  // the readiness passport minted for the ssh attempt in flight. The
-  // transition starts a clean cycle — the remote's following A is the
-  // entered environment's first prompt, not an interruption of the local
-  // command — so that A may be trusted (nocx-mlm7 P0).
-  | { type: 'passport' }
-  | { type: 'reset' }
-  | { type: 'exit' }
+  { type: 'buffer'; buffer: 'normal' | 'alternate' } | { type: 'reset' } | { type: 'exit' }
 
 export interface Machine {
   state: InputState
-  // The current prompt→C→D cycle reached C through a clean A/B. Consumers gate
-  // block actions (e.g. re-run) on this; anomalies clear it (Task 3).
-  trusted: boolean
-  // DOM keyboard ownership is authorized ONLY after A→B (ADR-0006 §4).
-  // A alone leaves owned:false; C/submit/alt-buffer/reset/exit clear it.
-  owned: boolean
 }
 
 export function initialMachine(): Machine {
-  return { state: 'RAW', trusted: false, owned: false }
+  return { state: 'Native' }
 }
 
 export class InputStateController {
@@ -38,26 +26,10 @@ export class InputStateController {
   get state(): InputState {
     return this.machine.state
   }
-  get trusted(): boolean {
-    return this.machine.trusted
-  }
-
-  // owned reports whether the DOM editor currently holds keyboard
-  // ownership (ADR-0006 §4): granted only by a clean A→B, cleared by
-  // submit/C/alt-buffer/reset/exit. The in-band integration gate is
-  // PROMPT_READY && trusted && owned (nocx-ynsx) — consent changes
-  // authorisation, not the identity of the foreground process.
-  get owned(): boolean {
-    return this.machine.owned
-  }
 
   dispatch(e: InputEvent): void {
     const next = reduce(this.machine, e)
-    if (
-      next.state === this.machine.state &&
-      next.trusted === this.machine.trusted &&
-      next.owned === this.machine.owned
-    ) {
+    if (next.state === this.machine.state) {
       this.machine = next
       return
     }
@@ -73,52 +45,9 @@ export class InputStateController {
 export function reduce(m: Machine, e: InputEvent): Machine {
   switch (e.type) {
     case 'buffer':
-      return e.buffer === 'alternate'
-        ? { state: 'ALT_SCREEN', trusted: false, owned: false }
-        : { state: 'RAW', trusted: false, owned: false }
-    case 'passport':
-      // Accepted readiness passport (spec §5.3): a confirmed environment
-      // transition starts a clean cycle. The remote's following A is the
-      // entered environment's first prompt and is trusted through THIS one
-      // event — not by loosening the RUNNING_RAW rule for everyone, which
-      // still keeps a nested or orphan prompt from taking ownership
-      // (ADR-0006 §4). Trust itself is still earned: only the A→B that
-      // follows grants `owned`.
-      return { state: 'RAW', trusted: false, owned: false }
+      return { state: e.buffer === 'alternate' ? 'ALT_SCREEN' : 'Native' }
     case 'reset':
     case 'exit':
-      return { state: 'RAW', trusted: false, owned: false }
-    case 'submit':
-      return { state: 'RUNNING_RAW', trusted: m.trusted, owned: false }
-    case 'marker':
-      switch (e.kind) {
-        case 'A':
-          // Fresh prompt. Trusted only when we arrived cleanly (from RAW after a
-          // finished command or from initial). An A that interrupts RUNNING_RAW
-          // (no D, or a nested prompt) is a resync: PROMPT_READY but untrusted.
-          // Ownership requires the full A→B sequence (ADR-0006 §4).
-          return { state: 'PROMPT_READY', trusted: m.state !== 'RUNNING_RAW', owned: false }
-        case 'B':
-          // B grants DOM ownership ONLY when a clean A already put us at a trusted
-          // prompt (ADR-0006 §4). Gating on `trusted` closes the B,B latch: a B that
-          // merely re-enters PROMPT_READY without a preceding A stays owned:false.
-          return {
-            state: 'PROMPT_READY',
-            trusted: m.state === 'PROMPT_READY' && m.trusted,
-            owned: m.state === 'PROMPT_READY' && m.trusted,
-          }
-        case 'C':
-          // Command start. Trusted only if a clean prompt preceded it; an orphan
-          // or nested C runs raw but disables downstream actions.
-          return {
-            state: 'RUNNING_RAW',
-            trusted: m.state === 'PROMPT_READY' && m.trusted,
-            owned: false,
-          }
-        case 'D':
-          // Finished — only meaningful while a command is running. Orphan D
-          // (e.g. empty Enter emits D with no preceding C) is ignored.
-          return m.state === 'RUNNING_RAW' ? { state: 'RAW', trusted: m.trusted, owned: false } : m
-      }
+      return { state: 'Native' }
   }
 }

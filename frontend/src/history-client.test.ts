@@ -22,7 +22,6 @@ function completedRecord(overrides: Partial<CommandRecord> = {}): CommandRecord 
     exitCode: 0,
     startedAt: 1000.4,
     endedAt: 1200.6,
-    trusted: true,
     lineOf: () => 3,
     disposed: false,
     ...overrides,
@@ -47,7 +46,6 @@ describe('recordCommand', () => {
       // store persists int64.
       startedAt: 1000,
       endedAt: 1201,
-      trusted: true,
     })
   })
 
@@ -67,7 +65,6 @@ describe('recordCommand', () => {
       'host',
       'startedAt',
       'status',
-      'trusted',
     ])
   })
 

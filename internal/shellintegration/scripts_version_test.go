@@ -50,6 +50,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// in readline runs no traps, so a job that misses it waits for a prompt
 		// the user may never produce (nocx-z9s9.16).
 		"13": "00383f333efb2633efb5b039302b36d834ffba9364dfb3b3406f4779d2cd3041",
+		// v14: the authenticated lifecycle channel (ADR-0024) — the shell
+		// speaks hello/accept/start/complete/prompt_ready over a transport
+		// that is not the tty, authenticated by the per-epoch capability
+		// (nocx-u7uh.3).
+		"14": "1db018fdd91b47676ba3e71d75b9ac3f02346dcb57d6c314f0ad3ce8d5936490",
 	}
 
 	h := sha256.New()

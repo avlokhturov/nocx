@@ -107,7 +107,7 @@ func TestBashLauncher_WholeRcfileExecutes(t *testing.T) {
 
 	arg := bashArgFor(bashRcfile(launcherEnvBlock(LaunchOptions{
 		SessionID: "sess-tail", Enhanced: true, EnvironmentID: "tail-env",
-	}), b.String()))
+	}), b.String(), ""))
 
 	// The two bounds, asserted rather than assumed: a payload that drifted
 	// under the pipe capacity would stop testing anything, and one that drifted

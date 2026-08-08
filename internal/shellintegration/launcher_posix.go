@@ -101,7 +101,10 @@ func (remoteLauncher) posixArg(opts LaunchOptions) (string, bool) {
 		// precondition is the caller's, enforced uniformly across tiers.
 		return "", false
 	}
-	return posixArgFor(posixEnvFile(launcherEnvBlock(opts), posixScript)), true
+	// The ENV file SOURCES the installed generation file rather than
+	// embedding the script — same reasoning and failure semantics as the
+	// bash tier (see launcher_bash.go bashArg).
+	return posixArgFor(posixEnvFile(launcherEnvBlock(opts), launchSourceLine("nocx.posix"))), true
 }
 
 // posixCommand builds the minimal-tier remote command, sent when the far

@@ -87,8 +87,13 @@ esac
 // deliberate: the minimal tier's ENV file is parsed by dash / busybox ash /
 // ksh, none of which know bash's `source`; `.` is understood by all of them
 // and by bash and zsh.
+//
+// stderr is suppressed on purpose: when the publish prelude failed,
+// NOCX_GENERATION is unset, the path names no file, and the session must
+// land in a CLEAN visible native prompt (ADR-0024 decision 4) — not a
+// conventional terminal with a shell error line on it.
 func launchSourceLine(name string) string {
-	return `. "${HOME}/.nocx/integration/${NOCX_GENERATION}/` + name + `"`
+	return `. "${HOME}/.nocx/integration/${NOCX_GENERATION}/` + name + `" 2>/dev/null`
 }
 
 // launchCarrier renders the compact carrier: the template with the three tier
@@ -97,9 +102,9 @@ func launchSourceLine(name string) string {
 // instead of embedding the scripts — a stable carrier over a changing bundle.
 func launchCarrier() string {
 	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@",
-		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"))))
+		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"), "")))
 	s = strings.ReplaceAll(s, "@ZSH_ARG@",
-		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"))))
+		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"), "")))
 	s = strings.ReplaceAll(s, "@POSIX_ARG@",
 		posixArgFor(posixEnvFile("", launchSourceLine("nocx.posix"))))
 	return s

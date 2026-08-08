@@ -458,17 +458,10 @@ func New(opts ...Option) (*App, error) {
 		// the transport builds. Before this line the launcher was reachable
 		// from its own tests and nowhere else (AGENTS.md check 5).
 		transport.WithRemoteLauncher(&remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: logger}),
-		// Launcher staging for the hand-typed-ssh rewrite (nocx-pu4.6).
-		// The launcher is ~35 KB and a typed line has only the tty, whose
-		// canonical buffer is 4096 bytes, so the payload goes to a private
-		// file and the renderer types the path. The home directory is
-		// known here and nowhere below: the transport must not pick a
-		// filesystem location of its own.
-		transport.WithLauncherStager(shellintegration.NewLauncherStager(logger, home)),
 		// The installed fact (nocx-mlm7 P7, design §5.4): the persisted
 		// memory of which resolved destinations carry a committed
-		// integration. The delivery planner reads it to choose the compact
-		// installed line; the observation RPC writes and invalidates it.
+		// integration. The footprint status surface reads it; the
+		// observation RPC that used to write it was severed (ADR-0024 §1).
 		transport.WithInstalledFactStore(installedFacts),
 		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
 		// satisfies transport.RemoteUninstaller without an adapter — the

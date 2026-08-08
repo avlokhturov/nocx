@@ -36,8 +36,10 @@ const (
 // recognisably ours. Includes the legacy run/ staging dir and the retired
 // VERSION marker so a nocx-pu4.6-era host is not mistaken for a foreign
 // directory (design §4.1: an existing ~/.nocx that is not recognisably ours
-// is never modified and never has its mode changed).
-var ourMarkers = []string{manifestName, launchName, lockName, tmpName, integrationDir, stageDirName, versionFile}
+// is never modified and never has its mode changed). "run" is a literal:
+// the staging dir it names was deleted with the P7 hand-typed-ssh surface
+// (ADR-0024 §1), but hosts that still carry it must stay recognisable.
+var ourMarkers = []string{manifestName, launchName, lockName, tmpName, integrationDir, "run", versionFile}
 
 // lockWaitBound is how long a publish waits for a contended lock before
 // applying the stale rule. Package-level so tests can shorten it.

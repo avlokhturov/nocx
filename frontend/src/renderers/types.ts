@@ -110,15 +110,6 @@ export interface TerminalRenderer {
   // nocx_env tag when the marker is tagged.
   onCommandMarker(cb: CommandMarkerCallback): void
 
-  // onInBandReady registers a callback that fires when the shell emits the
-  // private OSC 1337 in-band READY handshake (\x1b]1337;NOCX_IB_READY\x07).
-  // The wrapper line emits it only after raw -echo mode is provably on, so
-  // this event is the go-ahead to stream the in-band payload (nocx-ynsx,
-  // spec §4.4). The renderer whitelists the exact payload; anything else is
-  // discarded. Returns an unsubscribe: the caller registers immediately
-  // before sending the wrapper and removes the listener on success, cancel,
-  // timeout and error, so a stale READY can never trigger a stream.
-  onInBandReady(cb: () => void): () => void
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the
   // tab bar always lights the activity indicator on bell.

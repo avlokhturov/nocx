@@ -192,7 +192,6 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
   constructor(
     private newTab: () => Tab,
     private newConnection: () => void,
-    private integrateShell: () => void = () => {},
     /** Optional target-needing command ("Forward a port"): activating it
      *  drills into its steps inside the palette. */
     private drillCommand?: DrillCommand,
@@ -213,13 +212,6 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
         label: 'New connection',
         detail: 'Define an SSH connection in Settings',
         run: () => this.newConnection(),
-      },
-      {
-        id: '__integrate_shell__',
-        kind: 'command',
-        label: 'Integrate this shell',
-        detail: 'Bootstraps the shell at the current prompt (only from a trusted prompt)',
-        run: () => this.integrateShell(),
       },
     ]
     // The target-needing command comes LAST: the first row is what Enter

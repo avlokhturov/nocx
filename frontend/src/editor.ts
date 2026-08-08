@@ -59,14 +59,6 @@ export function stripPastedIndent(text: string, atLineStart: boolean): string {
  *  both or neither. */
 const MAX_ROWS = 30
 
-/**
- * What the location chip shows when the prompt's trust is lost (markers
- * stopped): the last known host must not keep rendering as current beside
- * an irreversible action (design §8.2). "unknown" alone could read as a
- * host literally named unknown; "context unknown" cannot.
- */
-export const LOCATION_UNKNOWN_LABEL = 'context unknown'
-
 export interface EditorActions {
   submit: (doc: string, plan?: SubmitPlan) => void
   // cancel discards the composed line the way Ctrl-C does at a shell prompt:
@@ -146,10 +138,7 @@ export class CommandEditor {
    *  shows (routed from locationLine, never derived a second way). Empty
    *  for a local session, where the absence of a chip is the information. */
   private _location = ''
-  /** Trust from the input-state machine (ADR-0006). False when markers
-   *  stopped or never started cleanly: the last known host must not keep
-   *  rendering as current (design §8.2). */
-  private _trusted = false
+
   /** The row count (capped at MAX_ROWS) the host was last told about. */
   private _lastRowCount = 1
   /** True while a programmatic document edit is in flight: such edits set the
@@ -414,22 +403,10 @@ export class CommandEditor {
     this.renderLocation()
   }
 
-  /**
-   * Trust from the input-state machine (ADR-0006). When markers stop, the
-   * machine clears trust and the chip must say the context is unknown
-   * immediately — never keep rendering the last trusted host as current
-   * (design §8.2). The unknown state is SHOWN, not hidden: an absent chip
-   * would read as "local", which is a different lie.
-   */
-  setTrusted(trusted: boolean): void {
-    this._trusted = trusted
-    this.renderLocation()
-  }
-
-  /** The chip is the machine's truth: hidden for a local session, the host
-   *  string while the prompt is trusted, the unknown label the moment it is
-   *  not. The block header's chip is a frozen record of where a command
-   *  RAN; this one is where the next Enter would land, so it tracks trust. */
+  /** The chip is where the next Enter would land: hidden for a local
+   *  session, the host string otherwise. The trust-gated display is deleted
+   *  with the `trusted` boolean (ADR-0024 §6) — no stream sequence may
+   *  promote or revoke the chip. */
   private renderLocation(): void {
     if (!this._location) {
       this.locationChip.style.display = 'none'
@@ -437,7 +414,7 @@ export class CommandEditor {
       return
     }
     this.locationChip.style.display = ''
-    this.locationChip.textContent = this._trusted ? this._location : LOCATION_UNKNOWN_LABEL
+    this.locationChip.textContent = this._location
   }
 
   // ── keyboard ──────────────────────────────────────────────────────────

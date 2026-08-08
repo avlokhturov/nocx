@@ -141,8 +141,12 @@ echo NOCX_SOURCED_OK
 
 // TestBashMarkerOnlyBeatsHostilePrompt spawns a bash that sources nocx.bash
 // with NOCX_PROMPT_MODE=marker-only, with a hostile PROMPT_COMMAND that sets
-// PS1='HOSTILE$ ', calls __nocx_prompt_command, and asserts HOSTILE does not
-// appear in the rendered prompt.
+// PS1='HOSTILE$ ', and asserts the B-marker overlay wins — but ONLY once the
+// authenticated channel is live. ADR-0024 decision 9: suppressing the native
+// prompt without a live domain is the phishing primitive, so a shell whose
+// handshake never completed keeps the framework's visible prompt. The live
+// state is injected here (the accept path itself is exercised end to end by
+// the channel tests); the no-channel arm below pins the new fail-open half.
 func TestBashMarkerOnlyBeatsHostilePrompt(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
@@ -152,6 +156,13 @@ func TestBashMarkerOnlyBeatsHostilePrompt(t *testing.T) {
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 PROMPT_COMMAND='PS1="HOSTILE$ "'
 source "$1"
+exec 9>/dev/null
+__nocx_lc_fd=9
+__nocx_lc_lane_esc=L
+__nocx_lc_dom_esc=D
+__nocx_lc_epoch=1
+__nocx_cap=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+__nocx_lc_active=1
 __nocx_prompt_command
 echo "PS1=[$PS1]"
 `
@@ -164,10 +175,31 @@ echo "PS1=[$PS1]"
 	}
 }
 
+// TestBashMarkerOnlyKeepsNativePromptWithoutChannel pins decision 9's other
+// half: a marker-only shell whose channel never became live must NOT
+// suppress the prompt. Before the channel, this test asserted the B marker
+// won unconditionally — the exact failure ADR-0024 decision 9 forbids.
+func TestBashMarkerOnlyKeepsNativePromptWithoutChannel(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+PROMPT_COMMAND='PS1="HOSTILE$ "'
+source "$1"
+__nocx_prompt_command
+echo "PS1=[$PS1]"
+`
+	out := runShellProg(t, bash, prog, script)
+	if !strings.Contains(out, "HOSTILE") {
+		t.Errorf("bash suppressed its prompt without a live channel; the framework's prompt must stand (ADR-0024 decision 9):\n%s", out)
+	}
+}
+
 // TestZshMarkerOnlyBeatsHostilePrompt spawns a zsh that sources nocx.zsh
 // with NOCX_PROMPT_MODE=marker-only, registers a hostile precmd that sets
 // PROMPT='HOSTILE$ ', runs the precmd hooks, and asserts HOSTILE does not
-// appear in the rendered prompt.
+// appear in the rendered prompt once the channel is live (injected here;
+// the accept path is covered by the channel tests).
 func TestZshMarkerOnlyBeatsHostilePrompt(t *testing.T) {
 	zsh := requireShell(t, "zsh")
 	script := writeScriptFile(t, "nocx.zsh", zshScript)
@@ -180,6 +212,13 @@ __hostile() { PROMPT='HOSTILE$ '; }
 add-zsh-hook precmd __hostile
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 source "$1"
+exec 9>/dev/null
+__nocx_lc_fd=9
+__nocx_lc_lane_esc=L
+__nocx_lc_dom_esc=D
+__nocx_lc_epoch=1
+__nocx_cap=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+__nocx_lc_active=1
 for f in $precmd_functions; do $f; done
 builtin printf 'PROMPT=[%s]' "$PROMPT"
 `
@@ -190,6 +229,26 @@ builtin printf 'PROMPT=[%s]' "$PROMPT"
 	// The prompt must still carry the B marker.
 	if !strings.Contains(out, "]133;B") {
 		t.Errorf("marker-only prompt missing OSC 133 B marker:\n%s", out)
+	}
+}
+
+// TestZshMarkerOnlyKeepsNativePromptWithoutChannel is the zsh half of the
+// decision-9 fail-open: no live channel, no prompt suppression.
+func TestZshMarkerOnlyKeepsNativePromptWithoutChannel(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+	prog := `
+autoload -Uz add-zsh-hook
+__hostile() { PROMPT='HOSTILE$ '; }
+add-zsh-hook precmd __hostile
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+source "$1"
+for f in $precmd_functions; do $f; done
+builtin printf 'PROMPT=[%s]' "$PROMPT"
+`
+	out := runShellProg(t, zsh, prog, script)
+	if !strings.Contains(out, "HOSTILE") {
+		t.Errorf("zsh suppressed its prompt without a live channel (ADR-0024 decision 9):\n%s", out)
 	}
 }
 
@@ -204,10 +263,12 @@ func TestZshNativeModeRestoresVisiblePrompt(t *testing.T) {
 autoload -Uz add-zsh-hook
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 source "$1"
+__nocx_lc_active=1
 
 # First run precmd — the marker-only overlay should be active.
 for f in $precmd_functions; do $f; done
 builtin printf 'BEFORE=[%s]\n' "$PROMPT"
+
 
 # Escape to native mode.
 __nocx_native_mode
@@ -255,6 +316,7 @@ func TestBashNativeModeRestoresVisiblePrompt(t *testing.T) {
 	prog := `
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 source "$1"
+__nocx_lc_active=1
 
 # First run prompt command — the marker-only overlay should be active.
 __nocx_prompt_command
@@ -300,10 +362,21 @@ func TestBashTopLevelMarkerOnlyArmsBMarker(t *testing.T) {
 	script := writeScriptFile(t, "nocx.bash", bashScript)
 
 	// Simulate a TOP-LEVEL enhanced session: NOCX_SESSION_ID is set by the
-	// backend and NO parent __nocx_owned_session exists.
+	// backend and NO parent __nocx_owned_session exists. The marker-only
+	// prompt is suppressed only when the channel is live (ADR-0024 decision
+	// 9), so the channel state is injected after sourcing, writing to
+	// /dev/null (the accept path itself is exercised end to end by the
+	// channel tests).
 	prog := `
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=deadbeefdeadbeef
 source "$1"
+exec 9>/dev/null
+__nocx_lc_fd=9
+__nocx_lc_lane_esc=L
+__nocx_lc_dom_esc=D
+__nocx_lc_epoch=1
+__nocx_cap=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+__nocx_lc_active=1
 
 # Run two prompt cycles — the second must set the marker-only PS1.
 __nocx_prompt_command

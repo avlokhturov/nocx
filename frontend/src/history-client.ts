@@ -23,7 +23,6 @@ export interface HistoryRecordParams {
   exitCode: number | null
   startedAt: number | null
   endedAt: number | null
-  trusted: boolean
 }
 
 /** Send one completed command's facts to the store. Best-effort by design: a
@@ -48,7 +47,6 @@ export function recordCommand(client: WSClient, rec: CommandRecord): Promise<His
     // in tests — the schema says integer, so the wire copy rounds.
     startedAt: rec.startedAt === null ? null : Math.round(rec.startedAt),
     endedAt: rec.endedAt === null ? null : Math.round(rec.endedAt),
-    trusted: rec.trusted,
   }
   return client
     .call<HistoryRecord>('history.record', params)

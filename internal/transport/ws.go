@@ -133,17 +133,11 @@ type WSServer struct {
 	// plain shell and report reason none.
 	remoteLauncher ssh.RemoteLauncher
 
-	// launcherStager puts a remote launcher where a LOCAL shell can read it,
-	// for the hand-typed-ssh rewrite (nocx-pu4.6). Wired through
-	// WithLauncherStager; when nil, shell.launcherCommand refuses and the
-	// renderer sends the line the user typed.
-	launcherStager LauncherStager
-
 	// installedFacts is the backend-owned, persisted memory of which
 	// resolved destinations carry a committed, protocol-compatible
 	// integration (§5.4). Wired through WithInstalledFactStore; when nil,
-	// every host bootstraps and observations are logged but never
-	// recorded.
+	// the footprint surface answers an empty list (the P7 observation RPC
+	// that used to write it was severed — ADR-0024 §1).
 	installedFacts *ssh.InstalledFactStore
 
 	// remoteUninstaller removes the integration bundle on a remote host,
@@ -151,14 +145,6 @@ type WSServer struct {
 	// when nil, shell.footprint.uninstall answers an error and removes
 	// nothing — the status surface never offers the button without it.
 	remoteUninstaller RemoteUninstaller
-
-	// launcherAttempts is the idempotency registry binding a minted
-	// environment id to its resolved identity and expected delivery
-	// (§5.3). Guarded by launcherAttemptsMu; a passport can arrive
-	// immediately after the result, so registration and observation
-	// consumption are atomic with the registry.
-	launcherAttemptsMu sync.Mutex
-	launcherAttempts   map[string]*launchAttempt
 
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
@@ -1118,8 +1104,6 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handlePortsMethod(wconn, req)
 	case "dialog.openFile":
 		s.handleDialogOpenFile(wconn, req)
-	case "shell.environmentObserved":
-		s.handleShellEnvironmentObserved(wconn, req)
 	case "shell.openUrl":
 		s.handleShellOpenUrl(wconn, req)
 	case "history.query":
@@ -1136,8 +1120,6 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleShellComplete(ctx, wconn, req)
 	case "shell.integrate":
 		s.handleShellIntegrate(wconn, req)
-	case "shell.launcherCommand":
-		s.handleShellLauncherCommand(wconn, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",

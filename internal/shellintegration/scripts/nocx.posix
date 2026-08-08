@@ -8,6 +8,17 @@
 # so C is unreachable through portable prompt hooks and is deliberately
 # never emitted here: a block simply appears already finished, with no
 # running phase. Do not fake C.
+#
+# The authenticated lifecycle channel (ADR-0024) is NOT implementable in
+# this tier, and this tier deliberately does not pretend otherwise: POSIX sh
+# has no preexec hook (a command-start event is unreachable), no precmd hook
+# (the exit status is only observable inside a forked PS1 expansion that
+# cannot carry state back), no bounded binary read (read -t and read -N are
+# not portable), and no way to hold a monotonic sequence across prompts.
+# A POSIX sh that cannot speak the protocol keeps a conventional terminal —
+# the honest, ADR-compliant state for an environment without a channel.
+# If a POSIX host must be integrated, the answer is the Tier-B helper
+# binary (ADR-0024 "Revisit when"), never a fake of this protocol.
 
 if [ -z "${NOCX_SHELL_INTEGRATION:-}" ]; then
     return 2>/dev/null || exit 0

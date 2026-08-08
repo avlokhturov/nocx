@@ -64,10 +64,7 @@ export type InputPresentation = 'editor' | 'terminal'
  *  authorisation and technical eligibility are resolved — never disabled
  *  and never rejected at click time. */
 export type RecoveryAction =
-  | { kind: 'integrate'; label: string }
-  | { kind: 'enable-editor'; label: string }
-  | { kind: 'retry-integration'; label: string }
-  | { kind: 'restore-editor'; label: string }
+  { kind: 'enable-editor'; label: string } | { kind: 'restore-editor'; label: string }
 
 /** The facts the action set is derived from. Authorisation and technical
  *  eligibility are separate gates, resolved BEFORE the action set is
@@ -91,21 +88,15 @@ export interface ActionFacts {
  * a chip or menu item should appear at all.
  */
 export function deriveActions(f: ActionFacts): RecoveryAction[] {
+  // SEVERED (ADR-0024 §4): there is no in-band fallback tier, so no action
+  // may offer integration or retry — a click that toasts "unavailable" is
+  // exactly the disabled-then-rejected anti-pattern this module exists to
+  // prevent. The integrate/retry branches are deleted with the in-band
+  // machinery (nocx-u7uh.1); the migration bead reconnects the remaining
+  // editor-presentation actions to authenticated facts.
   if (!f.authorized || !f.eligible) return []
 
   const actions: RecoveryAction[] = []
-
-  // A shell that has never been integrated: offer the integration path.
-  if (f.shellState === 'unsupported' || f.shellState === 'eligible') {
-    actions.push({ kind: 'integrate', label: 'Integrate this shell' })
-    return actions
-  }
-
-  // A failed integration: offer retry.
-  if (f.shellState === 'failed') {
-    actions.push({ kind: 'retry-integration', label: 'Retry integration' })
-    return actions
-  }
 
   // Integrated but the user is in terminal input: offer to switch back.
   if (f.shellState === 'integrated' && f.presentation === 'terminal') {

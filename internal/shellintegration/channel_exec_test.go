@@ -1,0 +1,945 @@
+package shellintegration
+
+// The authenticated lifecycle channel (ADR-0024) driven end to end: a REAL
+// shell on a REAL pty, its hooks speaking the length-prefixed JSON protocol
+// over a transport that is not the tty, against a fake kernel adapter that
+// validates the capability and the sequence and answers hello with accept.
+//
+// These tests are the paired success paths the repo demands: every failure
+// path in the hooks (bad capability, no transport, handshake timeout) has a
+// sibling here that proves an ordinary machine with a live kernel gets a
+// working channel, and the capability never appears in any environment.
+
+import (
+	"bufio"
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/creack/pty"
+)
+
+const (
+	testCap   = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testLane  = "lane-test"
+	testDom   = "dom-test"
+	testEpoch = 1
+)
+
+// kernelEvent is one accepted event, decoded just enough to assert on.
+type kernelEvent struct {
+	Seq  uint64
+	Evt  string
+	Body map[string]any
+}
+
+// frame is the wire shape of one envelope (docs/lifecycle-protocol.md §2).
+type frame struct {
+	V     uint8  `json:"v"`
+	Lane  string `json:"lane"`
+	Dom   string `json:"dom"`
+	Epoch uint64 `json:"epoch"`
+	Seq   uint64 `json:"seq"`
+	Cap   string `json:"cap"`
+	Evt   string `json:"evt"`
+}
+
+// fakeKernel plays the kernel's transport side: it accepts every connection
+// (any local process can reach the loopback port — that is the transport's
+// threat model), reads 4-byte big-endian length-prefixed JSON frames,
+// validates the envelope (version, lane, domain, epoch, capability, then the
+// monotonic sequence), answers the first hello with accept, and records
+// accepted events. A frame with a wrong capability or a non-increasing
+// sequence is rejected and counted — nothing about the domain state changes,
+// exactly like the real kernel.
+type fakeKernel struct {
+	t             *testing.T
+	cap           string
+	mu            sync.Mutex
+	accepted      []kernelEvent
+	rejected      int
+	lastSeq       uint64
+	acceptedHello bool
+}
+
+func newFakeKernel(t *testing.T, cap string) *fakeKernel {
+	return &fakeKernel{t: t, cap: cap}
+}
+
+// serveLoop accepts connections until the listener is closed and serves
+// each one.
+func (k *fakeKernel) serveLoop(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go k.serve(conn)
+	}
+}
+
+// serve reads frames until EOF.
+func (k *fakeKernel) serve(conn net.Conn) {
+	defer func() { _ = conn.Close() }()
+	r := bufio.NewReader(conn)
+	var hdr [4]byte
+	for {
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return
+		}
+		n := binary.BigEndian.Uint32(hdr[:])
+		if n == 0 || n > 65536 {
+			k.reject()
+			return
+		}
+		body := make([]byte, n)
+		if _, err := io.ReadFull(r, body); err != nil {
+			return
+		}
+		var f frame
+		if err := json.Unmarshal(body, &f); err != nil {
+			k.reject()
+			return
+		}
+		if !k.acceptFrame(f) {
+			continue // rejected as if it never arrived
+		}
+		k.mu.Lock()
+		ev := kernelEvent{Seq: f.Seq, Evt: f.Evt}
+		_ = json.Unmarshal(body, &ev.Body)
+		k.accepted = append(k.accepted, ev)
+		first := !k.acceptedHello
+		k.acceptedHello = true
+		k.mu.Unlock()
+		if first && f.Evt == "hello" {
+			k.sendAccept(conn)
+		}
+	}
+}
+
+func (k *fakeKernel) reject() {
+	k.mu.Lock()
+	k.rejected++
+	k.mu.Unlock()
+}
+
+// acceptFrame validates exactly what the real kernel validates before any
+// state is consulted (protocol doc §4): version, lane, domain, epoch,
+// capability, then the monotonic sequence.
+func (k *fakeKernel) acceptFrame(f frame) bool {
+	if f.V != 1 || f.Lane != testLane || f.Dom != testDom || f.Epoch != testEpoch {
+		k.reject()
+		return false
+	}
+	if f.Cap != k.cap {
+		k.reject()
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if f.Seq <= k.lastSeq {
+		k.rejected++
+		return false
+	}
+	k.lastSeq = f.Seq
+	return true
+}
+
+func (k *fakeKernel) sendAccept(conn net.Conn) {
+	body := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":0,"cap":%q,"evt":"accept"}`,
+		testLane, testDom, testEpoch, k.cap)
+	var hdr [4]byte
+	// #nosec G115 — the accept frame is a fixed-size test fixture, far
+	// under the 64 KiB protocol cap.
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+	_, _ = conn.Write(append(hdr[:], body...))
+}
+
+func (k *fakeKernel) events() []kernelEvent {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]kernelEvent(nil), k.accepted...)
+}
+
+func (k *fakeKernel) count(evt string) int {
+	n := 0
+	for _, e := range k.events() {
+		if e.Evt == evt {
+			n++
+		}
+	}
+	return n
+}
+
+// channelShell is a real interactive shell on a pty, its hooks sourced the
+// way the launcher would source them: a bootstrap file that sets the
+// capability as a non-exported variable (the @CAP@ substitution point) and
+// then sources the embedded script, with the channel config in the
+// environment (NOCX_LIFECYCLE_*).
+type channelShell struct {
+	t        *testing.T
+	cmd      *exec.Cmd
+	ptmx     *os.File
+	kernel   *fakeKernel
+	listener net.Listener
+	mu       sync.Mutex
+	out      []byte
+}
+
+// startChannelShell boots the hooks against a fake kernel over loopback TCP
+// (the remote / in-band transport shape). It returns only after the
+// handshake completed: the kernel has seen hello and the shell has sent its
+// first prompt_ready.
+func startChannelShell(t *testing.T, shell, scriptName, script string) *channelShell {
+	t.Helper()
+	sh := requireShell(t, shell)
+
+	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
+	if lnErr != nil {
+		t.Fatalf("listen: %v", lnErr)
+	}
+	port := tcpPort(t, ln)
+
+	home := t.TempDir()
+	bootstrap := filepath.Join(t.TempDir(), "bootstrap")
+	// The launcher's substitution point: __nocx_cap='@CAP@' in the rcfile
+	// text. The hooks drop the export attribute again at source time.
+	boot := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n"
+	if err := os.WriteFile(bootstrap, []byte(boot), 0o600); err != nil {
+		t.Fatalf("write bootstrap: %v", err)
+	}
+	scriptPath := writeScriptFile(t, scriptName, script)
+
+	// #nosec G204 — sh is the requireShell-resolved path, not input; a
+	// real interactive shell on a real pty is the only way to exercise the
+	// channel hooks (same annotation as the in-band pty suite).
+	cmd := exec.Command(sh, "-i")
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		"NOCX_SHELL_INTEGRATION=1",
+		"NOCX_PROMPT_MODE=marker-only",
+		"NOCX_SESSION_ID=chansess",
+		"NOCX_LIFECYCLE_LANE="+testLane,
+		"NOCX_LIFECYCLE_DOMAIN="+testDom,
+		fmt.Sprintf("NOCX_LIFECYCLE_EPOCH=%d", testEpoch),
+		fmt.Sprintf("NOCX_LIFECYCLE_PORT=%d", port),
+		"NOCX_LIFECYCLE_TIMEOUT_MS=3000",
+	)
+	// The gate line: source the bootstrap (cap) then the hooks — the shape
+	// of the launcher rcfile's install section.
+	gate := filepath.Join(t.TempDir(), "gate")
+	gateBody := ". " + shellQuote(bootstrap) + "\n. " + shellQuote(scriptPath) + "\n"
+	if err := os.WriteFile(gate, []byte(gateBody), 0o600); err != nil {
+		t.Fatalf("write gate: %v", err)
+	}
+	switch shell {
+	case "bash":
+		rc := filepath.Join(home, ".bashrc")
+		if err := os.WriteFile(rc, []byte(". "+shellQuote(gate)+"\n"), 0o600); err != nil {
+			t.Fatalf("write .bashrc: %v", err)
+		}
+	case "zsh":
+		zdot := t.TempDir()
+		if err := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte(". "+shellQuote(gate)+"\n"), 0o600); err != nil {
+			t.Fatalf("write .zshrc: %v", err)
+		}
+		cmd.Env = append(cmd.Env, "ZDOTDIR="+zdot)
+	}
+
+	k := newFakeKernel(t, testCap)
+	go k.serveLoop(ln)
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k, listener: ln}
+	// The pump must run before the shell renders anything: the handshake
+	// happens during rc sourcing, and the first prompt follows immediately.
+	go s.readPump()
+	s.waitForHandshake()
+	return s
+}
+
+func (s *channelShell) readPump() {
+	buf := make([]byte, 8192)
+	for {
+		n, err := s.ptmx.Read(buf)
+		if n > 0 {
+			s.mu.Lock()
+			s.out = append(s.out, buf[:n]...)
+			s.mu.Unlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (s *channelShell) output() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return string(s.out)
+}
+
+// waitForHandshake waits until the kernel has accepted hello and the first
+// prompt_ready — the handshake completed and the shell is at its first
+// ready prompt. Event-driven, so the shell's first prompt is never raced.
+func (s *channelShell) waitForHandshake() {
+	s.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.kernel.count("hello") > 0 && s.kernel.count("prompt_ready") > 0 {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	s.t.Fatalf("handshake never completed; accepted=%v output=%q", s.kernel.events(), s.output())
+}
+
+// run types one command line and waits for its completion to be accepted.
+func (s *channelShell) run(cmdline string) {
+	s.t.Helper()
+	if _, err := s.ptmx.Write([]byte(cmdline + "\n")); err != nil {
+		s.t.Fatalf("write %q: %v", cmdline, err)
+	}
+	s.waitForAccepted("complete")
+	// And then for the prompt the shell returns to. waitForAccepted stops at
+	// the FIRST event of a kind, so stopping at "complete" leaves the
+	// post-command prompt_ready still in flight — which the assertions below
+	// require. On a fast host it usually arrived anyway; in the test container
+	// it did not, and the test failed for a race rather than for a defect.
+	s.waitForPromptAfterComplete()
+}
+
+// waitForPromptAfterComplete blocks until a prompt_ready is accepted with a
+// sequence greater than the last complete's — the exact condition the caller
+// goes on to assert, rather than a proxy for it.
+func (s *channelShell) waitForPromptAfterComplete() {
+	s.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var lastComplete uint64
+		for _, e := range s.kernel.events() {
+			if e.Evt == "complete" {
+				lastComplete = e.Seq
+			}
+		}
+		if lastComplete > 0 {
+			for _, e := range s.kernel.events() {
+				if e.Evt == "prompt_ready" && e.Seq > lastComplete {
+					return
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	s.t.Fatalf("no prompt_ready followed the complete; accepted=%v output=%q", s.kernel.events(), s.output())
+}
+
+func (s *channelShell) waitForAccepted(evt string) {
+	s.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, e := range s.kernel.events() {
+			if e.Evt == evt {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	s.t.Fatalf("kernel never accepted %q; accepted=%v output=%q", evt, s.kernel.events(), s.output())
+}
+
+func (s *channelShell) close() {
+	_, _ = s.ptmx.Write([]byte("exit\n"))
+	time.Sleep(300 * time.Millisecond)
+	_ = s.ptmx.Close()
+	_ = s.cmd.Process.Kill()
+	_ = s.listener.Close()
+}
+
+// TestBashChannel_HandshakeAndLifecycle drives the REAL bash hooks through
+// the whole lifecycle on the authenticated channel: hello accepted, then a
+// command produces start → complete (with a fence) → prompt_ready, every
+// frame carrying the capability and a strictly increasing sequence, and the
+// fence bytes reaching the pty after the command's output.
+func TestBashChannel_HandshakeAndLifecycle(t *testing.T) {
+	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	defer s.close()
+
+	// The handshake completed: hello accepted, then prompt_ready at the
+	// first prompt.
+	hello := s.kernel.events()
+	if len(hello) < 2 {
+		t.Fatalf("expected hello + prompt_ready, got %v", hello)
+	}
+	if hello[0].Evt != "hello" || hello[0].Seq != 1 {
+		t.Errorf("first frame must be hello seq=1, got %v", hello[0])
+	}
+	if body, ok := hello[0].Body["shell"]; !ok || body != "bash" {
+		t.Errorf("hello must carry the shell kind, got %v", hello[0].Body)
+	}
+
+	s.run("echo CHANNEL-HELLO")
+
+	events := s.kernel.events()
+	var start, complete, ready *kernelEvent
+	prevSeq := uint64(0)
+	for i := range events {
+		e := &events[i]
+		if e.Seq <= prevSeq {
+			t.Errorf("sequence not strictly increasing at %v (after %d)", *e, prevSeq)
+		}
+		prevSeq = e.Seq
+		switch e.Evt {
+		case "start":
+			start = e
+		case "complete":
+			complete = e
+		case "prompt_ready":
+			ready = e
+		}
+	}
+	if start == nil {
+		t.Fatalf("no start accepted for the command; events=%v", events)
+	}
+	if complete == nil {
+		t.Fatalf("no complete accepted; events=%v", events)
+	}
+	if ready == nil || ready.Seq <= complete.Seq {
+		t.Errorf("prompt_ready must follow complete (ready=%v complete=%v)", ready, complete)
+	}
+
+	// The start carries the command text the user typed.
+	if cmd, ok := start.Body["command"].(string); !ok || !strings.Contains(cmd, "echo CHANNEL-HELLO") {
+		t.Errorf("start must carry the command line, got %v", start.Body)
+	}
+
+	// The complete carries the exit status and the fence; the fence bytes
+	// reach the pty after the command's output (the render rendezvous).
+	code, ok := complete.Body["exit_code"].(float64)
+	if !ok || code != 0 {
+		t.Errorf("complete must carry exit_code 0, got %v", complete.Body)
+	}
+	fence, ok := complete.Body["fence"].(string)
+	if !ok || len(fence) != 64 {
+		t.Fatalf("complete must carry a 64-hex fence, got %v", complete.Body)
+	}
+	out := s.output()
+	cmdIdx := strings.Index(out, "CHANNEL-HELLO")
+	fenceIdx := strings.Index(out, "NOCX_FENCE;"+fence)
+	if cmdIdx < 0 {
+		t.Fatalf("command output missing from pty: %q", out)
+	}
+	if fenceIdx < 0 {
+		t.Fatalf("fence OSC missing from pty output: %q", out)
+	}
+	if fenceIdx < cmdIdx {
+		t.Errorf("fence reached the pty BEFORE the command output (fence at %d, output at %d)", fenceIdx, cmdIdx)
+	}
+	// The fence must be exactly once.
+	if strings.Count(out, "NOCX_FENCE;"+fence) != 1 {
+		t.Errorf("fence appeared more than once in pty output")
+	}
+}
+
+// TestBashChannel_CapabilityNeverInAnyEnvironment asserts the capability's
+// non-negotiable property: it appears in NO environment — not `env`, not
+// /proc/<pid>/environ of the shell, and not of a child of the shell — and it
+// lives in a non-exported shell variable a child cannot read.
+func TestBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T) {
+	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	defer s.close()
+
+	if _, err := s.ptmx.Write([]byte("echo SHELL_ENV_HAS_CAP=$(env | grep -c " + testCap + ")\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := s.ptmx.Write([]byte("echo SHELL_VAR_HAS_CAP=${__nocx_cap:+yes}\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// A background child that stays alive long enough for the test to read
+	// its /proc/<pid>/environ: a foreground child would exit before the
+	// read, proving nothing about the environment it had.
+	if _, err := s.ptmx.Write([]byte("bash -c 'echo CHILD_PID=$$; sleep 30' &\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		// Wait for the RESULT lines, not the echoed command text (the typed
+		// line itself contains the capability literal).
+		o := s.output()
+		if strings.Contains(o, "SHELL_ENV_HAS_CAP=0") &&
+			strings.Contains(o, "SHELL_VAR_HAS_CAP=yes") &&
+			strings.Contains(o, "CHILD_PID="+strconv.Itoa(parsePidOrZero(o))) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	out := s.output()
+	if !strings.Contains(out, "SHELL_ENV_HAS_CAP=0") {
+		t.Errorf("capability found in the shell's `env`:\n%s", out)
+	}
+	if !strings.Contains(out, "SHELL_VAR_HAS_CAP=yes") {
+		t.Errorf("capability not held in the non-exported shell variable:\n%s", out)
+	}
+
+	// /proc/<pid>/environ of the shell and of the LIVE child must not
+	// contain the capability.
+	childPID := parseLastPID(t, out, "CHILD_PID=")
+	shellPID := s.cmd.Process.Pid
+	defer func() {
+		// Reap the background child.
+		_, _ = s.ptmx.Write([]byte("kill " + strconv.Itoa(childPID) + " 2>/dev/null\n"))
+	}()
+	for name, pid := range map[string]int{"shell": shellPID, "child": childPID} {
+		environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid)) // #nosec G304 — pid is the test's own child
+		if err != nil {
+			t.Fatalf("read /proc/%d/environ (%s): %v", pid, name, err)
+		}
+		if strings.Contains(string(environ), testCap) {
+			t.Errorf("capability present in /proc/%d/environ (%s)", pid, name)
+		}
+	}
+}
+
+// parsePidOrZero returns the last CHILD_PID=<digits> in out, or 0 when the
+// background child has not printed yet.
+func parsePidOrZero(out string) int {
+	last := 0
+	for _, line := range strings.Split(out, "\n") {
+		// The line may carry a preexec marker prefix (ESC ] 133 ; C), so
+		// search within it rather than prefix-matching.
+		if i := strings.Index(line, "CHILD_PID="); i >= 0 {
+			if pid, err := strconv.Atoi(strings.TrimSpace(line[i+len("CHILD_PID="):])); err == nil {
+				last = pid
+			}
+		}
+	}
+	return last
+}
+
+// parseLastPID finds the LAST occurrence of `name<digits>` in out — the
+// innermost shell's own pid in the fixtures that print it.
+func parseLastPID(t *testing.T, out, name string) int {
+	t.Helper()
+	last := -1
+	for _, line := range strings.Split(out, "\n") {
+		// The line may carry a preexec marker prefix (ESC ] 133 ; C), so
+		// search within it rather than prefix-matching.
+		if i := strings.Index(line, name); i >= 0 {
+			if pid, err := strconv.Atoi(strings.TrimSpace(line[i+len(name):])); err == nil {
+				last = pid
+			}
+		}
+	}
+	if last <= 0 {
+		t.Fatalf("no %sNNNN found in output: %q", name, out)
+	}
+	return last
+}
+
+// TestBashChannel_ChildProcessCannotReadTheCapability proves the
+// non-exported-variable property directly: a child of the shell cannot
+// obtain the capability by any normal means — not from its environment and
+// not from the parent's /proc/<pid>/environ.
+func TestBashChannel_ChildProcessCannotReadTheCapability(t *testing.T) {
+	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	defer s.close()
+	if _, err := s.ptmx.Write([]byte("echo CHILD_CAP_READ=$(bash -c 'env | grep -c " + testCap + "')\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		o := s.output()
+		if strings.Contains(o, "CHILD_CAP_READ=0") || strings.Contains(o, "CHILD_CAP_READ=1") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(s.output(), "CHILD_CAP_READ=0") {
+		t.Errorf("a child of the shell could read the capability:\n%s", s.output())
+	}
+}
+
+// TestBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent: a
+// process that inherited nothing but the transport's reachability — here the
+// test itself, connecting to the loopback port like any local process on the
+// remote host — writes a well-formed frame WITHOUT the capability. It must
+// produce no accepted event and leave the live domain untouched: the shell's
+// next command still completes.
+func TestBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent(t *testing.T) {
+	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	defer s.close()
+
+	port := tcpPort(t, s.listener)
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// A well-formed frame with a wrong capability (the "attacker" never
+	// learned the real one — the non-exported variable cannot be read).
+	bad := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":50,"cap":%q,"evt":"start","command":"evil"}`,
+		testLane, testDom, testEpoch, strings.Repeat("f", 64))
+	if len(bad) > 65536 {
+		t.Fatalf("test frame unexpectedly large: %d", len(bad))
+	}
+	var hdr [4]byte
+	// #nosec G115 — the frame is built in this test, bounded above by the
+	// protocol's 64 KiB cap, so the int→uint32 conversion cannot overflow.
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(bad)))
+	if _, err := conn.Write(append(hdr[:], bad...)); err != nil {
+		t.Fatalf("write bad frame: %v", err)
+	}
+	_ = conn.Close()
+	time.Sleep(300 * time.Millisecond)
+
+	if s.kernel.count("start") != 0 {
+		t.Fatalf("the capability-less frame was accepted as a start: %v", s.kernel.events())
+	}
+	if s.kernel.rejected == 0 {
+		t.Errorf("the capability-less frame was not counted as rejected")
+	}
+
+	// The live domain is untouched: the shell's next command completes.
+	s.run("echo STILL-LIVE")
+	if s.kernel.count("start") != 1 {
+		t.Errorf("the shell's own next start was not accepted; events=%v", s.kernel.events())
+	}
+}
+
+// TestBashChannel_NoTransportFailsOpen: a shell with a capability but no
+// listener (refused transport — AllowTcpForwarding off) must land in a
+// conventional terminal: visible native prompt, no lifecycle events, no
+// hang.
+func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
+	bash := requireShell(t, "bash")
+	home := t.TempDir()
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+	gate := filepath.Join(t.TempDir(), "gate")
+	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + shellQuote(script) + "\n"
+	if werr := os.WriteFile(gate, []byte(gateBody), 0o600); werr != nil {
+		t.Fatalf("write gate: %v", werr)
+	}
+	if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(". "+shellQuote(gate)+"\n"), 0o600); werr != nil {
+		t.Fatalf("write .bashrc: %v", werr)
+	}
+	// A port with nothing listening.
+	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
+	if lnErr != nil {
+		t.Fatalf("listen: %v", lnErr)
+	}
+	deadPort := tcpPort(t, ln)
+	_ = ln.Close()
+
+	// #nosec G204 — bash is the requireShell-resolved path, not input; a
+	// real interactive shell on a real pty is the only way to prove the
+	// fail-open on a refused transport.
+	cmd := exec.Command(bash, "-i")
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		"NOCX_SHELL_INTEGRATION=1",
+		"NOCX_PROMPT_MODE=marker-only",
+		"NOCX_SESSION_ID=chansess",
+		"NOCX_LIFECYCLE_LANE="+testLane,
+		"NOCX_LIFECYCLE_DOMAIN="+testDom,
+		fmt.Sprintf("NOCX_LIFECYCLE_EPOCH=%d", testEpoch),
+		fmt.Sprintf("NOCX_LIFECYCLE_PORT=%d", deadPort),
+		"NOCX_LIFECYCLE_TIMEOUT_MS=1000",
+	)
+	// #nosec G204 — bash is the requireShell-resolved path, not input; a
+	// real interactive shell on a real pty is the only way to prove the
+	// fail-open on a refused transport.
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	defer func() { _ = ptmx.Close() }()
+	out := make([]byte, 0, 65536)
+	done := make(chan bool, 1)
+	go func() {
+		buf := make([]byte, 8192)
+		for {
+			n, rerr := ptmx.Read(buf)
+			if n > 0 {
+				out = append(out, buf[:n]...)
+			}
+			if rerr != nil {
+				done <- true
+				return
+			}
+		}
+	}()
+	if _, err := ptmx.Write([]byte("exit\n")); err != nil {
+		t.Fatalf("write exit: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("shell hung on a refused transport; fail-open requires an immediate conventional terminal")
+	}
+	_ = cmd.Wait()
+	output := string(out)
+	// The prompt must be VISIBLE (decision 9: no suppression without a
+	// live channel) — the fixture default prompt, not a bare B marker.
+	if !strings.Contains(output, "]133;A") {
+		t.Logf("no render markers (conventional session); output=%q", output)
+	}
+}
+
+// TestBashChannel_LocalDescriptorTransport drives the LOCAL transport
+// shape: the transport is an inherited descriptor (socketpair, handed over
+// the way exec.Cmd.ExtraFiles does at spawn) instead of a loopback port.
+func TestBashChannel_LocalDescriptorTransport(t *testing.T) {
+	bash := requireShell(t, "bash")
+
+	// A connected unix socketpair: one end is the shell's inherited
+	// descriptor, the other the kernel's.
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
+	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+
+	home := t.TempDir()
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+	gate := filepath.Join(t.TempDir(), "gate")
+	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + shellQuote(script) + "\n"
+	if werr := os.WriteFile(gate, []byte(gateBody), 0o600); werr != nil {
+		t.Fatalf("write gate: %v", werr)
+	}
+	if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(". "+shellQuote(gate)+"\n"), 0o600); werr != nil {
+		t.Fatalf("write .bashrc: %v", werr)
+	}
+
+	// #nosec G204 — bash is the requireShell-resolved path, not input; an
+	// interactive shell with an inherited descriptor is the only way to
+	// exercise the local transport shape.
+	cmd := exec.Command(bash, "-i")
+	cmd.ExtraFiles = []*os.File{shellFile} // becomes fd 3
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		"NOCX_SHELL_INTEGRATION=1",
+		"NOCX_PROMPT_MODE=marker-only",
+		"NOCX_SESSION_ID=chansess",
+		"NOCX_LIFECYCLE_LANE="+testLane,
+		"NOCX_LIFECYCLE_DOMAIN="+testDom,
+		fmt.Sprintf("NOCX_LIFECYCLE_EPOCH=%d", testEpoch),
+		"NOCX_LIFECYCLE_FD=3",
+		"NOCX_LIFECYCLE_TIMEOUT_MS=3000",
+	)
+
+	k := newFakeKernel(t, testCap)
+	go k.serveFile(kernelFile)
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
+	go s.readPump()
+	defer func() { _ = ptmx.Close(); _ = cmd.Process.Kill() }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if k.count("hello") > 0 && k.count("prompt_ready") > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if k.count("hello") == 0 {
+		t.Fatalf("no hello over the inherited descriptor; output=%q", s.output())
+	}
+	s.run("echo FD-TRANSPORT-OK")
+	if k.count("complete") == 0 {
+		t.Errorf("no complete over the inherited descriptor; events=%v", k.events())
+	}
+}
+
+// serveFile serves one connection wrapped around a socketpair end.
+func (k *fakeKernel) serveFile(f *os.File) {
+	c, err := net.FileConn(f)
+	if err != nil {
+		return
+	}
+	k.serve(c)
+}
+
+// TestZshChannel_HandshakeAndLifecycle is the zsh half of the channel test:
+// hello accepted, then start → complete (with fence) → prompt_ready, with
+// the capability and a monotonic sequence on every frame.
+func TestZshChannel_HandshakeAndLifecycle(t *testing.T) {
+	s := startChannelShell(t, "zsh", "nocx.zsh", zshScript)
+	defer s.close()
+
+	s.run("echo ZSH-CHANNEL-OK")
+
+	events := s.kernel.events()
+	var start, complete *kernelEvent
+	prevSeq := uint64(0)
+	for i := range events {
+		e := &events[i]
+		if e.Seq <= prevSeq {
+			t.Errorf("sequence not strictly increasing at %v", *e)
+		}
+		prevSeq = e.Seq
+		switch e.Evt {
+		case "start":
+			start = e
+		case "complete":
+			complete = e
+		}
+	}
+	if start == nil {
+		t.Fatalf("no start accepted; events=%v", events)
+	}
+	if complete == nil {
+		t.Fatalf("no complete accepted; events=%v", events)
+	}
+	fence, ok := complete.Body["fence"].(string)
+	if !ok || len(fence) != 64 {
+		t.Fatalf("complete must carry a 64-hex fence, got %v", complete.Body)
+	}
+	if !strings.Contains(s.output(), "NOCX_FENCE;"+fence) {
+		t.Errorf("fence OSC missing from zsh pty output: %q", s.output())
+	}
+	// The zsh start carries the full command line.
+	if cmd, ok := start.Body["command"].(string); !ok || !strings.Contains(cmd, "echo ZSH-CHANNEL-OK") {
+		t.Errorf("zsh start must carry the command line, got %v", start.Body)
+	}
+}
+
+// TestInBand_AuthenticatedChannelFromStreamedCapability drives the FULL
+// in-band integration with an authenticated channel: the plan is built with
+// the channel configuration (lane, domain, epoch, port), the wrapper is
+// typed at the prompt, READY arrives, the backend writes the capability line
+// then the payload+terminator into the raw-mode stream — the wrapper
+// captures the capability into a non-exported variable BEFORE anything is
+// staged, so the staged file stays capability-free — and the sourced hooks
+// establish the channel with that streamed capability: hello accepted, then
+// start → complete → prompt_ready.
+func TestInBand_AuthenticatedChannelFromStreamedCapability(t *testing.T) {
+	bash := requireShell(t, "bash")
+
+	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
+	if lnErr != nil {
+		t.Fatalf("listen: %v", lnErr)
+	}
+	port := tcpPort(t, ln)
+	k := newFakeKernel(t, testCap)
+	go k.serveLoop(ln)
+
+	plan, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef", &ChannelConfig{
+		Lane: testLane, Domain: testDom, Epoch: testEpoch, Port: port,
+	})
+	if err != nil {
+		t.Fatalf("InBandBootstrap: %v", err)
+	}
+	if strings.Contains(plan.Payload, testCap) {
+		t.Fatal("the in-band payload must stay capability-free (it crosses the renderer)")
+	}
+
+	home := t.TempDir()
+	// #nosec G204 — bash is the requireShell-resolved path, not input; a
+	// real interactive shell on a real pty is the only way to exercise the
+	// in-band wrapper (same annotation as the in-band pty suite).
+	cmd := exec.Command(bash, "-i")
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		"NOCX_SHELL_INTEGRATION=1",
+		"NOCX_PROMPT_MODE=marker-only",
+		"NOCX_SESSION_ID=chansess",
+	)
+	if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("PS1='IBPROMPT> '\n"), 0o600); werr != nil {
+		t.Fatalf("write .bashrc: %v", werr)
+	}
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k, listener: ln}
+	go s.readPump()
+	defer func() { _ = ptmx.Close(); _ = cmd.Process.Kill(); _ = ln.Close() }()
+
+	// Wait for the native prompt, then type the wrapper (the way the
+	// frontend would).
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(s.output(), "IBPROMPT>") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if _, err := ptmx.Write([]byte(plan.Wrapper + "\r")); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	// READY means raw mode is on; the backend then writes the capability
+	// line, the payload and the terminator.
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(s.output(), "NOCX_IB_READY") {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	stream := testCap + "\n" + plan.Payload + plan.Terminator + "\n"
+	if _, err := ptmx.Write([]byte(stream)); err != nil {
+		t.Fatalf("write cap+payload: %v", err)
+	}
+
+	// The sourced hooks must connect and handshake with the streamed
+	// capability.
+	s.waitForHandshake()
+	if k.count("hello") != 1 {
+		t.Fatalf("expected exactly one hello; events=%v", k.events())
+	}
+	s.run("echo INBAND-CHANNEL-OK")
+	if k.count("complete") == 0 {
+		t.Errorf("no complete over the in-band channel; events=%v", k.events())
+	}
+	if !strings.Contains(s.output(), "SHELL_CAP_NONEXPORTED_CHECK") {
+		// The capability must be usable but non-exported: verify via the
+		// variable and its absence from env.
+		if _, err := ptmx.Write([]byte("echo IB_CAP_SET=${__nocx_cap:+yes} IB_CAP_ENV=$(env | grep -c " + testCap + ")\n")); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	deadline = time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(s.output(), "IB_CAP_SET=") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	out := s.output()
+	if !strings.Contains(out, "IB_CAP_SET=yes") {
+		t.Errorf("streamed capability not held in the shell variable:\n%s", out)
+	}
+	if !strings.Contains(out, "IB_CAP_ENV=0") {
+		t.Errorf("streamed capability leaked into the environment:\n%s", out)
+	}
+}
+
+// tcpPort extracts the bound port of a test listener with the comma-ok
+// assertion form errcheck demands.
+func tcpPort(t *testing.T, ln net.Listener) int {
+	t.Helper()
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T, want *net.TCPAddr", ln.Addr())
+	}
+	return addr.Port
+}

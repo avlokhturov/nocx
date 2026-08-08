@@ -19,26 +19,21 @@ afterEach(() => {
 /* ── Actions provider ───────────────────────────────────────────────── */
 
 describe('ActionsQuickConnectProvider', () => {
-  it('offers the local shell, new connection and integrate-this-shell, in that order', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+  it('offers the local shell and new connection, in that order', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
     // The order is the contract, not an accident: these are the palette's
     // first group and the separator below them is drawn from the group
     // boundary.
-    expect(items.map((i) => i.id)).toEqual([
-      '__local__',
-      '__new_connection__',
-      '__integrate_shell__',
-    ])
+    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__'])
     expect(items[0].label).toBe('Local shell')
     expect(items[0].detail).toContain('local terminal')
     expect(items[1].label).toBe('New connection')
-    expect(items[2].label).toBe('Integrate this shell')
   })
 
   it('every item is typed Command — the palette badge vocabulary (nocx-4t37)', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
     expect(items.every((i) => i.kind === 'command')).toBe(true)
@@ -56,42 +51,27 @@ describe('ActionsQuickConnectProvider', () => {
       ],
       run,
     }
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn(), drillCommand)
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), drillCommand)
 
     const items = await Promise.resolve(provider.getItems())
     // Last, not first: the first row is what Enter activates on open, and
     // that stays the muscle-memory "Local shell".
-    expect(items.map((i) => i.id)).toEqual([
-      '__local__',
-      '__new_connection__',
-      '__integrate_shell__',
-      '__forward_port__',
-    ])
-    expect(items[3].label).toBe('Forward a port')
-    expect(items[3].kind).toBe('command')
-    expect(items[3].drill).toBe(drillCommand)
+    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__', '__forward_port__'])
+    expect(items[2].label).toBe('Forward a port')
+    expect(items[2].kind).toBe('command')
+    expect(items[2].drill).toBe(drillCommand)
     // Activating the drill item never runs it directly — the surface walks
     // the steps instead.
-    items[3].run()
+    items[2].run()
     expect(run).not.toHaveBeenCalled()
   })
 
-  it('calls integrateShell when the integrate-this-shell item runs', () => {
-    const integrateShell = vi.fn()
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), integrateShell)
-
-    provider.getItems()[2].run()
-
-    expect(integrateShell).toHaveBeenCalledOnce()
-  })
-
   it('does not offer Ports in the palette — it is a sidebar view now (nocx-wzc4.7)', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
     // Ports is a surface you keep open beside the terminal, not a one-shot
-    // verb; the palette is for verbs. "Integrate this shell" above is the
-    // verb that stays.
+    // verb; the palette is for verbs.
     expect(items.some((i) => i.label === 'Ports')).toBe(false)
   })
 
@@ -1065,7 +1045,7 @@ describe('palette and drill-in', () => {
       run,
     }
     const providers: QuickConnectProvider[] = [
-      new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn(), drillCommand),
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn(), drillCommand),
       new SSHQuickConnectProvider(
         {
           listProfiles: vi.fn().mockResolvedValue([

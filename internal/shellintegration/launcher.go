@@ -1,6 +1,9 @@
 package shellintegration
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // ShellKind names the far shell a launcher builds a start command for.
 type ShellKind string
@@ -36,6 +39,20 @@ type LaunchOptions struct {
 	// well-formed, so an empty value is the fail-open default (no passport,
 	// no tagged marker) rather than a refusal.
 	EnvironmentID string
+	// The authenticated lifecycle channel (ADR-0024). Capability is the
+	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
+	// exported to the environment. Lane, Domain and Epoch are names, not
+	// secrets, and travel in the environment like the other NOCX_* fields.
+	// The transport is either an inherited descriptor (LifecycleFD, the
+	// local path) or a loopback TCP port (LifecyclePort, the remote path);
+	// zero means that side is absent. Empty Capability means no channel:
+	// the session is conventional.
+	Capability    string
+	Lane          string
+	Domain        string
+	Epoch         uint64
+	LifecycleFD   int
+	LifecyclePort int
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's
@@ -93,12 +110,35 @@ func launcherEnvBlock(opts LaunchOptions) string {
 		// baseline session that carries an id still announces it.
 		b.WriteString("NOCX_ENVIRONMENT_ID=" + shellQuote(opts.EnvironmentID) + "\n")
 	}
+	// Lifecycle channel addressing and transport (ADR-0024). The capability
+	// is deliberately NOT here: it rides the rcfile text (see @CAP@) and must
+	// never appear in /proc/<pid>/environ.
+	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
+		b.WriteString("NOCX_LIFECYCLE_LANE=" + shellQuote(opts.Lane) + "\n")
+		b.WriteString("NOCX_LIFECYCLE_DOMAIN=" + shellQuote(opts.Domain) + "\n")
+		b.WriteString("NOCX_LIFECYCLE_EPOCH=" + fmt.Sprintf("%d\n", opts.Epoch))
+		if opts.LifecycleFD > 0 {
+			b.WriteString("NOCX_LIFECYCLE_FD=" + fmt.Sprintf("%d\n", opts.LifecycleFD))
+		}
+		if opts.LifecyclePort > 0 {
+			b.WriteString("NOCX_LIFECYCLE_PORT=" + fmt.Sprintf("%d\n", opts.LifecyclePort))
+		}
+	}
 	b.WriteString("export NOCX_SHELL_INTEGRATION")
 	if opts.Enhanced {
 		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
 	}
 	if opts.EnvironmentID != "" {
 		b.WriteString(" NOCX_ENVIRONMENT_ID")
+	}
+	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
+		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")
+		if opts.LifecycleFD > 0 {
+			b.WriteString(" NOCX_LIFECYCLE_FD")
+		}
+		if opts.LifecyclePort > 0 {
+			b.WriteString(" NOCX_LIFECYCLE_PORT")
+		}
 	}
 	b.WriteString("\n")
 	return b.String()

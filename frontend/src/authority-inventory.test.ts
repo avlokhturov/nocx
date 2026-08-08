@@ -22,10 +22,9 @@
 //  2. PRE-ADR WAKE-UPS — today's stream-derived surfaces that ADR-0024
 //     "Consequences" deletes (the `trusted` laundering rule, `trusted` on the
 //     history record, `onMarker` as an entry point for anonymous kinds, the
-//     `_shellIntegrated` latch, the boolean editor axis). Each must exist in
-//     its pre-ADR shape today; the day the ADR work lands, the relevant
-//     assertion fails and the worker deletes the wake-up (or flips the
-//     manifest entry) as the acknowledgment.
+//     `_shellIntegrated` latch, the boolean editor axis). The severance bead
+//     (nocx-u7uh.1) deleted all five; the wake-ups and their checks were
+//     removed with them as the acknowledgment.
 import { describe, expect, it } from 'vitest'
 import * as ts from 'typescript'
 import { existsSync, readFileSync } from 'node:fs'
@@ -80,73 +79,6 @@ function findExportFunction(
   return null
 }
 
-function findClassMethod(
-  source: ts.SourceFile,
-  className: string,
-  methodName: string,
-): ts.MethodDeclaration | null {
-  for (const stmt of source.statements) {
-    if (ts.isClassDeclaration(stmt) && stmt.name?.text === className) {
-      for (const member of stmt.members) {
-        if (ts.isMethodDeclaration(member) && member.name.getText() === methodName) {
-          return member
-        }
-      }
-    }
-  }
-  return null
-}
-
-function findInterfaceProperty(
-  source: ts.SourceFile,
-  interfaceName: string,
-  propName: string,
-): ts.PropertySignature | null {
-  for (const stmt of source.statements) {
-    if (ts.isInterfaceDeclaration(stmt) && stmt.name.text === interfaceName) {
-      for (const member of stmt.members) {
-        if (ts.isPropertySignature(member) && member.name.getText() === propName) {
-          return member
-        }
-      }
-    }
-  }
-  return null
-}
-
-function findSwitchCaseLiteral(source: ts.SourceFile, literal: string): ts.CaseClause | null {
-  let found: ts.CaseClause | null = null
-  const visit = (node: ts.Node): void => {
-    if (found) return
-    if (
-      ts.isCaseClause(node) &&
-      node.expression &&
-      ts.isStringLiteral(node.expression) &&
-      node.expression.text === literal
-    ) {
-      found = node
-      return
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
-  return found
-}
-
-function findMemberNamed(source: ts.SourceFile, name: string): ts.Node | null {
-  let found: ts.Node | null = null
-  const visit = (node: ts.Node): void => {
-    if (found) return
-    if (ts.isPropertyDeclaration(node) && node.name.getText() === name) {
-      found = node
-      return
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
-  return found
-}
-
 // ─── The manifest ────────────────────────────────────────────────────────────
 // `symbol` + `authorityTypes` is the ADR-committed signature: the operation
 // must take a parameter whose type annotation is one of the authority types.
@@ -174,7 +106,7 @@ const MANIFEST: AuthorityEntry[] = [
     authorityTypes: ['LifecycleState'],
     state: 'pending',
     bead: BEAD,
-    note: 'ADR-0024 §6: the editor owns keys because the lifecycle axis says PromptReady(domain), not because a boolean does. Today this is native-mode.ts shouldShowEditor(owned: boolean, nativeMode: boolean) — the boolean axis §6 deletes (wake-up W5).',
+    note: 'ADR-0024 §6: the editor owns keys because the lifecycle axis says PromptReady(domain), not because a boolean does. The boolean axis (native-mode.ts shouldShowEditor(owned, nativeMode)) is deleted.',
   },
   {
     op: 'persist a history record',
@@ -183,7 +115,7 @@ const MANIFEST: AuthorityEntry[] = [
     authorityTypes: ['ExecutionAttempt'],
     state: 'wake',
     bead: BEAD,
-    note: "ADR-0024 consequences: `trusted` is deleted as a field crossing to history.record; what persists becomes the attempt's domain-authenticated status. Today recordCommand(client, rec: CommandRecord) carries trusted: boolean (wake-up W2).",
+    note: "ADR-0024 consequences: `trusted` is deleted as a field crossing to history.record; what persists becomes the attempt's domain-authenticated status.",
   },
   {
     op: 'complete an attempt',
@@ -228,7 +160,7 @@ const MANIFEST: AuthorityEntry[] = [
     authorityTypes: ['LifecycleState'],
     state: 'pending',
     bead: BEAD,
-    note: 'ADR-0024 §1: integration-sensitive command rewriting needs authority. Today it is the _shellIntegrated boolean latched by any OSC 133 marker (wake-up W4).',
+    note: 'ADR-0024 §1: integration-sensitive command rewriting needs authority. The _shellIntegrated latch it rode is deleted.',
   },
   {
     op: 'authorize a re-run',
@@ -238,53 +170,6 @@ const MANIFEST: AuthorityEntry[] = [
     state: 'pending',
     bead: BEAD,
     note: 'ADR-0024 §1: a re-run must be authorized by the attempt/domain, never by a block the stream forged.',
-  },
-]
-
-// ─── Pre-ADR wake-ups ─────────────────────────────────────────────────────────
-interface WakeUp {
-  name: string
-  module: string
-  check: (source: ts.SourceFile) => boolean
-  adr: string
-}
-
-const WAKE_UPS: WakeUp[] = [
-  {
-    name: 'input-state marker path (the trust-laundering rule)',
-    module: 'src/input-state.ts',
-    check: (s) => findSwitchCaseLiteral(s, 'marker') !== null,
-    adr: "ADR-0024 §6: the transition `trusted: m.state !== 'RUNNING_RAW'` (input-state.ts:100) is deleted rather than patched.",
-  },
-  {
-    name: 'history.record trusted boolean',
-    module: 'src/history-client.ts',
-    check: (s) => findInterfaceProperty(s, 'HistoryRecordParams', 'trusted') !== null,
-    adr: 'ADR-0024 consequences: `trusted` as a field crossing to history.record is deleted.',
-  },
-  {
-    name: 'ledger.onMarker anonymous kinds entry',
-    module: 'src/command-ledger.ts',
-    check: (s) => {
-      const m = findClassMethod(s, 'CommandLedger', 'onMarker')
-      return m !== null && m.parameters.length >= 1
-    },
-    adr: 'ADR-0024 consequences: `ledger.onMarker` as an entry point for anonymous kinds is deleted.',
-  },
-  {
-    name: '_shellIntegrated marker latch',
-    module: 'src/terminal-content.ts',
-    check: (s) => findMemberNamed(s, '_shellIntegrated') !== null,
-    adr: 'ADR-0024 consequences: `_shellIntegrated` latching on any OSC 133 (terminal-content.ts:1405) is deleted.',
-  },
-  {
-    name: 'boolean editor axis (shouldShowEditor owned flag)',
-    module: 'src/native-mode.ts',
-    check: (s) => {
-      const fn = findExportFunction(s, 'shouldShowEditor')
-      return fn !== null && fn.parameters.some((p) => p.name.getText() === 'owned')
-    },
-    adr: 'ADR-0024 §6: ownership is a state you can only be given; the `owned` boolean is replaced by the lifecycle axis.',
   },
 ]
 
@@ -322,20 +207,6 @@ describe('authority inventory — every authority operation takes a domain or an
           `${entry.symbol} must take a parameter typed ${entry.authorityTypes.join(' or ')} — got: ${types.join(', ') || '(none)'}. ${entry.note}`,
         ).toBe(true)
       }
-    })
-  }
-})
-
-describe("pre-ADR wake-ups — today's stream-derived authority surfaces still exist", () => {
-  for (const wake of WAKE_UPS) {
-    it(`${wake.name} exists in its pre-ADR shape`, () => {
-      const fullPath = join(SRC_ROOT, wake.module)
-      expect(existsSync(fullPath), `module ${wake.module} missing`).toBe(true)
-      const source = parseSource(wake.module)
-      expect(
-        wake.check(source),
-        `${wake.adr} — if the ADR work has landed, delete this wake-up (or flip the manifest entry) as the acknowledgment`,
-      ).toBe(true)
     })
   }
 })

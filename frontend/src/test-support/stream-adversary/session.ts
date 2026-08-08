@@ -1,14 +1,17 @@
 // The assembled-session seam for the stream-adversary harness. One interface,
 // two implementations in spirit: `assembleTodaySession` wires the modules that
-// exist today (the input-state machine, the command ledger, the passport
-// tracker), and the ADR-0024 renderer work replaces its internals with the
-// lifecycle reducer + published-fact projections without touching the
-// projection contract below. That is what makes the corpus reusable: the
-// snapshot shape is the contract the later bead tests against.
+// exist after the ADR-0024 severance (the buffer-axis input machine, the
+// app-owned command ledger, the passport tracker), and the migration bead
+// replaces its internals with the lifecycle reducer + published-fact
+// projections without touching the projection contract below. That is what
+// makes the corpus reusable: the snapshot shape is the contract the later
+// bead tests against.
 //
-// Deliberately NOT authority: today's projections are the live vulnerability
-// (a hostile cycle drives keyboardRoute to 'editor'). The harness only records
-// them; the judgment lives in conformance.test.ts / authority-expectations.ts.
+// SEVERED (ADR-0024 §1): OSC 133 markers are render-only. The seam parses
+// them and records the event (delivery proof) but feeds nothing — no input
+// state, no ledger, no blocks, no history. OSC 636 passports remain inert
+// observation against the app-minted expected id. OSC 7 keeps its validated
+// location role. The buffer axis is the only input-state transition left.
 import { CommandLedger } from '../../command-ledger'
 import { InputStateController } from '../../input-state'
 import { EnvironmentPassportTracker } from '../../environment-passport'
@@ -18,13 +21,15 @@ import type { CorpusFrame } from './corpus'
 /** The nine security-sensitive projections, captured before and after each
  *  case. Plain data — deep-cloned by the harness, never shared by reference. */
 export interface SessionProjection {
-  /** Lifecycle axis. Today: the InputState enum. Under ADR-0024 §6: the
-   *  two-axis LifecycleState (Native | PromptReady(domain) | Running(attempt)
-   *  | Desynchronized(domain) | Lost). */
+  /** Lifecycle axis. Post-severance: the InputState enum (Native |
+   *  ALT_SCREEN). Under ADR-0024 §6: the two-axis LifecycleState (Native |
+   *  PromptReady(domain) | Running(attempt) | Desynchronized(domain) | Lost). */
   lifecycle: string
-  /** Who owns keyboard input: 'editor' or 'raw'. */
+  /** Who owns keyboard input: 'editor' or 'raw'. Post-severance: always
+   *  'raw' — no stream sequence may grant DOM keyboard ownership. */
   keyboardRoute: 'editor' | 'raw'
-  /** The accepted domain/environment id, if any. */
+  /** The accepted domain/environment id, if any. Post-severance: only the
+   *  tracker's inert observation of a passport matching the app-minted id. */
   activeDomain: string | null
   /** Serialized attempt state from the ledger (status + exit code). */
   attemptState: string
@@ -34,9 +39,10 @@ export interface SessionProjection {
   historyCalls: number
   /** Environment-stack dispositions observed (passport tracker). */
   environmentStack: string
-  /** Integration-sensitive ssh rewriting enabled? Pre-ADR: always false. */
+  /** Integration-sensitive ssh rewriting enabled? Post-severance: always
+   *  false — the _shellIntegrated latch is deleted. */
   rewriteAuthority: boolean
-  /** Re-run authorized? Pre-ADR: always false. */
+  /** Re-run authorized? Post-severance: always false. */
   rerunAuthority: boolean
   /** OSC 7 cwd (render-only location metadata). */
   cwd: string | null
@@ -55,24 +61,24 @@ export interface SessionAssembly {
 const INBAND_READY = '1337;NOCX_IB_READY'
 
 /**
- * Wires today's real modules the way terminal-content does, minus the DOM:
- * OSC 133 markers feed both the ledger and the input-state machine, OSC 636
- * passports feed the tracker, OSC 7 updates cwd, and the alt-buffer CSI
- * sequence drives the buffer axis. 'app' frames model the editor submit that
- * synchronously creates the attempt before any bytes are written (ADR-0024 §5)
- * and the app-minted environment id.
+ * Wires the severed modules the way terminal-content does, minus the DOM:
+ * OSC 133 markers are parsed and logged but drive nothing (ADR-0024 §1),
+ * OSC 636 passports feed the tracker as inert observation, OSC 7 updates
+ * cwd, and the alt-buffer CSI sequence drives the buffer axis. 'app' frames
+ * model the editor submit that synchronously creates the attempt before any
+ * bytes are written (ADR-0024 §5) and the app-minted environment id.
  *
- * All state is real module state — no mocks, no hand-rolled reducer. The only
- * fake is the history sink behind the ledger's onComplete, which counts the
- * persistence calls the real system would make.
+ * All state is real module state — no mocks, no hand-rolled reducer. The
+ * ledger's persistence seam is gone with the marker cycle: nothing completes
+ * a record, so history.record has no terminal caller and historyCalls is
+ * always zero.
  */
 export function assembleTodaySession(): SessionAssembly {
   const input = new InputStateController()
   const passport = new EnvironmentPassportTracker()
   const events: string[] = []
 
-  let frozenBlocks = 0
-  let historyCalls = 0
+  const ledger = new CommandLedger({ now: () => 1000 })
   let acceptedDomain: string | null = null
   const passportDispositions: string[] = []
   let cwd: string | null = null
@@ -84,21 +90,12 @@ export function assembleTodaySession(): SessionAssembly {
     }
   })
 
-  const ledger = new CommandLedger({
-    now: () => 1000,
-    onComplete: () => {
-      frozenBlocks += 1
-      historyCalls += 1
-    },
-  })
-
   function dispatch(frame: CorpusFrame): void {
     switch (frame.channel) {
       case 'app': {
         if (frame.payload.startsWith('submit:')) {
           const command = frame.payload.slice('submit:'.length)
           ledger.open(command, '/tmp', '', () => undefined)
-          input.dispatch({ type: 'submit' })
           events.push(`app:submit:${command}`)
         } else if (frame.payload.startsWith('mint-env:')) {
           const id = frame.payload.slice('mint-env:'.length)
@@ -115,8 +112,7 @@ export function assembleTodaySession(): SessionAssembly {
           events.push('osc133:rejected')
           return
         }
-        ledger.onMarker(marker.kind, marker.exitCode)
-        input.dispatch({ type: 'marker', kind: marker.kind })
+        // SEVERED: the marker is logged (delivery proof) and drives nothing.
         events.push(
           `marker:${marker.kind}${marker.exitCode !== undefined ? `:${marker.exitCode}` : ''}`,
         )
@@ -168,14 +164,14 @@ export function assembleTodaySession(): SessionAssembly {
     const running = records.some((r) => r.status === 'running') ? 1 : 0
     return {
       lifecycle: input.state,
-      keyboardRoute: input.owned && input.state === 'PROMPT_READY' ? 'editor' : 'raw',
+      keyboardRoute: 'raw',
       activeDomain: acceptedDomain,
       attemptState:
         last === undefined
           ? 'none'
           : `id:${last.id} ${last.status}${last.exitCode !== null ? `:${last.exitCode}` : ''}`,
-      blockState: `${running} running, ${frozenBlocks} frozen`,
-      historyCalls,
+      blockState: `${running} running, 0 frozen`,
+      historyCalls: 0,
       environmentStack: passportDispositions.join(','),
       rewriteAuthority: false,
       rerunAuthority: false,

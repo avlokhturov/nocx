@@ -46,7 +46,6 @@ export interface RendererMock extends TerminalRenderer {
     onTitle?: TitleCallback
     onCwd?: CwdCallback
     onCommandMarker?: CommandMarkerCallback
-    onInBandReady?: () => void
     onBell?: () => void
     onBufferChange?: (type: 'normal' | 'alternate') => void
     onSelectionChange?: (text: string) => void
@@ -99,12 +98,6 @@ export function createRendererMock(): RendererMock {
       passportSubs.push(cb)
     }),
     setExpectedEnvironmentId: vi.fn(),
-    onInBandReady: vi.fn((cb: () => void) => {
-      cbs.onInBandReady = cb
-      return () => {
-        cbs.onInBandReady = undefined
-      }
-    }),
     onBell: vi.fn((cb: () => void) => {
       cbs.onBell = cb
     }),
@@ -155,9 +148,6 @@ export function createRendererMock(): RendererMock {
     },
     _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]) {
       cbs.onCommandMarker?.(marker)
-    },
-    _fireInBandReady() {
-      cbs.onInBandReady?.()
     },
     _fireBell() {
       cbs.onBell?.()

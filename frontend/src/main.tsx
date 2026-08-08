@@ -710,11 +710,6 @@ async function main() {
     new ActionsQuickConnectProvider(
       () => tm.newTab(),
       () => openSettingsTab().startNewConnection(),
-      // "Integrate this shell" (nocx-ynsx): route to the ACTIVE tab's
-      // terminal content — the shell at the current prompt. The content
-      // itself owns the PROMPT_READY && trusted && owned gate and refuses
-      // with a stated reason outside it.
-      () => void tm.activeTerminalContent()?.integrateShell(),
       forwardPortCommand,
     ),
     sshProvider,
@@ -745,22 +740,6 @@ async function main() {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
       e.preventDefault()
       qc.showPalette()
-    }
-  })
-
-  // Ctrl/Cmd+Shift+I — "Integrate this shell" (nocx-ynsx). The same entry
-  // the quick-connect palette lists, reachable without opening the picker.
-  // The gate (PROMPT_READY && trusted && owned) lives in
-  // TerminalContent.integrateShell and refuses with a stated reason outside
-  // it. Intercepted only while the ACTIVE tab is a terminal, so the chord
-  // stays free elsewhere (it collides with WebKit's devtools shortcut, and
-  // in a release build there is no inspector to open; the tradeoff is
-  // named here deliberately).
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'I') {
-      if (tm.activeTerminalContent() === null) return
-      e.preventDefault()
-      tm.activeTerminalContent()?.integrateShell()
     }
   })
 

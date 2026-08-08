@@ -29,6 +29,191 @@ if [[ -n "$__nocx_env_id" ]] && [[ "$__nocx_env_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]]
     __nocx_tagged=1
 fi
 
+# --- Authenticated lifecycle channel (ADR-0024, docs/lifecycle-protocol.md) ---
+#
+# The command lifecycle rides a channel that is not the tty; every envelope
+# is authenticated by the per-epoch capability. The capability reaches the
+# shell substituted into the bootstrap script text (the launcher rcfile's
+# @CAP@, or the first line of the in-band raw-mode stream); it is NEVER in
+# the environment, never exported, and never written to a file. A shell
+# without a capability, a transport or an accept is a conventional terminal:
+# the native prompt stays visible and no lifecycle event is sent (ADR-0024
+# decisions 3 and 9).
+#
+# The envelope addresses lane, domain and epoch explicitly — they are names,
+# not secrets, and arrive via the launcher environment (NOCX_LIFECYCLE_*) or
+# the in-band dispatcher. The transport is either an inherited descriptor
+# (NOCX_LIFECYCLE_FD, local) or a loopback TCP port (NOCX_LIFECYCLE_PORT,
+# remote and in-band).
+__nocx_cap="${__nocx_cap:-}"
+# A user rc running under `set -a` would auto-export the bootstrap's
+# assignment, publishing the capability in /proc/<pid>/environ; drop the
+# export attribute explicitly (the capability is assigned exactly once, so
+# this sticks — same pattern as __nocx_snapshot_nonce).
+export -n __nocx_cap 2>/dev/null
+__nocx_lc_lane="${NOCX_LIFECYCLE_LANE:-}"
+__nocx_lc_dom="${NOCX_LIFECYCLE_DOMAIN:-}"
+__nocx_lc_epoch="${NOCX_LIFECYCLE_EPOCH:-}"
+__nocx_lc_fd="${NOCX_LIFECYCLE_FD:-}"
+__nocx_lc_port="${NOCX_LIFECYCLE_PORT:-}"
+if [[ "${NOCX_LIFECYCLE_TIMEOUT_MS:-}" =~ ^[0-9]+$ ]] && (( NOCX_LIFECYCLE_TIMEOUT_MS >= 1 )); then
+    __nocx_lc_timeout_s=$(( (NOCX_LIFECYCLE_TIMEOUT_MS + 999) / 1000 ))
+else
+    # Matches the kernel's hello_timeout (protocol doc §5): a shell that
+    # gives up before the kernel's own budget would strand an accept that
+    # arrives late, leaving an Established domain with no consumer.
+    __nocx_lc_timeout_s=10
+fi
+__nocx_lc_active=0
+__nocx_lc_seq=0
+__nocx_lc_attempt_open=0
+__nocx_lc_frame=''
+__nocx_lc_lane_esc=''
+__nocx_lc_dom_esc=''
+
+# JSON-escape one string into __nocx_lc_json_escaped. Backslash, quote and
+# the C0/DEL bytes JSON forbids are escaped; raw UTF-8 passes through (the
+# byte length — not the character length — is what frames are sized by, so
+# __nocx_lc_send computes it under LC_ALL=C).
+__nocx_lc_json_escape() {
+    local s="$1" i c code hex out LC_ALL=C
+    out=${s//\\/\\\\}
+    out=${out//\"/\\\"}
+    out=${out//$'\n'/\\n}
+    out=${out//$'\t'/\\t}
+    out=${out//$'\r'/\\r}
+    out=${out//$'\b'/\\b}
+    out=${out//$'\f'/\\f}
+    # Remaining C0 (0x01-0x08, 0x0b, 0x0c, 0x0e-0x1f) and DEL break a JSON
+    # string; the common escapes above already took \t \n \r \b \f, so only
+    # the rare bytes reach the loop. Everything else passes through.
+    if [[ "$out" == *[$'\001'-$'\010'$'\013'$'\014'$'\016'-$'\037'$'\177']* ]]; then
+        for ((i = 0; i < ${#out}; i++)); do
+            c="${out:i:1}"
+            printf -v code '%d' "'$c"
+            if (( code < 32 || code == 127 )); then
+                printf -v hex '%02x' "$code"
+                out="${out:0:i}\\u00${hex}${out:i+1}"
+            fi
+        done
+    fi
+    __nocx_lc_json_escaped=$out
+}
+
+# Send one envelope: 4-byte big-endian length prefix then the JSON bytes
+# (protocol doc §6). Every envelope carries the full addressing tuple and
+# the bearer capability; the sequence increments per envelope (doc §11).
+__nocx_lc_send() {
+    # $1 = event kind; $2 = extra JSON fields (leading comma) or empty
+    local __evt="$1" __extra="${2:-}" __json __len __b0 __b1 __b2 __b3 LC_ALL=C
+    __nocx_lc_seq=$(( __nocx_lc_seq + 1 ))
+    __json="{\"v\":1,\"lane\":\"${__nocx_lc_lane_esc}\",\"dom\":\"${__nocx_lc_dom_esc}\",\"epoch\":${__nocx_lc_epoch},\"seq\":${__nocx_lc_seq},\"cap\":\"${__nocx_cap}\",\"evt\":\"${__evt}\"${__extra}}"
+    __len=${#__json}
+    __b0=$(( (__len >> 24) & 0xff )); __b1=$(( (__len >> 16) & 0xff ))
+    __b2=$(( (__len >> 8) & 0xff )); __b3=$(( __len & 0xff ))
+    builtin printf "\\$(printf '%03o' "$__b0")\\$(printf '%03o' "$__b1")\\$(printf '%03o' "$__b2")\\$(printf '%03o' "$__b3")%s" "$__json" >&"$__nocx_lc_fd" 2>/dev/null
+}
+
+# Wait for the transport to become readable, bounded by the handshake
+# timeout, consuming nothing. bash's `read` cannot hold NUL bytes, so the
+# binary length prefix must be read by dd|od instead; `read -N 0` is only
+# the bounded liveness check that keeps a dead kernel from hanging the
+# prompt (fail-open, decision 3).
+__nocx_lc_wait_readable() {
+    LC_ALL=C IFS= read -r -t "$__nocx_lc_timeout_s" -N 0 <&"$__nocx_lc_fd" 2>/dev/null
+}
+
+# Read one length-prefixed JSON frame into __nocx_lc_frame. Any framing
+# failure (EOF, garbage, oversize) returns non-zero and the caller fails
+# open: a conventional terminal is the safe direction.
+__nocx_lc_read_frame() {
+    local __hdr __len LC_ALL=C
+    __nocx_lc_wait_readable || return 1
+    __hdr="$(dd bs=1 count=4 2>/dev/null <&"$__nocx_lc_fd" | od -An -tx1 | tr -d ' \n')"
+    [[ "$__hdr" =~ ^[0-9a-f]{8}$ ]] || return 1
+    __len=$(( 16#$__hdr ))
+    (( __len > 0 && __len <= 65536 )) || return 1
+    __nocx_lc_wait_readable || return 1
+    __nocx_lc_frame="$(dd bs=1 count="$__len" 2>/dev/null <&"$__nocx_lc_fd")"
+    (( ${#__nocx_lc_frame} == __len )) || return 1
+    return 0
+}
+
+# The render fence: 32 random bytes (64 hex chars) the shell generates when
+# a command finishes and writes to the pty after the output. It is a
+# rendezvous for render ordering and carries NO authority (protocol doc §8);
+# when /dev/urandom is unavailable a session-scoped pseudo-random fallback
+# is honest for a nonce whose only job is matching.
+__nocx_lc_fence() {
+    local f i
+    f="$(od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    if [[ -z "$f" ]]; then
+        for ((i = 0; i < 16; i++)); do
+            builtin printf -v f '%s%04x' "$f" "$RANDOM"
+        done
+    fi
+    f="${f:0:64}"
+    if [[ "$f" =~ ^[0-9a-f]{64}$ ]]; then
+        __nocx_lc_fence_hex=$f
+        return 0
+    fi
+    return 1
+}
+
+# Establish the channel: connect (or use the inherited descriptor), send
+# hello (sequence 1), and wait — bounded — for accept. Only after accept may
+# the shell suppress its prompt or emit lifecycle events (decision 3). Any
+# failure leaves a conventional terminal with a visible native prompt.
+__nocx_lc_init() {
+    local __cfg_ok=0
+    __nocx_lc_active=0
+    if [[ -n "$__nocx_cap" ]] && [[ "$__nocx_cap" =~ ^[0-9a-f]{64}$ ]] \
+        && [[ -n "$__nocx_lc_lane" ]] && [[ -n "$__nocx_lc_dom" ]] \
+        && [[ "$__nocx_lc_epoch" =~ ^[0-9]+$ ]] \
+        && [[ -n "$__nocx_lc_fd" || -n "$__nocx_lc_port" ]]; then
+        __cfg_ok=1
+    fi
+    if [[ "$__cfg_ok" != "1" ]]; then
+        return 1
+    fi
+    if [[ -n "$__nocx_lc_port" ]]; then
+        # Remote / in-band transport: bash network redirection. The bind
+        # address is the literal 127.0.0.1, never localhost (ADR-0024).
+        #
+        # A FIXED high descriptor, not bash's `exec {fd}<>...` dynamic
+        # allocation: the {var} form is bash 4.1+, and macOS ships bash 3.2,
+        # where the same text would open a file literally named "{var}".
+        # fd 200 sits above the 3-9 range user scripts and POSIX sh use.
+        if ! exec 200<>"/dev/tcp/127.0.0.1/$__nocx_lc_port" 2>/dev/null; then
+            return 1
+        fi
+        __nocx_lc_fd=200
+    fi
+    __nocx_lc_json_escape "$__nocx_lc_lane"
+    __nocx_lc_lane_esc=$__nocx_lc_json_escaped
+    __nocx_lc_json_escape "$__nocx_lc_dom"
+    __nocx_lc_dom_esc=$__nocx_lc_json_escaped
+    __nocx_lc_send hello ',"shell":"bash","max_frame":65536'
+    if ! __nocx_lc_read_frame; then
+        return 1
+    fi
+    # Two independent substring checks, not one ordered pattern: the
+    # envelope's field order is the adapter's, and a case pattern like
+    # *evt*cap* would silently reject a valid accept whose cap field
+    # precedes evt.
+    case "$__nocx_lc_frame" in
+        *'"evt":"accept"'*) : ;;
+        *) return 1 ;;
+    esac
+    case "$__nocx_lc_frame" in
+        *'"cap":"'"$__nocx_cap"'"'*) : ;;
+        *) return 1 ;;
+    esac
+    __nocx_lc_active=1
+    return 0
+}
+__nocx_lc_init
+
 __nocx_first_prompt=
 __nocx_in_prompt_command=0
 # Latch so the command-start (C) marker fires once per entered line, not once
@@ -90,7 +275,22 @@ __nocx_marker() {
 }
 
 __nocx_preexec() {
+    # $1 = the user's command line, captured by the DEBUG trap BEFORE this
+    # function ran — inside the function $BASH_COMMAND would be our own
+    # current command, not the user's.
     __nocx_marker C
+    if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+        # Shell-originated start, WITHOUT an attempt id: the kernel attaches
+        # to a pending app attempt or mints a shell-originated one, and
+        # resolves the completion by context (protocol doc §7-§8). The
+        # command text is truncated to the kernel's command budget (4096
+        # bytes); a longer line loses its tail, never its frame.
+        local __cmd="${1:-}" LC_ALL=C
+        __cmd="${__cmd:0:4000}"
+        __nocx_lc_json_escape "$__cmd"
+        __nocx_lc_send start ',"command":"'"$__nocx_lc_json_escaped"'"'
+        __nocx_lc_attempt_open=1
+    fi
 }
 
 # In marker-only mode __nocx_prompt_command runs the user/framework
@@ -103,6 +303,24 @@ __nocx_prompt_command() {
     # would otherwise reset $? to 0 before __nocx_precmd could read it.
     local __nocx_exit=$?
     __nocx_in_prompt_command=1
+    # --- Authenticated channel: complete, fence, prompt_ready ---
+    if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+        if [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
+            # Complete the attempt: the exit status and a fresh fence nonce,
+            # and write the SAME nonce to the pty after the command's output
+            # — the render-order rendezvous (decision 1 carve-out, doc §8).
+            # The complete carries no attempt id; the kernel resolves the
+            # domain's single open attempt.
+            if __nocx_lc_fence; then
+                __nocx_lc_send complete ',"exit_code":'"$__nocx_exit"',"fence":"'"$__nocx_lc_fence_hex"'"'
+                builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
+            fi
+            __nocx_lc_attempt_open=0
+        fi
+        # The editor may own keys only at a ready prompt; the kernel rejects
+        # prompt_ready while any attempt is open.
+        __nocx_lc_send prompt_ready
+    fi
     if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]] && [[ "${__nocx_arm_marker_only:-}" == 1 ]]; then
         # Top-level session: arm the marker-only overlay.
         # 1) run the user/framework prompt command FIRST.
@@ -114,16 +332,16 @@ __nocx_prompt_command() {
         fi
         # 2) emit D/A/OSC7.
         __nocx_precmd "$__nocx_exit"
-        # 3) set the marker-only prompt as the FINAL action.
-        PS1="$__nocx_b_marker"
-    elif [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
-        # Nested session (nocx-4ff.13): keep a visible prompt via baseline path.
-        __nocx_precmd "$__nocx_exit"
-        if [[ -n "${__nocx_old_pc_arr+x}" ]]; then
-            local __c
-            for __c in "${__nocx_old_pc_arr[@]}"; do eval "$__c"; done
-        elif [[ -n "${__nocx_old_pc:-}" ]]; then
-            eval "$__nocx_old_pc"
+        # 3) set the marker-only prompt as the FINAL action — and only when
+        # the authenticated channel is live: suppressing the native prompt
+        # without a live domain is the phishing primitive decision 9
+        # forbids. Not live, the framework's prompt stands visible, with the
+        # render-only B partition marker appended exactly as baseline mode
+        # wraps it (the marker suppresses nothing by itself).
+        if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+            PS1="$__nocx_b_marker"
+        else
+            PS1="${PS1}${__nocx_b_marker}"
         fi
     else
         __nocx_precmd "$__nocx_exit"
@@ -211,7 +429,7 @@ __nocx_preexec_wrapper() {
         && [[ "${__nocx_in_prompt_command:-0}" != "1" ]] \
         && [[ "${__nocx_preexec_done:-0}" != "1" ]]; then
         __nocx_preexec_done=1
-        __nocx_preexec
+        __nocx_preexec "$__nocx_current_command"
     fi
     # Chain to the previous DEBUG trap, if any.
     if [[ -n "${__nocx_old_debug:-}" ]]; then
@@ -353,6 +571,14 @@ __nocx_exit_cleanup() {
     # handlers on some bash versions); mark the exit path as "in a prompt
     # command" so the wrapper suppresses any spurious OSC 133 C.
     __nocx_in_prompt_command=1
+    # Tell the kernel the domain is ending (best-effort: the transport may
+    # already be gone, and the kernel marks open attempts unknown on close).
+    # No explicit fd close: the process exit closes it, which is what the
+    # adapter reads as the transport ending.
+    if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+        __nocx_lc_send domain_closed
+        __nocx_lc_active=0
+    fi
     if [[ -n "${__nocx_snap_job:-}" ]] && [[ -n "${__nocx_snap_lstart:-}" ]] \
         && [[ "$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')" == "$__nocx_snap_lstart" ]]; then
         # Group-kill when the job is a process-group leader (interactive job

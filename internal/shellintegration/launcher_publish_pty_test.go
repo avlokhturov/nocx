@@ -110,10 +110,13 @@ func TestPosixFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	}
 }
 
-// TestFullLauncher_ReadonlyHome_TransientAndGenerationDash: a read-only
-// $HOME publishes nothing and records no installed fact, yet the session is
-// still transient-integrated — markers arrive and the passport carries "-".
-func TestFullLauncher_ReadonlyHome_TransientAndGenerationDash(t *testing.T) {
+// TestFullLauncher_ReadonlyHome_FallsBackToVisibleNativePrompt: a read-only
+// $HOME publishes nothing and records no installed fact. ADR-0024 decision 4
+// deletes the old "transient-integrated" middle tier (integration without an
+// installed generation): the argv tiers now SOURCE the installed generation
+// files, which a failed publish never created, so the session is a plain
+// conventional terminal — a visible native prompt, no markers, no passport.
+func TestFullLauncher_ReadonlyHome_FallsBackToVisibleNativePrompt(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
@@ -135,22 +138,32 @@ func TestFullLauncher_ReadonlyHome_TransientAndGenerationDash(t *testing.T) {
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "echo hello", "exit")
 
-	if n := strings.Count(out, passportBytes(envID, "enhanced", "-")); n != 1 {
-		t.Errorf("passport with generation '-' emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, passportBytes(envID, "enhanced", "-")) {
+		t.Errorf("passport emitted after a failed publish; the transient-integrated tier is deleted (ADR-0024 decision 4):\n%s", out)
 	}
 	ms := extractOscMarkers(out)
-	if countMarkers(ms, "A") == 0 {
-		t.Errorf("no A marker: the session did not come up transient-integrated; output:\n%s", out)
+	if countMarkers(ms, "A") != 0 || countMarkers(ms, "C") != 0 {
+		t.Errorf("markers emitted after a failed publish; the session must be conventional:\n%s", out)
+	}
+	// The user's fixture prompt must be visible — the conventional terminal
+	// is the fail-open, and it must be a prompt the user can see.
+	if !strings.Contains(out, "FIXTURE-PROMPT") {
+		t.Errorf("no visible native prompt after a failed publish:\n%s", out)
+	}
+	// The source-line failure must not print a shell error on the terminal.
+	if strings.Contains(out, "No such file or directory") {
+		t.Errorf("failed publish leaked a source error onto the terminal:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(home, dirName)); !os.IsNotExist(err) {
 		t.Errorf("read-only HOME gained a ~/.nocx (err=%v)", err)
 	}
 }
 
-// TestFullLauncher_ForeignRoot_RefusedAndStillIntegrated: an existing
-// ~/.nocx that is not recognisably ours is never modified, and the session
-// still integrates from argv with a "-" generation.
-func TestFullLauncher_ForeignRoot_RefusedAndStillIntegrated(t *testing.T) {
+// TestFullLauncher_ForeignRoot_RefusedAndConventional: an existing ~/.nocx
+// that is not recognisably ours is never modified, and — with the
+// transient-integrated tier deleted (ADR-0024 decision 4) — the session is a
+// plain conventional terminal: visible native prompt, no markers.
+func TestFullLauncher_ForeignRoot_RefusedAndConventional(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	root := filepath.Join(home, dirName)
@@ -172,8 +185,14 @@ func TestFullLauncher_ForeignRoot_RefusedAndStillIntegrated(t *testing.T) {
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
 
-	if n := strings.Count(out, passportBytes(envID, "enhanced", "-")); n != 1 {
-		t.Errorf("passport with generation '-' emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, passportBytes(envID, "enhanced", "-")) {
+		t.Errorf("passport emitted over a foreign root; the session must be conventional:\n%s", out)
+	}
+	if strings.Contains(out, "No such file or directory") {
+		t.Errorf("refused publish leaked a source error onto the terminal:\n%s", out)
+	}
+	if !strings.Contains(out, "FIXTURE-PROMPT") {
+		t.Errorf("no visible native prompt over a refused publish:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(root, manifestName)); !os.IsNotExist(err) {
 		t.Errorf("foreign root was modified (manifest appeared, err=%v)", err)

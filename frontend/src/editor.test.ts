@@ -18,7 +18,7 @@ import { describe, it, expect, vi, beforeAll } from 'vitest'
 import { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap } from '@codemirror/commands'
-import { CommandEditor, stripPastedIndent, EditorActions, LOCATION_UNKNOWN_LABEL } from './editor'
+import { CommandEditor, stripPastedIndent, type EditorActions } from './editor'
 import { shellExtensions, highlightShellText, shellHighlightReady } from './shell-highlight'
 import { CommandSnapshotStore } from './command-snapshot'
 import { CompletionController } from './suggest/controller'
@@ -281,7 +281,6 @@ describe('CommandEditor', () => {
     const chip = container.querySelector<HTMLElement>('.nocx-editor-location')
     expect(chip).not.toBeNull()
     ed.setLocation('root@192.168.0.57')
-    ed.setTrusted(true)
     expect(chip!.style.display).not.toBe('none')
     expect(chip!.textContent).toBe('root@192.168.0.57')
   })
@@ -290,7 +289,6 @@ describe('CommandEditor', () => {
     const { ed, container } = setup()
     ed.show()
     ed.setLocation('')
-    ed.setTrusted(true)
     const chip = container.querySelector<HTMLElement>('.nocx-editor-location')
     expect(chip).not.toBeNull()
     expect(chip!.style.display).toBe('none')
@@ -305,25 +303,10 @@ describe('CommandEditor', () => {
     expect(chip!.textContent).toBe('')
   })
 
-  it('when trust is lost the chip says the context is unknown, never the last host (nocx-3779)', () => {
-    const { ed, container } = setup()
-    ed.show()
-    ed.setLocation('root@192.168.0.57')
-    ed.setTrusted(true)
-    const chip = container.querySelector<HTMLElement>('.nocx-editor-location')
-    expect(chip!.textContent).toBe('root@192.168.0.57')
-    ed.setTrusted(false)
-    expect(chip!.textContent).toBe(LOCATION_UNKNOWN_LABEL)
-    expect(chip!.textContent).not.toContain('192.168.0.57')
-    // Absent would read as "local" — the unknown state must be visible.
-    expect(chip!.style.display).not.toBe('none')
-  })
-
   it('the location chip uses the kit identity classes, not bespoke ones (nocx-3779)', () => {
     const { ed, container } = setup()
     ed.show()
     ed.setLocation('root@example.com')
-    ed.setTrusted(true)
     const chip = container.querySelector('.nocx-editor-location')
     expect(chip!.classList.contains('nocx-chip')).toBe(true)
     expect(chip!.classList.contains('nocx-chip-muted')).toBe(true)

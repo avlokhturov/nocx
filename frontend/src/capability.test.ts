@@ -154,24 +154,6 @@ describe('deriveActions per state', () => {
   const authorizedFacts = (over: Partial<ActionFacts> = {}): ActionFacts =>
     facts({ authorized: true, eligible: true, ...over })
 
-  it('unsupported shell: offer integration', () => {
-    const actions = deriveActions(authorizedFacts({ shellState: 'unsupported' }))
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('integrate')
-  })
-
-  it('eligible shell: offer integration', () => {
-    const actions = deriveActions(authorizedFacts({ shellState: 'eligible' }))
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('integrate')
-  })
-
-  it('failed integration: offer retry', () => {
-    const actions = deriveActions(authorizedFacts({ shellState: 'failed' }))
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('retry-integration')
-  })
-
   it('integrated + terminal: offer enable-editor', () => {
     const actions = deriveActions(
       authorizedFacts({ shellState: 'integrated', presentation: 'terminal' }),
@@ -211,17 +193,32 @@ describe('three delivery axes, never collapsed (nocx-mlm7 §3.5)', () => {
   })
 
   it('deriveActions reads the axes, never a collapsed value', () => {
-    // The observed-delivery axis is part of the facts; deriving actions
-    // must not need to reconstruct it from a single policy string.
-    const actions = deriveActions(
+    // The presentation axis is part of the facts; deriving actions must
+    // not need to reconstruct it from a single policy string. The same
+    // shellState yields different actions for different presentations —
+    // the property the old integrate offer demonstrated, now carried by
+    // the surviving editor-presentation actions.
+    const enable = deriveActions(
       facts({
-        shellState: 'unsupported',
-        observedDelivery: 'none',
+        shellState: 'integrated',
+        presentation: 'terminal',
+        observedDelivery: 'installed-script',
         authorized: true,
         eligible: true,
       }),
     )
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('integrate')
+    expect(enable).toHaveLength(1)
+    expect(enable[0].kind).toBe('enable-editor')
+
+    const healthy = deriveActions(
+      facts({
+        shellState: 'integrated',
+        presentation: 'editor',
+        observedDelivery: 'installed-script',
+        authorized: true,
+        eligible: true,
+      }),
+    )
+    expect(healthy).toHaveLength(0)
   })
 })

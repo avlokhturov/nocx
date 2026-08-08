@@ -1209,12 +1209,11 @@ describe('withSessionText: this session comes back as it was run (nocx-xkve.4)',
     ...over,
   })
 
-  /** A ledger holding one command that actually RAN: startedAt is stamped by
-   *  the OSC 133 C marker, not by open(), and it is the match key. */
+  /** A ledger holding one command that actually RAN: the app-owned submit
+   *  stamps startedAt at open (ADR-0024 §5) — the match key. */
   const ran = (command: string, cwd: string, host: string): CommandLedger => {
     const ledger = new CommandLedger({ now: () => 1000 })
     ledger.open(command, cwd, host, () => undefined)
-    ledger.onMarker('C')
     return ledger
   }
 
@@ -1321,30 +1320,24 @@ describe('queryLedgerHistory: the session fallback behind the generated types', 
     const none = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1', '')
     expect(none.entries).toHaveLength(3) // empty filter is no filter
   })
-  it('states the session horizon and carries startedAt', () => {
+  it('carries startedAt and states no horizon — nothing completes in the severed world', () => {
     const now = () => 1000
     const ledger = new CommandLedger({ now })
-    // The full marker cycle: A (clean prompt) → B → C (start) → D (done).
-    // Only completed records carry endedAt, so only they set the horizon.
-    const run = (command: string) => {
-      ledger.open(command, '/a', 'h1', () => undefined)
-      ledger.onMarker('A')
-      ledger.onMarker('B')
-      ledger.onMarker('C')
-      ledger.onMarker('D', 0)
-    }
-    run('first')
-    run('second')
-    ledger.open('third', '/a', 'h2', () => undefined) // still running
+    // The app-owned submit stamps the attempt start (ADR-0024 §5); nothing
+    // completes a record in the severed world, so no endedAt exists and the
+    // horizon stays null.
+    ledger.open('first', '/a', 'h1', () => undefined)
+    ledger.open('second', '/a', 'h1', () => undefined)
+    ledger.open('third', '/a', 'h2', () => undefined)
 
     const dir = queryLedgerHistory(ledger, 'directory', '/a', 'h1')
-    expect(dir.coverage).toBe(1000) // the oldest completed entry, session-wide
+    expect(dir.coverage).toBe(null) // nothing completed, session-wide
     expect(dir.entries[0]?.startedAt).toBe(1000)
 
     // The rung narrows rows, never the horizon: the everywhere answer sees
-    // the same oldest entry the directory rung does.
+    // the same (absent) oldest entry the directory rung does.
     const everywhere = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1')
-    expect(everywhere.coverage).toBe(1000)
+    expect(everywhere.coverage).toBe(null)
   })
   it('a ledger with nothing completed states no horizon', () => {
     const now = () => 1000
