@@ -22,6 +22,30 @@ ships as an **AppImage** with its own implementation (extract + `chmod +x`,
 authority for this reversal; where §3 (D1), §9, §10 and §12 below still read "macOS only",
 ADR-0007 supersedes them.
 
+Revision (2026-08-08) — **the pipeline was run to completion for the first time, and §5 is
+corrected to what it does.** Until this date no run had ever reached the end: while CI was red
+on `main` the build jobs sat behind the gate and were never entered. The first dry run that got
+past it failed, and each fix let the next one fail one step further along — a compile that was
+never told about `webkit2gtk-4.1`, a `.desktop` file with no `Icon`, an icon at a resolution
+hicolor refuses. Three points where this spec described something that was not built:
+
+- **The publish job is now two jobs.** §5 said `workflow_dispatch` "performs every build, sign
+  and verify step … and creates no release". The spec was right and the implementation was not:
+  every signing step lived inside a job gated `if: release == 'true'`, so a dry run skipped all
+  of them, and the check that the signing key matches the shipped keyring had never once run.
+  `sign` now generates, signs and verifies on every run and holds no write permission; `publish`
+  keeps the tag gate, the `contents: write`, and nothing but the upload. The constraint this
+  section states — the key is never present in a job that runs build tooling — is unchanged.
+- **Linux is a build job here, not only in §7.** ADR-0007 reversed D1 for the updater; the
+  pipeline half was never written down. `build-linux` runs on `ubuntu-22.04` for its glibc 2.35
+  floor and packages an AppImage via `linuxdeploy` + the GTK plugin. `build` is now `build-macos`:
+  an unqualified name beside `build-linux` reads as "the build" and hides which platform failed.
+- **Artefact naming** is `nocx-<version>-darwin-universal.<ext>` _and_
+  `nocx-<version>-linux-amd64.AppImage`.
+
+Release branches are not part of the model and no longer exist: a release is a tag on a commit
+reachable from `main`, which is the only thing `validate` checks.
+
 ## 1. Problem
 
 nocx has no way to reach another machine. CI (`.github/workflows/ci.yml`) verifies but
@@ -183,8 +207,9 @@ could publish while the quality gates were failing._
 
 `ci.yml` gains a `workflow_call` trigger and **loses its `push: tags: ['v*']` trigger**.
 _Added after round 2:_ keeping both would run the whole suite twice for every release — once
-standalone, once through the caller — for no added protection. Release branches and
-`workflow_dispatch` keep their existing triggers.
+standalone, once through the caller — for no added protection. `workflow_dispatch` keeps its
+existing trigger. _(2026-08-08: the `release/**` clause is gone with the model — see the
+revision note at the top.)_
 
 `release.yml` triggers on `push: tags: ['v*']`, calls `ci.yml`, and gates every publishing job
 behind it, so a release cannot exist without green backend, frontend and e2e runs on that exact
@@ -201,7 +226,7 @@ verify step, uploads the results as workflow artefacts, and creates no release. 
 come from tags, and only from tags. _The first draft proposed a draft release for this, which
 also does not work — drafts are excluded from `releases/latest`._
 
-**Build (`macos-15` — an explicit image, not the moving `macos-latest` alias)**
+**`build-macos` (`macos-15` — an explicit image, not the moving `macos-latest` alias)**
 
 1. patch `wails.json` per §4
 2. `wails build -platform darwin/universal -ldflags "<version flags>"` — verified to work in
@@ -217,15 +242,51 @@ also does not work — drafts are excluded from `releases/latest`._
    _`--sequesterRsrc` was dropped after round 2:_ it is valid and round-trips correctly, but
    nothing in this bundle is shown to need it.
 
-**Publish (separate job)**
-Generates `manifest.json`, signs it with `RELEASE_SIGNING_KEY`, and attaches every artefact plus
-`manifest.json` and `manifest.json.sig` to the GitHub Release.
+**`build-linux` (`ubuntu-22.04` — pinned for its glibc, added 2026-08-08)**
+
+Runs in parallel with `build-macos`. The image is explicit and old on purpose: 22.04 provides
+glibc 2.35, which is the floor the support envelope promises (ADR-0007, README).
+
+1. `wails build -platform linux/amd64 -tags release,webkit2_41`. The tag is load-bearing —
+   Wails v2 resolves its cgo `pkg-config` against `webkit2gtk-4.0` unless told otherwise, so a
+   job that installs `libwebkit2gtk-4.1-dev` and says nothing else fails at "Package
+   webkit2gtk-4.0 was not found". 4.1 is the decided target, so the tag states it rather than
+   the apt line implying it.
+2. smoke checks: the binary is ELF 64-bit and reports the expected version.
+3. AppDir: the binary, an `AppRun`, and a `.desktop` file that MUST carry `Icon` —
+   `appimagetool` treats a missing icon as fatal, not cosmetic.
+4. the icon is derived here, at 512×512, from the single committed master
+   (`build/appicon.png`, 1024×1024 because that is what `.icns` wants). `linuxdeploy` installs
+   into the freedesktop hicolor theme, where the directory name _is_ the resolution, so it
+   accepts only that spec's list and refuses 1024 outright. Deriving keeps one icon in the
+   repository; a checked-in second copy is the kind that drifts from its master unnoticed.
+5. `linuxdeploy` + its GTK plugin, given `--desktop-file` and `--icon-file` — passing
+   `--appdir` alone leaves both merely _present_ rather than _installed_, and the AppDir root
+   links are never created.
+6. verification that means something: the AppImage is run with
+   `--appimage-extract-and-run --version` (which bypasses FUSE) and must report the expected
+   version. Producing a file is not evidence that it starts.
+
+**Sign (separate job, runs on every run)**
+Generates `manifest.json`, signs it with `RELEASE_SIGNING_KEY`, and then verifies that signature
+against the keyring compiled into the build being released. That last step is the point: a
+signature checked only by the key that produced it proves nothing, and if the secret and
+`internal/update/keyring.go` drift apart every step still passes while every user's update check
+fails. It is **not** gated on the tag, so the pair is proven on a dry run rather than by the
+release. The manifest is handed to `publish` as an artefact, so the bytes that were verified are
+the bytes that get uploaded.
 
 Separate from the build jobs so the signing key is never present in a job that runs build
-tooling. Manual approval gates and SHA-pinned actions were considered and declined: this is a
-single-owner repository using first-party `actions/*`, and the ceremony would buy nothing.
+tooling.
 
-Artefact naming: `nocx-<version>-darwin-universal.<ext>`.
+**Publish (separate job, the only tag-gated one)**
+Attaches every artefact plus `manifest.json` and `manifest.json.sig` to the GitHub Release. It
+runs no build tooling and no signing, and it is the only job granted `contents: write`. Manual
+approval gates and SHA-pinned actions were considered and declined: this is a single-owner
+repository using first-party `actions/*`, and the ceremony would buy nothing.
+
+Artefact naming: `nocx-<version>-darwin-universal.<ext>` and
+`nocx-<version>-linux-amd64.AppImage`.
 
 ## 6. Manifest
 
