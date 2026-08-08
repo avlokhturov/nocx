@@ -21,14 +21,18 @@
 //     fails with ErrOperationInactive when called outside every in-flight
 //     Run, so a captured handle cannot be carried out of the operation it
 //     was issued for.
-//   - The gates are non-blocking (control.TryAcquire never blocks): an
-//     operation whose gate is held by another operation is REFUSED with a
-//     *RefusedError, never queued. The transport already maps a
-//     control.Rejection to the control.saturated wire error
-//     (internal/transport/ws_saturation.go); a handler surfaces that. A
-//     refused request costs one acquire call and releases its worker
-//     permit immediately — refused conflict work never occupies an active
-//     worker permit.
+//   - The gates are WAITING (control.NewWaitingSemaphore): a gate held by
+//     another operation makes the new operation WAIT (bounded by a wait
+//     timeout and a queue-depth bound on the gate) rather than refuse. A
+//     domain conflict is a serialisation point, not an overload — the
+//     sequential client whose previous response left the permit held for a
+//     moment must never be told the control plane is busy. Only exhausting
+//     the bound is a refusal, and the transport maps that refusal to the
+//     control.saturated wire error (internal/transport/ws_saturation.go);
+//     a handler surfaces that. The wait happens inside Run, on the task
+//     goroutine, and the composite acquires the conflict gates BEFORE the
+//     execution lane (canonical order), so waiting conflict work never
+//     occupies a worker permit.
 //
 // # Canonical acquisition order
 //
@@ -89,6 +93,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -116,8 +121,19 @@ var CanonicalOrder = []string{GateConfig, GateVault, GateContent, GateSession, G
 // exclude each other. Capacity 1 is the conservative whole-domain exclusion;
 // a larger capacity admits more concurrent operations of that domain at the
 // cost of weaker exclusion.
-func Gate(domain string, capacity int) control.Admission {
-	return control.NewSemaphore(domain, capacity)
+//
+// The gate WAITS (bounded) for capacity instead of refusing instantly: a
+// conflicting operation is a serialisation point, not an overload — the
+// second request may proceed once the first releases, and the very next
+// request of a sequential client must never be answered "control plane
+// busy" because the response to its previous request left the permit still
+// held for a moment. maxQueue bounds how many requests may wait on the
+// gate (beyond it, refusal is instant) and waitTimeout bounds how long a
+// request waits (beyond it, refusal). Only exhausting a bound is a refusal.
+// The composition root supplies both; the defaults exist for direct use
+// (tests) and are deliberately generous.
+func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) control.Admission {
+	return control.NewWaitingSemaphore(domain, capacity, maxQueue, waitTimeout)
 }
 
 // ErrOperationInactive is returned by a domain service method called

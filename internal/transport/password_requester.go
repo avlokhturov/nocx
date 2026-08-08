@@ -86,7 +86,7 @@ type passwordAnswerPayload struct {
 
 // handlePasswordResolved handles the connections.passwordResolved RPC from
 // the renderer: it looks up the pending ask and signals its channel.
-func (s *WSServer) handlePasswordResolved(wconn Responder, req jsonrpcRequest) {
+func (h askResolverHandlers) handlePasswordResolved(req jsonrpcRequest) {
 	var params struct {
 		RequestID string `json:"requestId"`
 		Outcome   string `json:"outcome"`
@@ -94,13 +94,13 @@ func (s *WSServer) handlePasswordResolved(wconn Responder, req jsonrpcRequest) {
 		Remember  bool   `json:"remember,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
-	pa, ok := s.asks.consume(params.RequestID)
+	pa, ok := h.asks.consume(params.RequestID)
 	if !ok {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown request id"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown request id"})
 		return
 	}
 
@@ -118,5 +118,5 @@ func (s *WSServer) handlePasswordResolved(wconn Responder, req jsonrpcRequest) {
 		pa.ch <- askResolution{err: fmt.Errorf("password prompt resolved with unknown outcome: %q", params.Outcome)}
 	}
 
-	_ = wconn.TryResult(req.ID, json.RawMessage("{}"))
+	_ = h.r.TryResult(req.ID, json.RawMessage("{}"))
 }

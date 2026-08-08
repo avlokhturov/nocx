@@ -40,15 +40,15 @@ type OpenOperation interface {
 }
 
 // NewOpenOperation builds an OpenOperation that acquires configGate before
-// sessionGate (the canonical order).
+// sessionGate (the canonical order), then the execution lane.
 func NewOpenOperation(
-	configGate, sessionGate control.Admission,
+	configGate, sessionGate, lane control.Admission,
 	resolver ProfileResolver,
 	registry session.Registry,
 ) OpenOperation {
 	g := &guard{}
 	return newOperation[OpenService](
-		control.NewComposite(configGate, sessionGate),
+		control.NewComposite(configGate, sessionGate, lane),
 		g,
 		newOpenService(g, resolver, registry),
 	)

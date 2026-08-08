@@ -48,16 +48,17 @@ type FilesystemOpenOperation interface {
 }
 
 // NewFilesystemOpenOperation builds the files.open operation, acquiring
-// sessionGate before filesystemGate (the canonical order).
+// sessionGate before filesystemGate (the canonical order), then the
+// execution lane.
 func NewFilesystemOpenOperation(
-	sessionGate, filesystemGate control.Admission,
+	sessionGate, filesystemGate, lane control.Admission,
 	registry session.Registry,
 	factory ProviderFactory,
 	reg *filesystem.Registry,
 ) FilesystemOpenOperation {
 	g := &guard{}
 	return newOperation[FilesystemOpenService](
-		control.NewComposite(sessionGate, filesystemGate),
+		control.NewComposite(sessionGate, filesystemGate, lane),
 		g,
 		newFilesystemOpenService(g, registry, factory, reg),
 	)
@@ -125,15 +126,15 @@ type FilesystemBindingOperation interface {
 	Run(context.Context, func(context.Context, FilesystemBindingService) error) error
 }
 
-// NewFilesystemBindingOperation builds the filesystem-binding operation
-// over the filesystem gate.
-func NewFilesystemBindingOperation(filesystemGate control.Admission, reg *filesystem.Registry) FilesystemBindingOperation {
+// NewFilesystemBindingOperation builds the filesystem-binding operation,
+// acquiring the filesystem gate before the execution lane.
+func NewFilesystemBindingOperation(filesystemGate, lane control.Admission, reg *filesystem.Registry) FilesystemBindingOperation {
 	g := &guard{}
-	return newOperation[FilesystemBindingService](filesystemGate, g, newFilesystemBindingService(g, reg))
+	return newOperation[FilesystemBindingService](control.NewComposite(filesystemGate, lane), g, newFilesystemBindingService(g, reg))
 }
 
-// newFilesystemBindingService builds the concrete filesystem-binding
-// service bound to guard g.
+// newFilesystemBindingService builds the concrete filesystem-binding service
+// bound to guard g.
 func newFilesystemBindingService(g *guard, reg *filesystem.Registry) *filesystemBindingService {
 	return &filesystemBindingService{guard: g, reg: reg}
 }

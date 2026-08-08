@@ -23,8 +23,16 @@ type sshConfigPathResponse struct {
 }
 
 // ---------------------------------------------------------------------------
-// Handler
+// Handlers
 // ---------------------------------------------------------------------------
+
+// sshConfigHandlers answers sshConfig.aliases and sshConfig.path. It holds
+// the resolver and config path seams, fixed at construction; nothing else.
+type sshConfigHandlers struct {
+	resolver ssh.ConfigResolver
+	path     string
+	r        Responder
+}
 
 // handleSSHConfigPath reports which file sshConfig.aliases reads, and whether
 // reading it is possible at all.
@@ -39,12 +47,12 @@ type sshConfigPathResponse struct {
 // cheap on purpose: it stats nothing and resolves nothing, so a dialog may ask
 // merely to draw itself, which sshConfig.aliases (an `ssh -G` per host) is far
 // too expensive for.
-func (s *WSServer) handleSSHConfigPath(ctx context.Context, wconn Responder, req jsonrpcRequest) {
+func (h sshConfigHandlers) handleSSHConfigPath(ctx context.Context, req jsonrpcRequest) {
 	resp := sshConfigPathResponse{
-		Path:      s.sshConfigPath,
-		Available: s.sshConfigResolver != nil && s.sshConfigPath != "",
+		Path:      h.path,
+		Available: h.resolver != nil && h.path != "",
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(resp))
+	_ = h.r.TryResult(req.ID, mustMarshal(resp))
 }
 
 // handleSSHConfigAliases returns SSH aliases from ~/.ssh/config with their
@@ -59,8 +67,8 @@ func (s *WSServer) handleSSHConfigPath(ctx context.Context, wconn Responder, req
 // so the frontend can handle the condition uniformly.
 // When resolution fails, entries are returned with hostName=alias and
 // unavailable conveys the reason.
-func (s *WSServer) handleSSHConfigAliases(ctx context.Context, wconn Responder, req jsonrpcRequest) {
-	if s.sshConfigResolver == nil || s.sshConfigPath == "" {
+func (h sshConfigHandlers) handleSSHConfigAliases(ctx context.Context, req jsonrpcRequest) {
+	if h.resolver == nil || h.path == "" {
 		resp := sshConfigAliasesResponse{
 			Aliases: nil,
 			Unavailable: &ssh.UnavailableInfo{
@@ -68,12 +76,12 @@ func (s *WSServer) handleSSHConfigAliases(ctx context.Context, wconn Responder, 
 				Detail: "SSH config resolver not wired",
 			},
 		}
-		_ = wconn.TryResult(req.ID, mustMarshal(resp))
+		_ = h.r.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
 	// Enumerate host patterns from the config file.
-	patterns, err := ssh.EnumerateHostPatterns(s.sshConfigPath)
+	patterns, err := ssh.EnumerateHostPatterns(h.path)
 	if err != nil {
 		resp := sshConfigAliasesResponse{
 			Aliases: nil,
@@ -82,7 +90,7 @@ func (s *WSServer) handleSSHConfigAliases(ctx context.Context, wconn Responder, 
 				Detail: err.Error(),
 			},
 		}
-		_ = wconn.TryResult(req.ID, mustMarshal(resp))
+		_ = h.r.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
@@ -92,18 +100,18 @@ func (s *WSServer) handleSSHConfigAliases(ctx context.Context, wconn Responder, 
 			Aliases:     []ssh.AliasEntry{},
 			Unavailable: nil,
 		}
-		_ = wconn.TryResult(req.ID, mustMarshal(resp))
+		_ = h.r.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
 	// Resolve each pattern through the ConfigResolver (ssh -G).
 	// Use a background context with no deadline — the resolver has its own
 	// internal timeout per call (10s) and caches results.
-	resolved := ssh.ResolveAliases(ctx, s.sshConfigResolver, patterns)
+	resolved := ssh.ResolveAliases(ctx, h.resolver, patterns)
 
 	resp := sshConfigAliasesResponse{
 		Aliases:     resolved.Aliases,
 		Unavailable: resolved.Unavailable,
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(resp))
+	_ = h.r.TryResult(req.ID, mustMarshal(resp))
 }

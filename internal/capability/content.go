@@ -31,10 +31,11 @@ type ContentOperation interface {
 	Run(context.Context, func(context.Context, ContentService) error) error
 }
 
-// NewContentOperation builds a ContentOperation over the content gate.
-func NewContentOperation(contentGate control.Admission, db content.ContentDB) ContentOperation {
+// NewContentOperation builds a ContentOperation that acquires the content
+// gate before the execution lane.
+func NewContentOperation(contentGate, lane control.Admission, db content.ContentDB) ContentOperation {
 	g := &guard{}
-	return newOperation[ContentService](contentGate, g, newContentService(g, db))
+	return newOperation[ContentService](control.NewComposite(contentGate, lane), g, newContentService(g, db))
 }
 
 // newContentService builds the concrete content service bound to guard g.

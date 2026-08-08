@@ -7,6 +7,8 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"sort"
+	"sync"
 
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/tunnel"
@@ -97,8 +99,15 @@ func tunnelRecordFrom(t *tunnel.Tunnel) tunnelRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Handlers
-// ---------------------------------------------------------------------------
+// tunnelHandlers answers tunnel.open and tunnel.stop. It holds the resolver
+// holder, the connector and the tunnel ledger — the transport-owned forward
+// registry (spec §7.3) — and its Responder; nothing else.
+type tunnelHandlers struct {
+	resolver  *resolverHolder
+	connector tunnel.Connector
+	ledger    *tunnelLedger
+	r         Responder
+}
 
 // handleTunnelOpen establishes one local forward and reports the record.
 //
@@ -107,7 +116,9 @@ func tunnelRecordFrom(t *tunnel.Tunnel) tunnelRecord {
 //
 // The bind happens before this returns (spec §7.1): EADDRINUSE, an invalid
 // address and a permission error are synchronous, user-visible failures.
-func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
+// wconn is the *wsConn of the calling connection: it is the forward's owner
+// (the owner-map key, spec §7.3), passed per call by the build closure.
+func (h tunnelHandlers) handleTunnelOpen(ctx context.Context, wconn *wsConn, req jsonrpcRequest) {
 	var params tunnelOpenParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -125,16 +136,16 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: port must not be negative"})
 		return
 	}
-	if s.tunnelConnector == nil {
+	if h.connector == nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no tunnel connector wired)"})
 		return
 	}
-	if !s.resolverOK {
+	if _, ok := h.resolver.get(); !ok {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no profile resolver wired)"})
 		return
 	}
 
-	host, cfg, err := s.resolver.Resolve(params.ProfileID)
+	host, cfg, err := h.resolver.Resolve(params.ProfileID)
 	if err != nil {
 		// Resolving reads the stored secret, so a sealed vault surfaces
 		// here — the renderer needs the reason to offer the unlock prompt.
@@ -148,7 +159,7 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 		Destination: params.Destination,
 		Scope:       params.Scope,
 		Provenance:  tunnel.ProvenanceManual,
-	}, s.tunnelConnector)
+	}, h.connector)
 	if err != nil {
 		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
@@ -167,7 +178,7 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 		return
 	}
 
-	s.trackTunnel(wconn, t)
+	h.ledger.track(wconn, t)
 	_ = wconn.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
 }
 
@@ -177,76 +188,109 @@ func (s *WSServer) handleTunnelOpen(ctx context.Context, wconn *wsConn, req json
 //
 //	--> {"jsonrpc":"2.0","id":2,"method":"tunnel.stop","params":{"id":"ab12…"}}
 //	<-- {"jsonrpc":"2.0","id":2,"result":{"id":"ab12…","direction":"local",…,"state":"stopped","stopReason":"user","error":null}}
-func (s *WSServer) handleTunnelStop(wconn Responder, req jsonrpcRequest) {
+func (h tunnelHandlers) handleTunnelStop(req jsonrpcRequest) {
 	var params tunnelStopParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.ID == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: id required"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: id required"})
 		return
 	}
-	if s.tunnelConnector == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no tunnel connector wired)"})
+	if h.connector == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Forwarding not available (no tunnel connector wired)"})
 		return
 	}
 
-	t := s.stopTunnelByID(params.ID)
+	t := h.ledger.stopByID(params.ID)
 	if t == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "tunnel not found: " + params.ID})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "tunnel not found: " + params.ID})
 		return
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
+	_ = h.r.TryResult(req.ID, mustMarshal(tunnelRecordFrom(t)))
 }
 
 // ---------------------------------------------------------------------------
-// Lifetime (spec §7.3)
+// Ledger (spec §7.3)
 // ---------------------------------------------------------------------------
 
-// trackTunnel registers a tunnel with its owner connection, so tab teardown
-// stops exactly the tunnels that tab opened — and no one else's.
-func (s *WSServer) trackTunnel(wc *wsConn, t *tunnel.Tunnel) {
-	s.tunnelMu.Lock()
-	s.tunnels[t.ID] = t
-	owned := s.ownerTunnels[wc]
+// tunnelLedger is the transport-owned forward ledger, as a narrow seam: the
+// mutex and the two maps it guards. It points at the WSServer's own ledger
+// state — constructed once per server in seamSpecs — so tunnel.open,
+// tunnel.stop and ports.status share the exact maps that tab teardown and
+// stored-forward replay use: one ledger, several narrow holders.
+type tunnelLedger struct {
+	mu      *sync.Mutex
+	tunnels *map[string]*tunnel.Tunnel
+	owners  *map[*wsConn]map[string]struct{}
+}
+
+// track registers a tunnel with its owner connection, so tab teardown stops
+// exactly the tunnels that tab opened — and no one else's.
+func (l *tunnelLedger) track(wc *wsConn, t *tunnel.Tunnel) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	(*l.tunnels)[t.ID] = t
+	owned := (*l.owners)[wc]
 	if owned == nil {
 		owned = make(map[string]struct{})
-		s.ownerTunnels[wc] = owned
+		(*l.owners)[wc] = owned
 	}
 	owned[t.ID] = struct{}{}
-	s.tunnelMu.Unlock()
 }
 
-// stopTunnelByID stops the tunnel and forgets it everywhere. Returns nil for
-// an unknown id. Shared by tunnel.stop and tab teardown.
-func (s *WSServer) stopTunnelByID(id string) *tunnel.Tunnel {
-	s.tunnelMu.Lock()
-	t := s.tunnels[id]
-	delete(s.tunnels, id)
-	for wc, owned := range s.ownerTunnels {
+// stopByID stops the tunnel and forgets it everywhere. Returns nil for an
+// unknown id. Shared by tunnel.stop and tab teardown.
+func (l *tunnelLedger) stopByID(id string) *tunnel.Tunnel {
+	l.mu.Lock()
+	t := (*l.tunnels)[id]
+	delete(*l.tunnels, id)
+	for wc, owned := range *l.owners {
 		delete(owned, id)
 		if len(owned) == 0 {
-			delete(s.ownerTunnels, wc)
+			delete(*l.owners, wc)
 		}
 	}
-	s.tunnelMu.Unlock()
+	l.mu.Unlock()
 	if t != nil {
 		t.Stop()
 	}
 	return t
 }
 
-// stopOwnerTunnels stops every tunnel the connection opened. Called on
-// disconnect: closing the creating tab tears down its forwards even though
-// the shared connection survives (spec §7.3). Each forward holds its OWN
-// pooled reference, so this never touches another tab's forward.
-func (s *WSServer) stopOwnerTunnels(wc *wsConn) {
-	s.tunnelMu.Lock()
-	owned := s.ownerTunnels[wc]
-	delete(s.ownerTunnels, wc)
-	s.tunnelMu.Unlock()
+// stopOwner stops every tunnel the connection opened. Called on disconnect:
+// closing the creating tab tears down its forwards even though the shared
+// connection survives (spec §7.3). Each forward holds its OWN pooled
+// reference, so this never touches another tab's forward.
+func (l *tunnelLedger) stopOwner(wc *wsConn) {
+	l.mu.Lock()
+	owned := (*l.owners)[wc]
+	delete(*l.owners, wc)
+	l.mu.Unlock()
 	for id := range owned {
-		s.stopTunnelByID(id)
+		l.stopByID(id)
 	}
+}
+
+// forwardRecords snapshots the tracked forwards. User-stopped records leave
+// the ledger at stop time; records stopped by transport death stay until
+// stopped or their owning tab closes, so the panel sees the loss.
+func (l *tunnelLedger) forwardRecords() []tunnelRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	recs := make([]tunnelRecord, 0, len(*l.tunnels))
+	for _, t := range *l.tunnels {
+		recs = append(recs, tunnelRecordFrom(t))
+	}
+	sort.Slice(recs, func(i, j int) bool { return recs[i].ID < recs[j].ID })
+	return recs
+}
+
+// stopOwnerTunnels stops every tunnel the connection opened. Called on
+// disconnect (ws.go): the WSServer's ledger is the same state the handlers'
+// ledger points at, so this routes through a ledger view of it.
+func (s *WSServer) stopOwnerTunnels(wc *wsConn) {
+	led := &tunnelLedger{mu: &s.tunnelMu, tunnels: &s.tunnels, owners: &s.ownerTunnels}
+	led.stopOwner(wc)
 }

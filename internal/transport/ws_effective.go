@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/profile"
@@ -24,68 +23,6 @@ type profileErrorEntry struct {
 type effectiveResponse struct {
 	Profiles []profile.EffectiveProfileDTO `json:"profiles"`
 	Errors   []profileErrorEntry           `json:"errors,omitempty"`
-}
-
-func (s *WSServer) handleEffective(wconn Responder, req jsonrpcRequest) {
-	var params effectiveParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-		return
-	}
-
-	if len(params.IDs) == 0 {
-		_ = wconn.TryResult(req.ID, mustMarshal(effectiveResponse{}))
-		return
-	}
-
-	allProfiles, err := s.profiles.LoadProfiles()
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load profiles: %v", err)})
-		return
-	}
-	allGroups, err := s.groups.LoadGroups()
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load groups: %v", err)})
-		return
-	}
-	// Build lookups first.
-	profByID := make(map[string]profile.SSHProfile, len(allProfiles))
-	for _, p := range allProfiles {
-		profByID[p.ID] = p
-	}
-	groupByID := make(map[string]profile.ProfileGroup, len(allGroups))
-	for _, g := range allGroups {
-		groupByID[g.ID] = g
-	}
-
-	var dtos []profile.EffectiveProfileDTO
-	var errs []profileErrorEntry
-
-	for _, id := range params.IDs {
-		p, ok := profByID[id]
-		if !ok {
-			errs = append(errs, profileErrorEntry{ID: id, Error: "profile not found"})
-			continue
-		}
-
-		// Identity lives inline on the profile (ADR-0017): the effective
-		// options are the resolved options.
-		eff, err := profile.ResolveEffectiveProfile(p, allGroups, profile.SparseSSHOptions{})
-		if err != nil {
-			errs = append(errs, profileErrorEntry{ID: id, Error: err.Error()})
-			continue
-		}
-
-		// Secret references stay backend-owned: hand the renderer row handles.
-		dto := profile.ToEffectiveDTO(eff, groupByID)
-		wireEffectiveSecretFields(&dto)
-		dtos = append(dtos, dto)
-	}
-
-	_ = wconn.TryResult(req.ID, mustMarshal(effectiveResponse{
-		Profiles: dtos,
-		Errors:   errs,
-	}))
 }
 
 // ---------------------------------------------------------------------------
@@ -121,98 +58,4 @@ func validatePatch(p patchParams) error {
 		}
 	}
 	return nil
-}
-
-func (s *WSServer) handlePatch(wconn Responder, req jsonrpcRequest) {
-	var params patchParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-		return
-	}
-
-	if err := validatePatch(params); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
-		return
-	}
-
-	allProfiles, err := s.profiles.LoadProfiles()
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load profiles: %v", err)})
-		return
-	}
-	allGroups, err := s.groups.LoadGroups()
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("load groups: %v", err)})
-		return
-	}
-	// No credential layer exists (ADR-0017): identity lives inline on the
-	// profile, and the effective options are the resolved options.
-
-	// Build lookups first for later use.
-	groupByID := make(map[string]profile.ProfileGroup, len(allGroups))
-	for _, g := range allGroups {
-		groupByID[g.ID] = g
-	}
-
-	var target *profile.SSHProfile
-	for i := range allProfiles {
-		if allProfiles[i].ID == params.ID {
-			target = &allProfiles[i]
-			break
-		}
-	}
-	if target == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: fmt.Sprintf("profile %q not found", params.ID)})
-		return
-	}
-
-	// Apply set/unset operations directly on the stored (presence-aware)
-	// options. The renderer names secrets by row handle: resolve the three
-	// secret paths' values to references before they are stored.
-	opts := &target.Options
-	for path, value := range params.Set {
-		switch path {
-		case "options.passwordSecret", "options.keySecret", "options.keyPassphraseSecret":
-			row, isStr := value.(string)
-			if !isStr {
-				_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: path + " must be a string"})
-				return
-			}
-			resolved, resolveErr := s.rowToSecretRef(row)
-			if resolveErr != nil {
-				_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: resolveErr.Error()})
-				return
-			}
-			params.Set[path] = resolved
-		}
-		profile.ApplyPatchSet(opts, path, params.Set[path])
-	}
-	for _, path := range params.Unset {
-		profile.ApplyPatchUnset(opts, path)
-	}
-
-	// Validate: host is required and cannot be unset-made-empty.
-	if opts.Host == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "host is required and cannot be unset"})
-		return
-	}
-
-	// Persist — UpdateProfile writes the presence-aware options directly.
-	if updateErr := s.profiles.UpdateProfile(*target); updateErr != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(updateErr), Message: updateErr.Error()})
-		return
-	}
-
-	// Resolve effective profile from the patched stored options directly.
-	// ResolveEffectiveProfile reads the presence-aware StoredSSHProfileOptions
-	// and produces dense resolved values with provenance.
-	eff, err := profile.ResolveEffectiveProfile(*target, allGroups, profile.SparseSSHOptions{})
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("resolve after patch: %v", err)})
-		return
-	}
-
-	dto := profile.ToEffectiveDTO(eff, groupByID)
-	wireEffectiveSecretFields(&dto)
-	_ = wconn.TryResult(req.ID, mustMarshal(dto))
 }

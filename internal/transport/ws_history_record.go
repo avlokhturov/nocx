@@ -20,11 +20,13 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/secrets"
@@ -103,6 +105,27 @@ type historyRecordResponse struct {
 // what it observed.
 const epochFloor int64 = 1_577_836_800_000 // 2020-01-01T00:00:00Z
 
+// historyRecordHandlers answers history.record. It holds the ContentOperation
+// (nil → content store not wired), the transport-owned capture registry and
+// discovery seams, and the Responder; never the *WSServer (migration map,
+// "history.* — the content domain": the capture registry stays in the
+// handler, connection-scoped in-memory). The tab id comes per call, from the
+// connection identity.
+type historyRecordHandlers struct {
+	op       capability.ContentOperation // nil → content store not wired
+	captures *credential.CaptureRegistry
+	machine  historyMachine // discovery prompt hint (transport-owned)
+	r        Responder
+}
+
+// historyMachine is the transport-owned discovery seam history.record needs:
+// a completed command is the discovery cadence's prompt hint (spec §4,
+// nocx-wzc4.2). It is transport lifecycle, not a store — no capability gates
+// it (migration map, "The rest").
+type historyMachine interface {
+	discoveryPromptHint(state *connState)
+}
+
 // handleHistoryRecord accepts a completed command's facts and persists them
 // through the ContentDB seam. The store's Add enforces the live History
 // policy: history.enabled off means the call succeeds and no row appears —
@@ -114,10 +137,10 @@ const epochFloor int64 = 1_577_836_800_000 // 2020-01-01T00:00:00Z
 // the raw command), destroys the tab's pending captures, and errors the
 // ack. The command itself already ran — refusing the record fails nothing
 // the user did.
-func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
 	var p historyRecordParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 
@@ -126,9 +149,9 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 	// is what keeps an Enter hammering session from queueing probes. The
 	// profile ids come from the tab's own sessions (backend-authoritative),
 	// never from the renderer-reported host.
-	s.discoveryPromptHint(state)
+	h.machine.discoveryPromptHint(state)
 	if msg := validateHistoryRecord(p); msg != "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 		return
 	}
 
@@ -141,10 +164,10 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 	if err != nil {
 		// Fail closed: the raw command must not reach the row, and the
 		// tab's pending captures die with the failed record.
-		if s.captures != nil {
-			s.captures.DestroyTab(tabID(wconn))
+		if h.captures != nil {
+			h.captures.DestroyTab(tabID(wconn))
 		}
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: detection failed; command not recorded"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: detection failed; command not recorded"})
 		return
 	}
 
@@ -167,10 +190,10 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 	// only — it never crosses to the renderer.
 	rowCommand := masked
 	savedAt := make(map[int]string, len(findings)) // redaction index → name
-	if s.captures != nil {
+	if h.captures != nil {
 		for i, f := range findings {
-			fp := s.captures.Fingerprint([]byte(p.Command[f.ValueStart:f.ValueEnd]))
-			if name, ok := s.captures.SavedName(fp); ok {
+			fp := h.captures.Fingerprint([]byte(p.Command[f.ValueStart:f.ValueEnd]))
+			if name, ok := h.captures.SavedName(fp); ok {
 				savedAt[i] = name
 			}
 		}
@@ -224,12 +247,12 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		})
 	}
 
-	if s.contentDB == nil {
+	if h.op == nil {
 		// No store wired (test-only state): the request is accepted and
 		// recorded nowhere; history.query answers source=session in the
 		// same state. Without a row there is no entry id for a capture to
 		// rewrite, so no offer is made either.
-		_ = wconn.TryResult(req.ID, mustMarshal(ack))
+		_ = h.r.TryResult(req.ID, mustMarshal(ack))
 		return
 	}
 
@@ -247,20 +270,33 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		Redactions:  rowRedactions,
 	}
 	entryID := ""
-	id, err := s.contentDB.CommandHistory().Add(ctx, rec)
-	if err != nil {
+	runErr := h.op.Run(ctx, func(ctx context.Context, svc capability.ContentService) error {
+		id, err := svc.RecordCommand(ctx, rec)
+		if err != nil {
+			return err
+		}
+		if id > 0 {
+			entryID = strconv.FormatInt(id, 10)
+			ack.EntryID = entryID
+		}
+		return nil
+	})
+	if runErr != nil {
 		// History-record failure destroys the tab's pending captures: the
 		// record that was to carry the offer's row never landed (capture
-		// contract).
-		if s.captures != nil {
-			s.captures.DestroyTab(tabID(wconn))
+		// contract). A gate refusal is the saturation error; anything else
+		// keeps the store-failure answer unchanged from the pre-capability
+		// handler.
+		if h.captures != nil {
+			h.captures.DestroyTab(tabID(wconn))
 		}
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "history.record: ", err))
+		var rej *capability.RefusedError
+		if errors.As(runErr, &rej) {
+			_ = h.r.TryError(req.ID, saturationRPCError(&rej.Rejection))
+			return
+		}
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "history.record: ", runErr))
 		return
-	}
-	if id > 0 {
-		entryID = strconv.FormatInt(id, 10)
-		ack.EntryID = entryID
 	}
 
 	// The offers, decided after the row exists (the capture's first link is
@@ -275,14 +311,14 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 	// rather than until the user moved on, which is the boundary the design
 	// actually promises. With no credentials Submit does the supersede and
 	// returns nothing, which is exactly what is wanted here.
-	if s.captures != nil {
+	if h.captures != nil {
 		scope := credential.CaptureScope{
 			Tab:        tabID(wconn),
 			SessionIDs: sessionIDsOf(state),
 			EntryID:    entryID,
 			Generation: state.nextGeneration(),
 		}
-		results := s.captures.Submit(scope, creds)
+		results := h.captures.Submit(scope, creds)
 		for i, res := range results {
 			if res.Outcome == credential.OutcomeCaptured || res.Outcome == credential.OutcomeLinked {
 				ack.Captures = append(ack.Captures, captureWire{
@@ -295,7 +331,7 @@ func (s *WSServer) handleHistoryRecord(ctx context.Context, wconn *wsConn, state
 		}
 	}
 
-	_ = wconn.TryResult(req.ID, mustMarshal(ack))
+	_ = h.r.TryResult(req.ID, mustMarshal(ack))
 }
 
 // tabID is the per-connection identity captures are scoped to, in the

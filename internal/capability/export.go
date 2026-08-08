@@ -37,9 +37,9 @@ type ExportOperation interface {
 }
 
 // NewExportOperation builds an ExportOperation that acquires configGate
-// before contentGate (the canonical order).
+// before contentGate (the canonical order), then the execution lane.
 func NewExportOperation(
-	configGate, contentGate control.Admission,
+	configGate, contentGate, lane control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	reg *settings.Registry,
@@ -48,7 +48,7 @@ func NewExportOperation(
 ) ExportOperation {
 	g := &guard{}
 	return newOperation[ExportService](
-		control.NewComposite(configGate, contentGate),
+		control.NewComposite(configGate, contentGate, lane),
 		g,
 		newExportService(g, profiles, groups, reg, paths, contentDB),
 	)
@@ -133,16 +133,16 @@ type RestoreOperation interface {
 }
 
 // NewRestoreOperation builds a RestoreOperation that acquires configGate
-// before contentGate (the canonical order).
+// before contentGate (the canonical order), then the execution lane.
 func NewRestoreOperation(
-	configGate, contentGate control.Admission,
+	configGate, contentGate, lane control.Admission,
 	profileSvc *profile.ProfileService,
 	reg *settings.Registry,
 	contentDB content.ContentDB,
 ) RestoreOperation {
 	g := &guard{}
 	return newOperation[RestoreService](
-		control.NewComposite(configGate, contentGate),
+		control.NewComposite(configGate, contentGate, lane),
 		g,
 		newRestoreService(g, profileSvc, reg, contentDB),
 	)
@@ -231,15 +231,16 @@ type CaptureSaveOperation interface {
 }
 
 // NewCaptureSaveOperation builds a CaptureSaveOperation that acquires
-// vaultGate before contentGate (the canonical order).
+// vaultGate before contentGate (the canonical order), then the execution
+// lane.
 func NewCaptureSaveOperation(
-	vaultGate, contentGate control.Admission,
+	vaultGate, contentGate, lane control.Admission,
 	vaultLifecycle SecretVault,
 	contentDB content.ContentDB,
 ) CaptureSaveOperation {
 	g := &guard{}
 	return newOperation[CaptureSaveService](
-		control.NewComposite(vaultGate, contentGate),
+		control.NewComposite(vaultGate, contentGate, lane),
 		g,
 		newCaptureSaveService(g, vaultLifecycle, contentDB),
 	)
@@ -296,9 +297,10 @@ type TabbyImportOperation interface {
 }
 
 // NewTabbyImportOperation builds a TabbyImportOperation that acquires
-// configGate before vaultGate (the canonical order).
+// configGate before vaultGate (the canonical order), then the execution
+// lane.
 func NewTabbyImportOperation(
-	configGate, vaultGate control.Admission,
+	configGate, vaultGate, lane control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	svc *profile.ProfileService,
@@ -307,7 +309,7 @@ func NewTabbyImportOperation(
 ) TabbyImportOperation {
 	g := &guard{}
 	return newOperation[TabbyImportService](
-		control.NewComposite(configGate, vaultGate),
+		control.NewComposite(configGate, vaultGate, lane),
 		g,
 		newTabbyImportService(g, profiles, groups, svc, vaultLifecycle, store),
 	)

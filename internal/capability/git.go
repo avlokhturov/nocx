@@ -35,16 +35,16 @@ type GitOpenOperation interface {
 }
 
 // NewGitOpenOperation builds the git.open operation, acquiring sessionGate
-// before gitGate (the canonical order).
+// before gitGate (the canonical order), then the execution lane.
 func NewGitOpenOperation(
-	sessionGate, gitGate control.Admission,
+	sessionGate, gitGate, lane control.Admission,
 	registry session.Registry,
 	factory git.RepoFactory,
 	reg *git.Registry,
 ) GitOpenOperation {
 	g := &guard{}
 	return newOperation[GitOpenService](
-		control.NewComposite(sessionGate, gitGate),
+		control.NewComposite(sessionGate, gitGate, lane),
 		g,
 		newGitOpenService(g, registry, factory, reg),
 	)
@@ -93,10 +93,15 @@ func (s *gitOpenService) OpenBinding(ctx context.Context, sid session.ID, cwd st
 	}
 	bid, err := s.reg.Register(repo, sid)
 	if err != nil {
+		// Always a typed error, close outcome or not: the transport's
+		// git.open answers every register failure with the "git.open:"
+		// prefix, and the raw registry error alone (close succeeded) must
+		// not lose that classification.
+		re := &openRegisterError{err: err}
 		if cerr := repo.Close(); cerr != nil {
-			return "", git.OpenOutcome{}, &openRegisterError{err: err, closeErr: cerr}
+			re.closeErr = cerr
 		}
-		return "", git.OpenOutcome{}, err
+		return "", git.OpenOutcome{}, re
 	}
 	return bid, outcome, nil
 }
@@ -123,11 +128,11 @@ type GitBindingOperation interface {
 	Run(context.Context, func(context.Context, GitBindingService) error) error
 }
 
-// NewGitBindingOperation builds the git-binding operation over the git
-// gate.
-func NewGitBindingOperation(gitGate control.Admission, reg *git.Registry) GitBindingOperation {
+// NewGitBindingOperation builds the git-binding operation, acquiring the
+// git gate before the execution lane.
+func NewGitBindingOperation(gitGate, lane control.Admission, reg *git.Registry) GitBindingOperation {
 	g := &guard{}
-	return newOperation[GitBindingService](gitGate, g, newGitBindingService(g, reg))
+	return newOperation[GitBindingService](control.NewComposite(gitGate, lane), g, newGitBindingService(g, reg))
 }
 
 // newGitBindingService builds the concrete git-binding service bound to
@@ -180,13 +185,20 @@ func (e *openOutcomeNilRepoError) Error() string {
 	return "git.open: factory answered ok without a repository"
 }
 
-// openRegisterError reports a Register failure whose repo close also failed.
+// openRegisterError reports a Register failure. closeErr is set only when
+// the owned repo could also not be closed — a live repo must not leak, and a
+// failed close is a fact the operator should see, not a silently dropped
+// error. The "git.open:" prefix is the transport's wire vocabulary for the
+// whole open error class.
 type openRegisterError struct {
 	err      error
 	closeErr error
 }
 
 func (e *openRegisterError) Error() string {
-	return "git.open: register: " + e.err.Error() + "; close repo: " + e.closeErr.Error()
+	if e.closeErr != nil {
+		return "git.open: register: " + e.err.Error() + "; close repo: " + e.closeErr.Error()
+	}
+	return "git.open: register: " + e.err.Error()
 }
 func (e *openRegisterError) Unwrap() error { return e.err }

@@ -50,10 +50,11 @@ type VaultOperation interface {
 	Run(context.Context, func(context.Context, VaultService) error) error
 }
 
-// NewVaultOperation builds a VaultOperation over the vault-lifecycle gate.
-func NewVaultOperation(vaultGate control.Admission, lifecycle VaultLifecycle) VaultOperation {
+// NewVaultOperation builds a VaultOperation that acquires the vault gate
+// before the execution lane.
+func NewVaultOperation(vaultGate, lane control.Admission, lifecycle VaultLifecycle) VaultOperation {
 	g := &guard{}
-	return newOperation[VaultService](vaultGate, g, newVaultService(g, lifecycle))
+	return newOperation[VaultService](control.NewComposite(vaultGate, lane), g, newVaultService(g, lifecycle))
 }
 
 // newVaultService builds the concrete vault-lifecycle service bound to
@@ -165,10 +166,11 @@ type VaultResetOperation interface {
 }
 
 // NewVaultResetOperation builds a VaultResetOperation that acquires
-// configGate before vaultGate (the canonical order) for every Run.
-func NewVaultResetOperation(configGate, vaultGate control.Admission, reset VaultReset) VaultResetOperation {
+// configGate before vaultGate (the canonical order), then the execution
+// lane, for every Run.
+func NewVaultResetOperation(configGate, vaultGate, lane control.Admission, reset VaultReset) VaultResetOperation {
 	g := &guard{}
-	return newOperation[VaultResetService](control.NewComposite(configGate, vaultGate), g, newVaultResetService(g, reset))
+	return newOperation[VaultResetService](control.NewComposite(configGate, vaultGate, lane), g, newVaultResetService(g, reset))
 }
 
 // newVaultResetService builds the concrete reset service bound to guard g.

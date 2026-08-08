@@ -573,6 +573,14 @@ func testGates() (config, vault, content, sessionG, gitG, fsG control.Admission)
 		control.NewSemaphore(capability.GateFilesystem, 1)
 }
 
+// testLane returns the execution admission for test operations: a plain
+// non-blocking semaphore of ample capacity, so tests exercise the conflict
+// gates (also plain non-blocking semaphores) exactly as before. The
+// transport's own tests cover the waiting-gate behavior over the socket.
+func testLane() control.Admission {
+	return control.NewSemaphore("test-lane", 8)
+}
+
 // newFakeGitRegistry builds an empty git registry for gate tests.
 func newFakeGitRegistry() *git.Registry { return git.New() }
 
@@ -599,7 +607,7 @@ func TestConfigOperationCannotReachVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	vaultSeam := newFakeVault()
 
-	cfgOp := capability.NewConfigOperation(configGate, vaultGate, profiles, groups, newProfileService(t), nil, nil)
+	cfgOp := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
 
 	// The handler-shaped consumer: it takes the operation and nothing else.
 	runConsumer := func(op capability.ConfigOperation) error {
@@ -653,7 +661,7 @@ func TestServiceCannotEscapeCallback(t *testing.T) {
 	configGate, vaultGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(configGate, vaultGate, profiles, groups, newProfileService(t), nil, nil)
+	op := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
 
 	var leaked capability.ConfigService
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
@@ -672,7 +680,7 @@ func TestServiceCannotEscapeCallback(t *testing.T) {
 	// is the void case; a leaked call must not reach the store.)
 	vaultGate2 := control.NewSemaphore(capability.GateVault, 1)
 	seam := newFakeVault()
-	vop := capability.NewVaultOperation(vaultGate2, seam)
+	vop := capability.NewVaultOperation(vaultGate2, testLane(), seam)
 	var leakedVault capability.VaultService
 	if err := vop.Run(context.Background(), func(ctx context.Context, svc capability.VaultService) error {
 		leakedVault = svc
@@ -700,8 +708,8 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 	seam := newFakeVault()
 	cfgSvc := newProfileService(t)
 
-	secretOp := capability.NewSecretOperation(cfgGate, vltGate, profiles, groups, seam, seam)
-	tabbyOp := capability.NewTabbyImportOperation(cfgGate, vltGate, profiles, groups, cfgSvc, seam, seam)
+	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
+	tabbyOp := capability.NewTabbyImportOperation(cfgGate, vltGate, testLane(), profiles, groups, cfgSvc, seam, seam)
 
 	// Run both in both arrival orders, concurrently, repeatedly.
 	for i := 0; i < 20; i++ {
@@ -751,7 +759,7 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 func TestNonConflictingOperationsOverlap(t *testing.T) {
 	_, _, contentGate, _, gitGate, _ := testGates()
 	db := newFakeContentDB()
-	contentOp := capability.NewContentOperation(contentGate, db)
+	contentOp := capability.NewContentOperation(contentGate, testLane(), db)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -768,7 +776,7 @@ func TestNonConflictingOperationsOverlap(t *testing.T) {
 
 	// A git-binding operation (different domain) completes while the
 	// content callback is still blocked.
-	gitOp := capability.NewGitBindingOperation(gitGate, newFakeGitRegistry())
+	gitOp := capability.NewGitBindingOperation(gitGate, testLane(), newFakeGitRegistry())
 	gitDone := make(chan error, 1)
 	go func() {
 		gitDone <- gitOp.Run(context.Background(), func(ctx context.Context, svc capability.GitBindingService) error {
@@ -798,7 +806,7 @@ func TestSameDomainExclusion(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, newProfileService(t), nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -831,7 +839,7 @@ func TestForSecretUnknownID(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	factory := capability.NewSecretOperations(cfgGate, vltGate, profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
 
 	op, err := factory.ForSecret(context.Background(), "sec:v1:file:does-not-exist")
 	if err == nil {
@@ -855,7 +863,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed secret: %v", err)
 	}
-	factory := capability.NewSecretOperations(cfgGate, vltGate, profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
 	op, err := factory.ForSecret(context.Background(), id)
 	if err != nil {
 		t.Fatalf("ForSecret with a known id failed: %v", err)
@@ -886,7 +894,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 func TestForSessionUnknownID(t *testing.T) {
 	sessionGate, _, _, _, _, _ := testGates()
 	reg := newFakeSessionRegistry()
-	factory := capability.NewSessionOperations(sessionGate, reg, nil)
+	factory := capability.NewSessionOperations(sessionGate, testLane(), reg, nil)
 
 	op, err := factory.ForSession("no-such-session")
 	if err == nil {
@@ -902,7 +910,7 @@ func TestForSessionKnownIDSucceeds(t *testing.T) {
 	sessionGate, _, _, _, _, _ := testGates()
 	reg := newFakeSessionRegistry()
 	reg.sessions["s1"] = &fakeSession{id: "s1"}
-	factory := capability.NewSessionOperations(sessionGate, reg, nil)
+	factory := capability.NewSessionOperations(sessionGate, testLane(), reg, nil)
 
 	op, err := factory.ForSession("s1")
 	if err != nil {
@@ -934,7 +942,7 @@ func TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, profiles, groups, seam, seam)
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
 
 	// Failure path: unknown row.
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -978,7 +986,7 @@ func TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds(t *testing.T) {
 func TestVaultLifecycleSetupSucceeds(t *testing.T) {
 	vaultGate := control.NewSemaphore(capability.GateVault, 1)
 	seam := newFakeVault()
-	op := capability.NewVaultOperation(vaultGate, seam)
+	op := capability.NewVaultOperation(vaultGate, testLane(), seam)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.VaultService) error {
 		if _, err := svc.Setup(ctx, vault.SetupRequest{}); err != nil {
@@ -1000,10 +1008,10 @@ func TestVaultLifecycleSetupSucceeds(t *testing.T) {
 func TestVaultResetAndConfigRunTogether(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	reset := &fakeReset{}
-	resetOp := capability.NewVaultResetOperation(cfgGate, vltGate, reset)
+	resetOp := capability.NewVaultResetOperation(cfgGate, vltGate, testLane(), reset)
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, newProfileService(t), nil, nil)
+	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -1037,7 +1045,7 @@ func TestCaptureSaveWritesBothStores(t *testing.T) {
 	contentGate := control.NewSemaphore(capability.GateContent, 1)
 	seam := newFakeVault()
 	db := newFakeContentDB()
-	op := capability.NewCaptureSaveOperation(vltGate, contentGate, seam, db)
+	op := capability.NewCaptureSaveOperation(vltGate, contentGate, testLane(), seam, db)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.CaptureSaveService) error {
 		if _, _, err := svc.CreateSecret(ctx, credential.NewSecret("pw"), vault.SecretMeta{Name: "captured"}); err != nil {
@@ -1062,7 +1070,7 @@ func TestSettingsSurfaceSucceeds(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, newFakeSecretStore())
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, newProfileService(t), reg, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), reg, nil)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		snap, err := svc.Settings().GetSnapshot()
@@ -1085,7 +1093,7 @@ func TestConfigWriteWithRowButNoVaultFails(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, newProfileService(t), nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
 
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{
@@ -1115,7 +1123,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	seam := newFakeVault()
 	seam.rows["secrow:1"] = "sec:v1:file:fakea"
-	op := capability.NewConfigOperation(cfgGate, vltGate, profiles, groups, newProfileService(t), nil, seam)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, seam)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{
@@ -1133,5 +1141,65 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 	}
 	if got := profiles.profiles[0].Options.PasswordSecret; got != "sec:v1:file:fakea" {
 		t.Fatalf("stored %q, want resolved reference", got)
+	}
+}
+
+// TestMintSecretReturnsTheMintedID proves SecretService.MintSecret runs the
+// vault's named create sequence and returns the id it minted — the mint
+// handlers (secrets.save*) derive the row handle from it, so a wrong id
+// would make the minted secret unaddressable.
+func TestMintSecretReturnsTheMintedID(t *testing.T) {
+	cfgGate, vltGate, _, _, _, _ := testGates()
+	seam := newFakeVault()
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam)
+
+	var minted credential.SecretID
+	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
+		var err error
+		minted, err = svc.MintSecret(ctx, credential.NewSecret("pw"), vault.SecretMeta{Name: "minted", Kind: vault.KindPassword})
+		return err
+	}); err != nil {
+		t.Fatalf("mint failed: %v", err)
+	}
+	if calls := seam.LifecycleCalls(); len(calls) != 1 || calls[0] != "CreateNamed" {
+		t.Fatalf("mint lifecycle calls = %v, want [CreateNamed]", calls)
+	}
+	if !strings.HasPrefix(string(minted), "sec:v1:") {
+		t.Fatalf("minted id = %q, want a vault reference", minted)
+	}
+}
+
+// TestMintSecretFallsBackToPlainStore proves the no-vault mint path: the
+// plain store records the secret namelessly, exactly like the transport's
+// createSecret did before the capability migration.
+func TestMintSecretFallsBackToPlainStore(t *testing.T) {
+	cfgGate, vltGate, _, _, _, _ := testGates()
+	store := newFakeSecretStore()
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store)
+
+	var minted credential.SecretID
+	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
+		var err error
+		minted, err = svc.MintSecret(ctx, credential.NewSecret("pw"), vault.SecretMeta{Name: "minted", Kind: vault.KindPassword})
+		return err
+	}); err != nil {
+		t.Fatalf("mint failed: %v", err)
+	}
+	if !strings.HasPrefix(string(minted), "sec:v1:file:plain") {
+		t.Fatalf("minted id = %q, want the plain store's minted reference", minted)
+	}
+	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
+		secret, err := svc.GetSecret(ctx, minted)
+		if err != nil {
+			return err
+		}
+		return secret.Use(func(b []byte) error {
+			if string(b) != "pw" {
+				t.Fatalf("stored value = %q, want %q", string(b), "pw")
+			}
+			return nil
+		})
+	}); err != nil {
+		t.Fatalf("read back failed: %v", err)
 	}
 }

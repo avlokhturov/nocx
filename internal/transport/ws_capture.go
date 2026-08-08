@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/secrets"
@@ -57,114 +58,153 @@ type captureDismissParams struct {
 	CaptureID string `json:"captureId"`
 }
 
+// captureSaveHandlers answers secrets.captureSave: the settlement of a
+// pending capture. The capture registry is connection-scoped transport state
+// and stays a handler seam; the two store writes — the vault create and the
+// history rewrites — go through the CaptureSaveOperation (vault, content
+// gates). The wired flags reproduce the old dispatcher's unwired answers
+// ("capture registry unavailable", "vault unavailable", the partial
+// "history store unavailable" rewrite failure).
+type captureSaveHandlers struct {
+	op           capability.CaptureSaveOperation
+	captures     *credential.CaptureRegistry
+	r            Responder
+	vaultWired   bool // vaultLifecycle != nil at construction
+	contentWired bool // contentDB != nil at construction
+}
+
 // handleCaptureSave settles a capture into the vault. Idempotent: a retry
 // of a settled capture returns the recorded name (and re-runs only the
 // owed rewrites); a save in flight blocks until it settles, so two
 // concurrent saves cannot mint two secrets.
-func (s *WSServer) handleCaptureSave(ctx context.Context, wconn Responder, req jsonrpcRequest) {
-	if s.captures == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureSave: capture registry unavailable"})
+func (h captureSaveHandlers) handleCaptureSave(ctx context.Context, req jsonrpcRequest) {
+	if h.captures == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureSave: capture registry unavailable"})
 		return
 	}
 	var p captureSaveParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 	if p.CaptureID == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: captureId is required"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: captureId is required"})
 		return
 	}
 
-	h, err := s.captures.Reserve(credential.CaptureID(p.CaptureID))
+	handle, err := h.captures.Reserve(credential.CaptureID(p.CaptureID))
 	if err != nil {
-		_ = wconn.TryError(req.ID, captureErrorFor(err))
+		_ = h.r.TryError(req.ID, captureErrorFor(err))
 		return
 	}
 
 	// An idempotent retry: the save already settled.
-	if h.Completed {
-		if h.RewritePending {
-			if rwErr := s.rewriteLinks(ctx, h.Links, h.Name); rwErr != nil {
-				_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{
-					Name: h.Name, Partial: true, Error: rwErr.Error(),
-				}))
-				return
+	if handle.Completed {
+		if handle.RewritePending {
+			runErr := h.op.Run(ctx, func(ctx context.Context, svc capability.CaptureSaveService) error {
+				if rwErr := h.rewriteLinks(ctx, svc, handle.Links, handle.Name); rwErr != nil {
+					_ = h.r.TryResult(req.ID, mustMarshal(captureSaveResponse{
+						Name: handle.Name, Partial: true, Error: rwErr.Error(),
+					}))
+					return nil
+				}
+				h.captures.Complete(handle.CaptureID, handle.Name, handle.SecretID, false, nil)
+				_ = h.r.TryResult(req.ID, mustMarshal(captureSaveResponse{Name: handle.Name}))
+				return nil
+			})
+			if runErr != nil {
+				answerOperationRefusal(h.r, req.ID, runErr)
 			}
-			s.captures.Complete(h.CaptureID, h.Name, h.SecretID, false, nil)
+			return
 		}
-		_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{Name: h.Name}))
+		_ = h.r.TryResult(req.ID, mustMarshal(captureSaveResponse{Name: handle.Name}))
 		return
 	}
 
 	// The live save. The value never leaves the process: it goes from the
 	// capture straight into the vault create.
-	if s.vaultLifecycle == nil {
-		s.captures.Complete(h.CaptureID, "", "", false, errors.New("vault unavailable"))
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureSave: vault unavailable"})
+	if !h.vaultWired {
+		h.captures.Complete(handle.CaptureID, "", "", false, errors.New("vault unavailable"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureSave: vault unavailable"})
 		return
 	}
-	name := h.SuggestedName
+	name := handle.SuggestedName
 	if p.Name != "" {
 		name = sanitizeCaptureName(p.Name)
 	}
 	kind := vault.KindPassword
-	for _, l := range h.Links {
+	for _, l := range handle.Links {
 		if l.Redaction.Kind == string(secrets.KindPrivateKey) {
 			kind = vault.KindPrivateKey
 			break
 		}
 	}
-	secretID, realName, err := s.vaultLifecycle.CreateNamedResolved(ctx, h.Value,
-		vault.SecretMeta{Name: name, Kind: kind})
+	err = h.op.Run(ctx, func(ctx context.Context, svc capability.CaptureSaveService) error {
+		secretID, realName, createErr := svc.CreateSecret(ctx, handle.Value,
+			vault.SecretMeta{Name: name, Kind: kind})
+		if createErr != nil {
+			h.captures.Complete(handle.CaptureID, "", "", false, createErr)
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "secrets.captureSave: ", createErr))
+			return nil
+		}
+		if rwErr := h.rewriteLinks(ctx, svc, handle.Links, "{{secret:"+realName+"}}"); rwErr != nil {
+			// Step 1 done, step 2 owed: report the partial result; a retry
+			// with the same capture completes the rewrite without a second
+			// secret (the registry records name + rewrite-owed).
+			h.captures.Complete(handle.CaptureID, realName, secretID, true, nil)
+			_ = h.r.TryResult(req.ID, mustMarshal(captureSaveResponse{
+				Name: realName, Partial: true, Error: rwErr.Error(),
+			}))
+			return nil
+		}
+		h.captures.Complete(handle.CaptureID, realName, secretID, false, nil)
+		_ = h.r.TryResult(req.ID, mustMarshal(captureSaveResponse{Name: realName}))
+		return nil
+	})
 	if err != nil {
-		s.captures.Complete(h.CaptureID, "", "", false, err)
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "secrets.captureSave: ", err))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	if rwErr := s.rewriteLinks(ctx, h.Links, "{{secret:"+realName+"}}"); rwErr != nil {
-		// Step 1 done, step 2 owed: report the partial result; a retry
-		// with the same capture completes the rewrite without a second
-		// secret (the registry records name + rewrite-owed).
-		s.captures.Complete(h.CaptureID, realName, secretID, true, nil)
-		_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{
-			Name: realName, Partial: true, Error: rwErr.Error(),
-		}))
-		return
-	}
-	s.captures.Complete(h.CaptureID, realName, secretID, false, nil)
-	_ = wconn.TryResult(req.ID, mustMarshal(captureSaveResponse{Name: realName}))
+}
+
+// captureDismissHandlers answers secrets.captureDismiss: registry only, no
+// capability — destroying a pending capture touches no store.
+type captureDismissHandlers struct {
+	captures *credential.CaptureRegistry
+	r        Responder
 }
 
 // handleCaptureDismiss destroys a pending capture and suppresses its
 // fingerprint for the rest of the application session. Idempotent.
-func (s *WSServer) handleCaptureDismiss(ctx context.Context, wconn Responder, req jsonrpcRequest) {
-	if s.captures == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureDismiss: capture registry unavailable"})
+func (h captureDismissHandlers) handleCaptureDismiss(ctx context.Context, req jsonrpcRequest) {
+	if h.captures == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.captureDismiss: capture registry unavailable"})
 		return
 	}
 	var p captureDismissParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 	if p.CaptureID == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: captureId is required"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: captureId is required"})
 		return
 	}
-	if err := s.captures.Dismiss(credential.CaptureID(p.CaptureID)); err != nil {
-		_ = wconn.TryError(req.ID, captureErrorFor(err))
+	if err := h.captures.Dismiss(credential.CaptureID(p.CaptureID)); err != nil {
+		_ = h.r.TryError(req.ID, captureErrorFor(err))
 		return
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
+	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
 // rewriteLinks rewrites every linked history row's redaction segment to the
-// reference. The rows are addressed by their stable ids. A row the
-// retention sweep removed is skipped — the rewrite is moot, the secret
-// still exists; anything else fails the rewrite set.
-func (s *WSServer) rewriteLinks(ctx context.Context, links []credential.CaptureLink, reference string) error {
-	if s.contentDB == nil {
+// reference through the operation's service. The rows are addressed by their
+// stable ids. A row the retention sweep removed is skipped — the rewrite is
+// moot, the secret still exists; anything else fails the rewrite set. When
+// the content store is not wired the old dispatcher's "history store
+// unavailable" failure is reported, which settles the save as a partial
+// result exactly like a real rewrite failure.
+func (h captureSaveHandlers) rewriteLinks(ctx context.Context, svc capability.CaptureSaveService, links []credential.CaptureLink, reference string) error {
+	if !h.contentWired {
 		return errors.New("history store unavailable")
 	}
 	var firstErr error
@@ -181,7 +221,7 @@ func (s *WSServer) rewriteLinks(ctx context.Context, links []credential.CaptureL
 			}
 			continue
 		}
-		if err := s.contentDB.CommandHistory().RewriteRedaction(ctx, id, l.Redaction, reference); err != nil {
+		if err := svc.RewriteRedaction(ctx, id, l.Redaction, reference); err != nil {
 			if errors.Is(err, content.ErrNotFound) {
 				continue // swept away — nothing to rewrite
 			}

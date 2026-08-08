@@ -50,6 +50,11 @@ type ConfigService interface {
 	CreateGroup(g profile.ProfileGroup) error
 	UpdateGroup(g profile.ProfileGroup) error
 	DeleteGroup(id string) error
+	// ResolveGroup converts every row handle in g's defaults to its stored
+	// reference — the pure read side of the row-resolution contract, needed
+	// by the groups.impact handler to compare a PROPOSED group against the
+	// stored references without storing anything.
+	ResolveGroup(g profile.ProfileGroup) (profile.ProfileGroup, error)
 	// DeleteGroupAtomic deletes a group and promotes its children to
 	// root in one store write. Refuses when the wired store does not
 	// support atomic deletion.
@@ -80,8 +85,11 @@ type ConfigOperation interface {
 }
 
 // NewConfigOperation builds a ConfigOperation that acquires configGate
+// before vaultGate (the canonical order), then the execution lane: conflict
+// admission precedes the worker permit, so waiting conflict work never sits
+// on a lane slot.
 func NewConfigOperation(
-	configGate, vaultGate control.Admission,
+	configGate, vaultGate, lane control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	svc *profile.ProfileService,
@@ -89,7 +97,7 @@ func NewConfigOperation(
 	rows RowResolver,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate), g, newConfigService(g, profiles, groups, svc, reg, rows))
+	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, svc, reg, rows))
 }
 
 // newConfigService builds the concrete config service bound to guard g.
@@ -230,6 +238,17 @@ func (s *configService) UpdateGroup(g profile.ProfileGroup) error {
 		return err
 	}
 	return s.groups.UpdateGroup(resolved)
+}
+
+// ResolveGroup converts every row handle in g's defaults to its stored
+// reference — the pure read side of the row-resolution contract. The
+// groups.impact handler needs it to compare a PROPOSED group's defaults
+// against the stored references without storing anything.
+func (s *configService) ResolveGroup(g profile.ProfileGroup) (profile.ProfileGroup, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.ProfileGroup{}, err
+	}
+	return s.resolveGroup(g)
 }
 
 func (s *configService) DeleteGroup(id string) error {

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
@@ -24,7 +25,6 @@ import (
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
-	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
@@ -34,7 +34,6 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
-	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -108,16 +107,18 @@ type WSServer struct {
 	urlMu     sync.RWMutex
 	urlOpener UrlOpener
 
-	// Profile resolver maps profile IDs to SSH connect configs.
-	resolver ProfileResolver
+	// Profile resolver maps profile IDs to SSH connect configs. The holder
+	// is set post-construction (SetProfileResolver): the resolver depends on
+	// the transport, so the operations and handlers built at construction
+	// hold the holder and read the current value per call.
+	resolver *resolverHolder
 
 	// Profile service provides a single validated write path for profiles
 	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
 
 	// settings registry backs the settings.* JSON-RPC methods.
-	settings   *settings.Registry
-	resolverOK bool
+	settings *settings.Registry
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
 	// When nil, the handler returns a JSON-RPC error. The resolver
@@ -186,17 +187,43 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
-	// probeSub admits and runs connections.test probes off the read loop
-	// (ws_control.go): a 30-second SSH probe must never freeze the socket
-	// that feeds every other tab. Capacity one; a second probe is refused
-	// with the control-saturated error, and the permit frees when the task
+	// lane is the ordinary control lane: the shared bounded worker pool every
+	// admission-backed control method runs on (registration.go). Capacity
+	// laneCapacity; a full lane refuses new work with the control-saturated
+	// error instead of queueing it. Probe and dialog compose their own
+	// capacity-one resource admissions with the lane (see below).
+	lane control.Submission
+	// laneCapacity is the ordinary lane's permit count, configurable for
+	// tests that must saturate it deterministically.
+	laneCapacity int
+	// domainWaitTimeout bounds how long a request waits on a domain conflict
+	// gate before the wait itself is refused (the wait bound of the
+	// waiting-gate design). Long enough that a sequential client's
+	// back-to-back requests — whose previous response left the gate held
+	// for a moment — always clear it; short enough that a gate held by a
+	// long operation (a dial, an import) cannot delay the answer forever.
+	domainWaitTimeout time.Duration
+	// domainMaxQueue bounds how many requests may wait on one domain gate
+	// before further conflicting requests are refused instantly (the
+	// queue-depth bound at the gate). Cross-method waiters on a shared
+	// gate accumulate here.
+	domainMaxQueue int
+	// domainQueueDepth bounds in-flight tasks per operation (waiting on the
+	// gates or running): a flood of conflicting requests is refused at
+	// submit time rather than spawning unbounded tasks.
+	domainQueueDepth int
+	// probeSub admits and runs connections.test probes off the read loop:
+	// a 30-second SSH probe must never freeze the socket that feeds every
+	// other tab. Capacity one (a second probe is refused with the
+	// control-saturated error) composed with the lane, so a probe also
+	// occupies an ordinary worker permit; the permit frees when the task
 	// returns, cancelled or not — that is what releases the admission slot
 	// for the next connection.
 	probeSub control.Submission
 	// dialogSub admits and runs dialog.openFile off the read loop. Capacity
-	// one: while a dialog is open the native capability is busy, and a
-	// second dialog.openFile from any connection is refused rather than
-	// stacking a second picker over the first.
+	// one composed with the lane: while a dialog is open the native
+	// capability is busy, and a second dialog.openFile from any connection
+	// is refused rather than stacking a second picker over the first.
 	dialogSub control.Submission
 	// inflight tracks admitted off-loop tasks so Stop cancels them and
 	// waits, bounded, for them to drain (see Stop's documented maximum).
@@ -205,6 +232,15 @@ type WSServer struct {
 	// control work to finish after cancelling it. Work that ignores
 	// cancellation is abandoned at this bound.
 	controlDrainTimeout time.Duration
+	// methods is the validated control-method registration set: method →
+	// submission + per-connection handler builder. Built once at
+	// construction (registration.go); the per-connection materialisation
+	// happens in handleSession.
+	methods map[string]methodSpec
+	// satNotify rate-limits the control.saturated notification a refused
+	// notification (no id) triggers — one per class+scope per interval,
+	// never one per refused frame.
+	satNotify *saturatedNotifyLimiter
 
 	// profileUsage tracks last-used timestamps for the sessions.status RPC.
 	// When nil, the handler reports live-state from the registry but
@@ -424,17 +460,53 @@ type ProfileResolver interface {
 	Resolve(profileID string) (host string, cfg *ssh.ConnectConfig, err error)
 }
 
+// resolverHolder is the mutable profile-resolver seam. The resolver is set
+// post-construction (SetProfileResolver) because it depends on the transport
+// (the UnlockRequester wiring) and must be created after the transport
+// exists. The operations and seam handlers that use it therefore hold the
+// holder and read the current value per call, never a captured nil. It
+// satisfies both transport.ProfileResolver and capability.ProfileResolver
+// (identical signatures), so it can be handed to an OpenOperation at
+// construction and still observe a later SetProfileResolver.
+type resolverHolder struct {
+	mu sync.RWMutex
+	r  ProfileResolver
+}
+
+func (h *resolverHolder) set(r ProfileResolver) {
+	h.mu.Lock()
+	h.r = r
+	h.mu.Unlock()
+}
+
+// get returns the current resolver and whether one is wired.
+func (h *resolverHolder) get() (ProfileResolver, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.r, h.r != nil
+}
+
+// Resolve implements ProfileResolver (and capability.ProfileResolver),
+// forwarding to the current value. An unwired holder answers an error, which
+// the callers surface as their not-available refusal.
+func (h *resolverHolder) Resolve(profileID string) (string, *ssh.ConnectConfig, error) {
+	r, ok := h.get()
+	if !ok {
+		return "", nil, errors.New("no profile resolver wired")
+	}
+	return r.Resolve(profileID)
+}
+
 // WithProfileResolver attaches a profile resolver for SSH connection setup.
 func WithProfileResolver(r ProfileResolver) WSServerOption {
-	return func(s *WSServer) { s.resolver = r; s.resolverOK = true }
+	return func(s *WSServer) { s.resolver.set(r) }
 }
 
 // SetProfileResolver sets the profile resolver post-construction. Used when
 // the resolver depends on the transport (e.g. for UnlockRequester wiring)
 // and must be created after the transport exists.
 func (s *WSServer) SetProfileResolver(r ProfileResolver) {
-	s.resolver = r
-	s.resolverOK = true
+	s.resolver.set(r)
 }
 
 // WithSSHConfigResolver attaches the SSH config resolver and config path
@@ -598,6 +670,51 @@ func WithFilesRevealer(r FilesRevealer) WSServerOption {
 	return func(s *WSServer) { s.revealer = r }
 }
 
+// DefaultControlLaneCapacity is the ordinary lane's permit count: the number
+// of control tasks that may run concurrently before new work is refused with
+// the saturation error. Larger than one so non-conflicting long operations
+// genuinely overlap (a tabby import beside a git status); small enough that
+// a burst of control requests cannot spawn unbounded goroutines. The
+// composition root names it explicitly (app.go), the same way the D14 bounds
+// are named there; the option is also how tests saturate the lane with a
+// known number of blocked tasks.
+const DefaultControlLaneCapacity = 8
+
+// DefaultDomainConflictWaitTimeout is how long a conflicting control request
+// waits on its domain gate before being refused. The window it exists to
+// bridge is the task tail: a handler enqueues its response and the permit is
+// released a moment later, so a sequential client's next request can arrive
+// while the gate is still held. That window is microseconds; a second is
+// generous headroom for a genuinely queued request (the brief's "queue of
+// length two") while keeping the wait perceptually short when the gate is
+// held by a long operation.
+const DefaultDomainConflictWaitTimeout = time.Second
+
+// DefaultDomainMaxQueue is the default number of requests that may wait on
+// one domain gate; a conflicting request beyond it is refused instantly.
+const DefaultDomainMaxQueue = 8
+
+// DefaultDomainQueueDepth is the default number of in-flight tasks one
+// operation may have (waiting on the gates or running); a request beyond it
+// is refused at submit time.
+const DefaultDomainQueueDepth = 8
+
+// WithDomainConflictWaitTimeout sets how long a request waits on a domain
+// conflict gate before the wait is refused. Tests use a short value to
+// exhaust the bound deterministically and a long one to hold a conflict
+// open; the composition root names the production value explicitly, the
+// same way it names the lane capacity.
+func WithDomainConflictWaitTimeout(d time.Duration) WSServerOption {
+	return func(s *WSServer) { s.domainWaitTimeout = d }
+}
+
+// WithControlLaneCapacity sets the ordinary lane's permit count. The
+// composition root names the production value explicitly; tests use it to
+// saturate the lane with a known number of blocked tasks.
+func WithControlLaneCapacity(n int) WSServerOption {
+	return func(s *WSServer) { s.laneCapacity = n }
+}
+
 func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption) *WSServer {
 	s := &WSServer{
 		log:      logger,
@@ -617,11 +734,15 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		lanes:               make(map[session.ID]*sessionLane),
 		filesBySession:      make(map[session.ID]map[string]struct{}),
 		filesPollInterval:   defaultFilesPollInterval,
-		probeSub:            control.NewBoundedSubmission(control.NewSemaphore("probe", 1)),
-		dialogSub:           control.NewBoundedSubmission(control.NewSemaphore("dialog", 1)),
+		laneCapacity:        DefaultControlLaneCapacity,
+		domainWaitTimeout:   DefaultDomainConflictWaitTimeout,
+		domainMaxQueue:      DefaultDomainMaxQueue,
+		domainQueueDepth:    DefaultDomainQueueDepth,
 		controlDrainTimeout: defaultControlDrainTimeout,
 		gitBindings:         make(map[string]*gitBinding),
 		gitBySession:        make(map[session.ID]map[string]struct{}),
+		resolver:            &resolverHolder{},
+		satNotify:           newSaturatedNotifyLimiter(time.Second),
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and
@@ -634,7 +755,86 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 	for _, o := range opts {
 		o(s)
 	}
+	s.buildControlPlane()
 	return s
+}
+
+// buildControlPlane wires the scheduling contract after every option has
+// been applied: the ordinary lane (the bounded worker pool), the probe and
+// dialog resource admissions composed with it, the waiting domain gates,
+// and the validated method registrations. A validation failure (a duplicate
+// method, an ingress-critical method outside the closed set) is a
+// programming error and panics the server build rather than freezing a
+// socket at runtime.
+//
+// Domain-gated methods do not register on the lane submission: their
+// operation acquires the conflict gates (waiting, bounded) and THEN the
+// lane inside Run, on the task goroutine, so waiting conflict work never
+// occupies a worker permit and the read loop never blocks on a conflict.
+// The per-operation queue submissions bound in-flight tasks per operation.
+func (s *WSServer) buildControlPlane() {
+	lane := control.NewSemaphore("control", s.laneCapacity)
+	s.lane = control.NewBoundedSubmission(lane)
+	// Probe and dialog keep their own capacity-one resource admissions
+	// composed with the lane (canonical order: resource before execution
+	// permit): a second probe or dialog is refused even while the lane has
+	// free permits, and every task still occupies one lane permit.
+	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewComposite(
+		control.NewSemaphore("probe", 1), lane))}
+	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewComposite(
+		control.NewSemaphore("dialog", 1), lane))}
+
+	gates := s.domainGates()
+	immediate := control.ImmediateSubmission{}
+	specs := make([]methodSpec, 0, 96)
+	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
+	specs = append(specs, s.askResolverSpecs(immediate)...)
+	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
+	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
+	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
+	specs = append(specs, s.contentSpecs(lane, gates.config, gates.content)...)
+	specs = append(specs, s.shellSpecs(lane, gates.session)...)
+	specs = append(specs, s.seamSpecs(lane, gates.session)...)
+	methods, err := buildMethodSpecs(specs)
+	if err != nil {
+		panic("nocx: control-plane registration: " + err.Error())
+	}
+	s.methods = methods
+}
+
+// operationQueue builds the bounded queue-submission for one operation's
+// methods: at most domainQueueDepth tasks of the operation may be in flight
+// (waiting on the conflict gates or running) before new work is refused at
+// submit time. The refusal is the queue-depth half of the waiting-gate
+// bound; the gate itself carries the other half (its own waiters cap), and
+// the lane — acquired by the operation AFTER the gates, inside Run — is the
+// execution bound.
+func (s *WSServer) operationQueue(name string) control.Submission {
+	return control.NewBoundedSubmission(control.NewSemaphore(name+"-queue", s.domainQueueDepth))
+}
+
+// domainGates builds one gate per domain, capacity 1 — the conservative
+// whole-domain exclusion (capability package doc). The gates WAIT (bounded)
+// for capacity: a conflicting operation queues rather than being refused,
+// so a sequential client's back-to-back requests are never told the control
+// plane is busy. The composition root (this function) is the only place a
+// gate is constructed; operations take them as separate parameters and
+// compose in the canonical order.
+type domainGates struct {
+	config, vault, content, session, git, filesystem control.Admission
+}
+
+func (s *WSServer) domainGates() domainGates {
+	return domainGates{
+		config:     capability.Gate(capability.GateConfig, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		vault:      capability.Gate(capability.GateVault, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		content:    capability.Gate(capability.GateContent, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),
+	}
 }
 
 func (s *WSServer) Start(ctx context.Context) error {
@@ -811,6 +1011,11 @@ type RPCError struct {
 type wsConn struct {
 	out *outbound.Conn
 	id  uint64
+	// methods is this connection's materialised control-handler set
+	// (registration.go): method → submission + handler closure. The handlers
+	// are constructed with THIS connection's Responder, so the set is
+	// connection-scoped, built once on first control frame.
+	methods map[string]controlMethod
 }
 
 func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
@@ -1295,8 +1500,8 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// WebSocket connections.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-
 	wconn := newWSConn(s, conn, s.nextConnID.Add(1))
+
 	s.registerConn(wconn)
 	defer s.unregisterConn(wconn)
 	// Closing the outbound side closes the socket and stops the pump. It
@@ -1304,6 +1509,10 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// stuck renderer.
 	defer wconn.out.Close()
 	state := newConnState()
+	// Materialise the connection's control-handler set once, here, where the
+	// connState exists: the handlers' build closures capture it (and the
+	// connection's Responder), so every dispatch after this has its state.
+	wconn.methods = connMethods(s.methods, wconn, state)
 	readErr := make(chan error, 1)
 	go s.readLoop(ctx, wconn, state, readErr)
 
@@ -1416,125 +1625,55 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		return
 	}
 
-	switch req.Method {
-	case "open":
-		// handleOpen must NOT run on the read loop. Opening a saved
-		// connection can raise the connection-password ask (the prompt
-		// rung of the auth ladder) and block until the renderer answers —
-		// and the answer arrives over THIS websocket, which the read loop
-		// is what consumes. Running the dial on the read loop would make
-		// the resolution unreadable: the open would wait forever on a
-		// response the same loop is blocked from reading. The write mutex
-		// serializes the ack; connState is mutex-guarded, so the open can
-		// proceed beside the loop reading resize/close for OTHER sessions.
-		go s.handleOpen(ctx, wconn, state, req)
-	case "resize":
-		s.handleResize(wconn, state, req)
-	case "close":
-		s.handleClose(wconn, state, req)
-	case "attach":
-		s.handleAttach(ctx, wconn, state, req)
-	case "ack":
-		s.handleAck(req)
-	case "profiles.list", "profiles.create", "profiles.update", "profiles.delete",
-		"profiles.effective", "profiles.patch":
-		s.handleProfileMethod(ctx, wconn, req)
-	case "git.open", "git.status", "git.diff", "git.stage", "git.unstage",
-		"git.stageAll", "git.unstageAll", "git.commit", "git.headMessage",
-		"git.log", "git.remote", "git.close":
-		s.handleGitMethod(ctx, wconn, state, req)
-	case "profiles.importTabby":
-		s.handleImportTabby(ctx, wconn, req)
-	case "profiles.tabbyPreview":
-		s.handleTabbyPreview(ctx, wconn, req)
-	case "profiles.tabbyExecute":
-		s.handleTabbyExecute(ctx, wconn, req)
-	case "profiles.moveImpact":
-		s.handleProfileMoveImpact(wconn, req)
-	case "secrets.usage":
-		s.handleSecretUsageMethod(ctx, wconn, req)
-	case "secrets.savePassword", "secrets.saveKeyMaterial", "secrets.saveKeyPassphrase":
-		s.handleSecretMintMethod(ctx, wconn, req)
-	case "secrets.detect":
-		s.handleSecretsDetect(wconn, req)
-	case "secrets.captureSave":
-		s.handleCaptureSave(ctx, wconn, req)
-	case "secrets.captureDismiss":
-		s.handleCaptureDismiss(ctx, wconn, req)
-	case "files.open", "files.list", "files.read", "files.watch",
-		"files.close", "files.reveal":
-		s.handleFilesMethod(ctx, wconn, state, req)
-	case "groups.impact":
-		s.handleGroupImpact(wconn, req)
-	case "groups.apply":
-		s.handleGroupApply(wconn, req)
-	case "groups.list", "groups.create", "groups.update", "groups.delete":
-		s.handleGroupMethod(wconn, req)
-	case "settings.describe", "settings.getSnapshot", "settings.set", "settings.reset",
-		"settings.secretSet", "settings.secretDelete", "settings.secretExists":
-		s.handleSettingsMethod(wconn, req)
-	case "sessions.status":
-		s.handleSessionsStatus(wconn, req)
-	case "export.manifest", "export.configExport", "export.portableEncrypted",
-		"export.backup", "export.import", "export.importPortable":
-		s.handleExportMethod(ctx, wconn, req)
-	case "connections.test":
-		s.handleConnectionsTest(ctx, wconn, req)
-	case "connections.trustHostKey":
-		s.handleConnectionsTrustHostKey(ctx, wconn, req)
-	case "sshConfig.aliases":
-		s.handleSSHConfigAliases(ctx, wconn, req)
-	case "sshConfig.path":
-		s.handleSSHConfigPath(ctx, wconn, req)
-	case "tunnel.open":
-		s.handleTunnelOpen(ctx, wconn, req)
-	case "tunnel.stop":
-		s.handleTunnelStop(wconn, req)
-	case "ports.status", "ports.sample", "ports.pause", "ports.visible":
-		s.handlePortsMethod(wconn, req)
-	case "dialog.openFile":
-		s.handleDialogOpenFile(ctx, wconn, req)
-	case "shell.environmentObserved":
-		s.handleShellEnvironmentObserved(ctx, wconn, req)
-	case "shell.openUrl":
-		s.handleShellOpenUrl(ctx, wconn, req)
-	case "history.query":
-		s.handleHistoryQuery(ctx, wconn, req)
-	case "history.record":
-		s.handleHistoryRecord(ctx, wconn, state, req)
-	case "fs.complete":
-		s.handleFsComplete(wconn, req)
-	case "shell.footprint.status":
-		s.handleShellFootprintStatus(ctx, wconn, req)
-	case "shell.footprint.uninstall":
-		s.handleShellFootprintUninstall(ctx, wconn, req)
-	case "shell.complete":
-		s.handleShellComplete(ctx, wconn, req)
-	case "shell.integrate":
-		s.handleShellIntegrate(wconn, req)
-	case "shell.launcherCommand":
-		s.handleShellLauncherCommand(ctx, wconn, req)
-	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
-		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
-		"vault.setAutoSeal", "vault.activity", "vault.inventory",
-		"vault.createSecret", "vault.renameSecret", "vault.replaceSecret",
-		"vault.deleteSecret", "vault.resolveLine":
-		s.handleVaultMethod(ctx, wconn, req)
-	// Not routed through handleVaultMethod: that gate refuses when the vault
-	// lifecycle is absent, and a reset must work on a vault that is broken or
-	// half-built — which is the only state it is ever wanted in.
-	case "vault.resetPreview":
-		s.handleVaultResetPreview(ctx, wconn, req)
-	case "vault.reset":
-		s.handleVaultReset(ctx, wconn, req)
-	case "vault.unlockResolved":
-		s.handleUnlockResolved(wconn, req)
-	case "connections.passwordResolved":
-		s.handlePasswordResolved(wconn, req)
-	default:
+	// Dispatch through the registration set: the method's submission decides
+	// how the work runs (immediate on the read loop, on a worker under the
+	// lane, or refused) — there is no branch on method names here, and no
+	// switch. The per-connection handler set is materialised once per
+	// connection in handleSession.
+	m, ok := s.connMethodsFor(wconn)[req.Method]
+	if !ok {
 		resp := newJSONRPCError(req.ID, -32601, "Method not found")
 		_ = respond(wconn, resp)
+		return
 	}
+	rej := m.submission.TrySubmit(ctx, control.Task{Run: func(pctx context.Context) {
+		m.handle(pctx, req)
+	}})
+	if rej == nil {
+		return
+	}
+	// Refused. A request (has an id) answers with the saturation error; a
+	// notification (no id) has no response to carry it, so the server emits
+	// the rate-limited control.saturated notification instead.
+	if req.ID != nil {
+		_ = wconn.TryError(req.ID, saturationRPCError(rej))
+		return
+	}
+	s.emitSaturatedNotification(wconn, req.Method, rej)
+}
+
+// connMethodsFor returns the connection's materialised handler set. It is
+// built once in handleSession, where the connState exists (the handlers'
+// build closures capture it), so a real connection always has its set before
+// its read loop starts. Hand-build wsConns in tests that never dispatch have
+// a nil map; dispatch on one is a test bug, not a supported path.
+func (s *WSServer) connMethodsFor(wconn *wsConn) map[string]controlMethod {
+	if wconn.methods == nil {
+		wconn.methods = connMethods(s.methods, wconn, nil)
+	}
+	return wconn.methods
+}
+
+// emitSaturatedNotification sends the control.saturated notification for a
+// refused notification, rate-limited per (methodClass, scope): a burst of
+// refused notifications must not flood the wire.
+func (s *WSServer) emitSaturatedNotification(wconn Responder, method string, rej *control.Rejection) {
+	class := methodClassFor(method)
+	if !s.satNotify.allow(class, rej.Scope) {
+		return
+	}
+	params := saturatedNotificationParamsFor(class, rej.Scope)
+	_ = wconn.TryNotify("control.saturated", mustMarshal(params))
 }
 
 // --- control-plane handlers -----------------------------------------------
@@ -1556,261 +1695,6 @@ func desiredModeForAck(remote *ssh.ConnectConfig) string {
 	default:
 		return string(profile.DesiredScript)
 	}
-}
-
-// handleOpen creates a new session and output ring.
-//
-// Per AD-7: the server assigns the authoritative session-id. The JSON-RPC
-// request id serves as the correlation-id — we do NOT add a second
-// correlationId field, because two correlation identifiers for one exchange
-// is redundant state with two owners.
-func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
-	var params openParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	cfg := session.Config{
-		Kind:     session.KindLocal,
-		Cols:     params.Cols,
-		Rows:     params.Rows,
-		XPixel:   params.XPixel,
-		YPixel:   params.YPixel,
-		Enhanced: params.Enhanced,
-	}
-	// ProfileID is deliberately NOT set here. It is recorded below, only once
-	// the resolver has accepted it, because a local PTY has no profile and
-	// setting it up front lets a renderer attach any profile id to a local
-	// session it opens. sessions.status would then report that profile live and
-	// the connection list would draw a row as connected with nothing behind it
-	// (nocx-uxs5.4).
-
-	// SSH session — when kind="ssh", open a remote channel instead of local PTY.
-	if params.Kind == "ssh" {
-		var host string
-		var remote *ssh.ConnectConfig
-
-		if params.ProfileID != "" {
-			// Profile-based resolution: look up the stored profile, resolve
-			// credentials and jump hosts through the profile resolver.
-			if !s.resolverOK {
-				resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
-				_ = respond(wconn, resp)
-				return
-			}
-
-			var err error
-			host, remote, err = s.resolver.Resolve(params.ProfileID)
-			if err != nil {
-				s.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
-				// Resolving reads the stored password, so a sealed vault surfaces
-				// here — the renderer needs the reason to offer an unlock.
-				_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
-				return
-			}
-
-			remote.Cols = params.Cols
-			remote.Rows = params.Rows
-			remote.XPixel = params.XPixel
-			remote.YPixel = params.YPixel
-			remote.RemoteLauncher = s.remoteLauncher
-
-			s.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
-
-			cfg.Kind = session.KindRemote
-			cfg.Host = host
-			cfg.Remote = remote
-			// Recorded here and nowhere else: the resolver has just accepted this
-			// id, so the association is the backend's own conclusion rather than
-			// the renderer's claim.
-			cfg.ProfileID = params.ProfileID
-			// CredentialID from the resolver: scoped revocation matches
-			// sessions by credential. Empty for sessions with no linked
-			// credential (inline auth).
-			cfg.CredentialID = remote.CredentialID
-
-		} else if params.Host != "" {
-			// Direct host resolution: resolve through ~/.ssh/config (ssh -G)
-			// and build a minimal ConnectConfig. Used for SSH aliases from
-			// the config file — no stored profile involved.
-			if s.sshConfigResolver == nil {
-				resp := newJSONRPCError(req.ID, -32603, "SSH config resolver not available")
-				_ = respond(wconn, resp)
-				return
-			}
-
-			resolved, err := s.sshConfigResolver.ResolveConfig(ctx, params.Host)
-			if err != nil {
-				s.log.Warn("SSH config resolution degraded for direct host", "host", params.Host, "error", err)
-			}
-
-			user := params.User
-			if user == "" && resolved != nil && resolved.User != "" {
-				user = resolved.User
-			}
-			port := 0
-			if resolved != nil && resolved.Port > 0 {
-				port = resolved.Port
-			}
-			remoteHost := params.Host
-			if resolved != nil && resolved.HostName != "" {
-				remoteHost = resolved.HostName
-			}
-
-			var keyFile string
-			if resolved != nil {
-				keyFile = resolved.IdentityFile
-			}
-			remote = &ssh.ConnectConfig{
-				User:           user,
-				Port:           port,
-				KeyFile:        keyFile,
-				Cols:           params.Cols,
-				Rows:           params.Rows,
-				RemoteLauncher: s.remoteLauncher,
-			}
-
-			s.log.Info("SSH open via direct host", "host", params.Host, "resolvedHost", remoteHost, "user", user)
-
-			cfg.Kind = session.KindRemote
-			cfg.Host = remoteHost
-			cfg.Remote = remote
-			// No ProfileID — this is not a saved profile. The usage tracker
-			// does not record it.
-		} else {
-			resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
-			_ = respond(wconn, resp)
-			return
-		}
-		// Shell pin (nocx-pu4.1): the open may name the far shell the
-		// launcher must target. A pin beats auto-detection — a user who
-		// knows their host runs zsh can say so, and where detection is
-		// wrong they have an override. Anything else is ignored with a
-		// warn, never honoured: detection is the safe degrade for a
-		// meaningless pin, and the launcher refuses unmapped kinds rather
-		// than guessing if one slips past.
-		if params.Shell != "" {
-			switch ssh.ShellKind(params.Shell) {
-			case ssh.ShellBash, ssh.ShellZsh, ssh.ShellUnknown, ssh.ShellAuto:
-				remote.Shell = ssh.ShellKind(params.Shell)
-			default:
-				s.log.Warn("ignoring unknown shell pin", "profileId", params.ProfileID, "shell", params.Shell)
-			}
-		}
-	}
-
-	sess, err := s.registry.Open(ctx, cfg)
-	if err != nil {
-		s.log.Error("failed to open session", "error", err)
-		// A sealed vault surfaces here for EVERY connection that needs it —
-		// this is still a vault access, and the renderer must get the reason
-		// so the vault-owned unlock prompt appears instead of an error
-		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
-		if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
-			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
-			return
-		}
-		// Classify the SSH error through the same taxonomy the probe uses
-		// so the user sees what actually failed, not "Internal error".
-		pr := classifyProbeError(err)
-		var msg string
-		if pr.err == nil {
-			msg = string(pr.outcome) + ": " + pr.detail
-		} else {
-			msg = err.Error() // unclassifiable — use the raw wrapped error
-		}
-		resp := newJSONRPCError(req.ID, -32603, msg)
-		// For host-key errors, attach the evidence so the renderer can
-		// offer the accept-on-first-use dialog (the same one the probe
-		// path raises). Without this, open shows "Terminal failed to
-		// start" and the user has no way to accept the key (nocx-shat).
-		if hk := hostKeyInfoFromError(err); hk != nil {
-			resp.Error.Data = hk
-		}
-		_ = respond(wconn, resp)
-		return
-	}
-
-	state.add(sess)
-
-	rx := s.getOrCreateRx(sess.ID())
-	if rx == nil {
-		state.remove(sess.ID())
-		_ = s.registry.Close(sess.ID())
-		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
-		_ = respond(wconn, resp)
-		return
-	}
-	rx.setSubscriber(wconn, state)
-
-	// Port discovery (nocx-wzc4.2): only now, once the session is fully
-	// established (ring created, subscriber attached) is the target "up" —
-	// a session that failed its ring setup must not leave a discovery
-	// target behind with nobody to tear it down.
-	switch {
-	case cfg.ProfileID != "":
-		s.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)
-	case cfg.Kind == session.KindLocal:
-		// A local tab is a target too: the machine listens like any host,
-		// and the same ladder finds it (nocx-wzc4.8). Keyed by the
-		// reserved LocalTargetID, torn down when the last local tab closes.
-		s.discoveryUpLocal()
-	}
-
-	// cwd rides the open result so the tab has a name before any program sets
-	// a title (nocx-9vr). It is the starting directory only — following `cd`
-	// needs OSC 7 (nocx-5mn.2).
-	// shellIntegrationReason rides it too: a launcher decline (or a
-	// configured RemoteCommand) must be visible in the product, never
-	// log-only (AGENTS.md), and the open ack is the one result every session
-	// produces before any of its traffic. ReasonNone means integration
-	// succeeded or was never attempted (nocx-r52q, nocx-xs1d).
-	// desiredMode carries the RESOLVED destination mode (nocx-mlm7): the
-	// connection-scope default the tab's capability control starts from —
-	// script wraps and installs automatically, raw adds nothing, relay is
-	// consent-gated. It is the mode, never proof integration succeeded: the
-	// reason field and the arrival of markers are what confirm or downgrade
-	// the tab's state.
-	result := map[string]string{
-		"sessionId":              string(sess.ID()),
-		"cwd":                    sess.Cwd(),
-		"shellIntegrationReason": string(sess.ShellIntegrationReason()),
-		"desiredMode":            desiredModeForAck(cfg.Remote),
-	}
-	resultJSON, _ := json.Marshal(result)
-	resp := newJSONRPCResult(req.ID, resultJSON)
-	_ = respond(wconn, resp)
-
-	// Stored forwards (nocx-wzc4.5): replay the profile's configured
-	// forwards onto the connection. Deliberately ASYNC and only after the
-	// ack — a slow connector acquire must never delay the open result.
-	// The rows are connection-owned, not tab-owned (spec §7.3): closing
-	// this tab leaves them running.
-	if cfg.ProfileID != "" {
-		go s.replayStoredForwards(cfg.ProfileID, cfg.Host, cfg.Remote)
-	}
-
-	// Start the PTY → ring output pump only after the ack is sent.
-	// AD-7: the ack must precede the session's own traffic in both
-	// directions, otherwise the first prompt races the open result and
-	// the client drops it (its sessionId is still null).
-	// Background is deliberate — server/session-owned, the canonical member
-	// of that class. Owner: the session and its replay ring, which outlive
-	// every WebSocket (AD-9); the pump must survive a disconnect so the
-	// session's output keeps flowing into the ring for the next reattach.
-	// Closing event: session teardown — closeSession's registry.Close, which
-	// ends StartOutput and lets the pump return.
-	go s.pumpToRing(context.Background(), sess, rx.ring)
-
-	// Start exactly one monitorExit goroutine per session (DEFECT 2).
-	rx.monitorOnce.Do(func() {
-		go s.monitorExit(rx, sess)
-	})
-
-	sidBytes, _ := session.IDToBytes(sess.ID())
-	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, 0)
 }
 
 // replayStoredForwards opens the profile's stored forwards at connect time
@@ -1884,206 +1768,6 @@ func (s *WSServer) trackTunnelConnectionOwned(t *tunnel.Tunnel) {
 	s.tunnelMu.Lock()
 	s.tunnels[t.ID] = t
 	s.tunnelMu.Unlock()
-}
-
-func (s *WSServer) handleResize(wconn Responder, state *connState, req jsonrpcRequest) {
-	var params resizeParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || params.Cols == 0 || params.Rows == 0 {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId, cols, and rows required")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	sid := session.ID(params.SessionID)
-	if !state.has(sid) {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	sess, err := s.registry.Get(sid)
-	if err != nil {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	// The resize is handed to the session's lane, which applies it off the
-	// read loop with a per-session cancellable context: a window-change
-	// blocked on a dead transport must not freeze this connection, and the
-	// session's close (which cancels the lane) must not queue behind it.
-	// The response completes when the lane settles the op (applied,
-	// superseded, or cancelled by close) — the renderer never reads it.
-	op := &resizeOp{
-		cols:   params.Cols,
-		rows:   params.Rows,
-		xpixel: params.XPixel,
-		ypixel: params.YPixel,
-		done: func(err error) {
-			if err != nil {
-				resp := newJSONRPCError(req.ID, -32603, "Internal error")
-				_ = respond(wconn, resp)
-				return
-			}
-			result, _ := json.Marshal(map[string]any{})
-			resp := newJSONRPCResult(req.ID, result)
-			_ = respond(wconn, resp)
-		},
-	}
-	if !s.laneFor(sid, sess).enqueue(op) {
-		// The session's close was already admitted (a second connection may
-		// have closed it between the checks above and the enqueue): the
-		// resize cannot reach it. Same refusal as a session the registry
-		// no longer holds.
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
-	}
-}
-
-func (s *WSServer) handleClose(wconn Responder, state *connState, req jsonrpcRequest) {
-	var params closeParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	sid := session.ID(params.SessionID)
-	if !state.has(sid) {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	// Close is terminal for the session's resize lane: from here, queued
-	// and in-flight resizes are cancelled and nothing new may reach the
-	// session. Runs BEFORE the teardown below, and never waits for the
-	// lane's worker — the one operation that can unblock a dead resize
-	// must not queue behind it.
-	s.closeLane(sid)
-
-	s.closeSession(sid)
-
-	state.remove(sid)
-
-	result, _ := json.Marshal(map[string]any{})
-	resp := newJSONRPCResult(req.ID, result)
-	_ = respond(wconn, resp)
-}
-
-// handleAttach reattaches a connection to a session's output ring at the
-// given byte offset (AD-9 reconnect).
-//
-//	--> {"jsonrpc":"2.0","id":N,"method":"attach","params":{"sessionId":"...","offset":1234}}
-//
-// Result when offset is still in the ring:
-//
-//	<-- {"jsonrpc":"2.0","id":N,"result":{"resumed":true,"from":1234}}
-//
-// Result when offset is too old (ring has advanced past it):
-//
-//	<-- {"jsonrpc":"2.0","id":N,"result":{"reset":true,"from":5678}}
-//
-// Unknown sessionId → JSON-RPC error.
-// Offset ahead of written → JSON-RPC error (DEFECT 4).
-// Duplicate attach on the same connection → JSON-RPC error (DEFECT 3).
-func (s *WSServer) handleAttach(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
-	var params attachParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and offset required")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	sid := session.ID(params.SessionID)
-
-	sess, err := s.registry.Get(sid)
-	if err != nil {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	// Reject duplicate attach on the same connection (DEFECT 3).
-	// Without this guard, handleOpen already started a ringToConn for the
-	// open connection; a second attach on the same session would start
-	// another ringToConn, doubling every output byte for that subscriber.
-	if state.has(sid) {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: already attached to this session")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	rx := s.getRx(sid)
-	if rx == nil {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
-		return
-	}
-
-	// Reject offsets that run ahead of what the ring has produced (DEFECT 4).
-	// ring.ack already validates this; attach must be equally distrustful.
-	// An offset > written means the client claims to have received bytes
-	// that were never produced — a silent data skip waiting to happen.
-	// Uses the locking accessor rather than reaching into the ring's mu.
-	w := rx.ring.writtenLocked()
-	if params.Offset > w {
-		resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf("Invalid params: offset %d exceeds written %d", params.Offset, w))
-		_ = respond(wconn, resp)
-		return
-	}
-
-	_, from, needsReset := rx.ring.snapshot(params.Offset)
-
-	state.add(sess)
-	rx.setSubscriber(wconn, state)
-
-	if needsReset {
-		respJSON, _ := json.Marshal(map[string]any{"reset": true, "from": from})
-		resp := newJSONRPCResult(req.ID, respJSON)
-		_ = respond(wconn, resp)
-	} else {
-		respJSON, _ := json.Marshal(map[string]any{"resumed": true, "from": from})
-		resp := newJSONRPCResult(req.ID, respJSON)
-		_ = respond(wconn, resp)
-	}
-
-	// Files (fm-w8): deliver the dirty paths the session's bindings
-	// accumulated while no connection was attached. Runs after the attach
-	// response — and after setSubscriber above, so the notifications
-	// resolve to THIS connection (spec §5.2: the destination is resolved
-	// at emit time, and a reconnect is exactly when the accumulation was
-	// made).
-	s.flushFilesChanged(sid, wconn)
-
-	sidBytes, _ := session.IDToBytes(sid)
-	go s.ringToConn(ctx, wconn, sidBytes, rx.ring, from)
-}
-
-// handleAck processes an ack notification (AD-9 trimming).
-//
-//	<-- {"jsonrpc":"2.0","method":"ack","params":{"sessionId":"...","offset":1234}}
-//
-// Offsets that run ahead of what was produced or go backwards are rejected
-// with a warn — the server never trusts the client blindly.
-func (s *WSServer) handleAck(req jsonrpcRequest) {
-	var params ackParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		s.log.Warn("ack invalid params")
-		return
-	}
-
-	sid := session.ID(params.SessionID)
-
-	rx := s.getRx(sid)
-	if rx == nil {
-		s.log.Warn("ack for unknown session", "session_id", string(sid))
-		return
-	}
-
-	if err := rx.ring.ack(params.Offset); err != nil {
-		s.log.Warn("ack rejected", "session_id", string(sid), "error", err)
-	}
 }
 
 // handleDataFrame routes an inbound binary frame to the correct session.
@@ -2290,13 +1974,15 @@ func (s *WSServer) notifyInputStalled(sid session.ID) {
 	}
 }
 
-// closeSession tears down the session and its ring. Looks up the ring
-// instead of creating one — closing a session that has no ring is a no-op
-// for the ring path (DEFECT 6).
-func (s *WSServer) closeSession(sid session.ID) {
-	// The registry entry is needed after Close to decide the discovery
-	// target teardown, so read it first.
-	sess, _ := s.registry.Get(sid)
+// closeSession tears down a session's transport state after its registry
+// entry has been closed: the ring, the files and git bindings, and the
+// discovery target. The registry close itself is the caller's — the
+// explicit-close handler closes it through the session operation, monitorExit
+// and Stop close it directly (AD-9) — because the session gate is a
+// capability concern and the teardown is transport lifecycle (migration map,
+// close finding). sess is the pre-close registry value, needed by the
+// discovery teardown; nil is tolerated (callers without it).
+func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// The subscriber is captured BEFORE removeRx — the git teardown below
 	// writes its notification to this capture, because at that moment an
 	// emit-time lookup finds nobody (spec §5.2, nocx-lzfb). monitorExit
@@ -2308,7 +1994,6 @@ func (s *WSServer) closeSession(sid session.ID) {
 		rx.ring.close()
 	}
 	s.removeRx(sid)
-	_ = s.registry.Close(sid)
 	s.filesSessionClosed(sid)
 	s.gitSessionClosed(sid, wconn)
 	s.discoverySessionClosed(sess)
@@ -2319,202 +2004,6 @@ func (s *WSServer) closeSession(sid session.ID) {
 // These methods back the connection-manager JSON-RPC calls (AD-1 control
 // plane). Each returns a JSON-RPC error (-32601) when the relevant store is
 // not wired (WithProfileRepository/WithGroupRepository not called).
-
-func (s *WSServer) handleProfileMethod(ctx context.Context, wconn Responder, req jsonrpcRequest) {
-	if s.profiles == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
-		return
-	}
-	switch req.Method {
-	case "profiles.list":
-		profs, err := s.profiles.LoadProfiles()
-		if err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
-			return
-		}
-		// Secret references stay backend-owned: hand the renderer row handles.
-		for i := range profs {
-			profs[i] = wireProfile(profs[i])
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(profs))
-	case "profiles.create":
-		var p profile.SSHProfile
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-			return
-		}
-		// Mint an ID when the renderer sends none.
-		if p.ID == "" {
-			p.ID = profile.NewProfileID("ssh", p.Name)
-		}
-		// The renderer names secrets by row handle; resolve to references
-		// before storage.
-		var wireErr error
-		if p.Options, wireErr = s.optionsFromWire(p.Options); wireErr != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: wireErr.Error()})
-			return
-		}
-		if err := s.profiles.CreateProfile(p); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
-			return
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(wireProfile(p)))
-	case "profiles.update":
-		var p profile.SSHProfile
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-			return
-		}
-		if p.ID == "" {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "id required"})
-			return
-		}
-		var wireErr error
-		if p.Options, wireErr = s.optionsFromWire(p.Options); wireErr != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: wireErr.Error()})
-			return
-		}
-		if err := s.profiles.UpdateProfile(p); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
-			return
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(wireProfile(p)))
-	case "profiles.delete":
-		var params struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-			return
-		}
-		if err := s.profiles.DeleteProfile(params.ID); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
-			return
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(true))
-	case "profiles.effective":
-		s.handleEffective(wconn, req)
-	case "profiles.patch":
-		s.handlePatch(wconn, req)
-	}
-}
-
-func (s *WSServer) handleGroupMethod(wconn Responder, req jsonrpcRequest) {
-	if s.groups == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "groups not available"})
-		return
-	}
-	switch req.Method {
-	case "groups.list":
-		groups, err := s.groups.LoadGroups()
-		if err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
-			return
-		}
-		// The renderer addresses secret bindings by row handle (ADR-0011 §2):
-		// convert every stored reference in the defaults before marshaling.
-		for i := range groups {
-			groups[i] = wireGroup(groups[i])
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(groups))
-	case "groups.create":
-		var g profile.ProfileGroup
-		if err := json.Unmarshal(req.Params, &g); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-			return
-		}
-		// Mint an ID when the renderer sends none, as profiles.create does.
-		if g.ID == "" {
-			g.ID = profile.NewGroupID(g.Name)
-		}
-		// Resolve the defaults' row handles to stored references (ADR-0011 §2)
-		// so storage never holds a secrow handle.
-		wg, werr := s.groupFromWire(g)
-		if werr != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})
-			return
-		}
-		g = wg
-		if err := s.groups.CreateGroup(g); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
-			return
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(wireGroup(g)))
-	case "groups.update":
-		var g profile.ProfileGroup
-		if err := json.Unmarshal(req.Params, &g); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-			return
-		}
-		if g.ID == "" {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "id required"})
-			return
-		}
-		// Resolve the defaults' row handles before comparing against storage,
-		// or the guard below would see every secret binding as a change.
-		wg, werr := s.groupFromWire(g)
-		if werr != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: werr.Error()})
-			return
-		}
-		g = wg
-		// Guard: ParentGroupID and Defaults cannot be changed through generic
-		// CRUD — the renderer MUST use groups.impact + groups.apply.
-		allGroups, loadErr := s.groups.LoadGroups()
-		if loadErr != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: loadErr.Error()})
-			return
-		}
-		var stored *profile.ProfileGroup
-		for i := range allGroups {
-			if allGroups[i].ID == g.ID {
-				stored = &allGroups[i]
-				break
-			}
-		}
-		if stored == nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "group not found"})
-			return
-		}
-		if g.ParentGroupID != stored.ParentGroupID {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "ParentGroupId can only be changed through groups.apply, not groups.update"})
-			return
-		}
-		if defaultsChanged(stored.Defaults, g.Defaults) {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Defaults can only be changed through groups.apply, not groups.update"})
-			return
-		}
-		if err := s.groups.UpdateGroup(g); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
-			return
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(wireGroup(g)))
-	case "groups.delete":
-		var params struct {
-			ID string `json:"id"`
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-			return
-		}
-		if params.ID == "" {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "id required"})
-			return
-		}
-
-		// Use atomic delete (promotes children to root).
-		ad, ok := s.groups.(interface{ DeleteGroupAtomic(string) error })
-		if !ok {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "group store does not support atomic delete"})
-			return
-		}
-		if err := ad.DeleteGroupAtomic(params.ID); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: profileMethodErrorCode(err), Message: err.Error()})
-			return
-		}
-		_ = wconn.TryResult(req.ID, mustMarshal(true))
-	}
-}
 
 // profileMethodErrorCode maps a store error to a JSON-RPC code, same pattern
 // as credentialErrorCode.
@@ -2547,18 +2036,6 @@ func defaultsChanged(a, b *profile.ProfileDefaults) bool {
 		return true
 	}
 	return string(aJSON) != string(bJSON)
-}
-
-// createSecret stores a secret with its catalogue metadata (ADR-0016): the
-// display name generated by the connection editor (or asked of the user on
-// the Secrets page) and the kind, both riding the vault's create sequence.
-// When the vault lifecycle is not wired, the plain store is used and the
-// secret records namelessly, rendering by fallback.
-func (s *WSServer) createSecret(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error) {
-	if s.vaultLifecycle != nil {
-		return s.vaultLifecycle.CreateNamed(ctx, value, meta)
-	}
-	return s.credentials.Create(ctx, value)
 }
 
 // errInvalidKeyMaterial is returned when key text does not parse as a private
@@ -2688,219 +2165,6 @@ type tabbyExecuteParams struct {
 // supplied), and plans every profile, group, and secret WITHOUT writing
 // anything. Returns the full importPlan for execution and a preview response
 // for the renderer. The plan is stored server-side by the returned token.
-func (s *WSServer) planTabbyImport(ctx context.Context, configYAML, passphrase string) (*importPlan, *TabbyPreviewResponse, error) {
-	cfg, err := importer.ParseTabbyConfig([]byte(configYAML))
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Decrypt vault and build secret plans. Each password plan carries
-	// the connection target the tabby vault keyed it to, so execution can
-	// bind the minted secret onto the right profile (ADR-0017 §1).
-	var credentials []credentialPlan
-	skipped := make([]SkippedInfo, 0)
-
-	if cfg.Vault != nil && cfg.Vault.Encrypted {
-		if passphrase == "" {
-			return nil, nil, errors.New("vault is encrypted: passphrase required")
-		}
-		vaultContents, decryptErr := importer.DecryptTabbyVault(cfg.Vault, passphrase)
-		if decryptErr != nil {
-			return nil, nil, decryptErr
-		}
-
-		for _, sec := range vaultContents.DecodedSecrets() {
-			var val string
-			umErr := json.Unmarshal(sec.Value, &val)
-			if umErr != nil || val == "" {
-				skipped = append(skipped, SkippedInfo{
-					SecretType: sec.Type,
-					Reason:     "unreadable value",
-				})
-				continue
-			}
-			switch sec.Type {
-			case "ssh:password":
-				var t struct {
-					User string `json:"user"`
-					Host string `json:"host"`
-					Port int    `json:"port"`
-				}
-				umErr = json.Unmarshal(sec.Key, &t)
-				if umErr != nil || t.Host == "" {
-					skipped = append(skipped, SkippedInfo{
-						SecretType: sec.Type,
-						Reason:     "unreadable key (missing host)",
-					})
-					continue
-				}
-				name := t.User + "@" + t.Host
-				credentials = append(credentials, credentialPlan{
-					name:       name,
-					secret:     val,
-					targetUser: t.User,
-					targetHost: t.Host,
-					targetPort: t.Port,
-				})
-
-			case "ssh:key-passphrase":
-				var k struct {
-					Hash string `json:"hash"`
-				}
-				umErr = json.Unmarshal(sec.Key, &k)
-				if umErr != nil || k.Hash == "" {
-					skipped = append(skipped, SkippedInfo{
-						SecretType: sec.Type,
-						Reason:     "unreadable key (missing hash)",
-					})
-					continue
-				}
-				keyName := privateKeyLabel(k.Hash)
-				credentials = append(credentials, credentialPlan{
-					name:         keyName,
-					secret:       val,
-					isPassphrase: true,
-				})
-
-			default:
-				skipped = append(skipped, SkippedInfo{
-					SecretType: sec.Type,
-					Reason:     "unhandled secret type",
-				})
-			}
-		}
-	}
-
-	// Convert profiles.
-	var profiles []profile.SSHProfile
-	for _, tp := range cfg.Profiles {
-		if tp.Type != "ssh" {
-			continue
-		}
-		p := importer.ConvertProfile(tp)
-		// Profiles no longer link to credentials (ADR-0017): a profile's
-		// secret references are backend-owned, and an import brings none.
-		profiles = append(profiles, p)
-	}
-
-	// Convert groups.
-	var groups []profile.ProfileGroup
-	for _, tg := range cfg.Groups {
-		var defaults *profile.ProfileDefaults
-		if tg.Defaults != nil {
-			d, decodeErr := profile.DecodeDefaults(tg.Defaults)
-			if decodeErr != nil {
-				return nil, nil, fmt.Errorf("group %q defaults: %w", tg.Name, decodeErr)
-			}
-			defaults = &d
-		}
-		groups = append(groups, profile.ProfileGroup{
-			ID:            tg.ID,
-			ParentGroupID: tg.ParentGroupID,
-			Name:          tg.Name,
-			Icon:          tg.Icon,
-			Color:         tg.Color,
-			Defaults:      defaults,
-			Editable:      true,
-		})
-	}
-
-	// Build per-entry preview lists.
-	profileEntries := make([]ProfileEntry, 0, len(profiles))
-	groupNames := make([]string, 0, len(groups))
-	secretEntries := make([]SecretEntry, 0, len(credentials))
-
-	// Determine which profiles collide (for setting their action).
-	existingProfileIDs := make(map[string]bool)
-	if s.profiles != nil {
-		existingProfs, _ := s.profiles.LoadProfiles()
-		for _, p := range existingProfs {
-			existingProfileIDs[p.ID] = true
-		}
-	}
-	for _, p := range profiles {
-		action := "new"
-		if p.ID != "" && existingProfileIDs[p.ID] {
-			action = "overwrite"
-		}
-		// No import-time credential linking remains (ADR-0017): a profile's
-		// secret references are backend-owned and imports carry none.
-		profileEntries = append(profileEntries, ProfileEntry{Name: p.Name, Action: action})
-	}
-	for _, g := range groups {
-		groupNames = append(groupNames, g.Name)
-	}
-	for _, cp := range credentials {
-		typ := "password"
-		if cp.isPassphrase {
-			typ = "passphrase"
-		}
-		secretEntries = append(secretEntries, SecretEntry{Name: cp.name, Type: typ})
-	}
-
-	// Build preview response with collision info.
-	preview := &TabbyPreviewResponse{
-		ProfilesToImport: len(profiles),
-		GroupsToImport:   len(groups),
-		SecretsToImport:  len(credentials),
-		ProfileEntries:   profileEntries,
-		GroupNames:       groupNames,
-		SecretEntries:    secretEntries,
-		SkippedSecrets:   skipped,
-	}
-
-	// Detect collisions by checking against current store state.
-	if s.profiles != nil {
-		existingProfs, _ := s.profiles.LoadProfiles()
-		existingIDs := make(map[string]bool, len(existingProfs))
-		for _, p := range existingProfs {
-			existingIDs[p.ID] = true
-		}
-		for _, p := range profiles {
-			if p.ID != "" && existingIDs[p.ID] {
-				preview.Collisions = append(preview.Collisions, CollisionInfo{
-					Kind:   "profile",
-					Name:   p.Name,
-					Policy: "overwrite",
-				})
-			}
-		}
-	}
-
-	if s.groups != nil {
-		existingGroups, _ := s.groups.LoadGroups()
-		existingIDs := make(map[string]bool, len(existingGroups))
-		for _, g := range existingGroups {
-			existingIDs[g.ID] = true
-		}
-		for _, g := range groups {
-			if g.ID != "" && existingIDs[g.ID] {
-				preview.Collisions = append(preview.Collisions, CollisionInfo{
-					Kind:   "group",
-					Name:   g.Name,
-					Policy: "overwrite",
-				})
-			}
-		}
-	}
-
-	// Determine secret provider.
-	preview.SecretProvider = s.secretProviderName(ctx)
-
-	// Build the plan and store it.
-	plan := &importPlan{
-		profiles: profiles,
-		groups:   groups,
-		creds:    credentials,
-	}
-	token, err := s.storePlan(plan)
-	if err != nil {
-		return nil, nil, fmt.Errorf("store plan: %w", err)
-	}
-	preview.PlanToken = token
-
-	return plan, preview, nil
-}
 
 // secretProviderName returns a human-readable name for where secrets would be
 // stored. Uses the vault lifecycle if wired, otherwise returns "secret store".
@@ -2917,108 +2181,6 @@ func (s *WSServer) secretProviderName(ctx context.Context) string {
 	return "encrypted file"
 }
 
-// handleTabbyPreview parses a Tabby config and returns a preview of what
-// would be imported, without writing anything. Uses planTabbyImport for the
-// shared planning logic.
-func (s *WSServer) handleTabbyPreview(ctx context.Context, wconn Responder, req jsonrpcRequest) {
-	if s.profiles == nil || s.groups == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
-		return
-	}
-	var params struct {
-		Config     string `json:"config"`
-		Passphrase string `json:"passphrase,omitempty"`
-	}
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: config (YAML string) required"})
-		return
-	}
-
-	plan, preview, err := s.planTabbyImport(ctx, params.Config, params.Passphrase)
-	if err != nil {
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Tabby preview: ", err))
-		return
-	}
-	_ = plan // stored server-side by preview.PlanToken
-	_ = wconn.TryResult(req.ID, mustMarshal(preview))
-}
-
-// handleTabbyExecute executes a previously previewed Tabby import plan.
-// Takes the plan token from the preview response.
-func (s *WSServer) handleTabbyExecute(ctx context.Context, wconn Responder, req jsonrpcRequest) {
-	if s.profiles == nil || s.groups == nil || s.credentials == nil || s.profileSvc == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "import not available"})
-		return
-	}
-	var params tabbyExecuteParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.PlanToken == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: planToken required"})
-		return
-	}
-
-	// Claim the plan so concurrent calls for the same token are rejected.
-	plan := s.claimPlan(params.PlanToken)
-	if plan == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Plan not found, expired, or already in progress. Please preview again."})
-		return
-	}
-
-	// On any failure, release the plan for retry (vault setup/unlock flow).
-	var succeeded bool
-	defer func() {
-		if !succeeded {
-			s.releasePlan(params.PlanToken)
-		}
-	}()
-
-	// Mint every secret, binding each password onto the profile whose options
-	// match the target the tabby vault keyed it to (ADR-0017 §1). Passphrases
-	// are minted as unbound rows: a passphrase belongs to a private key the
-	// import cannot fingerprint, and the connection editor binds it.
-	for _, cp := range plan.creds {
-		kind := vault.KindPassword
-		if cp.isPassphrase {
-			kind = vault.KindKeyPassphrase
-		}
-		secretID, err := s.createSecret(ctx, credential.NewSecret(cp.secret),
-			vault.SecretMeta{Name: cp.name, Kind: kind})
-		if err != nil {
-			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", err))
-			return
-		}
-		if cp.isPassphrase {
-			continue
-		}
-		for i := range plan.profiles {
-			o := &plan.profiles[i].Options
-			port := 0
-			if o.Port != nil {
-				port = *o.Port
-			}
-			user := ""
-			if o.User != nil {
-				user = *o.User
-			}
-			if user == cp.targetUser && o.Host == cp.targetHost && port == cp.targetPort {
-				o.PasswordSecret = string(secretID)
-				break
-			}
-		}
-	}
-
-	// No credential records are imported: the bindings live on the profiles.
-	result := s.profileSvc.AtomicImport(plan.profiles, plan.groups)
-	if len(result.ImportErrors) > 0 {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Import failed: " + result.ImportErrors[0]})
-		return
-	}
-
-	// All writes succeeded — remove the plan permanently.
-	s.finishPlan(params.PlanToken)
-	succeeded = true
-	_ = wconn.TryResult(req.ID, mustMarshal(result))
-}
-
 func privateKeyLabel(hash string) string {
 	short := hash
 	if len(short) > 8 {
@@ -3027,466 +2189,6 @@ func privateKeyLabel(hash string) string {
 	return "Tabby key " + short
 }
 
-func (s *WSServer) handleImportTabby(ctx context.Context, wconn Responder, req jsonrpcRequest) {
-	if s.profiles == nil || s.groups == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "profiles not available"})
-		return
-	}
-	var params struct {
-		Config     string `json:"config"`
-		Passphrase string `json:"passphrase,omitempty"`
-	}
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.Config == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: config (YAML string) required"})
-		return
-	}
-
-	cfg, err := importer.ParseTabbyConfig([]byte(params.Config))
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Parse Tabby config: " + err.Error()})
-		return
-	}
-
-	// Decrypt vault and build credentials + profile matching.
-	// Profiles carry their secret bindings directly (ADR-0017): the minted
-	// password reference goes into the profile's own options, matched by the
-	// connection target the tabby vault keyed it to.
-	type pwKey struct {
-		user, host string
-		port       int
-	}
-	pwLookup := make(map[pwKey]credential.SecretID)
-
-	if cfg.Vault != nil && cfg.Vault.Encrypted {
-		if s.credentials == nil {
-			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", errors.New("credential store not available")))
-			return
-		}
-		if params.Passphrase == "" {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Vault is encrypted: passphrase required"})
-			return
-		}
-		vaultContents, err := importer.DecryptTabbyVault(cfg.Vault, params.Passphrase)
-		if err != nil {
-			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Decrypt vault: ", err))
-			return
-		}
-
-		// Plan every secret before creating any, so a shape we cannot read
-		// never leaves an orphaned secret behind.
-		//
-		// A secret we cannot interpret is SKIPPED, never fatal. Tabby's vault
-		// is shared by every plugin the user has installed, so an unknown type
-		// is normal rather than exceptional — and aborting on one would throw
-		// away the profiles and groups that imported fine. The shapes below are
-		// verified against tabby-ssh/src/services/passwordStorage.service.ts.
-		type secretPlan struct {
-			ts        importer.TabbySecret
-			val       string
-			keyName   string // private-key identifier (key-passphrase)
-			keyTarget *pwKey // connection target (password)
-		}
-		plans := make([]secretPlan, 0, len(vaultContents.DecodedSecrets()))
-		skipped := 0
-		for _, sec := range vaultContents.DecodedSecrets() {
-			var val string
-			if err := json.Unmarshal(sec.Value, &val); err != nil || val == "" {
-				s.log.Warn("tabby import: skipping secret with unreadable value", "type", sec.Type)
-				skipped++
-				continue
-			}
-			switch sec.Type {
-			case "ssh:password":
-				// getVaultKeyForConnection → {user, host, port}
-				var t struct {
-					User string `json:"user"`
-					Host string `json:"host"`
-					Port int    `json:"port"`
-				}
-				if err := json.Unmarshal(sec.Key, &t); err != nil || t.Host == "" {
-					s.log.Warn("tabby import: skipping password secret with unreadable key")
-					skipped++
-					continue
-				}
-				plans = append(plans, secretPlan{
-					ts:        sec,
-					val:       val,
-					keyTarget: &pwKey{user: t.User, host: t.Host, port: t.Port},
-				})
-			case "ssh:key-passphrase":
-				// getVaultKeyForPrivateKey → {hash: id}. It is an object, not a
-				// string: reading it as a string failed for every real Tabby
-				// vault and, before this, aborted the whole import.
-				var k struct {
-					Hash string `json:"hash"`
-				}
-				if err := json.Unmarshal(sec.Key, &k); err != nil || k.Hash == "" {
-					s.log.Warn("tabby import: skipping key-passphrase secret with unreadable key")
-					skipped++
-					continue
-				}
-				plans = append(plans, secretPlan{ts: sec, val: val, keyName: privateKeyLabel(k.Hash)})
-			default:
-				// Everything else, including Tabby's "file" secrets. Those hold
-				// base64 file CONTENT — usually a private key — which is not a
-				// credential secret and does not belong in a password slot.
-				// Importing key material is its own feature, not a side effect
-				// of this one.
-				s.log.Info("tabby import: skipping secret of unhandled type", "type", sec.Type)
-				skipped++
-			}
-		}
-		if skipped > 0 {
-			s.log.Info("tabby import: some vault secrets were not imported", "skipped", skipped, "imported", len(plans))
-		}
-
-		// All secrets validated. Create each one in the SecretStore, carrying
-		// the name the credential will bear (ADR-0016: the secret owns its
-		// name, and an import mints both together).
-		for _, p := range plans {
-			name := p.keyName
-			kind := vault.KindKeyPassphrase
-			if p.ts.Type == "ssh:password" {
-				name = p.keyTarget.user + "@" + p.keyTarget.host
-				kind = vault.KindPassword
-			}
-			secretID, err := s.createSecret(ctx, credential.NewSecret(p.val),
-				vault.SecretMeta{Name: name, Kind: kind})
-			if err != nil {
-				_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", err))
-				return
-			}
-			switch p.ts.Type {
-			case "ssh:password":
-				// The secret is bound to the connection it belongs to; no
-				// credential record is minted (ADR-0017 §1).
-				pwLookup[*p.keyTarget] = secretID
-			case "ssh:key-passphrase":
-				// Passphrases stay unbound rows: a passphrase belongs to a
-				// private key, and the imported key is a path whose
-				// fingerprint is not readable at import time. The connection
-				// editor's secret picker binds it where the user chooses.
-				_ = p.keyName
-			}
-		}
-	}
-
-	// Domain service path: atomic import.
-	var profiles []profile.SSHProfile
-	for _, tp := range cfg.Profiles {
-		if tp.Type != "ssh" {
-			continue
-		}
-		p := importer.ConvertProfile(tp)
-		if p.Options.User != nil && p.Options.Host != "" {
-			port := 0
-			if p.Options.Port != nil {
-				port = *p.Options.Port
-			}
-			user := ""
-			if p.Options.User != nil {
-				user = *p.Options.User
-			}
-			if secretID, ok := pwLookup[pwKey{user: user, host: p.Options.Host, port: port}]; ok {
-				p.Options.PasswordSecret = string(secretID)
-			}
-		}
-		profiles = append(profiles, p)
-	}
-
-	var groups []profile.ProfileGroup
-	for _, tg := range cfg.Groups {
-		var defaults *profile.ProfileDefaults
-		if tg.Defaults != nil {
-			d, err := profile.DecodeDefaults(tg.Defaults)
-			if err != nil {
-				_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: fmt.Sprintf("Import failed: group %q defaults: %v", tg.Name, err)})
-				return
-			}
-			defaults = &d
-		}
-		groups = append(groups, profile.ProfileGroup{
-			ID:            tg.ID,
-			ParentGroupID: tg.ParentGroupID,
-			Name:          tg.Name,
-			Icon:          tg.Icon,
-			Color:         tg.Color,
-			Defaults:      defaults,
-			Editable:      true,
-		})
-	}
-
-	result := s.profileSvc.AtomicImport(profiles, groups)
-	if len(result.ImportErrors) > 0 {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Import failed: " + result.ImportErrors[0]})
-		return
-	}
-	_ = wconn.TryResult(req.ID, mustMarshal(result.ProfilesImported))
-}
-
-// --- settings control-plane handlers -------------------------------------
-// findDescriptor looks up a setting declaration by key.
-func (s *WSServer) findDescriptor(key string) settings.Descriptor {
-	for _, d := range s.settings.Descriptors() {
-		if d.Key() == key {
-			return d
-		}
-	}
-	return nil
-}
-
-// handleSettingsMethod dispatches settings.* RPCs. Returns -32601 when the
-func (s *WSServer) handleSettingsMethod(wconn Responder, req jsonrpcRequest) {
-	if s.settings == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "Method not found"})
-		return
-	}
-	switch req.Method {
-	case "settings.describe":
-		s.handleSettingsDescribe(wconn, req)
-	case "settings.getSnapshot":
-		s.handleSettingsGetSnapshot(wconn, req)
-	case "settings.set":
-		s.handleSettingsSet(wconn, req)
-	case "settings.reset":
-		s.handleSettingsReset(wconn, req)
-	case "settings.secretSet":
-		s.handleSettingsSecretSet(wconn, req)
-	case "settings.secretDelete":
-		s.handleSettingsSecretDelete(wconn, req)
-	case "settings.secretExists":
-		s.handleSettingsSecretExists(wconn, req)
-	}
-}
-
-func (s *WSServer) handleSettingsDescribe(wconn Responder, req jsonrpcRequest) {
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]any{
-		"declarations": s.settings.Declarations(),
-	}))
-}
-
-func (s *WSServer) handleSettingsGetSnapshot(wconn Responder, req jsonrpcRequest) {
-	snap, err := s.settings.GetSnapshot()
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "settings.getSnapshot: " + err.Error()})
-		return
-	}
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]any{
-		"values":     snap.Values,
-		"overridden": snap.Overridden,
-		"revision":   snap.Revision,
-	}))
-}
-
-// settingsSetParams carries the key and the untyped value.
-type settingsSetParams struct {
-	Key   string          `json:"key"`
-	Value json.RawMessage `json:"value"`
-}
-
-func (s *WSServer) handleSettingsSet(wconn Responder, req jsonrpcRequest) {
-	var p settingsSetParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-		return
-	}
-
-	desc := s.findDescriptor(p.Key)
-	if desc == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown setting: " + p.Key})
-		return
-	}
-	if desc.Control() == settings.ControlSecret {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Secret settings must use settings.secretSet"})
-		return
-	}
-
-	var setErr error
-	switch desc.Control() {
-	case settings.ControlToggle:
-		var b bool
-		if err := json.Unmarshal(p.Value, &b); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected boolean"})
-			return
-		}
-		bk, ok := desc.(*settings.Bool)
-		if !ok {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as a toggle but is not a Bool key"})
-			return
-		}
-		setErr = s.settings.SetBool(bk, b)
-	case settings.ControlText:
-		var str string
-		if err := json.Unmarshal(p.Value, &str); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected string"})
-			return
-		}
-		sk, ok := desc.(*settings.String)
-		if !ok {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as text but is not a String key"})
-			return
-		}
-		setErr = s.settings.SetString(sk, str)
-	case settings.ControlNumber:
-		var n float64
-		if err := json.Unmarshal(p.Value, &n); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected number"})
-			return
-		}
-		nk, ok := desc.(*settings.Number)
-		if !ok {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as a number but is not a Number key"})
-			return
-		}
-		setErr = s.settings.SetNumber(nk, n)
-	case settings.ControlSelect:
-		var str string
-		if err := json.Unmarshal(p.Value, &str); err != nil {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid value: expected string"})
-			return
-		}
-		sk, ok := desc.(*settings.Select)
-		if !ok {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as a select but is not a Select key"})
-			return
-		}
-		setErr = s.settings.SetSelect(sk, str)
-	}
-
-	if setErr != nil {
-		if errors.Is(setErr, settings.ErrValidation) {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: setErr.Error()})
-			return
-		}
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: setErr.Error()})
-		return
-	}
-
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
-}
-
-// settingsResetParams carries the key to reset.
-type settingsResetParams struct {
-	Key string `json:"key"`
-}
-
-func (s *WSServer) handleSettingsReset(wconn Responder, req jsonrpcRequest) {
-	var p settingsResetParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-		return
-	}
-
-	desc := s.findDescriptor(p.Key)
-	if desc == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown setting: " + p.Key})
-		return
-	}
-
-	if err := s.settings.Reset(desc); err != nil {
-		if errors.Is(err, settings.ErrValidation) {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: err.Error()})
-			return
-		}
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "settings.reset: " + err.Error()})
-		return
-	}
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
-}
-
-// settingsSecretSetParams carries the key and the secret value.
-type settingsSecretSetParams struct {
-	Key   string `json:"key"`
-	Value string `json:"value"`
-}
-
-func (s *WSServer) handleSettingsSecretSet(wconn Responder, req jsonrpcRequest) {
-	var p settingsSecretSetParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-		return
-	}
-
-	desc := s.findDescriptor(p.Key)
-	if desc == nil || desc.Control() != settings.ControlSecret {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Not a secret setting: " + p.Key})
-		return
-	}
-
-	sk, ok := desc.(*settings.Secret)
-	if !ok {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as secret but is not a Secret key"})
-		return
-	}
-	if err := s.settings.SecretSet(sk, p.Value); err != nil {
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "settings.secretSet: ", err))
-		return
-	}
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
-}
-
-// settingsSecretDeleteParams carries the key to delete.
-type settingsSecretDeleteParams struct {
-	Key string `json:"key"`
-}
-
-func (s *WSServer) handleSettingsSecretDelete(wconn Responder, req jsonrpcRequest) {
-	var p settingsSecretDeleteParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-		return
-	}
-
-	desc := s.findDescriptor(p.Key)
-	if desc == nil || desc.Control() != settings.ControlSecret {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Not a secret setting: " + p.Key})
-		return
-	}
-
-	sk, ok := desc.(*settings.Secret)
-	if !ok {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as secret but is not a Secret key"})
-		return
-	}
-	if err := s.settings.SecretDelete(sk); err != nil {
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "settings.secretDelete: ", err))
-		return
-	}
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
-}
-
-// settingsSecretExistsParams carries the key to check.
-type settingsSecretExistsParams struct {
-	Key string `json:"key"`
-}
-
-func (s *WSServer) handleSettingsSecretExists(wconn Responder, req jsonrpcRequest) {
-	var p settingsSecretExistsParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
-		return
-	}
-
-	desc := s.findDescriptor(p.Key)
-	if desc == nil || desc.Control() != settings.ControlSecret {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Not a secret setting: " + p.Key})
-		return
-	}
-
-	sk, ok := desc.(*settings.Secret)
-	if !ok {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Setting " + p.Key + " is declared as secret but is not a Secret key"})
-		return
-	}
-	exists, err := s.settings.SecretExists(sk)
-	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "settings.secretExists: " + err.Error()})
-		return
-	}
-	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"exists": exists}))
-}
-
-// mustMarshal serializes v to JSON, panicking on error (only used for
 // values we construct ourselves, which are always serializable).
 func mustMarshal(v any) json.RawMessage {
 	out, err := json.Marshal(v)

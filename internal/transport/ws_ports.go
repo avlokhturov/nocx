@@ -13,7 +13,6 @@ package transport
 import (
 	"encoding/json"
 	"os"
-	"sort"
 
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/session"
@@ -140,44 +139,53 @@ func orEmpty(s []string) []string {
 // Handlers
 // ---------------------------------------------------------------------------
 
+// portsHandlers answers the four ports.* methods. It holds the discovery
+// scheduler seam, the tunnel ledger (whose forwards the status result
+// assembles) and its Responder; nothing else.
+type portsHandlers struct {
+	sched  *discovery.Scheduler
+	ledger *tunnelLedger
+	r      Responder
+}
+
 // handlePortsMethod dispatches the four ports.* methods. When the scheduler
 // is not wired the methods answer -32603, like tunnel.* without a connector.
-func (s *WSServer) handlePortsMethod(wconn Responder, req jsonrpcRequest) {
-	if s.discoverySched == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "Port discovery not available (no discovery scheduler wired)"})
+func (h portsHandlers) handlePortsMethod(req jsonrpcRequest) {
+	if h.sched == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Port discovery not available (no discovery scheduler wired)"})
 		return
 	}
 	switch req.Method {
 	case "ports.status":
-		profileID, ok := portsProfileParam(wconn, req)
+		profileID, ok := portsProfileParam(h.r, req)
 		if !ok {
 			return
 		}
-		_ = wconn.TryResult(req.ID, mustMarshal(s.portsStatus(profileID)))
+		_ = h.r.TryResult(req.ID, mustMarshal(h.portsStatus(profileID)))
 	case "ports.sample":
-		profileID, ok := portsProfileParam(wconn, req)
+		profileID, ok := portsProfileParam(h.r, req)
 		if !ok {
 			return
 		}
 		// Retry semantics (spec §4): clear a terminal refusal, sample now.
-		s.discoverySched.SampleNow(profileID)
-		_ = wconn.TryResult(req.ID, mustMarshal(s.portsStatus(profileID)))
+		h.sched.SampleNow(profileID)
+		_ = h.r.TryResult(req.ID, mustMarshal(h.portsStatus(profileID)))
 	case "ports.pause":
 		var params portsPauseParams
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 			return
 		}
-		s.discoverySched.SetPaused(params.ProfileID, params.Paused)
-		_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
+		h.sched.SetPaused(params.ProfileID, params.Paused)
+		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 	case "ports.visible":
 		var params portsPauseParams
 		if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 			return
 		}
-		s.discoverySched.SetVisible(params.ProfileID, params.Visible)
-		_ = wconn.TryResult(req.ID, mustMarshal(struct{}{}))
+		h.sched.SetVisible(params.ProfileID, params.Visible)
+		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 	}
 }
 
@@ -193,28 +201,14 @@ func portsProfileParam(wconn Responder, req jsonrpcRequest) (string, bool) {
 // portsStatus assembles the result: the scheduler's status for the profile
 // plus the transport's forward ledger, in stable id order (map iteration is
 // random; the renderer must not see a reordered list per call).
-func (s *WSServer) portsStatus(profileID string) portsStatusResult {
-	st := s.discoverySched.Status(profileID)
+func (h portsHandlers) portsStatus(profileID string) portsStatusResult {
+	st := h.sched.Status(profileID)
 	return portsStatusResult{
 		ProfileID: profileID,
 		Host:      st.Host,
 		Discovery: portsDiscoveryFrom(st),
-		Forwards:  s.forwardRecords(),
+		Forwards:  h.ledger.forwardRecords(),
 	}
-}
-
-// forwardRecords snapshots the tracked forwards. User-stopped records leave
-// the ledger at stop time; records stopped by transport death stay until
-// stopped or their owning tab closes, so the panel sees the loss.
-func (s *WSServer) forwardRecords() []tunnelRecord {
-	s.tunnelMu.Lock()
-	defer s.tunnelMu.Unlock()
-	recs := make([]tunnelRecord, 0, len(s.tunnels))
-	for _, t := range s.tunnels {
-		recs = append(recs, tunnelRecordFrom(t))
-	}
-	sort.Slice(recs, func(i, j int) bool { return recs[i].ID < recs[j].ID })
-	return recs
 }
 
 // ---------------------------------------------------------------------------

@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -52,6 +54,24 @@ type RemoteUninstaller interface {
 // AGENTS.md rule 1 forbids.
 func WithRemoteUninstaller(u RemoteUninstaller) WSServerOption {
 	return func(s *WSServer) { s.remoteUninstaller = u }
+}
+
+// footprintHandlers answers shell.footprint.status and
+// shell.footprint.uninstall: the visible, removable footprint of the silent
+// install (P10, design §4.1 and §9). It holds ONLY seams — the
+// installed-fact store, the remote uninstaller, the profile resolver holder,
+// the ssh -G oracle and the profile repository the removable pass reads
+// through — never the *WSServer, and no capability: the surface is a read of
+// transport-owned facts plus a dial-and-call owned by the internal/ssh
+// capability (UninstallIntegration).
+type footprintHandlers struct {
+	r           Responder
+	facts       *ssh.InstalledFactStore
+	uninstaller RemoteUninstaller
+	resolver    *resolverHolder // profile resolver, readable post-construction
+	sshCfg      ssh.ConfigResolver
+	profiles    profile.ProfileRepository
+	log         log.Logger
 }
 
 // shellFootprintDestination is one destination's footprint on the wire,
@@ -97,7 +117,7 @@ type shellFootprintUninstallResult struct {
 	Conflicts []string `json:"conflicts"`
 }
 
-// handleShellFootprintStatus serves shell.footprint.status: every recorded
+// handleFootprintStatus serves shell.footprint.status: every recorded
 // installed fact, plus which destinations a saved connection can remove.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.footprint.status"}
@@ -111,11 +131,11 @@ type shellFootprintUninstallResult struct {
 // marks nothing removable: we could not prove the mapping, and the surface
 // says removal needs a saved connection rather than offering a button that
 // would fail at click time.
-func (s *WSServer) handleShellFootprintStatus(ctx context.Context, wconn Responder, req jsonrpcRequest) {
+func (h footprintHandlers) handleFootprintStatus(ctx context.Context, req jsonrpcRequest) {
 	destinations := make([]shellFootprintDestination, 0)
-	if s.installedFacts != nil {
-		removable := s.removableProfiles(ctx)
-		for _, f := range s.installedFacts.All() {
+	if h.facts != nil {
+		removable := h.removableProfiles(ctx)
+		for _, f := range h.facts.All() {
 			destinations = append(destinations, shellFootprintDestination{
 				Identity:           f.Identity,
 				Generation:         f.Generation,
@@ -127,7 +147,7 @@ func (s *WSServer) handleShellFootprintStatus(ctx context.Context, wconn Respond
 			})
 		}
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(shellFootprintStatusResult{
+	_ = h.r.TryResult(req.ID, mustMarshal(shellFootprintStatusResult{
 		Destinations: destinations,
 	}))
 }
@@ -136,22 +156,22 @@ func (s *WSServer) handleShellFootprintStatus(ctx context.Context, wconn Respond
 // for every profile that resolves. Fail-closed: any missing dependency
 // (no profile store, no resolver, no oracle) or any resolution failure
 // yields an empty map — nothing is claimed removable that cannot be proven.
-func (s *WSServer) removableProfiles(ctx context.Context) map[string]*string {
+func (h footprintHandlers) removableProfiles(ctx context.Context) map[string]*string {
 	byIdentity := map[string]*string{}
-	if s.profiles == nil || s.resolver == nil || s.sshConfigResolver == nil {
+	if h.profiles == nil || h.resolver == nil || h.sshCfg == nil {
 		return byIdentity
 	}
-	profs, err := s.profiles.LoadProfiles()
+	profs, err := h.profiles.LoadProfiles()
 	if err != nil {
 		return byIdentity
 	}
 	for _, p := range profs {
-		host, cfg, err := s.resolver.Resolve(p.ID)
+		host, cfg, err := h.resolver.Resolve(p.ID)
 		if err != nil {
 			continue // a profile we cannot build a config for cannot be proven removable
 		}
 		argv := profileOracleArgv(host, cfg.User, cfg.Port)
-		hc, err := s.sshConfigResolver.ResolveArgv(ctx, argv)
+		hc, err := h.sshCfg.ResolveArgv(ctx, argv)
 		if err != nil {
 			continue // the oracle cannot answer; do not guess the mapping
 		}
@@ -179,7 +199,7 @@ func profileOracleArgv(host, user string, port int) []string {
 	return append(argv, host)
 }
 
-// handleShellFootprintUninstall serves shell.footprint.uninstall: remove the
+// handleFootprintUninstall serves shell.footprint.uninstall: remove the
 // integration bundle on the host a saved profile connects to.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.footprint.uninstall","params":{"profileId":"p_01"}}
@@ -189,22 +209,22 @@ func profileOracleArgv(host, user string, port int) []string {
 // A direct-host destination is refused with a profile error; the surface
 // never offers this button for one, because the status call reports
 // removableProfileId only when a profile resolves to the destination.
-func (s *WSServer) handleShellFootprintUninstall(ctx context.Context, wconn Responder, req jsonrpcRequest) {
+func (h footprintHandlers) handleFootprintUninstall(ctx context.Context, req jsonrpcRequest) {
 	var params struct {
 		ProfileID string `json:"profileId"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.ProfileID == "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "profileId is required"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "profileId is required"})
 		return
 	}
-	if s.resolver == nil || s.remoteUninstaller == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "uninstall is not available"})
+	if h.resolver == nil || h.uninstaller == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "uninstall is not available"})
 		return
 	}
 
-	host, cfg, err := s.resolver.Resolve(params.ProfileID)
+	host, cfg, err := h.resolver.Resolve(params.ProfileID)
 	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "unknown profile"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "unknown profile"})
 		return
 	}
 
@@ -212,10 +232,10 @@ func (s *WSServer) handleShellFootprintUninstall(ctx context.Context, wconn Resp
 	// discovery scheduler uses: every credential, key and jump hop the
 	// profile resolved to reaches the dial exactly as a tab's would.
 	opts := []ssh.ConnectOption{func(dst *ssh.ConnectConfig) { *dst = *cfg }}
-	removed, conflicts, err := s.remoteUninstaller.UninstallIntegration(ctx, host, opts...)
+	removed, conflicts, err := h.uninstaller.UninstallIntegration(ctx, host, opts...)
 	if err != nil {
-		s.log.Warn("shell.footprint.uninstall failed", "profileId", params.ProfileID, "error", err)
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "uninstall failed"})
+		h.log.Warn("shell.footprint.uninstall failed", "profileId", params.ProfileID, "error", err)
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "uninstall failed"})
 		return
 	}
 	if removed == nil {
@@ -224,7 +244,7 @@ func (s *WSServer) handleShellFootprintUninstall(ctx context.Context, wconn Resp
 	if conflicts == nil {
 		conflicts = []string{}
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(shellFootprintUninstallResult{
+	_ = h.r.TryResult(req.ID, mustMarshal(shellFootprintUninstallResult{
 		Removed:   removed,
 		Conflicts: conflicts,
 	}))

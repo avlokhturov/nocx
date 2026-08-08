@@ -15,6 +15,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // defaultControlDrainTimeout is the documented maximum Stop waits for
@@ -107,4 +109,69 @@ func (t *inflight) waitDrained(timeout time.Duration) bool {
 	case <-time.After(timeout):
 		return false
 	}
+}
+
+// inflightSubmission registers every admitted task with the inflight
+// machinery before the inner submission runs it. The probe and dialog tasks
+// need Stop to cancel them and wait (bounded) for them to drain, and the
+// registration must PRECEDE TrySubmit so the WaitGroup Add cannot race the
+// shutdown Wait (the inflight contract: begin is serialized with stop under
+// the same mutex). A refusal from the inner submission releases the
+// registration and passes the rejection up to the dispatcher.
+type inflightSubmission struct {
+	inflight *inflight
+	inner    control.Submission
+}
+
+// Name identifies the resource for metrics only.
+func (s *inflightSubmission) Name() string { return "inflight" }
+
+func (s *inflightSubmission) TrySubmit(ctx context.Context, task control.Task) *control.Rejection {
+	tctx, _, release, ok := s.inflight.begin(ctx)
+	if !ok {
+		return &control.Rejection{Reason: "server shutting down", Scope: "control"}
+	}
+	rej := s.inner.TrySubmit(tctx, control.Task{Run: func(pctx context.Context) {
+		defer release()
+		task.Run(pctx)
+	}})
+	if rej != nil {
+		release()
+	}
+	return rej
+}
+
+// saturatedNotifyLimiter rate-limits the control.saturated notification that
+// a refused NOTIFICATION (no id) triggers: it has no response to carry the
+// -32004 error, so the server emits the notification instead — but one per
+// refused frame would flood the wire when a burst of notifications is
+// refused, so the emission is bounded to at most one per (class, scope) per
+// interval. The renderer also deduplicates its toast over a 10 s window;
+// this bound protects the wire itself, independent of the renderer.
+type saturatedNotifyLimiter struct {
+	mu       sync.Mutex
+	interval time.Duration
+	last     map[string]time.Time
+}
+
+// newSaturatedNotifyLimiter builds a limiter that allows at most one
+// notification per key per interval.
+func newSaturatedNotifyLimiter(interval time.Duration) *saturatedNotifyLimiter {
+	return &saturatedNotifyLimiter{interval: interval, last: make(map[string]time.Time)}
+}
+
+// allow reports whether a notification for the key may be emitted now. The
+// key is (methodClass, scope) — server vocabulary both, so no request data
+// reaches the limiter.
+func (l *saturatedNotifyLimiter) allow(class, scope string) bool {
+	key := class + "\x00" + scope
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	last, ok := l.last[key]
+	if !ok || now.Sub(last) >= l.interval {
+		l.last[key] = now
+		return true
+	}
+	return false
 }

@@ -7,8 +7,10 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/secrets"
 )
@@ -81,13 +83,22 @@ const defaultHistoryPageLimit = 50
 // whole history in one request.
 const maxHistoryPageLimit = 200
 
+// historyQueryHandlers answers history.query. It holds the ContentOperation
+// and the Responder; nothing else (migration map, "history.* — the content
+// domain"). A nil operation is the content store not being wired: the
+// handler then answers the honest source=session fallback, never an error.
+type historyQueryHandlers struct {
+	op capability.ContentOperation // nil → content store not wired
+	r  Responder
+}
+
 // handleHistoryQuery serves the history.query method.
 //
 // Three behaviours carry the decisions the schema names:
-func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn Responder, req jsonrpcRequest) {
+func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrpcRequest) {
 	scope, cwd, host, limit, before, text, errMsg := parseHistoryQueryParams(req)
 	if errMsg != "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
 	}
 
@@ -101,49 +112,60 @@ func (s *WSServer) handleHistoryQuery(ctx context.Context, wconn Responder, req 
 		Source:    "session",
 	}
 
-	if s.contentDB == nil {
-		_ = wconn.TryResult(req.ID, mustMarshal(resp))
+	if h.op == nil {
+		_ = h.r.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
 
-	page, err := s.contentDB.CommandHistory().Query(ctx, scope, cwd, host, limit, before, text)
-	if err != nil {
-		_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "history.query: ", err))
-		return
-	}
-
-	if page.HasRows {
-		resp.Source = "store"
-	}
-	resp.Exhausted = page.Exhausted
-	resp.Coverage = page.Coverage
-	for _, r := range page.Entries {
-		kinds := r.MaskedKinds
-		if kinds == nil {
-			kinds = []string{}
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ContentService) error {
+		page, err := svc.QueryHistory(ctx, scope, cwd, host, limit, before, text)
+		if err != nil {
+			return err
 		}
-		reds := make([]redactionWire, 0, len(r.Redactions))
-		for _, red := range r.Redactions {
-			start, end := secrets.ToUTF16Span(r.Command, red.Start, red.End)
-			reds = append(reds, redactionWire{
-				Kind: red.Kind, Start: start, End: end, Prefix: red.Prefix, Suffix: red.Suffix,
+		if page.HasRows {
+			resp.Source = "store"
+		}
+		resp.Exhausted = page.Exhausted
+		resp.Coverage = page.Coverage
+		for _, r := range page.Entries {
+			kinds := r.MaskedKinds
+			if kinds == nil {
+				kinds = []string{}
+			}
+			reds := make([]redactionWire, 0, len(r.Redactions))
+			for _, red := range r.Redactions {
+				start, end := secrets.ToUTF16Span(r.Command, red.Start, red.End)
+				reds = append(reds, redactionWire{
+					Kind: red.Kind, Start: start, End: end, Prefix: red.Prefix, Suffix: red.Suffix,
+				})
+			}
+			resp.Entries = append(resp.Entries, historyQueryEntry{
+				ID:          strconv.FormatInt(r.ID, 10),
+				Command:     r.Command,
+				Cwd:         r.Cwd,
+				Host:        r.Host,
+				Status:      r.Status,
+				ExitCode:    r.ExitCode,
+				StartedAt:   r.StartedAt,
+				EndedAt:     r.EndedAt,
+				MaskedCount: r.MaskedCount,
+				MaskedKinds: kinds,
+				Redactions:  reds,
 			})
 		}
-		resp.Entries = append(resp.Entries, historyQueryEntry{
-			ID:          strconv.FormatInt(r.ID, 10),
-			Command:     r.Command,
-			Cwd:         r.Cwd,
-			Host:        r.Host,
-			Status:      r.Status,
-			ExitCode:    r.ExitCode,
-			StartedAt:   r.StartedAt,
-			EndedAt:     r.EndedAt,
-			MaskedCount: r.MaskedCount,
-			MaskedKinds: kinds,
-			Redactions:  reds,
-		})
+		_ = h.r.TryResult(req.ID, mustMarshal(resp))
+		return nil
+	})
+	if err != nil {
+		// A gate refusal is the saturation error; anything else keeps the
+		// store-failure answer unchanged from the pre-capability handler.
+		var rej *capability.RefusedError
+		if errors.As(err, &rej) {
+			_ = h.r.TryError(req.ID, saturationRPCError(&rej.Rejection))
+			return
+		}
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "history.query: ", err))
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
 // parseHistoryQueryParams validates the request against the handler contract

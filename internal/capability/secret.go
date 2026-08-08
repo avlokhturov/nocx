@@ -41,6 +41,13 @@ type SecretService interface {
 	// ⌘S save); the name ACTUALLY used comes back — the renderer must
 	// never predict that a suffixed name is free.
 	CreateSecret(ctx context.Context, value credential.Secret, meta vault.SecretMeta, resolve bool) (realName string, err error)
+	// MintSecret stores value with its catalogue metadata (ADR-0016) and
+	// returns the SecretID the vault minted, so the caller can derive the
+	// row handle it answers with (secrets.savePassword & friends reply
+	// with the row). When no vault is wired, the plain store records the
+	// secret namelessly — the same fallback the transport's createSecret
+	// used.
+	MintSecret(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
 	RenameSecret(ctx context.Context, row, name string) error
 	ReplaceSecret(ctx context.Context, row string, value credential.Secret) error
 	// DeleteSecret clears every profile reference to the secret — one
@@ -91,6 +98,7 @@ type SecretOperation interface {
 type SecretOperations struct {
 	configGate control.Admission
 	vaultGate  control.Admission
+	lane       control.Admission
 	profiles   profile.ProfileRepository
 	groups     profile.GroupRepository
 	vault      SecretVault
@@ -103,7 +111,7 @@ type SecretOperations struct {
 // NewSecretOperations wires the per-secret factory. Each ForSecret call
 // returns a fresh operation with its own guarded service.
 func NewSecretOperations(
-	configGate, vaultGate control.Admission,
+	configGate, vaultGate, lane control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	v SecretVault,
@@ -113,6 +121,7 @@ func NewSecretOperations(
 	return &SecretOperations{
 		configGate: configGate,
 		vaultGate:  vaultGate,
+		lane:       lane,
 		profiles:   profiles,
 		groups:     groups,
 		vault:      v,
@@ -135,7 +144,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 	}
 	g := &guard{}
 	return newOperation[SecretService](
-		control.NewComposite(f.configGate, f.vaultGate),
+		control.NewComposite(f.configGate, f.vaultGate, f.lane),
 		g,
 		newSecretService(g, f.profiles, f.groups, f.vault, f.store),
 	), nil
@@ -145,7 +154,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 // keyed form; most handlers use NewSecretOperations + ForSecret). It is
 // for handlers whose operation is fixed at construction.
 func NewSecretOperation(
-	configGate, vaultGate control.Admission,
+	configGate, vaultGate, lane control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	v SecretVault,
@@ -153,7 +162,7 @@ func NewSecretOperation(
 ) SecretOperation {
 	g := &guard{}
 	return newOperation[SecretService](
-		control.NewComposite(configGate, vaultGate),
+		control.NewComposite(configGate, vaultGate, lane),
 		g,
 		newSecretService(g, profiles, groups, v, store),
 	)
@@ -200,6 +209,16 @@ func (s *secretService) CreateSecret(ctx context.Context, value credential.Secre
 	}
 	_, err := s.vault.CreateNamed(ctx, value, meta)
 	return meta.Name, err
+}
+
+func (s *secretService) MintSecret(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error) {
+	if err := s.guard.check(); err != nil {
+		return "", err
+	}
+	if s.vault == nil {
+		return s.store.Create(ctx, value)
+	}
+	return s.vault.CreateNamed(ctx, value, meta)
 }
 
 func (s *secretService) RenameSecret(ctx context.Context, row, name string) error {

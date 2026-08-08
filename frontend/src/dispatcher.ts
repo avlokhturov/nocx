@@ -3,6 +3,7 @@
 // typed subscribe/unsubscribe.  WSClient and ProfileClient consume it.
 
 import type { ControlSaturated } from './generated/control.saturated'
+import type { ControlSaturatedNotification } from './generated/control.saturated.notification'
 import { log } from './log'
 export type NotificationHandler = (params: unknown) => void
 export type LifecycleHandler = () => void
@@ -223,6 +224,28 @@ export class Dispatcher {
     }
   }
 
+  /**
+   * Registered at construction: a refused notification (no id) cannot carry
+   * the -32004 error, so the server emits the control.saturated notification
+   * instead (rate-limited, with methodClass and scope only — the generated
+   * params type is consumed here, making the contract file reachable). It
+   * raises the same deduplicated saturation toast as the error path, with no
+   * calling surface opting in — a refused action must be visible in the
+   * product, not only in a log. close() is terminal (deliberate shutdown),
+   * so a constructor registration is not lost to a reconnect.
+   */
+  constructor() {
+    this.subscribe('control.saturated', (params: unknown) => {
+      // Consume the generated params type (the contract file must be
+      // reachable from main() — dead-exports ratchet). The notification's
+      // shape is the contract; the toast does not read it, so the cast is
+      // the consumption.
+      const _: ControlSaturatedNotification = params as ControlSaturatedNotification
+      void _
+      this.raiseSaturationToast()
+    })
+  }
+
   // --- Lifecycle subscriptions ---------------------------------------------
 
   onConnect(handler: LifecycleHandler): () => void {
@@ -316,7 +339,7 @@ export class Dispatcher {
           )
           return
         }
-        this.raiseSaturationToast(msg.error.data)
+        this.handleSaturationData(msg.error.data)
         p.reject(new RpcError(msg.error.message ?? 'rpc error', msg.error.code, msg.error.data))
       } else {
         p.resolve(msg.result)
@@ -386,8 +409,18 @@ export class Dispatcher {
    * must be visible in the product, not only in a log. Individual surfaces
    * may later disable an action or retry; this is what stops silence.
    */
-  private raiseSaturationToast(data: unknown): void {
+  private handleSaturationData(data: unknown): void {
     if (!isSaturationData(data)) return
+    this.raiseSaturationToast()
+  }
+
+  /**
+   * The deduplicated saturation toast, shared by the error path and the
+   * control.saturated notification path (a refused notification has no id,
+   * so the server emits the notification instead of an error — it must be
+   * visible the same way).
+   */
+  private raiseSaturationToast(): void {
     const now = Date.now()
     if (
       lastSaturationToastAt !== null &&

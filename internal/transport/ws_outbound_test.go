@@ -71,7 +71,11 @@ func TestUnlockResolved_ReleasesWaiterWhileOutboundBlocked(t *testing.T) {
 	// Resolve the ask the way the read loop would, on a connection whose
 	// acknowledgement cannot be written (the pump is blocked and the wedge
 	// is still held).
-	ws.handleUnlockResolved(wconn, jsonrpcRequest{
+	// Resolve the ask the way the read loop would, on a connection whose
+	// acknowledgement cannot be written (the pump is blocked and the wedge
+	// is still held). The resolver is a constructed handler holding the ask
+	// broker and the connection's Responder.
+	askResolverHandlers{asks: &ws.asks, r: wconn}.handleUnlockResolved(jsonrpcRequest{
 		JSONRPC: "2.0",
 		ID:      json.RawMessage(`1`),
 		Method:  "vault.unlockResolved",
@@ -190,6 +194,27 @@ func TestSessionInputFlowsWhileOutboundSaturated(t *testing.T) {
 	t.Cleanup(func() { _ = connA.Close() })
 	sid := openSSHOverSocket(t, connA, 1)
 
+	// A fresh connection attaches to the same session and types into it —
+	// BEFORE the flood starts. The session and its input path must survive
+	// the saturated connection (AD-9); the read loop must never wait behind
+	// outbound. The attach is itself an admitted control method now, so it
+	// must land while the lane is free: under the wired executor a
+	// saturated ordinary lane refuses control work with the retryable
+	// -32004 (the saturation contract), and what this test watches is the
+	// DATA path.
+	connB := connectWS(t, ws)
+	t.Cleanup(func() { _ = connB.Close() })
+	attachResp := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 2)
+	var attachEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(attachResp, &attachEnv); err != nil {
+		t.Fatalf("attach unmarshal: %v", err)
+	}
+	if attachEnv.Error != nil {
+		t.Fatalf("attach before the flood failed: %+v", attachEnv.Error)
+	}
+
 	// connA's renderer stops reading and floods the control plane without
 	// bound. The flood can only end when the server closes the connection
 	// (its writes start failing), which is exactly the close we wait for:
@@ -212,12 +237,8 @@ func TestSessionInputFlowsWhileOutboundSaturated(t *testing.T) {
 		}
 	}()
 
-	// A fresh connection attaches to the same session and types into it.
-	// The session and its input path survive the saturated connection
-	// (AD-9); the read loop must never wait behind outbound.
-	connB := connectWS(t, ws)
-	t.Cleanup(func() { _ = connB.Close() })
-	jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 2)
+	// Type into the live session while connA is wedged: the DATA path must
+	// never wait behind outbound.
 	sendData(t, connB, sid, "hostname\n")
 
 	deadline := time.After(15 * time.Second)

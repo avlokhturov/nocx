@@ -16,11 +16,15 @@ canonical order **config, vault, content, session, git, filesystem** — then
 calls the callback with a domain service. The service is the ONLY store
 reach a handler has; every service method checks the operation's guard and
 fails with `capability.ErrOperationInactive` outside every in-flight Run,
-so a captured service cannot be carried out of its operation. Gates are
-non-blocking (`control.TryAcquire`): an overlapping operation is refused
-with `*capability.RefusedError`, which the transport already maps to the
-`control.saturated` wire error (`ws_saturation.go`). See the package doc
-for the conservative-grain rationale and the per-domain read policy.
+so a captured service cannot be carried out of its operation. The gates
+WAIT, bounded (`control.NewWaitingSemaphore`): an overlapping operation is
+serialized — the second runs once the first releases — and only exhausting
+the wait bound or the queue-depth bound is a refusal, answered with
+`*capability.RefusedError` and mapped to the `control.saturated` wire error
+(`ws_saturation.go`). The wait happens on the task goroutine, before the
+execution lane is acquired, so waiting conflict work never occupies a
+worker permit. See the package doc for the conservative-grain rationale and
+the per-domain read policy.
 
 ## Gate construction (composition root)
 
@@ -233,13 +237,21 @@ KEEP (pure, no store): `wireProfile`, `wireGroup`, `sparseToWire`,
    deferred; the `ForSession`/`ForSecret` factories exist now and their
    grain is an implementation detail.
 3. **`open` holds [config, session] for the whole dial** — a concurrent
-   config request is refused during a slow dial rather than frozen. If
-   refusals during probes prove noisy, split the resolve phase from the
+   config request waits on the held gate (bounded), so it is served as
+   soon as the dial releases instead of being refused mid-dial. If the
+   wait proves noisy against long dials, split the resolve phase from the
    dial phase inside the operation.
-4. **Refusals, not queues** — overlapping work is refused with
-   `*RefusedError` (→ `control.saturated`), never blocked. This is the
-   control package's contract; the renderer already has the refusal
-   surface.
+4. **Bounded waits, not instant refusals** — overlapping work waits on
+   the conflict gate, bounded on both the wait duration and the queue
+   depth; only exhausting a bound is a refusal (`*RefusedError` →
+   `control.saturated`). This restores the design review's original
+   ordering — conflict admission before the execution permit — and it is
+   what keeps a sequential client's back-to-back requests from being told
+   the control plane is busy: a handler enqueues its response a moment
+   before its permit is released, so the very next request can arrive
+   while the gate is still held. The lane (execution admission) still
+   refuses instantly; that is the saturation the renderer's surface
+   exists for.
 
 ## Findings
 

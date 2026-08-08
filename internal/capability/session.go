@@ -39,6 +39,7 @@ type SessionOperation interface {
 // the operation's Run; the per-call Get inside the callback then errors.
 type SessionOperations struct {
 	sessionGate control.Admission
+	lane        control.Admission
 	registry    session.Registry
 	usage       session.ProfileUsageTracker
 }
@@ -46,8 +47,8 @@ type SessionOperations struct {
 // NewSessionOperations wires the per-session factory. usage may be nil: an
 // unwired tracker answers an empty last-used map, exactly as the transport
 // handles a nil tracker today.
-func NewSessionOperations(sessionGate control.Admission, registry session.Registry, usage session.ProfileUsageTracker) *SessionOperations {
-	return &SessionOperations{sessionGate: sessionGate, registry: registry, usage: usage}
+func NewSessionOperations(sessionGate, lane control.Admission, registry session.Registry, usage session.ProfileUsageTracker) *SessionOperations {
+	return &SessionOperations{sessionGate: sessionGate, lane: lane, registry: registry, usage: usage}
 }
 
 // ForSession returns a SessionOperation scoped to id, or an error when the
@@ -57,15 +58,15 @@ func (f *SessionOperations) ForSession(id session.ID) (SessionOperation, error) 
 		return nil, fmt.Errorf("capability: unknown session %q", id)
 	}
 	g := &guard{}
-	return newOperation[SessionService](f.sessionGate, g, newSessionService(g, f.registry, f.usage)), nil
+	return newOperation[SessionService](control.NewComposite(f.sessionGate, f.lane), g, newSessionService(g, f.registry, f.usage)), nil
 }
 
 // NewSessionOperation builds a single SessionOperation — for handlers whose
 // operation is fixed at construction (sessions.status, and the session
 // half of open) rather than keyed by a per-request id.
-func NewSessionOperation(sessionGate control.Admission, registry session.Registry, usage session.ProfileUsageTracker) SessionOperation {
+func NewSessionOperation(sessionGate, lane control.Admission, registry session.Registry, usage session.ProfileUsageTracker) SessionOperation {
 	g := &guard{}
-	return newOperation[SessionService](sessionGate, g, newSessionService(g, registry, usage))
+	return newOperation[SessionService](control.NewComposite(sessionGate, lane), g, newSessionService(g, registry, usage))
 }
 
 // newSessionService builds the concrete session service bound to guard g.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -43,60 +44,72 @@ type shellCompleteResponse struct {
 	Reason    string               `json:"reason,omitempty"`
 }
 
-// handleShellComplete serves the shell.complete method.
+// handleComplete serves the shell.complete method.
 //
 // Routes by session kind: a KindLocal session delegates to the local
 // completer (the backend's own filesystem); a KindRemote session
 // delegates to the SSH completer, which runs a second shell on the
-// remote host through the DiscoveryConn lane.
-func (s *WSServer) handleShellComplete(ctx context.Context, wconn Responder, req jsonrpcRequest) {
+// remote host through the DiscoveryConn lane. The session gate is the
+// SessionOperation's; the completion logic itself stays here.
+func (h sessionShellHandlers) handleComplete(ctx context.Context, req jsonrpcRequest) {
 	params, errMsg := parseShellCompleteParams(req)
 	if errMsg != "" {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
 	}
 
-	sess, err := s.registry.Get(session.ID(params.SessionID))
+	op, err := h.ops.ForSession(session.ID(params.SessionID))
 	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Session not found: " + params.SessionID})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Session not found: " + params.SessionID})
 		return
 	}
+	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
+		sess, getErr := svc.Get(session.ID(params.SessionID))
+		if getErr != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Session not found: " + params.SessionID})
+			return nil
+		}
 
-	var comp completion.Completer
-	switch sess.Kind() {
-	case session.KindLocal:
-		comp = s.localCompleter
-	case session.KindRemote:
-		comp = s.sshCompleter
-	}
-	if comp == nil {
-		_ = wconn.TryResult(req.ID, mustMarshal(shellCompleteResponse{
-			Entries: []shellCompleteEntry{},
-			Reason:  "completion unavailable for this session kind",
-		}))
-		return
-	}
+		var comp completion.Completer
+		switch sess.Kind() {
+		case session.KindLocal:
+			comp = h.local
+		case session.KindRemote:
+			comp = h.remote
+		}
+		if comp == nil {
+			_ = h.r.TryResult(req.ID, mustMarshal(shellCompleteResponse{
+				Entries: []shellCompleteEntry{},
+				Reason:  "completion unavailable for this session kind",
+			}))
+			return nil
+		}
 
-	limit := params.limit()
-	compReq := completion.Request{
-		Host:  sess.Host(),
-		Cwd:   params.Cwd,
-		Line:  params.Line,
-		Pos:   params.Pos,
-		Limit: limit,
-	}
+		limit := params.limit()
+		compReq := completion.Request{
+			Host:  sess.Host(),
+			Cwd:   params.Cwd,
+			Line:  params.Line,
+			Pos:   params.Pos,
+			Limit: limit,
+		}
 
-	compResp, err := comp.Complete(ctx, compReq)
+		compResp, compErr := comp.Complete(ctx, compReq)
+		if compErr != nil {
+			_ = h.r.TryResult(req.ID, mustMarshal(shellCompleteResponse{
+				Entries: []shellCompleteEntry{},
+				Reason:  "completion unavailable",
+			}))
+			return nil
+		}
+
+		resp := toWireResponse(compResp)
+		_ = h.r.TryResult(req.ID, mustMarshal(resp))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.TryResult(req.ID, mustMarshal(shellCompleteResponse{
-			Entries: []shellCompleteEntry{},
-			Reason:  "completion unavailable",
-		}))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-
-	resp := toWireResponse(compResp)
-	_ = wconn.TryResult(req.ID, mustMarshal(resp))
 }
 
 // parseShellCompleteParams validates the request against the handler contract.

@@ -205,4 +205,32 @@ describe('control-plane saturation visibility', () => {
     await vi.dynamicImportSettled()
     expect(toasts()).toHaveLength(0)
   })
+
+  it('raises the same toast for a refused NOTIFICATION (control.saturated has no id)', async () => {
+    const d = new Dispatcher()
+    await connected(d)
+
+    // A refused notification cannot carry the -32004 error (no id to
+    // answer), so the server emits the control.saturated notification
+    // instead. The dispatcher subscribes to it at construction and raises
+    // the same deduplicated toast.
+    socket().deliverText({
+      jsonrpc: '2.0',
+      method: 'control.saturated',
+      params: { methodClass: 'ssh', scope: 'probe' },
+    })
+    await vi.dynamicImportSettled()
+    expect(toasts()).toHaveLength(1)
+    expect(toasts()[0].level).toBe('danger')
+
+    // Inside the dedup window a second notification stays silent — the
+    // same episode, the same toast.
+    socket().deliverText({
+      jsonrpc: '2.0',
+      method: 'control.saturated',
+      params: { methodClass: 'config', scope: 'control' },
+    })
+    await vi.dynamicImportSettled()
+    expect(toasts()).toHaveLength(1)
+  })
 })
