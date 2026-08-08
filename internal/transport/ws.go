@@ -242,6 +242,12 @@ type WSServer struct {
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+	// lanesMu guards lanes: the per-session resize lanes (ws_session_ops.go).
+	// One lane per session that has been resized or closed; entries are
+	// never deleted (a closed lane is the tombstone that refuses every
+	// later resize from any connection).
+	lanesMu sync.Mutex
+	lanes   map[session.ID]*sessionLane
 
 	// tunnelConnector acquires an owned pooled-connection lease for a
 	// forward (spec §7.3). *ssh.RealClient satisfies tunnel.Connector
@@ -588,6 +594,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		ownerTunnels:      make(map[*wsConn]map[string]struct{}),
 		origins:           LoopbackOriginPolicy{},
 		filesBindings:     make(map[string]*filesBinding),
+		lanes:             make(map[session.ID]*sessionLane),
 		filesBySession:    make(map[session.ID]map[string]struct{}),
 		filesPollInterval: defaultFilesPollInterval,
 		gitBindings:       make(map[string]*gitBinding),
@@ -674,6 +681,7 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	s.ringsMu.Unlock()
 
 	for _, sess := range s.registry.List() {
+		s.closeLane(sess.ID())
 		_ = s.registry.Close(sess.ID())
 		// Files (fm-w8): Stop closes every session, which closes its
 		// bindings (spec §5.1); the watcher goroutines stop with them.
@@ -1854,15 +1862,36 @@ func (s *WSServer) handleResize(wconn Responder, state *connState, req jsonrpcRe
 		return
 	}
 
-	if err := sess.Resize(context.Background(), params.Cols, params.Rows, params.XPixel, params.YPixel); err != nil {
-		resp := newJSONRPCError(req.ID, -32603, "Internal error")
-		_ = respond(wconn, resp)
-		return
+	// The resize is handed to the session's lane, which applies it off the
+	// read loop with a per-session cancellable context: a window-change
+	// blocked on a dead transport must not freeze this connection, and the
+	// session's close (which cancels the lane) must not queue behind it.
+	// The response completes when the lane settles the op (applied,
+	// superseded, or cancelled by close) — the renderer never reads it.
+	op := &resizeOp{
+		cols:   params.Cols,
+		rows:   params.Rows,
+		xpixel: params.XPixel,
+		ypixel: params.YPixel,
+		done: func(err error) {
+			if err != nil {
+				resp := newJSONRPCError(req.ID, -32603, "Internal error")
+				_ = respond(wconn, resp)
+				return
+			}
+			result, _ := json.Marshal(map[string]any{})
+			resp := newJSONRPCResult(req.ID, result)
+			_ = respond(wconn, resp)
+		},
 	}
-
-	result, _ := json.Marshal(map[string]any{})
-	resp := newJSONRPCResult(req.ID, result)
-	_ = respond(wconn, resp)
+	if !s.laneFor(sid, sess).enqueue(op) {
+		// The session's close was already admitted (a second connection may
+		// have closed it between the checks above and the enqueue): the
+		// resize cannot reach it. Same refusal as a session the registry
+		// no longer holds.
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+		_ = respond(wconn, resp)
+	}
 }
 
 func (s *WSServer) handleClose(wconn Responder, state *connState, req jsonrpcRequest) {
@@ -1879,6 +1908,13 @@ func (s *WSServer) handleClose(wconn Responder, state *connState, req jsonrpcReq
 		_ = respond(wconn, resp)
 		return
 	}
+
+	// Close is terminal for the session's resize lane: from here, queued
+	// and in-flight resizes are cancelled and nothing new may reach the
+	// session. Runs BEFORE the teardown below, and never waits for the
+	// lane's worker — the one operation that can unblock a dead resize
+	// must not queue behind it.
+	s.closeLane(sid)
 
 	s.closeSession(sid)
 
@@ -2142,6 +2178,12 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 // so it fires even after the WebSocket connection drops (AD-9).
 func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	<-sess.Done()
+
+	// The session died on its own: the close gate is terminal here too, so
+	// a resize in flight on a dead channel is cancelled and nothing new is
+	// enqueued. Same gate as the explicit-close path (closeLane is
+	// idempotent).
+	s.closeLane(sess.ID())
 
 	wconn, state := rx.getSubscriber()
 	if state != nil {
