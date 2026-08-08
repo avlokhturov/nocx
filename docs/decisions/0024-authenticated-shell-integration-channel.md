@@ -159,12 +159,28 @@ This is the whole decision. Everything below is how it is made true.
 
 The contract is one sentence: **the shell reports its lifecycle over a transport
 that is not the terminal, and no event is accepted without demonstrated authority
-for the live integration domain.** One live channel is one `IntegrationDomain`,
-identified by an epoch. The transport differs per environment behind one interface;
-the contract does not.
+for the live integration domain.** The transport differs per environment behind one
+interface; the contract does not.
 
 Hostile _output_ cannot reach any of these transports — it writes to stdout, and
 stdout is the tty. That is what removes the class rather than narrowing it.
+
+**A domain is logical, and is never an alias for a transport.** An
+`IntegrationDomain` is one authenticated shell or helper instance, carrying an
+epoch and an optional parent; a `TerminalLane` is one input-routing lane with at
+most one active domain; one transport may carry several domains. Activation,
+suspension, restoration and closure are authenticated transitions, and an attempt
+belongs to exactly one domain and cannot cross an activation boundary.
+
+This is not built for the roadmap. nocx **already** has a nested environment stack
+— ssh, sudo, su, docker, with passports — so a kernel that identified a domain
+with its channel would not defer a future feature, it would silently regress a
+current one the moment the passport machinery goes. What is deliberately **not**
+built now is multi-lane discovery, routing and UI. The three properties that keep
+the relay a third adapter rather than a protocol rewrite are cheap and are
+required now: every envelope carries lane, domain and epoch; no API obtains them
+from a singleton; the registry and the kernel are keyed by lane and domain even
+while each adapter registers a single lane.
 
 **Local shell.** A descriptor handed over at spawn through `exec.Cmd.ExtraFiles`;
 the shell is already started by `exec.Command(shell, "-i")` + `pty.StartWithSize`
@@ -335,6 +351,14 @@ A `PromptReady(domain)` value exists only after an authenticated, sequence-legal
 prompt-ready event for a live domain. The editor owns keys because the lifecycle
 axis says `PromptReady`, not because a second boolean does.
 
+The lane's active domain is a stack, not a variable. Entering a nested
+environment **suspends** the parent rather than destroying it, restoring it takes
+an authenticated activation rather than a pop of ambient frontend state, and
+events from a suspended or closed domain are rejected against the active lane.
+That is the same model decision 2 fixes, seen from the state machine's side: the
+lifecycle and the domain stack are one reducer, because splitting them would
+force whichever landed first to be rewritten by the other.
+
 Keeping the buffer on its own axis is deliberate. Stashing the previous state
 inside an `AlternateBuffer` value would let a program enter the alternate buffer,
 have integration revoked underneath it, and restore a dead domain's authority on
@@ -350,6 +374,21 @@ guessed from the previous enum instead of established by the speaker.
 Every event is checked for protocol version, live epoch, domain, monotonic
 sequence, legal transition, matching attempt and payload bounds before anything
 downstream sees it. Invalid events mutate nothing.
+
+**Authentication terminates in the backend.** Raw framing and domain
+authentication happen in Go, next to the transports; only schema-checked
+published facts cross the control plane; no capability and no raw frame ever
+reaches the renderer, which validates legal application transitions and can
+construct no authority of its own. The backend already owns `ExtraFiles`,
+`TunnelConn`, the capabilities and the candidate connections, so shipping frames
+or secrets to the renderer would widen the trusted computing base for nothing and
+make a second frontend harder than it needs to be.
+
+This does not weaken `AD-6`. The backend parsing **its own protocol on its own
+socket** is not sniffing the byte stream, and `AD-1`'s 2026-08-02 amendment
+already permits typed, schema-checked facts crossing the control plane. The
+renderer keeps owning VT state; what it loses is the ability to mint authority
+from it.
 
 Replay, precisely: the validator rejects duplicate or decreasing sequence numbers
 after authentication; sequence state mutates only after authentication; a reconnect
@@ -476,11 +515,18 @@ Deleted, not deprecated — the repo is greenfield and clean-only:
   what persists becomes the attempt's domain-authenticated status;
 - `ledger.onMarker` as an entry point for anonymous kinds (`command-ledger.ts:150`).
 
-Added: the channel, its handshake and its framing in `internal/shellintegration`
-and `internal/pty`; the remote path built on the existing `TunnelConn`
-(`internal/ssh/ssh_tunnel.go:23`) rather than a new one; capability generation and
-substitution; the validator and the event type in the frontend; the two-axis state
-machine.
+Added, in the backend: the channel, its handshake, its framing, capability
+generation and substitution in `internal/shellintegration` and `internal/pty`; the
+remote path built on the existing `TunnelConn` (`internal/ssh/ssh_tunnel.go:23`)
+rather than a new one; the domain registry and the validator that terminates
+authentication there. In the renderer: the published fact's type, the two-axis
+state machine, and the projections that consume it.
+
+The published fact gets a `contracts/` schema like any other result shape. The
+channel's own framing does not: `contracts/README` scopes that directory to
+JSON-RPC results, and the lifecycle channel is neither JSON-RPC nor necessarily
+JSON. Widening it would be a deliberate change to that README, not a side effect
+of this ADR.
 
 This gives lifecycle authority **one publication boundary**. It does not shrink the
 trusted computing base to one function: channel establishment, framing, the
