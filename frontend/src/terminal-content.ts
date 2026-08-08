@@ -6,7 +6,12 @@
 import { XtermRenderer } from './renderers/xterm'
 import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
 import { LifecycleClient } from './lifecycle/client'
-import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
+import {
+  LifecycleKernel,
+  shouldShowEditor,
+  freezeBlock as kernelFreezeBlock,
+} from './lifecycle/state'
+import { LifecycleProjections } from './lifecycle/projections'
 import { CommandEditor } from './editor'
 import { shellExtensions } from './shell-highlight'
 import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
@@ -40,7 +45,7 @@ import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
-import { queryHistory } from './history-client'
+import { recordCommand, queryHistory } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
@@ -56,7 +61,7 @@ import { RpcError } from './dispatcher'
 import { LOCAL_TARGET_ID } from './ports-client'
 import {
   deriveActions,
-  deriveShellState,
+  shellStateFromLifecycle,
   type ShellState,
   type InputPresentation,
   type DesiredMode,
@@ -284,6 +289,9 @@ export class TerminalContent extends BaseTabContent {
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
+  /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
+   *  ledger, history and the block model, driven by this kernel. */
+  private _projections: LifecycleProjections | null = null
   private _markers = new Map<number, MarkerAdapter>()
   private _pendingCommand = ''
   private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
@@ -627,12 +635,15 @@ export class TerminalContent extends BaseTabContent {
             if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)
             if (sync) {
-              // SEVERED (ADR-0024 §1): the typed-ssh rewrite gate
-              // (`_shellIntegrated`) is deleted — hostile output must not
-              // select which transformation nocx applies to the user's next
-              // command. The rewrite machinery stays in ssh-transition.ts
-              // for the migration bead, unwired from this path; the line
-              // the user typed goes out unchanged.
+              // ADR-0024 §1 (the projection bead nocx-u7uh.7): the typed-ssh
+              // rewrite is integration-sensitive and is gated on the KERNEL
+              // — rewriteAuthority() is true only at a live authenticated
+              // prompt (lifecycle/state.ts), never on a stream latch. The
+              // rewrite input (the launcher path and the per-attempt
+              // environment id) is not available since the
+              // shell.launcherCommand RPC was deleted with the marker
+              // latch (nocx-u7uh.1), so the line goes out unchanged —
+              // fail-open — until a rewrite input exists.
               return sync
             }
             return planSubmit(doc, (line) => vault.resolveLine(line)).then((verdict) => {
@@ -978,6 +989,62 @@ export class TerminalContent extends BaseTabContent {
         this._updateCapability()
         this.scrollback?.setUnstructured()
       })
+
+      // ── The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7) ──
+      // The ledger, history and the block model consume the kernel and hold
+      // no lifecycle state of their own: on every kernel change the
+      // projections reconcile from state. The block port is the DOM half;
+      // the history port persists ONLY completed app-owned records — a
+      // shell-originated attempt's line, which may carry a literal
+      // password, opens no ledger record and persists nowhere (the
+      // command-text decision this bead owns).
+      this._projections = new LifecycleProjections(
+        this.lifecycle,
+        this.ledger,
+        {
+          bindBlock: (attempt) => {
+            // The running block opened at the app-owned submit binds to the
+            // published attempt (ADR-0024 §5 attachment semantics).
+            this.scrollback?.blockManager.bindAttempt(attempt.id)
+          },
+          openBlock: (attempt) => {
+            // A shell-originated attempt: the block gives a native-mode
+            // command structure; its text is already on the terminal and
+            // never persists (the command-text decision).
+            if (!this.scrollback || !this.renderer) return
+            this.scrollback.beginBlock(
+              attempt.command || '(empty)',
+              this._cwd,
+              this.renderer.cursorLine(),
+            )
+            this.scrollback.blockManager.bindAttempt(attempt.id)
+          },
+          freezeBlock: (attempt) => {
+            // ADR-0024 §7: the visual freeze is authorized only by the
+            // authenticated completion (kernel derivation). The render-fence
+            // rendezvous is bead nocx-u7uh.8; the freeze lands on the event
+            // for now, at the current output end.
+            if (!this.scrollback || !this.renderer) return
+            if (!kernelFreezeBlock(attempt, attempt.domain)) return
+            this.scrollback.freezeFromAttempt(attempt, this.renderer.cursorLine())
+          },
+          abandonBlock: (attempt) => {
+            // The attempt went unknown (loss, closure, native escape): the
+            // block freezes as abandoned — never successful.
+            if (!this.scrollback || !this.renderer) return
+            this.scrollback.abandonAttempt(attempt, this.renderer.cursorLine())
+          },
+        },
+        (rec, attempt) =>
+          recordCommand(this.client, rec, attempt).then((ack) => {
+            if (ack) {
+              const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
+              this.attachRecordedAck(rec.id, block, ack)
+            }
+            return ack
+          }),
+      )
+      this._projections.attach()
 
       // The kernel starts Native and onChange may not fire for the initial
       // state: present the session with the terminal visible from the first
@@ -1586,20 +1653,15 @@ export class TerminalContent extends BaseTabContent {
   // to be pressed.
 
   /** Derive the three axes, resolve authorisation + eligibility, and
-   *  update the editor's recovery chip (nocx-atyf.2). */
+   *  update the editor's recovery chip (nocx-atyf.2). The shell state is
+   *  the KERNEL's word (ADR-0024 §6, the projection bead nocx-u7uh.7): a
+   *  live authenticated domain is 'integrated', Native is 'unsupported', a
+   *  lost or desynchronized domain is 'lost'. The input presentation is a
+   *  presentation fact — what the user sees. Nothing stream-derived reaches
+   *  either axis. */
   private _updateCapability(): void {
-    // SEVERED (ADR-0024 §1): no stream sequence may claim integration. The
-    // observed shell state is 'unsupported' by construction — markers no
-    // longer count as delivery evidence — and the input presentation is
-    // always 'terminal' (conventional input). The migration bead reconnects
-    // the axes to authenticated facts.
-    const shellState: ShellState = deriveShellState({
-      integrated: false,
-      integrating: false,
-      integrationFailed: false,
-      trusted: false,
-    })
-    const presentation: InputPresentation = 'terminal'
+    const shellState: ShellState = shellStateFromLifecycle(this.lifecycle.state)
+    const presentation: InputPresentation = this.editor?.isVisible ? 'editor' : 'terminal'
     // The open-ack integration decline is still worth the tab's warning
     // mark: it is the backend's own fact about this session, not a
     // stream-derived claim.
@@ -1644,10 +1706,11 @@ export class TerminalContent extends BaseTabContent {
     // restore the editor presentation.
     this.editor.setRecoveryAction(action.label, () => this._restoreEditor())
   }
-
-  /** Leave terminal input and return to the command editor. */
   private _restoreEditor(): void {
     this.nativeMode = false
+    // The kernel is the authority; the sync shows the editor because the
+    // axis says PromptReady — and the user's own escape latch is now off.
+    this._syncLifecycleOwnership()
     this._updateCapability()
   }
 
@@ -1709,11 +1772,17 @@ export class TerminalContent extends BaseTabContent {
    *  (ADR-0024 §6): shouldShowEditor reads the axis, and the buffer axis
    *  gates presentation only — it can never restore authority. While the
    *  editor is up the grid is read-only, so keys land in the composed
-   *  command, not the (disabled) grid. */
+   *  command, not the (disabled) grid. The native escape is a presentation
+   *  latch, not an authority: the user's own choice keeps the editor hidden
+   *  even at a kernel-authenticated prompt (the input-router projection),
+   *  and only a fresh integration or an explicit switch back shows it. */
   private _syncLifecycleOwnership(): void {
     const editor = this.editor
     if (editor === null) return
-    const show = shouldShowEditor(this.lifecycle.state) && this.lifecycle.buffer === 'normal'
+    const show =
+      shouldShowEditor(this.lifecycle.state) &&
+      this.lifecycle.buffer === 'normal' &&
+      !this.nativeMode
     if (show && !editor.isVisible) {
       editor.show()
       this.renderer?.setReadOnly(true)
@@ -1730,6 +1799,8 @@ export class TerminalContent extends BaseTabContent {
     this._lifecycleUnsub = null
     this._lifecycleChangeUnsub?.()
     this._lifecycleChangeUnsub = null
+    this._projections?.detach()
+    this._projections = null
     if (this._globalKeydown) {
       document.removeEventListener('keydown', this._globalKeydown)
       this._globalKeydown = null

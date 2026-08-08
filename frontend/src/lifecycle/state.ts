@@ -149,6 +149,14 @@ export class LifecycleKernel {
     return this._stack.domains
   }
 
+  /** One attempt this lane has seen, by id — read-only kernel state for
+   *  the projections (the ledger, history, the block model). The attempt
+   *  carries the authority brand through its domain, so a projection can
+   *  hand it back to an authority surface; no caller can mint one. */
+  attempt(id: string): ExecutionAttempt | undefined {
+    return this._attempts.get(id)
+  }
+
   /** Subscribe to state changes; returns the unsubscribe. Fires only when a
    *  fact or buffer event actually changed the model. */
   onChange(cb: (k: LifecycleKernel) => void): () => void {

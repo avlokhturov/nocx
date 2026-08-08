@@ -1,3 +1,5 @@
+import type { LifecycleState } from './lifecycle/state'
+
 // Three independent axes replaced the single 'capability' value on
 // 2026-08-04, after codex diagnosed the root cause of the rejected rail's
 // offer-gate disagreement (nocx-atyf.1).
@@ -116,16 +118,23 @@ export function deriveActions(f: ActionFacts): RecoveryAction[] {
 
 // ── Derivation helpers ─────────────────────────────────────────────────
 
-/** Derive the observed shell state from the facts the renderer holds. */
-export function deriveShellState(opts: {
-  integrated: boolean
-  integrating: boolean
-  integrationFailed: boolean
-  trusted: boolean
-}): ShellState {
-  if (opts.integrating) return 'integrating'
-  if (opts.integrationFailed) return 'failed'
-  if (!opts.integrated) return 'unsupported'
-  if (!opts.trusted) return 'lost'
-  return 'integrated'
+/** Derive the observed shell state from the kernel's lifecycle axis
+ *  (ADR-0024 §6, the projection bead nocx-u7uh.7). The kernel is fed ONLY
+ *  by the published fact, so this is what the authenticated channel
+ *  concluded: a live domain — at a ready prompt or running an attempt — is
+ *  the kernel's word that the shell is integrated; Native means no domain
+ *  (a conventional terminal); a Desynchronized domain is not live (decision
+ *  9) and Lost is dead, both reported as lost. Stream-derived markers never
+ *  reach this derivation, and the boolean `trusted` it replaced is deleted. */
+export function shellStateFromLifecycle(state: LifecycleState): ShellState {
+  switch (state.kind) {
+    case 'prompt_ready':
+    case 'running':
+      return 'integrated'
+    case 'desynchronized':
+    case 'lost':
+      return 'lost'
+    case 'native':
+      return 'unsupported'
+  }
 }

@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
   deriveActions,
-  deriveShellState,
+  shellStateFromLifecycle,
   type ActionFacts,
   type DesiredMode,
   type ObservedDelivery,
   type RelayConsent,
 } from './capability'
+import { LifecycleKernel } from './lifecycle/state'
 
 const facts = (over: Partial<ActionFacts> = {}): ActionFacts => ({
   shellState: 'unsupported',
@@ -24,13 +25,11 @@ describe('three axes (nocx-atyf.1)', () => {
     // and "alt-screen program owns the pane". In the new model these are
     // separate axes: the shell IS integrated AND the presentation IS
     // terminal — the user chose it.
-    const state = deriveShellState({
-      integrated: true,
-      integrating: false,
-      integrationFailed: false,
-      trusted: true,
-    })
-    expect(state).toBe('integrated')
+    // The kernel says the domain is live at a ready prompt — the shell IS
+    // integrated (ADR-0024 §6; the old `trusted` boolean is deleted).
+    const k = new LifecycleKernel()
+    k.applyFact({ lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    expect(shellStateFromLifecycle(k.state)).toBe('integrated')
 
     // With authorisation and eligibility resolved, the user should be
     // offered a way back to the editor.
@@ -93,60 +92,37 @@ describe('three axes (nocx-atyf.1)', () => {
   })
 })
 
-describe('deriveShellState', () => {
-  it('a plain shell with no markers is unsupported', () => {
-    expect(
-      deriveShellState({
-        integrated: false,
-        integrating: false,
-        integrationFailed: false,
-        trusted: false,
-      }),
-    ).toBe('unsupported')
+describe('shellStateFromLifecycle — the kernel is the integration authority (ADR-0024 §6)', () => {
+  const promptReady = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
+
+  it('Native is unsupported: no domain, a conventional terminal', () => {
+    expect(shellStateFromLifecycle(new LifecycleKernel().state)).toBe('unsupported')
   })
 
-  it('a shell with markers and trust is integrated', () => {
-    expect(
-      deriveShellState({
-        integrated: true,
-        integrating: false,
-        integrationFailed: false,
-        trusted: true,
-      }),
-    ).toBe('integrated')
+  it('a live authenticated domain is integrated — at the prompt and while running', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady })
+    expect(shellStateFromLifecycle(k.state)).toBe('integrated')
+    k.applyFact({
+      lane: 'l',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'a1', state: 'open' },
+    })
+    expect(shellStateFromLifecycle(k.state)).toBe('integrated')
   })
 
-  it('a shell whose markers stopped is lost', () => {
-    expect(
-      deriveShellState({
-        integrated: true,
-        integrating: false,
-        integrationFailed: false,
-        trusted: false,
-      }),
-    ).toBe('lost')
-  })
+  it('lost and desynchronized are lost — neither is live, ownership is revoked', () => {
+    const lost = new LifecycleKernel()
+    lost.applyFact({ ...promptReady })
+    lost.applyFact({ lane: 'l', lifecycle: 'lost' })
+    expect(shellStateFromLifecycle(lost.state)).toBe('lost')
 
-  it('an in-flight integration is integrating', () => {
-    expect(
-      deriveShellState({
-        integrated: false,
-        integrating: true,
-        integrationFailed: false,
-        trusted: false,
-      }),
-    ).toBe('integrating')
-  })
-
-  it('a failed integration is failed', () => {
-    expect(
-      deriveShellState({
-        integrated: false,
-        integrating: false,
-        integrationFailed: true,
-        trusted: false,
-      }),
-    ).toBe('failed')
+    const desync = new LifecycleKernel()
+    desync.applyFact({ ...promptReady })
+    desync.applyFact({ lane: 'l', lifecycle: 'desynchronized', domain: 'd1', epoch: 1 })
+    expect(shellStateFromLifecycle(desync.state)).toBe('lost')
   })
 })
 

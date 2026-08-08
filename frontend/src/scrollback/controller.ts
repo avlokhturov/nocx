@@ -1,11 +1,17 @@
 // DOM scrollback controller — wires the renderer's OSC 133 markers to block
 // creation, manages the live region visibility, alt-screen transitions, and
 // `clear` detection. Owns the scrollback DOM structure inside the pane.
+//
+// ADR-0024 (bead nocx-u7uh.7): the block model is an attempt projection —
+// the freeze/abandon paths below are driven by authenticated attempts, never
+// by OSC 133 C/D (which the renderer now treats as render-only). The
+// authority checks (kernel freezeBlock) run at the composition site; these
+// methods paint the attempt's verdict.
 
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type GetLineFn } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
-
+import type { ExecutionAttempt } from '../lifecycle/state'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 export interface ScrollbackControllerOpts {
@@ -386,6 +392,34 @@ export class ScrollbackController {
   private _updateSeparator(): void {
     const hasBlocks = this._blockManager.blocks.length > 0
     this.separator.style.display = hasBlocks && this._mode !== 'fullscreen' ? '' : 'none'
+  }
+
+  /** The attempt-driven freeze (ADR-0024 §7 projection): freeze the block
+   *  bound to the attempt at the current output end and settle the live
+   *  region. The authority check (kernel freezeBlock) is the caller's; the
+   *  render-fence bead (nocx-u7uh.8) later refines the output boundary. */
+  freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine)
+    if (rec) {
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
+  }
+
+  /** The attempt-driven abandonment: the attempt went `unknown`, the block
+   *  freezes as abandoned — never successful (ADR-0024 §5). */
+  abandonAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
+    if (rec) {
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
   }
 
   dispose(): void {

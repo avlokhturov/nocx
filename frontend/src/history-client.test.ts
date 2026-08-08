@@ -7,9 +7,33 @@ import { describe, it, expect, vi } from 'vitest'
 import { recordCommand, queryHistory } from './history-client'
 import type { CommandRecord } from './command-ledger'
 import type { HistoryQuery } from './generated/history.query'
+import type { LifecycleChanged } from './generated/lifecycle.changed'
+import type { ExecutionAttempt } from './lifecycle/state'
+import { mintDomain, type IntegrationDomain } from './lifecycle/domains'
 import type { WSClient } from './ipc'
 function fakeClient(): { call: ReturnType<typeof vi.fn> } {
   return { call: vi.fn().mockResolvedValue({}) }
+}
+
+// The authority: an authenticated attempt. Its domain is branded (only the
+// kernel can mint one); its command is the SHELL's wire line, which may
+// carry vault-resolved values — and must never cross to the store.
+const FACT: LifecycleChanged = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 }
+const domain = mintDomain(FACT) as IntegrationDomain
+
+function completedAttempt(overrides: Partial<ExecutionAttempt> = {}): ExecutionAttempt {
+  return {
+    id: 'att-7',
+    domain,
+    state: 'completed',
+    exitCode: 0,
+    command: 'make deploy --token sk-live-1234',
+    origin: 'shell',
+    startedAt: '2026-08-08T12:00:00Z',
+    completedAt: '2026-08-08T12:00:02Z',
+    fence: 'a'.repeat(64),
+    ...overrides,
+  }
 }
 
 function completedRecord(overrides: Partial<CommandRecord> = {}): CommandRecord {
@@ -32,7 +56,7 @@ describe('recordCommand', () => {
   it('sends the full fact set over history.record, timestamps rounded to ints', () => {
     const client = fakeClient()
     const rec = completedRecord()
-    void recordCommand(client as unknown as WSClient, rec)
+    void recordCommand(client as unknown as WSClient, rec, completedAttempt())
     expect(client.call).toHaveBeenCalledTimes(1)
     const [method, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(method).toBe('history.record')
@@ -51,7 +75,7 @@ describe('recordCommand', () => {
 
   it('never sends the session-owned fields (id, lineOf, disposed) or output', () => {
     const client = fakeClient()
-    void recordCommand(client as unknown as WSClient, completedRecord())
+    void recordCommand(client as unknown as WSClient, completedRecord(), completedAttempt())
     const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(params).not.toHaveProperty('id')
     expect(params).not.toHaveProperty('lineOf')
@@ -72,10 +96,33 @@ describe('recordCommand', () => {
     const client = { call: vi.fn().mockRejectedValue(new Error('socket closed')) }
     await expect(
       new Promise<void>((resolve) => {
-        void recordCommand(client as unknown as WSClient, completedRecord())
+        void recordCommand(client as unknown as WSClient, completedRecord(), completedAttempt())
         resolve()
       }),
     ).resolves.toBeUndefined()
+  })
+
+  it('persists the record command, never the attempt command — the privacy rule (ADR-0024 §5)', () => {
+    // The record carries the app-owned text (references intact); the
+    // attempt's command is the shell's wire line, which may carry
+    // vault-resolved values. What crosses is the record's text.
+    const client = fakeClient()
+    const rec = completedRecord({ command: 'make deploy {{secret:ci-token}}' })
+    void recordCommand(client as unknown as WSClient, rec, completedAttempt())
+    const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
+    expect(params.command).toBe('make deploy {{secret:ci-token}}')
+  })
+
+  it('an open or abandoned attempt persists nothing — only a completed attempt is authority', async () => {
+    const client = fakeClient()
+    const rec = completedRecord()
+    await expect(
+      recordCommand(client as unknown as WSClient, rec, completedAttempt({ state: 'open' })),
+    ).resolves.toBeNull()
+    await expect(
+      recordCommand(client as unknown as WSClient, rec, completedAttempt({ state: 'unknown' })),
+    ).resolves.toBeNull()
+    expect(client.call).not.toHaveBeenCalled()
   })
 })
 

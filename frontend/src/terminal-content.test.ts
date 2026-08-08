@@ -1327,3 +1327,138 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     }
   })
 })
+
+describe('the projections consume the kernel through the composition root (ADR-0024 §5–§7, bead nocx-u7uh.7)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  it('the native escape holds through a later prompt_ready fact — the input router (ADR-0024 §6)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      // The user's own escape: the editor hides, keys route raw.
+      content.switchToTerminalInput()
+      expect(ed.isVisible).toBe(false)
+      // A native fact and ANOTHER authenticated prompt must not undo the
+      // escape — the latch is the user's, the authority stays the kernel's.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(false)
+      // The explicit switch back restores the editor at the authenticated prompt.
+      content.switchToEditorInput()
+      expect(ed.isVisible).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the capability rail reports the kernel state — integrated only from an authenticated prompt', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // The kernel starts Native: a conventional terminal, unsupported.
+      expect(content.shellState).toBe('unsupported')
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(content.shellState).toBe('integrated')
+      handler({ lane: 'lane-1', lifecycle: 'lost' })
+      expect(content.shellState).toBe('lost')
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+      expect(content.shellState).toBe('integrated')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a submitted command freezes its block and persists history from the authenticated completion', async () => {
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'make',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      ed.insertText('make')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The app-owned submit opened a ledger record and a running block.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+
+      // The published attempt: the shell start attaches, then completes.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+
+      // The block froze with the authenticated status.
+      const frozen = withScrollback.scrollback.blockManager.blocks[0]
+      expect(frozen.status).toBe('success')
+      expect(frozen.exitCode).toBe(0)
+      expect(frozen.attemptId).toBe('att-1')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+
+      // History persisted the app-owned text, authorized by the attempt.
+      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
+      expect(recordCall).toBeTruthy()
+      const params = recordCall![1] as { command: string; status: string; exitCode: number }
+      expect(params.command).toBe('make')
+      expect(params.status).toBe('success')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+})

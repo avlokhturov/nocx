@@ -1,11 +1,25 @@
-// Command ledger (ADR-0008) — SEVERED by ADR-0024. The marker cycle
-// (onMarker), the `trusted` boolean and the N6 environment-transition
-// machinery are deleted: no OSC 133 kind may populate or complete a record,
-// assign an exit status or persist history. These tests pin the app-owned
-// half — open at submit with its start time (ADR-0024 §5), records, dispose,
-// resolveID — and the absence of every stream entry point.
+// Command ledger (ADR-0008) — the completion projection (ADR-0024, bead
+// nocx-u7uh.7). The marker cycle (onMarker), the `trusted` boolean and the
+// N6 environment-transition machinery are deleted: no OSC 133 kind may
+// populate or complete a record, assign an exit status or persist history.
+// These tests pin the app-owned half — open at submit with its start time
+// (ADR-0024 §5), records, dispose, resolveID — and the authenticated
+// completion half: bindAttempt ties the pending record to the published
+// attempt, and complete applies its verdict exactly once (an abandoned
+// attempt is `unknown` and never successful).
 import { describe, it, expect, beforeEach } from 'vitest'
 import { CommandLedger } from './command-ledger'
+import { mintDomain, type IntegrationDomain } from './lifecycle/domains'
+import type { ExecutionAttempt } from './lifecycle/state'
+import type { LifecycleChanged } from './generated/lifecycle.changed'
+
+const FACT: LifecycleChanged = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 }
+const domain = mintDomain(FACT) as IntegrationDomain
+const FENCE = 'a'.repeat(64)
+
+function attempt(overrides: Partial<ExecutionAttempt> = {}): ExecutionAttempt {
+  return { id: 'att-1', domain, state: 'completed', exitCode: 0, fence: FENCE, ...overrides }
+}
 
 // Fake lineOf that returns the number we feed it. The ledger never caches
 // the result, so tests call this through the ledger's own API.
@@ -92,5 +106,70 @@ describe('CommandLedger (severed)', () => {
     }
     void proveAbsent
     expect(ledger.records()).toHaveLength(1)
+  })
+
+  it('bindAttempt ties the pending running record to the attempt — idempotent', () => {
+    const rec = ledger.open('make', '/', '', fakeLineOf(1))
+    const bound = ledger.bindAttempt('att-1')
+    expect(bound).toBe(rec)
+    expect(ledger.recordForAttempt('att-1')).toBe(rec)
+    // A repeated binding returns the same record.
+    expect(ledger.bindAttempt('att-1')).toBe(rec)
+    // A second pending record stays unbound: the kernel allows one open
+    // attempt per domain, so the projection binds the oldest pending.
+    const second = ledger.open('ls', '/', '', fakeLineOf(2))
+    expect(ledger.bindAttempt('att-2')).toBe(second)
+  })
+
+  it('bindAttempt with no pending record returns null — a shell-originated attempt', () => {
+    expect(ledger.bindAttempt('att-9')).toBeNull()
+  })
+
+  it('complete sets the exit status exactly once from the authenticated completion', () => {
+    const rec = ledger.open('make', '/repo', '', fakeLineOf(1))
+    ledger.bindAttempt('att-1')
+    const done = ledger.complete(attempt({ exitCode: 0 }))
+    expect(done).toBe(rec)
+    expect(rec.status).toBe('success')
+    expect(rec.exitCode).toBe(0)
+    expect(rec.endedAt).toBe(500)
+    // The exit status is set exactly once: a second completion is refused.
+    expect(ledger.complete(attempt({ exitCode: 7 }))).toBeNull()
+    expect(rec.status).toBe('success')
+    expect(rec.exitCode).toBe(0)
+  })
+
+  it('complete paints failure from a non-zero authenticated exit code', () => {
+    const rec = ledger.open('make', '/repo', '', fakeLineOf(1))
+    ledger.bindAttempt('att-1')
+    ledger.complete(attempt({ exitCode: 2 }))
+    expect(rec.status).toBe('failure')
+    expect(rec.exitCode).toBe(2)
+  })
+
+  it('an abandoned attempt is unknown and never successful', () => {
+    const rec = ledger.open('sleep 100', '/', '', fakeLineOf(1))
+    ledger.bindAttempt('att-1')
+    ledger.complete(attempt({ state: 'unknown' }))
+    expect(rec.status).toBe('unknown')
+    expect(rec.exitCode).toBeNull()
+    expect(rec.endedAt).toBe(500)
+  })
+
+  it('complete resolves the single pending record when no binding happened (reconnect replay)', () => {
+    const rec = ledger.open('make', '/', '', fakeLineOf(1))
+    expect(ledger.complete(attempt({ exitCode: 0 }))).toBe(rec)
+    expect(rec.status).toBe('success')
+  })
+
+  it('complete with nothing pending returns null — shell-originated attempts persist nothing', () => {
+    expect(ledger.complete(attempt())).toBeNull()
+  })
+
+  it('the record keeps the app-owned command text — the attempt command never lands in the record', () => {
+    const rec = ledger.open('make {{secret:ci}}', '/', '', fakeLineOf(1))
+    ledger.bindAttempt('att-1')
+    ledger.complete(attempt({ command: 'make sk-live-1234' }))
+    expect(rec.command).toBe('make {{secret:ci}}')
   })
 })

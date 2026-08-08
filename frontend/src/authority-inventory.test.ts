@@ -66,6 +66,23 @@ function findExportFunction(
     if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === symbol && isExported(stmt)) {
       return stmt
     }
+    // An exported class method is an authority surface like any other
+    // (CommandLedger.complete, BlockManager.freezeFromAttempt): the class
+    // itself must be exported, and the method must be public.
+    if (ts.isClassDeclaration(stmt) && stmt.name?.text !== undefined && isExported(stmt)) {
+      for (const member of stmt.members) {
+        if (
+          ts.isMethodDeclaration(member) &&
+          member.name !== undefined &&
+          ts.isIdentifier(member.name) &&
+          member.name.text === symbol &&
+          (member.modifiers === undefined ||
+            !member.modifiers.some((m) => m.kind === ts.SyntaxKind.PrivateKeyword))
+        ) {
+          return member
+        }
+      }
+    }
     if (ts.isVariableStatement(stmt) && isExported(stmt)) {
       for (const decl of stmt.declarationList.declarations) {
         if (ts.isIdentifier(decl.name) && decl.name.text === symbol && decl.initializer) {
@@ -113,9 +130,36 @@ const MANIFEST: AuthorityEntry[] = [
     module: 'src/history-client.ts',
     symbol: 'recordCommand',
     authorityTypes: ['ExecutionAttempt'],
-    state: 'wake',
+    state: 'live',
     bead: BEAD,
-    note: "ADR-0024 consequences: `trusted` is deleted as a field crossing to history.record; what persists becomes the attempt's domain-authenticated status.",
+    note: "ADR-0024 consequences: `trusted` is deleted as a field crossing to history.record; what persists becomes the attempt's domain-authenticated status — recordCommand takes the completed attempt as its authority (bead nocx-u7uh.7).",
+  },
+  {
+    op: 'complete a ledger record',
+    module: 'src/command-ledger.ts',
+    symbol: 'complete',
+    authorityTypes: ['ExecutionAttempt'],
+    state: 'live',
+    bead: BEAD,
+    note: 'ADR-0024 §5 (bead nocx-u7uh.7): a ledger record closes only on an authenticated attempt — exit status exactly once, an abandoned attempt unknown and never successful. onMarker stays deleted.',
+  },
+  {
+    op: 'freeze a block from an authenticated attempt',
+    module: 'src/scrollback/blocks.ts',
+    symbol: 'freezeFromAttempt',
+    authorityTypes: ['ExecutionAttempt'],
+    state: 'live',
+    bead: BEAD,
+    note: 'ADR-0024 §7 (bead nocx-u7uh.7): the visual freeze is authorized by the authenticated completed attempt for the block bound to it — a stream D must not freeze a block (the kernel derivation freezeBlock is the gate; this paints it).',
+  },
+  {
+    op: 'abandon a block from an abandoned attempt',
+    module: 'src/scrollback/blocks.ts',
+    symbol: 'abandonAttempt',
+    authorityTypes: ['ExecutionAttempt'],
+    state: 'live',
+    bead: BEAD,
+    note: 'ADR-0024 §5 (bead nocx-u7uh.7): an abandoned attempt is unknown and never successful — the block freezes as abandoned only from the attempt, never from a stream verdict.',
   },
   {
     op: 'complete an attempt',

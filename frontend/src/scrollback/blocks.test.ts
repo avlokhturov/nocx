@@ -16,6 +16,8 @@ import { shellHighlightReady } from '../shell-highlight'
 import { BufferLine } from './test-helpers'
 import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
 import { CommandSnapshotStore } from '../command-snapshot'
+import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
+import type { ExecutionAttempt } from '../lifecycle/state'
 
 /** Helper: returns a container supplier that references the given element. */
 function makeContainer(el: HTMLElement): () => HTMLElement {
@@ -1222,5 +1224,97 @@ describe('BlockManager entered freeze (N6, nocx-y5v5)', () => {
     expect(done!.exitCode).toBe(0)
     expect(done!.el.querySelector('.cmd-header-exit-ok')).not.toBeNull()
     expect(manager.blocks[0].status).toBe('entered') // still untouched
+  })
+})
+
+describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh.7)', () => {
+  let manager: BlockManager
+  let inner: HTMLElement
+  let xtermContainer: HTMLElement
+
+  beforeEach(() => {
+    _resetThemeState()
+    inner = document.createElement('div')
+    xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    document.body.appendChild(inner)
+    manager = new BlockManager(inner, xtermContainer, {
+      now: () => 1000,
+      snapshotStore: freshStore(),
+    })
+  })
+
+  const domain = mintDomain({
+    lane: 'l',
+    lifecycle: 'prompt_ready',
+    domain: 'd1',
+    epoch: 1,
+  }) as IntegrationDomain
+  const FENCE = 'a'.repeat(64)
+  const attempt = (over: Partial<ExecutionAttempt> = {}): ExecutionAttempt => ({
+    id: 'att-1',
+    domain,
+    state: 'completed',
+    exitCode: 0,
+    fence: FENCE,
+    ...over,
+  })
+
+  it('bindAttempt ties the running block to the attempt; freezeFromAttempt freezes it with the authenticated status', () => {
+    const rec = manager.startBlock('make', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(rec.attemptId).toBe('att-1')
+    expect(manager.blockForAttempt('att-1')).toBe(rec)
+
+    const frozen = manager.freezeFromAttempt(attempt({ exitCode: 0 }), () => undefined, 8)
+    expect(frozen).not.toBeNull()
+    expect(frozen!.status).toBe('success')
+    expect(frozen!.exitCode).toBe(0)
+    expect(frozen!.attemptId).toBe('att-1')
+    expect(manager.runningBlock).toBeNull()
+    expect(manager.blockForAttempt('att-1')).toBe(frozen)
+  })
+
+  it('freezeFromAttempt refuses a non-completed attempt — an open attempt cannot freeze a block', () => {
+    manager.startBlock('make', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(manager.freezeFromAttempt(attempt({ state: 'open' }), () => undefined, 8)).toBeNull()
+    expect(manager.runningBlock?.status).toBe('running')
+  })
+
+  it('freezeFromAttempt refuses when the running block is bound to a different attempt', () => {
+    manager.startBlock('make', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(manager.freezeFromAttempt(attempt({ id: 'att-other' }), () => undefined, 8)).toBeNull()
+    expect(manager.runningBlock?.status).toBe('running')
+  })
+
+  it('abandonAttempt freezes the bound block as unknown — never successful, no exit code', () => {
+    const rec = manager.startBlock('sleep 100', '~', 0)
+    manager.bindAttempt('att-1')
+    const frozen = manager.abandonAttempt(attempt({ state: 'unknown' }), () => undefined, 6)
+    expect(frozen).not.toBeNull()
+    expect(frozen!.status).toBe('unknown')
+    expect(frozen!.exitCode).toBeNull()
+    expect(frozen!.el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(manager.runningBlock).toBeNull()
+    expect(rec.attemptId).toBe('att-1')
+  })
+
+  it('abandonAttempt refuses a completed attempt and a foreign binding', () => {
+    manager.startBlock('make', '~', 0)
+    manager.bindAttempt('att-1')
+    expect(manager.abandonAttempt(attempt(), () => undefined, 6)).toBeNull()
+    expect(
+      manager.abandonAttempt(attempt({ id: 'att-other', state: 'unknown' }), () => undefined, 6),
+    ).toBeNull()
+    expect(manager.runningBlock?.status).toBe('running')
+  })
+
+  it('clearAll drops the attempt binding', () => {
+    manager.startBlock('make', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.clearAll()
+    expect(manager.blockForAttempt('att-1')).toBeNull()
   })
 })

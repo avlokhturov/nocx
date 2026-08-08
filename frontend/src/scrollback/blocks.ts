@@ -13,6 +13,7 @@ import { createSecretChipUnresolved } from '../ui/secret-chip'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
+import type { ExecutionAttempt } from '../lifecycle/state'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 function clipboardFallback(text: string): void {
@@ -45,8 +46,15 @@ export interface BlockRecord {
   exitCode: number | null
   /** Presentation state. 'entered' = frozen on environment entry (N6):
    *  neither success nor failure, no exit code — the block the ssh command
-   *  froze into when the remote session began. */
-  status: 'running' | 'success' | 'failure' | 'entered'
+   *  froze into when the remote session began. 'unknown' = the bound
+   *  attempt was abandoned (ADR-0024 §5): frozen, never successful, no
+   *  reported exit code. */
+  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown'
+  /** The authenticated attempt this block is bound to (ADR-0024 §7
+   *  projection): set when the running block binds to the published
+   *  attempt, kept when the block freezes. Absent only for a block that
+   *  never bound (cleared scrollback, never seen running). */
+  attemptId?: string
   /** IMarker line for C boundary. */
   startLine: number
   /** IMarker line for D boundary (approx). */
@@ -148,7 +156,7 @@ function createHeader(
   location: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'running' | 'success' | 'failure' | 'entered',
+  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown',
   store: CommandSnapshotStore,
 ): HTMLElement {
   const header = div('cmd-header')
@@ -472,7 +480,7 @@ export function createCommandBlock(
   outputHtml: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'success' | 'failure' | 'entered',
+  status: 'success' | 'failure' | 'entered' | 'unknown',
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
@@ -598,7 +606,7 @@ export function freezeBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
-  status: 'success' | 'failure' | 'entered',
+  status: 'success' | 'failure' | 'entered' | 'unknown',
 ): HTMLElement {
   const newEl = createCommandBlock(
     id,
@@ -686,6 +694,10 @@ export class BlockManager {
   /** Currently selected block id, or null if none selected (P1-8). */
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
+  /** The attempt id the running block is bound to (ADR-0024 §7 projection).
+   *  Set when the published running fact binds the block; cleared when the
+   *  block freezes or the scrollback is cleared. */
+  private _attemptId: string | null = null
 
   constructor(scrollbackInner: HTMLElement, xtermContainer: HTMLElement, opts: BlockManagerOpts) {
     this._scrollbackInner = scrollbackInner
@@ -754,6 +766,20 @@ export class BlockManager {
     if (this._selectedBlockId === blockId) {
       this._selectedBlockId = null
     }
+  }
+  /**
+   * Bind the running block to an authenticated attempt (ADR-0024 §7
+   *  projection): the block opened at app submit binds when the published
+   *  running fact arrives, and the freeze/abandon paths require the match.
+   */
+  bindAttempt(attemptId: string): void {
+    this._attemptId = attemptId
+    if (this._runningBlock) this._runningBlock.attemptId = attemptId
+  }
+
+  /** The block bound to an attempt id — running or frozen. */
+  blockForAttempt(attemptId: string): BlockRecord | null {
+    return this._blocks.find((b) => b.attemptId === attemptId) ?? null
   }
 
   /**
@@ -855,7 +881,7 @@ export class BlockManager {
     getLine: GetLineFn,
     endLine: number,
     exitCode: number | null,
-    status: 'success' | 'failure' | 'entered',
+    status: 'success' | 'failure' | 'entered' | 'unknown',
   ): BlockRecord | null {
     const rec = this._runningBlock
     if (!rec) return null
@@ -895,6 +921,41 @@ export class BlockManager {
     return rec
   }
 
+  /** Freeze the running block bound to the attempt, from the attempt's
+   *  authenticated completion (ADR-0024 §5, §7). Guards itself: only a
+   *  COMPLETED attempt may freeze a block as success/failure, and only the
+   *  block bound to that attempt — the kernel derivation freezeBlock() is
+   *  the authority, and this keeps the DOM operation honest if a caller
+   *  bypasses it. The render-fence rendezvous (u7uh.8) later refines the
+   *  output boundary; here the freeze lands on the authenticated event. */
+  freezeFromAttempt(
+    attempt: ExecutionAttempt,
+    getLine: GetLineFn,
+    endLine: number,
+  ): BlockRecord | null {
+    if (attempt.state !== 'completed') return null
+    if (this._attemptId !== attempt.id) return null
+    const code = attempt.exitCode ?? null
+    const rec = this._freeze(getLine, endLine, code, code === 0 ? 'success' : 'failure')
+    this._attemptId = null
+    return rec
+  }
+
+  /** Freeze the running block bound to the attempt as abandoned: the
+   *  attempt went `unknown` (loss, closure, native escape) — frozen, never
+   *  successful, no reported exit code (ADR-0024 §5). */
+  abandonAttempt(
+    attempt: ExecutionAttempt,
+    getLine: GetLineFn,
+    endLine: number,
+  ): BlockRecord | null {
+    if (attempt.state !== 'unknown') return null
+    if (this._attemptId !== attempt.id) return null
+    const rec = this._freeze(getLine, endLine, null, 'unknown')
+    this._attemptId = null
+    return rec
+  }
+
   clearAll(): void {
     this._stopTicker()
     for (const b of this._blocks) {
@@ -904,6 +965,7 @@ export class BlockManager {
     this._runningBlock = null
     this._cmdStartTime = null
     this._selectedBlockId = null
+    this._attemptId = null
   }
 
   private _finalizeRunningUnsafe(): void {
@@ -913,6 +975,7 @@ export class BlockManager {
     this._runningBlock.exitCode = null
     this._runningBlock = null
     this._cmdStartTime = null
+    this._attemptId = null
   }
 
   dispose(): void {

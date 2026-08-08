@@ -1,24 +1,23 @@
-// Command ledger model (ADR-0008) — SEVERED by ADR-0024. The ledger is the
-// completion projection: app-owned command records that no stream marker may
-// populate or complete. `onMarker` (the anonymous entry point for OSC 133
+import type { ExecutionAttempt } from './lifecycle/state'
+
+// Command ledger model (ADR-0008) — the completion projection (ADR-0024,
+// bead nocx-u7uh.7). App-owned command records that no stream marker may
+// populate or complete: `onMarker` (the anonymous entry point for OSC 133
 // kinds) is deleted, and with it the marker cycle (A→B→C→D trust tracking),
 // the `trusted` boolean, and the N6 environment-transition machinery
 // (enter/completeTransition — stream-driven activation and completion).
 // A record is opened at the app-owned submit with its start time (ADR-0024
 // §5: the attempt exists, started, before any bytes that could cause the
-// shell's own start event are written) and nothing completes it in the
-// severed world — there is no authenticated completion — so the persistence
-// seam is gone and history recording has no terminal caller. The migration
-// bead reconnects completion to authenticated domain events.
-// The status vocabulary of a ledger record. NOT exported on purpose: nothing
-// imports it today (recall reads the `status` field, never the type), and an
-// exported-but-unused type is exactly the dead export the knip ratchet
-// exists to catch. The migration bead — the one that reconnects completion
-// to authenticated domain events (ADR-0024 §5) — is the first consumer that
-// will need to name a status across modules; it re-exports this type with
-// its consumer in the same commit.
-type CommandStatus = 'running' | 'success' | 'failure' | 'interrupted' | 'unknown'
-
+// shell's own start event are written) and completed only by an
+// authenticated attempt: `bindAttempt` ties the pending record to the
+// published attempt, `complete` applies its exit status exactly once, and
+// an abandoned attempt is `unknown` and never successful. History
+// persistence (history-client.ts) consumes the completed record and takes
+// the attempt as its authority.
+// The status vocabulary of a ledger record. Exported because the
+// completion projection reconnects the ledger to history persistence and
+// the block model, which name a status across modules (ADR-0024 §5).
+export type CommandStatus = 'running' | 'success' | 'failure' | 'interrupted' | 'unknown'
 export interface CommandRecord {
   readonly id: number
   readonly command: string
@@ -52,6 +51,10 @@ export class CommandLedger {
   private _nextId = 1
   private readonly _now: () => number
 
+  /** attempt id → record id. The binding is projection bookkeeping: an
+   *  attempt belongs to exactly one record, and only the record bound to an
+   *  authenticated attempt may be completed by it (ADR-0024 §5). */
+  private readonly _attemptBindings = new Map<string, number>()
   constructor(opts: LedgerOpts) {
     this._now = opts.now
   }
@@ -108,5 +111,60 @@ export class CommandLedger {
   /** Look up a record by id. Returns undefined if not found. */
   resolveID(id: number): CommandRecord | undefined {
     return this._records.find((r) => r.id === id)
+  }
+
+  /** Tie the single unbound running record to an authenticated attempt.
+   *  Mirrors the kernel's attachment semantics: a start attaches to the one
+   *  pending app attempt, so the renderer binds the one pending app record.
+   *  Returns the bound record, or null when there is no pending record —
+   *  a shell-originated attempt, which opens no ledger record (its text may
+   *  carry a literal password and never persists; the block projection
+   *  still gives it structure). Idempotent for a repeated binding. */
+  bindAttempt(attemptId: string): CommandRecord | null {
+    const already = this._attemptBindings.get(attemptId)
+    if (already !== undefined) return this.resolveID(already) ?? null
+    const pending = this._records.find(
+      (r) => r.status === 'running' && !this._boundRecordIds().has(r.id),
+    )
+    if (pending === undefined) return null
+    this._attemptBindings.set(attemptId, pending.id)
+    return pending
+  }
+
+  /** Record ids already claimed by an attempt — one attempt per record. */
+  private _boundRecordIds(): Set<number> {
+    return new Set(this._attemptBindings.values())
+  }
+
+  recordForAttempt(attemptId: string): CommandRecord | undefined {
+    const id = this._attemptBindings.get(attemptId)
+    return id === undefined ? undefined : this.resolveID(id)
+  }
+
+  /** Complete the record bound to the attempt from the authenticated
+   *  attempt (ADR-0024 §5): the exit status is set exactly once, only by an
+   *  authenticated same-domain completion, and an abandoned attempt is
+   *  `unknown` and never successful. The attempt's command text is never
+   *  copied into the record — the record keeps the app-owned text captured
+   *  at submit, which may carry references where the shell's wire line
+   *  carries resolved values. Returns the completed record, or null when
+   *  nothing was bound (a shell-originated attempt persists nothing). */
+  complete(attempt: ExecutionAttempt): CommandRecord | null {
+    const rec =
+      this.recordForAttempt(attempt.id) ??
+      this._records.find((r) => r.status === 'running' && !this._boundRecordIds().has(r.id))
+    if (rec === undefined) return null
+    // 'running' cannot be completed again, by any attempt.
+    if (rec.status !== 'running') return null
+    if (attempt.state === 'completed') {
+      rec.status = attempt.exitCode === 0 ? 'success' : 'failure'
+      rec.exitCode = attempt.exitCode ?? null
+    } else {
+      // abandoned: unknown, and never successful (decision 5's interval).
+      rec.status = 'unknown'
+      rec.exitCode = null
+    }
+    rec.endedAt = this._now()
+    return rec
   }
 }

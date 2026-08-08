@@ -5,8 +5,19 @@
 // after the fact, never a copy of the output. When a fuller event envelope
 // lands (nocx-rtg0.3), only this module changes: the ledger and the recall
 // overlay call here and nowhere else.
-
-import type { CommandRecord } from './command-ledger'
+//
+// recordCommand takes the authenticated attempt as its authority (ADR-0024
+// §5): only an authenticated same-domain completion may persist a history
+// record — the `trusted` boolean that used to launder stream-derived
+// verdicts is deleted, and what persists is the attempt's
+// domain-authenticated status. The persisted command text is ALWAYS the
+// record's app-owned text, never the attempt's: for an attached app attempt
+// the shell's wire line may carry vault-resolved secrets while the record
+// carries references, and a shell-originated attempt opens no record at all
+// (the command-text decision of bead nocx-u7uh.7 — an authenticated origin
+// does not make a line the user typed a password into safe to store).
+import type { CommandRecord, CommandStatus } from './command-ledger'
+import type { ExecutionAttempt } from './lifecycle/state'
 import type { HistoryQuery } from './generated/history.query'
 import type { HistoryRecord } from './generated/history.record'
 import type { WSClient } from './ipc'
@@ -19,23 +30,38 @@ export interface HistoryRecordParams {
   command: string
   cwd: string
   host: string
-  status: CommandRecord['status']
+  status: CommandStatus
   exitCode: number | null
   startedAt: number | null
   endedAt: number | null
 }
 
-/** Send one completed command's facts to the store. Best-effort by design: a
+/** Send one completed command's facts to the store, authorized by the
+ *  authenticated attempt that completed it. Best-effort by design: a
  *  socket drop or an unavailable store loses the entry for this session —
  *  the honest cost of not blocking the terminal — and the recall overlay
  *  still answers from the session ledger until the store comes back.
+ *
+ *  The attempt is authority, never data: the record's command text is what
+ *  persists (app-owned, reference-intact), and the attempt's own command
+ *  field never crosses this seam. `trusted` does not exist on the wire.
+ *  Only a COMPLETED attempt persists: an open attempt has nothing to
+ *  record, and an abandoned one is `unknown` — the ledger keeps it for the
+ *  session, but nothing unreported crosses to the store (ADR-0024 §5's
+ *  interval: absence of a completion is not a status).
  *
  *  Resolves with the store's ack — what was masked and, when a credential
  *  was detected, the pending-capture offers — or null on failure. The ack
  *  is what lets the block show the masked command and attach the
  *  after-submit receipt; a dropped record must never surface as a terminal
  *  error, so the caller treats null exactly like "nothing to show". */
-export function recordCommand(client: WSClient, rec: CommandRecord): Promise<HistoryRecord | null> {
+export function recordCommand(
+  client: WSClient,
+  rec: CommandRecord,
+  attempt: ExecutionAttempt,
+): Promise<HistoryRecord | null> {
+  if (attempt.state !== 'completed') return Promise.resolve(null)
+  void attempt // the authority the caller already proved; the params carry only the record
   const params: HistoryRecordParams = {
     command: rec.command,
     cwd: rec.cwd,
