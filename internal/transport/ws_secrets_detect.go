@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/secrets"
 )
 
@@ -64,19 +65,28 @@ type secretsDetectResponse struct {
 	Findings []secretsDetectFinding `json:"findings"`
 }
 
-// handleSecretsDetect serves the secrets.detect method. Detection failure
+// secretsDetectHandlers answers secrets.detect: pure detection, NO capability
+// — the detector reads the line and nothing else, so there is no store to
+// scope and no gate to hold. log is carried for the constructed-handler
+// shape; the detection failures answer through the Responder.
+type secretsDetectHandlers struct {
+	log log.Logger
+	r   Responder
+}
+
+// handleDetect serves the secrets.detect method. Detection failure
 // (including a panic, which the safe wrapper converts) is an error — the
 // renderer shows nothing rather than a hint computed from a broken pass.
-func (s *WSServer) handleSecretsDetect(wconn *wsConn, req jsonrpcRequest) {
+func (h secretsDetectHandlers) handleDetect(req jsonrpcRequest) {
 	var p secretsDetectParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
 
 	findings, err := detectLineSafe(p.Line)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "secrets.detect: "+err.Error()))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "secrets.detect: " + err.Error()})
 		return
 	}
 	resp := secretsDetectResponse{
@@ -95,7 +105,7 @@ func (s *WSServer) handleSecretsDetect(wconn *wsConn, req jsonrpcRequest) {
 			SuggestedName: secrets.SuggestName(p.Line, f),
 		})
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = h.r.TryResult(req.ID, mustMarshal(resp))
 }
 
 // detectLineSafe runs the detector and converts a panic into an error. The

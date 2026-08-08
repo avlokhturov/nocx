@@ -35,6 +35,11 @@ func (r *recordingContentDB) CommandHistory() content.CommandHistoryRepository {
 }
 func (r *recordingContentDB) Backup(context.Context, string) error { return nil }
 func (r *recordingContentDB) Close() error                         { return nil }
+func (r *recordingContentDB) RestorePrivate(_ context.Context, conversations []content.Conversation, history []content.CommandRecord) error {
+	r.convs = append(r.convs, conversations...)
+	r.history = append(r.history, history...)
+	return nil
+}
 
 type recordingConvRepo struct{ db *recordingContentDB }
 

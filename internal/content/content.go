@@ -53,6 +53,21 @@ type ContentDB interface {
 	// copying the single file while running produces a torn backup.
 	Backup(ctx context.Context, destPath string) error
 	Close() error
+	// RestorePrivate applies the given conversations and command history to
+	// the store in ONE atomic operation: either every item is durable or
+	// none is. It is the write-side counterpart of the portable export's
+	// private content block (ADR-0011 §7) and the ONLY supported way to
+	// restore such a block — a caller that loops Save/Add instead builds a
+	// partial restore that cannot be unwound.
+	//
+	// The store owns the atomicity; the caller must not sequence the
+	// writes. A store that cannot hold conversations (the SQLite backing
+	// stubs them until agent mode, design §5.1) reports ErrNotImplemented
+	// when conversations are non-empty, exactly as its
+	// ConversationRepository does — the failure is honest, never a silent
+	// drop. History rows keep their timestamps; row ids are assigned by
+	// the store.
+	RestorePrivate(ctx context.Context, conversations []Conversation, history []CommandRecord) error
 }
 
 // CommandStatus is the execution status of a command. It mirrors the closed

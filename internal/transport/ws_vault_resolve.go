@@ -21,10 +21,8 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"regexp"
 
-	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/capability"
 )
 
 // vaultResolveLineParams is the request: the line to substitute references
@@ -52,125 +50,38 @@ type vaultResolveLineResponse struct {
 	Refs []vaultResolveLineRef `json:"refs"`
 }
 
-// resolveLineRefRE matches one {{secret:NAME}} reference. NAME is any text
-// up to the closing braces — vault inventory names carry spaces ("SSH
-// password for user@host:22"), so the grammar is deliberately permissive.
-var resolveLineRefRE = regexp.MustCompile(`\{\{secret:(.+?)\}\}`)
-
-func (s *WSServer) handleVaultResolveLine(wconn *wsConn, req jsonrpcRequest) {
+// handleResolveLine answers vault.resolveLine. The whole reference seam
+// lives in the SecretService: the name → row handle → SecretID → value
+// resolution, the sealed-mid-flight error (actionable -32001/vault-sealed,
+// distinct from "no such secret") and the no-references identity shortcut.
+// The handler only re-shapes the refs for the wire.
+func (h vaultSecretHandlers) handleResolveLine(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: h.notWired})
+		return
+	}
 	var p vaultResolveLineParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: params must be an object"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
-
-	if s.profiles == nil || s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault.resolveLine not available"))
-		return
-	}
-
-	// A line with no references is identity and an empty refs list; the
-	// vault is not consulted for it.
-	locs := resolveLineRefRE.FindAllStringSubmatchIndex(p.Line, -1)
-	if len(locs) == 0 {
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResolveLineResponse{
-			Line: p.Line,
-			Refs: []vaultResolveLineRef{},
-		})))
-		return
-	}
-
-	profiles, err := s.profiles.LoadProfiles()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-	groups, err := s.groups.LoadGroups()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-
-	inputs := s.vaultInventoryInputs(profiles, groups)
-
-	// The inventory is the name → row map: NAME is resolved to the row
-	// handle the way vault.inventory mints it, then to the SecretID through
-	// the vault's own ResolveRow, then to the value through Vault.Get.
-	// A sealed vault fails here with the actionable -32001/vault-sealed —
-	// the caller has to be able to tell "unseal and retry" from "no such
-	// secret", and a generic -32603 would not let it.
-	entries, err := s.vaultLifecycle.BuildInventory(context.Background(), inputs)
-	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.resolveLine: ", err))
-		return
-	}
-	nameToRow := make(map[string]string, len(entries))
-	for _, e := range entries {
-		if _, exists := nameToRow[e.Name]; !exists {
-			nameToRow[e.Name] = e.ID
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
+		line, refs, err := svc.ResolveLine(ctx, p.Line)
+		if err != nil {
+			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.resolveLine: ", err))
+			return nil
 		}
-	}
-
-	refs := make([]vaultResolveLineRef, 0, len(locs))
-	// Substitute left to right over the original byte offsets: the refs
-	// that resolve get their value spliced in, the ones that do not keep
-	// their literal text so the caller can see exactly what did not work.
-	out := make([]byte, 0, len(p.Line))
-	out = append(out, p.Line[:locs[0][0]]...)
-	for i, loc := range locs {
-		name := p.Line[loc[2]:loc[3]]
-		value, resolved, sealed := s.resolveVaultSecret(context.Background(), name, nameToRow, inputs)
-		if sealed {
-			// The vault sealed between inventory and read: the response
-			// would be a lie, because a retry after unsealing resolves
-			// differently. Surface the actionable error instead.
-			_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.resolveLine: ", vault.ErrVaultSealed))
-			return
+		out := vaultResolveLineResponse{
+			Line: line,
+			Refs: make([]vaultResolveLineRef, 0, len(refs)),
 		}
-		refs = append(refs, vaultResolveLineRef{Name: name, Resolved: resolved})
-		if resolved {
-			out = append(out, value...)
-		} else {
-			out = append(out, p.Line[loc[0]:loc[1]]...)
+		for _, ref := range refs {
+			out.Refs = append(out.Refs, vaultResolveLineRef{Name: ref.Name, Resolved: ref.Resolved})
 		}
-		if i+1 < len(locs) {
-			out = append(out, p.Line[loc[1]:locs[i+1][0]]...)
-		} else {
-			out = append(out, p.Line[loc[1]:]...)
-		}
-	}
-
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResolveLineResponse{
-		Line: string(out),
-		Refs: refs,
-	})))
-}
-
-// resolveVaultSecret maps name → row handle → SecretID → value. sealed is
-// true only when the vault sealed mid-flight (an actionable state, distinct
-// from "no such secret"); resolved is false for an unknown name or a store
-// that did not answer, and the caller reports that ref as unresolved.
-func (s *WSServer) resolveVaultSecret(ctx context.Context, name string, nameToRow map[string]string, inputs []vault.CredentialInventory) (value string, resolved bool, sealed bool) {
-	row, ok := nameToRow[name]
-	if !ok {
-		return "", false, false
-	}
-	id, ok := s.vaultLifecycle.ResolveRow(row, inputs)
-	if !ok {
-		return "", false, false
-	}
-	secret, err := s.vaultLifecycle.Get(ctx, id)
-	if err != nil {
-		return "", false, errors.Is(err, vault.ErrVaultSealed)
-	}
-	var valueBuf []byte
-	if useErr := secret.Use(func(b []byte) error {
-		valueBuf = append([]byte(nil), b...)
+		_ = h.r.TryResult(req.ID, mustMarshal(out))
 		return nil
-	}); useErr != nil {
-		return "", false, false
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	value = string(valueBuf)
-	clear(valueBuf)
-	return value, true, false
 }

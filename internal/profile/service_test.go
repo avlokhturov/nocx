@@ -306,6 +306,97 @@ func TestClearReviewFlag_RejectsNonexistent(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot + AtomicReplace
+// ---------------------------------------------------------------------------
+
+func TestServiceSnapshot_ReturnsFullState(t *testing.T) {
+	s := svc(t)
+	p1 := makeTestProfile("ssh:custom:test:1", "one", "one.example.com")
+	p2 := makeTestProfile("ssh:custom:test:2", "two", "two.example.com")
+	if err := s.SaveProfile(p1); err != nil {
+		t.Fatalf("SaveProfile p1: %v", err)
+	}
+	if err := s.SaveProfile(p2); err != nil {
+		t.Fatalf("SaveProfile p2: %v", err)
+	}
+	if err := s.SaveGroup(makeTestGroup("group-1", "Work", nil)); err != nil {
+		t.Fatalf("SaveGroup: %v", err)
+	}
+
+	snap, err := s.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	if len(snap.Profiles) != 2 {
+		t.Errorf("snapshot profiles = %d, want 2", len(snap.Profiles))
+	}
+	if len(snap.Groups) != 1 {
+		t.Errorf("snapshot groups = %d, want 1", len(snap.Groups))
+	}
+}
+
+// AtomicReplace is the rollback primitive: it must return the store to a
+// captured generation EXACTLY — a profile the import added disappears, and
+// a profile the import overwrote is restored. A merge can do neither for the
+// added profile, which is why this method exists.
+func TestServiceAtomicReplace_RestoresCapturedGeneration(t *testing.T) {
+	s := svc(t)
+	oldProfile := makeTestProfile("ssh:custom:test:1", "old-name", "old.example.com")
+	if err := s.SaveProfile(oldProfile); err != nil {
+		t.Fatalf("SaveProfile old: %v", err)
+	}
+	if err := s.SaveGroup(makeTestGroup("group-1", "Work", nil)); err != nil {
+		t.Fatalf("SaveGroup old: %v", err)
+	}
+
+	snap, err := s.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+
+	// Move the store to a NEW generation: overwrite the existing profile and
+	// add one that did not exist before — exactly what an import does.
+	overwritten := makeTestProfile("ssh:custom:test:1", "new-name", "new.example.com")
+	imported := makeTestProfile("ssh:custom:test:9", "imported", "imported.example.com")
+	importRes := s.AtomicImport([]SSHProfile{overwritten, imported}, nil)
+	if len(importRes.ImportErrors) > 0 {
+		t.Fatalf("AtomicImport: %v", importRes.ImportErrors)
+	}
+
+	if err := s.AtomicReplace(snap); err != nil {
+		t.Fatalf("AtomicReplace: %v", err)
+	}
+
+	all, _ := s.store.LoadAll()
+	if len(all.Profiles) != 1 {
+		t.Fatalf("profiles after replace = %d, want 1 (imported profile must be gone)", len(all.Profiles))
+	}
+	if all.Profiles[0].Name != oldProfile.Name {
+		t.Errorf("profile name = %q, want %q (overwritten profile must be restored)", all.Profiles[0].Name, oldProfile.Name)
+	}
+	if len(all.Groups) != 1 || all.Groups[0].Name != "Work" {
+		t.Errorf("groups after replace = %+v, want the captured group", all.Groups)
+	}
+}
+
+func TestServiceAtomicReplace_InvalidStateLeavesStoreUnchanged(t *testing.T) {
+	s := svc(t)
+	if err := s.SaveProfile(makeTestProfile("ssh:custom:test:1", "keep", "keep.example.com")); err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+
+	err := s.AtomicReplace(ConfigSnapshot{Profiles: []SSHProfile{{Base: Base{ID: "ssh:bad"}}}})
+	if err == nil {
+		t.Fatal("AtomicReplace with a host-less profile succeeded, want error")
+	}
+
+	after, _ := s.store.LoadAll()
+	if len(after.Profiles) != 1 || after.Profiles[0].Name != "keep" {
+		t.Errorf("store changed after failed replace: %+v", after.Profiles)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

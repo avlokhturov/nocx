@@ -42,8 +42,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -155,7 +158,28 @@ func oracleDestination(argv []string) string {
 	return argv[len(argv)-1]
 }
 
-// handleShellLauncherCommand serves the shell.launcherCommand method.
+// launcherHandlers answers shell.launcherCommand and
+// shell.environmentObserved: the delivery planner's decision, made once per
+// attempt, and the passport observation that may record or invalidate the
+// installed fact (§5.4). It holds ONLY seams — the launcher stager, the
+// installed-fact store, the launcher builder, the ssh -G oracle, the
+// server-owned attempt registry (shared across connections) and the session
+// factory for the server-authoritative session-id check (AD-7) — never the
+// *WSServer. No capability gates the rewrite: the decision runs on the
+// ordinary lane under no operation.
+type launcherHandlers struct {
+	ops        *capability.SessionOperations // session liveness check only (AD-7)
+	r          Responder
+	stager     LauncherStager
+	facts      *ssh.InstalledFactStore
+	launcher   ssh.RemoteLauncher
+	sshCfg     ssh.ConfigResolver
+	attempts   *map[string]*launchAttempt // server-owned registry slot, shared by every connection
+	attemptsMu *sync.Mutex
+	log        log.Logger
+}
+
+// handleLauncherCommand serves the shell.launcherCommand method.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.launcherCommand","params":{"sessionId":"0123…","oracleArgv":["ssh","-G","-p","2222","pi@host"]}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"mode":"bootstrap","environmentId":"…","launcherPath":"'/home/u/.nocx/run/launcher-123'","reason":null}}
@@ -178,19 +202,22 @@ func oracleDestination(argv []string) string {
 //     environment id could not be minted).
 //   - "stage-failed": the launcher could not be written where the local
 //     shell can read it (no home, unwritable directory, full disk).
-func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest) {
+func (h launcherHandlers) handleLauncherCommand(ctx context.Context, req jsonrpcRequest) {
 	var params struct {
 		SessionID  string   `json:"sessionId"`
 		OracleArgv []string `json:"oracleArgv"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || !validOracleArgv(params.OracleArgv) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and a well-formed oracleArgv required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId and a well-formed oracleArgv required"})
 		return
 	}
 
-	// Session id is server-authoritative (AD-7).
-	if _, err := s.registry.Get(session.ID(params.SessionID)); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+	// Session id is server-authoritative (AD-7): only a live session can
+	// anchor NOCX_SESSION_ID in a launcher command. ForSession performs the
+	// registry liveness check without running an operation — the rewrite
+	// itself is a seam decision, not a store operation.
+	if _, err := h.ops.ForSession(session.ID(params.SessionID)); err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
 
@@ -198,45 +225,45 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// decision so every result — including every refusal — carries one.
 	envID, err := mintEnvironmentID()
 	if err != nil {
-		s.log.Info("shell.launcherCommand mode decided",
+		h.log.Info("shell.launcherCommand mode decided",
 			"destination", oracleDestination(params.OracleArgv),
 			"mode", launcherModeRaw, "reason", "unsupported")
-		s.refuseLauncherCommand(wconn, req, envID, "unsupported")
+		h.refuseLauncherCommand(req, envID, "unsupported")
 		return
 	}
-	s.log.Info("shell.launcherCommand called",
+	h.log.Info("shell.launcherCommand called",
 		"destination", oracleDestination(params.OracleArgv),
 		"environmentId", envID)
 
 	// The oracle is mandatory and its failure refuses the rewrite
 	// (nocx-qwhp). A missing resolver is a failed oracle, not a silent
 	// bypass: without ssh -G's answer there is no basis for a rewrite.
-	if s.sshConfigResolver == nil {
-		s.log.Info("shell.launcherCommand oracle verdict",
+	if h.sshCfg == nil {
+		h.log.Info("shell.launcherCommand oracle verdict",
 			"destination", oracleDestination(params.OracleArgv),
 			"ok", false, "reason", "oracle-failed")
-		s.log.Info("shell.launcherCommand mode decided",
+		h.log.Info("shell.launcherCommand mode decided",
 			"destination", oracleDestination(params.OracleArgv),
 			"environmentId", envID, "mode", launcherModeRaw, "reason", "oracle-failed")
-		s.refuseLauncherCommand(wconn, req, envID, "oracle-failed")
+		h.refuseLauncherCommand(req, envID, "oracle-failed")
 		return
 	}
-	cfg, err := s.sshConfigResolver.ResolveArgv(context.Background(), params.OracleArgv)
+	cfg, err := h.sshCfg.ResolveArgv(ctx, params.OracleArgv)
 	if err != nil {
 		// The verdict is typed fields only: the refusal reason as a value,
 		// never the argv or the oracle's stderr — those can carry command
 		// and config text this log must not repeat.
-		s.log.Info("shell.launcherCommand oracle verdict",
+		h.log.Info("shell.launcherCommand oracle verdict",
 			"destination", oracleDestination(params.OracleArgv),
 			"ok", false, "reason", "oracle-failed")
-		s.log.Info("shell.launcherCommand mode decided",
+		h.log.Info("shell.launcherCommand mode decided",
 			"destination", oracleDestination(params.OracleArgv),
 			"environmentId", envID, "mode", launcherModeRaw, "reason", "oracle-failed")
-		s.refuseLauncherCommand(wconn, req, envID, "oracle-failed")
+		h.refuseLauncherCommand(req, envID, "oracle-failed")
 		return
 	}
 	identity := ssh.IdentityKey(cfg)
-	s.log.Info("shell.launcherCommand oracle verdict",
+	h.log.Info("shell.launcherCommand oracle verdict",
 		"destination", oracleDestination(params.OracleArgv),
 		"ok", true,
 		"identity", identity,
@@ -246,11 +273,11 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// OpenSSH refuses a command-line command alongside it, so no rewrite
 	// (ADR-0015).
 	if cfg.RemoteCommand != "" {
-		s.log.Info("shell.launcherCommand mode decided",
+		h.log.Info("shell.launcherCommand mode decided",
 			"destination", oracleDestination(params.OracleArgv),
 			"environmentId", envID, "mode", launcherModeRaw, "reason", "remote-command",
 			"identity", identity)
-		s.refuseLauncherCommand(wconn, req, envID, "remote-command")
+		h.refuseLauncherCommand(req, envID, "remote-command")
 		return
 	}
 
@@ -259,19 +286,19 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// bootstraps (§3.2/§3.3). The fact is keyed by the RESOLVED identity,
 	// so a host reached through two different argv spellings shares one
 	// memory.
-	if s.installedFacts != nil {
-		if fact, ok := s.installedFacts.Get(identity); ok && fact.Protocol == expectedInstalledProtocol {
-			s.log.Info("shell.launcherCommand mode decided",
+	if h.facts != nil {
+		if fact, ok := h.facts.Get(identity); ok && fact.Protocol == expectedInstalledProtocol {
+			h.log.Info("shell.launcherCommand mode decided",
 				"destination", oracleDestination(params.OracleArgv),
 				"environmentId", envID, "mode", launcherModeInstalled, "reason", "installed-fact",
 				"identity", identity)
-			s.registerAttempt(envID, identity, attemptExpectedInstalled)
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+			h.registerAttempt(envID, identity, attemptExpectedInstalled)
+			_ = h.r.TryResult(req.ID, mustMarshal(shellLauncherCommandResult{
 				Mode:          launcherModeInstalled,
 				EnvironmentID: envID,
 				LauncherPath:  nil,
 				Reason:        nil,
-			})))
+			}))
 			return
 		}
 	}
@@ -279,15 +306,15 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 	// Bootstrap: the launcher travels in argv (staged locally, consumed
 	// exactly once) and carries the fresh environment id — the far shell
 	// announces the passport only when NOCX_ENVIRONMENT_ID is set.
-	if s.remoteLauncher == nil || s.launcherStager == nil {
-		s.log.Info("shell.launcherCommand mode decided",
+	if h.launcher == nil || h.stager == nil {
+		h.log.Info("shell.launcherCommand mode decided",
 			"destination", oracleDestination(params.OracleArgv),
 			"environmentId", envID, "mode", launcherModeRaw, "reason", "unsupported",
 			"identity", identity)
-		s.refuseLauncherCommand(wconn, req, envID, "unsupported")
+		h.refuseLauncherCommand(req, envID, "unsupported")
 		return
 	}
-	launcher, reason, ok := s.remoteLauncher.StartCommand(ssh.ShellAuto, ssh.LaunchOptions{
+	launcher, reason, ok := h.launcher.StartCommand(ssh.ShellAuto, ssh.LaunchOptions{
 		SessionID:     params.SessionID,
 		Enhanced:      true,
 		EnvironmentID: envID,
@@ -297,57 +324,57 @@ func (s *WSServer) handleShellLauncherCommand(wconn *wsConn, req jsonrpcRequest)
 		if refusal == "" {
 			refusal = "unsupported"
 		}
-		s.log.Info("shell.launcherCommand mode decided",
+		h.log.Info("shell.launcherCommand mode decided",
 			"destination", oracleDestination(params.OracleArgv),
 			"environmentId", envID, "mode", launcherModeRaw, "reason", refusal,
 			"identity", identity)
-		s.refuseLauncherCommand(wconn, req, envID, refusal)
+		h.refuseLauncherCommand(req, envID, refusal)
 		return
 	}
 
 	// Stage it. The renderer never sees the payload — only where to find
 	// it — because the payload cannot cross the tty (stage.go).
-	path, err := s.launcherStager.Stage(launcher)
+	path, err := h.stager.Stage(launcher)
 	if err != nil {
-		s.log.Info("shell.launcherCommand mode decided",
+		h.log.Info("shell.launcherCommand mode decided",
 			"destination", oracleDestination(params.OracleArgv),
 			"environmentId", envID, "mode", launcherModeRaw, "reason", "stage-failed",
 			"identity", identity)
-		s.refuseLauncherCommand(wconn, req, envID, "stage-failed")
+		h.refuseLauncherCommand(req, envID, "stage-failed")
 		return
 	}
 
-	s.log.Info("shell.launcherCommand mode decided",
+	h.log.Info("shell.launcherCommand mode decided",
 		"destination", oracleDestination(params.OracleArgv),
 		"environmentId", envID, "mode", launcherModeBootstrap, "reason", "no-installed-fact",
 		"identity", identity)
-	s.registerAttempt(envID, identity, attemptExpectedBootstrap)
+	h.registerAttempt(envID, identity, attemptExpectedBootstrap)
 
 	// Shell-quote the path so the renderer can splice it into the line as
 	// a single word. The staging directory is ours and the names are
 	// generated, but a home directory with a quote or a space in it is an
 	// ordinary thing and must not break the rewrite.
 	quoted := shellQuote(path)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+	_ = h.r.TryResult(req.ID, mustMarshal(shellLauncherCommandResult{
 		Mode:          launcherModeBootstrap,
 		EnvironmentID: envID,
 		LauncherPath:  &quoted,
 		Reason:        nil,
-	})))
+	}))
 }
 
 // refuseLauncherCommand answers with a stated refusal: no path, a reason the
 // renderer can log, and an original line that goes to the pty unchanged. The
 // attempt is registered as raw so a later observation for its environment id
 // can never touch the installed fact.
-func (s *WSServer) refuseLauncherCommand(wconn *wsConn, req jsonrpcRequest, envID, reason string) {
-	s.registerAttempt(envID, "", attemptExpectedRaw)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellLauncherCommandResult{
+func (h launcherHandlers) refuseLauncherCommand(req jsonrpcRequest, envID, reason string) {
+	h.registerAttempt(envID, "", attemptExpectedRaw)
+	_ = h.r.TryResult(req.ID, mustMarshal(shellLauncherCommandResult{
 		Mode:          launcherModeRaw,
 		EnvironmentID: envID,
 		LauncherPath:  nil,
 		Reason:        &reason,
-	})))
+	}))
 }
 
 // observedPassport is the passport the renderer accepted, crossing the
@@ -375,35 +402,35 @@ type environmentObservedResult struct {
 	FactUpdated bool `json:"factUpdated"`
 }
 
-// handleShellEnvironmentObserved serves the shell.environmentObserved
-// method: the renderer reports what the attempt produced. passport non-null
-// is an accepted readiness passport (protocol, script version, generation
+// handleEnvironmentObserved serves the shell.environmentObserved method:
+// the renderer reports what the attempt produced. passport non-null is an
+// accepted readiness passport (protocol, script version, generation
 // preserved verbatim); passport null is "the attempt ended with no accepted
 // passport". Only an attempt this backend minted can change state, and the
 // first observation per attempt decides it — duplicates are idempotent and
 // can never regress a written fact.
-func (s *WSServer) handleShellEnvironmentObserved(wconn *wsConn, req jsonrpcRequest) {
+func (h launcherHandlers) handleEnvironmentObserved(ctx context.Context, req jsonrpcRequest) {
 	var params struct {
 		EnvironmentID string            `json:"environmentId"`
 		Passport      *observedPassport `json:"passport"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.EnvironmentID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: environmentId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: environmentId required"})
 		return
 	}
 	if params.Passport != nil && params.Passport.EnvironmentID != params.EnvironmentID {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: passport environmentId does not match"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: passport environmentId does not match"})
 		return
 	}
 	if !validPassport(params.Passport) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: malformed passport"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: malformed passport"})
 		return
 	}
-	processed, updated := s.consumeObservation(params.EnvironmentID, params.Passport)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(environmentObservedResult{
+	processed, updated := h.consumeObservation(params.EnvironmentID, params.Passport)
+	_ = h.r.TryResult(req.ID, mustMarshal(environmentObservedResult{
 		Processed:   processed,
 		FactUpdated: updated,
-	})))
+	}))
 }
 
 // consumeObservation applies one observation to the attempt registry under
@@ -412,22 +439,22 @@ func (s *WSServer) handleShellEnvironmentObserved(wconn *wsConn, req jsonrpcRequ
 // durable fact change happens BEFORE the attempt is marked consumed — a
 // failed write leaves the attempt consumable so a duplicate report can
 // retry, and Get keeps answering "not installed" in the meantime.
-func (s *WSServer) consumeObservation(envID string, p *observedPassport) (processed, factUpdated bool) {
-	s.launcherAttemptsMu.Lock()
-	defer s.launcherAttemptsMu.Unlock()
+func (h launcherHandlers) consumeObservation(envID string, p *observedPassport) (processed, factUpdated bool) {
+	h.attemptsMu.Lock()
+	defer h.attemptsMu.Unlock()
 
-	a, ok := s.launcherAttempts[envID]
+	a, ok := (*h.attempts)[envID]
 	if !ok {
 		// No live minted attempt: a report for an id this backend never
 		// minted (typically after a restart) changes nothing.
-		s.log.Info("shell.environmentObserved",
+		h.log.Info("shell.environmentObserved",
 			"environmentId", envID, "status", "unexpected")
 		return false, false
 	}
 	if a.consumed {
 		// A duplicate report: the first observation decided the attempt,
 		// and a duplicate can never regress a written fact.
-		s.log.Info("shell.environmentObserved",
+		h.log.Info("shell.environmentObserved",
 			"environmentId", envID, "status", "ignored")
 		return true, false
 	}
@@ -435,7 +462,7 @@ func (s *WSServer) consumeObservation(envID string, p *observedPassport) (proces
 		// A raw attempt can never touch the installed fact, whatever the
 		// renderer observed.
 		a.consumed = true
-		s.log.Info("shell.environmentObserved",
+		h.log.Info("shell.environmentObserved",
 			"environmentId", envID, "status", "ignored",
 			"identity", a.identity)
 		return true, false
@@ -449,28 +476,28 @@ func (s *WSServer) consumeObservation(envID string, p *observedPassport) (proces
 			Generation:    p.Generation,
 			ObservedAt:    time.Now(),
 		}
-		if s.installedFacts == nil {
+		if h.facts == nil {
 			a.consumed = true
-			s.log.Info("shell.environmentObserved",
+			h.log.Info("shell.environmentObserved",
 				"environmentId", envID, "status", "accepted",
 				"identity", a.identity)
-			s.log.Warn("shell.environmentObserved: installed-fact store not wired; accepted passport not recorded",
+			h.log.Warn("shell.environmentObserved: installed-fact store not wired; accepted passport not recorded",
 				"environmentId", envID)
 			return true, false
 		}
-		if err := s.installedFacts.Record(fact); err != nil {
-			s.log.Info("shell.environmentObserved",
+		if err := h.facts.Record(fact); err != nil {
+			h.log.Info("shell.environmentObserved",
 				"environmentId", envID, "status", "accepted",
 				"identity", a.identity)
-			s.log.Warn("shell.environmentObserved: could not record the installed fact",
+			h.log.Warn("shell.environmentObserved: could not record the installed fact",
 				"identity", a.identity, "error", err)
 			return true, false
 		}
 		a.consumed = true
-		s.log.Info("shell.environmentObserved",
+		h.log.Info("shell.environmentObserved",
 			"environmentId", envID, "status", "accepted",
 			"identity", a.identity)
-		s.log.Info("installed fact recorded",
+		h.log.Info("installed fact recorded",
 			"identity", a.identity,
 			"protocol", p.ProtocolVersion,
 			"generation", p.Generation)
@@ -482,31 +509,31 @@ func (s *WSServer) consumeObservation(envID string, p *observedPassport) (proces
 	// bootstraps again instead of failing forever (§3.3). Bootstrap and
 	// raw attempts recorded nothing, so there is nothing to invalidate.
 	if a.expected == attemptExpectedInstalled {
-		if s.installedFacts == nil {
+		if h.facts == nil {
 			a.consumed = true
-			s.log.Info("shell.environmentObserved",
+			h.log.Info("shell.environmentObserved",
 				"environmentId", envID, "status", "none",
 				"identity", a.identity)
 			return true, false
 		}
-		if err := s.installedFacts.Invalidate(a.identity); err != nil {
-			s.log.Info("shell.environmentObserved",
+		if err := h.facts.Invalidate(a.identity); err != nil {
+			h.log.Info("shell.environmentObserved",
 				"environmentId", envID, "status", "none",
 				"identity", a.identity)
-			s.log.Warn("shell.environmentObserved: could not invalidate the installed fact",
+			h.log.Warn("shell.environmentObserved: could not invalidate the installed fact",
 				"identity", a.identity, "error", err)
 			return true, false
 		}
 		a.consumed = true
-		s.log.Info("shell.environmentObserved",
+		h.log.Info("shell.environmentObserved",
 			"environmentId", envID, "status", "none",
 			"identity", a.identity)
-		s.log.Info("installed fact invalidated",
+		h.log.Info("installed fact invalidated",
 			"identity", a.identity)
 		return true, true
 	}
 	a.consumed = true
-	s.log.Info("shell.environmentObserved",
+	h.log.Info("shell.environmentObserved",
 		"environmentId", envID, "status", "none",
 		"identity", a.identity)
 	return true, false
@@ -544,23 +571,23 @@ func validPassport(p *observedPassport) bool {
 
 // registerAttempt records a minted attempt under the registry lock. The
 // registry is bounded: the oldest entry is evicted when full.
-func (s *WSServer) registerAttempt(envID, identity, expected string) {
-	s.launcherAttemptsMu.Lock()
-	defer s.launcherAttemptsMu.Unlock()
-	if s.launcherAttempts == nil {
-		s.launcherAttempts = make(map[string]*launchAttempt)
+func (h launcherHandlers) registerAttempt(envID, identity, expected string) {
+	h.attemptsMu.Lock()
+	defer h.attemptsMu.Unlock()
+	if *h.attempts == nil {
+		*h.attempts = make(map[string]*launchAttempt)
 	}
-	if len(s.launcherAttempts) >= maxLaunchAttempts {
+	if len(*h.attempts) >= maxLaunchAttempts {
 		var oldestID string
 		var oldest *launchAttempt
-		for id, a := range s.launcherAttempts {
+		for id, a := range *h.attempts {
 			if oldest == nil || a.mintedAt.Before(oldest.mintedAt) {
 				oldest, oldestID = a, id
 			}
 		}
-		delete(s.launcherAttempts, oldestID)
+		delete(*h.attempts, oldestID)
 	}
-	s.launcherAttempts[envID] = &launchAttempt{
+	(*h.attempts)[envID] = &launchAttempt{
 		environmentID: envID,
 		identity:      identity,
 		expected:      expected,

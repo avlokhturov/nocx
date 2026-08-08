@@ -51,6 +51,13 @@ const defaultFsCompleteLimit = 50
 // directory tree into the renderer.
 const maxFsCompleteLimit = 200
 
+// fsCompleteHandlers answers fs.complete. The handler is pure — it completes
+// against the backend's own filesystem and touches no transport state, so it
+// holds only its Responder.
+type fsCompleteHandlers struct {
+	r Responder
+}
+
 // handleFsComplete serves the fs.complete method.
 //
 // Completion fails soft, never loud: a typo'd or unreadable directory answers
@@ -59,10 +66,10 @@ const maxFsCompleteLimit = 200
 // every half-typed path. The renderer's own applicability rule (local session
 // only) is the hard gate; this handler answers the backend's filesystem
 // regardless, because the backend cannot see the session's host.
-func (s *WSServer) handleFsComplete(wconn *wsConn, req jsonrpcRequest) {
+func (h fsCompleteHandlers) handleFsComplete(req jsonrpcRequest) {
 	text, cwd, limit, errMsg := parseFsCompleteParams(req)
 	if errMsg != "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: "+errMsg))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
 	}
 
@@ -70,7 +77,7 @@ func (s *WSServer) handleFsComplete(wconn *wsConn, req jsonrpcRequest) {
 	if text != "" {
 		resp.Entries = completeLocalPath(text, cwd, limit)
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
+	_ = h.r.TryResult(req.ID, mustMarshal(resp))
 }
 
 // parseFsCompleteParams validates the request against the handler contract

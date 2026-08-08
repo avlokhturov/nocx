@@ -40,6 +40,9 @@ func (f *fakeRecordHistoryDB) Backup(_ context.Context, _ string) error {
 	return content.ErrNotImplemented
 }
 func (f *fakeRecordHistoryDB) Close() error { return nil }
+func (f *fakeRecordHistoryDB) RestorePrivate(_ context.Context, _ []content.Conversation, _ []content.CommandRecord) error {
+	return content.ErrNotImplemented
+}
 
 func (f *fakeRecordHistoryDB) Add(_ context.Context, record content.CommandRecord) (int64, error) {
 	f.mu.Lock()

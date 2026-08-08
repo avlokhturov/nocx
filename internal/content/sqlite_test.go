@@ -920,3 +920,106 @@ func TestMaskFactsRoundTrip(t *testing.T) {
 		t.Errorf("query facts = %d %d, want 0 then 1", page.Entries[0].MaskedCount, page.Entries[1].MaskedCount)
 	}
 }
+
+// ── atomic private-content restore (the export restore operation's seam) ─
+
+// A normal machine: a private-content block with history rows is restored
+// whole, and the rows keep their timestamps and facts.
+func TestRestorePrivate_RestoresHistoryRows(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	started := int64(1700000000000)
+	ended := int64(1700000001000)
+	records := []content.CommandRecord{
+		{
+			Command: "ssh prod", Cwd: "/home/dev", Host: "local", Status: content.StatusSuccess,
+			StartedAt: &started, EndedAt: &ended, Trusted: true,
+		},
+		{Command: "git push", Cwd: "/home/dev/nocx", Host: "local", Status: content.StatusFailure},
+	}
+	if err := db.RestorePrivate(ctx, nil, records); err != nil {
+		t.Fatalf("RestorePrivate: %v", err)
+	}
+
+	recs, err := db.CommandHistory().List(ctx, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("rows after restore = %d, want 2", len(recs))
+	}
+	// List is newest first; find the ssh prod row by command.
+	var found *content.CommandRecord
+	for i := range recs {
+		if recs[i].Command == "ssh prod" {
+			found = &recs[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("restored row 'ssh prod' missing")
+	}
+	if found.StartedAt == nil || *found.StartedAt != started || found.EndedAt == nil || *found.EndedAt != ended {
+		t.Errorf("restored timestamps not preserved: %+v", found)
+	}
+	if !found.Trusted {
+		t.Errorf("restored row lost Trusted: %+v", found)
+	}
+}
+
+// A block that carries conversations is refused on the SQLite backing (they
+// are stubbed until agent mode) — and the refusal must leave the store
+// untouched: refusing after writing the history rows would be the partial
+// restore the atomicity contract exists to prevent.
+func TestRestorePrivate_ConversationsRefusedAtomically(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	err := db.RestorePrivate(ctx, []content.Conversation{{ID: "conv-1", Title: "t"}}, []content.CommandRecord{
+		{Command: "ssh prod", Cwd: "/", Host: "local", Status: content.StatusSuccess},
+	})
+	if !errors.Is(err, content.ErrNotImplemented) {
+		t.Fatalf("err = %v, want ErrNotImplemented", err)
+	}
+	recs, err := db.CommandHistory().List(ctx, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Errorf("history rows written despite conversation refusal: %d", len(recs))
+	}
+}
+
+// Cancellation before the writer accepts the request changes nothing on
+// disk — the pre-commit half of the restore operation's interval.
+func TestRestorePrivate_CancelledBeforeAcceptanceChangesNothing(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := db.RestorePrivate(ctx, nil, []content.CommandRecord{
+		{Command: "ssh prod", Cwd: "/", Host: "local", Status: content.StatusSuccess},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	recs, err := db.CommandHistory().List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(recs) != 0 {
+		t.Errorf("rows written despite pre-acceptance cancellation: %d", len(recs))
+	}
+}
+
+// A closed store refuses the restore cleanly — and a restore of nothing is
+// still a no-op success, never a write to a closed store.
+func TestRestorePrivate_ClosedStoreRefuses(t *testing.T) {
+	db, _ := newTestStore(t)
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	err := db.RestorePrivate(context.Background(), nil, []content.CommandRecord{
+		{Command: "ssh prod", Cwd: "/", Host: "local", Status: content.StatusSuccess},
+	})
+	if !errors.Is(err, content.ErrClosed) {
+		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+}

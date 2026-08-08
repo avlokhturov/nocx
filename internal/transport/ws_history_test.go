@@ -32,6 +32,9 @@ func (f *fakeHistoryDB) CommandHistory() content.CommandHistoryRepository { retu
 func (f *fakeHistoryDB) Conversations() content.ConversationRepository    { return nil }
 func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error         { return content.ErrNotImplemented }
 func (f *fakeHistoryDB) Close() error                                     { return nil }
+func (f *fakeHistoryDB) RestorePrivate(_ context.Context, _ []content.Conversation, _ []content.CommandRecord) error {
+	return content.ErrNotImplemented
+}
 
 func (f *fakeHistoryDB) Add(_ context.Context, _ content.CommandRecord) (int64, error) {
 	return 0, content.ErrNotImplemented

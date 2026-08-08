@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
 
@@ -44,48 +45,71 @@ type vaultResetResponse struct {
 	Residue      []vaultResetResidueEntry `json:"residue"`
 }
 
-func (s *WSServer) handleVaultResetPreview(wconn *wsConn, req jsonrpcRequest) {
-	if s.vaultReset == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault reset not available"))
-		return
-	}
-	p, err := s.vaultReset.Preview(context.Background())
-	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.resetPreview: ", err))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResetPreviewResponse{
-		SecretCount:             p.Impact.SecretCount,
-		ProfileCount:            p.Impact.ProfileCount,
-		SystemKeychainReachable: p.SystemKeychainReachable,
-		VaultInitialized:        p.VaultInitialized,
-	})))
+// vaultResetHandlers answers vault.resetPreview and vault.reset. Reset is
+// deliberately its own operation: it must work on a vault that is broken or
+// half-built, so VaultResetOperation is built from the reset orchestrator
+// alone, independent of the vault lifecycle. The handler holds the operation,
+// the Responder and the vault.changed fan-out; nothing else.
+type vaultResetHandlers struct {
+	op      capability.VaultResetOperation // nil → reset not wired
+	r       Responder
+	machine vaultMachine
 }
 
-func (s *WSServer) handleVaultReset(wconn *wsConn, req jsonrpcRequest) {
-	if s.vaultReset == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "vault reset not available"))
+func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
-	result, err := s.vaultReset.Execute(context.Background())
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.VaultResetService) error {
+		p, err := svc.Preview(ctx)
+		if err != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "vault.resetPreview: ", err))
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(vaultResetPreviewResponse{
+			SecretCount:             p.Impact.SecretCount,
+			ProfileCount:            p.Impact.ProfileCount,
+			SystemKeychainReachable: p.SystemKeychainReachable,
+			VaultInitialized:        p.VaultInitialized,
+		}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "vault.reset: ", err))
+		answerOperationRefusal(h.r, req.ID, err)
+	}
+}
+
+func (h vaultResetHandlers) handleReset(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "vault reset not available"})
 		return
 	}
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.VaultResetService) error {
+		result, err := svc.Execute(ctx)
+		if err != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "vault.reset: ", err))
+			return nil
+		}
 
-	// Empty, not nil. The contract declares an array and the renderer types it
-	// as one; `residue: null` reaching a `.length` is the same defect this
-	// project already shipped once on the inventory (nocx-25k9.14).
-	residue := make([]vaultResetResidueEntry, 0, len(result.Residue))
-	for _, r := range result.Residue {
-		residue = append(residue, vaultResetResidueEntry{Store: r.Store, Reason: r.Reason})
+		// Empty, not nil. The contract declares an array and the renderer types it
+		// as one; `residue: null` reaching a `.length` is the same defect this
+		// project already shipped once on the inventory (nocx-25k9.14).
+		residue := make([]vaultResetResidueEntry, 0, len(result.Residue))
+		for _, r := range result.Residue {
+			residue = append(residue, vaultResetResidueEntry{Store: r.Store, Reason: r.Reason})
+		}
+
+		h.machine.broadcastVaultChanged()
+
+		_ = h.r.TryResult(req.ID, mustMarshal(vaultResetResponse{
+			SecretCount:  result.Impact.SecretCount,
+			ProfileCount: result.Impact.ProfileCount,
+			Residue:      residue,
+		}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-
-	s.broadcastVaultChanged()
-
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(vaultResetResponse{
-		SecretCount:  result.Impact.SecretCount,
-		ProfileCount: result.Impact.ProfileCount,
-		Residue:      residue,
-	})))
 }

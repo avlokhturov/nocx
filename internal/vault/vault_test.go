@@ -55,7 +55,12 @@ func (p *testProvider) Get(_ context.Context, id credential.SecretID) (credentia
 	return s, nil
 }
 
-func (p *testProvider) Put(_ context.Context, id credential.SecretID, s credential.Secret) error {
+func (p *testProvider) Put(ctx context.Context, id credential.SecretID, s credential.Secret) error {
+	if err := ctx.Err(); err != nil {
+		// A cancelled context must be observable by Setup's provider phase:
+		// that is the pre-commit cancellation path the interval documents.
+		return err
+	}
 	if p.delay > 0 {
 		time.Sleep(p.delay)
 	}
@@ -1051,9 +1056,56 @@ func TestSetup_SerialisesConcurrentCalls(t *testing.T) {
 		}
 	}
 
-	// Exactly one should succeed; the other should fail.
+	// Exactly one should succeed; the other should fail — a deterministic
+	// loser, no matter which goroutine wins the mutex.
 	if errCount != 1 {
 		t.Fatalf("expected exactly 1 error from 2 concurrent Setups, got %d", errCount)
+	}
+
+	// The winner completed and the loser left nothing behind: the vault is
+	// unsealed, and the system provider holds EXACTLY ONE OS key — the
+	// loser failed before minting, so an orphan key is not expressible.
+	if v.State() != StateUnsealed {
+		t.Fatalf("state = %v, want unsealed after one winning setup", v.State())
+	}
+	sys.mu.Lock()
+	keys := len(sys.data)
+	sys.mu.Unlock()
+	if keys != 1 {
+		t.Errorf("system provider holds %d keys after concurrent setup, want exactly 1 (no orphan)", keys)
+	}
+}
+
+// Cancellation before the commit point changes nothing on disk: the system
+// provider's Put observes the cancelled context and fails, and the vault is
+// left exactly where it started — uninitialized, no document, no key.
+func TestSetup_CancelledContextChangesNothing(t *testing.T) {
+	loweredCost(t)
+	sys := newTestProvider(ProviderSystem)
+	v, store, _ := testVault(t, sys, newTestFileProvider(ProviderFile))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := v.Setup(ctx, SetupRequest{})
+	if err == nil {
+		t.Fatal("Setup with a cancelled context succeeded, want error")
+	}
+
+	if v.State() != StateUninitialized {
+		t.Fatalf("state = %v, want uninitialized after cancelled setup", v.State())
+	}
+	doc, found, derr := loadDocument(store)
+	if derr != nil {
+		t.Fatalf("loadDocument: %v", derr)
+	}
+	if found || doc.Instance != "" {
+		t.Errorf("document written by a cancelled setup: found=%v instance=%q", found, doc.Instance)
+	}
+	sys.mu.Lock()
+	keys := len(sys.data)
+	sys.mu.Unlock()
+	if keys != 0 {
+		t.Errorf("system provider holds %d keys after cancelled setup, want 0", keys)
 	}
 }
 

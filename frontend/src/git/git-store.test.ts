@@ -19,6 +19,7 @@ import type { GitHeadMessageResult } from '../generated/git.headMessage'
 import type { GitCommitResult } from '../generated/git.commit'
 import type { GitPanelServices } from './git-client'
 import type { GitLogResult } from '../generated/git.log'
+import type { GitRemoteResult } from '../generated/git.remote'
 import { createGitStore, type GitStore } from './git-store'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -920,6 +921,50 @@ describe('the commits read', () => {
     // section says loaded — never a loading state no read can end.
     expect(store.logState()).toBe('loaded')
     expect(store.log()?.entries.length).toBe(1)
+  })
+
+  it('a log issued before a faster remote is applied when the remote lands first (completion order)', async () => {
+    const { store, services } = await openStore()
+    store.setVisible(true)
+    await settle()
+    const log = mockHandle(services, 'log')
+    const remote = mockHandle(services, 'remote')
+    log.mockClear()
+    remote.mockClear()
+    const logD = deferred<GitLogResult>()
+    const remoteD = deferred<GitRemoteResult>()
+    log.mockReturnValueOnce(logD.promise) // the refresh's log hangs…
+    remote.mockReturnValueOnce(remoteD.promise) // …and so does its remote
+    store.refresh()
+    await settle()
+    // The remote — issued AFTER the log — completes first: the control
+    // plane runs handlers concurrently, so a faster backend command's
+    // response overtakes a slower one's (responses travel in completion
+    // order, not issue order).
+    remoteD.resolve({ state: 'none' })
+    await settle()
+    // The log — issued BEFORE the remote — is not stale. Its answer must
+    // land, or the Commits list sits idle forever with no state text:
+    // the e2e failure, where git.log's response arrived on the wire with
+    // its entries and the panel never rendered one row.
+    const newest = logFixture({
+      entries: [
+        {
+          hash: '92e6c887a923ee21a841f1198f5676855c872f42',
+          shortHash: '92e6c88',
+          subject: 'newest',
+          authorName: 'Test Author',
+          authoredAt: '2026-08-08T12:00:00+03:00',
+          refs: ['main'],
+        },
+      ],
+      total: 2,
+    })
+    logD.resolve({ log: newest })
+    await settle()
+    expect(store.logState()).toBe('loaded')
+    expect(store.log()?.entries[0]?.subject).toBe('newest')
+    expect(store.log()?.total).toBe(2)
   })
 
   it('re-binding clears the previous repository log and re-reads under the new binding', async () => {

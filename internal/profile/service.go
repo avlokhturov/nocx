@@ -231,6 +231,82 @@ func (s *ProfileService) AtomicImport(profiles []SSHProfile, groups []ProfileGro
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot + AtomicReplace — whole-store capture and restore
+// ---------------------------------------------------------------------------
+
+// ConfigSnapshot is the full profiles-and-groups state of the store,
+// captured by Snapshot and written back by AtomicReplace.
+type ConfigSnapshot struct {
+	Profiles []SSHProfile
+	Groups   []ProfileGroup
+}
+
+// Snapshot returns the store's entire current state. It is the read side of
+// the export restore operation's rollback: the state captured here is what
+// AtomicReplace writes back when an import fails after its commit point.
+// The snapshot is a fresh read from the store; mutating it does not affect
+// the store.
+func (s *ProfileService) Snapshot() (ConfigSnapshot, error) {
+	data, err := s.store.LoadAll()
+	if err != nil {
+		return ConfigSnapshot{}, fmt.Errorf("snapshot store: %w", err)
+	}
+	return ConfigSnapshot{
+		Profiles: data.Profiles,
+		Groups:   data.Groups,
+	}, nil
+}
+
+// AtomicReplace validates the given state and, when valid, writes it as the
+// ENTIRE store in one atomic write — the inverse of AtomicImport's merge.
+// On any validation failure the store is unchanged.
+//
+// This is the rollback counterpart the export restore operation needs: a
+// merged import cannot be undone with more merges, because a profile or
+// group the import added survives every subsequent merge. Nothing outside
+// the restore operation may call it.
+func (s *ProfileService) AtomicReplace(snap ConfigSnapshot) error {
+	d := &storeData{
+		Profiles: make([]SSHProfile, len(snap.Profiles)),
+		Groups:   make([]ProfileGroup, len(snap.Groups)),
+	}
+	copy(d.Profiles, snap.Profiles)
+	copy(d.Groups, snap.Groups)
+
+	for i := range d.Profiles {
+		p := &d.Profiles[i]
+		if p.ID == "" {
+			return fmt.Errorf("profile with empty ID cannot be restored")
+		}
+		if p.Options.Host == "" {
+			return fmt.Errorf("%s: host is required", p.ID)
+		}
+		// Sync BehaviorOnSessionEnd from Base to Options for storage,
+		// exactly as SaveProfile and AtomicImport do.
+		if p.BehaviorOnSessionEnd != "" {
+			v := p.BehaviorOnSessionEnd
+			p.Options.BehaviorOnSessionEnd = &v
+		} else {
+			p.Options.BehaviorOnSessionEnd = nil
+		}
+	}
+	for _, g := range d.Groups {
+		if g.ID == "" {
+			return fmt.Errorf("group with empty ID cannot be restored")
+		}
+		if g.Defaults != nil {
+			if err := g.Defaults.Validate(); err != nil {
+				return fmt.Errorf("%s: %w", g.ID, err)
+			}
+		}
+	}
+	if err := ValidateGroupTree(d.Groups); err != nil {
+		return fmt.Errorf("group tree invalid: %w", err)
+	}
+	return s.store.WriteAll(d)
+}
+
+// ---------------------------------------------------------------------------
 // Review flag management
 // ---------------------------------------------------------------------------
 

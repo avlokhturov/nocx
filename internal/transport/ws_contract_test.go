@@ -3142,32 +3142,24 @@ func TestFilesReveal_OverTheWireConformsToContract(t *testing.T) {
 
 func TestFilesChanged_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.changed.schema.json")
-	cases := map[string]filesChangedNotification{
+	cases := map[string]filesChangedParams{
 		// rev present: the backend already knew the new digest (SFTP
 		// polling necessarily computed it).
 		"with rev": {
-			JSONRPC: "2.0", Method: "files.changed",
-			Params: filesChangedParams{BindingID: "ab12", Path: "/tmp/dir", Rev: "0123abcdef"},
+			BindingID: "ab12", Path: "/tmp/dir", Rev: "0123abcdef",
 		},
 		// rev absent: a local event where nothing has been re-listed.
 		"without rev": {
-			JSONRPC: "2.0", Method: "files.changed",
-			Params: filesChangedParams{BindingID: "ab12", Path: "/tmp/dir"},
+			BindingID: "ab12", Path: "/tmp/dir",
 		},
 	}
-	for name, n := range cases {
+	for name, params := range cases {
 		t.Run(name, func(t *testing.T) {
-			raw, err := json.Marshal(n)
+			raw, err := json.Marshal(params)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			var frame struct {
-				Params json.RawMessage `json:"params"`
-			}
-			if err := json.Unmarshal(raw, &frame); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			validateJSON(t, schema, frame.Params, "files.changed DTO")
+			validateJSON(t, schema, raw, "files.changed DTO")
 		})
 	}
 }
@@ -3597,21 +3589,11 @@ func TestGitClose_DTOConformsToContract(t *testing.T) {
 // contract.
 func TestGitChanged_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "git.changed.schema.json")
-	n := gitChangedNotification{
-		JSONRPC: "2.0", Method: "git.changed",
-		Params: gitChangedParams{BindingID: "ab12", Reason: "sessionClosed"},
-	}
-	raw, err := json.Marshal(n)
+	raw, err := json.Marshal(gitChangedParams{BindingID: "ab12", Reason: "sessionClosed"})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var frame struct {
-		Params json.RawMessage `json:"params"`
-	}
-	if err := json.Unmarshal(raw, &frame); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	validateJSON(t, schema, frame.Params, "git.changed DTO")
+	validateJSON(t, schema, raw, "git.changed DTO")
 }
 
 // ── git.* over the wire ──────────────────────────────────────────────────

@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -75,50 +74,6 @@ var dangerousFields = map[string]bool{
 
 func isDangerousField(field string) bool {
 	return dangerousFields[field]
-}
-
-func (s *WSServer) handleGroupImpact(wconn *wsConn, req jsonrpcRequest) {
-	if s.groups == nil || s.profiles == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
-		return
-	}
-
-	var params groupImpactParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
-		return
-	}
-	if err := params.validate(); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
-		return
-	}
-
-	allProfiles, err := s.profiles.LoadProfiles()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-	allGroups, err := s.groups.LoadGroups()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-
-	if params.Group != nil {
-		// The renderer proposes bindings by row handle: resolve them to
-		// stored references before computing impact, or the resolution of
-		// the proposed defaults would carry row handles into the diff.
-		proposed, werr := s.groupFromWire(*params.Group)
-		if werr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
-			return
-		}
-		resp := computeGroupUpdateImpact(proposed, allProfiles, allGroups)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
-	} else {
-		resp := computeGroupDeleteImpact(params.DeleteGroupID, allProfiles, allGroups)
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
-	}
 }
 
 // computeGroupUpdateImpact computes the impact of updating a group's
@@ -405,37 +360,6 @@ func (p profileMoveImpactParams) validate() error {
 	return nil
 }
 
-func (s *WSServer) handleProfileMoveImpact(wconn *wsConn, req jsonrpcRequest) {
-	if s.groups == nil || s.profiles == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "profiles not available"))
-		return
-	}
-
-	var params profileMoveImpactParams
-	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
-		return
-	}
-	if err := params.validate(); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, err.Error()))
-		return
-	}
-
-	allProfiles, err := s.profiles.LoadProfiles()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-	allGroups, err := s.groups.LoadGroups()
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-
-	resp := computeProfileMoveImpact(params.ProfileIDs, params.TargetGroupID, allProfiles, allGroups)
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(resp)))
-}
-
 // computeProfileMoveImpact computes the impact of moving one or more profiles
 // to a target group (or root, when targetGroupID is empty). Each profile is
 // resolved twice — once with its current group, once with the proposed group —
@@ -522,49 +446,3 @@ func computeProfileMoveImpact(
 // Unlike the old handler which called LoadGroups() → validate → UpdateGroup(g)
 // in three separate lock acquisitions, this handler delegates to the store's
 // ApplyGroups which loads, validates, and writes under a single lock.
-func (s *WSServer) handleGroupApply(wconn *wsConn, req jsonrpcRequest) {
-	if s.groups == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "groups not available"))
-		return
-	}
-
-	var groups []profile.ProfileGroup
-	if err := json.Unmarshal(req.Params, &groups); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
-		return
-	}
-	if len(groups) == 0 {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "groups required"))
-		return
-	}
-
-	// The renderer names secret bindings by row handle (ADR-0011 §2):
-	// resolve them to stored references so storage never holds a secrow.
-	for i := range groups {
-		wg, werr := s.groupFromWire(groups[i])
-		if werr != nil {
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, werr.Error()))
-			return
-		}
-		groups[i] = wg
-	}
-
-	ag, ok := s.groups.(interface {
-		ApplyGroups([]profile.ProfileGroup) error
-	})
-	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "group store does not support atomic apply"))
-		return
-	}
-	if err := ag.ApplyGroups(groups); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, profileMethodErrorCode(err), err.Error()))
-		return
-	}
-
-	// The echo carries the row handles the renderer addressed, never the
-	// stored references (ADR-0011 §2).
-	for i := range groups {
-		groups[i] = wireGroup(groups[i])
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(groups)))
-}

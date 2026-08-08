@@ -10,12 +10,20 @@
 // 1. RESPONSES CARRY THE SCOPE THEY WERE ISSUED FOR, PLUS AN EPOCH (D17).
 //    Every request captures {tabId, generation, bindingId, epoch}; a
 //    response applies only if the first three still match the store AND its
-//    epoch is not older than the newest already applied. generation bumps
-//    on every re-scope; epoch bumps before EVERY status-producing request —
-//    each poll, each manual refresh, each mutation. The epoch is what
-//    orders a poll issued BEFORE a mutation that lands AFTER it: the two
-//    requests carry identical scope, and a guard that cannot distinguish
-//    them cannot order them.
+//    epoch is not older than the newest already applied for its class.
+//    generation bumps on every re-scope; epoch bumps before EVERY
+//    status-producing request — each poll, each manual refresh, each
+//    mutation. The epoch is what orders a poll issued BEFORE a mutation
+//    that lands AFTER it: the two requests carry identical scope, and a
+//    guard that cannot distinguish them cannot order them.
+//    The status, log and remote are independent facts, so each class
+//    tracks its OWN applied epoch. The control plane delivers responses in
+//    completion order, not issue order (a faster backend command's answer
+//    overtakes a slower one's), so a shared epoch would let a remote that
+//    happens to complete first discard a log read issued BEFORE it — the
+//    Commits list then sits idle forever with its answer thrown away
+//    (nocx-sfv6). Only a newer-issued response of the SAME class
+//    supersedes; a slow in-flight read still applies.
 // 2. A STALE OPEN IS CLOSED, NOT MERELY DROPPED (nocx-myts). A successful
 //    git.open has registered a live binding on the backend; discarding the
 //    response leaks it. If the response is stale the store calls git.close
@@ -270,9 +278,14 @@ export function createGitStore(
   /** Bumps before EVERY status-producing request — the ordering half of
    *  rule 1 (D17). */
   let epoch = 0
-  /** The newest epoch already applied; a response whose epoch is older is
-   *  dropped, whichever order the responses land in. */
+  /** The newest status epoch already applied; a status response whose
+   *  epoch is older is dropped, whichever order the responses land in.
+   *  The log and remote reads keep their own per-class epochs (rule 1):
+   *  one class completing out of issue order must not invalidate an
+   *  earlier-issued read of another. */
   let lastAppliedEpoch = 0
+  let lastLogEpoch = 0
+  let lastRemoteEpoch = 0
   let visible = false
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let pollInFlight = false
@@ -506,13 +519,13 @@ export function createGitStore(
     setRemoteState('loading')
     services.remote(b.bindingId).then(
       (res) => {
-        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
+        if (!scopeCurrent(ctx) || ctx.epoch < lastRemoteEpoch) {
           // Dropped by rule 1: never paint a stale remote onto a
           // repository it did not come from.
           setRemoteState(untrack(remoteUrl) === null ? 'idle' : 'ok')
           return
         }
-        lastAppliedEpoch = ctx.epoch
+        lastRemoteEpoch = ctx.epoch
         if (res.state === 'ok') {
           setRemoteUrl(res.url ?? null)
           setRemoteState('ok')
@@ -524,7 +537,7 @@ export function createGitStore(
         setRemoteError(null)
       },
       (e) => {
-        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
+        if (!scopeCurrent(ctx) || ctx.epoch < lastRemoteEpoch) {
           setRemoteState(untrack(remoteUrl) === null ? 'idle' : 'ok')
           return
         }
@@ -554,21 +567,23 @@ export function createGitStore(
     setLogState('loading')
     services.log(b.bindingId).then(
       (res) => {
-        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
-          // Dropped by rule 1: a newer response superseded this read, and
-          // its answer can never land. Say what is true — the last good
-          // log, or idle when there was none (the next trigger re-reads)
-          // — never a stuck "loading".
+        if (!scopeCurrent(ctx) || ctx.epoch < lastLogEpoch) {
+          // Dropped by rule 1: a newer-issued LOG superseded this read,
+          // and its answer can never land. Say what is true — the last
+          // good log, or idle when there was none (the next trigger
+          // re-reads) — never a stuck "loading". A response from another
+          // class (status, remote) never supersedes a log read: the
+          // classes are independent facts (rule 1).
           setLogState(untrack(log) === null ? 'idle' : 'loaded')
           return
         }
-        lastAppliedEpoch = ctx.epoch
+        lastLogEpoch = ctx.epoch
         setLog(res.log)
         setLogState('loaded')
         setLogError(null)
       },
       (e) => {
-        if (!scopeCurrent(ctx) || ctx.epoch < lastAppliedEpoch) {
+        if (!scopeCurrent(ctx) || ctx.epoch < lastLogEpoch) {
           setLogState(untrack(log) === null ? 'idle' : 'loaded')
           return
         }
