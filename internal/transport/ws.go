@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -926,6 +927,239 @@ type ackParams struct {
 	Offset    uint64 `json:"offset"`
 }
 
+// ── ingress limits ─────────────────────────────────────────────────────────
+
+// wsReadLimit is the hard ceiling on a single WebSocket frame, set on the
+// connection in handleSession. A frame above it is refused by the protocol
+// layer before the read loop ever sees it: gorilla closes the connection
+// with close code 1009 (message too big) and ReadMessage returns an error.
+// That is the chosen failure mode — clean and per-connection; other
+// connections and their sessions are untouched (AD-9). It is the
+// last-resort bound behind the per-method params budget: 16 MiB exceeds the
+// largest declared budget (8 MiB for document-carrying methods) plus
+// envelope and base64 overhead, so no legitimate frame can trip it.
+const wsReadLimit = 16 << 20 // 16 MiB
+
+// envelopeScanCap bounds how many bytes of a control frame the read loop
+// scans looking for the JSON-RPC envelope. The envelope of a legitimate
+// request is a few hundred bytes — the renderer serializes method before
+// params (frontend/src/ipc/dispatcher.ts emits {jsonrpc, id, method,
+// params}) — so a frame whose method does not appear within the cap is
+// refused without ever scanning the rest of it.
+const envelopeScanCap = 4 << 10 // 4 KiB
+
+// Params budgets cap the TOTAL control frame — envelope plus params plus
+// JSON overhead. The envelope is ~200 bytes, so the params allowance is
+// effectively the budget. Sized against measured real payloads: a portable
+// backup of 25 profiles plus settings plus 300 command-history rows travels
+// as a 123 KB frame; a 20-host Tabby config as a 2.7 KB frame; a pasted
+// private key as ~0.6 KB.
+const (
+	// budgetTiny covers vault.unlockResolved and connections.passwordResolved,
+	// the only methods that run on the read loop itself: their frames must be
+	// small so the loop can never be made to spend real work on them.
+	budgetTiny = 1 << 10 // 1 KiB
+	// budgetDefault covers every ordinary method. 64 KiB is ~100x the largest
+	// ordinary frame measured (a pasted key).
+	budgetDefault = 64 << 10 // 64 KiB
+	// budgetDocument covers methods that legitimately carry a whole document:
+	// an exported backup or a Tabby config. 8 MiB is ~68x the measured
+	// realistic backup, comfortably absorbing a year of command history.
+	budgetDocument = 8 << 20 // 8 MiB
+)
+
+// paramsBudgetForMethod returns the frame budget for a control-plane method.
+// A frame above its method's budget is refused by handleControlFrame before
+// any params decoding, so the read loop never touches the payload of an
+// oversized frame.
+func paramsBudgetForMethod(method string) int {
+	switch method {
+	case "vault.unlockResolved", "connections.passwordResolved":
+		return budgetTiny
+	case "export.import", "export.importPortable",
+		"profiles.importTabby", "profiles.tabbyPreview":
+		return budgetDocument
+	default:
+		return budgetDefault
+	}
+}
+
+// errEnvelopeNotObject reports a control frame whose first JSON token is
+// not an object.
+var errEnvelopeNotObject = errors.New("not a JSON object")
+
+// errEnvelopeTooLarge reports a control frame whose method does not appear
+// within envelopeScanCap bytes of top-level structure.
+var errEnvelopeTooLarge = errors.New("envelope exceeds scan cap")
+
+// errEnvelopeDuplicateMember reports a control frame that repeats a
+// top-level envelope member (jsonrpc, id, method or params) before method is
+// decoded. Such a frame is ambiguous — encoding/json resolves a repeated
+// member to its LAST occurrence, so the same frame can read differently at
+// the budget gate and at dispatch. Refusing it keeps one meaning per frame.
+var errEnvelopeDuplicateMember = errors.New("duplicate envelope member")
+
+// decodeEnvelope extracts the JSON-RPC envelope — jsonrpc, id, method —
+// from a control frame WITHOUT decoding the rest of it, using a stdlib
+// json.Decoder capped at envelopeScanCap bytes (io.LimitReader). It walks
+// the top-level members with Token(), decodes keys and values with standard
+// JSON semantics (escapes, Unicode, control characters and literals all
+// follow encoding/json), and stops the moment method is decoded: params and
+// anything after it are never tokenized, which is what keeps a huge frame
+// cheap for the read loop.
+//
+// The cap is load-bearing: Token() materialises each token it returns, but
+// it can only read — and therefore allocate — as much input as the limited
+// reader provides. A frame whose method does not appear within the cap
+// exhausts the reader and is refused here, without ever materialising the
+// value that follows (a 16 MiB params string before method costs a few KiB).
+//
+// Error contract, mirroring the old whole-frame json.Unmarshal:
+//   - errEnvelopeNotObject (no JSON object) → -32600 Invalid Request
+//   - errEnvelopeTooLarge (method not found within the cap) → -32600
+//   - errEnvelopeDuplicateMember (an envelope member repeats) → -32600
+//   - a cleanly-formed object with no method returns (req, nil) with an
+//     empty Method, which the caller answers with -32600 — same as before
+//   - any other failure (invalid escape, control character, mismatched
+//     container, invalid literal, truncated frame) → -32700 Parse error
+func decodeEnvelope(data []byte) (jsonrpcRequest, error) {
+	var req jsonrpcRequest
+	er := &envelopeReader{r: bytes.NewReader(data), cap: envelopeScanCap}
+	dec := json.NewDecoder(er)
+
+	tok, err := dec.Token()
+	if err != nil {
+		if !startsWithObject(data) {
+			// No JSON object — parity with the old first-byte check.
+			return req, errEnvelopeNotObject
+		}
+		return req, envelopeError(er, err)
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return req, errEnvelopeNotObject
+	}
+
+	// Duplicate envelope members are refused so the budget gate and the
+	// full decode cannot read the same frame differently.
+	seen := make(map[string]bool, 4)
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return req, envelopeError(er, err)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return req, errors.New("non-string member name")
+		}
+		switch key {
+		case "jsonrpc", "id", "method", "params":
+			if seen[key] {
+				return req, errEnvelopeDuplicateMember
+			}
+			seen[key] = true
+		}
+
+		switch key {
+		case "method":
+			var m string
+			if err := dec.Decode(&m); err != nil {
+				return req, envelopeError(er, err)
+			}
+			req.Method = m
+			return req, nil // envelope complete — params is never tokenized
+		case "jsonrpc":
+			var v string
+			if err := dec.Decode(&v); err != nil {
+				return req, envelopeError(er, err)
+			}
+			req.JSONRPC = v
+		case "id":
+			var v json.RawMessage
+			if err := dec.Decode(&v); err != nil {
+				return req, envelopeError(er, err)
+			}
+			// An explicit null id behaves exactly like an absent one (as
+			// with the old whole-frame unmarshal): the response carries no
+			// id field at all.
+			if string(v) != "null" {
+				req.ID = v
+			}
+		default:
+			// Skip the value, decoding into a throwaway RawMessage. Bounded
+			// by the cap: the decoder cannot read more than the limited
+			// reader provides, so a huge value is never materialised.
+			var v json.RawMessage
+			if err := dec.Decode(&v); err != nil {
+				return req, envelopeError(er, err)
+			}
+		}
+	}
+	return req, nil
+}
+
+// envelopeReader serves at most cap bytes of a control frame to the
+// json.Decoder, recording whether the cap was consumed. encoding/json's
+// InputOffset does not reliably reflect a read truncated by a limit, so
+// this wrapper is how decodeEnvelope distinguishes "method never appeared
+// within the cap" (errEnvelopeTooLarge) from a syntax error inside it.
+type envelopeReader struct {
+	r   *bytes.Reader
+	n   int
+	cap int
+	hit bool // the cap was consumed
+}
+
+func (er *envelopeReader) Read(p []byte) (int, error) {
+	remaining := er.cap - er.n
+	if remaining <= 0 {
+		er.hit = true
+		return 0, io.EOF
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	n, err := er.r.Read(p)
+	er.n += n
+	if n == remaining {
+		// The whole budget went into one read: any later failure is cap
+		// exhaustion, not a syntax error.
+		er.hit = true
+	}
+	return n, err
+}
+
+// startsWithObject reports whether data's first non-whitespace byte within
+// envelopeScanCap bytes is '{'. Parity with the old scanner's first-byte
+// check: a frame that does not begin with an object is an invalid request,
+// not a parse error. It never scans more than the cap, so a hostile
+// whitespace frame cannot make the error path O(frame).
+func startsWithObject(data []byte) bool {
+	if len(data) > envelopeScanCap {
+		data = data[:envelopeScanCap]
+	}
+	for _, b := range data {
+		switch b {
+		case ' ', '\t', '\r', '\n':
+			continue
+		default:
+			return b == '{'
+		}
+	}
+	return false
+}
+
+// envelopeError maps a tokenizer failure to the envelope error contract: a
+// failure after the capped reader was exhausted means the method did not
+// appear within envelopeScanCap bytes (-32600); anything else is a syntax
+// error (-32700).
+func envelopeError(er *envelopeReader, err error) error {
+	if er.hit {
+		return errEnvelopeTooLarge
+	}
+	return err
+}
+
 // --- HTTP handler ---------------------------------------------------------
 
 func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -937,6 +1171,10 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("ws upgrade", "error", err)
 		return
 	}
+	// Bound ingress at the protocol layer before anything else: a frame
+	// above wsReadLimit is refused with close code 1009 and never reaches
+	// the read loop.
+	conn.SetReadLimit(wsReadLimit)
 	defer func() { _ = conn.Close() }()
 
 	// Derive a cancel context so that when handleSession returns,
@@ -993,33 +1231,71 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 }
 
 func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state *connState, data []byte) {
-	if !isJSONObject(data) {
-		s.log.Warn("jsonrpc invalid request", "len", len(data))
-		resp := newJSONRPCError(json.RawMessage("null"), -32600, "Invalid Request")
-		_ = wconn.writeJSON(resp)
-		return
-	}
-
-	var req jsonrpcRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		// Transport-wide rule: any control frame may carry a secret, so none
-		// are logged verbatim. Log size and error category only.
-		category := "parse_error"
-		var syntaxErr *json.SyntaxError
-		var typeErr *json.UnmarshalTypeError
+	// Envelope-only decode through a capped stdlib tokenizer: the read loop
+	// learns jsonrpc, id and method and stops there. The tokenizer reads at
+	// most envelopeScanCap bytes (io.LimitReader), so a frame's size cannot
+	// make this step expensive — a huge params value before method is never
+	// materialised, it just exhausts the cap and is refused.
+	req, err := decodeEnvelope(data)
+	if err != nil {
+		// Transport-wide rule: any control frame may carry a secret, so
+		// none are logged verbatim. Log size and category only.
 		switch {
-		case errors.As(err, &syntaxErr):
-			category = "syntax_error"
-		case errors.As(err, &typeErr):
-			category = "type_error"
+		case errors.Is(err, errEnvelopeNotObject),
+			errors.Is(err, errEnvelopeTooLarge),
+			errors.Is(err, errEnvelopeDuplicateMember):
+			s.log.Warn("jsonrpc invalid request", "len", len(data), "category", err.Error())
+			resp := newJSONRPCError(json.RawMessage("null"), -32600, "Invalid Request")
+			_ = wconn.writeJSON(resp)
+		default:
+			s.log.Warn("jsonrpc parse error", "len", len(data), "category", "syntax_error")
+			resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
+			_ = wconn.writeJSON(resp)
 		}
-		s.log.Warn("jsonrpc parse error", "len", len(data), "category", category)
-		resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
-		_ = wconn.writeJSON(resp)
 		return
 	}
 
 	if req.JSONRPC != "2.0" || req.Method == "" {
+		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
+		_ = wconn.writeJSON(resp)
+		return
+	}
+
+	// Per-method params budget: an oversized frame is refused by length
+	// BEFORE any full decode, so the read loop never spends time on it —
+	// the connection survives and reads the next frame immediately.
+	budgetedMethod := req.Method
+	if budget := paramsBudgetForMethod(budgetedMethod); len(data) > budget {
+		s.log.Warn("jsonrpc params over budget", "method", req.Method, "len", len(data))
+		resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf(
+			"params exceed the size budget for method %s (%d bytes)", req.Method, budget))
+		_ = wconn.writeJSON(resp)
+		return
+	}
+
+	// The frame is within budget: decode it fully. This validates
+	// everything the envelope pass deliberately skipped — escapes, control
+	// characters, container matching, literals, and any bytes after params.
+	if err := json.Unmarshal(data, &req); err != nil {
+		s.log.Warn("jsonrpc parse error", "len", len(data), "category", "syntax_error")
+		resp := newJSONRPCError(json.RawMessage("null"), -32700, "Parse error")
+		_ = wconn.writeJSON(resp)
+		return
+	}
+	// An explicit null id behaves exactly like an absent one: the response
+	// carries no id field (parity with the envelope pass and the old
+	// whole-frame unmarshal).
+	if string(req.ID) == "null" {
+		req.ID = nil
+	}
+
+	// The envelope pass and the full decode must agree on the method.
+	// encoding/json resolves a repeated top-level member to its LAST
+	// occurrence, so without this check a frame could take one method's
+	// budget (say the 8 MiB document tier of export.import) and dispatch as
+	// another (say the 1 KiB resolver tier of vault.unlockResolved).
+	if req.Method != budgetedMethod {
+		s.log.Warn("jsonrpc invalid request", "len", len(data), "category", "method_mismatch")
 		resp := newJSONRPCError(req.ID, -32600, "Invalid Request")
 		_ = wconn.writeJSON(resp)
 		return
