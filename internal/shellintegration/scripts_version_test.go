@@ -55,6 +55,12 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// that is not the tty, authenticated by the per-epoch capability
 		// (nocx-u7uh.3).
 		"14": "1db018fdd91b47676ba3e71d75b9ac3f02346dcb57d6c314f0ad3ce8d5936490",
+		// v15: the hooks answer a refresh_request with an authenticated
+		// snapshot at the next prompt boundary and restore a visible prompt
+		// while the domain is desynchronized (ADR-0024 decision 7/9,
+		// nocx-u7uh.9). The snapshot names no attempt — the shell never
+		// learns attempt ids — so open attempts reconcile as unknown.
+		"15": "462c239042f18b149f94d8349bce08d5354595869eba785965dbb7037346ce7a",
 	}
 
 	h := sha256.New()

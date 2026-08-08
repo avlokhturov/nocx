@@ -341,6 +341,61 @@ describe('the lifecycle kernel (ADR-0024 §6)', () => {
     expect(shouldShowEditor(k.state)).toBe(true)
   })
 
+  it('a snapshot restore reconciles open attempts to unknown before accepting the restoring prompt_ready', () => {
+    // decision 7: only a snapshot answering the refresh restores authority.
+    // The kernel reconciled att-1 to unknown while applying the snapshot
+    // (it was neither active nor completed), but a prompt_ready fact
+    // carries no attempt — the renderer must reconcile its own copy, or the
+    // open-attempt guard rejects the restoring fact and the lane stays
+    // desynchronized forever while the kernel is Established+PromptReady.
+    const k = new LifecycleKernel()
+    k.applyFact(promptReady('d1', 1))
+    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    k.applyFact(desynchronized('d1', 1))
+    expect(k.state.kind).toBe('desynchronized')
+    k.applyFact(promptReady('d1', 1))
+    expect(k.state.kind).toBe('prompt_ready')
+    expect(shouldShowEditor(k.state)).toBe(true)
+    expect(k.attempt('att-1')?.state).toBe('unknown')
+  })
+
+  it('a running restore names the surviving attempt and reconciles the rest to unknown', () => {
+    // The snapshot named att-2 as active (its start was lost in the gap):
+    // the kernel created it open and marked att-1 unknown. The published
+    // fact carries only att-2, so the renderer mirrors the reconciliation —
+    // a stale open att-1 would otherwise reject every later prompt_ready.
+    const k = new LifecycleKernel()
+    k.applyFact(promptReady('d1', 1))
+    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    k.applyFact(desynchronized('d1', 1))
+    k.applyFact(running('d1', 1, { id: 'att-2' }))
+    expect(k.state.kind).toBe('running')
+    if (k.state.kind === 'running') expect(k.state.attempt.id).toBe('att-2')
+    expect(k.attempt('att-1')?.state).toBe('unknown')
+    expect(k.attempt('att-2')?.state).toBe('open')
+  })
+
+  it('a running restore naming the still-open attempt keeps it open', () => {
+    const k = new LifecycleKernel()
+    k.applyFact(promptReady('d1', 1))
+    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    k.applyFact(desynchronized('d1', 1))
+    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    expect(k.state.kind).toBe('running')
+    if (k.state.kind === 'running') expect(k.state.attempt.state).toBe('open')
+    expect(k.attempt('att-1')?.state).toBe('open')
+  })
+
+  it('a stale-epoch restore fact is rejected without mutating the attempts', () => {
+    const k = new LifecycleKernel()
+    k.applyFact(promptReady('d1', 1))
+    k.applyFact(running('d1', 1, { id: 'att-1' }))
+    k.applyFact(desynchronized('d1', 1))
+    k.applyFact(promptReady('d1', 2)) // epoch 2 for a domain at epoch 1
+    expect(k.state.kind).toBe('desynchronized')
+    expect(k.attempt('att-1')?.state).toBe('open') // untouched by the rejection
+  })
+
   it('loss marks open attempts unknown, clears the stack, and a fresh domain may establish after', () => {
     const k = new LifecycleKernel()
     k.applyFact(promptReady('d1', 1))

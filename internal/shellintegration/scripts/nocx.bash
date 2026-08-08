@@ -67,6 +67,7 @@ fi
 __nocx_lc_active=0
 __nocx_lc_seq=0
 __nocx_lc_attempt_open=0
+__nocx_lc_desynced=0
 __nocx_lc_frame=''
 __nocx_lc_lane_esc=''
 __nocx_lc_dom_esc=''
@@ -120,22 +121,76 @@ __nocx_lc_send() {
 # the bounded liveness check that keeps a dead kernel from hanging the
 # prompt (fail-open, decision 3).
 __nocx_lc_wait_readable() {
-    LC_ALL=C IFS= read -r -t "$__nocx_lc_timeout_s" -N 0 <&"$__nocx_lc_fd" 2>/dev/null
+    # $1 = timeout in seconds (defaults to the handshake timeout). The
+    # refresh poll passes a short bound: the prompt is the user's critical
+    # path, and a partial or stalled frame must never hold it.
+    local __t="${1:-$__nocx_lc_timeout_s}"
+    LC_ALL=C IFS= read -r -t "$__t" -N 0 <&"$__nocx_lc_fd" 2>/dev/null
 }
 
 # Read one length-prefixed JSON frame into __nocx_lc_frame. Any framing
 # failure (EOF, garbage, oversize) returns non-zero and the caller fails
-# open: a conventional terminal is the safe direction.
+# open: a conventional terminal is the safe direction. $1, when given, is
+# the per-read timeout in seconds (the refresh poll bounds the prompt).
 __nocx_lc_read_frame() {
-    local __hdr __len LC_ALL=C
-    __nocx_lc_wait_readable || return 1
+    local __hdr __len LC_ALL=C __t="${1:-}"
+    __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
     __hdr="$(dd bs=1 count=4 2>/dev/null <&"$__nocx_lc_fd" | od -An -tx1 | tr -d ' \n')"
     [[ "$__hdr" =~ ^[0-9a-f]{8}$ ]] || return 1
     __len=$(( 16#$__hdr ))
     (( __len > 0 && __len <= 65536 )) || return 1
-    __nocx_lc_wait_readable || return 1
+    __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
     __nocx_lc_frame="$(dd bs=1 count="$__len" 2>/dev/null <&"$__nocx_lc_fd")"
     (( ${#__nocx_lc_frame} == __len )) || return 1
+    return 0
+}
+
+# Answer a pending refresh_request with an authenticated snapshot (protocol
+# doc §10, ADR-0024 decision 7). The kernel demands this when a framing gap
+# desynchronized the domain; ONLY a snapshot answering the request restores
+# authority, so this runs at every prompt and must not lose the request.
+#
+# The shell can only speak from a prompt — an idle shell in readline runs no
+# traps (nocx-z9s9.16) — so the poll is prompt-boundary. It is non-blocking
+# in the common case (`read -t 0` probes, consuming nothing): no frame
+# pending, the prompt costs nothing.
+#
+# The snapshot names no attempt: the shell never learns attempt ids (the app
+# mints them and no outbound envelope carries one back — protocol §8), so it
+# cannot report active_attempt or last_completed. The kernel reconciles open
+# attempts it is not told about as unknown — never success — which is the
+# safe direction (decision 7). shell_state is at_prompt because this runs
+# from a prompt; next_seq is the shell's next sequence, strictly greater
+# than the snapshot's own (the kernel rejects `next_seq <= seq`).
+#
+# On success restores a visible prompt: a Desynchronized domain is not live
+# (decision 9), and the marker-only suppression would leave an invisible
+# prompt taking raw input. The shell cannot observe the snapshot's
+# acceptance (no ack envelope exists), so once desynced it keeps the visible
+# prompt — a visible prompt is never the failure mode; an invisible one over
+# a desynchronized domain is.
+__nocx_lc_ans_refresh() {
+    local __rid
+    if ! LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+        return 1
+    fi
+    # A frame is buffered (the kernel writes each envelope in one write);
+    # the short bound is a stall guard, not a working budget.
+    __nocx_lc_read_frame 1 || return 1
+    case "$__nocx_lc_frame" in
+        *'"evt":"refresh_request"'*) : ;;
+        *) return 1 ;; # not a refresh; leave it buffered for the next prompt
+    esac
+    __rid="${__nocx_lc_frame#*\"request\":\"}"
+    __rid="${__rid%%\"*}"
+    # Kernel-minted shape: req-<16 hex>. Anything else is not a request we
+    # can answer — quoting it into the JSON would forge one.
+    [[ "$__rid" =~ ^req-[0-9a-f]{16}$ ]] || return 1
+    # The snapshot's own seq is seq+1 after this call; next_seq must be
+    # strictly greater than it, and is the sequence the NEXT envelope will
+    # carry — so it is seq+2 in pre-send terms.
+    __nocx_lc_send snapshot ',"request":"'"$__rid"'","shell_state":"at_prompt","next_seq":'"$(( __nocx_lc_seq + 2 ))"
+    __nocx_lc_desynced=1
     return 0
 }
 
@@ -303,9 +358,21 @@ __nocx_prompt_command() {
     # would otherwise reset $? to 0 before __nocx_precmd could read it.
     local __nocx_exit=$?
     __nocx_in_prompt_command=1
-    # --- Authenticated channel: complete, fence, prompt_ready ---
+    # --- Authenticated channel: refresh, complete, fence, prompt_ready ---
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
-        if [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
+        # A framing gap may have desynchronized the domain while the shell
+        # was busy; the kernel's refresh_request is buffered. Answer it
+        # FIRST — only a snapshot answering it restores authority (decision
+        # 7), and while the domain is desynchronized the complete and
+        # prompt_ready below would be quarantined anyway. The snapshot
+        # reports the shell's state (at a prompt, no attempt it can name),
+        # so the open attempt — if the just-finished command had one — is
+        # reconciled by the kernel as unknown, never success.
+        if __nocx_lc_ans_refresh; then
+            # The refresh was answered; the desync also ended the marker-only
+            # suppression (decision 9), so PS1 below takes the visible arm.
+            __nocx_lc_attempt_open=0
+        elif [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
             # Complete the attempt: the exit status and a fresh fence nonce,
             # and write the SAME nonce to the pty after the command's output
             # — the render-order rendezvous (decision 1 carve-out, doc §8).
@@ -339,7 +406,19 @@ __nocx_prompt_command() {
         # render-only B partition marker appended exactly as baseline mode
         # wraps it (the marker suppresses nothing by itself).
         if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
-            PS1="$__nocx_b_marker"
+            if [[ "${__nocx_lc_desynced:-0}" == "1" ]]; then
+                # decision 9: a Desynchronized domain is not live. The
+                # suppressed marker-only prompt would be an invisible prompt
+                # taking raw input — restore a visible native prompt until
+                # resynchronization succeeds. The shell cannot observe the
+                # snapshot's acceptance (no ack envelope exists), so the
+                # visible prompt stays: a visible prompt is never the
+                # failure mode; an invisible one over a desynchronized
+                # domain is.
+                PS1='\w \$ '"$__nocx_b_marker"
+            else
+                PS1="$__nocx_b_marker"
+            fi
         else
             PS1="${PS1}${__nocx_b_marker}"
         fi

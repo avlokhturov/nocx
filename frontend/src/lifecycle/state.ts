@@ -265,8 +265,28 @@ export class LifecycleKernel {
           if (cur.attempt.state !== 'completed') return null // prompt over an open attempt
         }
         if (cur.kind === 'desynchronized' && cur.domain.id !== fact.domain) return null
+        if (cur.kind === 'desynchronized') {
+          // decision 7: only a snapshot answering nocx's own refresh
+          // request restores authority. resolveDomain with mint=false is
+          // pure validation here (the domain is already on the stack — the
+          // desync fact resolved it), so it runs before any mutation: an
+          // invalid restoring fact changes nothing.
+          const domain = this.resolveDomain(fact, false)
+          if (domain === null) return null
+          // The kernel reconciled the domain's open attempts while applying
+          // the snapshot — anything it did not name active or completed
+          // became unknown there, and a prompt_ready fact carries no
+          // attempt (derive publishes only the lane's current attempt).
+          // Mirror the reconciliation BEFORE the open-attempt guard, or the
+          // restoring fact is rejected as "prompt over an open attempt" and
+          // the lane stays desynchronized forever while the kernel is
+          // Established+PromptReady.
+          this.unknownAttemptsOf(fact.domain!)
+          if (this.openAttemptOf(fact.domain!) !== null) return null
+          return { kind: 'prompt_ready', domain, [authorityBrand]: true }
+        }
         if (this.openAttemptOf(fact.domain!) !== null) return null // prompt over an open attempt
-        const domain = this.resolveDomain(fact, cur.kind !== 'desynchronized')
+        const domain = this.resolveDomain(fact, true)
         if (domain === null) return null
         return { kind: 'prompt_ready', domain, [authorityBrand]: true }
       }
@@ -342,6 +362,21 @@ export class LifecycleKernel {
       }
     }
     if (attempt === null) return null
+    if (cur.kind === 'desynchronized') {
+      // decision 7: the kernel reconciled the domain's open attempts while
+      // applying the snapshot — only the attempt it named active survived
+      // as open; every other open attempt became unknown. The published
+      // fact carries only the named attempt (derive publishes the lane's
+      // current attempt), so mirror the reconciliation here — after the
+      // named attempt validated, so an invalid fact mutates nothing. A
+      // stale open attempt would otherwise reject every later prompt_ready
+      // for the domain and the lane would never leave Running.
+      for (const [id, att] of this._attempts) {
+        if (att.domain.id === fact.domain && att.state === 'open' && id !== a.id) {
+          this._attempts.set(id, { ...att, state: 'unknown' as const })
+        }
+      }
+    }
     this._attempts.set(attempt.id, attempt)
     return { kind: 'running', domain, attempt, [authorityBrand]: true }
   }

@@ -71,6 +71,10 @@ type fakeKernel struct {
 	rejected      int
 	lastSeq       uint64
 	acceptedHello bool
+	// conn is the shell's connection, captured on accept so a test can
+	// push a refresh_request at it (the kernel-originated outbound the
+	// adapter's Send would frame). Tests dial only one shell connection.
+	conn net.Conn
 }
 
 func newFakeKernel(t *testing.T, cap string) *fakeKernel {
@@ -92,6 +96,11 @@ func (k *fakeKernel) serveLoop(ln net.Listener) {
 // serve reads frames until EOF.
 func (k *fakeKernel) serve(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	k.mu.Lock()
+	if k.conn == nil {
+		k.conn = conn
+	}
+	k.mu.Unlock()
 	r := bufio.NewReader(conn)
 	var hdr [4]byte
 	for {
@@ -161,6 +170,25 @@ func (k *fakeKernel) sendAccept(conn net.Conn) {
 		testLane, testDom, testEpoch, k.cap)
 	var hdr [4]byte
 	// #nosec G115 — the accept frame is a fixed-size test fixture, far
+	// under the 64 KiB protocol cap.
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
+	_, _ = conn.Write(append(hdr[:], body...))
+}
+
+// sendRefresh pushes a refresh_request envelope at the shell's connection,
+// exactly what the adapter's Send would frame when the kernel desynchronizes
+// the domain (protocol §10). seq 0 like every kernel-originated envelope.
+func (k *fakeKernel) sendRefresh(rid string) {
+	k.mu.Lock()
+	conn := k.conn
+	k.mu.Unlock()
+	if conn == nil {
+		k.t.Fatalf("no shell connection captured; the handshake never completed?")
+	}
+	body := fmt.Sprintf(`{"v":1,"lane":%q,"dom":%q,"epoch":%d,"seq":0,"cap":%q,"evt":"refresh_request","request":%q}`,
+		testLane, testDom, testEpoch, k.cap, rid)
+	var hdr [4]byte
+	// #nosec G115 — the refresh frame is a fixed-size test fixture, far
 	// under the 64 KiB protocol cap.
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
 	_, _ = conn.Write(append(hdr[:], body...))
@@ -452,6 +480,69 @@ func TestBashChannel_HandshakeAndLifecycle(t *testing.T) {
 	// The fence must be exactly once.
 	if strings.Count(out, "NOCX_FENCE;"+fence) != 1 {
 		t.Errorf("fence appeared more than once in pty output")
+	}
+}
+
+// TestBashChannel_AnswersRefreshWithSnapshot drives the shell half of the
+// desync recovery (ADR-0024 decision 7, protocol §10): the kernel
+// desynchronizes the domain (a framing gap) and sends refresh_request; at
+// the next prompt the shell answers with an authenticated snapshot carrying
+// the request id, its state (at_prompt) and its next sequence — and
+// restores a visible prompt (decision 9: a Desynchronized domain is not
+// live, and the suppressed marker-only prompt would be invisible raw input).
+func TestBashChannel_AnswersRefreshWithSnapshot(t *testing.T) {
+	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	defer s.close()
+
+	// The kernel desynchronizes the domain and demands an authenticated
+	// snapshot.
+	rid := "req-" + strings.Repeat("ab", 8)
+	s.kernel.sendRefresh(rid)
+
+	// An idle shell in readline runs no traps (nocx-z9s9.16): the answer
+	// lands at the next prompt boundary. Type a command to reach it.
+	if _, err := s.ptmx.Write([]byte("echo AFTER-REFRESH\n")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	s.waitForAccepted("snapshot")
+
+	events := s.kernel.events()
+	var snap *kernelEvent
+	for i := range events {
+		if events[i].Evt == "snapshot" {
+			snap = &events[i]
+		}
+	}
+	if snap == nil {
+		t.Fatalf("no snapshot accepted; events=%v", events)
+	}
+	if got, _ := snap.Body["request"].(string); got != rid {
+		t.Errorf("snapshot must echo the refresh request id, got %v", snap.Body)
+	}
+	if st, ok := snap.Body["shell_state"].(string); !ok || st != "at_prompt" {
+		t.Errorf("snapshot shell_state = %v, want at_prompt", snap.Body["shell_state"])
+	}
+	if ns, ok := snap.Body["next_seq"].(float64); !ok || ns <= float64(snap.Seq) {
+		t.Errorf("snapshot next_seq = %v, want strictly greater than its own seq %d", snap.Body["next_seq"], snap.Seq)
+	}
+	// The shell cannot name attempts (protocol §8 — no outbound envelope
+	// carries an attempt id): the snapshot carries neither, and the kernel
+	// reconciles open attempts as unknown, never success.
+	if _, ok := snap.Body["active_attempt"]; ok {
+		t.Errorf("snapshot must not carry active_attempt the shell cannot know: %v", snap.Body)
+	}
+	if _, ok := snap.Body["last_completed"]; ok {
+		t.Errorf("snapshot must not carry last_completed the shell cannot know: %v", snap.Body)
+	}
+
+	// decision 9: the marker-only suppression ended. The desynced PS1 is
+	// '\w \$ ' + B marker; probe the raw value at the next prompt.
+	if _, err := s.ptmx.Write([]byte(`printf 'PS1=[%s]\n' "$PS1"` + "\n")); err != nil {
+		t.Fatalf("write probe: %v", err)
+	}
+	s.waitForAccepted("complete")
+	if !strings.Contains(s.output(), `PS1=[\w`) {
+		t.Errorf("visible prompt not restored after desync; output=%q", s.output())
 	}
 }
 
