@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -396,5 +397,85 @@ func TestOneStuckConnectionDoesNotDelayAnother(t *testing.T) {
 	waitWrites(t, healthy, 10)
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("healthy connection delayed by a stuck one: %v", elapsed)
+	}
+}
+
+// ── responses: reserved capacity, never silence ─────────────────────────
+
+// A JSON-RPC response is the other half of a promise: dropping it strands
+// the caller forever. A saturated data queue (PTY output, say) must not be
+// able to consume the capacity a response needs — this is the e2e failure
+// (the Commits list never populating) reproduced at the queue level.
+func TestResponseSurvivesSaturatedDataQueue(t *testing.T) {
+	c, f := fillQueue(t, 4)
+	defer c.Close()
+
+	resp := []byte(`{"jsonrpc":"2.0","id":7,"result":{"ok":true}}`)
+	// The pump is stuck mid-write on "first" and all 4 queue slots hold
+	// "fill" frames: the refreshable data plane is saturated. The response
+	// must still be accepted — it has reserved capacity of its own.
+	if err := c.TryEnqueueResponse(resp); err != nil {
+		t.Fatalf("response enqueue on a saturated data queue: %v", err)
+	}
+	if c.Stalled() {
+		t.Fatal("a response accepted into reserved capacity must not mark the data queue stalled")
+	}
+
+	close(f.release)
+	writes := waitWrites(t, f, 6)
+	if !bytes.Equal(writes[1].Data, resp) {
+		t.Fatalf("response not written ahead of the queued data; write 1 = %q", writes[1].Data)
+	}
+	for _, w := range writes[2:] {
+		if string(w.Data) != "fill" {
+			t.Fatalf("queued data frame lost or reordered: %q", w.Data)
+		}
+	}
+}
+
+// If even the reserved response capacity is exhausted, the connection must
+// close — never drop the response: the renderer's disconnect/reconnect
+// surface then rejects the caller's pending promise. Silence is the one
+// outcome that must not survive.
+func TestResponseOverflowClosesConnection(t *testing.T) {
+	f := newFakeSocket(true)
+	c := New(f, Config{})
+	defer c.Close()
+	if err := c.TryEnqueue(TextMessage, []byte("first")); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	select {
+	case <-f.writeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pump never started its first write")
+	}
+	// The pump is stuck, so the response queue cannot drain. Fill it.
+	for i := range DefaultResponseQueueDepth {
+		if err := c.TryEnqueueResponse([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}`)); err != nil {
+			t.Fatalf("fill response %d: %v", i, err)
+		}
+	}
+	if err := c.TryEnqueueResponse([]byte(`{"jsonrpc":"2.0","id":2,"result":{}}`)); !errors.Is(err, ErrStalled) {
+		t.Fatalf("overflow response err = %v, want ErrStalled", err)
+	}
+	if !f.closed.Load() {
+		t.Fatal("connection not closed on response overflow — a dropped response would strand the caller forever")
+	}
+	if err := c.TryEnqueueResponse([]byte(`{"jsonrpc":"2.0","id":3,"result":{}}`)); !errors.Is(err, ErrConnClosed) {
+		t.Fatalf("response after close err = %v, want ErrConnClosed", err)
+	}
+}
+
+// The process-wide byte budget applies to responses too; when it cannot
+// hold one, the same never-silence rule closes the connection.
+func TestResponseBudgetExhaustionClosesConnection(t *testing.T) {
+	f := newFakeSocket(false)
+	c := New(f, Config{Budget: NewBudget(5)})
+	defer c.Close()
+	if err := c.TryEnqueueResponse([]byte("123456")); !errors.Is(err, ErrStalled) {
+		t.Fatalf("response over budget err = %v, want ErrStalled", err)
+	}
+	if !f.closed.Load() {
+		t.Fatal("connection not closed when the budget cannot hold a response")
 	}
 }

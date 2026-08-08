@@ -130,6 +130,7 @@ bounds are named there, so a reviewer looks in one place
 | bound                             | value                                                                               | where                                     |
 | --------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------- |
 | per-connection outbound queue     | `outbound.DefaultQueueDepth` = 256 frames                                           | `internal/transport/outbound/outbound.go` |
+| reserved response queue           | `outbound.DefaultResponseQueueDepth` = 64 frames                                    | same                                      |
 | per-write deadline                | `outbound.DefaultWriteDeadline` = 10 s                                              | same                                      |
 | process-wide outbound             | `outboundBudgetBytes` = 32 MiB queued bytes                                         | `internal/transport/ws.go`                |
 | ordinary lane capacity            | `DefaultControlLaneCapacity` = 8 concurrent tasks                                   | `ws.go`, named at the composition root    |
@@ -268,6 +269,18 @@ stuck renderer can delay the read loop by no more than one channel send, and a
 connection whose queue overflows is marked outbound-stalled and told through a
 reserved overload slot (`outbound.stalled`). The two bounds are independent, and
 both are needed.
+
+Responses and notifications are not the same class of frame, and the overflow
+consequence differs deliberately. A notification is refreshable state: dropping it
+is safe, so the stall notice — "reconnect and resync" — is the honest answer to a
+saturated refreshable queue. A response is the other half of a promise: the caller
+correlates by request id and waits forever if it is dropped, so a stall notice
+announcing that the answer was thrown away is the same silence. Responses therefore
+get reserved capacity (`outbound.DefaultResponseQueueDepth` = 64 frames, sized
+against the lane's 8 concurrent tasks) that the data plane cannot consume; the pump
+drains them ahead of data; and a response that cannot be queued even there closes
+the connection, so the caller's promise settles on disconnect instead of hanging.
+Silence is the one outcome that must not survive (nocx-sfv6).
 
 ### 14. Observability
 

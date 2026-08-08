@@ -971,11 +971,19 @@ func (s *WSServer) removeRx(id session.ID) {
 
 // Responder is the outbound capability handed to control-plane handlers:
 // every response is a non-blocking enqueue into the connection's outbound
-// queue. None of these methods may block — a full queue applies the
-// outbound stall policy (mark stalled, reserve one control-overload notice,
-// close as a last resort) and the frame is dropped. A handler that can
-// block on the socket is the defect this whole package boundary exists to
-// remove (nocx-o2le): the read loop must never wait behind a renderer.
+// side. None of these methods may block — a handler that can block on the
+// socket is the defect this whole package boundary exists to remove
+// (nocx-o2le): the read loop must never wait behind a renderer.
+//
+// Responses and notifications are different classes of frame. TryResult and
+// TryError (the other half of a promise) go through the connection's
+// reserved response queue, which the refreshable data plane cannot consume;
+// if even that capacity is exhausted the connection closes rather than drop
+// the response, so a caller's promise always settles — result, error, or
+// disconnect. TryNotify is refreshable state: on a saturated queue it is
+// dropped and the stall policy applies (mark stalled, reserve one
+// control-overload notice, close as a last resort), which is safe because
+// the renderer re-syncs from the next notification.
 //
 // The exceptions that keep a *wsConn rather than a Responder are exactly
 // the ones that need the connection as an identity, not as a writer:
@@ -1035,7 +1043,7 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 }
 
 func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
-	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(newJSONRPCResult(id, result)))
+	return w.out.TryEnqueueResponse(mustMarshal(newJSONRPCResult(id, result)))
 }
 
 func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
@@ -1043,7 +1051,7 @@ func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
 	}
-	return w.out.TryEnqueue(websocket.TextMessage, mustMarshal(jsonrpcResponse{
+	return w.out.TryEnqueueResponse(mustMarshal(jsonrpcResponse{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error:   obj,
