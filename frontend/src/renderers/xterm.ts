@@ -11,6 +11,8 @@ import type {
   CwdCallback,
   DataCallback,
   MarkerAdapter,
+  RenderFenceCallback,
+  RenderFenceEvent,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -138,6 +140,27 @@ export function parseOsc133(payload: string): CommandMarker | null {
   return marker
 }
 
+// ── Render fence parser (ADR-0024 §7 carve-out) ──────────────────────────
+// The shell writes ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER the
+// command's output and carries the same 64 hex chars in the authenticated
+// `complete` event (docs/lifecycle-protocol.md §8). The renderer reports
+// where the fence landed — a rendezvous for render ordering, never an
+// authority: a fence with no authenticated event behind it does nothing.
+// OSC 1337 is a private namespace other software also uses (iTerm2 file
+// transfer), so only an exact NOCX_FENCE; prefix with exactly 64 lowercase
+// hex chars parses; everything else is nothing.
+const FENCE_PREFIX = 'NOCX_FENCE;'
+const FENCE_HEX_RE = /^[0-9a-f]{64}$/
+
+/** Parses an OSC 1337 payload into the fence nonce. Returns null unless the
+ *  payload is exactly `NOCX_FENCE;<64 lowercase hex>`. */
+export function parseRenderFence(payload: string): { hex: string } | null {
+  if (!payload.startsWith(FENCE_PREFIX)) return null
+  const hex = payload.slice(FENCE_PREFIX.length)
+  if (!FENCE_HEX_RE.test(hex)) return null
+  return { hex }
+}
+
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
   private webgl?: WebglAddon
@@ -150,6 +173,8 @@ export class XtermRenderer implements TerminalRenderer {
   private osc133Disposable?: { dispose(): void }
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
+  private fenceSubs: Array<(event: RenderFenceEvent) => void> = []
+  private fenceOscDisposable?: { dispose(): void }
   private snapshotOscDisposable?: { dispose(): void }
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
@@ -244,7 +269,35 @@ export class XtermRenderer implements TerminalRenderer {
       }
       return false
     })
+
+    // OSC 1337 — the render fence (ADR-0024 §7 carve-out). The shell writes
+    // NOCX_FENCE;<64hex> after a command's output; the renderer reports
+    // where it landed. Render-only: the fence matches an authenticated
+    // completion, it never creates one. Registered here (like OSC 636) and
+    // lazily in onRenderFence, so a subscriber that mounts first or last
+    // always lands on a live handler.
+    this._ensureFenceOsc()
     this.applyTheme(getCurrentTheme())
+  }
+
+  /** Register the OSC 1337 fence handler exactly once, when the terminal
+   *  exists. The handler parses the payload and fans the sighting out to
+   *  the subscribers with the absolute buffer line it landed on. */
+  private _ensureFenceOsc(): void {
+    if (this.fenceOscDisposable || !this.term) return
+    this.fenceOscDisposable = this.term.parser.registerOscHandler(1337, (data: string) => {
+      const parsed = parseRenderFence(data)
+      if (parsed && this.term) {
+        const buf = this.term.buffer.active
+        const event: RenderFenceEvent = {
+          hex: parsed.hex,
+          line: buf.baseY + buf.cursorY,
+          buffer: buf.type,
+        }
+        for (const sub of this.fenceSubs) sub(event)
+      }
+      return false
+    })
   }
 
   /**
@@ -379,6 +432,11 @@ export class XtermRenderer implements TerminalRenderer {
 
   onEnvironmentPassport(cb: (disposition: PassportDisposition) => void): void {
     this.passportSubs.push(cb)
+  }
+
+  onRenderFence(cb: RenderFenceCallback): void {
+    this.fenceSubs.push(cb)
+    this._ensureFenceOsc()
   }
 
   setExpectedEnvironmentId(id: string | null): void {

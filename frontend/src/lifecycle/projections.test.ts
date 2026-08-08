@@ -154,6 +154,38 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     expect(persist).toHaveBeenCalledTimes(1)
   })
 
+  it('logical completion does not wait for the render fence — ledger and history land on the event alone (u7uh.8)', () => {
+    const { kernel, ledger, blocks, persist } = makeEnv()
+    ledger.open('make', '/repo', '', () => undefined)
+    kernel.applyFact(promptReady())
+    kernel.applyFact(running('d1', 1, { id: 'att-1', origin: 'app', command: 'make' }))
+    blocks.events.length = 0
+    persist.mockClear()
+
+    // The completion event arrives with its fence still in flight on the
+    // pty. The exit status is recorded and history is written NOW — nothing
+    // in this module waits for the fence bytes. The block port is asked to
+    // freeze on the same event; the rendezvous (u7uh.8) defers the VISUAL
+    // freeze until the fence lands, which is the block manager's concern,
+    // never the ledger's or the store's.
+    kernel.applyFact(
+      running('d1', 1, {
+        id: 'att-1',
+        state: 'completed',
+        exitCode: 0,
+        fence: FENCE,
+        completedAt: '2026-08-08T12:00:02Z',
+      }),
+    )
+    const rec = ledger.recordForAttempt('att-1')
+    expect(rec?.status).toBe('success')
+    expect(rec?.exitCode).toBe(0)
+    expect(persist).toHaveBeenCalledTimes(1)
+    // The freeze port call is the LAST projection on the event — after the
+    // status and the history write, never before them.
+    expect(blocks.events).toEqual(['freeze:att-1:0'])
+  })
+
   it('lane loss abandons the bound projections — unknown, never success, nothing persisted', () => {
     const { kernel, ledger, blocks, persist } = makeEnv()
     ledger.open('make', '/', '', () => undefined)

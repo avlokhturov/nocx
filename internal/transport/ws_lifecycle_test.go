@@ -373,3 +373,225 @@ func TestLifecycleChanged_ReplayOnAttach(t *testing.T) {
 		t.Fatalf("replayed fact leaked to the detached connection: %s", leaked)
 	}
 }
+
+// ── lifecycle.submitAttempt (ADR-0024 decision 5) ─────────────────────────
+
+// decodeSubmitAttemptResult decodes the raw result of a lifecycle.submitAttempt
+// response and fails on a JSON-RPC error.
+func decodeSubmitAttemptResult(t *testing.T, resp json.RawMessage) lifecycleSubmitAttemptResult {
+	t.Helper()
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("submitAttempt: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("submitAttempt: %+v", envelope.Error)
+	}
+	var got lifecycleSubmitAttemptResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("submitAttempt: decode result: %v", err)
+	}
+	return got
+}
+
+// submitAttemptErr drives lifecycle.submitAttempt through the real socket and
+// returns the JSON-RPC error object, failing when the call succeeded.
+func submitAttemptErr(t *testing.T, conn *websocket.Conn, params map[string]string, id int) *jsonrpcErrorObj {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, conn, "lifecycle.submitAttempt", params, id)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("submitAttempt: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error == nil {
+		t.Fatalf("submitAttempt: expected an error, got %s", resp)
+	}
+	return envelope.Error
+}
+
+// TestLifecycleSubmitAttempt_StartAttachesAndReplacesNothing proves the seam
+// the renderer reaches (ADR-0024 decision 5): the app-owned submit opens the
+// attempt through the control plane BEFORE the pty bytes, the attempt carries
+// the app-owned command/cwd/host, and the shell's later authenticated start
+// ATTACHES to it — the attempt id, command text, cwd and host are replaced by
+// nothing, and the shell's own line (which may carry vault-resolved secrets)
+// is ignored outright.
+func TestLifecycleSubmitAttempt_StartAttachesAndReplacesNothing(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	// Drain the handshake's prompt_ready fact.
+	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+
+	const command = "make && echo done"
+	const cwd = "/srv/app"
+	const host = "build.example.com"
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		map[string]string{"domain": string(h.Domain), "command": command, "cwd": cwd, "host": host}, 41))
+	if got.State != lifecyclepub.AttemptOpen || got.Origin != lifecyclepub.OriginApp {
+		t.Fatalf("result = %+v, want an open app-originated attempt", got)
+	}
+	if got.ID == "" || got.Domain != string(h.Domain) {
+		t.Fatalf("result = %+v, want an id and the submitted domain", got)
+	}
+	if got.Command != command || got.Cwd != cwd || got.Host != host {
+		t.Fatalf("result = %+v, want the app-owned command/cwd/host echoed", got)
+	}
+
+	// The kernel holds the attempt, not yet started, and the lane runs it.
+	att, ok := pub.Attempt(lifecycle.AttemptID(got.ID))
+	if !ok {
+		t.Fatalf("attempt %q not in the kernel", got.ID)
+	}
+	if att.Started {
+		t.Fatal("attempt started before the shell's authenticated start")
+	}
+	if att.Command != command || att.Cwd != cwd || att.Host != host || att.Origin != lifecycle.OriginApp {
+		t.Fatalf("kernel attempt = %+v, want the app-owned fields", att)
+	}
+	st, err := pub.State(lane)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if st.Lifecycle != lifecycle.LifecycleRunning || st.Attempt != lifecycle.AttemptID(got.ID) {
+		t.Fatalf("lane state = %+v, want running with %q", st, got.ID)
+	}
+
+	// A second submit over the pending attempt is refused: the app opens
+	// exactly one attempt per submit, and the ordering rule means there is
+	// never a second one waiting.
+	errObj := submitAttemptErr(t, e.conn, map[string]string{
+		"domain": string(h.Domain), "command": "git status", "cwd": cwd, "host": host,
+	}, 42)
+	if errObj.Code != -32602 {
+		t.Fatalf("second submitAttempt code = %d, want -32602", errObj.Code)
+	}
+
+	// The authenticated start attaches: same id, replaces nothing, and the
+	// shell's line — which may carry a resolved secret — is ignored.
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(nil, "shell-saw-a-different-line")))
+	att, ok = pub.Attempt(lifecycle.AttemptID(got.ID))
+	if !ok {
+		t.Fatalf("attempt %q lost after the start", got.ID)
+	}
+	if !att.Started {
+		t.Fatal("authenticated start did not attach")
+	}
+	if att.Command != command {
+		t.Fatalf("start replaced the app command: %q", att.Command)
+	}
+	if att.Cwd != cwd || att.Host != host {
+		t.Fatalf("start replaced cwd/host: %+v", att)
+	}
+	if att.Origin != lifecycle.OriginApp {
+		t.Fatalf("start changed the origin: %v", att.Origin)
+	}
+}
+
+// TestLifecycleSubmitAttempt_RefusesWithoutALiveDomain proves the boundary's
+// safe direction: a submit naming no live domain opens no attempt — a
+// conventional terminal stays conventional, and an empty command (a bare
+// newline) is not an execution and never becomes one.
+func TestLifecycleSubmitAttempt_RefusesWithoutALiveDomain(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+
+	errObj := submitAttemptErr(t, e.conn, map[string]string{
+		"domain": "dom-nope", "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+	}, 41)
+	if errObj.Code != -32602 {
+		t.Fatalf("unknown domain code = %d, want -32602", errObj.Code)
+	}
+	if _, ok := kernel.OpenAttempt("dom-nope"); ok {
+		t.Fatal("an attempt was fabricated for an unknown domain")
+	}
+
+	errObj = submitAttemptErr(t, e.conn, map[string]string{
+		"domain": "dom-nope", "command": "", "cwd": "", "host": "",
+	}, 42)
+	if errObj.Code != -32602 {
+		t.Fatalf("empty command code = %d, want -32602", errObj.Code)
+	}
+}
+
+// TestLifecycleSubmitAttempt_IsScopedToTheOwningSession proves the mutating
+// call is addressable only by the connection that owns the lane's session: a
+// domain id guessed from another session opens nothing.
+func TestLifecycleSubmitAttempt_IsScopedToTheOwningSession(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sidA := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sidA))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+
+	// A second connection with its own session must not open attempts on
+	// session A's domain.
+	connB := connectWS(t, e.ws)
+	defer func() { _ = connB.Close() }()
+	openSessionOnConn(t, e.ws, connB, 2)
+	params := map[string]string{
+		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+	}
+	errObj := submitAttemptErr(t, connB, params, 41)
+	if errObj.Code != -32602 {
+		t.Fatalf("foreign session code = %d, want -32602", errObj.Code)
+	}
+	if _, ok := kernel.OpenAttempt(h.Domain); ok {
+		t.Fatal("a foreign submit opened an attempt on the domain")
+	}
+
+	// The owning connection succeeds with the same payload.
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", params, 42))
+	if got.ID == "" {
+		t.Fatal("owning connection's submit returned no attempt id")
+	}
+}
+
+// TestLifecycleSubmitAttempt_NotWiredFailsClosed proves the un-wired state:
+// with no publisher (no lifecycle adapter can exist), the method refuses
+// rather than pretending.
+func TestLifecycleSubmitAttempt_NotWiredFailsClosed(t *testing.T) {
+	e := newLifecycleTestEnv(t)
+	errObj := submitAttemptErr(t, e.conn, map[string]string{
+		"domain": "dom-1", "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+	}, 41)
+	if errObj.Code != -32601 {
+		t.Fatalf("unwired code = %d, want -32601", errObj.Code)
+	}
+}

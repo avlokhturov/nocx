@@ -15,12 +15,29 @@
 
 import type { Dispatcher } from '../dispatcher'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttempt'
 
 /** One lifecycle fact, delivered to a subscriber with its lane intact. The
  *  lane is what lets the projection attach the fact to the right tab's state
  *  machine; a fact is routed to the lane's own session, and the renderer
  *  filters nothing. */
 export type LifecycleFactHandler = (fact: LifecycleChanged) => void
+
+/** The payload of lifecycle.submitAttempt: the app-owned half of a command's
+ *  execution, declared before the bytes that can cause the shell's own start
+ *  are written to the pty (ADR-0024 decision 5). The command text is the
+ *  reference-intact record line — never the resolved send line. */
+export interface LifecycleSubmitAttemptParams {
+  /** The live domain to open the attempt on — the id the published
+   *  prompt_ready fact carried. */
+  readonly domain: string
+  /** The app-owned command text as submitted. */
+  readonly command: string
+  /** The cwd the command runs in, captured at submit. */
+  readonly cwd: string
+  /** The host the command runs on, captured at submit. */
+  readonly host: string
+}
 
 export class LifecycleClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -33,5 +50,14 @@ export class LifecycleClient {
       const p = params as LifecycleChanged
       if (p && typeof p.lane === 'string') handler(p)
     })
+  }
+
+  /** Open an app-originated attempt on the live domain — the ordering seam
+   *  of ADR-0024 decision 5. The renderer calls this BEFORE writing the
+   *  command bytes to the pty; the later authenticated start attaches to the
+   *  returned attempt and replaces nothing. Resolves with the attempt as the
+   *  kernel created it. */
+  submitAttempt(params: LifecycleSubmitAttemptParams): Promise<LifecycleSubmitAttempt> {
+    return this.dispatcher.call('lifecycle.submitAttempt', params)
   }
 }

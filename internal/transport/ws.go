@@ -1136,6 +1136,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleShellComplete(ctx, wconn, req)
 	case "shell.integrate":
 		s.handleShellIntegrate(wconn, req)
+	case "lifecycle.submitAttempt":
+		s.handleLifecycleSubmitAttempt(wconn, state, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",

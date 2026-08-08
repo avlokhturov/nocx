@@ -229,10 +229,14 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
 // ═══════════════════════════════════════════════════════════════════════════
 /** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
  *  subscribe(method, handler) returns the unsubscribe, and tests capture
- *  the handler to deliver published facts (lifecycle.changed). Not
- *  exported — it is a shape of ClientFake, never named by consumers. */
+ *  the handler to deliver published facts (lifecycle.changed). `call` is
+ *  the request half (lifecycle.submitAttempt): it resolves by default so a
+ *  submit at a live prompt proceeds to the pty write; tests override it to
+ *  control or record the attempt-open ordering. Not exported — it is a
+ *  shape of ClientFake, never named by consumers. */
 interface DispatcherFake {
   subscribe: ReturnType<typeof vi.fn>
+  call: ReturnType<typeof vi.fn>
 }
 
 export interface ClientFake {
@@ -284,6 +288,18 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionReset: vi.fn(),
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),
+      // A live prompt opens the attempt before the pty write; the default
+      // resolves so the write always proceeds (fail-open).
+      call: vi.fn().mockResolvedValue({
+        id: 'att-0',
+        domain: 'd1',
+        state: 'open',
+        command: '',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      }),
     },
     call: vi.fn().mockRejectedValue(new Error('no store wired (fake)')),
     get connected() {

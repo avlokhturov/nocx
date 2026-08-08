@@ -42,6 +42,7 @@ import {
 } from './test-support/tabs-fixtures'
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
+import { CommandLedger } from './command-ledger'
 import { TerminalContent, type TerminalContentHooks } from './terminal-content'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
@@ -1458,6 +1459,265 @@ describe('the projections consume the kernel through the composition root (ADR-0
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+})
+
+describe('the editor submit opens the attempt before the pty write (ADR-0024 §5, nocx-u7uh.18)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  /** Dispatch a keydown exactly where a user's keystroke lands. */
+  const key = (view: EditorView, init: KeyboardEventInit): void => {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+    )
+  }
+
+  /** jsdom does not implement scrollTo/scrollIntoView; the block model
+   *  calls them on submit. Stub them for the duration — the same trade the
+   *  projections tests make. Returns the restore. */
+  function stubScrolling(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+    }
+  }
+  it('a submit at a live prompt opens the attempt with the app-owned text BEFORE the pty write', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
+    // the resolver is captured via the executor form (the codebase pattern).
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    submitAttempt.mockImplementation(() => attemptPromise)
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // The attempt-open call went out synchronously at submit, with the
+      // app-owned text, cwd and host — and the pty write has NOT happened.
+      // The ordering is asserted, not assumed: the backend emits the
+      // running fact INSIDE SubmitAttempt, so the bytes must wait for the
+      // answer or the shell's start could open a second attempt first.
+      expect(submitAttempt).toHaveBeenCalledWith('lifecycle.submitAttempt', {
+        domain: 'd1',
+        command: 'make deploy',
+        cwd: FIXTURE_CWD,
+        host: '',
+      })
+      expect(session.send).not.toHaveBeenCalled()
+      // The running block opened at submit, before any fact could arrive —
+      // the published running fact always finds the block it binds to.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+
+      // The backend answers: only now do the bytes go out.
+      resolveAttempt({
+        id: 'att-9',
+        domain: 'd1',
+        state: 'open',
+        command: 'make deploy',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('the attempt receives the reference-intact record line, never the resolved send line', async () => {
+    const client = makeClient()
+    // vault.resolveLine goes over the WSClient seam (client.call); the
+    // attempt-open goes over the dispatcher (client.dispatcher.call).
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({
+          line: 'make --token=SECRETVALUE',
+          refs: [{ name: 'TOKEN', resolved: true }],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const submitAttempt = client.dispatcher.call
+    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
+    // the resolver is captured via the executor form (the codebase pattern).
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    submitAttempt.mockImplementation(() => attemptPromise)
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const renderer = rendererOf(content)
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make --token={{secret:TOKEN}}')
+      key(view, { key: 'Enter' })
+
+      // The line with references resolves first (ADR-0021); the attempt
+      // then opens with the RECORD line — reference intact (decision 5's
+      // privacy rule) — while the RESOLVED line goes to the pty and
+      // nowhere else.
+      await vi.waitFor(() =>
+        expect(submitAttempt).toHaveBeenCalledWith('lifecycle.submitAttempt', {
+          domain: 'd1',
+          command: 'make --token={{secret:TOKEN}}',
+          cwd: FIXTURE_CWD,
+          host: '',
+        }),
+      )
+      expect(session.send).not.toHaveBeenCalled()
+      resolveAttempt({
+        id: 'att-10',
+        domain: 'd1',
+        state: 'open',
+        command: 'make --token={{secret:TOKEN}}',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
+      expect(pasteMock.paste).toHaveBeenCalledWith('make --token=SECRETVALUE')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('a submit with no live domain opens no attempt — the terminal stays conventional', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // No fact was delivered: the kernel is Native, the session is a
+      // conventional terminal.
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // The write goes out on the synchronous path and no attempt-open call
+      // was ever made — nothing is fabricated for a conventional terminal.
+      expect(submitAttempt).not.toHaveBeenCalled()
+      expect(session.send).toHaveBeenCalledTimes(1)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('an empty line is a bare newline: no attempt, no ledger record, but the shell still gets its newline', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const withLedger = content as unknown as { ledger: CommandLedger }
+    const handler = factHandler(client)
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      key(view, { key: 'Enter' }) // empty draft
+
+      // A bare newline is not an execution: no attempt-open call, no ledger
+      // record (CommandLedger.open refuses empty commands), no crash — and
+      // the shell still receives its newline.
+      expect(submitAttempt).not.toHaveBeenCalled()
+      expect(withLedger.ledger.records()).toHaveLength(0)
+      expect(session.send).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a refused attempt never swallows the command: the bytes still go out', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockRejectedValue(new RpcError('lifecycle: no prompt is ready', -32602))
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // Fail-open: the domain lost its prompt between the last fact and the
+      // Enter, the attempt was refused — and the command still runs.
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+    } finally {
+      restoreScroll()
       teardown()
     }
   })

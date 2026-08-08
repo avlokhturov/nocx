@@ -11,6 +11,8 @@ import {
   freezeBlock,
   deselectAllBlocks,
   getSelectedBlock,
+  blockOutputText,
+  FENCE_DEFER_MS,
 } from './blocks'
 import { shellHighlightReady } from '../shell-highlight'
 import { BufferLine } from './test-helpers'
@@ -1266,7 +1268,15 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(rec.attemptId).toBe('att-1')
     expect(manager.blockForAttempt('att-1')).toBe(rec)
 
-    const frozen = manager.freezeFromAttempt(attempt({ exitCode: 0 }), () => undefined, 8)
+    // The fence landed before the completion: the rendezvous is complete
+    // and the freeze lands at the fence's line.
+    manager.sightFence(FENCE, 8)
+    const frozen = manager.freezeFromAttempt(
+      attempt({ exitCode: 0 }),
+      () => undefined,
+      8,
+      () => 9,
+    )
     expect(frozen).not.toBeNull()
     expect(frozen!.status).toBe('success')
     expect(frozen!.exitCode).toBe(0)
@@ -1278,14 +1288,28 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
   it('freezeFromAttempt refuses a non-completed attempt — an open attempt cannot freeze a block', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')
-    expect(manager.freezeFromAttempt(attempt({ state: 'open' }), () => undefined, 8)).toBeNull()
+    expect(
+      manager.freezeFromAttempt(
+        attempt({ state: 'open' }),
+        () => undefined,
+        8,
+        () => 9,
+      ),
+    ).toBeNull()
     expect(manager.runningBlock?.status).toBe('running')
   })
 
   it('freezeFromAttempt refuses when the running block is bound to a different attempt', () => {
     manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')
-    expect(manager.freezeFromAttempt(attempt({ id: 'att-other' }), () => undefined, 8)).toBeNull()
+    expect(
+      manager.freezeFromAttempt(
+        attempt({ id: 'att-other' }),
+        () => undefined,
+        8,
+        () => 9,
+      ),
+    ).toBeNull()
     expect(manager.runningBlock?.status).toBe('running')
   })
 
@@ -1316,5 +1340,236 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     manager.bindAttempt('att-1')
     manager.clearAll()
     expect(manager.blockForAttempt('att-1')).toBeNull()
+  })
+})
+
+describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)', () => {
+  let manager: BlockManager
+  let inner: HTMLElement
+  let xtermContainer: HTMLElement
+
+  beforeEach(() => {
+    _resetThemeState()
+    inner = document.createElement('div')
+    xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    document.body.appendChild(inner)
+    manager = new BlockManager(inner, xtermContainer, {
+      now: () => 1000,
+      snapshotStore: freshStore(),
+    })
+  })
+
+  const domain = mintDomain({
+    lane: 'l',
+    lifecycle: 'prompt_ready',
+    domain: 'd1',
+    epoch: 1,
+  }) as IntegrationDomain
+  const FENCE_A = 'a'.repeat(64)
+  const FENCE_B = 'b'.repeat(64)
+  const attempt = (over: Partial<ExecutionAttempt> = {}): ExecutionAttempt => ({
+    id: 'att-1',
+    domain,
+    state: 'completed',
+    exitCode: 0,
+    fence: FENCE_A,
+    ...over,
+  })
+
+  /** THE acceptance case: the last output bytes land AFTER the authenticated
+   *  completion. The fence proves where the output ended, so the block
+   *  contains ALL of it — truncation is the defect this bead exists to fix.
+   *  The two halves settle at DIFFERENT times: the status flips on the
+   *  completion event alone, the output boundary only when the fence lands. */
+  it('output delayed past the completion is captured in full once the fence lands', () => {
+    manager.startBlock('slow', '~', 0)
+    manager.bindAttempt('att-1')
+    const lines = [new BufferLine('first'), new BufferLine('second'), new BufferLine('the tail')]
+    const getLine = (y: number) => lines[y]
+
+    // The completion event arrives while only the first two lines are in the
+    // buffer, and the fence has NOT been sighted. The LOGICAL freeze lands
+    // NOW, on the authenticated event alone: the status flips and the running
+    // slot is freed. (The deferred return means the caller keeps the live
+    // region up — the boundary is still in flight.)
+    const frozen = manager.freezeFromAttempt(attempt(), getLine, 1, () => 3)
+    expect(frozen).toBeNull()
+    expect(manager.runningBlock).toBeNull()
+    const block = manager.blockForAttempt('att-1')
+    expect(block).not.toBeNull()
+    expect(block!.status).toBe('success')
+    expect(block!.exitCode).toBe(0)
+
+    // ...but the output boundary has NOT landed yet: no rows are serialized
+    // (the running element has no output region) and the end line is still
+    // the start. Status first, boundary later — the different-times split.
+    expect(block!.el.querySelector('.cmd-output')).toBeNull()
+    expect(block!.endLine).toBe(0)
+
+    // The tail and the fence land together: the fence line IS the output
+    // end, and every line up to it is serialized into the block.
+    manager.sightFence(FENCE_A, 2)
+    expect(manager.runningBlock).toBeNull()
+    expect(block!.endLine).toBe(2)
+    const text = blockOutputText(block!.el.querySelector('.cmd-output'))
+    expect(text).toContain('first')
+    expect(text).toContain('second')
+    expect(text).toContain('the tail')
+  })
+
+  it('a fence with no authenticated event behind it changes nothing at all', () => {
+    // No block, no attempt: the sighting is remembered for a future match
+    // and freezes nothing.
+    manager.sightFence(FENCE_A, 3)
+    expect(manager.runningBlock).toBeNull()
+    expect(manager.blocks).toHaveLength(0)
+
+    // Even with a block running, a foreign fence never freezes it.
+    manager.startBlock('cmd', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.sightFence(FENCE_B, 4)
+    expect(manager.runningBlock?.status).toBe('running')
+  })
+
+  it('a replayed fence — the same value twice, or one for an already-frozen block — does nothing', () => {
+    manager.startBlock('cmd', '~', 0)
+    manager.bindAttempt('att-1')
+
+    // Sighted once, then the same bytes again: the second sighting is a
+    // replay and does nothing (the line is not even overwritten).
+    manager.sightFence(FENCE_A, 3)
+    manager.sightFence(FENCE_A, 9)
+    const frozen = manager.freezeFromAttempt(
+      attempt(),
+      () => undefined,
+      0,
+      () => 9,
+    )
+    expect(frozen).not.toBeNull()
+    expect(frozen!.endLine).toBe(3) // the ORIGINAL sighting's line, not the replay's
+
+    // The same fence again after the block froze: an already-frozen block's
+    // fence changes nothing.
+    manager.sightFence(FENCE_A, 10)
+    expect(manager.runningBlock).toBeNull()
+    expect(manager.blocks).toHaveLength(1)
+    expect(manager.blockForAttempt('att-1')!.endLine).toBe(3)
+  })
+
+  it('a completion whose fence never arrives defers the boundary, then settles at the current output end', () => {
+    vi.useFakeTimers()
+    try {
+      manager.startBlock('cmd', '~', 0)
+      manager.bindAttempt('att-1')
+
+      // Completion at endLine 0 with the fence still in flight: the STATUS
+      // flips now on the event alone; the boundary defers — the block is
+      // NOT serialized at the truncated event-time end.
+      const frozen = manager.freezeFromAttempt(
+        attempt(),
+        () => undefined,
+        0,
+        () => 10,
+      )
+      expect(frozen).toBeNull()
+      expect(manager.runningBlock).toBeNull()
+      expect(manager.blockForAttempt('att-1')!.status).toBe('success')
+
+      // The whole deferral window passes with no fence: the freeze settles
+      // at the CURRENT output end (10), where the in-flight tail has landed.
+      vi.advanceTimersByTime(FENCE_DEFER_MS)
+      expect(manager.runningBlock).toBeNull()
+      const block = manager.blockForAttempt('att-1')
+      expect(block).not.toBeNull()
+      expect(block!.status).toBe('success')
+      expect(block!.endLine).toBe(10)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a completion that carries NO fence at all still defers — the boundary is never cut on the event alone', () => {
+    vi.useFakeTimers()
+    try {
+      manager.startBlock('cmd', '~', 0)
+      manager.bindAttempt('att-1')
+
+      // No fence on the attempt (unreachable from the kernel, which
+      // requires the nonce on completed attempts, but the manager guards
+      // callers that bypass it): the status flips now; the boundary defers
+      // instead of truncating at the event-time output end.
+      const frozen = manager.freezeFromAttempt(
+        attempt({ fence: undefined }),
+        () => undefined,
+        0,
+        () => 10,
+      )
+      expect(frozen).toBeNull()
+      expect(manager.runningBlock).toBeNull()
+      expect(manager.blockForAttempt('att-1')!.status).toBe('success')
+
+      // No sighting can match a null-hex pending — a stray fence lands in
+      // the sighting ring and changes nothing.
+      manager.sightFence('ff'.repeat(32), 5)
+      expect(manager.runningBlock).toBeNull()
+      expect(manager.blockForAttempt('att-1')!.status).toBe('success')
+
+      // The deferral window settles it at the CURRENT output end, where the
+      // in-flight tail has landed — the same degrade as a fence that never
+      // arrives, never a truncation.
+      vi.advanceTimersByTime(FENCE_DEFER_MS)
+      expect(manager.runningBlock).toBeNull()
+      const block = manager.blockForAttempt('att-1')
+      expect(block).not.toBeNull()
+      expect(block!.status).toBe('success')
+      expect(block!.endLine).toBe(10)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('the deferral window is a named policy — FENCE_DEFER_MS — not a magic number', () => {
+    expect(FENCE_DEFER_MS).toBeGreaterThan(0)
+  })
+
+  it('onDeferredFreeze fires when the sighting resolves the pending freeze', () => {
+    const onDeferredFreeze = vi.fn()
+    manager = new BlockManager(inner, xtermContainer, {
+      now: () => 1000,
+      snapshotStore: freshStore(),
+      onDeferredFreeze,
+    })
+    manager.startBlock('cmd', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.freezeFromAttempt(
+      attempt(),
+      () => undefined,
+      0,
+      () => 9,
+    )
+    expect(onDeferredFreeze).not.toHaveBeenCalled()
+    manager.sightFence(FENCE_A, 4)
+    expect(onDeferredFreeze).toHaveBeenCalledTimes(1)
+  })
+
+  it('clearAll cancels a pending deferral — the block is gone, the timer fires into nothing', () => {
+    vi.useFakeTimers()
+    try {
+      manager.startBlock('cmd', '~', 0)
+      manager.bindAttempt('att-1')
+      manager.freezeFromAttempt(
+        attempt(),
+        () => undefined,
+        0,
+        () => 9,
+      )
+      manager.clearAll()
+      vi.advanceTimersByTime(FENCE_DEFER_MS)
+      expect(manager.blocks).toHaveLength(0)
+      expect(manager.runningBlock).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

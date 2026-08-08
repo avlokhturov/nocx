@@ -97,6 +97,24 @@ export class ScrollbackController {
     this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
       now,
       snapshotStore: opts.snapshotStore,
+      // A DEFERRED freeze landed inside the manager (the fence arrived, or
+      // the FENCE_DEFER_MS window elapsed): settle the live region exactly
+      // like a direct freeze, since freezeFromAttempt already returned.
+      onDeferredFreeze: () => {
+        this.setIdle()
+        this._scrollToLastBlockStart()
+      },
+    })
+
+    // ── Render fence rendezvous (nocx-u7uh.8, ADR-0024 §7 carve-out) ────
+    // The renderer reports where the fence landed; the block manager matches
+    // it against the pending authenticated completion. A fence in the
+    // alternate buffer has no scrollback line to serialize — ignored here.
+    // Optional on the renderer: without it, every freeze takes the defined
+    // no-fence path (defer, then settle at the current output end).
+    opts.renderer.onRenderFence?.((ev) => {
+      if (ev.buffer !== 'normal') return
+      this._blockManager.sightFence(ev.hex, ev.line)
     })
 
     // ── Follow state ─────────────────────────────────────────────────────
@@ -394,13 +412,20 @@ export class ScrollbackController {
     this.separator.style.display = hasBlocks && this._mode !== 'fullscreen' ? '' : 'none'
   }
 
-  /** The attempt-driven freeze (ADR-0024 §7 projection): freeze the block
-   *  bound to the attempt at the current output end and settle the live
-   *  region. The authority check (kernel freezeBlock) is the caller's; the
-   *  render-fence bead (nocx-u7uh.8) later refines the output boundary. */
+  /** The attempt-driven freeze (ADR-0024 §7 projection, bead nocx-u7uh.8):
+   *  the LOGICAL freeze — the block's status, exit code and attempt
+   *  binding — lands on the authenticated completion event alone (history
+   *  and the ledger have already landed); only the VISUAL boundary (which
+   *  rows belong to the block) waits for the matching render fence. When
+   *  the fence bytes have not arrived, this returns false and the live
+   *  region stays up — the manager's onDeferredFreeze settles it on the
+   *  sighting, or after FENCE_DEFER_MS at the current output end. The
+   *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
-    const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine)
+    const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine, () =>
+      this._renderer.cursorLine(),
+    )
     if (rec) {
       this.setIdle()
       this._scrollToLastBlockStart()

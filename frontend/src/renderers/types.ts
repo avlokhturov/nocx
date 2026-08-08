@@ -50,6 +50,26 @@ export interface CommandMarkerEvent extends CommandMarker {
 // each enriched marker as an event — the backend never sniffs the byte stream.
 export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
 
+// RenderFenceEvent — the ADR-0024 §7 carve-out rendezvous: the shell writes
+// ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER a command's output, and
+// carries the same 64 hex chars in the authenticated `complete` event. The
+// renderer parses the OSC and reports WHERE the fence landed (render-only —
+// a fence carries no authority; see ADR-0024 decision 1). The block model
+// matches the fence hex against the authenticated completion to freeze the
+// block at the true output end instead of truncating the in-flight tail.
+export interface RenderFenceEvent {
+  /** 64 lowercase hex chars — the nonce the shell generated at completion. */
+  hex: string
+  /** Absolute buffer line the fence sequence was parsed on. The command's
+   *  last output byte is on this line or the one above it. */
+  line: number
+  /** Active buffer at parse time. A fence in the alternate buffer has no
+   *  scrollback line to serialize — the consumer ignores it. */
+  buffer: 'normal' | 'alternate'
+}
+
+export type RenderFenceCallback = (event: RenderFenceEvent) => void
+
 export interface TerminalRenderer {
   mount(container: HTMLElement): Promise<void>
   /**
@@ -110,6 +130,13 @@ export interface TerminalRenderer {
   // nocx_env tag when the marker is tagged.
   onCommandMarker(cb: CommandMarkerCallback): void
 
+  // onRenderFence registers a callback that fires when the shell emits the
+  // private render fence (OSC 1337 NOCX_FENCE — ADR-0024 §7 carve-out).
+  // Parse-and-report only: the renderer says where the fence landed; the
+  // consumer matches it against the authenticated completion. Optional so a
+  // renderer that does not parse fences degrades to the documented
+  // no-fence deferral instead of failing to mount.
+  onRenderFence?(cb: RenderFenceCallback): void
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the
   // tab bar always lights the activity indicator on bell.

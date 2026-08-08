@@ -14,8 +14,9 @@
 // attempt opens no record, so its command text, which may carry a literal
 // password, persists nowhere (the command-text decision this bead owns:
 // authenticated origin makes the completion trustworthy, never the line).
-// The block model opens on an attempt and freezes on its completion.
-//
+// The block model opens on an attempt and freezes on its completion — the
+// VISUAL freeze may wait for the render fence (u7uh.8), but this module
+// never does: logical completion (ledger, history) lands on the event alone.
 // The DOM half is a port (BlockProjectionPort): the composition root
 // (terminal-content) implements it over the scrollback controller; this
 // module never touches the DOM, which is what makes it testable without a
@@ -36,7 +37,10 @@ export interface BlockProjectionPort {
    *  record exists, so the block is the structure the attempt earns
    *  (ADR-0024 §5), and nothing of it persists. */
   openBlock(attempt: ExecutionAttempt): void
-  /** Freeze the bound block with the attempt's authenticated exit status. */
+  /** Freeze the bound block with the attempt's authenticated exit status.
+   *  The port may defer the VISUAL freeze until the render fence (u7uh.8)
+   *  proves where the output ended; the projection never waits for that —
+   *  the ledger and history land on this event alone. */
   freezeBlock(attempt: ExecutionAttempt): void
   /** Freeze the bound block as abandoned — the attempt went `unknown`. */
   abandonBlock(attempt: ExecutionAttempt): void

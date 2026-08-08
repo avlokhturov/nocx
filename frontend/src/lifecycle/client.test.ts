@@ -56,7 +56,13 @@ class MockSocket {
     this._fire('open')
   }
 
-  deliver(msg: { method?: string; params?: unknown }): void {
+  deliver(msg: {
+    id?: number
+    result?: unknown
+    error?: unknown
+    method?: string
+    params?: unknown
+  }): void {
     const event = { data: JSON.stringify(msg) }
     this.onmessage?.(event)
     this._fire('message', event)
@@ -157,5 +163,55 @@ describe('LifecycleClient', () => {
     lastSocket().deliver({ method: 'lifecycle.changed', params: fact() })
 
     expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('submitAttempt sends the app-owned params and resolves the created attempt', async () => {
+    const dispatcher = new Dispatcher()
+    await connectAndAccept(dispatcher)
+    const client = new LifecycleClient(dispatcher)
+    const p = client.submitAttempt({
+      domain: 'd1',
+      command: 'make',
+      cwd: '/srv/app',
+      host: 'build.example.com',
+    })
+
+    // The request went out with the app-owned half of the execution —
+    // command, cwd and host captured at submit (ADR-0024 decision 5).
+    const sent = JSON.parse(lastSocket().sent[0]) as { method: string; params: unknown }
+    expect(sent.method).toBe('lifecycle.submitAttempt')
+    expect(sent.params).toEqual({
+      domain: 'd1',
+      command: 'make',
+      cwd: '/srv/app',
+      host: 'build.example.com',
+    })
+
+    lastSocket().deliver({
+      id: 1,
+      result: {
+        id: 'att-1',
+        domain: 'd1',
+        state: 'open',
+        command: 'make',
+        cwd: '/srv/app',
+        host: 'build.example.com',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      },
+    })
+    await expect(p).resolves.toMatchObject({ id: 'att-1', state: 'open', origin: 'app' })
+  })
+
+  it('submitAttempt surfaces a backend refusal as a rejected promise', async () => {
+    const dispatcher = new Dispatcher()
+    await connectAndAccept(dispatcher)
+    const client = new LifecycleClient(dispatcher)
+    const p = client.submitAttempt({ domain: 'd1', command: 'make', cwd: '', host: '' })
+    lastSocket().deliver({
+      id: 1,
+      error: { code: -32602, message: 'lifecycle: no prompt is ready' },
+    })
+    await expect(p).rejects.toMatchObject({ code: -32602 })
   })
 })

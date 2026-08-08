@@ -664,6 +664,17 @@ export class TerminalContent extends BaseTabContent {
             // directory and vanished from a history scoped to "this
             // directory". The command ran here, whatever it goes on to do.
             const submitCwd = this._cwd
+            // An empty line is a bare newline: no execution, no attempt, no
+            // ledger record (CommandLedger.open refuses empty commands) and
+            // no block. The shell still gets its newline — a conventional
+            // terminal stays conventional.
+            if (recordLine === '') {
+              submitCommand(doc, {
+                focusGrid: () => renderer.focus(),
+                sendDoc: (d) => void this.shellTarget!.submit(d),
+              })
+              return
+            }
             // SEVERED (ADR-0024): the ssh attempt binding (expected passport
             // id, tagged A→B entry, local-D completion) and the
             // environment-entry heuristic (docker, su, …) are deleted with
@@ -685,17 +696,43 @@ export class TerminalContent extends BaseTabContent {
               }
             }
             this.scrollback?.maybeClear(recordLine)
-            submitCommand(doc, {
-              focusGrid: () => renderer.focus(),
-              sendDoc: (d) => void this.shellTarget!.submit(d),
-            })
-            // App-owned start (nocx-atyf.4): mark the block as running
-            // immediately, before any OSC marker arrives. The start line
-            // is the cursor position at submit time; when C arrives (if
-            // it does), cReceived is set on the running block.
+            // The running block opens at the app-owned submit — before any
+            // bytes and before any fact can arrive — so the published
+            // running fact (which the backend emits BEFORE the RPC response,
+            // inside SubmitAttempt) always finds the block it binds to
+            // (ADR-0024 §5, §7).
             if (this.scrollback && this.renderer) {
               this.scrollback.beginBlock(recordLine, submitCwd, this.renderer.cursorLine())
             }
+            const write = (): void => {
+              submitCommand(doc, {
+                focusGrid: () => renderer.focus(),
+                sendDoc: (d) => void this.shellTarget!.submit(d),
+              })
+            }
+            const st = this.lifecycle.state
+            if (st.kind !== 'prompt_ready') {
+              // No live domain: nothing to attach the app-owned text to. The
+              // shell's own start (if any) opens a shell-originated attempt
+              // and the block binds to it — a conventional terminal stays
+              // conventional, and the privacy rule holds either way.
+              write()
+              return
+            }
+            // ADR-0024 decision 5: the app-owned attempt opens BEFORE the
+            // bytes that can cause the shell's own start are written to the
+            // pty; the later authenticated start attaches to it and replaces
+            // nothing. Fail-open: a refused attempt (the domain lost its
+            // prompt mid-typing) must never swallow the command — the bytes
+            // still go out and the session stays conventional.
+            void new LifecycleClient(this.client.dispatcher)
+              .submitAttempt({
+                domain: st.domain.id,
+                command: recordLine,
+                cwd: submitCwd,
+                host: this._host,
+              })
+              .then(write, write)
           },
           cancel: () => this.session?.send('\x03'),
           // A taller editor is a shorter scrollback. Keep the bottom of the

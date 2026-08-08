@@ -3530,3 +3530,91 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 		t.Errorf("domain/epoch = %q/%d, want %q/%d", params.Domain, params.Epoch, h.Domain, h.Epoch)
 	}
 }
+
+// ── lifecycle.submitAttempt ────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, enum spelling, and the exact key
+// set (additionalProperties:false plus required makes it exact in both
+// directions). The state is always "open" and the origin always "app" —
+// this call is the app-originated half of decision 5 — and cwd and host are
+// present even when empty (a local session has no host).
+func TestLifecycleSubmitAttempt_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.submitAttempt.schema.json")
+	started := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	cases := map[string]lifecycleSubmitAttemptResult{
+		// An SSH session: host and cwd both known.
+		"remote attempt": {
+			ID: "att-1", Domain: "dom-1", State: lifecyclepub.AttemptOpen,
+			Command: "make", Cwd: "/srv/app", Host: "build.example.com",
+			Origin: lifecyclepub.OriginApp, StartedAt: started,
+		},
+		// A local session: no host, and the cwd may be unknown.
+		"local attempt": {
+			ID: "att-2", Domain: "dom-2", State: lifecyclepub.AttemptOpen,
+			Command: "ls", Cwd: "", Host: "",
+			Origin: lifecyclepub.OriginApp, StartedAt: started,
+		},
+	}
+	for name, dto := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "lifecycle.submitAttempt DTO")
+		})
+	}
+}
+
+// The real method through the real socket: a live domain at a ready prompt,
+// the renderer's exact payload, and the actual result bytes validated
+// against the schema. Nothing here names a field, so nothing here can omit
+// one — a future refactor that drops cwd, host or origin from the response
+// fails right here.
+func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.submitAttempt.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+
+	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", map[string]string{
+		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+	}, 41)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("submitAttempt: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("submitAttempt: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "lifecycle.submitAttempt result (real socket)")
+
+	// The result is not just schema-shaped: it is the actual kernel attempt,
+	// and the domain the renderer addressed is the one the attempt opened on.
+	var got lifecycleSubmitAttemptResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Domain != string(h.Domain) {
+		t.Errorf("domain = %q, want %q", got.Domain, h.Domain)
+	}
+	if att, ok := kernel.Attempt(lifecycle.AttemptID(got.ID)); !ok || att.Command != "make" {
+		t.Errorf("kernel attempt = %+v (ok=%v), want the submitted command", att, ok)
+	}
+}
