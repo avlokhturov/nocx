@@ -15,6 +15,17 @@ package app
 //     `sudo --preserve-fds=3,N -i env -u BASH_ENV bash --rcfile /dev/fd/N
 //     -i` — ADR-0024's own preferred answer (recorded in its open-questions
 //     section): the per-epoch capability never enters a filesystem object.
+//     su has no --preserve-fds flag, so its launch
+//     (`su -l -c 'env -u BASH_ENV bash --rcfile /dev/fd/N -i'`) rests on
+//     the descriptor surviving su's own exec. Verified 2026-08-09
+//     (nocx-u7uh.30): util-linux su (v2.42.2, su-common.c run_shell),
+//     shadow su (4.19.4, execve_shell — the binary measured on this host,
+//     which preserved fd 7 through the exact launcher line) and BSD/macOS
+//     su (FreeBSD lineage) all end in a plain exec with no fd sweep — but
+//     none promises preservation in a man page. The fallback when one does
+//     not: the child starts conventional, never establishes, and the parent
+//     stillborn-activates (§9) — asserted by the fd-closed su test. The
+//     full reasoning lives at the launcher site in nocx.bash/nocx.zsh.
 //   - ssh: the bootstrap is a rewritten command line the parent executes —
 //     ADR-0022, "the ssh command line is the carrier" — carrying the child's
 //     forwarded lifecycle port as a -R reverse forward on that same ssh

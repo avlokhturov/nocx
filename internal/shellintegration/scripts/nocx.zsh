@@ -567,6 +567,19 @@ __nocx_nested_launch() {
             __nocx_stage_ok=1
         fi
         if (( __nocx_stage_ok == 1 )); then
+            # su has no --preserve-fds: the whole launch rests on the rcfile
+            # descriptor surviving su's own exec. Measured/verified 2026-08-09
+            # (nocx-u7uh.30): util-linux su (v2.42.2, su-common.c run_shell)
+            # and shadow su (4.19.4, execve_shell) end in a plain
+            # execv/execve with no fd sweep, BSD/macOS su (FreeBSD lineage)
+            # is the same, and the real shadow su on this host preserved fd 7
+            # through the exact launcher line — but NONE of them promise
+            # preservation in a man page; it is an incidental property of
+            # plain exec. The fallback when one does not preserve: the child
+            # bash cannot read its rcfile, starts as a conventional shell
+            # (measured: bash silently ignores the unreadable --rcfile),
+            # never establishes, and the parent stillborn-activates at its
+            # next prompt — asserted by the fd-closed su test.
             if [[ "$__nocx_nested_env" == "sudo" ]]; then
                 sudo --preserve-fds=3,$__nocx_boot_fd -i env -u BASH_ENV bash --rcfile /dev/fd/$__nocx_boot_fd -i </dev/tty
             else
