@@ -121,15 +121,31 @@ __nocx_lc_send() {
 
 # Wait for the transport to become readable, bounded by the handshake
 # timeout, consuming nothing. bash's `read` cannot hold NUL bytes, so the
-# binary length prefix must be read by dd|od instead; `read -N 0` is only
-# the bounded liveness check that keeps a dead kernel from hanging the
-# prompt (fail-open, decision 3).
+# binary length prefix must be read by dd|od instead. The bound is a poll:
+# `read -N 0` with a NONZERO `-t` returns immediately on an open fd
+# (verified empirically — it only detects EOF, so it cannot bound a silent
+# peer), while `read -t 0 -N 0` is a true non-blocking probe that succeeds
+# iff data is available right now. The sleep loop is the bound, and a
+# closed channel fails on the first probe instead of waiting it out
+# (fail-open, decision 3).
 __nocx_lc_wait_readable() {
     # $1 = timeout in seconds (defaults to the handshake timeout). The
     # refresh poll passes a short bound: the prompt is the user's critical
     # path, and a partial or stalled frame must never hold it.
-    local __t="${1:-$__nocx_lc_timeout_s}"
-    LC_ALL=C IFS= read -r -t "$__t" -N 0 <&"$__nocx_lc_fd" 2>/dev/null
+    #
+    # The loop probes at the TOP of every round, so it runs once more AFTER
+    # the last sleep: a frame that arrived during the sleep is seen, and a
+    # 1-second bound is one sleep plus the probes around it — not a probe,
+    # a sleep, and a premature give-up.
+    local __t="${1:-$__nocx_lc_timeout_s}" __round=0
+    while :; do
+        if LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+            return 0 # data is available; the caller reads it
+        fi
+        (( __round >= __t )) && return 1 # the bound expired: fail open
+        sleep 1
+        __round=$(( __round + 1 ))
+    done
 }
 
 # Read one length-prefixed JSON frame into __nocx_lc_frame. Any framing
@@ -255,7 +271,12 @@ __nocx_lc_init() {
         # allocation: the {var} form is bash 4.1+, and macOS ships bash 3.2,
         # where the same text would open a file literally named "{var}".
         # fd 200 sits above the 3-9 range user scripts and POSIX sh use.
-        if ! exec 200<>"/dev/tcp/127.0.0.1/$__nocx_lc_port" 2>/dev/null; then
+        # The 2>/dev/null is scoped to the GROUP: for `exec` every
+        # redirection is permanent, and an unscoped one would redirect the
+        # shell's stderr to /dev/null for the rest of the session —
+        # readline writes the prompt to stderr, so the restored native
+        # prompt (decisions 8/9) would be invisible.
+        if ! { exec 200<>"/dev/tcp/127.0.0.1/$__nocx_lc_port"; } 2>/dev/null; then
             return 1
         fi
         __nocx_lc_fd=200

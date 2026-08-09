@@ -19,9 +19,12 @@ type Options struct {
 
 // Kernel is the pure authenticated lifecycle model. It is safe for concurrent
 // use: each public method serializes on an internal mutex, applies its
-// transition, and only then — outside the lock — delivers outbound envelopes
-// (accept, refresh_request) to the transport ports. Invalid events mutate
-// nothing and return a sentinel error (errors.go).
+// transition, and hands the outbound envelopes it produced (accept,
+// refresh_request) back to the caller UNSENT — the caller owns delivery
+// ordering (ADR-0024 decision 9: an accept must not reach the shell before
+// the renderer has acknowledged the published fact). Deliver sends one
+// such envelope to its transport's port, outside the lock. Invalid events
+// mutate nothing and return a sentinel error (errors.go).
 type Kernel struct {
 	mu       sync.Mutex
 	now      func() time.Time
@@ -128,16 +131,19 @@ func (k *Kernel) RequestDomain(lane LaneID, parent *DomainID, t TransportID) (Do
 // order (decision 7): protocol version, domain liveness, transport binding,
 // epoch, capability — authentication terminates before any domain or sequence
 // state is consulted — then lane match, then the monotonic sequence rule, then
-// the legal transition. Invalid events mutate nothing.
-func (k *Kernel) Ingest(t TransportID, env Envelope) error {
+// the legal transition. Invalid events mutate nothing, produce no outbound,
+// and return a sentinel error.
+//
+// The outbound envelopes the transition produced (accept, refresh_request)
+// are returned UNSENT: the caller owns their delivery ordering (decision 9).
+func (k *Kernel) Ingest(t TransportID, env Envelope) ([]Outbound, error) {
 	k.mu.Lock()
 	out, err := k.ingestLocked(t, env)
 	k.mu.Unlock()
-	k.flush(out)
-	return err
+	return out, err
 }
 
-func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]outbound, error) {
+func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 	if _, ok := k.ports[t]; !ok {
 		return nil, ErrUnknownTransport
 	}
@@ -175,7 +181,7 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]outbound, error) {
 	if d.State == DomainDesynchronized {
 		k.checkDesyncBudget(d, ls) // time can elapse while nothing is scanned
 	}
-	var out []outbound
+	var out []Outbound
 	var err error
 	switch env.Event.Kind {
 	case KindHello:
@@ -210,15 +216,14 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]outbound, error) {
 // enters Desynchronized (or the episode's budgets accumulate), nocx requests an
 // authenticated snapshot, and only a snapshot answering it restores authority
 // (decision 7). Budget exhaustion revokes the domain.
-func (k *Kernel) NotifyGap(t TransportID, dID DomainID, garbageBytes, garbageFrames int) error {
+func (k *Kernel) NotifyGap(t TransportID, dID DomainID, garbageBytes, garbageFrames int) ([]Outbound, error) {
 	k.mu.Lock()
 	out, err := k.notifyGapLocked(t, dID, garbageBytes, garbageFrames)
 	k.mu.Unlock()
-	k.flush(out)
-	return err
+	return out, err
 }
 
-func (k *Kernel) notifyGapLocked(t TransportID, dID DomainID, garbageBytes, garbageFrames int) ([]outbound, error) {
+func (k *Kernel) notifyGapLocked(t TransportID, dID DomainID, garbageBytes, garbageFrames int) ([]Outbound, error) {
 	if _, ok := k.ports[t]; !ok {
 		return nil, ErrUnknownTransport
 	}
@@ -233,7 +238,7 @@ func (k *Kernel) notifyGapLocked(t TransportID, dID DomainID, garbageBytes, garb
 		return nil, ErrWrongTransport
 	}
 	ls := k.lanes[d.Lane]
-	var out []outbound
+	var out []Outbound
 	switch d.State {
 	case DomainEstablished:
 		if d.desyncEpisodes+1 > k.budgets.MaxDesyncEpisodes {
@@ -304,6 +309,29 @@ func (k *Kernel) TransportLost(t TransportID) error {
 			k.setLifecycle(ls, LifecycleLost, "", "")
 		}
 	}
+	return nil
+}
+
+// EstablishmentTimeout rolls back a domain whose accept was never delivered
+// (decision 9): an accept-pending domain is revoked — Closed, its open
+// attempts unknown, the lane back to Native — and the caller publishes the
+// resulting safe state. A domain whose accept WAS delivered (the
+// acknowledgement raced the timeout) is left live: the shell has its accept
+// and must not be revoked under it. A domain that never helloed (Pending) is
+// not touched either — the transport's own hello bound (TransportLost) owns
+// that case.
+func (k *Kernel) EstablishmentTimeout(domain DomainID) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	d, ok := k.registry.Lookup(domain)
+	if !ok {
+		return ErrUnknownDomain
+	}
+	if d.State != DomainEstablished || !d.acceptPending {
+		return nil // delivered (race lost), or not awaiting an accept
+	}
+	ls := k.lanes[d.Lane]
+	k.revoke(d, ls)
 	return nil
 }
 
@@ -439,7 +467,7 @@ func (k *Kernel) Domain(id DomainID) (Domain, bool) {
 
 // --- transitions -----------------------------------------------------------
 
-func (k *Kernel) applyHello(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applyHello(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	switch d.State {
 	case DomainPending:
 		if d.Parent == nil {
@@ -461,20 +489,27 @@ func (k *Kernel) applyHello(d *Domain, ls *laneState, env Envelope) ([]outbound,
 			}
 		}
 		d.State = DomainEstablished
+		// The accept is minted but NOT delivered — the caller owns delivery
+		// ordering (decision 9), and the domain is not live until the
+		// accept reaches the shell (Deliver clears acceptPending). Events
+		// are rejected meanwhile (requireActive → ErrDomainPending), and
+		// EstablishmentTimeout rolls the domain back if the accept never
+		// goes out.
+		d.acceptPending = true
 		ls.stack = append(ls.stack, d.ID)
 		k.setLifecycle(ls, LifecyclePromptReady, d.ID, "")
-		return []outbound{k.acceptOutbound(d)}, nil
+		return []Outbound{k.acceptOutbound(d)}, nil
 	case DomainEstablished, DomainSuspended, DomainDesynchronized:
 		// Reconnect within the epoch: accepted, counter never resets,
 		// authority unchanged. A fresh accept lets the shell gate its
 		// prompt suppression on the reply.
-		return []outbound{k.acceptOutbound(d)}, nil
+		return []Outbound{k.acceptOutbound(d)}, nil
 	default:
 		return nil, ErrDomainNotLive
 	}
 }
 
-func (k *Kernel) applyStart(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applyStart(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if err := k.requireActive(d, ls); err != nil {
 		return nil, err
 	}
@@ -542,7 +577,7 @@ func (k *Kernel) applyStart(d *Domain, ls *laneState, env Envelope) ([]outbound,
 	}
 }
 
-func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if err := k.requireActive(d, ls); err != nil {
 		return nil, err
 	}
@@ -581,7 +616,7 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]outbou
 	return nil, nil
 }
 
-func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if err := k.requireActive(d, ls); err != nil {
 		return nil, err
 	}
@@ -592,7 +627,7 @@ func (k *Kernel) applyPromptReady(d *Domain, ls *laneState, env Envelope) ([]out
 	return nil, nil
 }
 
-func (k *Kernel) applySuspend(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applySuspend(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if err := k.requireActive(d, ls); err != nil {
 		return nil, err
 	}
@@ -601,7 +636,7 @@ func (k *Kernel) applySuspend(d *Domain, ls *laneState, env Envelope) ([]outboun
 	return nil, nil
 }
 
-func (k *Kernel) applyActivate(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applyActivate(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if d.State != DomainSuspended {
 		return nil, ErrNotSuspended
 	}
@@ -617,7 +652,7 @@ func (k *Kernel) applyActivate(d *Domain, ls *laneState, env Envelope) ([]outbou
 	return nil, nil
 }
 
-func (k *Kernel) applyClose(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applyClose(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if d.State != DomainEstablished && d.State != DomainSuspended {
 		return nil, ErrDomainNotLive
 	}
@@ -631,7 +666,7 @@ func (k *Kernel) applyClose(d *Domain, ls *laneState, env Envelope) ([]outbound,
 	return nil, nil
 }
 
-func (k *Kernel) applySnapshot(d *Domain, ls *laneState, env Envelope) ([]outbound, error) {
+func (k *Kernel) applySnapshot(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
 	if d.State != DomainDesynchronized {
 		return nil, ErrSnapshotUnexpected
 	}
@@ -732,24 +767,55 @@ func (k *Kernel) resolveAttempt(d *Domain, id AttemptID) (*ExecutionAttempt, boo
 
 // --- helpers ---------------------------------------------------------------
 
-type outbound struct {
-	port Port
-	env  Envelope
+// Outbound is one kernel-originated envelope awaiting delivery — accept or
+// refresh_request, the only two kinds the kernel sends. It is addressed to
+// the transport the domain is bound to; the caller delivers it with Deliver,
+// owning the ordering (decision 9). The transport port itself stays private
+// to the kernel; the caller never touches it.
+type Outbound struct {
+	Transport TransportID
+	Envelope  Envelope
 }
 
-// flush delivers outbound envelopes after the lock is released. Ports are
-// captured under the lock and never unbound, so the captured value stays
-// valid. Send failures are best-effort (safe direction: the shell times out).
-func (k *Kernel) flush(out []outbound) {
-	for _, o := range out {
-		_ = o.port.Send(o.env)
+// Deliver sends one outbound envelope to its transport's port. The port is
+// looked up under the lock and the send runs OUTSIDE it — the "send outside
+// the kernel mutex" invariant the old internal flush preserved. An accept is
+// refused unless the domain is still Established: an accept for a revoked,
+// lost or never-helloed domain would let a shell suppress its prompt against
+// a dead domain (decision 9). On a successful accept send the domain's
+// acceptPending clears — the domain is live past ACCEPT (decision 3), and
+// only then may lifecycle events be accepted. Send failures are best-effort
+// (safe direction: the shell times out its handshake).
+func (k *Kernel) Deliver(out Outbound) error {
+	k.mu.Lock()
+	port, ok := k.ports[out.Transport]
+	var d *Domain
+	if ok {
+		d, _ = k.registry.Lookup(out.Envelope.Domain)
 	}
+	if out.Envelope.Event.Kind == KindAccept && (d == nil || d.State != DomainEstablished) {
+		k.mu.Unlock()
+		return ErrDomainNotLive
+	}
+	k.mu.Unlock()
+	if !ok || port == nil {
+		return ErrUnknownTransport
+	}
+	err := port.Send(out.Envelope)
+	if err == nil && out.Envelope.Event.Kind == KindAccept && d != nil {
+		k.mu.Lock()
+		if d.State == DomainEstablished && d.acceptPending {
+			d.acceptPending = false
+		}
+		k.mu.Unlock()
+	}
+	return err
 }
 
-func (k *Kernel) acceptOutbound(d *Domain) outbound {
-	return outbound{
-		port: k.ports[d.Transport],
-		env: Envelope{
+func (k *Kernel) acceptOutbound(d *Domain) Outbound {
+	return Outbound{
+		Transport: d.Transport,
+		Envelope: Envelope{
 			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
 			Epoch: d.Epoch, Capability: d.capability,
 			Event: Event{Kind: KindAccept, Accept: &Accept{}},
@@ -757,10 +823,10 @@ func (k *Kernel) acceptOutbound(d *Domain) outbound {
 	}
 }
 
-func (k *Kernel) refreshOutbound(d *Domain, rid RequestID) outbound {
-	return outbound{
-		port: k.ports[d.Transport],
-		env: Envelope{
+func (k *Kernel) refreshOutbound(d *Domain, rid RequestID) Outbound {
+	return Outbound{
+		Transport: d.Transport,
+		Envelope: Envelope{
 			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
 			Epoch: d.Epoch, Capability: d.capability,
 			Event: Event{Kind: KindRefreshRequest, RefreshRequest: &RefreshRequest{RequestID: rid}},
@@ -769,10 +835,14 @@ func (k *Kernel) refreshOutbound(d *Domain, rid RequestID) outbound {
 }
 
 // requireActive enforces that the domain is live, established (not
-// desynchronized), and the top of its lane stack.
+// desynchronized), the top of its lane stack, and past ACCEPT (decision 9:
+// a domain whose accept was minted but never delivered is not live).
 func (k *Kernel) requireActive(d *Domain, ls *laneState) error {
 	switch d.State {
 	case DomainEstablished:
+		if d.acceptPending {
+			return ErrDomainPending // not past accept (decision 3/9)
+		}
 		if ls.top() != d.ID {
 			return ErrDomainNotTop
 		}

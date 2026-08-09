@@ -1114,6 +1114,67 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
   })
 })
 
+describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
+  // The renderer half of the gate: the backend withholds the shell's ACCEPT
+  // — and therefore the shell's authority to suppress its native prompt —
+  // until this acknowledgement says the editor presentation is committed.
+  // Silence here is the fail-open direction, not a no-op: the handshake
+  // times out and the session stays a conventional terminal.
+  it('acknowledges a prompt_ready generation exactly once, after the fact is applied', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const call = client.dispatcher.call
+
+      // No generation on the fact: there is no establishment episode open,
+      // so there is nothing to release and nothing is acknowledged.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
+
+      // The establishment fact carries the backend-minted generation.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+      const sid = client._sessions[0].sessionId
+      expect(call).toHaveBeenCalledWith('lifecycle.establishAck', {
+        sessionId: sid,
+        lane: 'lane-1',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+      expect(
+        call.mock.calls.filter((c: unknown[]) => c[0] === 'lifecycle.establishAck'),
+      ).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('never acknowledges a fact that names no live domain', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const call = client.dispatcher.call
+      // native and lost carry no establishment; a running fact is past the
+      // gate. None of them may release an accept.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, generation: 'est-1' })
+      expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
+    } finally {
+      teardown()
+    }
+  })
+})
+
 /**
  * Extract the body of the first top-level rule whose selector contains
  * `className` as a whole class. Brace-matched, so nested blocks (media
@@ -1649,6 +1710,116 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
     } finally {
       Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+})
+
+describe('alt-screen exit and the ready prompt present the structured layout (nocx-u7uh.26, nocx-u7uh.27)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  const scrollbackOf = (content: TerminalContent): ScrollbackController =>
+    (content as unknown as { scrollback: ScrollbackController }).scrollback
+
+  it('a ready prompt with a live domain presents the structured idle layout (nocx-u7uh.27)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      // The kernel starts Native: a conventional terminal, flat grid.
+      expect(scrollbackOf(content).mode).toBe('unstructured')
+      // Integration establishes at the first prompt boundary. A live domain
+      // entitles the session to the block model (ADR-0024 §4), so the pane
+      // must move to the idle/structured layout — it used to stay on the
+      // conventional grid until the first command opened a block, so the
+      // first impression of an integrated session was a flat terminal.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(scrollbackOf(content).mode).toBe('idle')
+      expect(
+        scrollbackOf(content).scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaving the alternate buffer in an integrated session restores the structured layout (nocx-u7uh.26)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      const renderer = rendererOf(content)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // vim enters the alternate buffer: the program takes the pane.
+      renderer._fireBufferChange('alternate')
+      expect(scrollbackOf(content).mode).toBe('fullscreen')
+      // vim quits: leaving the alternate buffer must land on the structured
+      // idle layout, not the flat conventional grid — the live domain
+      // entitles the session to the block model on the way out too.
+      renderer._fireBufferChange('normal')
+      expect(scrollbackOf(content).mode).toBe('idle')
+      expect(
+        scrollbackOf(content).scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaving the alternate buffer while the attempt still runs keeps the live region up (nocx-u7uh.26)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // A shell-originated attempt opens a running block.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'vim file' },
+      })
+      expect(scrollbackOf(content).mode).toBe('running')
+      renderer._fireBufferChange('alternate')
+      expect(scrollbackOf(content).mode).toBe('fullscreen')
+      // vim exits before the completion fact lands: the command cycle still
+      // owns the live region, so the pane stays in the running layout until
+      // the authenticated completion freezes the block.
+      renderer._fireBufferChange('normal')
+      expect(scrollbackOf(content).mode).toBe('running')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a conventional session still lands unstructured after the alternate buffer (nocx-u7uh.26)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const renderer = rendererOf(content)
+      // Native: no domain, a conventional terminal. The alt-screen path
+      // must leave it exactly as it found it — a flat grid.
+      renderer._fireBufferChange('alternate')
+      expect(scrollbackOf(content).mode).toBe('fullscreen')
+      renderer._fireBufferChange('normal')
+      expect(scrollbackOf(content).mode).toBe('unstructured')
+    } finally {
       teardown()
     }
   })

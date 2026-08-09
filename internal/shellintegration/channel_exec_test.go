@@ -76,10 +76,16 @@ type fakeKernel struct {
 	// push a refresh_request at it (the kernel-originated outbound the
 	// adapter's Send would frame). Tests dial only one shell connection.
 	conn net.Conn
+	// readFrames, when false, accepts connections but never reads them:
+	// the hello never ARRIVES (decision-9 fault variant 1).
+	readFrames bool
+	// answerHello, when false, reads and records the hello but never
+	// answers it: ACCEPT never comes (decision-9 fault variant 2).
+	answerHello bool
 }
 
 func newFakeKernel(t *testing.T, cap string) *fakeKernel {
-	return &fakeKernel{t: t, cap: cap}
+	return &fakeKernel{t: t, cap: cap, readFrames: true, answerHello: true}
 }
 
 // serveLoop accepts connections until the listener is closed and serves
@@ -89,6 +95,13 @@ func (k *fakeKernel) serveLoop(ln net.Listener) {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
+		}
+		if !k.readFrames {
+			// Fault variant 1: the connection is accepted and held open,
+			// never read — the shell's hello sits in the socket buffer and
+			// the accept never comes. The shell's bounded handshake wait
+			// expires with its native prompt visible.
+			continue
 		}
 		go k.serve(conn)
 	}
@@ -132,7 +145,7 @@ func (k *fakeKernel) serve(conn net.Conn) {
 		first := !k.acceptedHello
 		k.acceptedHello = true
 		k.mu.Unlock()
-		if first && f.Evt == "hello" {
+		if first && f.Evt == "hello" && k.answerHello {
 			k.sendAccept(conn)
 		}
 	}
@@ -232,6 +245,19 @@ type channelShell struct {
 // first prompt_ready.
 func startChannelShell(t *testing.T, shell, scriptName, script string) *channelShell {
 	t.Helper()
+	return startChannelShellCfg(t, shell, scriptName, script, newFakeKernel(t, testCap), "", true)
+}
+
+// startChannelShellCfg boots the hooks against a fake kernel over loopback
+// TCP (the remote / in-band transport shape), with the decision-9 fault
+// harness knobs: the kernel may be in a fault mode (never reading the
+// connection, or never answering hello), the shell's native prompt may carry
+// a sentinel text the assertions key on (a suppressed marker-only prompt has
+// no native text at all), and the handshake wait is optional — the fault
+// tests must observe the shell AFTER its bounded wait expires, not after a
+// completed handshake.
+func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fakeKernel, sentinelPrompt string, waitHandshake bool) *channelShell {
+	t.Helper()
 	sh := requireShell(t, shell)
 
 	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
@@ -241,6 +267,7 @@ func startChannelShell(t *testing.T, shell, scriptName, script string) *channelS
 	port := tcpPort(t, ln)
 
 	home := t.TempDir()
+	tmpDir := t.TempDir()
 	bootstrap := filepath.Join(t.TempDir(), "bootstrap")
 	// The launcher's substitution point: __nocx_cap='@CAP@' in the rcfile
 	// text. The hooks drop the export attribute again at source time.
@@ -254,8 +281,19 @@ func startChannelShell(t *testing.T, shell, scriptName, script string) *channelS
 	// real interactive shell on a real pty is the only way to exercise the
 	// channel hooks (same annotation as the in-band pty suite).
 	cmd := exec.Command(sh, "-i")
+	promptEnv := ""
+	if sentinelPrompt != "" {
+		// The sentinel rides the shell's own prompt variable, so the
+		// assertion is on the fixture's prompt text — what a person sees —
+		// not on marker bytes.
+		if shell == "zsh" {
+			promptEnv = "PROMPT=" + sentinelPrompt
+		} else {
+			promptEnv = "PS1=" + sentinelPrompt
+		}
+	}
 	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		cleanEnv("HOME="+home, "TMPDIR="+tmpDir, "TERM=xterm", "HISTFILE=/dev/null", promptEnv),
 		"NOCX_SHELL_INTEGRATION=1",
 		"NOCX_PROMPT_MODE=marker-only",
 		"NOCX_SESSION_ID=chansess",
@@ -263,7 +301,7 @@ func startChannelShell(t *testing.T, shell, scriptName, script string) *channelS
 		"NOCX_LIFECYCLE_DOMAIN="+testDom,
 		fmt.Sprintf("NOCX_LIFECYCLE_EPOCH=%d", testEpoch),
 		fmt.Sprintf("NOCX_LIFECYCLE_PORT=%d", port),
-		"NOCX_LIFECYCLE_TIMEOUT_MS=3000",
+		"NOCX_LIFECYCLE_TIMEOUT_MS=1000",
 	)
 	// The gate line: source the bootstrap (cap) then the hooks — the shape
 	// of the launcher rcfile's install section.
@@ -272,21 +310,32 @@ func startChannelShell(t *testing.T, shell, scriptName, script string) *channelS
 	if err := os.WriteFile(gate, []byte(gateBody), 0o600); err != nil {
 		t.Fatalf("write gate: %v", err)
 	}
+	// The sentinel prompt must be set INSIDE the rc file, not only in the
+	// environment: the developer machine's own bashrc may export PS1, and
+	// bash takes the FIRST value from the environment, so an env-only
+	// sentinel silently loses and the assertion checks the wrong prompt.
+	promptLine := ""
+	if sentinelPrompt != "" {
+		if shell == "zsh" {
+			promptLine = "PROMPT='" + sentinelPrompt + "'\n"
+		} else {
+			promptLine = "PS1='" + sentinelPrompt + "'\n"
+		}
+	}
 	switch shell {
 	case "bash":
 		rc := filepath.Join(home, ".bashrc")
-		if err := os.WriteFile(rc, []byte(". "+shellQuote(gate)+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(rc, []byte(promptLine+". "+shellQuote(gate)+"\n"), 0o600); err != nil {
 			t.Fatalf("write .bashrc: %v", err)
 		}
 	case "zsh":
 		zdot := t.TempDir()
-		if err := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte(". "+shellQuote(gate)+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte(promptLine+". "+shellQuote(gate)+"\n"), 0o600); err != nil {
 			t.Fatalf("write .zshrc: %v", err)
 		}
 		cmd.Env = append(cmd.Env, "ZDOTDIR="+zdot)
 	}
 
-	k := newFakeKernel(t, testCap)
 	go k.serveLoop(ln)
 
 	ptmx, err := pty.Start(cmd)
@@ -297,7 +346,9 @@ func startChannelShell(t *testing.T, shell, scriptName, script string) *channelS
 	// The pump must run before the shell renders anything: the handshake
 	// happens during rc sourcing, and the first prompt follows immediately.
 	go s.readPump()
-	s.waitForHandshake()
+	if waitHandshake {
+		s.waitForHandshake()
+	}
 	return s
 }
 
@@ -741,21 +792,26 @@ func TestBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent(t *testi
 	}
 }
 
-// TestBashChannel_NoTransportFailsOpen: a shell with a capability but no
-// listener (refused transport — AllowTcpForwarding off) must land in a
-// conventional terminal: visible native prompt, no lifecycle events, no
-// hang.
-func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
-	bash := requireShell(t, "bash")
+// assertNoTransportFailsOpen is acceptance criterion 3 asserted for real: a
+// shell with a capability but no listener (refused transport —
+// AllowTcpForwarding off) lands in a conventional terminal — the fixture's
+// own prompt text stays VISIBLE (a suppressed marker-only prompt carries no
+// native text), no lifecycle event is accepted, and the shell exits without
+// hanging. The old version ended in a t.Logf that proved nothing.
+func assertNoTransportFailsOpen(t *testing.T, shell, scriptName, script, sentinel string) {
+	t.Helper()
+	sh := requireShell(t, shell)
 	home := t.TempDir()
-	script := writeScriptFile(t, "nocx.bash", bashScript)
+	scriptFile := writeScriptFile(t, scriptName, script)
 	gate := filepath.Join(t.TempDir(), "gate")
-	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + shellQuote(script) + "\n"
+	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + shellQuote(scriptFile) + "\n"
 	if werr := os.WriteFile(gate, []byte(gateBody), 0o600); werr != nil {
 		t.Fatalf("write gate: %v", werr)
 	}
-	if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(". "+shellQuote(gate)+"\n"), 0o600); werr != nil {
-		t.Fatalf("write .bashrc: %v", werr)
+	if shell == "bash" {
+		if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("PS1='"+sentinel+"'\n. "+shellQuote(gate)+"\n"), 0o600); werr != nil {
+			t.Fatalf("write .bashrc: %v", werr)
+		}
 	}
 	// A port with nothing listening.
 	ln, lnErr := net.Listen("tcp", "127.0.0.1:0")
@@ -765,12 +821,22 @@ func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
 	deadPort := tcpPort(t, ln)
 	_ = ln.Close()
 
-	// #nosec G204 — bash is the requireShell-resolved path, not input; a
+	// #nosec G204 — sh is the requireShell-resolved path, not input; a
 	// real interactive shell on a real pty is the only way to prove the
 	// fail-open on a refused transport.
-	cmd := exec.Command(bash, "-i")
-	cmd.Env = append(
-		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+	cmd := exec.Command(sh, "-i")
+	promptEnv := "PS1=" + sentinel
+	if shell == "zsh" {
+		promptEnv = "PROMPT=" + sentinel
+		zdot := t.TempDir()
+		if werr := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte("PROMPT='"+sentinel+"'\n. "+shellQuote(gate)+"\n"), 0o600); werr != nil {
+			t.Fatalf("write .zshrc: %v", werr)
+		}
+		cmd.Env = append(cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null", promptEnv), "ZDOTDIR="+zdot)
+	} else {
+		cmd.Env = cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null", promptEnv)
+	}
+	cmd.Env = append(cmd.Env,
 		"NOCX_SHELL_INTEGRATION=1",
 		"NOCX_PROMPT_MODE=marker-only",
 		"NOCX_SESSION_ID=chansess",
@@ -780,7 +846,7 @@ func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
 		fmt.Sprintf("NOCX_LIFECYCLE_PORT=%d", deadPort),
 		"NOCX_LIFECYCLE_TIMEOUT_MS=1000",
 	)
-	// #nosec G204 — bash is the requireShell-resolved path, not input; a
+	// #nosec G204 — sh is the requireShell-resolved path, not input; a
 	// real interactive shell on a real pty is the only way to prove the
 	// fail-open on a refused transport.
 	ptmx, err := pty.Start(cmd)
@@ -788,6 +854,7 @@ func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
 		t.Fatalf("pty start: %v", err)
 	}
 	defer func() { _ = ptmx.Close() }()
+	var mu sync.Mutex
 	out := make([]byte, 0, 65536)
 	done := make(chan bool, 1)
 	go func() {
@@ -795,7 +862,9 @@ func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
 		for {
 			n, rerr := ptmx.Read(buf)
 			if n > 0 {
+				mu.Lock()
 				out = append(out, buf[:n]...)
+				mu.Unlock()
 			}
 			if rerr != nil {
 				done <- true
@@ -803,6 +872,24 @@ func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
 			}
 		}
 	}()
+	snapshot := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return string(out)
+	}
+	// The prompt must become visible on its own — no accept exists to gate
+	// it on, and the shell must not wait for one.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(snapshot(), sentinel) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !strings.Contains(snapshot(), sentinel) {
+		_ = cmd.Process.Kill()
+		t.Fatalf("native prompt %q never appeared without a transport; output=%q", sentinel, snapshot())
+	}
 	if _, err := ptmx.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
@@ -813,12 +900,24 @@ func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
 		t.Fatal("shell hung on a refused transport; fail-open requires an immediate conventional terminal")
 	}
 	_ = cmd.Wait()
-	output := string(out)
-	// The prompt must be VISIBLE (decision 9: no suppression without a
-	// live channel) — the fixture default prompt, not a bare B marker.
-	if !strings.Contains(output, "]133;A") {
-		t.Logf("no render markers (conventional session); output=%q", output)
+	// No lifecycle event was accepted: the shell never became active.
+	if strings.Contains(snapshot(), "prompt_ready") {
+		t.Fatalf("shell emitted lifecycle events with no transport; output=%q", snapshot())
 	}
+}
+
+// TestBashChannel_NoTransportFailsOpen: a shell with a capability but no
+// listener (refused transport — AllowTcpForwarding off) must land in a
+// conventional terminal: visible native prompt, no lifecycle events, no
+// hang (acceptance criterion 3).
+func TestBashChannel_NoTransportFailsOpen(t *testing.T) {
+	assertNoTransportFailsOpen(t, "bash", "nocx.bash", bashScript, "BASH_PROMPT_SENTINEL> ")
+}
+
+// TestZshChannel_NoTransportFailsOpen is the zsh half of criterion 3: parity
+// with bash — whatever is asserted for one is asserted for the other.
+func TestZshChannel_NoTransportFailsOpen(t *testing.T) {
+	assertNoTransportFailsOpen(t, "zsh", "nocx.zsh", zshScript, "ZSH_PROMPT_SENTINEL> ")
 }
 
 // TestBashChannel_LocalDescriptorTransport drives the LOCAL transport
@@ -1122,4 +1221,73 @@ func tcpPort(t *testing.T, ln net.Listener) int {
 		t.Fatalf("listener address is %T, want *net.TCPAddr", ln.Addr())
 	}
 	return addr.Port
+}
+
+// --- decision 9 fault injection: every handshake boundary, prompt stays visible ---
+
+// assertConventionalAfterHandshakeFault is the decision-9 fault assertion:
+// after the shell's bounded handshake wait expires, the fixture's own
+// prompt text (the sentinel) must be VISIBLE — a suppressed marker-only
+// prompt has no native text at all — no lifecycle event beyond the
+// swallowed hello is accepted, and the shell still exits cleanly. The
+// assertion is on what a person sees, not on the absence of a hang.
+func assertConventionalAfterHandshakeFault(t *testing.T, s *channelShell, sentinel string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(s.output(), sentinel) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !strings.Contains(s.output(), sentinel) {
+		t.Fatalf("native prompt %q never became visible after the handshake fault; output=%q", sentinel, s.output())
+	}
+	for _, evt := range []string{"prompt_ready", "start", "complete"} {
+		if n := s.kernel.count(evt); n != 0 {
+			t.Fatalf("shell sent %d %q events with no accept in the picture: %v", n, evt, s.kernel.events())
+		}
+	}
+	s.close()
+}
+
+// TestBashChannel_HelloNeverArrivesKeepsVisiblePrompt is fault variant 1:
+// the transport accepts the connection but the hello never ARRIVES (the
+// kernel never reads). No accept can come; the bounded handshake wait
+// expires and the native prompt stays visible (acceptance criterion 1).
+func TestBashChannel_HelloNeverArrivesKeepsVisiblePrompt(t *testing.T) {
+	k := newFakeKernel(t, testCap)
+	k.readFrames = false
+	s := startChannelShellCfg(t, "bash", "nocx.bash", bashScript, k, "BASH_PROMPT_SENTINEL> ", false)
+	assertConventionalAfterHandshakeFault(t, s, "BASH_PROMPT_SENTINEL> ")
+}
+
+// TestBashChannel_AcceptNeverComesKeepsVisiblePrompt is fault variant 2:
+// the hello arrives but ACCEPT never comes (the kernel reads and records,
+// and answers nothing). The shell's bounded wait expires and the native
+// prompt stays visible (acceptance criterion 1).
+func TestBashChannel_AcceptNeverComesKeepsVisiblePrompt(t *testing.T) {
+	k := newFakeKernel(t, testCap)
+	k.answerHello = false
+	s := startChannelShellCfg(t, "bash", "nocx.bash", bashScript, k, "BASH_PROMPT_SENTINEL> ", false)
+	assertConventionalAfterHandshakeFault(t, s, "BASH_PROMPT_SENTINEL> ")
+}
+
+// TestZshChannel_HelloNeverArrivesKeepsVisiblePrompt is the zsh half of
+// fault variant 1: parity with bash — whatever is asserted for one is
+// asserted for the other.
+func TestZshChannel_HelloNeverArrivesKeepsVisiblePrompt(t *testing.T) {
+	k := newFakeKernel(t, testCap)
+	k.readFrames = false
+	s := startChannelShellCfg(t, "zsh", "nocx.zsh", zshScript, k, "ZSH_PROMPT_SENTINEL> ", false)
+	assertConventionalAfterHandshakeFault(t, s, "ZSH_PROMPT_SENTINEL> ")
+}
+
+// TestZshChannel_AcceptNeverComesKeepsVisiblePrompt is the zsh half of
+// fault variant 2: parity with bash.
+func TestZshChannel_AcceptNeverComesKeepsVisiblePrompt(t *testing.T) {
+	k := newFakeKernel(t, testCap)
+	k.answerHello = false
+	s := startChannelShellCfg(t, "zsh", "nocx.zsh", zshScript, k, "ZSH_PROMPT_SENTINEL> ", false)
+	assertConventionalAfterHandshakeFault(t, s, "ZSH_PROMPT_SENTINEL> ")
 }

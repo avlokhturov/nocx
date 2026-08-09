@@ -10,6 +10,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -26,8 +27,32 @@ func (r *seqRand) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func newTestKernel() *lifecycle.Kernel {
-	return lifecycle.New(lifecycle.Options{Rand: &seqRand{}})
+// newTestKernel builds the adapter's kernel seam the way the composition root
+// does: the PUBLISHER wrapping the raw kernel, with an emitter that
+// acknowledges every establishment synchronously — the renderer applying the
+// published fact instantly (decision 9). The adapter drives the publisher;
+// the raw kernel no longer satisfies the adapter seam because it returns
+// outbound unsent.
+func newTestKernel() *lifecyclepub.Publisher {
+	k := lifecycle.New(lifecycle.Options{Rand: &seqRand{}})
+	pub := lifecyclepub.New(k)
+	pub.SetEmitter(ackingEmitter{pub: pub})
+	return pub
+}
+
+// ackingEmitter acknowledges every published establishment fact immediately,
+// as a renderer that commits the editor presentation on receipt would. The
+// accept then flushes through the publisher (decision 9).
+type ackingEmitter struct {
+	pub *lifecyclepub.Publisher
+}
+
+func (e ackingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
+	if f.Generation == "" || f.Domain == "" {
+		return
+	}
+	_ = e.pub.AcknowledgeEstablishment(
+		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
 }
 
 // shellEnv builds an authenticated envelope for the adapter's minted domain.

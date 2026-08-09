@@ -59,6 +59,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -356,11 +357,15 @@ func stripControl(s string) string {
 // ---------------------------------------------------------------------------
 // Observation seam: the real provider drives a kernel the test can watch.
 
-// recordingKernel wraps the real lifecycle kernel and records what one
-// establishment mints, so the test can assert on the kernel read model
-// (State/Attempt/Domain) without reimplementing any wiring.
+// recordingKernel wraps the PUBLISHER — the same kernel → publisher →
+// adapter composition production wires (internal/app/app.go) — and records
+// what one establishment mints, so the test can assert on the kernel read
+// model (State/Attempt/Domain) without reimplementing any wiring. The raw
+// *lifecycle.Kernel no longer satisfies lifecyclechannel.Kernel by design:
+// it hands outbound (accept, refresh_request) back unsent, and only the
+// publisher orders and gates delivery (ADR-0024 decision 9).
 type recordingKernel struct {
-	*lifecycle.Kernel
+	*lifecyclepub.Publisher
 
 	mu         sync.Mutex
 	lane       lifecycle.LaneID
@@ -370,7 +375,7 @@ type recordingKernel struct {
 }
 
 func (r *recordingKernel) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error) {
-	h, err := r.Kernel.RequestDomain(lane, parent, t)
+	h, err := r.Publisher.RequestDomain(lane, parent, t)
 	if err == nil {
 		r.mu.Lock()
 		r.lane = lane
@@ -380,6 +385,34 @@ func (r *recordingKernel) RequestDomain(lane lifecycle.LaneID, parent *lifecycle
 		r.mu.Unlock()
 	}
 	return h, err
+}
+
+// ackingEmitter acknowledges every published establishment immediately, as
+// the renderer does after committing the editor presentation (decision 9).
+// The live-sshd proofs drive the real shell over the real sshd against the
+// production composition; without the acknowledgement the accept is never
+// flushed and the session never enters enhanced mode, so the proofs would
+// assert against a conventional terminal.
+type ackingEmitter struct {
+	pub *lifecyclepub.Publisher
+}
+
+func (e ackingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
+	if f.Generation == "" || f.Domain == "" {
+		return
+	}
+	_ = e.pub.AcknowledgeEstablishment(
+		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
+}
+
+// newRecordingKernel builds the observation seam the way production wires
+// it: publisher over the raw kernel, acking emitter bound, the publisher
+// handed to the adapters.
+func newRecordingKernel() *recordingKernel {
+	k := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(k)
+	pub.SetEmitter(ackingEmitter{pub: pub})
+	return &recordingKernel{Publisher: pub}
 }
 
 // capabilityHex is the bearer as the launch embedded it: the provider
@@ -537,7 +570,7 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 // render fence on the terminal.
 func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	kernel := &recordingKernel{Kernel: lifecycle.New(lifecycle.Options{})}
+	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash)
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
@@ -611,7 +644,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 // but not distinguishable (ADR-0024 decision 4).
 func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	fx := startLiveSshd(t, false)
-	kernel := &recordingKernel{Kernel: lifecycle.New(lifecycle.Options{})}
+	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash)
 
 	// The refusal is synchronous: no domain may ever be minted.
@@ -657,7 +690,7 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 // unknown — never success.
 func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 	fx := startLiveSshd(t, true)
-	kernel := &recordingKernel{Kernel: lifecycle.New(lifecycle.Options{})}
+	kernel := newRecordingKernel()
 	ch, _ := fx.connect(t, kernel, ssh.ShellBash)
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {
@@ -726,7 +759,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 	}
 
 	fx := startLiveSshd(t, true)
-	kernel := &recordingKernel{Kernel: lifecycle.New(lifecycle.Options{})}
+	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellZsh)
 
 	waitFor(t, "domain established", 15*time.Second, func() bool {

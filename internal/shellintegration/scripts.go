@@ -43,7 +43,14 @@ var (
 // 20: __nocx_snapshot_wait_ms is declared once per shell, not once per
 // source, so the rcfile's deliberate re-source over an installer-era install
 // no longer errors (nocx-u7uh.22).
-const version = "20"
+//
+// 21: the handshake wait is a real poll (nocx-u7uh.10). `read -N 0` with a
+// nonzero -t returns immediately on an open fd, so a kernel that accepted
+// the connection but never answered left the shell blocked in dd with no
+// prompt at all; the bounded wait now polls with `read -t 0 -N 0` and a
+// sleep loop, and a silent peer times out with the native prompt visible
+// (ADR-0024 decision 3/9).
+const version = "21"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

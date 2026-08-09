@@ -90,6 +90,16 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// enhanced session printed "readonly variable" as its first line
 		// (nocx-u7uh.22).
 		"20": "4171ef459ec928439c0268ec98e6204d89ee0f05c53d4effc67048509faa7ba0",
+		// v21: the handshake wait is a real poll and the connect no longer
+		// hijacks stderr (nocx-u7uh.10). `read -N 0` with a nonzero -t
+		// returns immediately on an open fd, so a kernel that accepted the
+		// connection but never answered left the shell blocked in dd with no
+		// prompt; the bounded wait now polls with `read -t 0 -N 0` around
+		// each sleep, and the connect's 2>/dev/null is scoped to a group —
+		// unscoped, `exec` made it permanent and every restored native
+		// prompt (decisions 8/9) was invisible, because readline writes the
+		// prompt to stderr.
+		"21": "94b686e116c401b4d393319972333bf49e406b2c2021344e550f878b9ad256ca",
 	}
 
 	h := sha256.New()

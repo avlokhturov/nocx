@@ -17,10 +17,10 @@ func TestSequenceDuplicateAndDecreasingRejected(t *testing.T) {
 	// seq 2 accepted, then the same seq 2 replayed, then a decreasing 1.
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(nil, "ls")))
 	att, _ := k.OpenAttempt(h.Domain)
-	if err := k.Ingest("T", env("L", h, 2, startEvt(nil, "ls"))); !errors.Is(err, ErrSequenceReplay) {
+	if _, err := k.Ingest("T", env("L", h, 2, startEvt(nil, "ls"))); !errors.Is(err, ErrSequenceReplay) {
 		t.Fatalf("duplicate seq must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", env("L", h, 1, promptReadyEvt())); !errors.Is(err, ErrSequenceReplay) {
+	if _, err := k.Ingest("T", env("L", h, 1, promptReadyEvt())); !errors.Is(err, ErrSequenceReplay) {
 		t.Fatalf("decreasing seq must be rejected, got %v", err)
 	}
 	// The attempt is still open: the rejected frames mutated nothing.
@@ -40,7 +40,7 @@ func TestSequenceStateMutatesOnlyAfterAuthentication(t *testing.T) {
 	// right capability.
 	wrong := h.Capability
 	wrong[0] ^= 0xFF
-	if err := k.Ingest("T", envRaw("L", h.Domain, h.Epoch, wrong, 999, startEvt(nil, "evil"))); !errors.Is(err, ErrBadCapability) {
+	if _, err := k.Ingest("T", envRaw("L", h.Domain, h.Epoch, wrong, 999, startEvt(nil, "evil"))); !errors.Is(err, ErrBadCapability) {
 		t.Fatalf("wrong capability must be rejected, got %v", err)
 	}
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(nil, "ok")))
@@ -64,7 +64,7 @@ func TestReconnectNeverResetsCounterWithinEpoch(t *testing.T) {
 	p.reset()
 	mustIngest(t, k, "T", env("L", h, 3, helloEvt("bash")))
 	mustAccept(t, p)
-	if err := k.Ingest("T", env("L", h, 2, promptReadyEvt())); !errors.Is(err, ErrSequenceReplay) {
+	if _, err := k.Ingest("T", env("L", h, 2, promptReadyEvt())); !errors.Is(err, ErrSequenceReplay) {
 		t.Fatalf("reconnect must not reset the counter, got %v", err)
 	}
 	mustIngest(t, k, "T", env("L", h, 4, completeEvt(att.ID, 0, fence(0xAA))))
@@ -125,7 +125,7 @@ func TestAbandonAttempt(t *testing.T) {
 		t.Fatalf("abandoned attempt must be unknown with no exit code, got %+v", got)
 	}
 	// A completion for an abandoned attempt is rejected.
-	if err := k.Ingest("T", env("L", h, 3, completeEvt(att.ID, 0, fence(0xBB)))); !errors.Is(err, ErrAttemptNotOpen) {
+	if _, err := k.Ingest("T", env("L", h, 3, completeEvt(att.ID, 0, fence(0xBB)))); !errors.Is(err, ErrAttemptNotOpen) {
 		t.Fatalf("completion of an abandoned attempt must be rejected, got %v", err)
 	}
 }
@@ -141,9 +141,11 @@ func TestGapDesynchronizesAndOnlySnapshotRestores(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "make")))
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 512, 3); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 512, 3)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	// The kernel demanded a snapshot.
 	kinds := p.kinds()
 	if len(kinds) != 1 || kinds[0] != KindRefreshRequest {
@@ -156,11 +158,11 @@ func TestGapDesynchronizesAndOnlySnapshotRestores(t *testing.T) {
 	}
 
 	// Ordinary lifecycle events are quarantined: rejected, nothing mutated.
-	if err := k.Ingest("T", env("L", h, 3, promptReadyEvt())); !errors.Is(err, ErrDomainDesynchronized) {
+	if _, err := k.Ingest("T", env("L", h, 3, promptReadyEvt())); !errors.Is(err, ErrDomainDesynchronized) {
 		t.Fatalf("events while desynced must be quarantined, got %v", err)
 	}
 	// A snapshot answering the wrong request is rejected.
-	if err := k.Ingest("T", env("L", h, 4, snapshotEvt("req-other", ShellRunning, &att.ID, nil, 5))); !errors.Is(err, ErrSnapshotMismatch) {
+	if _, err := k.Ingest("T", env("L", h, 4, snapshotEvt("req-other", ShellRunning, &att.ID, nil, 5))); !errors.Is(err, ErrSnapshotMismatch) {
 		t.Fatalf("snapshot answering another request must be rejected, got %v", err)
 	}
 	// The real answer restores authority and keeps the open attempt running.
@@ -185,9 +187,11 @@ func TestSnapshotReconcilesOpenAttemptAsUnknown(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "lost in gap")))
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	// The shell is at a prompt with no active attempt and no completion for
 	// ours: the open attempt must become unknown, never successful.
@@ -207,9 +211,11 @@ func TestSnapshotCreatesShellOriginatedActiveAttempt(t *testing.T) {
 	h := establish(t, k, "T", p, "L", nil)
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	// The gap swallowed the Start; the snapshot names the running attempt.
 	sid := AttemptID("att-shell-1")
@@ -230,20 +236,22 @@ func TestSnapshotContradictionsRejected(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	// Active and last-completed naming the same attempt: contradiction.
-	if err := k.Ingest("T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &att.ID, &CompletedRef{AttemptID: att.ID, ExitCode: intPtr(0)}, 4))); !errors.Is(err, ErrSnapshotConflict) {
+	if _, err := k.Ingest("T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &att.ID, &CompletedRef{AttemptID: att.ID, ExitCode: intPtr(0)}, 4))); !errors.Is(err, ErrSnapshotConflict) {
 		t.Fatalf("contradictory snapshot must be rejected, got %v", err)
 	}
 	// A snapshot with a next sequence that does not advance is rejected.
-	if err := k.Ingest("T", env("L", h, 4, snapshotEvt(rid, ShellRunning, &att.ID, nil, 3))); !errors.Is(err, ErrSnapshotSequence) {
+	if _, err := k.Ingest("T", env("L", h, 4, snapshotEvt(rid, ShellRunning, &att.ID, nil, 3))); !errors.Is(err, ErrSnapshotSequence) {
 		t.Fatalf("non-advancing snapshot must be rejected, got %v", err)
 	}
 	// A snapshot answering a different request id is rejected.
-	if err := k.Ingest("T", env("L", h, 5, snapshotEvt("req-none", ShellRunning, &att.ID, nil, 6))); !errors.Is(err, ErrSnapshotMismatch) {
+	if _, err := k.Ingest("T", env("L", h, 5, snapshotEvt("req-none", ShellRunning, &att.ID, nil, 6))); !errors.Is(err, ErrSnapshotMismatch) {
 		t.Fatalf("snapshot answering another request must be rejected, got %v", err)
 	}
 	// The domain is still desynchronized after all the rejections.
@@ -266,9 +274,11 @@ func TestSnapshotValidationPrecedesMutation(t *testing.T) {
 	mustIngest(t, k, "T", env("L2", hO, 2, startEvt(&foreign.ID, "other")))
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 
 	// The snapshot names an unknown active attempt (which the apply phase
@@ -276,7 +286,7 @@ func TestSnapshotValidationPrecedesMutation(t *testing.T) {
 	// the whole envelope must be rejected before anything mutates.
 	ghost := AttemptID("att-ghost")
 	last := &CompletedRef{AttemptID: foreign.ID, ExitCode: intPtr(0)}
-	if err := k.Ingest("T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &ghost, last, 4))); !errors.Is(err, ErrSnapshotConflict) {
+	if _, err := k.Ingest("T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &ghost, last, 4))); !errors.Is(err, ErrSnapshotConflict) {
 		t.Fatalf("foreign last-completed must be rejected, got %v", err)
 	}
 	if _, exists := k.Attempt(ghost); exists {
@@ -305,9 +315,11 @@ func TestSnapshotRecoversLostCompletionViaShellAlias(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make"))) // attach + alias
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	// The complete (exit 2) was swallowed by the gap; the shell reports the
 	// attempt it just finished under its own id with the real status.
@@ -336,9 +348,11 @@ func TestSnapshotUnknownShellIDNeverInventsSuccess(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make")))
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	// A second command's id: it never attached, so the snapshot cannot
 	// connect it to the open attempt.
@@ -362,9 +376,11 @@ func TestSnapshotActiveAttemptResolvesViaShellAlias(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&shellID, "make")))
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &shellID, nil, 4)))
 	st := mustState(t, k, "L")
@@ -388,9 +404,11 @@ func TestSnapshotNeverCreatesAnAlias(t *testing.T) {
 	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	ghost := AttemptID("s-9-0")
 	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &ghost, nil, 4)))
@@ -418,9 +436,11 @@ func TestSnapshotAliasResolutionIsPerDomain(t *testing.T) {
 	mustIngest(t, k, "T", env("LB", hB, 2, startEvt(&shared, "b")))
 
 	p.reset()
-	if err := k.NotifyGap("T", hA.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", hA.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	last := &CompletedRef{AttemptID: shared, ExitCode: intPtr(3)}
 	mustIngest(t, k, "T", env("LA", hA, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
@@ -451,9 +471,11 @@ func TestShellAliasLivesUntilTheDomainEnds(t *testing.T) {
 
 	// Still within the domain's life: the alias resolves through a desync.
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	last := &CompletedRef{AttemptID: shellID, ExitCode: intPtr(1)}
 	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
@@ -463,7 +485,7 @@ func TestShellAliasLivesUntilTheDomainEnds(t *testing.T) {
 
 	// The domain ends: its alias dies with it — no snapshot can reach it.
 	mustIngest(t, k, "T", env("L", h, 4, closeEvt()))
-	if err := k.Ingest("T", env("L", h, 5, snapshotEvt(rid, ShellAtPrompt, nil, last, 6))); !errors.Is(err, ErrSnapshotUnexpected) {
+	if _, err := k.Ingest("T", env("L", h, 5, snapshotEvt(rid, ShellAtPrompt, nil, last, 6))); !errors.Is(err, ErrSnapshotUnexpected) {
 		t.Fatalf("snapshot for a closed domain must be rejected, got %v", err)
 	}
 }
@@ -489,9 +511,11 @@ func TestSnapshotResolvesOwnDomainIDWithSameCounterElsewhere(t *testing.T) {
 	mustIngest(t, k, "T", env("LB", hB, 2, startEvt(&idB, "b")))
 
 	p.reset()
-	if err := k.NotifyGap("T", hB.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", hB.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	last := &CompletedRef{AttemptID: idB, ExitCode: intPtr(2)}
 	mustIngest(t, k, "T", env("LB", hB, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4)))
@@ -519,13 +543,15 @@ func TestSnapshotCrossDomainIDStillConflict(t *testing.T) {
 	mustIngest(t, k, "T", env("LA", hA, 4, promptReadyEvt()))
 
 	p.reset()
-	if err := k.NotifyGap("T", hB.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", hB.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	// B's shell names A's attempt id: a contradiction, not an unknown id.
 	last := &CompletedRef{AttemptID: idA, ExitCode: intPtr(9)}
-	if err := k.Ingest("T", env("LB", hB, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4))); !errors.Is(err, ErrSnapshotConflict) {
+	if _, err := k.Ingest("T", env("LB", hB, 3, snapshotEvt(rid, ShellAtPrompt, nil, last, 4))); !errors.Is(err, ErrSnapshotConflict) {
 		t.Fatalf("snapshot naming another domain's attempt id must conflict, got %v", err)
 	}
 	if got, _ := k.Attempt(idA); got.ExitCode != nil && *got.ExitCode == 9 {
@@ -560,9 +586,11 @@ func TestStaleChildAliasNeverResolvesAfterParentRestored(t *testing.T) {
 	mustIngest(t, k, "T", env("L", hA, 3, activateEvt()))
 
 	p.reset()
-	if err := k.NotifyGap("T", hA.Domain, 64, 1); err != nil {
+	outs, err := k.NotifyGap("T", hA.Domain, 64, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	last := &CompletedRef{AttemptID: childAlias, ExitCode: intPtr(5)}
 	mustIngest(t, k, "T", env("L", hA, 4, snapshotEvt(rid, ShellAtPrompt, nil, last, 5)))
@@ -584,9 +612,11 @@ func TestDesyncBudgetExhaustionRevokesDomain(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
 
 	p.reset()
-	if err := k.NotifyGap("T", h.Domain, 16, 1); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 16, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	rid := p.envelopes()[0].Event.RefreshRequest.RequestID
 	mustIngest(t, k, "T", env("L", h, 3, snapshotEvt(rid, ShellRunning, &att.ID, nil, 4)))
 	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleRunning {
@@ -594,10 +624,10 @@ func TestDesyncBudgetExhaustionRevokesDomain(t *testing.T) {
 	}
 	// The second episode exceeds the budget of one: the gap itself revokes
 	// (it is accepted, then the domain is gone), and later gaps are rejected.
-	if err := k.NotifyGap("T", h.Domain, 16, 1); err != nil {
+	if _, err := k.NotifyGap("T", h.Domain, 16, 1); err != nil {
 		t.Fatalf("the revoking gap must not error, got %v", err)
 	}
-	if err := k.NotifyGap("T", h.Domain, 16, 1); !errors.Is(err, ErrDomainNotLive) {
+	if _, err := k.NotifyGap("T", h.Domain, 16, 1); !errors.Is(err, ErrDomainNotLive) {
 		t.Fatalf("gap on a revoked domain must be rejected, got %v", err)
 	}
 	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleNative || len(st.Stack) != 0 {
@@ -614,13 +644,17 @@ func TestDesyncScanBudgetExhaustionRevokesDomain(t *testing.T) {
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
 
-	if err := k.NotifyGap("T", h.Domain, 0, 0); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 0, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	// 200 garbage frames exceeds the 128-frame budget.
-	if err := k.NotifyGap("T", h.Domain, 0, 200); err != nil {
+	outs, err = k.NotifyGap("T", h.Domain, 0, 200)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleNative {
 		t.Fatalf("scan-budget exhaustion must revoke, got %v", st.Lifecycle)
 	}
@@ -635,13 +669,17 @@ func TestDesyncDurationBudgetExhaustionRevokesDomain(t *testing.T) {
 	_ = k.BindTransport("T", p)
 	h := establish(t, k, "T", p, "L", nil)
 
-	if err := k.NotifyGap("T", h.Domain, 0, 0); err != nil {
+	outs, err := k.NotifyGap("T", h.Domain, 0, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	clock.advance(6 * time.Second)
-	if err := k.NotifyGap("T", h.Domain, 0, 0); err != nil {
+	outs, err = k.NotifyGap("T", h.Domain, 0, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
+	mustDeliver(t, k, outs)
 	if st := mustState(t, k, "L"); st.Lifecycle != LifecycleNative {
 		t.Fatalf("duration-budget exhaustion must revoke, got %v", st.Lifecycle)
 	}
@@ -658,10 +696,10 @@ func TestNothingBeforeAccept(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Lifecycle events for a Pending domain are rejected before any accept.
-	if err := k.Ingest("T", env("L", h, 1, startEvt(nil, "ls"))); !errors.Is(err, ErrDomainPending) {
+	if _, err := k.Ingest("T", env("L", h, 1, startEvt(nil, "ls"))); !errors.Is(err, ErrDomainPending) {
 		t.Fatalf("start before accept must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", env("L", h, 1, promptReadyEvt())); !errors.Is(err, ErrDomainPending) {
+	if _, err := k.Ingest("T", env("L", h, 1, promptReadyEvt())); !errors.Is(err, ErrDomainPending) {
 		t.Fatalf("prompt_ready before accept must be rejected, got %v", err)
 	}
 	if len(p.envelopes()) != 0 {
@@ -679,7 +717,7 @@ func TestHandshakeRateLimit(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		wrong := h.Capability
 		wrong[0] ^= byte(i + 1)
-		if err := k.Ingest("T", envRaw("L", h.Domain, h.Epoch, wrong, 100, helloEvt("bash"))); !errors.Is(err, ErrBadCapability) {
+		if _, err := k.Ingest("T", envRaw("L", h.Domain, h.Epoch, wrong, 100, helloEvt("bash"))); !errors.Is(err, ErrBadCapability) {
 			t.Fatalf("failed handshake %d must be rejected, got %v", i, err)
 		}
 	}
@@ -725,10 +763,10 @@ func TestStartAttachRules(t *testing.T) {
 	// attach window admits exactly one start, because Started flips and the
 	// next start hits ErrAttemptOpen (constraint d) — with an explicit id
 	// and without.
-	if err := k.Ingest("T", env("L", h, 3, startEvt(&att.ID, "again"))); !errors.Is(err, ErrAttemptOpen) {
+	if _, err := k.Ingest("T", env("L", h, 3, startEvt(&att.ID, "again"))); !errors.Is(err, ErrAttemptOpen) {
 		t.Fatalf("start while running must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", env("L", h, 4, startEvt(nil, "again"))); !errors.Is(err, ErrAttemptOpen) {
+	if _, err := k.Ingest("T", env("L", h, 4, startEvt(nil, "again"))); !errors.Is(err, ErrAttemptOpen) {
 		t.Fatalf("anonymous start while running must be rejected, got %v", err)
 	}
 
@@ -789,7 +827,7 @@ func TestStartRequiresPromptReady(t *testing.T) {
 	mustIngest(t, k, "T", env("L", h, 3, completeEvt(att.ID, 0, fence(0x01))))
 	// The lane is Running with a closed attempt, awaiting prompt_ready: a
 	// fresh start here would open a second attempt — rejected.
-	if err := k.Ingest("T", env("L", h, 4, startEvt(nil, "too early"))); !errors.Is(err, ErrNotPromptReady) {
+	if _, err := k.Ingest("T", env("L", h, 4, startEvt(nil, "too early"))); !errors.Is(err, ErrNotPromptReady) {
 		t.Fatalf("start before prompt_ready must be rejected, got %v", err)
 	}
 }
@@ -801,7 +839,7 @@ func TestPromptReadyOverOpenAttemptRejected(t *testing.T) {
 	h := establish(t, k, "T", p, "L", nil)
 	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
 	mustIngest(t, k, "T", env("L", h, 2, startEvt(&att.ID, "x")))
-	if err := k.Ingest("T", env("L", h, 3, promptReadyEvt())); !errors.Is(err, ErrPromptOverAttempt) {
+	if _, err := k.Ingest("T", env("L", h, 3, promptReadyEvt())); !errors.Is(err, ErrPromptOverAttempt) {
 		t.Fatalf("prompt_ready over an open attempt must be rejected, got %v", err)
 	}
 }
@@ -814,17 +852,17 @@ func TestCompleteValidation(t *testing.T) {
 	att, _ := k.SubmitAttempt(h.Domain, "x", "/", "local")
 
 	// Complete before start: rejected.
-	if err := k.Ingest("T", env("L", h, 2, completeEvt(att.ID, 0, fence(0x02)))); !errors.Is(err, ErrAttemptNotStarted) {
+	if _, err := k.Ingest("T", env("L", h, 2, completeEvt(att.ID, 0, fence(0x02)))); !errors.Is(err, ErrAttemptNotStarted) {
 		t.Fatalf("completion of an unstarted attempt must be rejected, got %v", err)
 	}
 	mustIngest(t, k, "T", env("L", h, 3, startEvt(&att.ID, "x")))
 	// Missing fence: rejected.
-	if err := k.Ingest("T", env("L", h, 4, completeEvtNoFence(att.ID))); !errors.Is(err, ErrFenceMissing) {
+	if _, err := k.Ingest("T", env("L", h, 4, completeEvtNoFence(att.ID))); !errors.Is(err, ErrFenceMissing) {
 		t.Fatalf("fence-less completion must be rejected, got %v", err)
 	}
 	mustIngest(t, k, "T", env("L", h, 5, completeEvt(att.ID, 7, fence(0x03))))
 	// Exit status is set exactly once.
-	if err := k.Ingest("T", env("L", h, 6, completeEvt(att.ID, 0, fence(0x04)))); !errors.Is(err, ErrAttemptNotOpen) {
+	if _, err := k.Ingest("T", env("L", h, 6, completeEvt(att.ID, 0, fence(0x04)))); !errors.Is(err, ErrAttemptNotOpen) {
 		t.Fatalf("second completion must be rejected, got %v", err)
 	}
 	if got, _ := k.Attempt(att.ID); got.ExitCode == nil || *got.ExitCode != 7 {
@@ -843,10 +881,10 @@ func TestCompleteCannotCrossDomains(t *testing.T) {
 	hB := establish(t, k, "T", p, "L", &hA.Domain)
 	// A completion for A's attempt arriving with B's domain on the envelope:
 	// wrong domain. With A's own domain: A is inactive. Both rejected.
-	if err := k.Ingest("T", env("L", hB, 2, completeEvt(att.ID, 0, fence(0x05)))); !errors.Is(err, ErrAttemptDomainMismatch) {
+	if _, err := k.Ingest("T", env("L", hB, 2, completeEvt(att.ID, 0, fence(0x05)))); !errors.Is(err, ErrAttemptDomainMismatch) {
 		t.Fatalf("cross-domain completion must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", env("L", hA, 4, completeEvt(att.ID, 0, fence(0x06)))); !errors.Is(err, ErrDomainInactive) {
+	if _, err := k.Ingest("T", env("L", hA, 4, completeEvt(att.ID, 0, fence(0x06)))); !errors.Is(err, ErrDomainInactive) {
 		t.Fatalf("completion for an inactive domain must be rejected, got %v", err)
 	}
 }
@@ -863,7 +901,7 @@ func TestChildCannotEstablishOverActiveParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := k.Ingest("T", env("L", hB, 1, helloEvt("bash"))); !errors.Is(err, ErrParentActive) {
+	if _, err := k.Ingest("T", env("L", hB, 1, helloEvt("bash"))); !errors.Is(err, ErrParentActive) {
 		t.Fatalf("child over an active parent must be rejected, got %v", err)
 	}
 	if _, ok := k.Domain(hB.Domain); !ok {
@@ -893,19 +931,19 @@ func TestActivateAndCloseOrdering(t *testing.T) {
 	_ = k.BindTransport("T", p)
 	hA := establish(t, k, "T", p, "L", nil)
 	// Activating an established (active) domain is not a thing.
-	if err := k.Ingest("T", env("L", hA, 2, activateEvt())); !errors.Is(err, ErrNotSuspended) {
+	if _, err := k.Ingest("T", env("L", hA, 2, activateEvt())); !errors.Is(err, ErrNotSuspended) {
 		t.Fatalf("activating an established domain must be rejected, got %v", err)
 	}
 	mustIngest(t, k, "T", env("L", hA, 3, suspendEvt()))
 	hB := establish(t, k, "T", p, "L", &hA.Domain)
 
 	// The parent cannot be activated while the child is on top.
-	if err := k.Ingest("T", env("L", hA, 4, activateEvt())); !errors.Is(err, ErrDomainNotTop) {
+	if _, err := k.Ingest("T", env("L", hA, 4, activateEvt())); !errors.Is(err, ErrDomainNotTop) {
 		t.Fatalf("activation under a live child must be rejected, got %v", err)
 	}
 	// The child closes; closing it again is rejected.
 	mustIngest(t, k, "T", env("L", hB, 2, closeEvt()))
-	if err := k.Ingest("T", env("L", hB, 3, closeEvt())); !errors.Is(err, ErrDomainNotLive) {
+	if _, err := k.Ingest("T", env("L", hB, 3, closeEvt())); !errors.Is(err, ErrDomainNotLive) {
 		t.Fatalf("closing a closed domain must be rejected, got %v", err)
 	}
 }
@@ -921,7 +959,7 @@ func TestSuspendedDomainEventsRejected(t *testing.T) {
 		promptReadyEvt(),
 		suspendEvt(),
 	} {
-		if err := k.Ingest("T", env("L", hA, 3, evt)); !errors.Is(err, ErrDomainInactive) {
+		if _, err := k.Ingest("T", env("L", hA, 3, evt)); !errors.Is(err, ErrDomainInactive) {
 			t.Fatalf("suspended-domain event %s must be rejected, got %v", evt.Kind, err)
 		}
 	}
@@ -992,10 +1030,10 @@ func TestLossThenNewEstablishmentGetsFreshEpoch(t *testing.T) {
 	// The dead domain's authenticators are dead: the old epoch on the new
 	// domain, and the old capability on the new domain, are both rejected
 	// before any state is consulted.
-	if err := k.Ingest("T2", envRaw("L", h2.Domain, h1.Epoch, h2.Capability, 1, helloEvt("bash"))); !errors.Is(err, ErrStaleEpoch) {
+	if _, err := k.Ingest("T2", envRaw("L", h2.Domain, h1.Epoch, h2.Capability, 1, helloEvt("bash"))); !errors.Is(err, ErrStaleEpoch) {
 		t.Fatalf("stale epoch must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T2", envRaw("L", h2.Domain, h2.Epoch, h1.Capability, 1, helloEvt("bash"))); !errors.Is(err, ErrBadCapability) {
+	if _, err := k.Ingest("T2", envRaw("L", h2.Domain, h2.Epoch, h1.Capability, 1, helloEvt("bash"))); !errors.Is(err, ErrBadCapability) {
 		t.Fatalf("dead domain's capability must be rejected, got %v", err)
 	}
 	// The fresh domain still establishes normally.
@@ -1017,16 +1055,16 @@ func TestEnvelopeAddressingRejected(t *testing.T) {
 	badDomain := envRaw("L", "dom-nope", h.Epoch, h.Capability, 2, startEvt(nil, "x"))
 	unknownTransport := env("L", h, 2, startEvt(nil, "x"))
 
-	if err := k.Ingest("T2", unknownTransport); !errors.Is(err, ErrUnknownTransport) {
+	if _, err := k.Ingest("T2", unknownTransport); !errors.Is(err, ErrUnknownTransport) {
 		t.Fatalf("unknown transport must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", badDomain); !errors.Is(err, ErrUnknownDomain) {
+	if _, err := k.Ingest("T", badDomain); !errors.Is(err, ErrUnknownDomain) {
 		t.Fatalf("unknown domain must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", badVersion); !errors.Is(err, ErrBadVersion) {
+	if _, err := k.Ingest("T", badVersion); !errors.Is(err, ErrBadVersion) {
 		t.Fatalf("bad version must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", badLane); !errors.Is(err, ErrWrongLane) {
+	if _, err := k.Ingest("T", badLane); !errors.Is(err, ErrWrongLane) {
 		t.Fatalf("wrong lane must be rejected, got %v", err)
 	}
 }
@@ -1041,7 +1079,7 @@ func TestKernelOriginatedKindsRejectedInbound(t *testing.T) {
 		{Kind: KindRefreshRequest, RefreshRequest: &RefreshRequest{RequestID: "r"}},
 		{Kind: KindDomainEstablished, DomainEstablished: &DomainEstablishedEvent{}},
 	} {
-		if err := k.Ingest("T", env("L", h, 2, evt)); !errors.Is(err, ErrIllegalEvent) {
+		if _, err := k.Ingest("T", env("L", h, 2, evt)); !errors.Is(err, ErrIllegalEvent) {
 			t.Fatalf("kernel-originated kind %s must be rejected inbound, got %v", evt.Kind, err)
 		}
 	}
@@ -1085,7 +1123,7 @@ func TestOversizeCommandRejected(t *testing.T) {
 	if _, err := k.SubmitAttempt(h.Domain, string(big), "/", "local"); !errors.Is(err, ErrOversizeCommand) {
 		t.Fatalf("oversize submit must be rejected, got %v", err)
 	}
-	if err := k.Ingest("T", env("L", h, 2, startEvt(nil, string(big)))); !errors.Is(err, ErrOversizeCommand) {
+	if _, err := k.Ingest("T", env("L", h, 2, startEvt(nil, string(big)))); !errors.Is(err, ErrOversizeCommand) {
 		t.Fatalf("oversize start must be rejected, got %v", err)
 	}
 }
@@ -1105,11 +1143,11 @@ func TestCompleteWithoutAttemptIDResolvesByContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
 	}
-	if err := k.Ingest("T", env("L", h, 2, startEvt(nil, "echo hi"))); err != nil {
+	if _, err := k.Ingest("T", env("L", h, 2, startEvt(nil, "echo hi"))); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	ev := Event{Kind: KindComplete, Complete: &Complete{ExitCode: intPtr(0), Fence: fence(0x31)}}
-	if err := k.Ingest("T", env("L", h, 3, ev)); err != nil {
+	if _, err := k.Ingest("T", env("L", h, 3, ev)); err != nil {
 		t.Fatalf("unnamed completion must resolve the open attempt: %v", err)
 	}
 	got, ok := k.Attempt(att.ID)
@@ -1128,12 +1166,12 @@ func TestCompleteWithForeignAttemptIDRejected(t *testing.T) {
 	if _, err := k.SubmitAttempt(h.Domain, "echo hi", "/home/dev", "local"); err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
 	}
-	if err := k.Ingest("T", env("L", h, 2, startEvt(nil, "echo hi"))); err != nil {
+	if _, err := k.Ingest("T", env("L", h, 2, startEvt(nil, "echo hi"))); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	bogus := AttemptID("does-not-exist")
 	ev := Event{Kind: KindComplete, Complete: &Complete{AttemptID: &bogus, ExitCode: intPtr(0), Fence: fence(0x32)}}
-	if err := k.Ingest("T", env("L", h, 3, ev)); !errors.Is(err, ErrAttemptNotOpen) {
+	if _, err := k.Ingest("T", env("L", h, 3, ev)); !errors.Is(err, ErrAttemptNotOpen) {
 		t.Fatalf("foreign attempt id must be rejected, got %v", err)
 	}
 }
@@ -1219,4 +1257,154 @@ func TestRecoveryNonceMintedPerDomain(t *testing.T) {
 	if st2 := mustState(t, k, "L"); st2.RecoveryNonce != h2.Recovery {
 		t.Fatal("the lane must mirror the new domain's nonce")
 	}
+}
+
+// --- decision 9: the accept must be delivered before the domain is live ------
+
+// TestEstablishmentUndeliveredAcceptNotLive: a hello is accepted and the
+// accept minted, but the accept is NOT delivered — the domain is not live
+// (decision 9: live means past ACCEPT). Lifecycle events are rejected while
+// the accept is undelivered; delivering it is the closing event that makes
+// them legal.
+func TestEstablishmentUndeliveredAcceptNotLive(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h, err := k.RequestDomain("L", nil, "T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outs, err := k.Ingest("T", env("L", h, 1, helloEvt("bash")))
+	if err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	if len(outs) != 1 || outs[0].Envelope.Event.Kind != KindAccept {
+		t.Fatalf("hello must produce exactly one accept outbound, got %v", outboundKinds(outs))
+	}
+	// The shell has not received the accept: the domain must not be live.
+	if _, err := k.Ingest("T", env("L", h, 2, startEvt(nil, "ls"))); !errors.Is(err, ErrDomainPending) {
+		t.Fatalf("start before accept delivery must be rejected as not past accept, got %v", err)
+	}
+	if _, err := k.Ingest("T", env("L", h, 2, promptReadyEvt())); !errors.Is(err, ErrDomainPending) {
+		t.Fatalf("prompt_ready before accept delivery must be rejected, got %v", err)
+	}
+	// Delivering the accept is the closing event: the domain becomes live.
+	if err := k.Deliver(outs[0]); err != nil {
+		t.Fatalf("Deliver(accept): %v", err)
+	}
+	mustIngest(t, k, "T", env("L", h, 2, startEvt(nil, "ls")))
+	att, ok := k.OpenAttempt(h.Domain)
+	if !ok || att.Command != "ls" {
+		t.Fatalf("start must attach after the accept is delivered, got %+v", att)
+	}
+}
+
+// TestEstablishmentTimeoutRevokesUndeliveredAccept: an accept that never
+// reaches the shell (no renderer acknowledgement) is rolled back by
+// EstablishmentTimeout — the domain is revoked, the lane falls to Native,
+// and the safe state is what the caller publishes. The accept itself is
+// never delivered afterwards: a late Deliver is refused.
+func TestEstablishmentTimeoutRevokesUndeliveredAccept(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h, err := k.RequestDomain("L", nil, "T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outs, err := k.Ingest("T", env("L", h, 1, helloEvt("bash")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The ack never arrives; the establishment bound expires.
+	if err := k.EstablishmentTimeout(h.Domain); err != nil {
+		t.Fatalf("EstablishmentTimeout: %v", err)
+	}
+	st := mustState(t, k, "L")
+	if st.Lifecycle != LifecycleNative || len(st.Stack) != 0 {
+		t.Fatalf("timeout must revoke to a native lane, got %+v", st)
+	}
+	if d, _ := k.Domain(h.Domain); d.State != DomainClosed {
+		t.Fatalf("timed-out domain must be Closed, got %v", d.State)
+	}
+	// A late delivery of the minted accept is refused: the shell must never
+	// receive an accept for a dead domain (it would suppress against it).
+	if err := k.Deliver(outs[0]); !errors.Is(err, ErrDomainNotLive) {
+		t.Fatalf("late accept delivery must be refused, got %v", err)
+	}
+	if got := p.kinds(); len(got) != 0 {
+		t.Fatalf("no envelope may reach the port after rollback, got %v", got)
+	}
+}
+
+// TestEstablishmentTimeoutNoOpAfterDelivery: the acknowledgement raced the
+// timeout — the accept WAS delivered, so the domain is live and the timeout
+// must not revoke it.
+func TestEstablishmentTimeoutNoOpAfterDelivery(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	if err := k.EstablishmentTimeout(h.Domain); err != nil {
+		t.Fatalf("EstablishmentTimeout after delivery: %v", err)
+	}
+	st := mustState(t, k, "L")
+	if st.Lifecycle != LifecyclePromptReady || st.Domain != h.Domain {
+		t.Fatalf("delivered domain must stay live, got %+v", st)
+	}
+	// Events still accepted.
+	mustIngest(t, k, "T", env("L", h, 2, promptReadyEvt()))
+}
+
+// TestEstablishmentTimeoutNoOpOnPendingDomain: a domain that never helloed is
+// not touched by EstablishmentTimeout — the transport's own hello bound
+// (TransportLost) owns that case.
+func TestEstablishmentTimeoutNoOpOnPendingDomain(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h, err := k.RequestDomain("L", nil, "T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := k.EstablishmentTimeout(h.Domain); err != nil {
+		t.Fatalf("EstablishmentTimeout on a pending domain: %v", err)
+	}
+	if d, _ := k.Domain(h.Domain); d.State != DomainPending {
+		t.Fatalf("pending domain must be untouched, got %v", d.State)
+	}
+}
+
+// TestReconnectAcceptDoesNotReRequireDelivery: a reconnect hello within the
+// epoch produces a fresh accept but does NOT take the domain back to
+// accept-pending — the domain was already live, and the fresh accept is the
+// publisher's gating concern (it may reuse or re-gate it), not a revocation
+// of liveness. Events stay legal while the reconnect accept is undelivered.
+func TestReconnectAcceptDoesNotReRequireDelivery(t *testing.T) {
+	k, _, _ := newTestKernel()
+	p := &fakePort{}
+	_ = k.BindTransport("T", p)
+	h := establish(t, k, "T", p, "L", nil)
+	p.reset()
+	outs, err := k.Ingest("T", env("L", h, 2, helloEvt("bash")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outs) != 1 || outs[0].Envelope.Event.Kind != KindAccept {
+		t.Fatalf("reconnect hello must produce an accept, got %v", outboundKinds(outs))
+	}
+	// The reconnect accept is NOT delivered, yet the domain stays live.
+	mustIngest(t, k, "T", env("L", h, 3, startEvt(nil, "still live")))
+	att, ok := k.OpenAttempt(h.Domain)
+	if !ok || att.Command != "still live" {
+		t.Fatalf("events must stay legal across an undelivered reconnect accept, got %+v", att)
+	}
+}
+
+func outboundKinds(outs []Outbound) []EventKind {
+	kinds := make([]EventKind, 0, len(outs))
+	for _, o := range outs {
+		kinds = append(kinds, o.Envelope.Event.Kind)
+	}
+	return kinds
 }

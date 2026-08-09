@@ -69,6 +69,21 @@ func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
 	return rx.subscriber, rx.subState
 }
 
+// clearSubscriber drops the subscriber slot iff it still holds wconn —
+// connection teardown. A newer subscriber (a reattach that replaced this
+// connection) is preserved. The slot is what the lifecycle establishment
+// acknowledgement validates against (decision 9): a detached connection's
+// late ack must never release an accept, and with the slot cleared on
+// teardown it cannot.
+func (rx *sessionRx) clearSubscriber(wconn *wsConn) {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	if rx.subscriber == wconn {
+		rx.subscriber = nil
+		rx.subState = nil
+	}
+}
+
 type WSServer struct {
 	log      log.Logger
 	registry session.Registry
@@ -976,12 +991,14 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	<-readErr
 
-	// Connection dropped. Wake any ring waiters blocked on this
-	// connection's sessions. The cancel above also fires (via defer)
-	// which is the primary exit signal for ringToConn.
+	// Connection dropped. Clear this connection from every subscriber slot
+	// it still holds (a newer subscriber is preserved), then wake any ring
+	// waiters blocked on this connection's sessions. The cancel above also
+	// fires (via defer) which is the primary exit signal for ringToConn.
 	state.mu.Lock()
 	for sid := range state.sessions {
 		if rx := s.getRx(sid); rx != nil {
+			rx.clearSubscriber(wconn)
 			rx.ring.wake()
 		}
 	}
@@ -1143,6 +1160,8 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		s.handleLifecycleSubmitAttempt(wconn, state, req)
 	case "lifecycle.recoverAck":
 		s.handleLifecycleRecoverAck(wconn, state, req)
+	case "lifecycle.establishAck":
+		s.handleLifecycleEstablishAck(wconn, state, req)
 	case "vault.status", "vault.setup", "vault.unseal", "vault.seal",
 		"vault.changePassphrase", "vault.regenerateRecovery", "vault.setDefaultProvider",
 		"vault.setAutoSeal", "vault.activity", "vault.inventory",

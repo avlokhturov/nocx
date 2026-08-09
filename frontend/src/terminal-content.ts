@@ -1023,7 +1023,18 @@ export class TerminalContent extends BaseTabContent {
           // setUnstructured declines while an alt-screen program owns the
           // pane.
           this.scrollback?.exitFullscreen()
-          this.scrollback?.setUnstructured()
+          if (shellStateFromLifecycle(this.lifecycle.state) !== 'integrated') {
+            this.scrollback?.setUnstructured()
+          } else if (this.lifecycle.state.kind === 'running') {
+            // A command still in flight (the completion fact has not
+            // landed): the command cycle owns the live region, so keep it
+            // up — the authenticated completion freezes the block and
+            // collapses it. A ready prompt (prompt_ready) stays on
+            // exitFullscreen's idle layout, the structured block
+            // presentation the live domain entitles the session to
+            // (nocx-u7uh.26).
+            this.scrollback?.setRunning()
+          }
         }
       })
 
@@ -1052,6 +1063,32 @@ export class TerminalContent extends BaseTabContent {
           // The kernel applies the fact and notifies onChange on a real
           // change; the ownership sync runs there, once.
           this.lifecycle.applyFact(fact)
+          // ADR-0024 decision 9: the establishment is acknowledged only
+          // AFTER the presentation is committed — applyFact above is what
+          // makes the editor available (ownership syncs on its onChange).
+          // The backend flushes the pending accept, and the shell may
+          // suppress its native prompt, ONLY on this acknowledgement for
+          // this exact generation. Without it the handshake times out and
+          // the session stays conventional with a visible prompt, which is
+          // the fail-open direction: no window in which the prompt is
+          // suppressed and no editor exists.
+          if (fact.lifecycle === 'prompt_ready' && fact.generation && this.session) {
+            new LifecycleClient(this.client.dispatcher)
+              .establishAck(
+                this.session.sessionId,
+                fact.lane,
+                fact.domain ?? '',
+                fact.epoch ?? 0,
+                fact.generation,
+              )
+              .catch((e: unknown) => {
+                // A refusal is the backend's own bookkeeping (stale
+                // generation, superseded establishment, replaced
+                // subscriber). The accept stays unflushed and the session
+                // stays conventional — safe, and nothing to retry here.
+                log.warn('nocx: establishment acknowledgement refused', { error: e })
+              })
+          }
         },
       )
       // Match the shell's one-shot recovery fence in the render stream — an
@@ -1076,6 +1113,19 @@ export class TerminalContent extends BaseTabContent {
         // fact, so no block ever showed (nocx-u7uh.25).
         if (shellStateFromLifecycle(this.lifecycle.state) !== 'integrated') {
           this.scrollback?.setUnstructured()
+        } else if (this.lifecycle.state.kind === 'prompt_ready') {
+          // A ready prompt with a live domain presents the structured idle
+          // layout (nocx-u7uh.27): the block model is the presentation an
+          // integrated session is entitled to (ADR-0024 §4), and nothing
+          // else would move the pane off the conventional grid it was left
+          // in — the first prompt after integration, or the prompt after a
+          // desynchronized episode comes back, used to stay flat until the
+          // first command opened a block. 'running' is deliberately absent:
+          // the command cycle owns the live region there (beginBlock,
+          // freezeFromAttempt and the fullscreen path), and forcing idle
+          // mid-command would collapse it. setIdle declines while an
+          // alt-screen program owns the pane.
+          this.scrollback?.setIdle()
         }
       })
 

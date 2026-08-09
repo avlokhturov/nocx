@@ -143,10 +143,28 @@ func fence(b byte) FenceNonce {
 	return f
 }
 
+// mustIngest ingests one envelope and delivers whatever outbound it produced,
+// exactly as the publisher would (kernel.go: Ingest hands outbound back;
+// the caller owns delivery ordering). Tests that must assert on the outbound
+// itself — the accept-pending and timeout rollback tests — call Ingest and
+// mustDeliver explicitly instead.
 func mustIngest(t *testing.T, k *Kernel, tID TransportID, e Envelope) {
 	t.Helper()
-	if err := k.Ingest(tID, e); err != nil {
+	outs, err := k.Ingest(tID, e)
+	if err != nil {
 		t.Fatalf("Ingest(%s) failed: %v", e.Event.Kind, err)
+	}
+	mustDeliver(t, k, outs)
+}
+
+// mustDeliver delivers every outbound envelope through the kernel's port,
+// the delivery path the publisher uses.
+func mustDeliver(t *testing.T, k *Kernel, outs []Outbound) {
+	t.Helper()
+	for _, o := range outs {
+		if err := k.Deliver(o); err != nil {
+			t.Fatalf("Deliver(%s) failed: %v", o.Envelope.Event.Kind, err)
+		}
 	}
 }
 

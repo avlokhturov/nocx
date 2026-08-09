@@ -29,7 +29,9 @@
 package lifecyclepub
 
 import (
+	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"reflect"
 	"sync"
 	"time"
@@ -48,6 +50,12 @@ type Fact struct {
 	Domain    string   `json:"domain,omitempty"`
 	Epoch     uint64   `json:"epoch,omitempty"`
 	Attempt   *Attempt `json:"attempt,omitempty"`
+	// Generation is the backend-minted establishment generation of the
+	// domain (decision 9): minted fresh for every accept-producing hello,
+	// present exactly when the fact names a domain. The renderer returns it
+	// in lifecycle.establishAck after committing the editor presentation;
+	// the backend flushes the pending accept only for the exact generation.
+	Generation string `json:"generation,omitempty"`
 	// Recovery is present exactly when this lost fact opens a restoration
 	// episode (ADR-0024 decision 8): the one-shot fence the shell will
 	// write to the pty at its next prompt boundary, and the generation the
@@ -211,8 +219,10 @@ func originString(o lifecycle.AttemptOrigin) string {
 type Kernel interface {
 	BindTransport(t lifecycle.TransportID, port lifecycle.Port) error
 	RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error)
-	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error
-	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error
+	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) ([]lifecycle.Outbound, error)
+	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) ([]lifecycle.Outbound, error)
+	Deliver(out lifecycle.Outbound) error
+	EstablishmentTimeout(domain lifecycle.DomainID) error
 	TransportLost(t lifecycle.TransportID) error
 	RecoverLane(lane lifecycle.LaneID) error
 	SubmitAttempt(domain lifecycle.DomainID, command, cwd, host string) (lifecycle.ExecutionAttempt, error)
@@ -221,6 +231,47 @@ type Kernel interface {
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
 	Attempt(id lifecycle.AttemptID) (lifecycle.ExecutionAttempt, bool)
 	OpenAttempt(domain lifecycle.DomainID) (lifecycle.ExecutionAttempt, bool)
+}
+
+// Option configures a Publisher.
+type Option func(*options)
+
+type options struct {
+	establishTimeout time.Duration
+}
+
+// WithEstablishmentTimeout bounds how long a minted accept may wait for the
+// renderer's acknowledgement before the domain is rolled back (decision 9).
+// Zero uses lifecycle.HelloTimeout, which mirrors the shell's own bounded
+// handshake wait (protocol §5): the backend never outwaits the shell.
+func WithEstablishmentTimeout(d time.Duration) Option {
+	return func(o *options) { o.establishTimeout = d }
+}
+
+// Establishment sentinel errors, returned by AcknowledgeEstablishment.
+var (
+	ErrNoPendingEstablishment  = errors.New("lifecyclepub: no establishment is pending acknowledgement")
+	ErrEstablishmentGeneration = errors.New("lifecyclepub: acknowledgement generation does not match the pending establishment")
+)
+
+// estKey addresses one establishment episode: a domain on a lane in an
+// epoch. Pending accepts are keyed by domain/epoch — never by lane or
+// adapter alone, because one transport carries several domains (nested
+// ssh/sudo/su), and a parent's acknowledgement can never authorize a child
+// (decision 9).
+type estKey struct {
+	lane   lifecycle.LaneID
+	domain lifecycle.DomainID
+	epoch  uint64
+}
+
+// pendingAccept is one minted accept awaiting the renderer's
+// acknowledgement: the exact outbound envelope to flush, the generation the
+// acknowledgement must name, and the establishment bound.
+type pendingAccept struct {
+	gen   string
+	out   lifecycle.Outbound
+	timer *time.Timer
 }
 
 // Emitter is where published facts go: the WSServer at the composition root,
@@ -240,19 +291,29 @@ type Emitter interface {
 type Publisher struct {
 	kernel Kernel
 
-	mu      sync.Mutex
-	emitter Emitter
-	last    map[lifecycle.LaneID]Fact
-	known   map[lifecycle.LaneID]struct{}
+	mu               sync.Mutex
+	emitter          Emitter
+	last             map[lifecycle.LaneID]Fact
+	known            map[lifecycle.LaneID]struct{}
+	gen              map[estKey]string        // current establishment generation per episode
+	pending          map[estKey]pendingAccept // accepts awaiting the renderer's ack (decision 9)
+	establishTimeout time.Duration
 }
 
 // New builds a Publisher over the kernel. The emitter is bound separately
 // with SetEmitter.
-func New(k Kernel) *Publisher {
+func New(k Kernel, opts ...Option) *Publisher {
+	o := options{establishTimeout: lifecycle.HelloTimeout}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return &Publisher{
-		kernel: k,
-		last:   make(map[lifecycle.LaneID]Fact),
-		known:  make(map[lifecycle.LaneID]struct{}),
+		kernel:           k,
+		last:             make(map[lifecycle.LaneID]Fact),
+		known:            make(map[lifecycle.LaneID]struct{}),
+		gen:              make(map[estKey]string),
+		pending:          make(map[estKey]pendingAccept),
+		establishTimeout: o.establishTimeout,
 	}
 }
 
@@ -299,15 +360,128 @@ func (p *Publisher) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.Domai
 }
 
 // Ingest forwards one authenticated envelope and publishes the lane's
-// projection. Published on failure as well as success: the one mutation a
-// kernel (the domain is closed and the lane falls to native while the frame
-// is being quarantined), and that is a state change the renderer must see.
+// projection, ordering the replies (decision 9): mutation → publish → only
+// then the accept, and the accept only on a real acknowledgement. Published
+// on failure as well as success: the one mutation a kernel makes on a
+// rejected frame (the domain is closed and the lane falls to native while
+// the frame is being quarantined) is a state change the renderer must see.
 // Every other rejection leaves the projection unchanged and the change-dedupe
 // suppresses the emission.
+//
+// An accept-producing hello opens an establishment episode BEFORE the fact
+// goes out: the generation is minted and the pending accept recorded first,
+// so an acknowledgement that lands with (or synchronously from) the
+// emission finds it. The decision-9 ordering is about the FLUSH, which
+// still happens only after the ack. refresh_request is never deferred — it
+// restores authority and visible-prompt behaviour, grants no suppression
+// authority, and delaying it behind frontend publication can only prolong a
+// desynchronization.
 func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
-	err := p.kernel.Ingest(t, env)
+	outs, err := p.kernel.Ingest(t, env)
+	if err != nil {
+		p.publishLane(env.Lane)
+		return err
+	}
+	for _, out := range outs {
+		if out.Envelope.Event.Kind == lifecycle.KindAccept {
+			p.beginEstablishment(out)
+		}
+	}
 	p.publishLane(env.Lane)
-	return err
+	for _, out := range outs {
+		if out.Envelope.Event.Kind != lifecycle.KindAccept {
+			_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
+		}
+	}
+	return nil
+}
+
+// beginEstablishment records one minted accept awaiting the renderer's
+// acknowledgement (decision 9). Every accept-producing hello mints a fresh
+// backend-minted generation — a fresh episode, so an old connection's
+// acknowledgement (an old generation) can never release a newer accept —
+// and arms the establishment bound. A later hello for the same domain
+// supersedes the pending accept.
+func (p *Publisher) beginEstablishment(out lifecycle.Outbound) {
+	env := out.Envelope
+	key := estKey{lane: env.Lane, domain: env.Domain, epoch: env.Epoch}
+	gen := "est-" + p.randomHex(8)
+	p.mu.Lock()
+	if cur, ok := p.pending[key]; ok && cur.timer != nil {
+		cur.timer.Stop()
+	}
+	p.gen[key] = gen
+	p.pending[key] = pendingAccept{gen: gen, out: out}
+	p.mu.Unlock()
+	p.armEstablishmentTimer(key, gen)
+}
+
+func (p *Publisher) armEstablishmentTimer(key estKey, gen string) {
+	t := time.AfterFunc(p.establishTimeout, func() { p.establishmentTimedOut(key, gen) })
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pend, ok := p.pending[key]
+	if !ok || pend.gen != gen {
+		t.Stop() // acked or superseded before the timer armed
+		return
+	}
+	pend.timer = t
+	p.pending[key] = pend
+}
+
+// establishmentTimedOut is the bound of one establishment episode: no
+// acknowledgement arrived, so the accept is dropped and the domain rolled
+// back if it is still awaiting its accept (decision 9). A reconnect accept
+// for an already-live domain is dropped instead — the shell keeps its
+// visible prompt either way — and the kernel leaves it live.
+func (p *Publisher) establishmentTimedOut(key estKey, gen string) {
+	p.mu.Lock()
+	pend, ok := p.pending[key]
+	if !ok || pend.gen != gen {
+		p.mu.Unlock()
+		return // acked or superseded meanwhile
+	}
+	delete(p.pending, key)
+	p.mu.Unlock()
+	if err := p.kernel.EstablishmentTimeout(key.domain); err == nil {
+		p.publishLane(key.lane) // the revoke changed the lane; the dedupe suppresses a no-op
+	}
+}
+
+// AcknowledgeEstablishment is the renderer's establishment acknowledgement
+// (decision 9): the transport has already validated that the acknowledging
+// connection owns the session and is its current subscriber, and forwards
+// the ack here. The acknowledgement must name the exact generation of the
+// pending accept — anything else is stale or foreign and is refused. On a
+// match the accept is flushed, and only on a real acknowledgement. The
+// domain must still be established and current: Deliver refuses an accept
+// for a domain that was revoked or lost in the meantime (its safe state is
+// already published or being published).
+func (p *Publisher) AcknowledgeEstablishment(lane lifecycle.LaneID, domain lifecycle.DomainID, epoch uint64, generation string) error {
+	key := estKey{lane: lane, domain: domain, epoch: epoch}
+	p.mu.Lock()
+	pend, ok := p.pending[key]
+	if !ok {
+		p.mu.Unlock()
+		return ErrNoPendingEstablishment
+	}
+	if pend.gen != generation {
+		p.mu.Unlock()
+		return ErrEstablishmentGeneration
+	}
+	if pend.timer != nil {
+		pend.timer.Stop()
+	}
+	delete(p.pending, key)
+	out := pend.out
+	p.mu.Unlock()
+	return p.kernel.Deliver(out)
+}
+
+func (p *Publisher) randomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // Domain returns the read model of one domain, forwarding to the kernel. The
@@ -337,15 +511,21 @@ func (p *Publisher) OpenAttempt(domain lifecycle.DomainID) (lifecycle.ExecutionA
 
 // NotifyGap forwards a framing-gap report and publishes the domain's lane:
 // the domain enters Desynchronized (or a desync budget exhausts and it is
-// revoked, which is also a published change).
+// revoked, which is also a published change). The refresh_request the
+// transition produces is delivered immediately — never deferred behind
+// publication (decision 9: it grants no suppression authority, and delay
+// only prolongs the desynchronization).
 func (p *Publisher) NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error {
 	lane := ""
 	if dom, ok := p.kernel.Domain(d); ok {
 		lane = string(dom.Lane)
 	}
-	err := p.kernel.NotifyGap(t, d, garbageBytes, garbageFrames)
+	outs, err := p.kernel.NotifyGap(t, d, garbageBytes, garbageFrames)
 	if lane != "" {
 		p.publishLane(lifecycle.LaneID(lane))
+	}
+	for _, out := range outs {
+		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
 	}
 	return err
 }
@@ -355,6 +535,20 @@ func (p *Publisher) NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, gar
 // Lost, and each affected lane publishes a lost fact. Unaffected lanes derive
 // unchanged and the dedupe suppresses them.
 func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
+	// Cancel every pending establishment whose domain rides the lost
+	// transport: an accept for a dead domain must never flush (decision 9).
+	p.mu.Lock()
+	for key, pend := range p.pending {
+		d, ok := p.kernel.Domain(key.domain)
+		if !ok || d.Transport != t {
+			continue
+		}
+		if pend.timer != nil {
+			pend.timer.Stop()
+		}
+		delete(p.pending, key)
+	}
+	p.mu.Unlock()
 	err := p.kernel.TransportLost(t)
 	if err != nil {
 		return err
@@ -423,6 +617,7 @@ func (p *Publisher) ReplayLane(lane lifecycle.LaneID) {
 		return
 	}
 	p.mu.Lock()
+	p.stampGenLocked(lane, &f)
 	p.last[lane] = f
 	e := p.emitter
 	p.mu.Unlock()
@@ -442,6 +637,7 @@ func (p *Publisher) publishLane(lane lifecycle.LaneID) {
 		return
 	}
 	p.mu.Lock()
+	p.stampGenLocked(lane, &f)
 	if last, seen := p.last[lane]; seen && reflect.DeepEqual(last, f) {
 		p.mu.Unlock()
 		return
@@ -451,5 +647,20 @@ func (p *Publisher) publishLane(lane lifecycle.LaneID) {
 	p.mu.Unlock()
 	if e != nil {
 		e.PublishLifecycle(f)
+	}
+}
+
+// stampGenLocked attaches the lane's current establishment generation to a
+// fact naming a domain. A reconnect hello mints a fresh generation, so the
+// replayed fact differs from the previous one and the dedupe lets it out —
+// that replay is what carries the fresh generation to the renderer for the
+// acknowledgement (decision 9: no deadlock on reconnect).
+func (p *Publisher) stampGenLocked(lane lifecycle.LaneID, f *Fact) {
+	if f.Domain == "" {
+		return
+	}
+	key := estKey{lane: lane, domain: lifecycle.DomainID(f.Domain), epoch: f.Epoch}
+	if g, ok := p.gen[key]; ok {
+		f.Generation = g
 	}
 }

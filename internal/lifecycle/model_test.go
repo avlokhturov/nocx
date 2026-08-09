@@ -68,7 +68,7 @@ func TestModelScenario(t *testing.T) {
 
 	// 5. Reject an A completion while B is active. Nothing moves.
 	before := mustState(t, k, L)
-	if ingestErr := k.Ingest("T", env(L, hA, 6, completeEvt(a1.ID, 0, fence(0x22)))); !errors.Is(ingestErr, ErrDomainInactive) {
+	if _, ingestErr := k.Ingest("T", env(L, hA, 6, completeEvt(a1.ID, 0, fence(0x22)))); !errors.Is(ingestErr, ErrDomainInactive) {
 		t.Fatalf("completion for suspended A must be rejected, got %v", ingestErr)
 	}
 	if after := mustState(t, k, L); !statesEqual(before, after) {
@@ -110,7 +110,7 @@ func TestModelScenario(t *testing.T) {
 		promptReadyEvt(),
 		startEvt(nil, "whoami"),
 	} {
-		if ingestErr := k.Ingest("T", env(L, hB, 6, evt)); !errors.Is(ingestErr, ErrDomainNotLive) {
+		if _, ingestErr := k.Ingest("T", env(L, hB, 6, evt)); !errors.Is(ingestErr, ErrDomainNotLive) {
 			t.Fatalf("stale B event must be rejected, got %v", ingestErr)
 		}
 	}
@@ -144,10 +144,10 @@ func TestModelScenario(t *testing.T) {
 	}
 	// The old epoch on the new transport is rejected; the old capability on
 	// the new domain is rejected; the fresh domain authenticates.
-	if ingestErr := k.Ingest("T2", envRaw(L, hA2.Domain, hA.Epoch, hA2.Capability, 1, helloEvt("bash"))); !errors.Is(ingestErr, ErrStaleEpoch) {
+	if _, ingestErr := k.Ingest("T2", envRaw(L, hA2.Domain, hA.Epoch, hA2.Capability, 1, helloEvt("bash"))); !errors.Is(ingestErr, ErrStaleEpoch) {
 		t.Fatalf("stale epoch must be rejected, got %v", ingestErr)
 	}
-	if ingestErr := k.Ingest("T2", envRaw(L, hA2.Domain, hA2.Epoch, hA.Capability, 1, helloEvt("bash"))); !errors.Is(ingestErr, ErrBadCapability) {
+	if _, ingestErr := k.Ingest("T2", envRaw(L, hA2.Domain, hA2.Epoch, hA.Capability, 1, helloEvt("bash"))); !errors.Is(ingestErr, ErrBadCapability) {
 		t.Fatalf("old capability must be rejected, got %v", ingestErr)
 	}
 	mustIngest(t, k, "T2", env(L, hA2, 1, helloEvt("bash")))
@@ -173,7 +173,7 @@ func TestModelScenario(t *testing.T) {
 	mustIngest(t, k2, "R", env("L2", hY, 1, helloEvt("bash")))
 	// The relay multiplexes: each envelope names its lane and domain; the
 	// kernel keeps the two lanes' domains strictly apart.
-	if ingestErr := k2.Ingest("R", env("L1", hY, 2, startEvt(nil, "ls"))); !errors.Is(ingestErr, ErrWrongLane) {
+	if _, ingestErr := k2.Ingest("R", env("L1", hY, 2, startEvt(nil, "ls"))); !errors.Is(ingestErr, ErrWrongLane) {
 		t.Fatalf("cross-lane event must be rejected, got %v", ingestErr)
 	}
 	x1, err := k2.SubmitAttempt(hX.Domain, "make", "/work/nocx", "local")

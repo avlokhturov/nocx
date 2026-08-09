@@ -314,11 +314,14 @@ func (a *Adapter) Send(env lifecycle.Envelope) error {
 	}
 	var target net.Conn
 	if env.Event.Kind == lifecycle.KindAccept {
-		// The accept answers the hello the kernel just accepted: it must go
-		// to the claimant — the connection whose hello is in flight — even
+		// The accept answers the hello the kernel accepted: it must go to
+		// the claimant — the connection whose hello is in flight — even
 		// when the domain already has a speaker (a reconnect within the
 		// epoch: the fresh accept belongs to the NEW connection, and the
-		// kernel supersedes the old speaker).
+		// kernel supersedes the old speaker). The accept is NOT flushed
+		// synchronously with Ingest anymore (decision 9: it is gated on
+		// the renderer's acknowledgement), so the claim stays until this
+		// send settles it.
 		target = a.claim[env.Domain]
 	}
 	if target == nil {
@@ -337,6 +340,21 @@ func (a *Adapter) Send(env lifecycle.Envelope) error {
 	if _, err := lifecyclecodec.Encode(target, env); err != nil {
 		a.log.Debug("lifecycle outbound send failed", "kind", env.Event.Kind, "error", err)
 		return err
+	}
+	if env.Event.Kind == lifecycle.KindAccept {
+		// The accept reached its claimant: settle the handshake — the
+		// connection becomes the speaker, the claim closes, the
+		// connection's handshake bound clears, and the adapter's hello
+		// bound stops. All of it only once the accept is actually
+		// flushed (decision 9).
+		a.mu.Lock()
+		if a.claim[env.Domain] == target {
+			a.speakers[env.Domain] = target
+			delete(a.claim, env.Domain)
+		}
+		a.mu.Unlock()
+		_ = target.SetReadDeadline(time.Time{})
+		a.stopHelloTimer()
 	}
 	return nil
 }
@@ -443,6 +461,14 @@ func (a *Adapter) serveCandidate(c net.Conn) {
 		<-a.slots
 		a.mu.Lock()
 		delete(a.conns, c)
+		// A claimant that ended without its accept (handshake bound, close)
+		// must not leave a stale claim behind: a later Send(accept) would
+		// route to a dead connection and never settle.
+		for d, claimant := range a.claim {
+			if claimant == c {
+				delete(a.claim, d)
+			}
+		}
 		a.mu.Unlock()
 		_ = c.Close()
 	}()
@@ -456,9 +482,14 @@ func (a *Adapter) serveCandidate(c net.Conn) {
 		env, err := dec.ReadFrame()
 		if err == nil {
 			if env.Event.Kind == lifecycle.KindHello {
-				// Serialize hello ingestion: the kernel answers accept
-				// synchronously inside Ingest, and the claim must be
-				// unambiguous while that flush runs (see Send).
+				// Serialize hello ingestion: the claim must be unambiguous
+				// while Ingest runs. The accept is NOT flushed inside
+				// Ingest anymore (decision 9: it is gated on the renderer's
+				// acknowledgement), so helloMu covers only the claim →
+				// Ingest window — never a wait on the renderer — and the
+				// claim settles in Send when the accept is actually
+				// flushed. The handshake bound (read deadline) stays until
+				// then, so an unacknowledged candidate cannot claim forever.
 				a.helloMu.Lock()
 				a.mu.Lock()
 				a.claim[env.Domain] = c
@@ -466,14 +497,7 @@ func (a *Adapter) serveCandidate(c net.Conn) {
 				ierr := a.kernel.Ingest(a.id, env)
 				a.mu.Lock()
 				accepted := ierr == nil
-				if accepted {
-					// Accepted: this connection now owns the domain. The
-					// accept was already routed to it via the claim during
-					// Ingest. Clear the handshake bound.
-					a.speakers[env.Domain] = c
-					delete(a.claim, env.Domain)
-					_ = c.SetReadDeadline(time.Time{})
-				} else if a.claim[env.Domain] == c {
+				if !accepted && a.claim[env.Domain] == c {
 					// Rejected candidate: unauthenticated, can neither
 					// mutate nor preempt. Drop the claim and close it.
 					delete(a.claim, env.Domain)
@@ -481,11 +505,7 @@ func (a *Adapter) serveCandidate(c net.Conn) {
 				a.mu.Unlock()
 				a.helloMu.Unlock()
 				if accepted {
-					// The handshake succeeded; the hello timeout is done.
-					// Deliberately outside the mutex: stopHelloTimer takes
-					// a.mu, and this branch just released it.
-					a.stopHelloTimer()
-					continue
+					continue // the accept comes through Send once acknowledged
 				}
 				a.log.Debug("lifecycle hello rejected",
 					"domain", env.Domain, "error", ierr)

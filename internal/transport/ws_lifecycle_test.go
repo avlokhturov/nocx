@@ -119,6 +119,25 @@ func mustLifecycleIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycl
 	}
 }
 
+// ackEstablishmentFrom reads the published prompt_ready fact for the lane,
+// extracts the establishment generation and acknowledges it — the renderer's
+// decision-9 step, driven directly at the publisher (the wire-level ack RPC
+// is covered by the establishAck tests). The domain is not live before this.
+func ackEstablishmentFrom(t *testing.T, pub *lifecyclepub.Publisher, lane lifecycle.LaneID, h lifecycle.DomainHandle, conn *websocket.Conn) {
+	t.Helper()
+	raw := readNotification(t, conn, "lifecycle.changed", 5*time.Second)
+	var ready lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &ready); err != nil {
+		t.Fatalf("decode prompt_ready: %v\nraw: %s", err, raw)
+	}
+	if ready.Generation == "" {
+		t.Fatalf("published fact carries no establishment generation: %+v", ready)
+	}
+	if err := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, ready.Generation); err != nil {
+		t.Fatalf("AcknowledgeEstablishment: %v", err)
+	}
+}
+
 // TestLifecycleChanged_NoCapabilityOrRawFrameCrosses is the assertion this
 // bead exists for (ADR-0024 decision 7): "no capability and no raw frame ever
 // reaches the renderer". It is asserted, not reasoned about, and asserted
@@ -148,9 +167,23 @@ func TestLifecycleChanged_NoCapabilityOrRawFrameCrosses(t *testing.T) {
 	fenceHex := hex.EncodeToString(fence[:])
 
 	// hello first: the domain must be past accept before an attempt can be
-	// submitted. The start event then attaches to the app attempt (the
-	// kernel requires an authenticated start before a completion).
+	// submitted. The renderer's acknowledgement is what makes it live
+	// (decision 9); the hello's prompt_ready fact carries the generation
+	// and is itself checked for the no-capability/no-raw-frame property
+	// below, then acknowledged.
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	first := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	checkFactClean(t, first, capHex, fenceHex, fence)
+	var ready lifecyclepub.Fact
+	if derr := json.Unmarshal(first, &ready); derr != nil {
+		t.Fatalf("decode prompt_ready: %v\nraw: %s", derr, first)
+	}
+	if ready.Generation == "" {
+		t.Fatal("the hello's fact must carry the establishment generation")
+	}
+	if aerr := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, ready.Generation); aerr != nil {
+		t.Fatalf("AcknowledgeEstablishment: %v", aerr)
+	}
 	att, err := pub.SubmitAttempt(h.Domain, "make", "/work", "local")
 	if err != nil {
 		t.Fatalf("SubmitAttempt: %v", err)
@@ -159,10 +192,10 @@ func TestLifecycleChanged_NoCapabilityOrRawFrameCrosses(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(att.ID, 0, fence)))
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 4, lifecyclePromptEvt()))
 
-	// Every notification the socket carried during the whole scenario: the
-	// hello's prompt_ready, the submit's running, the completion's
-	// running(completed), the prompt_ready.
-	for i := 0; i < 4; i++ {
+	// The remaining notifications the socket carried during the scenario:
+	// the submit's running, the completion's running(completed), the
+	// prompt_ready.
+	for i := 0; i < 3; i++ {
 		raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
 		if bytes.Contains(raw, []byte(capHex)) {
 			t.Fatalf("notification %d carries the domain capability %q: %s", i, capHex, raw)
@@ -258,7 +291,9 @@ func TestLifecycleChanged_RoutesToTheLaneSession(t *testing.T) {
 func TestLifecycleChanged_DroppedWithoutRegistrationAndAfterClose(t *testing.T) {
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
-	e := newLifecycleTestEnv(t)
+	// WithLifecyclePublisher: the attach-time replay needs the server to
+	// hold the publisher.
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
 	pub.SetEmitter(e.ws)
 	sid := e.openSession(t, 1)
 	connB := connectWS(t, e.ws)
@@ -293,6 +328,17 @@ func TestLifecycleChanged_DroppedWithoutRegistrationAndAfterClose(t *testing.T) 
 	if atEnv.Error != nil {
 		t.Fatalf("attach: %+v", atEnv.Error)
 	}
+	// The attach replays the current projection to connB; its generation is
+	// what the renderer would acknowledge (decision 9), making the domain
+	// live so the post-close event below is a REAL fact with no route.
+	rawReplay := readNotification(t, connB, "lifecycle.changed", 5*time.Second)
+	var replay lifecyclepub.Fact
+	if err := json.Unmarshal(rawReplay, &replay); err != nil {
+		t.Fatalf("decode replay: %v", err)
+	}
+	if err := pub.AcknowledgeEstablishment("lane-1", h.Domain, h.Epoch, replay.Generation); err != nil {
+		t.Fatalf("AcknowledgeEstablishment: %v", err)
+	}
 	closeResp := jsonrpcCallWithID(t, connB, "close", map[string]string{"sessionId": sid}, 3)
 	var closeEnv struct {
 		Error *jsonrpcErrorObj `json:"error"`
@@ -305,8 +351,11 @@ func TestLifecycleChanged_DroppedWithoutRegistrationAndAfterClose(t *testing.T) 
 	}
 
 	// After close, the fact is dropped again — nothing reaches connB. Last
-	// read on connB.
-	mustLifecycleIngest(t, pub, "T", lifecycleEnv("lane-1", h, 2, lifecyclePromptEvt()))
+	// read on connB. The event is accepted (the domain is live), so the
+	// drop is a routing property, not a rejection.
+	if err := pub.Ingest("T", lifecycleEnv("lane-1", h, 2, lifecyclePromptEvt())); err != nil {
+		t.Fatalf("prompt_ready after close: %v", err)
+	}
 	if raw := tryReadNotification(t, connB, "lifecycle.changed", 300*time.Millisecond); raw != nil {
 		t.Fatalf("fact delivered after its session closed: %s", raw)
 	}
@@ -508,8 +557,9 @@ func TestLifecycleSubmitAttempt_StartAttachesAndReplacesNothing(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	// Drain the handshake's prompt_ready fact.
-	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	// The renderer acknowledges the published fact; only then is the domain
+	// live past accept (decision 9).
+	ackEstablishmentFrom(t, pub, lane, h, e.conn)
 
 	const command = "make && echo done"
 	const cwd = "/srv/app"
@@ -629,7 +679,7 @@ func TestLifecycleSubmitAttempt_IsScopedToTheOwningSession(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	ackEstablishmentFrom(t, pub, lane, h, e.conn)
 
 	// A second connection with its own session must not open attempts on
 	// session A's domain.
@@ -1006,5 +1056,30 @@ func TestLifecycleRecoverAck_DoubleAckLandsOnce(t *testing.T) {
 	}
 	if st, _ := pub.State(lifecycle.LaneID(lost.Lane)); st.Lifecycle != lifecycle.LifecycleNative {
 		t.Fatalf("lane after double ack = %v, want Native", st.Lifecycle)
+	}
+}
+
+// checkFactClean asserts the no-capability/no-raw-frame property of one
+// published fact (ADR-0024 decision 7): the domain capability never appears,
+// none of the channel framing keys appear, and a completed attempt carries
+// exactly its own fence.
+func checkFactClean(t *testing.T, raw []byte, capHex, fenceHex string, fence lifecycle.FenceNonce) {
+	t.Helper()
+	if bytes.Contains(raw, []byte(capHex)) {
+		t.Fatalf("notification carries the domain capability %q: %s", capHex, raw)
+	}
+	for _, key := range []string{`"v":`, `"dom":`, `"seq":`, `"cap":`, `"evt":`} {
+		if bytes.Contains(raw, []byte(key)) {
+			t.Fatalf("notification carries a raw envelope field %s: %s", key, raw)
+		}
+	}
+	var params lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("decode: %v\nraw: %s", err, raw)
+	}
+	if params.Attempt != nil && params.Attempt.State == lifecyclepub.AttemptCompleted {
+		if params.Attempt.Fence != fenceHex {
+			t.Fatalf("completion must carry the fence (value-discriminated from the capability), got %q, want %q", params.Attempt.Fence, fenceHex)
+		}
 	}
 }

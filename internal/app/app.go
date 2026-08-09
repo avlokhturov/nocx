@@ -545,7 +545,15 @@ func New(opts ...Option) (*App, error) {
 	// (AGENTS.md check 5); the adapter creation itself lands with the
 	// shell-spawn wiring in internal/transport/ws_shell.go.
 	lifecycleKernel := lifecycle.New(lifecycle.Options{})
-	lifecyclePub := lifecyclepub.New(lifecycleKernel)
+	// The establishment bound is stated here for the same reason the hello
+	// timeouts below are: how long a minted accept may wait for the
+	// renderer's acknowledgement before the domain is rolled back and the
+	// session falls back to a conventional terminal (ADR-0024 decision 9) is
+	// a product decision, and the composition root is where product
+	// decisions belong. It is the shell's own handshake budget, so the
+	// backend never outwaits the shell it is gating.
+	lifecyclePub := lifecyclepub.New(lifecycleKernel,
+		lifecyclepub.WithEstablishmentTimeout(lifecycle.HelloTimeout))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.

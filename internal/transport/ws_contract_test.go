@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -3541,6 +3542,30 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+// lifecycleRecordingPort records every outbound envelope the publisher
+// flushed to the transport, for the decision-9 acceptance assertions.
+type lifecycleRecordingPort struct {
+	mu   sync.Mutex
+	sent []lifecycle.Envelope
+}
+
+func (r *lifecycleRecordingPort) Send(env lifecycle.Envelope) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent = append(r.sent, env)
+	return nil
+}
+
+func (r *lifecycleRecordingPort) kinds() []lifecycle.EventKind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]lifecycle.EventKind, 0, len(r.sent))
+	for _, e := range r.sent {
+		out = append(out, e.Event.Kind)
+	}
+	return out
+}
+
 // ── lifecycle.recoverAck (ADR-0024 decision 8) ───────────────────────────
 
 // The DTO's own conformance: the result is exactly {ok: true} — the schema
@@ -3607,6 +3632,162 @@ func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, env.Result, "lifecycle.recoverAck result (real socket)")
 }
 
+// ── lifecycle.establishAck (ADR-0024 decision 9) ─────────────────────────
+
+// The DTO's own conformance: the result is exactly {ok: true} — the schema
+// pins the key set and the value, so a future refactor that adds fields to
+// the acknowledgement fails here before any renderer could depend on it.
+func TestLifecycleEstablishAck_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.establishAck.schema.json")
+	raw, err := json.Marshal(map[string]bool{"ok": true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "lifecycle.establishAck DTO")
+}
+
+// The real method through the real socket: a pending establishment, the
+// renderer's exact five-field payload (the generation the published fact
+// carried), the actual result bytes validated against the schema — and the
+// accept reaching the transport ONLY after that acknowledgement, never
+// before (decision 9).
+func TestLifecycleEstablishAck_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.establishAck.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	port := &lifecycleRecordingPort{}
+	if err := pub.BindTransport("T", port); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	var ready lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &ready); err != nil {
+		t.Fatalf("decode prompt_ready: %v", err)
+	}
+	if ready.Generation == "" {
+		t.Fatal("the published prompt_ready fact must carry the establishment generation")
+	}
+	// No acknowledgement yet: the accept has not reached the transport.
+	if got := port.kinds(); len(got) != 0 {
+		t.Fatalf("accept flushed before the acknowledgement: %v", got)
+	}
+	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.establishAck", map[string]any{
+		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
+		"epoch": h.Epoch, "generation": ready.Generation,
+	}, 2)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("establishAck: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if env.Error != nil {
+		t.Fatalf("establishAck: %+v", env.Error)
+	}
+	validateJSON(t, schema, env.Result, "lifecycle.establishAck result (real socket)")
+	// The acknowledgement was the closing event: the accept went out once.
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("after ack: %v, want exactly one accept", got)
+	}
+}
+
+// TestLifecycleEstablishAck_ReplacedSubscriberCantRelease: an old
+// connection's acknowledgement must not release an accept after the
+// subscriber has been replaced (decision 9; the brief's frontend-reconnect
+// item). connA opens the session and the establishment is pending; connB
+// attaches (the subscriber slot moves to connB); connA's late ack is
+// refused — only connB's ack flushes.
+func TestLifecycleEstablishAck_ReplacedSubscriberCantRelease(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	connA := e.conn
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	port := &lifecycleRecordingPort{}
+	if err := pub.BindTransport("T", port); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	raw := readNotification(t, connA, "lifecycle.changed", 5*time.Second)
+	var ready lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &ready); err != nil {
+		t.Fatalf("decode prompt_ready: %v", err)
+	}
+
+	// connB attaches to the session: it becomes the current subscriber.
+	connB := connectWS(t, e.ws)
+	defer func() { _ = connB.Close() }()
+	at := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 7)
+	var atEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(at, &atEnv); err != nil {
+		t.Fatalf("attach: unmarshal: %v", err)
+	}
+	if atEnv.Error != nil {
+		t.Fatalf("attach: %+v", atEnv.Error)
+	}
+
+	// connA's late ack must not release the accept: it is no longer the
+	// subscriber.
+	resp := jsonrpcCallWithID(t, connA, "lifecycle.establishAck", map[string]any{
+		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
+		"epoch": h.Epoch, "generation": ready.Generation,
+	}, 8)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("old ack: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if env.Error == nil {
+		t.Fatal("a replaced connection's ack must be refused")
+	}
+	if got := port.kinds(); len(got) != 0 {
+		t.Fatalf("old connection's ack flushed the accept: %v", got)
+	}
+
+	// The current subscriber's ack (after its attach replay) is the only
+	// one that flushes.
+	_ = readNotification(t, connB, "lifecycle.changed", 5*time.Second) // the attach replay
+	resp = jsonrpcCallWithID(t, connB, "lifecycle.establishAck", map[string]any{
+		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
+		"epoch": h.Epoch, "generation": ready.Generation,
+	}, 9)
+	// A FRESH struct: unmarshaling a success does not clear the Error
+	// pointer of the struct connA's refusal populated.
+	var env2 struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env2); err != nil {
+		t.Fatalf("new ack: unmarshal: %v", err)
+	}
+	if env2.Error != nil {
+		t.Fatalf("current subscriber's ack: %+v", env2.Error)
+	}
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("after current ack: %v, want exactly one accept", got)
+	}
+}
+
 // ── lifecycle.submitAttempt ────────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, enum spelling, and the exact key
@@ -3664,7 +3845,7 @@ func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	ackEstablishmentFrom(t, pub, lane, h, e.conn)
 
 	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", map[string]string{
 		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",

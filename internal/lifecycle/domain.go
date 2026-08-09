@@ -35,6 +35,7 @@ type Domain struct {
 
 	capability     Capability
 	recovery       FenceNonce // the one-shot recovery fence, minted with the capability
+	acceptPending  bool       // hello accepted, accept minted but not yet delivered (decision 9)
 	lastSeq        uint64     // last accepted inbound sequence
 	desyncBytes    int
 	desyncFrames   int

@@ -200,14 +200,24 @@ func (a *Adapter) Launch() Launch {
 // shell times out its handshake in the safe direction.
 func (a *Adapter) Send(env lifecycle.Envelope) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.closed {
+		a.mu.Unlock()
 		return ErrClosed
 	}
 	_ = a.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	if _, err := lifecyclecodec.Encode(a.conn, env); err != nil {
+	_, err := lifecyclecodec.Encode(a.conn, env)
+	a.mu.Unlock()
+	if err != nil {
 		a.log.Debug("lifecycle outbound send failed", "kind", env.Event.Kind, "error", err)
 		return err
+	}
+	// The accept reached the shell: the handshake is complete, and ONLY
+	// now does the hello bound stop (decision 9). The accept is gated on
+	// the renderer's acknowledgement, so a publication/ack failure leaves
+	// the timer running and the domain times out — it must never sit
+	// Established forever.
+	if env.Event.Kind == lifecycle.KindAccept {
+		a.stopHelloTimer()
 	}
 	return nil
 }
@@ -270,9 +280,11 @@ func (a *Adapter) pump() {
 					"domain", env.Domain, "kind", env.Event.Kind, "error", ierr)
 				continue
 			}
-			if env.Event.Kind == lifecycle.KindHello {
-				a.stopHelloTimer() // the handshake succeeded; no timeout left
-			}
+			// The hello bound is NOT stopped here: the accept is gated on
+			// the renderer's acknowledgement (decision 9) and may be
+			// flushed later, so the timer keeps bounding the whole
+			// handshake and stops only in Send, when the accept actually
+			// goes out.
 			continue
 		}
 		switch {
