@@ -21,6 +21,9 @@ function makeRenderer(): TerminalRenderer {
     paste: vi.fn(),
     clearViewport: vi.fn(),
     fitViewport: vi.fn(),
+    // 0 = "cannot measure", which the frozen-block metric publisher treats
+    // as "publish nothing" — existing tests are unaffected by the metric.
+    cellWidth: 0,
     getBufferLine: vi.fn(() => null),
     cursorLine: vi.fn(() => 0),
     reset: vi.fn(),
@@ -469,5 +472,90 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.xtermInner.style.transform).toBe('')
     expect(clearViewport).toHaveBeenCalledTimes(1)
     controller.blockManager.clearAll()
+  })
+})
+
+describe('the frozen block metric is published from the renderer (nocx-yy9g)', () => {
+  /** A renderer whose cell width the test controls and whose cell-dims
+   *  notification the test can fire. */
+  function metricRenderer() {
+    let cellWidth = 8.5
+    let onChange: (() => void) | null = null
+    const renderer = makeRenderer() as TerminalRenderer & {
+      cellWidth: number
+      onCellDimsChange: (cb: () => void) => void
+      _setCellWidth: (w: number) => void
+      _fireCellDimsChange: () => void
+    }
+    renderer.cellWidth = cellWidth
+    renderer.onCellDimsChange = (cb) => {
+      onChange = cb
+    }
+    renderer._setCellWidth = (w) => {
+      cellWidth = w
+      renderer.cellWidth = w
+    }
+    renderer._fireCellDimsChange = () => onChange?.()
+    return renderer
+  }
+
+  /** The publisher's probe measures its text as 64 W's at 10px = 640px,
+   *  so the natural advance is 10 — a stand-in for the real layout the
+   *  browser computes. */
+  function stubProbeMeasurement(container: HTMLElement): void {
+    const probe = container.querySelector<HTMLElement>('.cell-metric-probe')
+    expect(probe).not.toBeNull()
+    Object.defineProperty(probe!, 'getBoundingClientRect', {
+      value: () => ({ width: 640, height: 16 }),
+      configurable: true,
+    })
+  }
+
+  it('publishes the renderer cell width onto the scrollback at construction', () => {
+    const pane = document.createElement('div')
+    const renderer = metricRenderer()
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    stubProbeMeasurement(controller.scrollbackInner)
+    // The constructor publish ran before the probe was measurable, so the
+    // properties land on the first refresh — same path the mount-end
+    // notification takes in the app.
+    renderer._fireCellDimsChange()
+    expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-width')).toBe('8.5px')
+    expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-delta')).toBe('-1.5px')
+  })
+
+  it('re-publishes when the renderer reports its cell dims changed (resize, dpr)', () => {
+    const pane = document.createElement('div')
+    const renderer = metricRenderer()
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    stubProbeMeasurement(controller.scrollbackInner)
+
+    renderer._setCellWidth(9)
+    renderer._fireCellDimsChange()
+
+    expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-width')).toBe('9px')
+    expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-delta')).toBe('-1px')
+  })
+
+  it('publishes nothing while the renderer cannot measure — blocks keep their natural advance', () => {
+    const pane = document.createElement('div')
+    const renderer = metricRenderer()
+    renderer._setCellWidth(0)
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    renderer._fireCellDimsChange()
+    expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-width')).toBe('')
+    expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-delta')).toBe('')
   })
 })

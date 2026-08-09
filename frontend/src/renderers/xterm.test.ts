@@ -710,3 +710,82 @@ describe('Shift+Enter as its own chord (nocx-nt70)', () => {
     r.dispose()
   })
 })
+
+describe('XtermRenderer cell metric (nocx-yy9g)', () => {
+  async function mountRenderer() {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return { r, container }
+  }
+
+  it('reports the render service cell width — the same source FitAddon fits to', async () => {
+    const { r } = await mountRenderer()
+    // Access the private term via a cast — the test owns both sides,
+    // exactly like the setReadOnly test above.
+    const term = (r as unknown as Record<string, unknown>).term as
+      { _core: Record<string, unknown> } | undefined
+    term!._core._renderService = {
+      dimensions: { css: { cell: { width: 8.5, height: 15.6 } } },
+    }
+    expect(r.cellWidth).toBe(8.5)
+    r.dispose()
+  })
+
+  it('reports 0 when the render service cannot measure yet', async () => {
+    const { r } = await mountRenderer()
+    // jsdom has no layout, so xterm's own char-size measurement is 0 and
+    // the fallback char-measure element measures nothing either.
+    expect(r.cellWidth).toBe(0)
+    r.dispose()
+  })
+
+  it('fires onCellDimsChange once at the end of mount (fonts loaded, atlas attached)', async () => {
+    const r = new XtermRenderer()
+    const cb = vi.fn()
+    r.onCellDimsChange(cb)
+    stubBrowser()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    expect(cb).toHaveBeenCalledTimes(1)
+    r.dispose()
+  })
+
+  it('re-fires onCellDimsChange when the device pixel ratio changes', async () => {
+    const changeListeners: Array<() => void> = []
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: (type: string, l: EventListenerOrEventListenerObject) => {
+        if (type === 'change') changeListeners.push(l as () => void)
+      },
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // Registered after mount so the mount-end fire is not counted.
+    const cb = vi.fn()
+    r.onCellDimsChange(cb)
+    for (const l of changeListeners) l()
+    expect(cb).toHaveBeenCalledTimes(1)
+    r.dispose()
+  })
+})

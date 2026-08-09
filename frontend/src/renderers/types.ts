@@ -206,6 +206,24 @@ export interface TerminalRenderer {
    *  Falls back to fontSize * lineHeight only if measurement is unavailable. */
   readonly cellHeight: number
 
+  /** CSS-pixel width of one grid cell — xterm's real cell advance, snapped
+   *  to whole device pixels (the same source FitAddon fits to). 0 while the
+   *  renderer cannot measure (not yet mounted, no layout). The frozen block
+   *  layout publishes this so N columns of frozen output occupy exactly
+   *  N × cellWidth (nocx-yy9g).
+   */
+  readonly cellWidth: number
+
+  /**
+   * Subscribe to "the cell dimensions MAY have changed" — fired at mount
+   *  (after the fonts load), on grid resize and on device-pixel-ratio
+   *  change, the three places xterm re-measures its char size. The
+   *  scrollback re-publishes the cell metric to the frozen block layout on
+   *  this. Optional so a renderer that never re-measures degrades to the
+   *  single publish the scrollback does at construction.
+   */
+  onCellDimsChange?(cb: () => void): void
+
   /** Absolute buffer line index at the top of the visible viewport.
    *  = buffer.active.baseY + buffer.active.viewportY in xterm terms. */
   readonly viewportTopLine: number

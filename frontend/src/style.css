@@ -662,6 +662,35 @@
   display: block;
   font-size: var(--font-size-terminal);
   min-height: 1.2em;
+  /* N frozen columns must occupy exactly N × the terminal's cell width
+     (nocx-yy9g). xterm rasterises at a cell advance snapped to whole
+     device pixels; the DOM would otherwise lay the same font out at its
+     natural fractional advance, and a fraction of a pixel per cell over a
+     hundred columns is several columns of drift — a block that fitted the
+     pane while live grows a scrollbar once frozen. The correction is
+     per-character letter-spacing (cellWidth − naturalAdvance), published
+     as --term-cell-delta on the scrollback container by
+     scrollback/cell-metric.ts from the renderer's real measurement
+     (_getCellDims). The DOM cannot simply be trusted to match: CSS has no
+     term for xterm's snapped cell width, because the snap depends on the
+     device pixel ratio at rasterise time. The value is refreshed by the
+     same publish on mount, resize and device-pixel-ratio change, and every
+     block — old or new — adopts the current geometry, deliberately (see
+     cell-metric.ts). */
+  letter-spacing: var(--term-cell-delta, 0px);
+}
+
+/* Hidden probe the cell-metric publisher measures the DOM's natural
+   advance from. Inherits the block's font by living inside the scrollback
+   container; positioned out of the way and never visible or interactive. */
+.cell-metric-probe {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: pre;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-terminal);
+  line-height: 1.2;
 }
 
 /* ── Block overflow menu (P2-9) ─────────────────────────────────────── */

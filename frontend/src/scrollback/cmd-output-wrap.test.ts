@@ -88,3 +88,26 @@ describe('a frozen block preserves the column alignment the live output had (noc
     expect(shippedValue(['cmd-output'], 'overflow-x')).toBe('auto')
   })
 })
+
+describe('frozen output lays out on the terminal cell metric (nocx-yy9g)', () => {
+  it('corrects every character advance to the published cell width: .term-line carries the delta as letter-spacing', () => {
+    // The renderer's real cell width (snapped to device pixels) is published
+    // as --term-cell-delta on the scrollback container; the block applies it
+    // per character, so N columns advance exactly N × cellWidth. Without
+    // this, the DOM lays the same font out at its natural fractional advance
+    // and a block that fitted the pane while live drifts wider (or narrower)
+    // once frozen.
+    expect(shippedValue(['term-line'], 'letter-spacing')).toBe('var(--term-cell-delta, 0px)')
+  })
+
+  it('declares the hidden probe the publisher measures with the block\u2019s own font', () => {
+    // The probe must inherit the block's font chain (--font-family-mono,
+    // --font-size-terminal) by living inside the scrollback container, or
+    // the measured natural advance would be for a different font than the
+    // one the block actually renders.
+    const probe = RULES.find((r) => r.selectors.includes('.cell-metric-probe'))
+    expect(probe).toBeDefined()
+    expect(probe!.body).toMatch(/font-family\s*:\s*var\(--font-family-mono\)/)
+    expect(probe!.body).toMatch(/visibility\s*:\s*hidden/)
+  })
+})

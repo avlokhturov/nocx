@@ -11,6 +11,7 @@
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type GetLineFn } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
+import { publishCellMetric } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
@@ -107,6 +108,19 @@ export class ScrollbackController {
         this._scrollToLastBlockStart()
       },
     })
+
+    // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────
+    // The frozen block layout must reproduce xterm's cell width exactly,
+    // so the renderer's real measurement is published as custom properties
+    // on the scrollback container (see cell-metric.ts for why the DOM
+    // cannot be trusted to match on its own). Subscribed BEFORE the
+    // renderer mounts, so the mount-end notification lands on a live
+    // subscription; the publish itself is a no-op until the renderer can
+    // measure (cellWidth 0), so the first real publish is the mount-end
+    // fire. Old blocks adopt the current geometry on every republish —
+    // deliberate, see the module comment.
+    this._renderer.onCellDimsChange?.(() => this._republishCellMetric())
+    this._republishCellMetric()
 
     // ── Render fence rendezvous (nocx-u7uh.8, ADR-0024 §7 carve-out) ────
     // The renderer reports where the fence landed; the block manager matches
@@ -329,6 +343,14 @@ export class ScrollbackController {
     const next = px > 0 ? `translateY(-${px}px)` : ''
     if (this.xtermInner.style.transform === next) return
     this.xtermInner.style.transform = next
+  }
+
+  /** Re-read the renderer's cell width and republish the frozen block
+   *  metric (nocx-yy9g). No-op while the renderer cannot measure; a
+   *  republish is cheap, so it runs on every cell-dims notification
+   *  without trying to detect whether anything actually changed. */
+  private _republishCellMetric(): void {
+    publishCellMetric(this.scrollbackInner, this._renderer.cellWidth)
   }
 
   /**

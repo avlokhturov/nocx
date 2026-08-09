@@ -125,6 +125,8 @@ export function createRendererMock(): RendererMock {
     registerMarker: vi.fn().mockReturnValue(undefined),
     cellHeight: 16,
     viewportTopLine: 0,
+    cellWidth: 8,
+    onCellDimsChange: vi.fn(),
     onScroll: vi.fn(),
     onRender: vi.fn(),
     paneElement: document.createElement('div'),

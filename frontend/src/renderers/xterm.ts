@@ -221,6 +221,12 @@ export class XtermRenderer implements TerminalRenderer {
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
   private _cachedCellHeight: number | null = null
+  /** Subscribers to "the cell dimensions may have changed" (nocx-yy9g) —
+   *  the frozen block layout re-publishes its metric on this. */
+  private _cellDimsSubs: Array<() => void> = []
+  /** The device-pixel-ratio watch, kept so dispose can detach it. */
+  private _dprMedia: MediaQueryList | null = null
+  private _dprChangeHandler: (() => void) | null = null
   /** This tab's command-existence store (OSC 636). Created per renderer so
    *  two tabs never share a snapshot; the editor and frozen headers of this
    *  tab read the same instance this OSC handler feeds. */
@@ -304,9 +310,12 @@ export class XtermRenderer implements TerminalRenderer {
       }, FORCED_REFRESH_MS)
     }
 
-    // Invalidate cellHeight cache on resize (M1).
+    // Invalidate the cellHeight cache and re-publish the cell metric on
+    // resize (M1 + nocx-yy9g): xterm re-measures its char size on some
+    // resize paths, and a republish is cheap even when nothing changed.
     this.term?.onResize(() => {
       this._cachedCellHeight = null
+      this._fireCellDimsChange()
     })
 
     // Subscribe to theme changes BEFORE construction completes. Re-apply the
@@ -333,6 +342,24 @@ export class XtermRenderer implements TerminalRenderer {
     // always lands on a live handler.
     this._ensureFenceOsc()
     this.applyTheme(getCurrentTheme())
+
+    // Cell-dims change watch (nocx-yy9g): a device-pixel-ratio change
+    // re-snaps xterm's cell width (xterm re-measures its char size on the
+    // same resolution query), so the frozen block layout must re-publish.
+    // Guarded: jsdom's matchMedia stub may lack addEventListener.
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+      if (typeof mql.addEventListener === 'function') {
+        this._dprChangeHandler = () => this._fireCellDimsChange()
+        mql.addEventListener('change', this._dprChangeHandler)
+        this._dprMedia = mql
+      }
+    }
+
+    // Publish the initial metric: fonts have loaded, the atlas is attached,
+    // and the char-size measurement is real now (mount awaited
+    // document.fonts.ready above).
+    this._fireCellDimsChange()
   }
 
   /** Register the OSC 1337 fence handler exactly once, when the terminal
@@ -400,6 +427,25 @@ export class XtermRenderer implements TerminalRenderer {
       if (rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height }
     }
     return null
+  }
+
+  /** CSS-pixel width of one grid cell — xterm's real cell advance, snapped
+   *  to whole device pixels (nocx-yy9g). 0 when the render service cannot
+   *  measure yet (not mounted, no layout) — the frozen block layout treats
+   *  0 as "keep the previous metric". */
+  get cellWidth(): number {
+    return this._getCellDims()?.width ?? 0
+  }
+
+  /** Subscribe to "the cell dimensions may have changed" — the frozen block
+   *  layout re-publishes its metric on this. Fired at mount end, on grid
+   *  resize and on device-pixel-ratio change. */
+  onCellDimsChange(cb: () => void): void {
+    this._cellDimsSubs.push(cb)
+  }
+
+  private _fireCellDimsChange(): void {
+    for (const cb of this._cellDimsSubs) cb()
   }
 
   private attachWebGL(): void {
@@ -593,6 +639,12 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
+    if (this._dprMedia !== null && this._dprChangeHandler !== null) {
+      this._dprMedia.removeEventListener('change', this._dprChangeHandler)
+      this._dprMedia = null
+      this._dprChangeHandler = null
+    }
+    this._cellDimsSubs = []
     this.scrollDisposable?.dispose()
     this.scrollDisposable = undefined
     this.scrollSubs = []
