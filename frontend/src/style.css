@@ -634,8 +634,25 @@
   font-size: var(--font-size-terminal);
   line-height: 1.2;
   color: var(--color-text);
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
+  /* Frozen output never re-wraps (nocx-juau). The serializer joins the
+     physical rows xterm soft-wrapped at the PTY grid width back into one
+     logical line, so a CSS re-wrap here happens at the block's CURRENT
+     width — a width nothing verifies against the grid the program drew to —
+     and a re-wrap at the wrong width is exactly what folds a status bar or a
+     boxed panel and puts every box-drawing character after the fold in the
+     wrong column. So the block does not wrap at all: a line wider than the
+     block overflows and overflow-x: auto scrolls it into view — the one
+     escape that does not depend on a width the block can verify. (A live
+     terminal reaches the far end by soft-wrapping at its grid width; the
+     frozen block cannot reproduce that wrap, because it does not know the
+     grid width, so it scrolls instead.)
+
+     The deliberate loss: a long ordinary line (a stack trace, a grep hit)
+     that used to wrap into view now needs horizontal scrolling to reach its
+     far end. That is the price of a rule that never guesses intent — a
+     status bar and a grep hit are indistinguishable text runs in the DOM,
+     and a rule that tried to tell them apart would fold one of them again. */
+  white-space: pre;
   overflow-x: auto;
   user-select: text;
   -webkit-user-select: text;

@@ -401,13 +401,14 @@ export function serializeLine(snapshot: TerminalSnapshot, line: IBufferLine | un
  * Serialize a range of buffer lines (inclusive [startLine, endLine]) into a
  * single HTML string.
  *
- * REFLOW (owner directive): physical lines that xterm soft-wrapped at the
+ * JOIN (owner directive): physical lines that xterm soft-wrapped at the
  * PTY grid width (IBufferLine.isWrapped on the CONTINUATION line) are
  * joined back into one logical line — one <span class="term-line"> per
  * logical line. The wrap the application was forced into at print time is
- * NOT baked into the block; CSS re-wraps naturally at the block's actual
- * width, so frozen output reflows cleanly on window resize. Hard newlines
- * (table rows, ls output) are untouched.
+ * NOT re-created as separate rows: the frozen block never re-wraps
+ * (nocx-juau — see .cmd-output in style.css), so a joined line wider than
+ * the block overflows and is reached by horizontal scrolling as one row.
+ * Hard newlines (table rows, ls output) are untouched.
  *
  * Trailing EMPTY logical lines are trimmed: the range typically ends at the
  * D-marker line (an empty prompt-again row), and a dangling empty term-line

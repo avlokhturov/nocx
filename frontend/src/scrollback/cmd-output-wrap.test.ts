@@ -1,0 +1,90 @@
+// The frozen-block wrap defect (nocx-juau): `.cmd-output` declared
+// `white-space: pre-wrap` + `overflow-wrap: break-word` + `overflow-x: auto`.
+// The first two fold a line as wide as the terminal — a status bar, a
+// full-width rule, a boxed panel — and the third can never engage, because a
+// wrapped line never overflows. Every box-drawing character after the fold
+// lands in the wrong column, so the frozen block stops matching what the live
+// terminal showed.
+//
+// jsdom computes no layout and `getComputedStyle` only sees injected styles,
+// not the shipped stylesheet, so this pins the mechanism family the way the
+// scroll-chain test pins its chain: read the real `src/style.css` and assert
+// what the cascade resolves for `.cmd-output`. The contract is three facts:
+// a term-line never wraps (white-space: pre, not pre-wrap), an unbroken run
+// is never broken anywhere (no overflow-wrap), and a line wider than the
+// block is reached by horizontal scrolling (overflow-x: auto).
+import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
+type Rule = { selectors: string[]; body: string }
+const STYLE_ENTRY = resolve(import.meta.dirname ?? '.', '..', 'style.css')
+/** Top-level rules only, comments stripped. An at-rule block is skipped whole:
+ *  a declaration that only holds at some viewport width does not hold. */
+function topLevelRules(css: string): Rule[] {
+  const rules: Rule[] = []
+  const source = css.replace(/\/\*[\s\S]*?\*\//g, '')
+  let depth = 0
+  let head = ''
+  let body = ''
+  for (const ch of source) {
+    if (ch === '{') {
+      depth++
+      if (depth === 1) {
+        body = ''
+        continue
+      }
+    } else if (ch === '}') {
+      depth--
+      if (depth === 0) {
+        const selector = head.trim()
+        if (!selector.startsWith('@')) {
+          rules.push({ selectors: selector.split(',').map((s) => s.trim()), body })
+        }
+        head = ''
+        continue
+      }
+    }
+    if (depth === 0) head += ch
+    else body += ch
+  }
+  return rules
+}
+
+const RULES: Rule[] = topLevelRules(readFileSync(STYLE_ENTRY, 'utf8'))
+
+/** The value the shipped cascade gives `property` for an element carrying
+ *  `classes`, or null. Every matching bare-class rule contributes, later rules
+ *  winning, which is how the cascade resolves it in the browser. */
+function shippedValue(classes: readonly string[], property: string): string | null {
+  let found: string | null = null
+  const pattern = new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+)`)
+  for (const rule of RULES) {
+    if (!rule.selectors.some((s) => /^\.[\w-]+$/.test(s) && classes.includes(s.slice(1)))) {
+      continue
+    }
+    const m = rule.body.match(pattern)
+    if (m) found = m[1].trim()
+  }
+  return found
+}
+
+describe('a frozen block preserves the column alignment the live output had (nocx-juau)', () => {
+  it('keeps every term-line on one row: .cmd-output white-space is pre, not pre-wrap', () => {
+    // pre-wrap folds a full-width line at the block's edge; `pre` never
+    // wraps, so the box-drawing columns survive.
+    expect(shippedValue(['cmd-output'], 'white-space')).toBe('pre')
+  })
+
+  it('never breaks an unbroken run: .cmd-output declares no overflow-wrap', () => {
+    // overflow-wrap: break-word is what folded a status bar — a run of box
+    // characters with no break opportunity — at an arbitrary point. Absent
+    // (or the initial `normal`) is the contract.
+    const value = shippedValue(['cmd-output'], 'overflow-wrap')
+    expect(value === null || value === 'normal').toBe(true)
+  })
+
+  it('reaches the far end of a wide line by scrolling: .cmd-output keeps overflow-x: auto', () => {
+    expect(shippedValue(['cmd-output'], 'overflow-x')).toBe('auto')
+  })
+})
