@@ -1,6 +1,7 @@
 package shellintegration
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -1163,5 +1164,45 @@ true;  for f in $precmd_functions; do $f; done
 	}
 	if strings.Contains(out, "nocx_env=") {
 		t.Errorf("no marker may carry a nocx_env= tag (nocx-u7uh.11); output:\n%s", out)
+	}
+}
+
+// TestZshNestedJsonUnescape decodes the grant's bootstrap field exactly as
+// the wire carries it (nocx-u7uh.28): the frame is built by Go's JSON
+// encoder — the same bytes lifecyclecodec writes for the domain_grant — and
+// the payload deliberately carries backslashes, quotes, newlines, tabs, an
+// OSC escape and non-ASCII. A broken decoder corrupts the child rcfile,
+// which makes the child a conventional shell — the safe direction, but
+// invisible in the pty test unless the corruption is exact. The decoded
+func TestZshNestedJsonUnescape(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+
+	// \x01 exercises the \uXXXX wire form (Go escapes it as \u0001); the
+	// other bytes cover the backslash, quote, newline, tab and OSC cases.
+	payload := "# rc\nprintf '\\e]133;B\\a' \"q\\\"q\" \\\n\tline\né done\x01x\n"
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	frame := []byte(`{"v":1,"lane":"L","dom":"D","epoch":1,"seq":9,"cap":"abc","evt":"domain_grant","request":"r-1","env":"sudo","bootstrap":` + string(b) + `}`)
+	framePath := filepath.Join(t.TempDir(), "frame")
+	if err := os.WriteFile(framePath, frame, 0o600); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+frame=$(cat "$NOCX_TEST_FRAME_PATH")
+bootstrap="${frame##*\"bootstrap\":\"}"
+bootstrap="${bootstrap%?}"
+bootstrap="${bootstrap%\"}"
+__nocx_lc_json_unescape "$bootstrap"
+builtin printf '%s' "$__nocx_lc_json_unescaped"
+`
+	out := runShellProgEnv(t, zsh, prog, script, "NOCX_TEST_FRAME_PATH="+framePath)
+	if out != payload {
+		t.Errorf("unescaped bootstrap mismatch:\n got %q\nwant %q", out, payload)
 	}
 }

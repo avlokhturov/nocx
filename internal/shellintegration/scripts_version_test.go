@@ -102,6 +102,15 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		"21": "94b686e116c401b4d393319972333bf49e406b2c2021344e550f878b9ad256ca",
 		"22": "21de58ea754f1d0099c63934b2916704aa92eab74da2d29975dd2df8e2ec2dd6",
 		"23": "0ea2de4602addb7f5240a62b3490981ee34332e90a257b0bc7490d2f039d6d31",
+		// v24: the zsh tier gets the nested-domain machinery (nocx-u7uh.28)
+		// — accept-line-widget interception and zsh's own descriptor
+		// staging, porting the bash tier's nocx-u7uh.11 flow.
+		"24": "d31066a947f5a56af583bb12ed936f910bb2fc4987682e85ce742ec31cde24ce",
+		// v25: the zsh nested launch binds the child's stdin to the tty
+		// (zle gives widget commands /dev/null, which EOF'd the child) and
+		// runs the precmd chain at the widget's end (zle does not fire it
+		// for consumed lines) — nocx-u7uh.28.
+		"25": "9d9703fb279d9732d6db22ff1d89a2a4372a5c75714b739c032b4ebd288dc005",
 	}
 
 	h := sha256.New()

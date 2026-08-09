@@ -63,7 +63,23 @@ var (
 // NOCX_ENVIRONMENT_ID, no nocx_env= tagged marker — the environment
 // identity now rides the authenticated lifecycle channel (ADR-0024), and
 // the env-id machinery that fed the passport-era renderer is gone.
-const version = "23"
+//
+// 24: the zsh tier gets the nested-domain machinery (nocx-u7uh.28): a zsh
+// parent entering sudo/su/ssh requests a child domain (domain_request),
+// reads the grant, suspends, and launches the child — the bash tier's
+// nocx-u7uh.11 flow ported. The interception mechanism differs (the
+// accept-line widget replaces the DEBUG-trap skip — zsh's DEBUG trap
+// cannot suppress a command), and the descriptor staging is zsh's own
+// (exec {var}< <(...) — measured non-CLOEXEC, where bash's coproc/{var}
+// are close-on-exec).
+//
+// 25: the zsh nested launch binds its commands' stdin to /dev/tty and runs
+// the precmd chain at the widget's end (nocx-u7uh.28). zle executes a
+// widget's commands with stdin at /dev/null (measured), which sent the
+// child shell to EOF — bash's EOF behaviour displays `exit` and the child
+// never established — and zle does not run the precmd hooks for a line a
+// widget consumed, which delayed domain_activated past §9's boundary.
+const version = "25"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

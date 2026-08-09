@@ -38,8 +38,25 @@ func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) 
 	if !strings.Contains(line, "'alice@box.example.com'") {
 		t.Errorf("line does not carry the quoted destination: %s", line)
 	}
-	if !strings.Contains(line, "stty raw -echo; cat; } | ssh -t") {
-		t.Errorf("line lacks the keyboard bridge: %s", line)
+	if !strings.Contains(line, "stty raw -echo; cat; } | ssh -tt") {
+		t.Errorf("line lacks the keyboard bridge and the forced pty: %s", line)
+	}
+	// The capability must ride the stream as the FIRST line after the
+	// wrapper (the in-band contract; nocx-u7uh.29 found the grant builder
+	// emitting an empty capability line, which integrates the far shell
+	// capability-free). The wrapper and capability are the first printf's
+	// two arguments — the capability precedes the payload's printf.
+	if !strings.Contains(line, "'"+plan.Capability+"'; printf '%s\\n'") {
+		t.Errorf("line does not stream the capability before the payload: %s", line)
+	}
+	// -tt is load-bearing (nocx-u7uh.29): the ssh client's stdin is the
+	// pipe from the brace group, and a single -t would refuse to allocate
+	// the remote pty ("Pseudo-terminal will not be allocated because stdin
+	// is not a terminal"), leaving the far shell non-interactive where the
+	// in-band wrapper's `stty raw -echo` fails. Asserting the double -t
+	// keeps a future cleanup from silently reintroducing the defect.
+	if strings.Contains(line, "ssh -t ") || strings.Contains(line, "ssh -t'") {
+		t.Errorf("composed line uses a single -t; the in-band flow needs -tt to force the remote pty: %s", line)
 	}
 
 	// The line must parse under bash — the parent evals it verbatim, and a

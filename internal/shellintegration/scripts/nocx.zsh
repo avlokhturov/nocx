@@ -263,6 +263,384 @@ __nocx_lc_init() {
 }
 __nocx_lc_init
 
+# --- Nested environments (nocx-u7uh.28, the zsh tier of nocx-u7uh.11) ---
+# A nested environment (sudo -i, su -, ssh host) is a DIFFERENT shell than
+# the parent, and protocol doc §9 gives it its own authenticated domain.
+# The parent requests the child over this channel (domain_request), reads
+# the grant (the kernel's answer, carrying the opaque bootstrap the parent
+# executes), sends domain_suspended, and launches the child. The child owns
+# the channel stream from its exec until it exits; the parent resumes at its
+# next prompt boundary and sends domain_activated — the only way a suspended
+# parent returns. A child that never establishes (refused bootstrap, sudo
+# policy, no forwarding) still ends with the parent's activation: the
+# stillborn interval (§9) is the expected path, not an error.
+#
+# zsh's interception differs from bash's by one mechanism, and the choice is
+# made here: bash skips the entering command from a DEBUG trap (shopt -s
+# extdebug); zsh's DEBUG trap CANNOT suppress a command. The zsh mechanism
+# is the accept-line WIDGET (registered at the bottom of this script): it
+# runs when the user accepts a line, BEFORE the line is executed, and can
+# consume the line instead. A preexec re-dispatch was rejected: zsh's
+# preexec hook fires after acceptance, immediately before execution, and has
+# no supported veto — re-dispatching from there would race the original
+# command. The widget replaces the accept-line widget itself (not a
+# keybinding) so every accept path — ^M, ^J, vi mode, other widgets that
+# call accept-line — routes through it, and the normal path chains to the
+# previous accept-line (a user/framework wrapper, or the builtin).
+__nocx_nested_active=0
+__nocx_nested_n=0
+__nocx_nested_env=
+__nocx_nested_host=
+__nocx_nested_user=
+__nocx_nested_port=0
+__nocx_grant_bootstrap=
+__nocx_nested_rc=
+# Bounds the grant wait: the grant is composed synchronously by the backend
+# pump (or refused with an empty bootstrap), so a few seconds is generous
+# and a dead channel fails open without holding the user's command.
+# Declared once per shell, not once per source: the rcfile deliberately
+# re-sources the embedded script over an installer-era install, and a
+# readonly cannot be re-declared.
+if [[ -z "${__nocx_lc_grant_timeout_s:-}" ]]; then
+    readonly __nocx_lc_grant_timeout_s=5
+fi
+
+# JSON unescape (zsh): the grant's bootstrap is a JSON string on the wire
+# (the frame is one JSON document); the shell extracts and decodes it. A
+# decoding failure corrupts the rcfile, which makes the child conventional —
+# the safe direction — so the decoder is best-effort by construction.
+#
+# zsh escaping differs from bash's in one load-bearing way, measured on
+# 5.9.2 (nocx-u7uh.28): inside ${s//pat/repl} the pattern is matched
+# LITERALLY — a backslash in the pattern text is a literal backslash, and
+# parse-time double-quote processing has already happened on the SOURCE,
+# never on ${...} expansion results. So ONE ${bs} in the pattern matches
+# ONE literal backslash in the text; a pattern spelled \\n in the source
+# matches backslash-n only because the source's \\ collapsed at parse
+# time, and two ${bs} match TWO backslashes, never one. (bash collapses
+# the same way, so its three-backslash forms match a different class
+# here.)
+__nocx_lc_json_unescape() {
+    local s="$1" hexc octc n
+    local bs=$'\\' dq='"' nl=$'\n' tab=$'\t' cr=$'\r' bb=$'\b' ff=$'\f'
+    # Protect literal backslashes (\\ in JSON) before the single-char
+    # escapes: a literal backslash must not be consumed by the \" or \n
+    # passes below. The marker is DOMAIN-scoped: the payload being decoded
+    # is itself shell source that CONTAINS this function's text, so any
+    # fixed marker (like the payload's own __NOCX_BS__ references) would
+    # collide with itself; the runtime domain value appears nowhere in the
+    # payload's static text.
+    s="${s//$bs$bs/__NOCX_BS_${__nocx_lc_dom}__}"
+    s="${s//$bs$dq/$dq}"
+    s="${s//$bs"n"/$nl}"
+    s="${s//$bs"t"/$tab}"
+    s="${s//$bs"r"/$cr}"
+    s="${s//$bs"b"/$bb}"
+    s="${s//$bs"f"/$ff}"
+    s="${s//$bs"/"/"/"}"
+    # \uXXXX is rare in the rcfile (printable ASCII dominates); convert it
+    # to octal so the (g:o:) pass below decodes it with the rest. The ERE
+    # names the backslash as \\ (two characters — an ERE \\ is one literal
+    # backslash), while the replacement glob names it as one ${bs}. The
+    # loop is bounded: every iteration consumes the match (the glob always
+    # replaces what the regex found), and a 64 KiB frame cannot hold more
+    # than ~10k six-byte \uXXXX sequences — the bound converts any future
+    # regression from a hang to a fail-open.
+    n=0
+    while [[ "$s" =~ ${bs}${bs}"u"([0-9a-fA-F]{4}) ]]; do
+        if (( n++ > 20000 )); then
+            # Pathological (cannot happen in a 64 KiB frame): fail open to
+            # an EMPTY bootstrap, which the launch treats as the refusal —
+            # the child runs conventionally, never a hang.
+            __nocx_lc_json_unescaped=
+            return 1
+        fi
+        hexc="${match[1]}"
+        octc=$(( [##8] 16#$hexc ))
+        s="${s//${bs}"u"$hexc/${bs}${octc}}"
+    done
+    # The zsh twin of bash's printf %b pass: (g:o:) processes backslash
+    # escapes in place — no fork, and no trailing-newline loss (a $(...)
+    # substitution would strip them).
+    s="${(g:o:)s}"
+    s="${s//__NOCX_BS_${__nocx_lc_dom}__/$bs}"
+    __nocx_lc_json_unescaped="$s"
+}
+
+# Read the grant answering request $1 (bounded). Sets __nocx_grant_env and
+# __nocx_grant_bootstrap; non-grant frames (a refresh demand, a stale grant
+# from an earlier request) are handled or skipped. Returns non-zero on
+# timeout or a dead channel — the parent then runs its command
+# conventionally.
+__nocx_lc_read_grant() {
+    local __rid="$1" __t=0 __env __bootstrap
+    __nocx_grant_bootstrap=
+    __nocx_grant_env=
+    while (( __t < __nocx_lc_grant_timeout_s )); do
+        if zmodload zsh/zselect 2>/dev/null; then
+            # zsh's read cannot probe without consuming a byte (no bash
+            # `read -N 0`), so the readiness probe is zselect -r, which
+            # consumes nothing — the same probe the refresh poll uses. A
+            # silent channel still advances the bound below.
+            if ! zselect -t 0 -r "$__nocx_lc_fd" 2>/dev/null; then
+                sleep 1
+                __t=$(( __t + 1 ))
+                continue
+            fi
+        fi
+        __nocx_lc_read_frame 1 || return 1
+        case "$__nocx_lc_frame" in
+            *'"evt":"domain_grant"'*) : ;;
+            *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
+            *) continue ;; # a stale frame (e.g. a late accept): skip it
+        esac
+        case "$__nocx_lc_frame" in
+            *'"request":"'"$__rid"'"'*) : ;;
+            *) continue ;; # a grant for a different request: skip (stale)
+        esac
+        __env="${__nocx_lc_frame#*\"env\":\"}"
+        __env="${__env%%\"*}"
+        # The bootstrap is the grant's LAST field (the wire order is pinned
+        # by the codec): everything after its opening quote, minus the
+        # closing quote and brace. Its own escaped quotes are untouched.
+        __bootstrap="${__nocx_lc_frame##*\"bootstrap\":\"}"
+        __bootstrap="${__bootstrap%?}"
+        __bootstrap="${__bootstrap%\"}"
+        __nocx_lc_json_unescape "$__bootstrap"
+        __nocx_grant_bootstrap="$__nocx_lc_json_unescaped"
+        __nocx_grant_env="$__env"
+        return 0
+    done
+    return 1
+}
+
+# Classify a typed line as a nested environment. Conservative by design:
+# anything ambiguous is NOT nested and runs conventionally — the honest
+# fallback, never a guessed launch. Sets __nocx_nested_env (sudo|su|ssh)
+# plus the ssh destination parts.
+__nocx_nested_detect() {
+    __nocx_nested_env=
+    __nocx_nested_host=
+    __nocx_nested_user=
+    __nocx_nested_port=0
+    [[ "${__nocx_lc_active:-0}" == "1" ]] || return 1
+    local __line="$1"
+    # sudo: -i/--login/-s/--shell with NO command — a login/shell session,
+    # not `sudo -i ls` (which is a command, not a nested shell).
+    if [[ "$__line" =~ ^sudo[[:space:]]+(-i|--login|-s|--shell)[[:space:]]*$ ]]; then
+        __nocx_nested_env=sudo
+        return 0
+    fi
+    # su: no -c (a command), no shell metacharacters, only known flags and
+    # at most one username. The metachar check is a case pattern, not a
+    # bracket expression: an unquoted backtick inside [[ ]] would be
+    # command substitution in zsh.
+    if [[ "$__line" =~ ^su([[:space:]]+.*)?$ ]]; then
+        case "$__line" in
+            *';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'`'*) return 1 ;;
+        esac
+        [[ "$__line" =~ -c([[:space:]]|$) ]] && return 1
+        local __rest="${__line#su}" __tok __users=0
+        for __tok in ${=__rest}; do
+            case "$__tok" in
+                -|-l|--login|-p|-m|--preserve-environment) : ;;
+                -*) return 1 ;; # an option we do not model: refuse
+                *) __users=$(( __users + 1 )); (( __users > 1 )) && return 1 ;;
+            esac
+        done
+        __nocx_nested_env=su
+        return 0
+    fi
+    # ssh: a simple interactive login — known flags, exactly one
+    # destination, no remote command. The frontend's classifier is the
+    # authority for editor lines; this is the conservative shell fallback.
+    if [[ "$__line" =~ ^ssh([[:space:]]+.*)?$ ]]; then
+        case "$__line" in
+            *';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'`'*) return 1 ;;
+        esac
+        local -a __toks
+        __toks=(${=__line})
+        local __i __tok __dest="" __skip=0 __want_port=0
+        # zsh arrays are 1-indexed; element 1 is "ssh".
+        for ((__i = 2; __i <= ${#__toks}; __i++)); do
+            __tok="${__toks[$__i]}"
+            if (( __skip )); then
+                (( __want_port )) && __nocx_nested_port="$__tok"
+                __want_port=0
+                __skip=0
+                continue
+            fi
+            case "$__tok" in
+                -t|-tt|-4|-6|-v|-C|-x|-X) : ;;
+                -p) __skip=1; __want_port=1 ;;
+                -l|-o|-i|-F|-J|-e|-b|-c|-m) __skip=1 ;;
+                -*) return 1 ;; # an option we do not model: refuse
+                *) [[ -n "$__dest" ]] && return 1; __dest="$__tok" ;;
+            esac
+        done
+        [[ -z "$__dest" ]] && return 1
+        if [[ "$__dest" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+(:[0-9]+)?$ ]]; then
+            local __h="${__dest##*@}"
+            __nocx_nested_host="${__h%%:*}"
+            [[ "$__dest" == *@* ]] && __nocx_nested_user="${__dest%%@*}"
+            [[ "$__h" == *:* ]] && __nocx_nested_port="${__h##*:}"
+            __nocx_nested_env=ssh
+            return 0
+        fi
+        return 1
+    fi
+    return 1
+}
+
+# Request the child domain and launch it. Runs from the accept-line widget
+# (which returns without accepting the line only when this returns 0). The
+# launch BLOCKS here for the child's whole lifetime — the parent shell is
+# inside this call while the child owns the stream, which is exactly the
+# handoff interval §9 names.
+#
+# Return codes, three outcomes: 0 the line was consumed (child ran, or the
+# conventional fallback after a suspend); 1 NOT nested — the widget chains
+# to accept-line and the preexec hook fires normally; 2 nested but failed
+# open BEFORE the suspend (no grant, dead transport) — the C marker and the
+# start were already emitted, so the widget runs the command itself rather
+# than accepting the line (which would double-fire the preexec hook).
+__nocx_nested_launch() {
+    local __line="$1" __rid __extra
+    __nocx_nested_detect "$__line" || return 1
+    # The C marker and the start event are emitted HERE, mirroring the bash
+    # tier's DEBUG-trap ordering (preexec before launch): the widget never
+    # accepts the line, so zsh's preexec hook will not fire for it — this
+    # call is the only start the kernel sees for the nested line.
+    __nocx_preexec "$__line"
+    __rid="r-$__nocx_lc_dom-$(( __nocx_nested_n++ ))"
+    __extra='"request":"'"$__rid"'","env":"'"$__nocx_nested_env"'"'
+    if [[ "$__nocx_nested_env" == "ssh" ]]; then
+        __extra+=',"host":"'"$__nocx_nested_host"'"'
+        [[ -n "$__nocx_nested_user" ]] && __extra+=',"user":"'"$__nocx_nested_user"'"'
+        (( __nocx_nested_port != 0 )) && __extra+=',"port":'"$__nocx_nested_port"
+    fi
+    __nocx_lc_send domain_request ",$__extra" || return 2
+    if ! __nocx_lc_read_grant "$__rid"; then
+        return 2 # no grant: channel dead or refused without a reply
+    fi
+    # The child's hello requires the parent Suspended (§9) — never exec the
+    # child before this frame is written.
+    __nocx_lc_send domain_suspended
+    __nocx_nested_active=1
+    local __nocx_stage_ok=0 __nocx_boot_fd=0
+    if [[ "$__nocx_nested_env" == "ssh" ]]; then
+        # The bootstrap is the backend-composed rewritten line (ADR-0022):
+        # the -R reverse forward plus the in-band payload piped into ssh -t.
+        # The </dev/tty is load-bearing: zle runs a widget's commands with
+        # stdin at /dev/null (measured, nocx-u7uh.28), so without the bind
+        # the ssh line's `cat` bridge would see EOF and the in-band child
+        # would get no keyboard.
+        eval "$__nocx_grant_bootstrap" </dev/tty
+        __nocx_nested_rc=$?
+    elif [[ -n "$__nocx_grant_bootstrap" ]]; then
+        # Same machine: stage the child's rcfile into a preserved descriptor
+        # and launch. The child reads it via --rcfile /dev/fd/N (ADR-0024's
+        # preferred answer: the capability never enters a filesystem
+        # object); fd 3 is the inherited lifecycle channel, preserved so the
+        # child speaks over the SAME transport as the parent.
+        #
+        # zsh's descriptor staging, measured on 5.9.2 (nocx-u7uh.28):
+        #   - `exec {var}<file` allocates the FIRST FREE fd >= 10 and does
+        #     NOT set close-on-exec — /proc/self/fdinfo flags 0100000/00,
+        #     and the fd survives a real fork+exec. This DIFFERS from bash,
+        #     whose coproc and {var} fds are close-on-exec.
+        #   - zsh's coproc gives no COPROC array (empty, measured) — the
+        #     fds are unreachable, so coproc cannot stage the child's
+        #     descriptor the way bash's does.
+        #   - process substitution <(...) yields a plain (non-CLOEXEC) read
+        #     end, but zsh exposes NO writer PID ($! stays 0, measured —
+        #     bash records the substitution PID), so the parent cannot wait
+        #     for the writer. The guarantee is therefore the size bound:
+        #     the payload (the child's rcfile) is ~25 KB — under the 64 KiB
+        #     frame cap and the Linux pipe buffer, so the single fast
+        #     printf completes before the child could read. On a 16 KB
+        #     pipe-buffer platform a truncated read fails open — the child
+        #     is a conventional shell and the parent re-activates at its
+        #     next prompt (§9's stillborn interval), never a hung session —
+        #     exactly the bash tier's documented bash-3.2 fallback.
+        if exec {__nocx_boot_fd}< <(builtin printf '%s' "$__nocx_grant_bootstrap"); then
+            __nocx_stage_ok=1
+        fi
+        if (( __nocx_stage_ok == 1 )); then
+            if [[ "$__nocx_nested_env" == "sudo" ]]; then
+                sudo --preserve-fds=3,$__nocx_boot_fd -i env -u BASH_ENV bash --rcfile /dev/fd/$__nocx_boot_fd -i </dev/tty
+            else
+                su -l -c 'env -u BASH_ENV bash --rcfile /dev/fd/'"$__nocx_boot_fd"' -i' </dev/tty
+            fi
+            __nocx_nested_rc=$?
+            # The child closes its own copy after reading the rcfile (the
+            # bootstrap's closing line); the parent's permanent copy must
+            # not linger for the next nested launch.
+            exec {__nocx_boot_fd}<&- 2>/dev/null
+        else
+            # Cannot stage: run the command conventionally — the child is a
+            # plain sudo/su session and the parent still activates at its
+            # next prompt.
+            eval "$__line" </dev/tty
+            __nocx_nested_rc=$?
+        fi
+    else
+        # The grant refused (empty bootstrap): run conventionally.
+        eval "$__line" </dev/tty
+        __nocx_nested_rc=$?
+    fi
+    return 0
+}
+
+# Run the prompt-boundary hooks the way zle would after a normally
+# accepted line. The widget consumed a line without accepting it, and zle
+# does NOT run the precmd hooks for that (measured, nocx-u7uh.28) — but
+# the nested launch just closed the child, which IS a prompt boundary, and
+# §9's domain_activated must ride THIS boundary, not the user's next
+# command. The hooks are the same chain a real boundary runs (capture,
+# __nocx_precmd, the marker-only prompt armer), so the second boundary the
+# user eventually produces finds nested_active already cleared and sends
+# nothing further.
+__nocx_widget_prompt_boundary() {
+    local __nocx_f
+    for __nocx_f in $precmd_functions; do
+        "$__nocx_f"
+    done
+    zle reset-prompt
+}
+
+# The accept-line widget (see the mechanism note at the top of this block).
+__nocx_accept_line() {
+    local __line="$BUFFER" __rc
+    __nocx_nested_launch "$__line"
+    __rc=$?
+    if (( __rc == 0 )); then
+        # The launch consumed the line (the child ran inside the widget to
+        # completion); the original command must not execute. The child
+        # closing is the parent's next prompt boundary — run the hooks now.
+        BUFFER=''
+        __nocx_widget_prompt_boundary
+        return 0
+    fi
+    if (( __rc == 2 )); then
+        # Nested but failed open (no grant, dead transport): the C marker
+        # and the start were already emitted, so accepting the line would
+        # double-fire the preexec hook. Run it here instead — with the tty
+        # as stdin (the same EOF hazard as the launch commands).
+        eval "$__line" </dev/tty
+        BUFFER=''
+        __nocx_widget_prompt_boundary
+        return 0
+    fi
+    # Not nested: chain to the previous accept-line (a user/framework
+    # wrapper, or the builtin); the preexec hook fires normally.
+    if [[ -n "$__nocx_old_accept_line" ]]; then
+        zle "$__nocx_old_accept_line"
+    else
+        zle .accept-line
+    fi
+}
+
 autoload -Uz add-zsh-hook
 
 __nocx_exit_code=0
@@ -317,7 +695,24 @@ __nocx_precmd() {
     # command's output (the render-order rendezvous, decision 1 carve-out),
     # then prompt_ready. The complete carries no attempt id; the kernel
     # resolves the domain's single open attempt.
+    # A nested child whose command the widget consumed leaves __nocx_exit_code
+    # = the widget's own last status (the launch's assignments clobbered $?);
+    # the child's REAL status was captured right after the launch and
+    # overrides here, exactly as the bash tier's __nocx_nested_rc does.
+    if [[ -n "${__nocx_nested_rc:-}" ]]; then
+        __nocx_exit_code=$__nocx_nested_rc
+        __nocx_nested_rc=
+    fi
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+        # The child closed (the parent was blocked inside the accept-line
+        # widget's launch); the parent owns the stream again. Activation MUST
+        # precede the complete — a completion for a suspended domain is
+        # rejected, and only an authenticated activation restores the parent
+        # (§9).
+        if [[ "${__nocx_nested_active:-0}" == "1" ]]; then
+            __nocx_lc_send domain_activated
+            __nocx_nested_active=0
+        fi
         # Record the just-finished command's completion BEFORE the refresh
         # can preempt the complete: the snapshot reports what the shell
         # actually knows — its own attempt id and the real exit status — so
@@ -466,3 +861,22 @@ __nocx_native_mode() {
     PROMPT='%~ %# '
     PS1='%~ %# '
 }
+
+# Nested interception registration (see the mechanism note at the nested
+# block). The widget replaces the accept-line widget itself — not a
+# keybinding — so every accept path (^M, ^J, vi mode, other widgets that
+# call accept-line) routes through it. Save the previous definition first
+# (a user/framework wrapper registered before our gate): the builtin prints
+# nothing under `zle -lL`, a custom widget prints its registration line.
+# The registration is interactive-only: sourcing this file from a
+# non-interactive context (the exec tests) must not touch zle.
+__nocx_old_accept_line=
+if [[ -o interactive ]]; then
+    zmodload zsh/zle 2>/dev/null
+    __nocx_acc_def="$(zle -lL accept-line 2>/dev/null)"
+    if [[ -n "$__nocx_acc_def" ]]; then
+        __nocx_old_accept_line="${__nocx_acc_def##* }"
+    fi
+    unset __nocx_acc_def
+    zle -N accept-line __nocx_accept_line
+fi

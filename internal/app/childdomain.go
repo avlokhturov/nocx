@@ -98,9 +98,17 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // domain_grant outbound. It is the single owner of "how do we reach a
 // host" (ADR-0022): the composition root decides the transport and the
 // launch, and the shell never parses the bootstrap.
-func newChildGrantBuilder(lg log.Logger, pub *lifecyclepub.Publisher, shint *shellintegration.Impl, transports *transportRegistry, sessions *sessionRegistry) lifecyclepub.GrantBuilder {
+//
+// pub is a LAZY accessor, not the publisher: the composition root builds
+// the publisher around this builder (app.go declares the variable and
+// assigns it only after lifecyclepub.New evaluates the WithGrantBuilder
+// option), so a captured *Publisher value would be nil for the lifetime of
+// the closure — the first real domain_request would dereference nil
+// (nocx-u7uh.29). The accessor resolves the variable at grant time.
+func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, shint *shellintegration.Impl, transports *transportRegistry, sessions *sessionRegistry) lifecyclepub.GrantBuilder {
 	return func(req lifecyclepub.GrantRequest) (lifecyclepub.GrantBootstrap, error) {
-		parent, ok := pub.Domain(req.Parent)
+		p := pub()
+		parent, ok := p.Domain(req.Parent)
 		if !ok {
 			return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: unknown parent %s", req.Parent)
 		}
@@ -110,9 +118,9 @@ func newChildGrantBuilder(lg log.Logger, pub *lifecyclepub.Publisher, shint *she
 		}
 		switch req.Env {
 		case lifecycle.EnvSudo, lifecycle.EnvSu:
-			return buildLocalChildBootstrap(pub, sessions, req, parent.Transport, kind)
+			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind)
 		case lifecycle.EnvSSH:
-			return buildSSHChildBootstrap(lg, pub, shint, sessions, req, kind)
+			return buildSSHChildBootstrap(lg, p, shint, sessions, req, kind)
 		default:
 			return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: unsupported environment %q", req.Env)
 		}
@@ -212,6 +220,15 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, shint *s
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}
+	// The capability is the FIRST streamed line (the in-band contract:
+	// InBandPlan.Capability is what the backend writes into the raw-mode
+	// stream right after the wrapper's READY). InBandBootstrap leaves it
+	// unset — the local flow (shell.integrate) hands the plan to the
+	// renderer, which writes it — so THIS seam is where the child's
+	// per-epoch bearer enters the composed line. Without it the far shell
+	// receives an empty first line, treats it as payload, and integrates
+	// capability-free: no channel, conventional terminal (nocx-u7uh.29).
+	plan.Capability = hex.EncodeToString(h.Capability[:])
 	line := composeSSHChildLine(plan, remotePort, ln.Port(), req)
 	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
 }
@@ -220,7 +237,7 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, shint *s
 // (ADR-0022: the ssh command line is the carrier). The shape:
 //
 //	stty-save; { printf wrapper; printf cap; printf payload; printf terminator;
-//	             stty raw -echo; cat; } | ssh -t -R 127.0.0.1:CPORT:127.0.0.1:LPORT dst;
+//	             stty raw -echo; cat; } | ssh -tt -R 127.0.0.1:CPORT:127.0.0.1:LPORT dst;
 //	rc=$?; stty-restore; (exit rc)
 //
 // The in-band stream (wrapper, capability as the first line, payload,
@@ -229,6 +246,17 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, shint *s
 // local raw-mode window makes the remote pty's echo authoritative. The
 // capability never touches a filesystem object (it rides the stream, as the
 // in-band contract requires).
+//
+// -tt, deliberately, and this is a measured requirement (nocx-u7uh.29):
+// the ssh client's own stdin is the pipe from the brace group, NEVER a
+// terminal — so a single -t makes OpenSSH print "Pseudo-terminal will not
+// be allocated because stdin is not a terminal" and run the far shell
+// NON-interactively, where the in-band wrapper's `stty raw -echo` fails and
+// its && chain stops before any byte is staged: the child could never
+// establish. -tt forces pty allocation regardless of the client's stdin,
+// which is what the whole in-band contract ("typing into the shell at its
+// prompt") depends on. The remote shell is a plain interactive login shell
+// — sshd passes no command — so the wrapper arrives at a real prompt.
 func composeSSHChildLine(plan shellintegration.InBandPlan, remotePort, localPort int, req lifecyclepub.GrantRequest) string {
 	var b strings.Builder
 	b.WriteString("__nocx_ssh_saved=$(stty -g); { ")
@@ -240,7 +268,7 @@ func composeSSHChildLine(plan shellintegration.InBandPlan, remotePort, localPort
 	b.WriteString(shellintegration.ShellQuote(plan.Payload))
 	b.WriteString("; printf '%s\\n' ")
 	b.WriteString(shellintegration.ShellQuote(plan.Terminator))
-	b.WriteString("; stty raw -echo; cat; } | ssh -t -R 127.0.0.1:")
+	b.WriteString("; stty raw -echo; cat; } | ssh -tt -R 127.0.0.1:")
 	b.WriteString(fmt.Sprintf("%d:127.0.0.1:%d", remotePort, localPort))
 	if req.Port != 0 {
 		b.WriteString(fmt.Sprintf(" -p %d", req.Port))

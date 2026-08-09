@@ -55,6 +55,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -71,14 +72,15 @@ import (
 // Fixture: a real OpenSSH server as a subprocess.
 
 type liveSshd struct {
-	addr    string       // "127.0.0.1:<port>"
-	user    string       // passwd name of the current uid
-	home    string       // the session HOME (SetEnv override, fixture-owned)
-	signer  gossh.Signer // client key installed in authorized_keys
-	hostKey gossh.PublicKey
-	client  *ssh.RealClient // the pooled client, for the connection-loss proof
-	cmd     *exec.Cmd
-	logBuf  *lockedBuffer
+	addr      string       // "127.0.0.1:<port>"
+	user      string       // passwd name of the current uid
+	home      string       // the session HOME (SetEnv override, fixture-owned)
+	signer    gossh.Signer // client key installed in authorized_keys
+	hostKey   gossh.PublicKey
+	clientRaw ed25519.PrivateKey // the raw client key, for the child-line ssh-agent fixture
+	client    *ssh.RealClient    // the pooled client, for the connection-loss proof
+	cmd       *exec.Cmd
+	logBuf    *lockedBuffer
 	// registeredLanes records the lane→session bindings the provider
 	// reported (the production RegisterLifecycleLane wiring); the tests
 	// assert the minted lane reached the session it belongs to.
@@ -167,7 +169,7 @@ func startLiveSshd(t *testing.T, allowForward bool) *liveSshd {
 
 	dir := t.TempDir()
 	hostKeyRaw, hostSigner := genSigner(t)
-	_, clientSigner := genSigner(t)
+	clientRaw, clientSigner := genSigner(t)
 
 	hostKeyPEM, err := gossh.MarshalPrivateKey(hostKeyRaw, "")
 	if err != nil {
@@ -224,6 +226,12 @@ LogLevel VERBOSE
 		t.Fatalf("write sshd_config: %v", err)
 	}
 	cmd := exec.Command(sshdPath, "-D", "-e", "-f", cfgPath) // #nosec G204 — sshdPath is a LookPath-validated binary; a spawned daemon is the only way to observe real sshd.
+	// sshd -D re-execs its listener into a child of this process (OpenSSH
+	// 9.8+), so killing only the parent would orphan the listener — one
+	// leak per live-sshd test, and accumulated orphans load the machine
+	// into flaking unrelated suites. Kill the whole group instead
+	// (nocx-u7uh.29 found the leak this way).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	logBuf := &lockedBuffer{}
 	cmd.Stdout = logBuf
 	cmd.Stderr = logBuf
@@ -231,7 +239,7 @@ LogLevel VERBOSE
 		t.Fatalf("sshd start: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // #nosec G206 — the group is this test's own sshd
 		_ = cmd.Wait()
 	})
 
@@ -241,13 +249,14 @@ LogLevel VERBOSE
 	for time.Now().Before(deadline) {
 		if strings.Contains(logBuf.String(), want) {
 			return &liveSshd{
-				addr:    addr,
-				user:    userName,
-				home:    home,
-				signer:  clientSigner,
-				hostKey: hostSigner.PublicKey(),
-				cmd:     cmd,
-				logBuf:  logBuf,
+				addr:      addr,
+				user:      userName,
+				home:      home,
+				signer:    clientSigner,
+				clientRaw: clientRaw,
+				hostKey:   hostSigner.PublicKey(),
+				cmd:       cmd,
+				logBuf:    logBuf,
 			}
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -407,10 +416,9 @@ func (e ackingEmitter) PublishLifecycle(f lifecyclepub.Fact) {
 
 // newRecordingKernel builds the observation seam the way production wires
 // it: publisher over the raw kernel, acking emitter bound, the publisher
-// handed to the adapters.
-func newRecordingKernel() *recordingKernel {
+func newRecordingKernel(opts ...lifecyclepub.Option) *recordingKernel {
 	k := lifecycle.New(lifecycle.Options{})
-	pub := lifecyclepub.New(k)
+	pub := lifecyclepub.New(k, opts...)
 	pub.SetEmitter(ackingEmitter{pub: pub})
 	return &recordingKernel{Publisher: pub}
 }

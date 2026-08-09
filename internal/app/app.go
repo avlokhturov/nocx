@@ -568,7 +568,8 @@ func New(opts ...Option) (*App, error) {
 		// domain_grant outbound. The kernel stays the sole minter; this
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
-		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger, lifecyclePub, shint, childTransports, childSessions)))
+		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
+			func() *lifecyclepub.Publisher { return lifecyclePub }, shint, childTransports, childSessions)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
