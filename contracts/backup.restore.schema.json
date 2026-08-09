@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/backup.restore.schema.json",
+  "title": "BackupRestoreResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "strategy",
+    "settingsChanged",
+    "settingsReset",
+    "connectionsAdded",
+    "connectionsUpdated",
+    "connectionsRemoved",
+    "groupsAdded",
+    "groupsUpdated",
+    "groupsRemoved",
+    "groupCredentialBindingsRemoved",
+    "connectionsRequiringCredential",
+    "omissions"
+  ],
+  "properties": {
+    "strategy": { "type": "string", "enum": ["merge", "replace"] },
+    "settingsChanged": { "type": "integer" },
+    "settingsReset": { "type": "integer" },
+    "connectionsAdded": { "type": "integer" },
+    "connectionsUpdated": { "type": "integer" },
+    "connectionsRemoved": { "type": "integer" },
+    "groupsAdded": { "type": "integer" },
+    "groupsUpdated": { "type": "integer" },
+    "groupsRemoved": { "type": "integer" },
+    "groupCredentialBindingsRemoved": { "type": "integer" },
+    "connectionsRequiringCredential": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/profileRef" }
+    },
+    "omissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credentialBindingsRemoved",
+        "groupCredentialBindingsRemoved",
+        "groupDefaultKeysOmitted"
+      ],
+      "properties": {
+        "credentialBindingsRemoved": { "type": "integer" },
+        "groupCredentialBindingsRemoved": { "type": "integer" },
+        "groupDefaultKeysOmitted": { "type": "integer" }
+      }
+    }
+  },
+  "$defs": {
+    "profileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" } }
+    }
+  }
+}

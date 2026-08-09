@@ -1,0 +1,28 @@
+package transport
+
+import (
+	"context"
+
+	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/transport/control"
+)
+
+func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admission) []methodSpec {
+	var contentOp capability.ContentOperation
+	if s.contentDB != nil {
+		contentOp = capability.NewContentOperation(contentGate, lane, s.contentDB)
+	}
+	contentSub := s.operationQueue("content")
+	return []methodSpec{
+		regResponder(contentSub, "history.query", func(r Responder) handlerFunc {
+			h := historyQueryHandlers{op: contentOp, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryQuery(ctx, req) }
+		}),
+		reg(contentSub, "history.record", func(w *wsConn, state *connState) handlerFunc {
+			h := historyRecordHandlers{op: contentOp, captures: s.captures, machine: s, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) {
+				h.handleHistoryRecord(ctx, w, state, req)
+			}
+		}),
+	}
+}

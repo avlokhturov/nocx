@@ -382,3 +382,31 @@ func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
 
 	return s.writeLocked(d)
 }
+
+// LoadConnectionSnapshot returns one locked copy of profiles and groups.
+func (s *JSONStore) LoadConnectionSnapshot() (ConnectionSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return ConnectionSnapshot{}, err
+	}
+	return ConnectionSnapshot{Profiles: d.Profiles, Groups: d.Groups}, nil
+}
+
+// ReplaceConnectionSnapshot validates and replaces profiles and groups in one
+// document write, preserving any credential metadata carried by profiles.
+func (s *JSONStore) ReplaceConnectionSnapshot(snapshot ConnectionSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ValidateGroupTree(snapshot.Groups); err != nil {
+		return err
+	}
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	d.Profiles = snapshot.Profiles
+	d.Groups = snapshot.Groups
+	return s.writeLocked(d)
+}

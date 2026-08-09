@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connectfwd"
@@ -30,7 +31,6 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
@@ -119,6 +119,10 @@ type WSServer struct {
 
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
+	// Structured backup capability and native file saver. The operation is
+	// constructed after all options so it shares the current config gate.
+	backupService   *backup.Service
+	backupFileSaver func(string, string) (*backup.SaveResult, error)
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
 	// When nil, the handler returns a JSON-RPC error. The resolver
@@ -246,13 +250,6 @@ type WSServer struct {
 	// When nil, the handler reports live-state from the registry but
 	// last-used timestamps are unavailable (nocx-uxs5.4).
 	profileUsage session.ProfileUsageTracker
-
-	// When nil, export.* methods return a JSON-RPC error.
-	// The fields are populated by WithPaths, WithContentDB.
-	// The credential.CredentialStore is deliberately absent —
-	// no export mode may resolve a secret (ADR-0011 §2).
-	exportPaths     storage.Paths
-	exportContentDB content.ContentDB
 
 	// contentDB is the durable content store backing history.query. When
 	// nil, the method answers source=session — the overlay then labels what
@@ -577,30 +574,28 @@ func WithCredentialStore(cs credential.SecretStore) WSServerOption {
 func WithSettingsRegistry(r *settings.Registry) WSServerOption {
 	return func(s *WSServer) {
 		s.settings = r
+
 		r.SetNotifier(func(revision int, keys []string) {
 			s.broadcastSettingsChanged(revision, keys)
 		})
 	}
 }
 
-// WithExportPaths attaches storage path resolution for the export.backup
-// JSON-RPC method (same-machine backup manifest).
-func WithExportPaths(p storage.Paths) WSServerOption {
-	return func(s *WSServer) { s.exportPaths = p }
+// WithBackupService attaches the structured Backup & Restore service.
+func WithBackupService(svc *backup.Service) WSServerOption {
+	return func(s *WSServer) { s.backupService = svc }
 }
 
-// WithExportContentDB attaches a content database for the
-// export.portableEncrypted JSON-RPC method. A stub is correct when
-// content.db has not yet been created (ADR-0011 §5).
-func WithExportContentDB(db content.ContentDB) WSServerOption {
-	return func(s *WSServer) { s.exportContentDB = db }
+// WithBackupFileSaver injects the native save-file capability. Tests can
+// provide a deterministic writer; production passes backup.SaveToFile.
+func WithBackupFileSaver(saver func(string, string) (*backup.SaveResult, error)) WSServerOption {
+	return func(s *WSServer) { s.backupFileSaver = saver }
 }
 
 // WithContentDB attaches the durable content store backing history.query.
 // When absent, the method answers source=session so the overlay labels what
-// it shows "this session only" instead of presenting the in-memory ledger
-// as all history (contracts/history.query.schema.json). The composition
-// root passes the same ContentDB it hands WithExportContentDB.
+// it shows "this session only" instead of presenting the in-memory ledger as
+// all history (contracts/history.query.schema.json).
 func WithContentDB(db content.ContentDB) WSServerOption {
 	return func(s *WSServer) { s.contentDB = db }
 }
@@ -790,11 +785,12 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.contentSpecs(lane, gates.config, gates.content)...)
+	specs = append(specs, s.contentSpecs(lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
@@ -1303,8 +1299,8 @@ func paramsBudgetForMethod(method string) int {
 	switch method {
 	case "vault.unlockResolved", "connections.passwordResolved":
 		return budgetTiny
-	case "export.import", "export.importPortable",
-		"profiles.importTabby", "profiles.tabbyPreview":
+	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
+		"profiles.tabbyPreview":
 		return budgetDocument
 	default:
 		return budgetDefault
@@ -1320,9 +1316,6 @@ var errEnvelopeNotObject = errors.New("not a JSON object")
 var errEnvelopeTooLarge = errors.New("envelope exceeds scan cap")
 
 // errEnvelopeDuplicateMember reports a control frame that repeats a
-// top-level envelope member (jsonrpc, id, method or params) before method is
-// decoded. Such a frame is ambiguous — encoding/json resolves a repeated
-// member to its LAST occurrence, so the same frame can read differently at
 // the budget gate and at dispatch. Refusing it keeps one meaning per frame.
 var errEnvelopeDuplicateMember = errors.New("duplicate envelope member")
 
@@ -1624,7 +1617,7 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// The envelope pass and the full decode must agree on the method.
 	// encoding/json resolves a repeated top-level member to its LAST
 	// occurrence, so without this check a frame could take one method's
-	// budget (say the 8 MiB document tier of export.import) and dispatch as
+	// budget (say the 8 MiB document tier of backup.preview) and dispatch as
 	// another (say the 1 KiB resolver tier of vault.unlockResolved).
 	if req.Method != budgetedMethod {
 		s.log.Warn("jsonrpc invalid request", "len", len(data), "category", "method_mismatch")

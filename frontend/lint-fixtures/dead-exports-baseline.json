@@ -275,11 +275,6 @@
     },
     {
       "kind": "files",
-      "file": "src/generated/export.importPortable.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
       "file": "src/generated/profiles.effective.ts",
       "symbol": ""
     },
@@ -352,6 +347,26 @@
       "kind": "types",
       "file": "src/environment-passport.ts",
       "symbol": "PassportTier"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/backup.preview.ts",
+      "symbol": "ItemCounts"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/backup.preview.ts",
+      "symbol": "ProfileRef"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/backup.preview.ts",
+      "symbol": "SettingsCounts"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/backup.restore.ts",
+      "symbol": "ProfileRef"
     },
     {
       "kind": "types",

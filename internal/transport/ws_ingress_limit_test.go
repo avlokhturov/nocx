@@ -7,18 +7,14 @@ package transport
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/export"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -163,101 +159,6 @@ func TestOversizedFrame_DoesNotStallSessionInput(t *testing.T) {
 				live.received())
 		case <-time.After(5 * time.Millisecond):
 		}
-	}
-}
-
-// ── T3: the large budget accepts a genuine backup ───────────────────────────
-
-// TestImportPortable_AcceptsRealisticBackupFrame round-trips a genuine
-// exported backup over the real socket: a passphrase-encrypted payload built
-// through the export package, carrying a few thousand command-history rows.
-// Without this test the large budget gets quietly tightened later and
-// nothing goes red.
-func TestImportPortable_AcceptsRealisticBackupFrame(t *testing.T) {
-	src := &recordingContentDB{
-		convs: []content.Conversation{{
-			ID: "conv-1", Title: "Debugging", CreatedAt: 1700000000000,
-			Messages: []content.Message{{Role: "user", Content: "why slow", Timestamp: 1700000000000}},
-		}},
-		history: make([]content.CommandRecord, 2000),
-	}
-	for i := range src.history {
-		src.history[i] = content.CommandRecord{
-			Command:  fmt.Sprintf("ssh prod-%02d && tail -n 40 /var/log/app/error.log | grep -i timeout", i%25),
-			Cwd:      "/home/dev",
-			Host:     "local",
-			Status:   content.StatusSuccess,
-			ExitCode: new(int),
-		}
-	}
-	enc, err := export.ExportPortableEncrypted(export.PortableEncryptedDeps{
-		ConfigExport: export.ConfigExportDeps{
-			Profiles: &wireProfileRepo{},
-			Groups:   &wireGroupRepo{},
-		},
-		ContentDB: src,
-	}, "pass", true)
-	if err != nil {
-		t.Fatalf("ExportPortableEncrypted: %v", err)
-	}
-	payload := base64.StdEncoding.EncodeToString(enc.Payload)
-	frame, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 1, "method": "export.importPortable",
-		"params": map[string]any{"payload": payload, "passphrase": "pass"},
-	})
-	if len(frame) > budgetDocument {
-		t.Fatalf("test backup frame %d B exceeds the document budget %d B", len(frame), budgetDocument)
-	}
-	if len(frame) < 100<<10 {
-		t.Fatalf("test backup frame only %d B — not a realistically large payload", len(frame))
-	}
-
-	dst := &recordingContentDB{}
-	ws, _, _, cleanup := newExportWSServer(t, dst)
-	defer cleanup()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	resp := exportCall(t, conn, "export.importPortable", map[string]any{
-		"payload": payload, "passphrase": "pass",
-	})
-	if resp.Error != nil {
-		t.Fatalf("realistic backup rejected: %+v", resp.Error)
-	}
-	if len(dst.history) != len(src.history) {
-		t.Fatalf("restored %d history rows, want %d", len(dst.history), len(src.history))
-	}
-	if len(dst.convs) != 1 {
-		t.Fatalf("restored %d conversations, want 1", len(dst.convs))
-	}
-
-	// And the same method rejects a frame above its large budget — the
-	// ceiling is real, not a suggestion.
-	tooBig := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("A", 6<<20)))
-	raw, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0", "id": 2, "method": "export.importPortable",
-		"params": map[string]any{"payload": tooBig, "passphrase": "pass"},
-	})
-	if len(raw) <= budgetDocument {
-		t.Fatalf("test frame %d B does not exceed the document budget", len(raw))
-	}
-	rej := jsonrpcCallWithID(t, conn, "export.importPortable", map[string]any{
-		"payload": tooBig, "passphrase": "pass",
-	}, 2)
-	var rejEnv struct {
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rej, &rejEnv); err != nil {
-		t.Fatalf("unmarshal rejection: %v", err)
-	}
-	if rejEnv.Error == nil || rejEnv.Error.Code != -32602 {
-		t.Fatalf("above-budget import: expected -32602, got %+v", rejEnv.Error)
-	}
-	if !strings.Contains(rejEnv.Error.Message, "size budget") {
-		t.Fatalf("above-budget import: unexpected message %q", rejEnv.Error.Message)
 	}
 }
 
@@ -527,17 +428,17 @@ func TestEnvelope_GarbageAfterParamsIsParseError_NoHandlerRuns(t *testing.T) {
 // ── T12: a duplicate method cannot take one budget and dispatch as another ──
 
 // TestEnvelope_DuplicateMethod_CannotBypassBudgetTier: the frame repeats the
-// "method" member. The envelope pass reads the FIRST (export.import — the
+// "method" member. The envelope pass reads the FIRST (backup.preview — the
 // 8 MiB document budget); a full JSON decode resolves the LAST
 // (vault.unlockResolved — the 1 KiB resolver tier). The frame is ~2 KiB:
 // inside the document budget, far above the resolver tier. A code that
-// budgeted by the first name and dispatched by the last would let a resolver
-// call ride the document budget, so the method-equality check must refuse
-// the frame outright with -32600.
+// selects the budget after the full decode would admit an oversized payload.
 func TestEnvelope_DuplicateMethod_CannotBypassBudgetTier(t *testing.T) {
-	_, conn := newBareTransport(t)
+	ws, conn := newBareTransport(t)
+	defer func() { _ = conn.Close() }()
+	defer func() { _ = ws.Stop(context.Background()) }()
 
-	frame := `{"jsonrpc":"2.0","id":1,"method":"export.import","method":"vault.unlockResolved","params":{"payload":"` +
+	frame := `{"jsonrpc":"2.0","id":1,"method":"backup.preview","method":"vault.unlockResolved","params":{"contents":"` +
 		strings.Repeat("x", 2<<10) + `"}}`
 	writeRaw(t, conn, frame)
 	code, msg := readErrorCode(t, conn)

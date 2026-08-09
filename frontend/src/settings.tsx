@@ -38,7 +38,7 @@ import {
   type SettingsMirror,
   type SettingsSnapshot,
 } from './settings-domain'
-import { ExportSection } from './export-section'
+import { BackupRestoreSection } from './backup-restore-section'
 import { VaultSection } from './vault'
 import { log } from './log'
 import {
@@ -309,20 +309,12 @@ export function SettingsComponent(props: SettingsComponentProps) {
       id: s,
       title: s,
     }))
-    // Export used to render unconditionally beneath the settings list, which
-    // meant a search for something that matches nothing still showed a page of
-    // export cards under "No settings match your search". It is a page.
-    const exportPage: SettingsPage = {
+    const backupPage: SettingsPage = {
       kind: 'component',
-      id: 'export',
-      title: 'Export / Backup / Import',
+      id: 'backup',
+      title: 'Backup & Restore',
       scrollMode: 'page',
-      renderContent: () => (
-        <ExportSection
-          profileClient={props.profileClient}
-          vaultController={props.vaultController}
-        />
-      ),
+      renderContent: () => <BackupRestoreSection profileClient={props.profileClient} />,
     }
     const connectionPage: SettingsPage = {
       kind: 'component',
@@ -386,7 +378,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, exportPage, connectionPage, secretsPage, vaultPage]
+    return [...generated, backupPage, connectionPage, secretsPage, vaultPage]
   })
 
   /** The active component page, or null when a generated section is showing. */

@@ -2,8 +2,15 @@ import { Dispatcher } from './dispatcher'
 import type { ConnectionTestResult } from './generated/connections.probe'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
-import type { ImportResult } from './generated/export.import'
+import type { BackupCreateResult } from './generated/backup.create'
+import type { BackupRestorePreview as RestorePreview } from './generated/backup.preview'
+import type { BackupRestoreResult as RestoreResult } from './generated/backup.restore'
+import type { BackupSaveFileResult as SaveFileResult } from './generated/backup.saveToFile'
 
+interface TabbyImportResult {
+  profilesImported: number
+  groupsImported: number
+}
 // Profile/group models + IPC client for the connection manager.
 // Mirrors the backend internal/profile package (nocx-fxs.1) and the
 // JSON-RPC control-plane methods wired in nocx-fxs.5.
@@ -393,7 +400,7 @@ export class ProfileClient {
     return this.call('profiles.tabbyPreview', params)
   }
 
-  tabbyExecute(planToken: string): Promise<ImportResult> {
+  tabbyExecute(planToken: string): Promise<TabbyImportResult> {
     return this.call('profiles.tabbyExecute', { planToken })
   }
 
@@ -583,36 +590,26 @@ export class ProfileClient {
   secretExists(key: string): Promise<{ exists: boolean }> {
     return this.call('settings.secretExists', { key })
   }
-  // ── Export/backup/import RPC methods ──────────────────────────────────
+  // ── Backup & Restore RPC methods ─────────────────────────────────────
 
-  exportManifest(mode: string): Promise<ExportManifest> {
-    return this.call('export.manifest', { mode })
+  async createBackup(): Promise<BackupCreateResult> {
+    return this.call('backup.create', {})
   }
 
-  configExport(): Promise<ConfigExport> {
-    return this.call('export.configExport', {})
+  async previewBackupRestore(contents: string, strategy: RestoreStrategy): Promise<RestorePreview> {
+    return this.call('backup.preview', { contents, strategy })
   }
 
-  portableEncryptedExport(
-    passphrase: string,
-    includePrivateContent?: boolean,
-  ): Promise<PortableEncryptedExport> {
-    return this.call('export.portableEncrypted', {
-      passphrase,
-      includePrivateContent: includePrivateContent ?? false,
-    })
+  async restoreBackup(
+    contents: string,
+    strategy: RestoreStrategy,
+    previewToken: string,
+  ): Promise<RestoreResult> {
+    return this.call('backup.restore', { contents, strategy, previewToken })
   }
 
-  backup(): Promise<BackupManifest> {
-    return this.call('export.backup', {})
-  }
-
-  importConfig(data: ConfigExport): Promise<ImportResult> {
-    return this.call('export.import', { data })
-  }
-
-  importPortable(payloadBase64: string, passphrase: string): Promise<ImportResult> {
-    return this.call('export.importPortable', { payload: payloadBase64, passphrase })
+  async saveBackupToFile(fileName: string, contents: string): Promise<SaveFileResult | null> {
+    return this.call('backup.saveToFile', { fileName, contents })
   }
 }
 
@@ -644,37 +641,8 @@ export interface SessionStatus {
   lastUsed?: string
 }
 
-// ── Export/backup/import types (ADR-0011 §7) ─────────────────────────────
-
-export interface ExportManifest {
-  mode: string
-  carries: string[]
-  omits: string[]
-  notes?: string[]
-}
-
-export interface ConfigExport {
-  profiles: SSHProfile[]
-  groups: ProfileGroup[]
-  settings?: Record<string, unknown>
-}
-
-export interface PortableEncryptedExport {
-  payload: string // base64-encoded NaCl secretbox ciphertext
-  includePrivateContent?: boolean
-}
-
-export interface BackupManifest {
-  mode: string
-  configDir: string
-  contentDbPath?: string
-  contentDbAbsent: boolean
-  secretsStatement: string
-  carries: string[]
-  omits: string[]
-}
-
-export type { ImportResult }
+export type RestoreStrategy = RestorePreview['strategy']
+export type { BackupCreateResult, RestorePreview, RestoreResult, SaveFileResult }
 
 // ── Tabby import preview types (bead nocx-kqw6) ──────────────────────────
 
