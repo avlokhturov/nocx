@@ -357,3 +357,117 @@ describe('the frozen block\u2019s rows leave the grid (nocx-m87n live-region win
     controller.blockManager.clearAll()
   })
 })
+
+describe('the echoed command line leaves the live region too (nocx-w1n4)', () => {
+  // The frozen body already skips the echo: the app-owned submit opens the
+  // block BEFORE the bytes, the shell's echo lands on the creation line,
+  // and the output range starts one row later (nocx-4yhi). The LIVE region
+  // is the xterm grid itself, which still holds that echoed line on the
+  // creation row — so the running block showed one row more than the frozen
+  // one will. The range was decided in the block model; this describe pins
+  // the grid to the same decision: the region's first SHOWN row is
+  // outputStart. The box clips the grid's TOP rows, so offsetting the
+  // box's height hides the bottom, never the echo — the grid itself must
+  // move, and it does: a vertical translate on the inner wrapper.
+  const FENCE = 'ab'.repeat(32)
+  const domain = mintDomain({
+    lane: 'l',
+    lifecycle: 'prompt_ready',
+    domain: 'd1',
+    epoch: 1,
+  }) as IntegrationDomain
+  const completedAttempt = (fence: string): ExecutionAttempt => ({
+    id: 'att-1',
+    domain,
+    state: 'completed',
+    exitCode: 0,
+    fence,
+  })
+
+  /** A renderer whose cell geometry the controller can read, with a
+   *  settable viewport top — the number that decides when the echo has
+   *  scrolled out of the grid. */
+  function rendererWithGeometry(): {
+    renderer: TerminalRenderer
+    sight: (ev: RenderFenceEvent) => void
+    setViewportTop: (line: number) => void
+  } {
+    const renderer = makeRenderer()
+    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
+    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
+      fenceCb = cb
+    }
+    let top = 0
+    Object.defineProperty(renderer, 'cellHeight', { value: 16, configurable: true })
+    Object.defineProperty(renderer, 'viewportTopLine', {
+      configurable: true,
+      get: () => top,
+    })
+    return {
+      renderer,
+      sight: (ev) => fenceCb?.(ev),
+      setViewportTop: (line: number) => {
+        top = line
+      },
+    }
+  }
+
+  it('hides the echo row from the running block and releases it once the grid scrolls past', () => {
+    const { renderer, sight, setViewportTop } = rendererWithGeometry()
+
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const clearViewport = renderer.clearViewport
+    /* eslint-enable @typescript-eslint/unbound-method */
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    // App-owned submit: the block opens at the prompt line and the output
+    // range starts one row later (nocx-4yhi) — the shape Defect 1 is about.
+    // The grid was cleared at the previous freeze, so the echo row IS the
+    // grid's top row and the shift is exactly one cell.
+    controller.beginBlock('ls', '~', 0, 1)
+    expect(controller.mode).toBe('running')
+    expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+
+    // Output arrives: the box is sized to the measured content and the
+    // echo stays out of view — and the height itself is NOT offset (an
+    // offset moves what is measured, not what is shown).
+    controller.setLiveHeight(3 * 16)
+    expect(controller.xtermLiveContainer.style.height).toBe('48px')
+    expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+
+    // The output outgrows the viewport: the echo row scrolls above the
+    // grid, and the shift MUST release — a stale shift would clip the
+    // first real output row instead.
+    setViewportTop(1)
+    controller.setLiveHeight(24 * 16)
+    expect(controller.xtermInner.style.transform).toBe('')
+    // The box still clamps to the live-region cap (nocx-zn4d).
+    expect(controller.xtermLiveContainer.style.height).toBe('360px')
+
+    // The shift is live, not one-shot: back before the echo scrolled out,
+    // it re-applies on the next sizing frame.
+    setViewportTop(0)
+    controller.setLiveHeight(3 * 16)
+    expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+
+    // Freeze hands the rows to the DOM and the live region settles: the
+    // shift is gone at idle, exactly like the box's height.
+    controller.blockManager.bindAttempt('att-1')
+    sight({ hex: FENCE, line: 3, buffer: 'normal' })
+    expect(controller.freezeFromAttempt(completedAttempt(FENCE), 3)).toBe(true)
+    expect(controller.mode).toBe('idle')
+    expect(controller.xtermInner.style.transform).toBe('')
+    expect(clearViewport).toHaveBeenCalledTimes(1)
+    controller.blockManager.clearAll()
+  })
+})

@@ -13,7 +13,7 @@ import {
   DEFAULT_SNAPSHOT,
   fromITheme,
 } from './serializer'
-import { BufferLine } from './test-helpers'
+import { BufferLine, lineWith, XTERM_CM_P16, XTERM_CM_P256, XTERM_CM_RGB } from './test-helpers'
 
 // ── Minimal mock of xterm's IBufferLine ────────────────────────────────────
 
@@ -73,8 +73,12 @@ describe('colorToCSS', () => {
   })
 
   it('handles mode 2 (24-bit RGB)', () => {
-    // Color = 0x0000FF00 = green in RGB mode (0-7=R, 8-15=G, 16-23=B)
+    // xterm packs a truecolor cell as 0xRRGGBB — R in bits 16-23, G 8-15,
+    // B 0-7 (measured from a real 5.5.0 buffer, nocx-07o7). The serializer
+    // used to unpack R and B swapped; 0x0000ff00 is R/B-symmetric so it
+    // passed either way, 0xff5500 is not and is the discriminator.
     expect(colorToCSS(DEFAULT_SNAPSHOT, 0x0000ff00, 2)).toBe('rgb(0,255,0)')
+    expect(colorToCSS(DEFAULT_SNAPSHOT, 0xff5500, 2)).toBe('rgb(255,85,0)')
   })
 
   it('returns null for unknown modes', () => {
@@ -116,6 +120,7 @@ describe('attrsEqual', () => {
       bg: '#000',
       bold: true,
       italic: false,
+      dim: false,
       underline: true,
       inverse: false,
       blink: false,
@@ -384,18 +389,20 @@ describe('theme snapshot freezing', () => {
     const snapB = fromITheme(themeB)
 
     // An ANSI colour, which is what the snapshot is for: index 1 means whatever
-    // "red" is in the theme that was live when the block froze. fgMode 1 is the
-    // palette mode in the mock cell.
+    // "red" is in the theme that was live when the block froze. The mock cell
+    // models xterm 5.5's getFgColorMode(): the raw CM_P16 flag, not a small
+    // integer (nocx-07o7).
     const line = new BufferLine(
       [...'coloured'].map((ch) => ({
         chars: ch,
         width: 1,
         fg: 1,
-        fgMode: 1,
+        fgMode: XTERM_CM_P16,
         bg: 0,
         bgMode: 0,
         bold: false,
         italic: false,
+        dim: false,
         underline: false,
         inverse: false,
         blink: false,
@@ -480,8 +487,68 @@ describe('theme snapshot freezing', () => {
     expect(paletteToRGB(snapA, 232)).toBe('rgb(8,8,8)')
     expect(paletteToRGB(snapB, 232)).toBe('rgb(8,8,8)')
 
-    // Truecolor (mode 2)
-    expect(colorToCSS(snapA, 0x00ff0000, 2)).toBe('rgb(0,0,255)')
-    expect(colorToCSS(snapB, 0x00ff0000, 2)).toBe('rgb(0,0,255)')
+    // Truecolor (mode 2). 0x00ff0000 packs R=0xff, G=0, B=0 (0xRRGGBB) —
+    // the serializer used to unpack it as B=0xff and emit blue.
+    expect(colorToCSS(snapA, 0x00ff0000, 2)).toBe('rgb(255,0,0)')
+    expect(colorToCSS(snapB, 0x00ff0000, 2)).toBe('rgb(255,0,0)')
+  })
+})
+
+describe('the colour modes a frozen block preserves (nocx-07o7)', () => {
+  // While codex or omp runs, the output is coloured — the moment the block
+  // freezes, the same content is monochrome. Measured from a real xterm
+  // 5.5.0 buffer first: getFgColorMode()/getBgColorMode() return the RAW
+  // attribute bits (CM_P16 = 0x01000000, CM_P256 = 0x02000000, CM_RGB =
+  // 0x03000000), not small integers, and truecolor cells pack 0xRRGGBB.
+  // The fixture cells below encode exactly what xterm hands back, one per
+  // mode; each asserts the span the frozen block must emit.
+  it('preserves a 16-colour palette cell (raw CM_P16)', () => {
+    const line = lineWith({ chars: 'X', fg: 4, fgMode: XTERM_CM_P16 }) // palette blue
+    expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe(
+      '<span class="term-line"><span style="color:#7aa2f7">X</span></span>',
+    )
+  })
+
+  it('preserves a 256-colour cell (raw CM_P256)', () => {
+    const line = lineWith({ chars: 'X', fg: 196, fgMode: XTERM_CM_P256 }) // cube red
+    expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe(
+      '<span class="term-line"><span style="color:rgb(255,0,0)">X</span></span>',
+    )
+  })
+
+  it('preserves a 24-bit RGB cell (raw CM_RGB, 0xRRGGBB)', () => {
+    // 0xff5500 is orange in xterm's packing; an R/B swap turns it blue.
+    const line = lineWith({ chars: 'X', fg: 0xff5500, fgMode: XTERM_CM_RGB })
+    expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe(
+      '<span class="term-line"><span style="color:rgb(255,85,0)">X</span></span>',
+    )
+  })
+
+  it('keeps a default-mode cell plain — the paired assertion that the working mode still works', () => {
+    const line = lineWith({ chars: 'X', fg: 7, fgMode: 0 })
+    expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe('<span class="term-line">X</span>')
+  })
+
+  it('preserves a background colour through the same mode path', () => {
+    const line = lineWith({ chars: 'X', fg: 0, fgMode: 0, bg: 1, bgMode: XTERM_CM_P16 }) // red bg
+    expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe(
+      '<span class="term-line"><span style="background:#f7768e">X</span></span>',
+    )
+  })
+
+  it('carries the dim attribute the live terminal renders', () => {
+    // xterm dims to 50% (multiplyOpacity(color, 0.5)); opacity is the
+    // static-block equivalent and dims a default-colour cell too.
+    const line = lineWith({ chars: 'X', fg: 7, fgMode: 0, dim: true })
+    expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe(
+      '<span class="term-line"><span style="opacity:0.5">X</span></span>',
+    )
+  })
+
+  it('carries italic — the paired assertion that the working attribute still works', () => {
+    const line = lineWith({ chars: 'X', fg: 7, fgMode: 0, italic: true })
+    expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe(
+      '<span class="term-line"><span style="font-style:italic">X</span></span>',
+    )
   })
 })

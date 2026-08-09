@@ -127,30 +127,58 @@ export function paletteToRGB(snapshot: TerminalSnapshot, idx: number): string {
 }
 
 /**
+ * The colour-mode flags xterm's getFgColorMode()/getBgColorMode() actually
+ * return. They are the raw attribute bits (Attributes.CM_P16/CM_P256/CM_RGB),
+ * NOT small integers — measured from a real xterm 5.5.0 buffer (nocx-07o7);
+ * the typings deliberately do not document the values and point at the
+ * isFg* predicates instead. The serializer used to compare against 1 and 2,
+ * which matched nothing, so every coloured cell froze as default.
+ */
+const CM_MASK = 0xff000000
+const CM_P16 = 0x01000000
+const CM_P256 = 0x02000000
+const CM_RGB = 0x03000000
+
+/** Map an xterm colour mode to the canonical 0/1/2 this file reasons in
+ *  (0 default, 1 palette, 2 RGB). */
+function normalizeColorMode(mode: number): number {
+  switch (mode & CM_MASK) {
+    case CM_P16:
+    case CM_P256:
+      return 1
+    case CM_RGB:
+      return 2
+    default:
+      return 0
+  }
+}
+
+/**
  * Maps an xterm color (mode + color) to a CSS color string, or null for default.
  * - mode 0: default terminal color (inherit via CSS / snapshot default)
  * - mode 1: 256-color palette index
- * - mode 2: 24-bit RGB (bits 0-7=R, 8-15=G, 16-23=B)
+ * - mode 2: 24-bit RGB packed 0xRRGGBB (xterm's own packing: R in bits
+ *   16-23, G 8-15, B 0-7 — the serializer once unpacked R and B swapped,
+ *   turning orange into blue in every frozen block, nocx-07o7)
  */
 export function colorToCSS(snapshot: TerminalSnapshot, color: number, mode: number): string | null {
   if (mode === 0) return null
   if (mode === 2) {
-    const r = color & 0xff
+    const r = (color >> 16) & 0xff
     const g = (color >> 8) & 0xff
-    const b = (color >> 16) & 0xff
+    const b = color & 0xff
     return `rgb(${r},${g},${b})`
   }
   if (mode === 1) return paletteToRGB(snapshot, color)
   return null
 }
 
-// ── Cell attributes ────────────────────────────────────────────────────────
-
 export interface CellAttrs {
   fg: string | null
   bg: string | null
   bold: boolean
   italic: boolean
+  dim: boolean
   underline: boolean
   inverse: boolean
   blink: boolean
@@ -164,6 +192,7 @@ export function emptyAttrs(): CellAttrs {
     bg: null,
     bold: false,
     italic: false,
+    dim: false,
     underline: false,
     inverse: false,
     blink: false,
@@ -178,6 +207,7 @@ export function attrsEqual(a: CellAttrs, b: CellAttrs): boolean {
     a.bg === b.bg &&
     a.bold === b.bold &&
     a.italic === b.italic &&
+    a.dim === b.dim &&
     a.underline === b.underline &&
     a.inverse === b.inverse &&
     a.blink === b.blink &&
@@ -203,11 +233,14 @@ export function cellAttrs(
   const bgColor = cell.getBgColor()
   const bgMode = cell.getBgColorMode()
 
+  // xterm hands back the RAW mode flags; normalize to the canonical 0/1/2
+  // colorToCSS reasons in (nocx-07o7).
   return {
-    fg: colorToCSS(snapshot, fgColor, fgMode),
-    bg: colorToCSS(snapshot, bgColor, bgMode),
+    fg: colorToCSS(snapshot, fgColor, normalizeColorMode(fgMode)),
+    bg: colorToCSS(snapshot, bgColor, normalizeColorMode(bgMode)),
     bold: cell.isBold() !== 0,
     italic: cell.isItalic() !== 0,
+    dim: cell.isDim() !== 0,
     underline: cell.isUnderline() !== 0,
     inverse: cell.isInverse() !== 0,
     blink: cell.isBlink() !== 0,
@@ -242,6 +275,12 @@ export function attrsToStyle(snapshot: TerminalSnapshot, a: CellAttrs): string {
   if (effectiveBg && effectiveBg !== snapshot.defaultBg) parts.push(`background:${effectiveBg}`)
   if (a.bold) parts.push('font-weight:bold')
   if (a.italic) parts.push('font-style:italic')
+  // Dim (CSI 2 m): the live terminal renders it as 50% opacity
+  // (xterm's multiplyOpacity(color, 0.5)); opacity is the static-block
+  // equivalent and works for default-colour cells too, which have no
+  // explicit color to dim. It dims an explicit background along with the
+  // text — xterm dims the resolved background the same way (nocx-07o7).
+  if (a.dim) parts.push('opacity:0.5')
   if (a.underline && !a.strikethrough) parts.push('text-decoration:underline')
   if (a.strikethrough && !a.underline) parts.push('text-decoration:line-through')
   if (a.underline && a.strikethrough) parts.push('text-decoration:underline line-through')

@@ -178,6 +178,8 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
+    // The echo shift is a running-mode property: clear it with the region.
+    this._applyEchoShift()
     this._updateSeparator()
   }
 
@@ -189,6 +191,9 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-running'
     this.xtermInner.className = 'xterm-inner'
+    // The block just opened; its echo row is the grid's top row, so the
+    // shift applies from the first frame (nocx-w1n4).
+    this._applyEchoShift()
     this._updateSeparator()
     this._scrollToBottom()
   }
@@ -206,6 +211,7 @@ export class ScrollbackController {
     this.xtermLiveContainer.className = 'xterm-live-container live-unstructured'
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
+    this._applyEchoShift()
     const max = this.scrollbackArea.clientHeight
     if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
   }
@@ -244,8 +250,14 @@ export class ScrollbackController {
    * Ignored outside `running`: `idle` is a zero-height region by definition and
    * `fullscreen` is owned by the alt-screen path (nocx-6w4z).
    */
+
   setLiveHeight(px: number): void {
     if (this._mode !== 'running') return
+    // nocx-w1n4: the echoed command line leaves the LIVE region the same
+    // way it leaves the frozen body — the first shown row is the running
+    // block's outputStart. Applied before the height guards so a viewport
+    // scroll that leaves the box size unchanged still releases the shift.
+    this._applyEchoShift()
     if (px <= 0) return
     // The ceiling is the SCROLLER's client height, not the pane's. They are the
     // same number while a command runs — the editor takes its box away when it
@@ -276,6 +288,47 @@ export class ScrollbackController {
     // enough to fill the pane the header arrives at the top of its own accord
     // and can go no further (nocx-6w4z).
     if (this._following) this._scrollToBottom()
+  }
+
+  /**
+   * The vertical offset, in CSS pixels, that moves the live region's first
+   * SHOWN row to the running block's outputStart (nocx-w1n4).
+   *
+   * The frozen body already skips the shell's echo of the command: the
+   * app-owned submit opens the block before the bytes, the echo lands on
+   * the creation line, and the output range starts one row later
+   * (nocx-4yhi). The live region is the grid itself, which still holds
+   * that echoed line on the creation row — so the running block showed one
+   * row more than the frozen one will. The box clips the grid's TOP rows,
+   * which is why offsetting the measured height does nothing useful: it
+   * hides the bottom rows, never the echo. The grid itself must move.
+   *
+   * The offset is `outputStart - viewportTopLine`: exactly the rows between
+   * the top of the viewport and the first row the frozen block will
+   * contain. While the echo is the top visible row that is one cell; the
+   * moment the output outgrows the viewport and the echo scrolls above the
+   * grid, the offset drops to zero and the first real output row is left
+   * alone.
+   */
+  private _echoShiftPx(): number {
+    if (this._mode !== 'running') return 0
+    const rec = this._blockManager.runningBlock
+    if (!rec) return 0
+    const cell = this._renderer.cellHeight
+    if (!cell || cell <= 0) return 0
+    const top = this._renderer.viewportTopLine ?? 0
+    const rows = rec.outputStart - top
+    return rows > 0 ? rows * cell : 0
+  }
+
+  /** Apply the echo shift to the grid, or clear it. The write is guarded:
+   *  identical values are skipped so the per-frame sizing pass does not
+   *  rewrite the style on every chunk of output. */
+  private _applyEchoShift(): void {
+    const px = this._echoShiftPx()
+    const next = px > 0 ? `translateY(-${px}px)` : ''
+    if (this.xtermInner.style.transform === next) return
+    this.xtermInner.style.transform = next
   }
 
   /**
@@ -319,6 +372,7 @@ export class ScrollbackController {
     this.xtermLiveContainer.className = 'xterm-live-container live-fullscreen'
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
+    this._applyEchoShift()
     const max = this.scrollbackArea.clientHeight
     if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
   }
@@ -330,6 +384,7 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
+    this._applyEchoShift()
     this.scrollbackInner.classList.remove('inner-fullscreen-mode')
     this._updateSeparator()
   }

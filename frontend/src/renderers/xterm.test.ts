@@ -11,25 +11,25 @@ import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
 
-describe('XtermRenderer setReadOnly', () => {
-  const stubBrowser = () => {
-    window.matchMedia = (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    })
-    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
+const stubBrowser = () => {
+  window.matchMedia = (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })
+  ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   }
+}
 
+describe('XtermRenderer setReadOnly', () => {
   it('toggles disableStdin on the underlying terminal', async () => {
     stubBrowser()
     const r = new XtermRenderer()
@@ -639,6 +639,74 @@ describe('XtermRenderer fence delivery through the real parser', () => {
     r.write('\x1b]133;A\x07')
     await fenceMarker
     expect(seen).toEqual([])
+    r.dispose()
+  })
+})
+
+// ── Shift+Enter as its own chord (nocx-nt70) ──────────────────────────────
+// A program that owns the keyboard receives Enter as a bare CR and cannot
+// tell Shift+Enter apart — xterm drops the modifier. The renderer re-encodes
+// the plain chord as ESC CR (the decision and the named alternative live at
+// SHIFT_ENTER_SEQUENCE in xterm.ts). These tests pin the exact bytes that
+// leave the renderer for each chord, driven through xterm's real keydown
+// path — the same DOM events a user's keystrokes produce.
+describe('Shift+Enter as its own chord (nocx-nt70)', () => {
+  async function mountKeyRenderer(): Promise<{ r: XtermRenderer; received: string[] }> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    const received: string[] = []
+    r.onData((text) => received.push(text))
+    return { r, received }
+  }
+
+  /** Dispatch a real keydown at xterm's hidden textarea — the production
+   *  path (xterm binds its key handling to the textarea with capture). */
+  function pressKey(r: XtermRenderer, init: KeyboardEventInit & { keyCode: number }): void {
+    const term = (r as unknown as Record<string, unknown>).term as { element: HTMLElement }
+    const textarea = term.element.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    const event = new KeyboardEvent('keydown', { ...init, bubbles: true })
+    // jsdom does not compute keyCode from `key`; xterm's encoder reads it.
+    Object.defineProperty(event, 'keyCode', { value: init.keyCode })
+    textarea!.dispatchEvent(event)
+  }
+
+  it('sends ESC CR for Shift+Enter and CR for Enter — the exact bytes a program sees', async () => {
+    const { r, received } = await mountKeyRenderer()
+    pressKey(r, { key: 'Enter', keyCode: 13 })
+    pressKey(r, { key: 'Enter', keyCode: 13, shiftKey: true })
+    expect(received).toEqual(['\r', '\x1b\r'])
+    r.dispose()
+  })
+
+  it('leaves every neighbouring chord byte-identical to xterm\u2019s own encoding', async () => {
+    const { r, received } = await mountKeyRenderer()
+    // Ctrl+Enter, Alt+Enter, Ctrl+Shift+Enter, Shift+Tab, then a bare Enter.
+    // Only the plain Shift+Enter chord is re-encoded; everything else must
+    // stay exactly what xterm produced before the hook existed (the
+    // "nothing negotiated, nothing changed" property, pinned per chord).
+    // Alt+Enter = ESC CR is the collision the decision names: a program
+    // still cannot tell it from Shift+Enter under the legacy encoding.
+    pressKey(r, { key: 'Enter', keyCode: 13, ctrlKey: true })
+    pressKey(r, { key: 'Enter', keyCode: 13, altKey: true })
+    pressKey(r, { key: 'Enter', keyCode: 13, shiftKey: true, ctrlKey: true })
+    pressKey(r, { key: 'Tab', keyCode: 9, shiftKey: true })
+    pressKey(r, { key: 'Enter', keyCode: 13 })
+    expect(received).toEqual(['\r', '\x1b\r', '\r', '\x1b[Z', '\r'])
+    r.dispose()
+  })
+
+  it('never re-encodes a Ctrl-modified Enter into the Shift+Enter bytes', async () => {
+    const { r, received } = await mountKeyRenderer()
+    // Ctrl+Shift+Enter is not the plain chord: the hook must not fire for it.
+    // If the hook condition ever widened past Enter+Shift alone, this key
+    // would come back as ESC CR — the bytes this test pins it against.
+    pressKey(r, { key: 'Enter', keyCode: 13, shiftKey: true, ctrlKey: true })
+    expect(received).toEqual(['\r'])
     r.dispose()
   })
 })
