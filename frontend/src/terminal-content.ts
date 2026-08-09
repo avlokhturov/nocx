@@ -1764,7 +1764,18 @@ export class TerminalContent extends BaseTabContent {
     // Zero before first layout — the delivered box is the better guess then,
     // and the next viewport delivery corrects it. Each axis falls back on its
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
-    const height = area && area.clientHeight > 0 ? area.clientHeight : viewport.height
+    //
+    // While a command runs, the height is the live region's CAP, not the bare
+    // scroller: setLiveHeight clamps the live box to scroller minus the
+    // running block's header, and a grid fitted to the full scroller is taller
+    // than the box that displays it — its last rows are clipped by the box's
+    // overflow and nothing scrolls them, so the bottom of a tall inline TUI
+    // (its composer) is unreachable (nocx-zn4d). Fitting the grid to the same
+    // cap makes the box and the grid agree; output past the grid goes into
+    // xterm's own scrollback and is reachable through its viewport. Outside
+    // `running` the cap is null and the delivered/scroller height applies.
+    const cap = this.scrollback?.runningLiveCap
+    const height = cap ?? (area && area.clientHeight > 0 ? area.clientHeight : viewport.height)
     const width = area && area.clientWidth > 0 ? area.clientWidth : viewport.width
     return { ...viewport, width, height }
   }

@@ -6,12 +6,13 @@
 //
 // See AD-7: sessionId is server-authoritative, cwd is set once at session
 // open. The fake must carry both.
-
-import { vi } from 'vitest'
+import { vi, type Mock } from 'vitest'
 import type {
   CommandMarkerCallback,
   CwdCallback,
   DataCallback,
+  RenderFenceCallback,
+  RenderFenceEvent,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -34,8 +35,10 @@ export const FIXTURE_CWD = '~/Documents/repos/nocx'
 export const FIXTURE_DIRECTORY_LABEL = 'repos/nocx'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Renderer mock — factory called once per tab by createRenderer().
-// ═══════════════════════════════════════════════════════════════════════════
+/** The renderer mock's live-content-height measurer: a spy the tests
+ *  program to stand in for the real renderer measuring the grid (the
+ *  TerminalRenderer interface types it as a plain function). */
+export type LiveContentHeightSpy = Mock<() => number>
 export interface RendererMock extends TerminalRenderer {
   /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
   snapshotStore: CommandSnapshotStore
@@ -63,6 +66,8 @@ export interface RendererMock extends TerminalRenderer {
   _fireClipboardWrite(text: string): void
   /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
   _fireRecoveryFence(hex: string): void
+  /** Fire a render-fence sighting (ADR-0024 §7 carve-out, u7uh.8). */
+  _fireRenderFence(ev: RenderFenceEvent): void
 }
 
 /**
@@ -73,6 +78,7 @@ export interface RendererMock extends TerminalRenderer {
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
   const recoverySubs: Array<(hex: string) => void> = []
+  const fenceSubs: Array<(ev: RenderFenceEvent) => void> = []
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -101,6 +107,9 @@ export function createRendererMock(): RendererMock {
     }),
     onRecoveryFence: vi.fn((cb: (hex: string) => void) => {
       recoverySubs.push(cb)
+    }),
+    onRenderFence: vi.fn((cb: RenderFenceCallback) => {
+      fenceSubs.push(cb)
     }),
     onSelectionChange: vi.fn((cb: (text: string) => void) => {
       cbs.onSelectionChange = cb
@@ -159,6 +168,9 @@ export function createRendererMock(): RendererMock {
     /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
     _fireRecoveryFence(hex: string) {
       for (const sub of recoverySubs) sub(hex)
+    },
+    _fireRenderFence(ev: RenderFenceEvent) {
+      for (const sub of fenceSubs) sub(ev)
     },
   }
   return mock as unknown as RendererMock

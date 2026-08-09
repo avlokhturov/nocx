@@ -209,6 +209,22 @@ export class ScrollbackController {
   }
 
   /**
+   * The height the live region is capped at while a command runs: the
+   * scroller's client height less the running block's header, which share
+   * the viewport (nocx-6w4z). `setLiveHeight` clamps the box to this, and
+   * the grid must be fitted to the SAME number — a grid taller than the
+   * box leaves its last rows outside the clipping container, unreachable
+   * rather than merely off-screen (nocx-zn4d). Null outside `running` or
+   * when the scroller cannot be measured.
+   */
+  get runningLiveCap(): number | null {
+    if (this._mode !== 'running') return null
+    const header = this._blockManager.runningBlock?.el.getBoundingClientRect().height ?? 0
+    const max = this.scrollbackArea.clientHeight - header
+    return max > 0 ? max : null
+  }
+
+  /**
    * Size the live region to the output it is showing.
    *
    * The height used to be a constant 140px in `style.css`, sized for the few
@@ -237,10 +253,10 @@ export class ScrollbackController {
     // against the bare scroller instead, header plus region came to more than
     // the space available and the last rows of a program that filled the pane
     // had nowhere to be drawn — the same defect as the editor's reserved box,
-    // one element along.
-    const header = this._blockManager.runningBlock?.el.getBoundingClientRect().height ?? 0
-    const max = this.scrollbackArea.clientHeight - header
-    if (max <= 0) return
+    // one element along. This is `runningLiveCap`, the one number both the box
+    // and the grid fit to (nocx-zn4d).
+    const max = this.runningLiveCap
+    if (max === null) return
     const previous = this.xtermLiveContainer.getBoundingClientRect().height
     const h = Math.min(px, max)
     if (Math.abs(h - previous) < 0.5) return

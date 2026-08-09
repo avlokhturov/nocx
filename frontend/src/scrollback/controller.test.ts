@@ -179,4 +179,51 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.mode).toBe('running')
     controller.blockManager.clearAll()
   })
+  it('a second shell-originated attempt opens its own block while the first is pending its fence — no merge (nocx-m87n)', () => {
+    const { renderer, sight } = rendererWithFence()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    // First shell-originated command: the running fact opens the block.
+    controller.beginBlock('codex', '~', 0)
+    controller.blockManager.bindAttempt('att-1')
+    expect(controller.mode).toBe('running')
+
+    // Its completion lands while the fence is still in flight: the LOGICAL
+    // freeze flips the status and frees the running slot, but the VISUAL
+    // boundary defers — the live region stays up (u7uh.8).
+    expect(
+      controller.freezeFromAttempt({ ...completedAttempt(FENCE), id: 'att-1', exitCode: 130 }, 3),
+    ).toBe(false)
+    expect(controller.blockManager.runningBlock).toBeNull()
+    expect(controller.blockManager.blockForAttempt('att-1')?.status).toBe('failure')
+
+    // The second shell-originated command starts while the first block's
+    // boundary is still pending: a NEW block opens and owns the running
+    // slot (the owner's Ctrl-C then `codex` again — keys are raw, so the
+    // second command arrives through openBlock, not the editor).
+    controller.beginBlock('codex', '~', 4)
+    controller.blockManager.bindAttempt('att-2')
+    expect(controller.blockManager.blocks).toHaveLength(2)
+    expect(controller.blockManager.runningBlock?.status).toBe('running')
+    expect(controller.blockManager.blockForAttempt('att-2')?.status).toBe('running')
+
+    // The first fence lands: the first block freezes with its own exit
+    // status — while the second command is still running.
+    sight({ hex: FENCE, line: 3, buffer: 'normal' })
+    const first = controller.blockManager.blockForAttempt('att-1')
+    expect(first?.status).toBe('failure')
+    expect(first?.exitCode).toBe(130)
+    expect(first?.el.classList.contains('cmd-block-running')).toBe(false)
+    const second = controller.blockManager.blockForAttempt('att-2')
+    expect(second?.status).toBe('running')
+    expect(controller.blockManager.runningBlock).toBe(second)
+    // The live region belongs to the second command, not the first's tail.
+    expect(controller.mode).toBe('running')
+    controller.blockManager.clearAll()
+  })
 })

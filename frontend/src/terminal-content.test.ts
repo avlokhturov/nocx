@@ -35,9 +35,10 @@ import {
   makeBanner,
   makeSession,
   type ClipboardFake,
+  type ClientFake,
+  type LiveContentHeightSpy,
   type RendererMock,
   type SessionFake,
-  type ClientFake,
   FIXTURE_CWD,
 } from './test-support/tabs-fixtures'
 import { ClipboardGate } from './clipboard'
@@ -1836,6 +1837,326 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
     } finally {
       Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+})
+
+describe('two attempts and the live region stay separate while running (nocx-m87n, nocx-zn4d, nocx-mu8s)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  it('two shell-originated attempts keep their own blocks while the first is still settling its fence (nocx-m87n)', async () => {
+    // The owner's report: run `codex` (an inline TUI, no alternate buffer),
+    // Ctrl-C it, type `codex` again. While the second run is live the pane
+    // showed ONE running block whose body held both runs' content; on exit
+    // the same content rendered as two correct frozen blocks. The attempt
+    // model was right the whole time (both completions landed with the
+    // right durations) — the defect is in the render: the first block must
+    // freeze while the second command runs, each with its own exit status.
+    // The second command is SHELL-originated (keys were raw), so it opens
+    // through the openBlock port, not the editor submit.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      // The authenticated prompt; the first command is typed at the shell.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'codex' },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      expect(withScrollback.scrollback.mode).toBe('running')
+
+      // Ctrl-C: the authenticated completion lands with its fence still in
+      // flight — the LOGICAL freeze flips the status and frees the running
+      // slot; the VISUAL boundary defers (u7uh.8) and the live region stays
+      // up until it settles.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 130,
+          fence: 'f'.repeat(64),
+          completedAt: '2026-08-09T00:00:08Z',
+        },
+      })
+      const first = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
+      expect(first?.status).toBe('failure')
+      expect(first?.exitCode).toBe(130)
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+
+      // The shell is back at the prompt and the user types `codex` again:
+      // a SECOND shell-originated attempt opens its own block — the first
+      // block's visual boundary is still pending, so the running slot must
+      // be free for it.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-2', state: 'open', origin: 'shell', command: 'codex' },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(2)
+      const second = withScrollback.scrollback.blockManager.blockForAttempt('att-2')
+      expect(second).not.toBeNull()
+      expect(second!.status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBe(second)
+
+      // The first fence lands while the second command runs: the first
+      // block freezes with its own exit status, the second stays running,
+      // and the live region belongs to the second command.
+      rendererOf(content)._fireRenderFence({
+        hex: 'f'.repeat(64),
+        line: 3,
+        buffer: 'normal',
+      })
+      const firstAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
+      expect(firstAfter?.status).toBe('failure')
+      expect(firstAfter?.exitCode).toBe(130)
+      expect(firstAfter?.endLine).toBe(3)
+      expect(firstAfter?.el.classList.contains('cmd-block-running')).toBe(false)
+      const secondAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-2')
+      expect(secondAfter?.status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBe(secondAfter)
+      expect(withScrollback.scrollback.mode).toBe('running')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('the running grid is fitted to the live region cap, so a tall inline TUI keeps its last row reachable (nocx-zn4d)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const raf = globalThis.requestAnimationFrame
+    const fitViewport = renderer.fitViewport
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      content.setVisible(true)
+      // The initial fit uses the delivered viewport (jsdom reports no
+      // layout, so clientHeight is 0 at this point).
+      content.viewportChanged({ width: 800, height: 400, devicePixelRatio: 1 })
+      expect(fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 800, height: 400 }),
+      )
+
+      // A real scroller height, and a running block header that occupies
+      // part of it: grid and live box share the scroller, so the grid must
+      // be fitted to scroller MINUS header — the same cap setLiveHeight
+      // clamps the box to. A taller grid's last rows sit outside the box
+      // (overflow: hidden) and are unreachable: the omp report, where the
+      // composer at the bottom of the program could not be scrolled to.
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'omp' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      block!.el.getBoundingClientRect = () => ({
+        height: 24,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: 24,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+
+      // Output taller than the pane: the box is capped at scroller minus
+      // header (276) and the grid must be fitted to the SAME 276 — not the
+      // bare scroller, which would leave the last rows clipped and
+      // unscrollable inside the box.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(1000)
+      client._sessions[0].fireData('repaint')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
+      expect(fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 800, height: 276 }),
+      )
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a program repainting the same rows does not yank the scroll (nocx-6w4z)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const raf = globalThis.requestAnimationFrame
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      content.setVisible(true)
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'top' },
+      })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      block!.el.getBoundingClientRect = () => ({
+        height: 24,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: 24,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+      // jsdom does no layout, so a measured height never reflects the
+      // inline height setLiveHeight wrote. A real browser applies it next
+      // frame; the guard reads it. Emulate that so the guard is exercised.
+      const live = withScrollback.scrollback.xtermLiveContainer
+      live.getBoundingClientRect = () => ({
+        height: parseFloat(live.style.height) || 0,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: parseFloat(live.style.height) || 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+      const scrollTo = vi.fn()
+      withScrollback.scrollback.scrollbackArea.scrollTo = scrollTo
+
+      // The first sizing sets the height; the box grows to the cap.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
+      client._sessions[0].fireData('top frame')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
+      expect(scrollTo).toHaveBeenCalled()
+      scrollTo.mockClear()
+
+      // `top` repaints the same rows: the height does not change, so the
+      // early return holds and the scroll is NOT yanked while the user
+      // reads (nocx-6w4z).
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
+      client._sessions[0].fireData('top frame')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
+      expect(scrollTo).not.toHaveBeenCalled()
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a foreign OSC 133 B/A repaint (omp writing its own prompt marks) no longer blanks the live region (nocx-mu8s)', async () => {
+    // The mu8s report: omp writes ESC]133;B then ESC]133;A during the
+    // repaint where it starts working on a message. The old marker cycle
+    // read that as prompt-ready → setIdle() → `.live-idle { height: 0 }` —
+    // the running program became invisible while still taking keys. The
+    // lifecycle left the byte stream (ADR-0024 §1, nocx-u7uh.1): markers
+    // are render-only, so the live region must stay up while the
+    // authenticated attempt runs.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'omp' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+
+      // omp's repaint writes its own prompt marks. Under the severed
+      // lifecycle these are render-only: no setIdle, no zero-height live
+      // region, no editor, no keyboard handoff.
+      renderer._fireCommandMarker({ kind: 'B', line: 12, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'A', line: 12, col: 0, buffer: 'normal' })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(withScrollback.scrollback.xtermLiveContainer.className).not.toContain('live-idle')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).not.toBe('0px')
+      // The editor never takes the keyboard from a stream mark — ownership
+      // is the lifecycle axis (prompt_ready) alone (ADR-0024 §6).
+      expect(content.presentation).toBe('terminal')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })
