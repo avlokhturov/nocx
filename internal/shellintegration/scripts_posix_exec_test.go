@@ -172,14 +172,12 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// TestPosixEmitsPassportAndTaggedMarkers drives the REAL interactive dash and
-// busybox ash with an environment id set and asserts the minimal-tier
-// readiness passport is emitted exactly once at source time and the A/B/D
-// markers are tagged nocx_env=<id> — the fixture's exact sequences. The
-// minimal tier never emits C (POSIX sh has no preexec hook), and a tagged
-// stream must not invent one.
-func TestPosixEmitsPassportAndTaggedMarkers(t *testing.T) {
-	fx := loadPassportFixtures(t)
+// TestPosixEmitsNoPassport drives the REAL interactive dash and busybox ash
+// with an environment id set: the readiness passport is DELETED
+// (nocx-u7uh.11), so no OSC 636 P and no nocx_env= tagged marker may reach
+// the wire. The A/B/D markers stay untagged; the minimal tier never emits C
+// (POSIX sh has no preexec hook).
+func TestPosixEmitsNoPassport(t *testing.T) {
 	script := writeScriptFile(t, "nocx.posix", posixScript)
 
 	cases := []struct {
@@ -206,7 +204,7 @@ exit
 				os.Environ(),
 				"HOSTNAME=testhost",
 				"NOCX_SHELL_INTEGRATION=1",
-				"NOCX_ENVIRONMENT_ID="+fx.EnvironmentID,
+				"NOCX_ENVIRONMENT_ID=env-abc-123",
 				"NOCX_SCRIPT_PATH="+script,
 			)
 			cmd.Stdin = strings.NewReader(driver)
@@ -216,59 +214,14 @@ exit
 			}
 			out := string(outBytes)
 
-			passport := fx.Passports["minimal"].Sequence
-			if n := strings.Count(out, passport); n != 1 {
-				t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+			if strings.Contains(out, "]636;P") {
+				t.Errorf("the readiness passport must not be emitted (nocx-u7uh.11); output:\n%s", out)
 			}
-			for name, want := range map[string]string{
-				"tagged A":   fx.Markers["A"].Sequence,
-				"tagged B":   fx.Markers["B"].Sequence,
-				"tagged D;0": fx.Markers["D0"].Sequence,
-			} {
-				if !strings.Contains(out, want) {
-					t.Errorf("missing %s (%q); output:\n%s", name, want, out)
-				}
+			if strings.Contains(out, "nocx_env=") {
+				t.Errorf("no marker may carry a nocx_env= tag (nocx-u7uh.11); output:\n%s", out)
 			}
 			if strings.Contains(out, "]133;C") {
 				t.Errorf("minimal tier must never emit a C marker; output:\n%s", out)
-			}
-		})
-	}
-}
-
-// TestPosixRefusesPassportForMalformedEnvironmentId is the dash half of the
-// fail-open refusal test: a malformed id must produce no passport and no
-// tagged marker. The posix validation is the trickiest (no regex — case glob
-// plus a length bound), so this is where a charset slip would surface.
-func TestPosixRefusesPassportForMalformedEnvironmentId(t *testing.T) {
-	requireShell(t, "dash")
-	script := writeScriptFile(t, "nocx.posix", posixScript)
-	for _, id := range loadPassportFixtures(t).Invalid.EnvironmentIDs {
-		t.Run(id.Name, func(t *testing.T) {
-			driver := `. "$NOCX_SCRIPT_PATH"
-exit
-`
-			// #nosec G204 — test-only: literals from this file, never input.
-			cmd := exec.Command("dash", "-i")
-			cmd.Dir = t.TempDir()
-			cmd.Env = append(
-				os.Environ(),
-				"HOSTNAME=testhost",
-				"NOCX_SHELL_INTEGRATION=1",
-				"NOCX_ENVIRONMENT_ID="+id.Value,
-				"NOCX_SCRIPT_PATH="+script,
-			)
-			cmd.Stdin = strings.NewReader(driver)
-			outBytes, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Logf("dash exited non-zero (may be benign): %v", err)
-			}
-			out := string(outBytes)
-			if strings.Contains(out, "]636;P") {
-				t.Errorf("emitted a passport for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-			if strings.Contains(out, "nocx_env=") {
-				t.Errorf("tagged a marker for malformed environment id %q; output:\n%s", id.Value, out)
 			}
 		})
 	}

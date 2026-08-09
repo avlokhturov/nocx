@@ -157,6 +157,12 @@ func (k *fakeKernel) reject() {
 	k.mu.Unlock()
 }
 
+func (k *fakeKernel) rejectedCount() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.rejected
+}
+
 // acceptFrame validates exactly what the real kernel validates before any
 // state is consulted (protocol doc §4): version, lane, domain, epoch,
 // capability, then the monotonic sequence.
@@ -229,11 +235,21 @@ func (k *fakeKernel) count(evt string) int {
 // capability as a non-exported variable (the @CAP@ substitution point) and
 // then sources the embedded script, with the channel config in the
 // environment (NOCX_LIFECYCLE_*).
+// kernelHarness is the slice of the fake kernel the channelShell helper
+// drives: count, events and the refresh-push the refresh tests use. Both
+// the single-domain fakeKernel and the two-domain nestedKernel satisfy it.
+type kernelHarness interface {
+	count(evt string) int
+	events() []kernelEvent
+	sendRefresh(rid string)
+	rejectedCount() int
+}
+
 type channelShell struct {
 	t        *testing.T
 	cmd      *exec.Cmd
 	ptmx     *os.File
-	kernel   *fakeKernel
+	kernel   kernelHarness
 	listener net.Listener
 	mu       sync.Mutex
 	out      []byte
@@ -306,7 +322,7 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 	// The gate line: source the bootstrap (cap) then the hooks — the shape
 	// of the launcher rcfile's install section.
 	gate := filepath.Join(t.TempDir(), "gate")
-	gateBody := ". " + shellQuote(bootstrap) + "\n. " + shellQuote(scriptPath) + "\n"
+	gateBody := ". " + ShellQuote(bootstrap) + "\n. " + ShellQuote(scriptPath) + "\n"
 	if err := os.WriteFile(gate, []byte(gateBody), 0o600); err != nil {
 		t.Fatalf("write gate: %v", err)
 	}
@@ -325,12 +341,12 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 	switch shell {
 	case "bash":
 		rc := filepath.Join(home, ".bashrc")
-		if err := os.WriteFile(rc, []byte(promptLine+". "+shellQuote(gate)+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(rc, []byte(promptLine+". "+ShellQuote(gate)+"\n"), 0o600); err != nil {
 			t.Fatalf("write .bashrc: %v", err)
 		}
 	case "zsh":
 		zdot := t.TempDir()
-		if err := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte(promptLine+". "+shellQuote(gate)+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte(promptLine+". "+ShellQuote(gate)+"\n"), 0o600); err != nil {
 			t.Fatalf("write .zshrc: %v", err)
 		}
 		cmd.Env = append(cmd.Env, "ZDOTDIR="+zdot)
@@ -781,7 +797,7 @@ func TestBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent(t *testi
 	if s.kernel.count("start") != 0 {
 		t.Fatalf("the capability-less frame was accepted as a start: %v", s.kernel.events())
 	}
-	if s.kernel.rejected == 0 {
+	if s.kernel.rejectedCount() == 0 {
 		t.Errorf("the capability-less frame was not counted as rejected")
 	}
 
@@ -804,12 +820,12 @@ func assertNoTransportFailsOpen(t *testing.T, shell, scriptName, script, sentine
 	home := t.TempDir()
 	scriptFile := writeScriptFile(t, scriptName, script)
 	gate := filepath.Join(t.TempDir(), "gate")
-	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + shellQuote(scriptFile) + "\n"
+	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + ShellQuote(scriptFile) + "\n"
 	if werr := os.WriteFile(gate, []byte(gateBody), 0o600); werr != nil {
 		t.Fatalf("write gate: %v", werr)
 	}
 	if shell == "bash" {
-		if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("PS1='"+sentinel+"'\n. "+shellQuote(gate)+"\n"), 0o600); werr != nil {
+		if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("PS1='"+sentinel+"'\n. "+ShellQuote(gate)+"\n"), 0o600); werr != nil {
 			t.Fatalf("write .bashrc: %v", werr)
 		}
 	}
@@ -829,7 +845,7 @@ func assertNoTransportFailsOpen(t *testing.T, shell, scriptName, script, sentine
 	if shell == "zsh" {
 		promptEnv = "PROMPT=" + sentinel
 		zdot := t.TempDir()
-		if werr := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte("PROMPT='"+sentinel+"'\n. "+shellQuote(gate)+"\n"), 0o600); werr != nil {
+		if werr := os.WriteFile(filepath.Join(zdot, ".zshrc"), []byte("PROMPT='"+sentinel+"'\n. "+ShellQuote(gate)+"\n"), 0o600); werr != nil {
 			t.Fatalf("write .zshrc: %v", werr)
 		}
 		cmd.Env = append(cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null", promptEnv), "ZDOTDIR="+zdot)
@@ -938,11 +954,11 @@ func TestBashChannel_LocalDescriptorTransport(t *testing.T) {
 	home := t.TempDir()
 	script := writeScriptFile(t, "nocx.bash", bashScript)
 	gate := filepath.Join(t.TempDir(), "gate")
-	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + shellQuote(script) + "\n"
+	gateBody := "export -n __nocx_cap 2>/dev/null\n__nocx_cap='" + testCap + "'\nexport -n __nocx_cap 2>/dev/null\n. " + ShellQuote(script) + "\n"
 	if werr := os.WriteFile(gate, []byte(gateBody), 0o600); werr != nil {
 		t.Fatalf("write gate: %v", werr)
 	}
-	if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(". "+shellQuote(gate)+"\n"), 0o600); werr != nil {
+	if werr := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(". "+ShellQuote(gate)+"\n"), 0o600); werr != nil {
 		t.Fatalf("write .bashrc: %v", werr)
 	}
 

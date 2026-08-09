@@ -102,6 +102,14 @@ func TestRoundTripAllKinds(t *testing.T) {
 		}}, 7),
 		env(lifecycle.KindAccept, lifecycle.Event{Kind: lifecycle.KindAccept, Accept: &lifecycle.Accept{}}, 0),
 		env(lifecycle.KindDomainClosed, lifecycle.Event{Kind: lifecycle.KindDomainClosed, DomainClosed: &lifecycle.DomainClosedEvent{}}, 8),
+		env(lifecycle.KindDomainRequest, lifecycle.Event{Kind: lifecycle.KindDomainRequest, DomainRequest: &lifecycle.DomainRequest{
+			RequestID: "r-dom-1-0", Env: "ssh", Host: "box.example.com", User: "alice", Port: 2222,
+		}}, 9),
+		env(lifecycle.KindDomainGrant, lifecycle.Event{Kind: lifecycle.KindDomainGrant, DomainGrant: &lifecycle.DomainGrant{
+			RequestID: "r-dom-1-0", Env: "sudo",
+			Domain: "dom-2", Epoch: 2,
+			Bootstrap: "sudo --preserve-fds=3,4 -i bash --rcfile /dev/fd/4 -i\n# with a \"quote\" and a \\backslash\n",
+		}}, 0),
 	}
 
 	for _, want := range envs {
@@ -350,5 +358,63 @@ func TestMultipleGarbageRegionsReportedSeparately(t *testing.T) {
 	}
 	if regions[0].bytes != len("garbage-one") || regions[1].bytes != len("garbage-two") {
 		t.Fatalf("region byte counts wrong: %v", regions)
+	}
+}
+
+// TestDomainGrantBootstrapEscaping proves the grant's opaque bootstrap
+// survives the wire byte-identical even when it carries the shell text that
+// the shell-side extraction must not trip on: escaped quotes, backslashes,
+// newlines and a payload near the frame bound. The bootstrap is the rcfile
+// the child reads — a single mis-decoded byte is a corrupt rcfile and a
+// silent conventional fallback — so the round trip is the contract.
+func TestDomainGrantBootstrapEscaping(t *testing.T) {
+	bootstrap := "saved=$(stty -g)\n" +
+		`printf '%s\n' "a \"quoted\" value" '\' ` + "\n" +
+		strings.Repeat("# line with 'quotes' and \\backslashes\\ and \t tabs\n", 500)
+	want := env(lifecycle.KindDomainGrant, lifecycle.Event{Kind: lifecycle.KindDomainGrant, DomainGrant: &lifecycle.DomainGrant{
+		RequestID: "r-dom-7-3", Env: "su",
+		Domain: "dom-8", Epoch: 9,
+		Bootstrap: bootstrap,
+	}}, 0)
+
+	var buf bytes.Buffer
+	if _, err := Encode(&buf, want); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if buf.Len() > lifecycle.MaxFrameBytes {
+		t.Fatalf("grant frame %d bytes exceeds the %d frame bound", buf.Len(), lifecycle.MaxFrameBytes)
+	}
+	dec := NewDecoder(&buf, Config{}, nil)
+	got, err := dec.ReadFrame()
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("grant round trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestDomainRequestFieldPresence proves the optional request fields are
+// absent when unset (a sudo request carries no host), so the shell's
+// substring extraction of the grant never sees a spurious field.
+func TestDomainRequestFieldPresence(t *testing.T) {
+	want := env(lifecycle.KindDomainRequest, lifecycle.Event{Kind: lifecycle.KindDomainRequest, DomainRequest: &lifecycle.DomainRequest{
+		RequestID: "r-dom-2-1", Env: "sudo",
+	}}, 3)
+	var buf bytes.Buffer
+	if _, err := Encode(&buf, want); err != nil {
+		t.Fatal(err)
+	}
+	body := buf.Bytes()
+	if strings.Contains(string(body), "host") || strings.Contains(string(body), "user") || strings.Contains(string(body), "port") {
+		t.Fatalf("unset optional fields must be omitted from the wire, got %s", body)
+	}
+	dec := NewDecoder(&buf, Config{}, nil)
+	got, err := dec.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("request round trip mismatch:\n got %+v\nwant %+v", got, want)
 	}
 }

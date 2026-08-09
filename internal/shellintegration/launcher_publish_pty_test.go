@@ -9,23 +9,17 @@ import (
 
 // The full bootstrap launcher's acceptance surface, watched end to end on a
 // real pty against a disposable $HOME: the launcher publishes the bundle,
-// then the integrated shell emits the readiness passport naming the COMMITTED
-// generation (not "-"), and the Go publisher verifies the published state.
-
-// passportBytes is the exact OSC 636 P sequence the scripts emit for an
-// identified environment (design §5.2): protocol 1, the environment id, "-"
-// parent, script version 11, the tier, and the generation dir name.
-func passportBytes(envID, tier, generation string) string {
-	return "\x1b]636;P;1;" + envID + ";-;11;" + tier + ";" + generation + "\x07"
-}
+// the integrated shell comes up integrated, and the Go publisher verifies
+// the published state. The readiness passport is DELETED (nocx-u7uh.11):
+// the environment identity now rides the authenticated lifecycle channel,
+// and the scripts emit no OSC 636 P — asserted below.
 
 func TestBashFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	const envID = "bash-env-42"
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
-		SessionID: "sess-bash", Enhanced: true, EnvironmentID: envID,
+		SessionID: "sess-bash", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("bash launcher refused")
@@ -34,8 +28,8 @@ func TestBashFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "echo hello", "exit")
 
-	if n := strings.Count(out, passportBytes(envID, "enhanced", genDir(version))); n != 1 {
-		t.Errorf("passport naming %s emitted %d times, want exactly once; output:\n%s", genDir(version), n, out)
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted (nocx-u7uh.11); output:\n%s", out)
 	}
 	if !strings.Contains(out, "USER_RC_RAN") {
 		t.Errorf("user rc did not run; output:\n%s", out)
@@ -53,14 +47,13 @@ func TestBashFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 }
 
 // TestZshFullLauncher_PublishesAndPassportNamesGeneration is the zsh tier's
-// half: the transient-ZDOTDIR lifecycle plus the publish plus the passport.
+// half: the transient-ZDOTDIR lifecycle plus the publish.
 func TestZshFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	requireIntegrationShell(t, "zsh")
 	home := writeZshFixtureHome(t, "")
 	tmp := t.TempDir()
-	const envID = "zsh-env-7"
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellZsh, LaunchOptions{
-		SessionID: "sess-zsh", Enhanced: true, EnvironmentID: envID,
+		SessionID: "sess-zsh", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("zsh launcher refused")
@@ -69,8 +62,8 @@ func TestZshFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "echo hi", "exit")
 
-	if n := strings.Count(out, passportBytes(envID, "enhanced", genDir(version))); n != 1 {
-		t.Errorf("passport naming %s emitted %d times, want exactly once; output:\n%s", genDir(version), n, out)
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted (nocx-u7uh.11); output:\n%s", out)
 	}
 	vr, err := NewPublisher(testLogger(), NewOSFS(), filepath.Join(home, dirName)).Verify()
 	if err != nil || !vr.Installed || vr.Generation != genDir(version) {
@@ -79,8 +72,7 @@ func TestZshFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 }
 
 // TestPosixFullLauncher_PublishesAndPassportNamesGeneration is the minimal
-// tier's half: dash parses the command, the publish lands, and the passport
-// names the generation with tier minimal.
+// tier's half: dash parses the command and the publish lands.
 func TestPosixFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 	dashPath := requireIntegrationShell(t, "dash")
 	home := t.TempDir()
@@ -89,9 +81,8 @@ func TestPosixFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 		t.Fatalf("write fixture .profile: %v", err)
 	}
 	tmp := t.TempDir()
-	const envID = "posix-env-3"
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellUnknown, LaunchOptions{
-		SessionID: "sess-posix", Enhanced: true, EnvironmentID: envID,
+		SessionID: "sess-posix", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("posix launcher refused")
@@ -101,8 +92,8 @@ func TestPosixFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 		[]string{"HOME=" + home, "SHELL=" + dashPath, "TMPDIR=" + tmp, "TERM=xterm"},
 		"true", "exit")
 
-	if n := strings.Count(out, passportBytes(envID, "minimal", genDir(version))); n != 1 {
-		t.Errorf("passport naming %s emitted %d times, want exactly once; output:\n%s", genDir(version), n, out)
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted (nocx-u7uh.11); output:\n%s", out)
 	}
 	vr, err := NewPublisher(testLogger(), NewOSFS(), filepath.Join(home, dirName)).Verify()
 	if err != nil || !vr.Installed || vr.Generation != genDir(version) {
@@ -115,14 +106,13 @@ func TestPosixFullLauncher_PublishesAndPassportNamesGeneration(t *testing.T) {
 // deletes the old "transient-integrated" middle tier (integration without an
 // installed generation): the argv tiers now SOURCE the installed generation
 // files, which a failed publish never created, so the session is a plain
-// conventional terminal — a visible native prompt, no markers, no passport.
+// conventional terminal — a visible native prompt, no markers.
 func TestFullLauncher_ReadonlyHome_FallsBackToVisibleNativePrompt(t *testing.T) {
 	requireBinBash(t)
 	home := writeBashFixtureHome(t, "")
 	tmp := t.TempDir()
-	const envID = "ro-env-9"
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
-		SessionID: "sess-ro", Enhanced: true, EnvironmentID: envID,
+		SessionID: "sess-ro", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("bash launcher refused")
@@ -138,8 +128,8 @@ func TestFullLauncher_ReadonlyHome_FallsBackToVisibleNativePrompt(t *testing.T) 
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "echo hello", "exit")
 
-	if strings.Contains(out, passportBytes(envID, "enhanced", "-")) {
-		t.Errorf("passport emitted after a failed publish; the transient-integrated tier is deleted (ADR-0024 decision 4):\n%s", out)
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted (nocx-u7uh.11):\n%s", out)
 	}
 	ms := extractOscMarkers(out)
 	if countMarkers(ms, "A") != 0 || countMarkers(ms, "C") != 0 {
@@ -174,9 +164,8 @@ func TestFullLauncher_ForeignRoot_RefusedAndConventional(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmp := t.TempDir()
-	const envID = "foreign-env-1"
 	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
-		SessionID: "sess-f", Enhanced: true, EnvironmentID: envID,
+		SessionID: "sess-f", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("bash launcher refused")
@@ -185,8 +174,8 @@ func TestFullLauncher_ForeignRoot_RefusedAndConventional(t *testing.T) {
 	out := runLauncherOnPTY(t, "/bin/sh", cmd,
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
 
-	if strings.Contains(out, passportBytes(envID, "enhanced", "-")) {
-		t.Errorf("passport emitted over a foreign root; the session must be conventional:\n%s", out)
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted (nocx-u7uh.11):\n%s", out)
 	}
 	if strings.Contains(out, "No such file or directory") {
 		t.Errorf("refused publish leaked a source error onto the terminal:\n%s", out)

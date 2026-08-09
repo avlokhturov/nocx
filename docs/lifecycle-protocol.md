@@ -61,21 +61,23 @@ capability is what its bootstrap holds.
 
 ## 3. Event kinds
 
-| Kind                 | Direction       | Payload                                                                  | Meaning                                                                          |
-| -------------------- | --------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| `hello`              | shell → kernel  | `shell` (kind), `max_frame` (optional)                                   | First frame of a connection. Establishes the domain (§5).                        |
-| `accept`             | kernel → shell  | —                                                                        | The domain is live; the shell may suppress its prompt and emit lifecycle events. |
-| `start`              | shell → kernel  | `attempt` (optional), `command`                                          | A command began. §7.                                                             |
-| `complete`           | shell → kernel  | `attempt`, `exit_code` (optional), `fence`                               | A command ended. §8.                                                             |
-| `prompt_ready`       | shell → kernel  | —                                                                        | The shell is at a prompt; the editor may own keys.                               |
-| `refresh_request`    | kernel → shell  | `request`                                                                | nocx demands an authenticated state snapshot. §10.                               |
-| `snapshot`           | shell → kernel  | `request`, `shell_state`, `active_attempt`, `last_completed`, `next_seq` | The shell's authoritative state. §10.                                            |
-| `domain_established` | kernel → (fact) | —                                                                        | Published when the handshake completes; the frontend keys enhanced mode on it.   |
-| `domain_suspended`   | shell → kernel  | —                                                                        | The shell is entering a nested environment; its domain yields the lane.          |
-| `domain_activated`   | shell → kernel  | —                                                                        | The shell is back; its domain reclaims the lane.                                 |
-| `domain_closed`      | shell → kernel  | —                                                                        | The shell instance is ending.                                                    |
+| Kind                 | Direction       | Payload                                                                  | Meaning                                                                            |
+| -------------------- | --------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `hello`              | shell → kernel  | `shell` (kind), `max_frame` (optional)                                   | First frame of a connection. Establishes the domain (§5).                          |
+| `accept`             | kernel → shell  | —                                                                        | The domain is live; the shell may suppress its prompt and emit lifecycle events.   |
+| `start`              | shell → kernel  | `attempt` (optional), `command`                                          | A command began. §7.                                                               |
+| `complete`           | shell → kernel  | `attempt`, `exit_code` (optional), `fence`                               | A command ended. §8.                                                               |
+| `prompt_ready`       | shell → kernel  | —                                                                        | The shell is at a prompt; the editor may own keys.                                 |
+| `refresh_request`    | kernel → shell  | `request`                                                                | nocx demands an authenticated state snapshot. §10.                                 |
+| `snapshot`           | shell → kernel  | `request`, `shell_state`, `active_attempt`, `last_completed`, `next_seq` | The shell's authoritative state. §10.                                              |
+| `domain_established` | kernel → (fact) | —                                                                        | Published when the handshake completes; the frontend keys enhanced mode on it.     |
+| `domain_suspended`   | shell → kernel  | —                                                                        | The shell is entering a nested environment; its domain yields the lane.            |
+| `domain_activated`   | shell → kernel  | —                                                                        | The shell is back; its domain reclaims the lane.                                   |
+| `domain_closed`      | shell → kernel  | —                                                                        | The shell instance is ending.                                                      |
+| `domain_request`     | shell → kernel  | `request`, `env`, `host`/`user`/`port` (ssh)                             | The parent asks for a child domain for a nested environment it is entering. §9.    |
+| `domain_grant`       | kernel → shell  | `request`, `domain`, `epoch`, `bootstrap`                                | The answer: the child's identity and the opaque bootstrap the parent executes. §9. |
 
-`accept`, `refresh_request` and `domain_established` are kernel-originated;
+`accept`, `refresh_request` and `domain_grant` are kernel-originated;
 ingesting them from a shell is a protocol violation. Everything else is
 shell-originated.
 
@@ -127,16 +129,17 @@ A listener existing is not a channel being live (decision 3). The sequence:
 6. Timeout (`hello_timeout`, 10 s) or any failure leaves the visible native
    prompt in place.
 
-`accept`, `refresh_request` and `domain_established` are kernel-originated;
+`accept`, `refresh_request` and `domain_grant` are kernel-originated;
 ingesting them from a shell is a protocol violation. Everything else is
-shell-originated. **Two outbound paths, one boundary:** the transport port
-carries exactly two kinds of envelope — `accept` and `refresh_request`, the
-replies the shell must see. `domain_established` (and every other fact about
-domain and attempt state) is **not** a transport envelope: it is a published
-fact for the frontend projection layer, derived from the kernel's read model by
-the publication bead (`nocx-u7uh.5`/`.13`). Adapters implement the port and see
-only the two reply kinds; projection authors consume the read model. There is
-no third path.
+shell-originated. **Three outbound kinds, one boundary:** the transport port
+carries exactly three kinds of envelope — `accept`, `refresh_request` and
+`domain_grant`, the replies the shell must see. `domain_established` (and
+every other fact about domain and attempt state) is **not** a transport
+envelope: it is a published fact for the frontend projection layer, derived
+from the kernel's read model by the publication bead
+(`nocx-u7uh.5`/`.13`). Adapters implement the port and see only the three
+reply kinds; projection authors consume the read model. There is no fourth
+path.
 
 **The first authenticated connection claims the epoch.** A `hello` for an
 already-`Established` domain with a matching capability is a _reconnect_: it is
@@ -275,6 +278,54 @@ Transitions are authenticated events, never frontend stack guessing (decision 2)
 - A **top-level** domain (no parent) requires the lane to have no live domains;
   one root per lane at a time.
 
+**Nesting is a request/grant, and the stream is owned one domain at a
+time.** The parent shell detects the nested command (sudo/su/ssh) in its
+preexec hook, sends `domain_request` (`env` names the environment; `host`,
+`user`, `port` carry the ssh destination), and blocks reading the channel.
+The kernel validates the request (parent active and top-of-stack; known env
+kind; ssh requires a host) and answers `domain_grant` — addressed to the
+PARENT's connection — carrying the request echo plus, once the publisher's
+grant seam has minted the child (`kernel.RequestDomain`, the kernel stays the
+sole minter) and composed it, the child's domain id, epoch and an **opaque,
+already-substituted bootstrap** the parent executes verbatim. The bootstrap
+is opaque text: the parent never parses it, the per-epoch capability rides
+inside it (never in the environment), and an **empty bootstrap is the
+refusal** — the parent runs its command conventionally, never suspended
+under a child that cannot exist (forwarding refused, sudo policy, an
+unsupported shell).
+
+The stream-ownership interval, both ends named (the descriptor-handoff
+invariant the adapters must not break):
+
+> The **parent** owns the channel stream from its `hello` until it has read
+> the grant for its request. It then sends `domain_suspended` (a child's
+> `hello` requires the parent Suspended — never exec the child before that
+> frame is written) and execs the child with the bootstrap. The **child**
+> owns the stream from its exec until the child process exits. The parent
+> resumes at its next prompt boundary and sends `domain_activated`; only
+> that authenticated activation restores it — a close alone must not.
+
+And the failure interval, which is the one that bites:
+
+> The child never establishes (bootstrap refused, sudo policy, no
+> forwarding). The parent still resumes at its next prompt boundary and
+> still activates — the kernel accepts an activation of a parent whose
+> child never established (a Pending child is not on the stack), and a late
+> frame from that stillborn child is rejected against the restored parent.
+
+Delivery of the bootstrap is per environment: for **sudo/su** (same
+machine) the parent stages it and the child reads it through a **preserved
+descriptor** (`sudo --preserve-fds=N … --rcfile /dev/fd/N`); the per-epoch
+capability never enters a filesystem object (ADR-0024's own preference,
+recorded in its open-questions section). For **ssh** the bootstrap is a
+**rewritten command line** the parent executes — ADR-0022: the ssh command
+line is the carrier — carrying the child's forwarded lifecycle port as a
+reverse forward on that same ssh connection plus the in-band install
+payload. Where the local platform cannot preserve the descriptor (sudo
+policy, su that closes fds), the honest fallback is the conventional
+terminal, visible in the product. `docker exec` is conventional-only by
+owner decision: neither an inherited descriptor nor a loopback port crosses
+the container boundary — that is a container relay, a Tier-B transport.
 Events from a suspended, closed or lost domain are rejected against the active
 lane — stale events can never touch the live domain.
 

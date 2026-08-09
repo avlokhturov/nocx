@@ -8,10 +8,9 @@
 //
 // What is asserted: the parser-level invariants (malformed/foreign/private/
 // DCS sequences are inert; OSC 7 moves cwd and nothing else; a fence alone
-// does nothing), the tracker-level expected-id invariant (a passport cannot
-// activate a domain without a minted id), the buffer axis, and — with
-// ASSERT_AUTHORITY true — the post-ADR-0024 verdicts for the hostile cycles
-// in authority-expectations.ts. The severance (bead nocx-u7uh.1) made the
+// does nothing), the buffer axis, and — with ASSERT_AUTHORITY true — the
+// post-ADR-0024 verdicts for the hostile cycles in
+// authority-expectations.ts. The severance (bead nocx-u7uh.1) made the
 // stream render-only: the hostile cycles must leave every security-sensitive
 // projection byte-identical.
 import { describe, expect, it } from 'vitest'
@@ -32,7 +31,6 @@ const ALL_PROJECTION_KEYS: (keyof SessionProjection)[] = [
   'attemptState',
   'blockState',
   'historyCalls',
-  'environmentStack',
   'rewriteAuthority',
   'rerunAuthority',
   'cwd',
@@ -154,41 +152,6 @@ describe('parser-level invariants (pass today, must never stop passing)', () => 
   })
 })
 
-describe('passport expected-id invariant (a surviving characterization, not authority)', () => {
-  it('a passport with no minted id is ignored and accepts nothing', () => {
-    const result = replayCase(
-      CORPUS.find((c) => c.id === 'passport-no-expected')!,
-      assembleTodaySession,
-    )
-    expect(result.after.environmentStack).toBe('ignored')
-    expect(result.after.activeDomain).toBeNull()
-  })
-
-  it('a passport for a foreign id is unexpected and never accepted', () => {
-    const result = replayCase(
-      CORPUS.find((c) => c.id === 'passport-unexpected')!,
-      assembleTodaySession,
-    )
-    expect(result.after.environmentStack).toBe('unexpected')
-    expect(result.after.activeDomain).toBeNull()
-  })
-
-  it('an overlong passport is rejected by the parser bound', () => {
-    const result = replayCase(
-      CORPUS.find((c) => c.id === 'passport-overlong')!,
-      assembleTodaySession,
-    )
-    expect(result.after.environmentStack).toBe('ignored')
-  })
-
-  it('a matching passport is accepted against the app-minted id', () => {
-    const result = replayCase(
-      CORPUS.find((c) => c.id === 'passport-enhanced')!,
-      assembleTodaySession,
-    )
-    expect(result.after.activeDomain).toBe('env-ab12')
-  })
-})
 describe('authority expectations (post-ADR verdicts — asserted once ASSERT_AUTHORITY is flipped)', () => {
   it('judges the hostile corpus once ASSERT_AUTHORITY is flipped', () => {
     // This test exists so the assertions are compiled and their expectations

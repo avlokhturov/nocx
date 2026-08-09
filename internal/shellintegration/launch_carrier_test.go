@@ -18,12 +18,12 @@ import (
 // conformance criterion.
 
 // runCarrierOnPTY execs the carrier the way the pinned remote command does —
-// `exec "$HOME/.nocx/launch" <env-id>` under /bin/sh (the login shell's
+// `exec "$HOME/.nocx/launch" <session-id>` under /bin/sh (the login shell's
 // role), with SHELL naming the shell the carrier dispatches on — and returns
 // the captured output.
-func runCarrierOnPTY(t *testing.T, home, shellPath, envID string, lines ...string) string {
+func runCarrierOnPTY(t *testing.T, home, shellPath, sessionID string, lines ...string) string {
 	t.Helper()
-	cmd := `exec "$HOME/.nocx/launch" ` + shellQuote(envID)
+	cmd := `exec "$HOME/.nocx/launch" ` + ShellQuote(sessionID)
 	return runLauncherOnPTY(t, "/bin/sh", cmd,
 		[]string{"HOME=" + home, "SHELL=" + shellPath, "TERM=xterm"}, lines...)
 }
@@ -63,13 +63,14 @@ func TestLaunchCarrier_GoodManifest_BashExecsIntegratedShell(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const envID = "carrier-bash-1"
-	out := runCarrierOnPTY(t, home, bashPath, envID, "echo hi", "exit")
+	out := runCarrierOnPTY(t, home, bashPath, "sess-carrier-bash", "echo hi", "exit")
 
-	// The passport names the committed generation; the marker and the
-	// user's rc prove the INTEGRATED shell ran, not the native one.
-	if n := strings.Count(out, passportBytes(envID, "enhanced", genDir(version))); n != 1 {
-		t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+	// The user's rc and the markers prove the INTEGRATED shell ran, not
+	// the native one — and the readiness passport is deleted
+	// (nocx-u7uh.11): the environment identity rides the authenticated
+	// lifecycle channel, and the scripts emit no OSC 636 P.
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted; output:\n%s", out)
 	}
 	if !strings.Contains(out, "USER_RC_RAN") {
 		t.Errorf("user rc did not run; output:\n%s", out)
@@ -83,26 +84,24 @@ func TestLaunchCarrier_GoodManifest_PosixExecsIntegratedShell(t *testing.T) {
 	dashPath := requireIntegrationShell(t, "dash")
 	home, _ := publishForCarrier(t)
 	writeProfileMarker(t, home)
-	const envID = "carrier-posix-1"
-	out := runCarrierOnPTY(t, home, dashPath, envID, "true", "exit")
+	out := runCarrierOnPTY(t, home, dashPath, "sess-carrier-posix", "true", "exit")
 
-	if n := strings.Count(out, passportBytes(envID, "minimal", genDir(version))); n != 1 {
-		t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted; output:\n%s", out)
 	}
 	// No NATIVE_LOGIN_RAN assertion here: the minimal tier IS a login
 	// shell and reads ~/.profile natively — that is the user's rc running,
-	// not a refusal. The passport is the distinguishing signal.
+	// not a refusal.
 }
 
 func TestLaunchCarrier_GoodManifest_ZshExecsIntegratedShell(t *testing.T) {
 	zshPath := requireIntegrationShell(t, "zsh")
 	home, _ := publishForCarrier(t)
 	writeProfileMarker(t, home)
-	const envID = "carrier-zsh-1"
-	out := runCarrierOnPTY(t, home, zshPath, envID, "echo hi", "exit")
+	out := runCarrierOnPTY(t, home, zshPath, "sess-carrier-zsh", "echo hi", "exit")
 
-	if n := strings.Count(out, passportBytes(envID, "enhanced", genDir(version))); n != 1 {
-		t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, "636;P") {
+		t.Errorf("no readiness passport may be emitted; output:\n%s", out)
 	}
 	if strings.Contains(out, "NATIVE_LOGIN_RAN") {
 		t.Errorf("native login shell ran instead of the integrated one; output:\n%s", out)
@@ -113,14 +112,13 @@ func TestLaunchCarrier_GoodManifest_ZshExecsIntegratedShell(t *testing.T) {
 // refusal shape the carrier must recognise: a missing, truncated,
 // hash-mismatched or protocol-incompatible manifest, or a symlinked
 // generation file. Each must exec a NATIVE login shell (the ~/.profile
-// marker) and emit no passport and no tagged marker.
+// marker).
 func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 	requireBinBash(t)
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatal(err)
 	}
-	const envID = "carrier-bad-1"
 
 	t.Run("missing-manifest", func(t *testing.T) {
 		home, root := publishForCarrier(t)
@@ -132,7 +130,7 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 		if err := os.Remove(filepath.Join(root, manifestName)); err != nil { // #nosec G304 — test-owned.
 			t.Fatal(err)
 		}
-		out := runCarrierOnPTY(t, home, bashPath, envID, "exit")
+		out := runCarrierOnPTY(t, home, bashPath, "sess-carrier-bad", "exit")
 		assertNativeLogin(t, out)
 	})
 
@@ -146,7 +144,7 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, manifestName), data[:len(data)/2], 0o600); err != nil { // #nosec G304 — test-owned.
 			t.Fatal(err)
 		}
-		out := runCarrierOnPTY(t, home, bashPath, envID, "exit")
+		out := runCarrierOnPTY(t, home, bashPath, "sess-carrier-bad", "exit")
 		assertNativeLogin(t, out)
 	})
 
@@ -164,7 +162,7 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = f.Close()
-		out := runCarrierOnPTY(t, home, bashPath, envID, "exit")
+		out := runCarrierOnPTY(t, home, bashPath, "sess-carrier-bad", "exit")
 		assertNativeLogin(t, out)
 	})
 
@@ -180,7 +178,7 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, manifestName), data, 0o600); err != nil { // #nosec G304 — test-owned.
 			t.Fatal(err)
 		}
-		out := runCarrierOnPTY(t, home, bashPath, envID, "exit")
+		out := runCarrierOnPTY(t, home, bashPath, "sess-carrier-bad", "exit")
 		assertNativeLogin(t, out)
 	})
 
@@ -194,7 +192,7 @@ func TestLaunchCarrier_BadManifest_FailsOpenToNativeLoginShell(t *testing.T) {
 		if err := os.Symlink("/etc/hostname", filepath.Join(gen, "nocx.bash")); err != nil { // #nosec G304 — test-owned.
 			t.Fatal(err)
 		}
-		out := runCarrierOnPTY(t, home, bashPath, envID, "exit")
+		out := runCarrierOnPTY(t, home, bashPath, "sess-carrier-bad", "exit")
 		assertNativeLogin(t, out)
 	})
 }

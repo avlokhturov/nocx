@@ -21,7 +21,6 @@ import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
 import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
-import { EnvironmentPassportTracker, type PassportDisposition } from '../environment-passport'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -195,11 +194,6 @@ export class XtermRenderer implements TerminalRenderer {
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
   private _cachedCellHeight: number | null = null
-  /** This tab's readiness-passport tracker (OSC 636 P). Per-renderer, like
-   *  the snapshot store — tab 2 is never judged against tab 1's expected id.
-   *  Parse-and-report only; the consumer decides what acceptance means. */
-  readonly passportTracker = new EnvironmentPassportTracker()
-  private passportSubs: Array<(d: PassportDisposition) => void> = []
   /** This tab's command-existence store (OSC 636). Created per renderer so
    *  two tabs never share a snapshot; the editor and frozen headers of this
    *  tab read the same instance this OSC handler feeds. */
@@ -269,20 +263,13 @@ export class XtermRenderer implements TerminalRenderer {
     // be missed). ADR-0013 §8, design spec §5.4.
     this._themeUnsub = subscribeThemeChanges((t: ITheme) => this.applyTheme(t))
 
-    // OSC 636 — command-existence snapshot (command-snapshot.ts) and the
-    // readiness passport (environment-passport.ts). The stores own parse +
-    // policy; the renderer is just the wire, exactly like OSC 7/52/133. One
-    // handler feeds both: the snapshot store sees H/S, the passport tracker
-    // only P payloads. Each renderer owns its own stores, so tab 2 is never
-    // judged against tab 1's command set or expected id — the editor and
-    // frozen headers receive this same instance at the composition point
-    // (terminal-content.ts).
+    // OSC 636 — command-existence snapshot (command-snapshot.ts). The store
+    // owns parse + policy; the renderer is just the wire, exactly like OSC
+    // 7/52/133. Each renderer owns its own store, so tab 2 is never judged
+    // against tab 1's command set — the editor and frozen headers receive
+    // this same instance at the composition point (terminal-content.ts).
     this.snapshotOscDisposable = term.parser.registerOscHandler(636, (data: string) => {
       this.snapshotStore.ingest(data)
-      if (data.startsWith('P;')) {
-        const disposition = this.passportTracker.ingest(data)
-        for (const sub of this.passportSubs) sub(disposition)
-      }
       return false
     })
 
@@ -452,10 +439,6 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  onEnvironmentPassport(cb: (disposition: PassportDisposition) => void): void {
-    this.passportSubs.push(cb)
-  }
-
   onRenderFence(cb: RenderFenceCallback): void {
     this.fenceSubs.push(cb)
     this._ensureFenceOsc()
@@ -468,10 +451,6 @@ export class XtermRenderer implements TerminalRenderer {
   onRecoveryFence(cb: (hex: string) => void): void {
     this.recoverySubs.push(cb)
     this._ensureFenceOsc()
-  }
-
-  setExpectedEnvironmentId(id: string | null): void {
-    this.passportTracker.setExpectedEnvironmentId(id)
   }
 
   onBell(cb: BellCallback): void {
@@ -562,7 +541,6 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
-    this.passportSubs = []
     this.scrollDisposable?.dispose()
     this.scrollDisposable = undefined
     this.scrollSubs = []

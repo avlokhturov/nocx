@@ -40,12 +40,34 @@ const (
 	KindDomainActivated   EventKind = "domain_activated"
 	KindDomainSuspended   EventKind = "domain_suspended"
 	KindDomainClosed      EventKind = "domain_closed"
+	// KindDomainRequest asks the kernel for a child domain for a nested
+	// environment (sudo/su/ssh) the parent shell is about to enter. The
+	// shell-visible answer is KindDomainGrant; the two are one
+	// request/response pair (protocol doc §9).
+	KindDomainRequest EventKind = "domain_request"
+	// KindDomainGrant is the kernel's answer to a domain_request: the
+	// child's domain id, epoch and the opaque, already-substituted
+	// bootstrap the parent executes to launch the child. It travels the
+	// authenticated channel to the PARENT (its envelope addresses the
+	// parent); the bootstrap is opaque text the parent never parses.
+	KindDomainGrant EventKind = "domain_grant"
+)
+
+// Nested environment kinds a domain_request may name. The kernel validates
+// the kind and rejects anything else outright; the bootstrap the grant
+// carries is built per kind by the composition root (a preserved-fd launch
+// for sudo/su, a rewritten ssh line for ssh — ADR-0022).
+const (
+	EnvSudo = "sudo"
+	EnvSu   = "su"
+	EnvSSH  = "ssh"
 )
 
 // Envelope is the protocol unit. Every envelope carries the full addressing
 // tuple — version, lane, domain, epoch, sequence, capability — and one event.
 // The sequence rule (§11 of the protocol doc) applies to inbound envelopes;
-// outbound envelopes (accept, refresh_request) carry Sequence 0.
+// outbound envelopes (accept, refresh_request, domain_grant) carry
+// Sequence 0.
 type Envelope struct {
 	Version    uint8
 	Lane       LaneID
@@ -56,7 +78,6 @@ type Envelope struct {
 	Event      Event
 }
 
-// Event is a tagged payload. Exactly one payload pointer is set, matching Kind.
 type Event struct {
 	Kind              EventKind
 	Hello             *Hello
@@ -70,6 +91,8 @@ type Event struct {
 	DomainActivated   *DomainActivatedEvent
 	DomainSuspended   *DomainSuspendedEvent
 	DomainClosed      *DomainClosedEvent
+	DomainRequest     *DomainRequest
+	DomainGrant       *DomainGrant
 }
 
 // EventKind is the wire name of an event kind.
@@ -96,6 +119,8 @@ func (e Event) validInbound() bool {
 		return e.DomainSuspended != nil
 	case KindDomainClosed:
 		return e.DomainClosed != nil
+	case KindDomainRequest:
+		return e.DomainRequest != nil
 	}
 	return false
 }
@@ -173,6 +198,48 @@ type (
 
 	// DomainClosedEvent ends the top-of-stack domain.
 	DomainClosedEvent struct{}
+
+	// DomainRequest asks the kernel to mint a child domain for a nested
+	// environment the parent shell is about to enter. The request must
+	// carry the environment kind; host/user/port are the ssh destination
+	// the backend composes the rewritten line from (ADR-0022: the ssh
+	// command line is the carrier). RequestID is the shell's own nonce:
+	// the grant echoes it, so a stale grant from an earlier request can
+	// never be mistaken for the answer to this one.
+	DomainRequest struct {
+		RequestID RequestID `json:"request"`
+		Env       string    `json:"env"`
+		Host      string    `json:"host,omitempty"`
+		User      string    `json:"user,omitempty"`
+		Port      int       `json:"port,omitempty"`
+	}
+
+	// DomainGrant is the kernel's answer to a domain_request: the child's
+	// domain id and epoch, plus the opaque, already-substituted bootstrap
+	// the parent executes to launch the child (a rewritten command line
+	// for ssh, a preserved-fd launch for sudo/su). The bootstrap is opaque
+	// text — the parent never parses it; the per-epoch capability rides
+	// inside it, never in the environment. The envelope addresses the
+	// PARENT (its lane/domain/epoch/capability): the grant is delivered
+	// to the parent's connection on the parent's transport. An empty
+	// bootstrap is the refusal: the parent runs its command conventionally
+	// (no suspension), the honest fallback when no child could be minted.
+	DomainGrant struct {
+		RequestID RequestID `json:"request"`
+		// Env/Host/User/Port are the request's context, echoed by the
+		// kernel so the bootstrap builder can compose the right launch
+		// without state of its own.
+		Env  string `json:"env,omitempty"`
+		Host string `json:"host,omitempty"`
+		User string `json:"user,omitempty"`
+		Port int    `json:"port,omitempty"`
+		// Domain/Epoch/Bootstrap are the answer, filled by the publisher's
+		// grant seam (which mints via kernel.RequestDomain — the kernel
+		// stays the sole minter) before delivery.
+		Domain    DomainID `json:"domain"`
+		Epoch     uint64   `json:"epoch"`
+		Bootstrap string   `json:"bootstrap,omitempty"`
+	}
 )
 
 // ShellState is the shell's answer about where it is.

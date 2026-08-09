@@ -178,13 +178,13 @@ func (s *Impl) InBandBootstrap(sessionID string, ch *ChannelConfig) (InBandPlan,
 	}
 	lane, dom, epoch, port := "", "", "0", ""
 	if ch != nil {
-		lane = shellQuote(ch.Lane)
-		dom = shellQuote(ch.Domain)
+		lane = ShellQuote(ch.Lane)
+		dom = ShellQuote(ch.Domain)
 		epoch = fmt.Sprintf("%d", ch.Epoch)
 		port = fmt.Sprintf("%d", ch.Port)
 	}
 	payload := inBandDispatcher
-	payload = strings.ReplaceAll(payload, "@SID@", shellQuote(sessionID))
+	payload = strings.ReplaceAll(payload, "@SID@", ShellQuote(sessionID))
 	payload = strings.ReplaceAll(payload, "@LANE@", lane)
 	payload = strings.ReplaceAll(payload, "@DOM@", dom)
 	payload = strings.ReplaceAll(payload, "@EPOCH@", epoch)

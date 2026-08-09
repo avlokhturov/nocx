@@ -58,7 +58,7 @@ import { pushOverlay, popOverlay } from './ui/overlay/stack'
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
 // The shared fixture mock implements the full TerminalRenderer surface,
-// including P2's passport methods and the _firePassport test seam.
+// including the recovery-fence seam and the _fire* test helpers.
 vi.mock('./renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
 }))
@@ -1616,6 +1616,132 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const params = recordCall![1] as { command: string; status: string; exitCode: number }
       expect(params.command).toBe('make')
       expect(params.status).toBe('success')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('the whole authenticated cycle: submit attaches, output stays visible, the completion freezes the block, the status persists exactly once, and the next command reaches the shell', async () => {
+    // The epic's positive criterion, watched end to end through the real
+    // composition root (ADR-0024 §5–§7): in an authenticated session the
+    // user submits a command, the authenticated start attaches to the app
+    // attempt, ALL output stays visible, Complete plus fence freezes the
+    // complete block, the exit status persists exactly once, PromptReady
+    // returns the editor, and the next submitted command reaches the shell.
+    const client = makeClient()
+    const callMock = client.call
+    let recordCalls = 0
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        recordCalls++
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'echo hello',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const pasteSpy = renderer.paste
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+
+      // 1. The authenticated prompt gives the editor the keyboard.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+
+      // 2. The user submits; the command reaches the shell BEFORE any
+      //    published start, and the app-owned attempt opens a running block.
+      ed.insertText('echo hello')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      // The app-owned attempt opens BEFORE the pty write; the write itself
+      // lands in the microtask after the submit RPC settles.
+      await vi.waitFor(() => expect(pasteSpy).toHaveBeenCalledWith('echo hello'))
+
+      // 3. The authenticated start attaches to the app attempt; the pane
+      //    stays in the running layout with the block visible — output is
+      //    never hidden by the lifecycle (nocx-u7uh.25).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'echo hello' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(
+        withScrollback.scrollback.scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
+
+      // 4. Output lands and stays visible while the command runs.
+      renderer.write('hello\n')
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+
+      // 5. Complete plus fence freezes the complete block with the
+      //    authenticated status.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 1,
+          fence: 'b'.repeat(64),
+          completedAt: '2026-08-09T00:00:02Z',
+        },
+      })
+      const frozen = withScrollback.scrollback.blockManager.blocks[0]
+      expect(frozen.status).toBe('failure')
+      expect(frozen.exitCode).toBe(1)
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+
+      // 6. The exit status persists exactly once — one history.record for
+      //    the completed app-owned attempt.
+      await vi.waitFor(() => expect(recordCalls).toBe(1))
+      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
+      const params = recordCall![1] as { command: string; status: string; exitCode: number }
+      expect(params.command).toBe('echo hello')
+      expect(params.status).toBe('failure')
+      expect(params.exitCode).toBe(1)
+
+      // 7. PromptReady returns the editor.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+
+      // 8. The next submitted command reaches the shell and opens a fresh
+      //    attempt — the cycle restarts, not the previous block.
+      ed.insertText('echo again')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(pasteSpy).toHaveBeenLastCalledWith('echo again'))
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(2)
+      expect(withScrollback.scrollback.blockManager.blocks[1].status).toBe('running')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView

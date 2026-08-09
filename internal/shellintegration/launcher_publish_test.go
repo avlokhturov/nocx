@@ -40,28 +40,6 @@ func versionPlus(t *testing.T, delta int) string {
 // interrupted at a boundary, the previous activation stays byte-identical and
 // the next attempt converges.
 
-// TestFullLauncher_EnvBlockCarriesEnvironmentID: NOCX_ENVIRONMENT_ID is
-// exported exactly when set — the piece P2 could not verify — and is
-// independent of Enhanced (the passport is gated on the id, never the mode).
-func TestFullLauncher_EnvBlockCarriesEnvironmentID(t *testing.T) {
-	with := launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "sess", EnvironmentID: "env-abc-123"})
-	if !strings.Contains(with, "NOCX_ENVIRONMENT_ID='env-abc-123'\n") {
-		t.Errorf("env block does not export the id: %q", with)
-	}
-	if !strings.Contains(with, " NOCX_ENVIRONMENT_ID\n") {
-		t.Errorf("env block does not export the id var: %q", with)
-	}
-	without := launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "sess"})
-	if strings.Contains(without, "NOCX_ENVIRONMENT_ID") {
-		t.Errorf("env block exports the id when unset: %q", without)
-	}
-	// A hostile id is shell-quoted like every other value in the block.
-	quoted := launcherEnvBlock(LaunchOptions{EnvironmentID: "a'b"})
-	if !strings.Contains(quoted, `NOCX_ENVIRONMENT_ID='a'\''b'`) {
-		t.Errorf("env block does not shell-quote the id: %q", quoted)
-	}
-}
-
 // TestFullLauncher_PreludeIsOneLineNoSingleQuotes: the publish prelude
 // travels inside the outer command's single-quoted argument, which a csh
 // login shell would split on an embedded quote or newline.
@@ -72,7 +50,7 @@ func TestFullLauncher_PreludeIsOneLineNoSingleQuotes(t *testing.T) {
 	}
 	for _, kind := range []ShellKind{ShellBash, ShellZsh, ShellUnknown, ShellAuto} {
 		cmd, _, ok := NewRemoteLauncher().StartCommand(kind, LaunchOptions{
-			SessionID: "s", Enhanced: true, EnvironmentID: "env-1",
+			SessionID: "s", Enhanced: true,
 		})
 		if !ok {
 			t.Fatalf("%s refused", kind)

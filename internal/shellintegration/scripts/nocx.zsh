@@ -11,21 +11,6 @@ if [[ -n "${__nocx_loaded:-}" ]]; then
 fi
 __nocx_loaded=1
 
-# Environment identity — the readiness passport (OSC 636 ; P) and the
-# nocx_env= tag on every OSC 133 marker. NOCX_ENVIRONMENT_ID is minted by the
-# backend delivery planner per attempt and exported by the launcher before
-# this script is sourced; a shell without it (transient-integrated, raw, or a
-# child shell inside tmux/sudo) emits no passport and no tagged marker —
-# fail-open, exactly the pre-passport behaviour. The id is restricted to
-# [A-Za-z0-9._-]{1,64}; a marker is tagged only when the id is present AND
-# well-formed, because a malformed id must never reach the wire.
-__nocx_env_id="${NOCX_ENVIRONMENT_ID:-}"
-__nocx_parent_env_id="${NOCX_PARENT_ENVIRONMENT_ID:--}"
-__nocx_generation="${NOCX_GENERATION:--}"
-__nocx_tagged=0
-if [[ -n "$__nocx_env_id" ]] && [[ "$__nocx_env_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-    __nocx_tagged=1
-fi
 
 # --- Authenticated lifecycle channel (ADR-0024, docs/lifecycle-protocol.md) ---
 # The command lifecycle rides a channel that is not the tty; every envelope
@@ -300,19 +285,14 @@ __nocx_capture_status() {
 }
 
 # Emit one OSC 133 lifecycle marker — \e]133;A, \e]133;B, \e]133;C or
-# \e]133;D[;<exit>] — tagged with the environment id (nocx_env=<id>) when
-# this shell is an identified environment and bare otherwise. Untagged
-# markers drive block boundaries exactly as before; the tag is what lets the
-# renderer attribute a marker to an environment (spec §5.2).
+# \e]133;D[;<exit>]. A/B partition prompt bytes from output bytes for
+# rendering; C/D are the standard's command-boundary markers, kept for
+# third-party interop (ADR-0024 decision 1 leaves the decision open: nocx
+# no longer consumes them, but any other tool reading the stream still can,
+# and they carry no authority here).
 __nocx_marker() {
     local __kind="$1" __code="${2:-}"
-    if [[ "${__nocx_tagged:-0}" == "1" ]]; then
-        if [[ -n "$__code" ]]; then
-            builtin printf '\e]133;%s;%s;nocx_env=%s\a' "$__kind" "$__code" "$__nocx_env_id"
-        else
-            builtin printf '\e]133;%s;nocx_env=%s\a' "$__kind" "$__nocx_env_id"
-        fi
-    elif [[ -n "$__code" ]]; then
+    if [[ -n "$__code" ]]; then
         builtin printf '\e]133;%s;%s\a' "$__kind" "$__code"
     else
         builtin printf '\e]133;%s\a' "$__kind"
@@ -419,11 +399,6 @@ precmd_functions=(__nocx_capture_status ${precmd_functions:#__nocx_capture_statu
 
 # Non-printing B marker (zsh %{...%} so it takes zero prompt width).
 __nocx_b_marker=$'%{\e]133;B\a%}'
-if [[ "${__nocx_tagged:-0}" == "1" ]]; then
-    # The id is [A-Za-z0-9._-]{1,64} — no '%' or '}' can reach PROMPT, so
-    # the %{...%} non-printing wrapper cannot be forged by the value.
-    __nocx_b_marker=$'%{\e]133;B;nocx_env='"$__nocx_env_id"$'%}'
-fi
 
 
 if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
@@ -475,42 +450,9 @@ if [[ "${NOCX_PROMPT_MODE:-}" == "marker-only" ]]; then
         precmd_functions=(${precmd_functions:#__nocx_marker_only_prompt} __nocx_marker_only_prompt)
     fi
 elif [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
-    if [[ "${__nocx_tagged:-0}" == "1" ]]; then
-        PS1="${PS1:-}"$'%{\e]133;B;nocx_env='"$__nocx_env_id"$'%}'
-    else
-        PS1="${PS1:-}"$'%{\e]133;B\a%}'
-    fi
+    PS1="${PS1:-}"$'%{\e]133;B\a%}' 
     __nocx_prompt_wrapped=1
 fi
-
-# Readiness passport — OSC 636 ; P ; <protocolVersion> ; <environmentId> ;
-# <parentEnvironmentId> ; <scriptVersion> ; <tier> ; <generation> ST (spec
-# §5.2). Announced ONCE, at source time, before the first prompt. The
-# environment id, parent and generation travel in env vars set by the
-# launcher; protocol version, script version and tier are static here. Every
-# field is [A-Za-z0-9._-]{1,64}; when any env-provided field is absent or
-# malformed NO passport is emitted — a passport the renderer would reject
-# must not be sent (fail-open). The renderer accepts a passport only when
-# its id matches the one minted for the attempt in flight; a duplicate or
-# unexpected id changes nothing.
-__nocx_protocol_version='1'
-__nocx_script_version='11'
-__nocx_tier='enhanced'
-__nocx_passport_ok=0
-if [[ "${__nocx_tagged:-0}" == "1" ]] \
-    && [[ "$__nocx_parent_env_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] \
-    && [[ "$__nocx_generation" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-    __nocx_passport_ok=1
-fi
-__nocx_passport_emit() {
-    if [[ "${__nocx_passport_ok:-0}" != "1" ]]; then
-        return
-    fi
-    builtin printf '\e]636;P;%s;%s;%s;%s;%s;%s\a' \
-        "$__nocx_protocol_version" "$__nocx_env_id" "$__nocx_parent_env_id" \
-        "$__nocx_script_version" "$__nocx_tier" "$__nocx_generation"
-}
-__nocx_passport_emit
 
 # Restore a visible native prompt. Real caller: the marker-only prompt
 # hook's recovered branch (ADR-0024 decision 8) — after the lifecycle channel

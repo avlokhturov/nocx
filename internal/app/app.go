@@ -261,7 +261,15 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	shint := shellintegration.New(logger)
-	ptf := &localPTYFactory{log: logger, shint: shint}
+	// The child-domain registries (nocx-u7uh.11): the grant builder needs
+	// to know each lifecycle transport's kind (fd vs forwarded port) and
+	// each lane's owning session before it can compose a child bootstrap.
+	// They are fed by the two adapter factories below and by the same
+	// registerLane closure that binds lanes to the transport's session
+	// registry.
+	childTransports := newTransportRegistry()
+	childSessions := newSessionRegistry()
+	ptf := &localPTYFactory{log: logger, shint: shint, transports: childTransports}
 	sess := session.New(logger, ptf)
 
 	// SSH config resolver: shared by both the SSH client and the profile
@@ -552,8 +560,15 @@ func New(opts ...Option) (*App, error) {
 	// a product decision, and the composition root is where product
 	// decisions belong. It is the shell's own handshake budget, so the
 	// backend never outwaits the shell it is gating.
-	lifecyclePub := lifecyclepub.New(lifecycleKernel,
-		lifecyclepub.WithEstablishmentTimeout(lifecycle.HelloTimeout))
+	var lifecyclePub *lifecyclepub.Publisher
+	lifecyclePub = lifecyclepub.New(lifecycleKernel,
+		lifecyclepub.WithEstablishmentTimeout(lifecycle.HelloTimeout),
+		// The child-domain bootstrap builder (nocx-u7uh.11): the single
+		// owner of "how do we reach a host" (ADR-0022) behind the
+		// domain_grant outbound. The kernel stays the sole minter; this
+		// closure mints through the publisher and composes the opaque
+		// launch text the parent executes.
+		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger, lifecyclePub, shint, childTransports, childSessions)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -565,7 +580,7 @@ func New(opts ...Option) (*App, error) {
 	// (AD-4), and refusal (the remote sshd will not forward) leaves the
 	// session conventional. Before this line the remote adapter was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
-	remoteLifecycle := &remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger}
+	remoteLifecycle := &remoteLifecycleProvider{client: sshClient, kernel: lifecyclePub, logger: logger, transports: childTransports}
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
@@ -608,6 +623,7 @@ func New(opts ...Option) (*App, error) {
 	registerLane := func(lane lifecycle.LaneID, sid string) {
 		if sid != "" {
 			tp.RegisterLifecycleLane(lane, session.ID(sid))
+			childSessions.register(lane, sid)
 		}
 	}
 	remoteLifecycle.registerLane = registerLane
@@ -807,6 +823,10 @@ type localPTYFactory struct {
 	log    log.Logger
 	shint  shellintegration.ShellIntegration
 	kernel lifecyclechannel.Kernel
+	// transports records each local adapter's transport kind so the child
+	// grant builder knows the child rides the inherited descriptor
+	// (nocx-u7uh.11).
+	transports *transportRegistry
 	// registerLane binds a minted lifecycle lane to the session that owns
 	// it, so published facts route to the right subscriber. Wired at the
 	// composition root once the transport exists; nil (tests, or a server
@@ -848,6 +868,9 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		lifecyclechannel.WithHelloTimeout(lifecycle.HelloTimeout))
 	if err != nil {
 		return nil, err
+	}
+	if f.transports != nil {
+		f.transports.register(ch.TransportID(), transportKind{local: true})
 	}
 	// The local bootstrap (nocx-u7uh.21): bash starts with a transient
 	// --rcfile carrying THIS session's capability and recovery fence in its
@@ -1011,9 +1034,8 @@ func (a *remoteLauncherAdapter) StartCommand(shell ssh.ShellKind, opts ssh.Launc
 	cmd, reason, ok := a.inner.StartCommand(
 		shellintegration.ShellKind(shell),
 		shellintegration.LaunchOptions{
-			SessionID:     opts.SessionID,
-			Enhanced:      opts.Enhanced,
-			EnvironmentID: opts.EnvironmentID,
+			SessionID: opts.SessionID,
+			Enhanced:  opts.Enhanced,
 			// The lifecycle channel (ADR-0024 decision 2 "Over SSH"): the
 			// port becomes NOCX_LIFECYCLE_PORT and the capability the
 			// rcfile's @CAP@. Empty when no channel was established — the
@@ -1068,18 +1090,14 @@ func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReaso
 
 // remoteLifecycleProvider implements ssh.RemoteLifecycle with the lifecycle
 // kernel and the ssh client (ADR-0024 decision 2 "Over SSH"; bead
-// nocx-u7uh.4). Establish acquires a tunnel lease on the SAME pooled
-// connection the session uses (AD-4: same pool key, same connection —
-// envelopes come back over the connection the session already has), asks
-// the remote sshd to listen on loopback via lifecycleremote.New, and mints
-// the domain. Refusal — AllowTcpForwarding off, or a bind outside
-// PermitListen — surfaces as ErrForwardingRefused, detectable synchronously
-// and NOT distinguishable: the ssh layer then opens a conventional terminal
-// and no diagnostic names a policy.
 type remoteLifecycleProvider struct {
 	client *ssh.RealClient
 	kernel lifecyclechannel.Kernel
 	logger log.Logger
+	// transports records each remote adapter's transport kind and its
+	// forwarded port so the child grant builder can compose the child's
+	// launch (nocx-u7uh.11).
+	transports *transportRegistry
 	// registerLane binds the minted lane to the session that owns it
 	// (RegisterLifecycleLane at the transport), so the published facts of
 	// this remote domain route to the right subscriber. Wired at the
@@ -1105,6 +1123,9 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 	if err != nil {
 		_ = tc.Close()
 		return ssh.RemoteLifecycleLaunch{}, nil, err
+	}
+	if p.transports != nil {
+		p.transports.register(adapter.TransportID(), transportKind{local: false, port: cfg.Port})
 	}
 	// The session id rides the connect options (ssh.WithSessionID); apply
 	// them to a scratch config to read it back — the lane must be bound to

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"io"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -35,6 +36,12 @@ type Kernel struct {
 	attempts map[AttemptID]*ExecutionAttempt
 	ports    map[TransportID]Port
 }
+
+// requestIDRe bounds a shell-minted domain-request id: [A-Za-z0-9._-]{1,64}.
+// The id is the shell's nonce, echoed by the grant; the shape keeps it out
+// of any quoting the shell side does and makes a malformed id a rejection
+// rather than a string compared by accident.
+var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // New builds a Kernel with the given options. A nil Now uses time.Now; a nil
 // Rand uses crypto/rand.Reader.
@@ -200,6 +207,8 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		out, err = k.applyActivate(d, ls, env)
 	case KindDomainClosed:
 		out, err = k.applyClose(d, ls, env)
+	case KindDomainRequest:
+		out, err = k.applyDomainRequest(d, ls, env)
 	default:
 		return nil, ErrIllegalEvent
 	}
@@ -664,6 +673,58 @@ func (k *Kernel) applyClose(d *Domain, ls *laneState, env Envelope) ([]Outbound,
 	k.unknownOpenAttempts(d.ID) // the shell is gone; no completion will come
 	k.setLifecycle(ls, LifecycleNative, "", "")
 	return nil, nil
+}
+
+func (k *Kernel) applyDomainRequest(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	req := env.Event.DomainRequest
+	if req.RequestID == "" {
+		return nil, ErrRequestIDShape
+	}
+	// The request id is the shell's own nonce; the grant echoes it so a
+	// stale grant can never answer a newer request. The shape bound keeps
+	// it out of any quoting the shell side does: [A-Za-z0-9._-]{1,64}.
+	if !requestIDRe.MatchString(string(req.RequestID)) {
+		return nil, ErrRequestIDShape
+	}
+	switch req.Env {
+	case EnvSudo, EnvSu, EnvSSH:
+		// Known kinds only; an unknown env is a malformed request, never a
+		// silent conventional fallback (the refusal must be explicit).
+	default:
+		return nil, ErrBadRequest
+	}
+	if req.Env == EnvSSH && req.Host == "" {
+		return nil, ErrBadRequest // no destination: nothing to compose a line for
+	}
+	if req.Port < 0 || req.Port > 65535 {
+		return nil, ErrBadRequest
+	}
+	// The kernel validates and mints nothing here: the grant's child is
+	// minted by the publisher seam (kernel.RequestDomain — the kernel
+	// stays the sole minter), which also picks the child's transport and
+	// builds the bootstrap. This outbound is the request echo; the seam
+	// enriches it (or delivers it as the empty-bootstrap refusal).
+	return []Outbound{k.grantOutbound(d, req)}, nil
+}
+
+func (k *Kernel) grantOutbound(d *Domain, req *DomainRequest) Outbound {
+	return Outbound{
+		Transport: d.Transport,
+		Envelope: Envelope{
+			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
+			Epoch: d.Epoch, Capability: d.capability,
+			Event: Event{Kind: KindDomainGrant, DomainGrant: &DomainGrant{
+				RequestID: req.RequestID,
+				Env:       req.Env,
+				Host:      req.Host,
+				User:      req.User,
+				Port:      req.Port,
+			}},
+		},
+	}
 }
 
 func (k *Kernel) applySnapshot(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {

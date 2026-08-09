@@ -12,11 +12,9 @@ import "strings"
 // next connection bootstraps again (§3.2). An `ssh` that fails with 127 is a
 // bug in this design, never a user-visible outcome.
 //
-// The arguments are the environment id minted for this attempt and the
-// session id (AD-7); they are exported as NOCX_ENVIRONMENT_ID and
-// NOCX_SESSION_ID and validated by the shell scripts themselves — an
-// absent or malformed id means no passport and no tagged marker
-// (fail-open). The second argument is the nocx-mlm7 P7 amendment of the
+// The argument is the session id (AD-7), exported as NOCX_SESSION_ID and
+// validated by the shell scripts themselves — an absent id means no
+// marker-only mode (fail-open). The nocx-mlm7 P7 amendment of the
 // 2026-08-05 delivery-modes design: the compact path carries the session
 // id exactly like the argv launchers do, so the ownership handshake is
 // not degraded on installed hosts.
@@ -29,7 +27,7 @@ import "strings"
 const launchCarrierTemplate = `#!/bin/sh
 # nocx launch carrier — the compact activation entry point (design §3.3).
 # Reads manifest.json only; refuses an incomplete or protocol-incompatible
-# generation and in that case execs a native login shell with no passport.
+# generation and in that case execs a native login shell.
 __nocx_root="${HOME}/.nocx"
 __nocx_manifest="$__nocx_root/manifest.json"
 __nocx_protocol_version="1"
@@ -68,8 +66,7 @@ for __nocx_f in nocx.bash nocx.zsh nocx.posix; do
     [ -n "$__nocx_actual" ] || __nocx_native
     [ "$__nocx_expected" = "sha256:$__nocx_actual" ] || __nocx_native
 done
-export NOCX_ENVIRONMENT_ID="${1-}"
-export NOCX_SESSION_ID="${2-}"
+export NOCX_SESSION_ID="${1-}"
 export NOCX_GENERATION="$__nocx_generation"
 export NOCX_SHELL_INTEGRATION=1
 export NOCX_PROMPT_MODE=marker-only

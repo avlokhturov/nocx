@@ -54,6 +54,8 @@ var (
 	ErrPromptOverAttempt     = errors.New("lifecycle: prompt ready over an open attempt")
 	ErrNoActiveDomain        = errors.New("lifecycle: lane has no active domain")
 	ErrOversizeCommand       = errors.New("lifecycle: command exceeds the frame command budget")
+	ErrBadRequest            = errors.New("lifecycle: domain request is malformed or names an unsupported environment")
+	ErrRequestIDShape        = errors.New("lifecycle: domain request id has an unexpected shape")
 
 	// Snapshot (decision 7).
 	ErrSnapshotUnexpected = errors.New("lifecycle: snapshot without an outstanding refresh request")

@@ -93,12 +93,6 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
-	// EnvironmentID is the environment-transition id minted for this
-	// attempt (2026-08-05 delivery-modes design §5.3). Exported as
-	// NOCX_ENVIRONMENT_ID; the far shell emits the readiness passport and
-	// tags its markers only when it is set and well-formed, so an empty
-	// value is the fail-open default (no passport, no tagged marker).
-	EnvironmentID string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
 	// exported to the environment. Lane, Domain and Epoch are names, not

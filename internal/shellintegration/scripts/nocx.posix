@@ -32,50 +32,6 @@ if [ -n "${__nocx_loaded:-}" ]; then
 fi
 __nocx_loaded=1
 
-# Environment identity — the readiness passport (OSC 636 ; P) and the
-# nocx_env= tag on every OSC 133 marker. NOCX_ENVIRONMENT_ID is minted by
-# the backend delivery planner per attempt and exported by the launcher;
-# a shell without it (transient-integrated, raw, or a child shell inside
-# tmux/sudo) emits no passport and no tagged marker — fail-open, exactly the
-# pre-passport behaviour. POSIX sh has no regex, so the charset check is a
-# case glob plus a length bound.
-__nocx_env_id="${NOCX_ENVIRONMENT_ID:-}"
-__nocx_parent_env_id="${NOCX_PARENT_ENVIRONMENT_ID:--}"
-__nocx_generation="${NOCX_GENERATION:--}"
-
-# 0/1 exit status: the value is a valid passport field ([A-Za-z0-9._-]{1,64}).
-__nocx_ok_field() {
-    case "$1" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-    esac
-    [ "${#1}" -le 64 ]
-}
-
-__nocx_tagged=0
-if __nocx_ok_field "$__nocx_env_id"; then
-    __nocx_tagged=1
-fi
-
-# Readiness passport — OSC 636 ; P ; <protocolVersion> ; <environmentId> ;
-# <parentEnvironmentId> ; <scriptVersion> ; <tier> ; <generation> ST (spec
-# §5.2). Emitted ONCE, at source time, from the main shell — NOT from PS1,
-# which forks per prompt and would re-announce every prompt. Every field is
-# [A-Za-z0-9._-]{1,64}; when any env-provided field is absent or malformed
-# no passport is emitted (fail-open).
-__nocx_protocol_version=1
-__nocx_script_version=11
-__nocx_tier=minimal
-__nocx_passport_ok=0
-if [ "${__nocx_tagged:-0}" = 1 ] && __nocx_ok_field "$__nocx_parent_env_id" && __nocx_ok_field "$__nocx_generation"; then
-    __nocx_passport_ok=1
-fi
-__nocx_passport_emit() {
-    [ "${__nocx_passport_ok:-0}" = 1 ] || return 0
-    printf '\033]636;P;%s;%s;%s;%s;%s;%s\007' \
-        "$__nocx_protocol_version" "$__nocx_env_id" "$__nocx_parent_env_id" \
-        "$__nocx_script_version" "$__nocx_tier" "$__nocx_generation"
-}
-__nocx_passport_emit
 
 # URL-encode the bytes that would break the OSC 7 payload: space, tab,
 # newline — the same set as the bash script. POSIX sh has no
@@ -103,21 +59,12 @@ __nocx_prompt() {
     __nocx_exit=$?
     __nocx_host=${HOSTNAME:-}
     __nocx_host=${__nocx_host%%.*}
-    if [ "${__nocx_tagged:-0}" = 1 ]; then
-        printf '\033]133;D;%s;nocx_env=%s\007' "$__nocx_exit" "$__nocx_env_id"
-        printf '\033]133;A;nocx_env=%s\007' "$__nocx_env_id"
-    else
-        printf '\033]133;D;%s\007' "$__nocx_exit"
-        printf '\033]133;A\007'
-    fi
+    printf '\033]133;D;%s\007' "$__nocx_exit"
+    printf '\033]133;A\007' 
     printf '\033]7;file://%s%s\007' \
         "$(__nocx_encode_url "$__nocx_host")" \
         "$(__nocx_encode_url "$PWD")"
-    if [ "${__nocx_tagged:-0}" = 1 ]; then
-        printf '\033]133;B;nocx_env=%s\007' "$__nocx_env_id"
-    else
-        printf '\033]133;B\007'
-    fi
+    printf '\033]133;B\007' 
 }
 # Single-quoted on purpose: double quotes would expand $? once, at install
 # time, and freeze that value into the prompt forever — a naive

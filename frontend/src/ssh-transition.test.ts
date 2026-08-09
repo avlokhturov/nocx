@@ -15,7 +15,6 @@ import {
   buildRewrite,
   planSsh,
   buildBootstrapRewrite,
-  buildInstalledRewrite,
   applyProfile,
   typedDestinationParts,
   type SshPlan,
@@ -455,72 +454,6 @@ describe('buildBootstrapRewrite (nocx-pu4.6 + nocx-sxdd consume-once)', () => {
   })
 })
 
-describe('buildInstalledRewrite (nocx-nl6q §3.3 compact installed form)', () => {
-  const plan = (line: string) => planSsh(line, 0) as SshPlan
-
-  const remote = (id: string) =>
-    `if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" ${id}; else exec "\${SHELL:-/bin/sh}" -l; fi`
-
-  it('submits the ssh with the guard travelling as the remote command', () => {
-    expect(buildInstalledRewrite(plan('ssh pi@192.168.0.93'), 'env-1')).toBe(
-      `ssh -t pi@192.168.0.93 '${remote('env-1')}'`,
-    )
-  })
-
-  it('preserves the typed options in the integrated command', () => {
-    expect(buildInstalledRewrite(plan('ssh -p 2222 host'), 'env-1')).toBe(
-      `ssh -t -p 2222 host '${remote('env-1')}'`,
-    )
-    expect(buildInstalledRewrite(plan('ssh -o "StrictHostKeyChecking no" host'), 'env-1')).toBe(
-      `ssh -t -o "StrictHostKeyChecking no" host '${remote('env-1')}'`,
-    )
-  })
-
-  it('does not double -t when already present', () => {
-    expect(buildInstalledRewrite(plan('ssh -t host'), 'env-1')).toBe(
-      `ssh -t host '${remote('env-1')}'`,
-    )
-  })
-
-  it('no local guard: ssh is called unconditionally', () => {
-    const out = buildInstalledRewrite(plan('ssh host'), 'env-1')!
-    expect(out.startsWith('ssh ')).toBe(true)
-    expect(out).not.toContain('if [ -x ~/.nocx/launch ]')
-    expect(out).not.toContain('else ssh host')
-  })
-  it('the installed form is compact: 130 bytes for a plain login', () => {
-    const out = buildInstalledRewrite(plan('ssh pi@raspberrypi'), 'env-1')!
-    expect(new TextEncoder().encode(out).byteLength).toBe(130)
-    expect(new TextEncoder().encode(out).byteLength).toBeLessThanOrEqual(4095)
-  })
-
-  it('refuses an environment id outside the passport charset', () => {
-    expect(buildInstalledRewrite(plan('ssh host'), 'has space')).toBeNull()
-    expect(buildInstalledRewrite(plan('ssh host'), "a'b")).toBeNull()
-    expect(buildInstalledRewrite(plan('ssh host'), 'a/b')).toBeNull()
-    expect(buildInstalledRewrite(plan('ssh host'), '~')).toBeNull()
-    expect(buildInstalledRewrite(plan('ssh host'), '')).toBeNull()
-    expect(buildInstalledRewrite(plan('ssh host'), 'x'.repeat(65))).toBeNull()
-    expect(buildInstalledRewrite(plan('ssh host'), 'env_1.a-2')).not.toBeNull()
-  })
-  it('carries the session id as the carrier second argument (P7 compact-path amendment)', () => {
-    const out = buildInstalledRewrite(plan('ssh pi@host'), 'env-1', 'sess-0123456789abcdef')!
-    expect(out).toContain('exec "$HOME/.nocx/launch" env-1 sess-0123456789abcdef')
-    expect(new TextEncoder().encode(out).byteLength).toBeLessThanOrEqual(4095)
-  })
-
-  it('omits the session id when not given — the two-argument call is unchanged', () => {
-    const without = buildInstalledRewrite(plan('ssh pi@host'), 'env-1')!
-    expect(without).toContain('exec "$HOME/.nocx/launch" env-1;')
-    expect(without).not.toContain('NOCX_SESSION_ID')
-  })
-
-  it('refuses a malformed session id like a malformed environment id', () => {
-    expect(buildInstalledRewrite(plan('ssh host'), 'env-1', 'has space')).toBeNull()
-    expect(buildInstalledRewrite(plan('ssh host'), 'env-1', '')).toBeNull()
-  })
-})
-
 describe('typedDestinationParts — the spelled destination the profile match keys on', () => {
   const parts = (line: string) => typedDestinationParts(planSsh(line, 0) as SshPlan)
 
@@ -753,51 +686,6 @@ describe('the generated wrapper, executed (real shell + fake ssh that records ar
     }
   })
 
-  it('installed form: one remote argv element, $HOME/$SHELL unexpanded; then-branch execs launch, else-branch execs a login shell', () => {
-    const h = fakeSshHarness()
-    try {
-      const line = "ssh -p 2222 'pi@[fe80::1]%eth0'"
-      const plan = planSsh(line, 0) as SshPlan
-      const wrapper = buildInstalledRewrite(plan, 'abc-123')!
-      const remote =
-        'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" abc-123; else exec "${SHELL:-/bin/sh}" -l; fi'
-
-      // ssh is called unconditionally — there is no local guard — and the
-      // remote command is ONE argv element whose $HOME and $SHELL are still
-      // literal: the local shell never expanded them.
-      expect(h.run(wrapper)).toEqual(['ssh', '-t', '-p', '2222', 'pi@[fe80::1]%eth0', remote])
-
-      // Then-branch, really executed: with an executable $HOME/.nocx/launch
-      // on the far side, the guard execs it with the environment id. The fake
-      // ssh plays sshd by running the remote command in a shell.
-      const launchLog = join(h.dir, 'launch.log')
-      writeFileSync(
-        join(h.home, '.nocx', 'launch'),
-        '#!/bin/sh\nprintf \'%s\\n\' "$0" "$@" > "$NOCX_FAKE_EXEC_LOG"\n',
-      )
-      chmodSync(join(h.home, '.nocx', 'launch'), 0o755)
-      h.run(wrapper, { exec: true, execLog: launchLog })
-      expect(readArgv(launchLog)).toEqual([join(h.home, '.nocx', 'launch'), 'abc-123'])
-
-      // Else-branch, really executed: a far HOME with no .nocx falls back to
-      // the login shell — the one case the launch script cannot cover. SHELL
-      // points at a recorder so "a login shell" is observable.
-      const bareHome = join(h.dir, 'bare-home')
-      mkdirSync(bareHome, { recursive: true })
-      const shellRecorder = join(h.dir, 'myshell')
-      writeFileSync(
-        shellRecorder,
-        '#!/bin/sh\nprintf \'%s\\n\' "$0" "$@" > "$NOCX_FAKE_EXEC_LOG"\n',
-      )
-      chmodSync(shellRecorder, 0o755)
-      const shellLog = join(h.dir, 'shell.log')
-      h.run(wrapper, { exec: true, execLog: shellLog, home: bareHome, shell: shellRecorder })
-      expect(readArgv(shellLog)).toEqual([shellRecorder, '-l'])
-    } finally {
-      h.cleanup()
-    }
-  })
-
   it("a saved profile's settings reach the rewritten argv — -i -p -J, with the fail-open else branch untouched", () => {
     const h = fakeSshHarness()
     try {
@@ -898,38 +786,6 @@ describe('the generated wrapper, executed (real shell + fake ssh that records ar
       writeFileSync(launcherFile, 'LAUNCHER_PAYLOAD')
       const wrapper = buildBootstrapRewrite(plan, `'${launcherFile}'`)!
       expect(h.run(wrapper)).toEqual(['ssh', '-t', 'root@prod', 'LAUNCHER_PAYLOAD'])
-    } finally {
-      h.cleanup()
-    }
-  })
-
-  it('the installed form carries the profile flags too', () => {
-    const h = fakeSshHarness()
-    try {
-      const profiles: SSHProfile[] = [
-        {
-          id: 'p1',
-          type: 'ssh',
-          name: 'Prod',
-          options: { host: 'prod', port: 2222, keyPath: '~/.ssh/prod' },
-        },
-      ]
-      const plan = planSsh('ssh root@prod', 0) as SshPlan
-      const overlay = resolveSshProfileOverlay(profiles, typedDestinationParts(plan))
-      const enriched = applyProfile(plan, overlay!)
-      const wrapper = buildInstalledRewrite(enriched, 'abc-123')!
-      const remote =
-        'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" abc-123; else exec "${SHELL:-/bin/sh}" -l; fi'
-      expect(h.run(wrapper)).toEqual([
-        'ssh',
-        '-t',
-        '-p',
-        '2222',
-        '-i',
-        '~/.ssh/prod',
-        'root@prod',
-        remote,
-      ])
     } finally {
       h.cleanup()
     }

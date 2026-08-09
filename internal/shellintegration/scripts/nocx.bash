@@ -11,23 +11,6 @@ if [[ -n "${__nocx_loaded:-}" ]]; then
 fi
 __nocx_loaded=1
 
-# Environment identity — the readiness passport (OSC 636 ; P) and the
-# nocx_env= tag on every OSC 133 marker. NOCX_ENVIRONMENT_ID is minted by the
-# backend delivery planner per attempt and exported by the launcher before
-# this script is sourced; a shell without it (transient-integrated, raw, or a
-# child shell inside tmux/sudo) emits no passport and no tagged marker —
-# fail-open, exactly the pre-passport behaviour. The id is restricted to
-# [A-Za-z0-9._-]{1,64}; a marker is tagged only when the id is present AND
-# well-formed, because a malformed id must never reach the wire: the renderer
-# would reject the passport anyway, and tagging with garbage would make every
-# marker of this session unparseable.
-__nocx_env_id="${NOCX_ENVIRONMENT_ID:-}"
-__nocx_parent_env_id="${NOCX_PARENT_ENVIRONMENT_ID:--}"
-__nocx_generation="${NOCX_GENERATION:--}"
-__nocx_tagged=0
-if [[ -n "$__nocx_env_id" ]] && [[ "$__nocx_env_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-    __nocx_tagged=1
-fi
 
 # --- Authenticated lifecycle channel (ADR-0024, docs/lifecycle-protocol.md) ---
 #
@@ -193,6 +176,13 @@ __nocx_lc_read_frame() {
 # a desynchronized domain is.
 __nocx_lc_ans_refresh() {
     local __rid
+    # Handoff gate (nocx-u7uh.11): while a nested child is live, the child
+    # owns the channel stream — the parent reads nothing (§9). The parent
+    # resumes at its next prompt boundary, which is exactly when the latch
+    # clears.
+    if [[ "${__nocx_nested_active:-0}" == "1" ]]; then
+        return 1
+    fi
     if ! LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
         return 1
     fi
@@ -306,6 +296,308 @@ __nocx_lc_init() {
 }
 __nocx_lc_init
 
+# --- Nested environments (nocx-u7uh.11) ---
+# A nested environment (sudo -i, su -, ssh host) is a DIFFERENT shell than
+# the parent, and protocol doc §9 gives it its own authenticated domain.
+# The parent requests the child over this channel (domain_request), reads
+# the grant (the kernel's answer, carrying the opaque bootstrap the parent
+# executes), sends domain_suspended, and launches the child. The child owns
+# the channel stream from its exec until it exits; the parent resumes at its
+# next prompt boundary and sends domain_activated — the only way a suspended
+# parent returns. A child that never establishes (refused bootstrap, sudo
+# policy, no forwarding) still ends with the parent's activation: the
+# stillborn interval (§9) is the expected path, not an error.
+__nocx_nested_active=0
+__nocx_nested_n=0
+__nocx_nested_env=
+__nocx_nested_host=
+__nocx_nested_user=
+__nocx_nested_port=0
+__nocx_grant_bootstrap=
+__nocx_nested_rc=
+# Bounds the grant wait: the grant is composed synchronously by the backend
+# pump (or refused with an empty bootstrap), so a few seconds is generous
+# and a dead channel fails open without holding the user's command.
+# Declared once per shell, not once per source: the rcfile deliberately
+# re-sources the embedded script over an installer-era install (the same
+# guard __nocx_snapshot_wait_ms uses), and a readonly cannot be re-declared.
+if [[ -z "${__nocx_lc_grant_timeout_s:-}" ]]; then
+    readonly __nocx_lc_grant_timeout_s=5
+fi
+
+# JSON unescape (bash): the grant's bootstrap is a JSON string on the wire
+# (the frame is one JSON document); the shell extracts and decodes it. A
+# decoding failure corrupts the rcfile, which makes the child conventional —
+# the safe direction — so the decoder is best-effort by construction.
+__nocx_lc_json_unescape() {
+    local s="$1" LC_ALL=C hex oct
+    # Protect literal backslashes (\\ in JSON) before the single-char
+    # escapes: a literal backslash must not be consumed by the \" or \n
+    # passes below. The marker is DOMAIN-scoped: the payload being decoded
+    # is itself shell source that CONTAINS this function's text, so any
+    # fixed marker (like the payload's own __NOCX_BS__ references) would
+    # collide with itself; the runtime domain value appears nowhere in the
+    # payload's static text.
+    s="${s//\\\\/__NOCX_BS_${__nocx_lc_dom}__}"
+    s="${s//\\\"/\"}"
+    s="${s//\\n/$'\n'}"
+    s="${s//\\t/$'\t'}"
+    s="${s//\\r/$'\r'}"
+    s="${s//\\b/$'\b'}"
+    s="${s//\\f/$'\f'}"
+    s="${s//\\\//\/}"
+    # \uXXXX is rare in the rcfile (printable ASCII dominates); convert it
+    # to octal so one printf %b pass below decodes it with the rest.
+    while [[ "$s" =~ \\u([0-9a-fA-F]{4}) ]]; do
+        hex="${BASH_REMATCH[1]}"
+        printf -v oct '%03o' "$((16#$hex))"
+        s="${s//\\u$hex/\\$oct}"
+    done
+    printf -v s '%b' "$s"
+    s="${s//__NOCX_BS_${__nocx_lc_dom}__/\\}"
+    __nocx_lc_json_unescaped="$s"
+}
+
+# Read the grant answering request $1 (bounded). Sets __nocx_grant_env and
+# __nocx_grant_bootstrap; non-grant frames (a refresh demand, a stale grant
+# from an earlier request) are handled or skipped. Returns non-zero on
+# timeout or a dead channel — the parent then runs its command
+# conventionally.
+__nocx_lc_read_grant() {
+    local __rid="$1" __t=0 __env __bootstrap
+    __nocx_grant_bootstrap=
+    __nocx_grant_env=
+    while (( __t < __nocx_lc_grant_timeout_s )); do
+        if ! LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+            sleep 1
+            __t=$(( __t + 1 ))
+            continue
+        fi
+        __nocx_lc_read_frame 1 || return 1
+        case "$__nocx_lc_frame" in
+            *'"evt":"domain_grant"'*) : ;;
+            *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
+            *) continue ;; # a stale frame (e.g. a late accept): skip it
+        esac
+        case "$__nocx_lc_frame" in
+            *'"request":"'"$__rid"'"'*) : ;;
+            *) continue ;; # a grant for a different request: skip (stale)
+        esac
+        __env="${__nocx_lc_frame#*\"env\":\"}"
+        __env="${__env%%\"*}"
+        # The bootstrap is the grant's LAST field (the wire order is pinned
+        # by the codec): everything after its opening quote, minus the
+        # closing quote and brace. Its own escaped quotes are untouched.
+        # The strips are %? (one char) — a pattern of } would be read by
+        # bash as an empty pattern plus a literal brace, stripping nothing.
+        __bootstrap="${__nocx_lc_frame##*\"bootstrap\":\"}"
+        __bootstrap="${__bootstrap%?}"
+        __bootstrap="${__bootstrap%\"}"
+        __nocx_lc_json_unescape "$__bootstrap"
+        __nocx_grant_bootstrap="$__nocx_lc_json_unescaped"
+        __nocx_grant_env="$__env"
+        return 0
+    done
+    return 1
+}
+
+# Classify a typed line as a nested environment. Conservative by design:
+# anything ambiguous is NOT nested and runs conventionally — the honest
+# fallback, never a guessed launch. Sets __nocx_nested_env (sudo|su|ssh)
+# plus the ssh destination parts.
+__nocx_nested_detect() {
+    __nocx_nested_env=
+    __nocx_nested_host=
+    __nocx_nested_user=
+    __nocx_nested_port=0
+    [[ "${__nocx_lc_active:-0}" == "1" ]] || return 1
+    local __line="$1"
+    # sudo: -i/--login/-s/--shell with NO command — a login/shell session,
+    # not `sudo -i ls` (which is a command, not a nested shell).
+    if [[ "$__line" =~ ^sudo[[:space:]]+(-i|--login|-s|--shell)[[:space:]]*$ ]]; then
+        __nocx_nested_env=sudo
+        return 0
+    fi
+    # su: no -c (a command), no shell metacharacters, only known flags and
+    # at most one username.
+    if [[ "$__line" =~ ^su([[:space:]]+.*)?$ ]] && [[ "$__line" != *[\;\|\&\<\>\`]* ]] \
+        && [[ ! "$__line" =~ -c([[:space:]]|$) ]]; then
+        local __rest="${__line#su}" __tok __users=0
+        for __tok in $__rest; do
+            case "$__tok" in
+                -|-l|--login|-p|-m|--preserve-environment) : ;;
+                -*) return 1 ;; # an option we do not model: refuse
+                *) __users=$(( __users + 1 )); (( __users > 1 )) && return 1 ;;
+            esac
+        done
+        __nocx_nested_env=su
+        return 0
+    fi
+    # ssh: a simple interactive login — known flags, exactly one
+    # destination, no remote command. The frontend's classifier is the
+    # authority for editor lines; this is the conservative shell fallback.
+    if [[ "$__line" =~ ^ssh([[:space:]]+.*)?$ ]] && [[ "$__line" != *[\;\|\&\<\>\`]* ]]; then
+        local -a __toks
+        read -r -a __toks <<< "$__line"
+        local __i __tok __dest="" __skip=0 __want_port=0
+        for ((__i = 1; __i < ${#__toks[@]}; __i++)); do
+            __tok="${__toks[$__i]}"
+            if (( __skip )); then
+                (( __want_port )) && __nocx_nested_port="$__tok"
+                __want_port=0
+                __skip=0
+                continue
+            fi
+            case "$__tok" in
+                -t|-tt|-4|-6|-v|-C|-x|-X) : ;;
+                -p) __skip=1; __want_port=1 ;;
+                -l|-o|-i|-F|-J|-e|-b|-c|-m) __skip=1 ;;
+                -*) return 1 ;; # an option we do not model: refuse
+                *) [[ -n "$__dest" ]] && return 1; __dest="$__tok" ;;
+            esac
+        done
+        [[ -z "$__dest" ]] && return 1
+        if [[ "$__dest" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+(:[0-9]+)?$ ]]; then
+            local __h="${__dest##*@}"
+            __nocx_nested_host="${__h%%:*}"
+            [[ "$__dest" == *@* ]] && __nocx_nested_user="${__dest%%@*}"
+            [[ "$__h" == *:* ]] && __nocx_nested_port="${__h##*:}"
+            __nocx_nested_env=ssh
+            return 0
+        fi
+        return 1
+    fi
+    return 1
+}
+
+# Request the child domain and launch it. Runs from the DEBUG-trap wrapper,
+# which returns 1 (skipping the user's original command) only when this
+# returns 0. The launch BLOCKS here for the child's whole lifetime — the
+# parent shell is inside this call while the child owns the stream, which is
+# exactly the handoff interval §9 names.
+__nocx_nested_launch() {
+    local __line="$1" __rid __extra __nocx_boot_fd=0 __nocx_boot_w
+    __nocx_nested_detect "$__line" || return 1
+    __rid="r-$__nocx_lc_dom-$(( __nocx_nested_n++ ))"
+    __extra='"request":"'"$__rid"'","env":"'"$__nocx_nested_env"'"'
+    if [[ "$__nocx_nested_env" == "ssh" ]]; then
+        __extra+=',"host":"'"$__nocx_nested_host"'"'
+        [[ -n "$__nocx_nested_user" ]] && __extra+=',"user":"'"$__nocx_nested_user"'"'
+        (( __nocx_nested_port != 0 )) && __extra+=',"port":'"$__nocx_nested_port"
+    fi
+    __nocx_lc_send domain_request ",$__extra" || return 1
+    if ! __nocx_lc_read_grant "$__rid"; then
+        return 1 # no grant: channel dead or refused without a reply
+    fi
+    # The child's hello requires the parent Suspended (§9) — never exec the
+    # child before this frame is written.
+    __nocx_lc_send domain_suspended
+    __nocx_nested_active=1
+    if [[ "$__nocx_nested_env" == "ssh" ]]; then
+        # The bootstrap is the backend-composed rewritten line (ADR-0022):
+        # the -R reverse forward plus the in-band payload piped into ssh -t.
+        eval "$__nocx_grant_bootstrap"
+        __nocx_nested_rc=$?
+    elif [[ -n "$__nocx_grant_bootstrap" ]]; then
+        # Same machine: stage the child's rcfile into a preserved descriptor
+        # and launch. The child reads it via --rcfile /dev/fd/4 (ADR-0024's
+        # preferred answer: the capability never enters a filesystem
+        # object); fd 3 is the inherited lifecycle channel, preserved so the
+        # child speaks over the SAME transport as the parent.
+        # Stage the rcfile into the preserved descriptor with NO writer
+        # race: bash reads a pipe rcfile chunk-at-a-time, so a child that
+        # starts before the writer finishes gets a truncated rcfile — the
+        # exact failure the top-level launcher solved with a file, which
+        # ADR-0024 forbids here (the per-epoch capability never enters a
+        # filesystem object). The coproc lets the PARENT wait for the
+        # writer and close the write end (EOF) before launching; the child
+        # then reads the complete rcfile. bash 3.2 (macOS) has no coproc:
+        # the substitution's single fast printf is the fallback, and a
+        # truncated read fails open — the child is a conventional shell and
+        # the parent re-activates at its next prompt (§9's stillborn
+        # interval), never a hung session.
+        # A redirect on a commandless `exec` is PERMANENT (the script's
+        # own warning at the /dev/tcp group) — the coproc's exec must not
+        # carry a 2>/dev/null, or the parent's stderr (and the child's
+        # inherited copy) would go to /dev/null for the rest of the
+        # session. The coproc's own printf redirect is scoped inside its
+        # braces instead.
+        # bash's coproc and {var} fds are CLOSE-ON-EXEC (measured), so the
+        # preserved descriptor must be a LITERAL fd in the free single-digit
+        # range (4-9, the POSIX-sh guarantee), opened FRESH from the coproc's
+        # read end via /dev/fd/N — an OPEN never sets CLOEXEC, where a dup
+        # (N<&src) preserves the source's. A busy user fd is never clobbered
+        # (the /dev/fd check first).
+        __nocx_stage_ok=0
+        __nocx_boot_fd=0
+        if (( ${BASH_VERSINFO[0]:-0} > 4 || (${BASH_VERSINFO[0]:-0} == 4 && ${BASH_VERSINFO[1]:-0} >= 1) )); then
+            coproc __nocx_boot { builtin printf '%s' "$__nocx_grant_bootstrap" 2>/dev/null; }
+            for __nocx_cand in 4 5 6 7 8 9; do
+                if [[ ! -e /dev/fd/$__nocx_cand ]]; then
+                    case $__nocx_cand in
+                        4) if exec 4</dev/fd/${__nocx_boot[0]}; then __nocx_boot_fd=4; fi ;;
+                        5) if exec 5</dev/fd/${__nocx_boot[0]}; then __nocx_boot_fd=5; fi ;;
+                        6) if exec 6</dev/fd/${__nocx_boot[0]}; then __nocx_boot_fd=6; fi ;;
+                        7) if exec 7</dev/fd/${__nocx_boot[0]}; then __nocx_boot_fd=7; fi ;;
+                        8) if exec 8</dev/fd/${__nocx_boot[0]}; then __nocx_boot_fd=8; fi ;;
+                        9) if exec 9</dev/fd/${__nocx_boot[0]}; then __nocx_boot_fd=9; fi ;;
+                    esac
+                    if (( __nocx_boot_fd != 0 )); then
+                        # Close the parent's copy of the write end — EOF for
+                        # the child — then wait for the writer: the pipe is
+                        # complete before the child ever reads it.
+                        __nocx_boot_w="${__nocx_boot[1]}"
+                        exec {__nocx_boot_w}>&-
+                        wait "$__nocx_boot_PID" 2>/dev/null
+                        __nocx_stage_ok=1
+                    fi
+                    break
+                fi
+            done
+        else
+            # bash 3.2 (macOS): no coproc. The substitution's single fast
+            # printf is the fallback (the writer race can truncate — the
+            # child then fails open conventionally, §9's stillborn
+            # interval); the fd is still a checked-free literal.
+            for __nocx_cand in 4 5 6 7 8 9; do
+                if [[ ! -e /dev/fd/$__nocx_cand ]]; then
+                    case $__nocx_cand in
+                        4) if exec 4< <(builtin printf '%s' "$__nocx_grant_bootstrap"); then __nocx_boot_fd=4; fi ;;
+                        5) if exec 5< <(builtin printf '%s' "$__nocx_grant_bootstrap"); then __nocx_boot_fd=5; fi ;;
+                        6) if exec 6< <(builtin printf '%s' "$__nocx_grant_bootstrap"); then __nocx_boot_fd=6; fi ;;
+                        7) if exec 7< <(builtin printf '%s' "$__nocx_grant_bootstrap"); then __nocx_boot_fd=7; fi ;;
+                        8) if exec 8< <(builtin printf '%s' "$__nocx_grant_bootstrap"); then __nocx_boot_fd=8; fi ;;
+                        9) if exec 9< <(builtin printf '%s' "$__nocx_grant_bootstrap"); then __nocx_boot_fd=9; fi ;;
+                    esac
+                    break
+                fi
+            done
+            if (( __nocx_boot_fd != 0 )); then
+                __nocx_stage_ok=1
+            fi
+        fi
+        if (( __nocx_stage_ok == 1 )); then
+            if [[ "$__nocx_nested_env" == "sudo" ]]; then
+                sudo --preserve-fds=3,$__nocx_boot_fd -i env -u BASH_ENV bash --rcfile /dev/fd/$__nocx_boot_fd -i
+            else
+                su -l -c 'env -u BASH_ENV bash --rcfile /dev/fd/'"$__nocx_boot_fd"' -i'
+            fi
+            __nocx_nested_rc=$?
+        else
+            # Cannot stage (no free fd): run the command conventionally — the
+            # child is a plain sudo/su session and the parent still
+            # activates at its next prompt.
+            eval "$__line"
+            __nocx_nested_rc=$?
+        fi
+    else
+        # The grant refused (empty bootstrap): run conventionally.
+        eval "$__line"
+        __nocx_nested_rc=$?
+    fi
+    return 0
+}
+
 __nocx_first_prompt=
 __nocx_in_prompt_command=0
 # Latch so the command-start (C) marker fires once per entered line, not once
@@ -347,19 +639,14 @@ __nocx_precmd() {
 }
 
 # Emit one OSC 133 lifecycle marker — \e]133;A, \e]133;B, \e]133;C or
-# \e]133;D[;<exit>] — tagged with the environment id (nocx_env=<id>) when
-# this shell is an identified environment and bare otherwise. Untagged
-# markers drive block boundaries exactly as before; the tag is what lets the
-# renderer attribute a marker to an environment (spec §5.2).
+# \e]133;D[;<exit>]. A/B partition prompt bytes from output bytes for
+# rendering; C/D are the standard's command-boundary markers, kept for
+# third-party interop (ADR-0024 decision 1 leaves the decision open: nocx
+# no longer consumes them, but any other tool reading the stream still can,
+# and they carry no authority here).
 __nocx_marker() {
     local __kind="$1" __code="${2:-}"
-    if [[ "${__nocx_tagged:-0}" == "1" ]]; then
-        if [[ -n "$__code" ]]; then
-            builtin printf '\e]133;%s;%s;nocx_env=%s\a' "$__kind" "$__code" "$__nocx_env_id"
-        else
-            builtin printf '\e]133;%s;nocx_env=%s\a' "$__kind" "$__nocx_env_id"
-        fi
-    elif [[ -n "$__code" ]]; then
+    if [[ -n "$__code" ]]; then
         builtin printf '\e]133;%s;%s\a' "$__kind" "$__code"
     else
         builtin printf '\e]133;%s\a' "$__kind"
@@ -415,11 +702,26 @@ __nocx_lc_recover() {
 # original order is preserved (precmd first, then old PC).
 __nocx_prompt_command() {
     # Capture the just-finished command's status FIRST — the assignment below
-    # would otherwise reset $? to 0 before __nocx_precmd could read it.
+    # would otherwise reset $? to 0 before __nocx_precmd could read it. A
+    # nested child whose command the DEBUG trap skipped leaves $? = 0 (the
+    # skip is not the child's exit); the child's real status was captured
+    # right after the launch and overrides here.
     local __nocx_exit=$?
+    if [[ -n "${__nocx_nested_rc:-}" ]]; then
+        __nocx_exit=$__nocx_nested_rc
+        __nocx_nested_rc=
+    fi
     __nocx_in_prompt_command=1
-    # --- Authenticated channel: refresh, complete, fence, prompt_ready ---
+    # --- Authenticated channel: activate, refresh, complete, fence, prompt_ready ---
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
+        # The child closed (the parent was blocked inside the launch); the
+        # parent owns the stream again. Activation MUST precede the complete
+        # — a completion for a suspended domain is rejected, and only an
+        # authenticated activation restores the parent (§9).
+        if [[ "${__nocx_nested_active:-0}" == "1" ]]; then
+            __nocx_lc_send domain_activated
+            __nocx_nested_active=0
+        fi
         # Record the just-finished command's completion BEFORE the refresh
         # can preempt the complete: the snapshot reports what the shell
         # actually knows — its own attempt id and the real exit status — so
@@ -585,31 +887,54 @@ fi
 # Save the original DEBUG trap so we can chain to it after our preexec hook.
 __nocx_old_debug="$(trap -p DEBUG 2>/dev/null | sed "s/^trap -- '//;s/' DEBUG$//")"
 
+# extdebug (nocx-u7uh.11): with it, a DEBUG trap returning non-zero SKIPS
+# the next command. That is the nested-environment interception: the parent
+# detects `sudo -i` / `su -` / `ssh host` in its preexec hook, launches the
+# child (which runs to completion inside the trap), and returns 1 so the
+# original command never also runs. The wrapper therefore returns 0 on
+# every non-nested path — explicitly, because extdebug would otherwise let a
+# non-zero return from the USER's own old DEBUG trap start skipping their
+# commands. It never returns 2 (which extdebug turns into a synthetic
+# `return` from the enclosing function). extdebug also makes the DEBUG trap
+# fire inside functions and command substitutions; the __nocx_* /
+# in_prompt_command / preexec_done guards below are exactly what keeps that
+# from recursing.
+shopt -s extdebug
+
 __nocx_preexec_wrapper() {
     local __nocx_current_command=${BASH_COMMAND}
     # Fire the command-start marker once per entered line. Skip our own
-    # internal commands, anything that runs while servicing PROMPT_COMMAND, and
-    # every command after the first (the DEBUG trap fires per simple command,
-    # so a pipeline/list would otherwise emit several C markers).
+    # internal commands, anything that runs while servicing PROMPT_COMMAND,
+    # every command after the first (the DEBUG trap fires per simple
+    # command, so a pipeline/list would otherwise emit several C markers),
+    # and commands inside the nested launch itself.
     if [[ "$__nocx_current_command" != __nocx_* ]] \
         && [[ "${__nocx_in_prompt_command:-0}" != "1" ]] \
+        && [[ "${__nocx_in_nested_launch:-0}" != "1" ]] \
         && [[ "${__nocx_preexec_done:-0}" != "1" ]]; then
         __nocx_preexec_done=1
         __nocx_preexec "$__nocx_current_command"
+        # Nested environment: the parent requests a child domain and runs
+        # the child here, inside the trap. Returning 1 skips the original
+        # command (extdebug), so the child runs exactly once; the parent
+        # shell survives and re-activates at its next prompt (§9).
+        __nocx_in_nested_launch=1
+        __nocx_nested_launch "$__nocx_current_command"
+        local __nested_rc=$?
+        __nocx_in_nested_launch=0
+        if (( __nested_rc == 0 )); then
+            return 1 # the launch ran; skip the original command
+        fi
     fi
     # Chain to the previous DEBUG trap, if any.
     if [[ -n "${__nocx_old_debug:-}" ]]; then
         eval "$__nocx_old_debug"
     fi
+    # Explicit 0 on every non-nested path (see the extdebug note above).
+    return 0
 }
 trap '__nocx_preexec_wrapper' DEBUG
-
 __nocx_b_marker='\[\e]133;B\a\]'
-if [[ "${__nocx_tagged:-0}" == "1" ]]; then
-    # The id is [A-Za-z0-9._-]{1,64} — no quote, backslash or ']' can reach
-    # PS1, so the \[...\] non-printing wrapper cannot be forged by the value.
-    __nocx_b_marker='\[\e]133;B;nocx_env='"$__nocx_env_id"'\a\]'
-fi
 
 if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] || [[ "${__nocx_arm_marker_only:-}" != 1 ]]; then
     # Baseline mode or nested marker-only (nocx-4ff.13): wrap PS1 with
@@ -618,11 +943,7 @@ if [[ "${NOCX_PROMPT_MODE:-}" != "marker-only" ]] || [[ "${__nocx_arm_marker_onl
     if [[ -z "${__nocx_prompt_wrapped:-}" ]]; then
         # Use ANSI-C quoting with doubled backslashes so \[ and \] are emitted
         # literally; they tell bash that the OSC sequence is non-printing.
-        if [[ "${__nocx_tagged:-0}" == "1" ]]; then
-            PS1="${PS1:-}"'\[\e]133;B;nocx_env='"$__nocx_env_id"'\a\]'
-        else
-            PS1="${PS1:-}"$'\\[\e]133;B\\a\\]'
-        fi
+        PS1="${PS1:-}"$'\\[\e]133;B\\a\\]' 
         __nocx_prompt_wrapped=1
     fi
 fi
@@ -891,36 +1212,6 @@ disown "$__nocx_snap_job" 2>/dev/null
 # Announce the session nonce before the first prompt.
 builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"
 
-
-# Readiness passport — OSC 636 ; P ; <protocolVersion> ; <environmentId> ;
-# <parentEnvironmentId> ; <scriptVersion> ; <tier> ; <generation> ST (spec
-# §5.2). Announced ONCE, at source time, right after the hello and before the
-# first prompt — the only moment the shell is the sole writer to the tty.
-# The environment id, parent and generation travel in env vars set by the
-# launcher; protocol version, script version and tier are static here. Every
-# field is [A-Za-z0-9._-]{1,64}; when any env-provided field is absent or
-# malformed NO passport is emitted — a passport the renderer would reject
-# must not be sent (fail-open). The renderer accepts a passport only when
-# its id matches the one minted for the attempt in flight; a duplicate or
-# unexpected id changes nothing.
-__nocx_protocol_version='1'
-__nocx_script_version='11'
-__nocx_tier='enhanced'
-__nocx_passport_ok=0
-if [[ "${__nocx_tagged:-0}" == "1" ]] \
-    && [[ "$__nocx_parent_env_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]] \
-    && [[ "$__nocx_generation" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
-    __nocx_passport_ok=1
-fi
-__nocx_passport_emit() {
-    if [[ "${__nocx_passport_ok:-0}" != "1" ]]; then
-        return
-    fi
-    builtin printf '\e]636;P;%s;%s;%s;%s;%s;%s\a' \
-        "$__nocx_protocol_version" "$__nocx_env_id" "$__nocx_parent_env_id" \
-        "$__nocx_script_version" "$__nocx_tier" "$__nocx_generation"
-}
-__nocx_passport_emit
 # Restore a visible native prompt. Real caller: the prompt-boundary arm's
 # recovered branch (ADR-0024 decision 8) — after the lifecycle channel dies
 # mid-session, the user must never be left at a suppressed prompt taking raw

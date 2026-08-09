@@ -1,7 +1,6 @@
 package shellintegration
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -1110,188 +1109,59 @@ func countMarkers(ms []oscMarker, kind string) int {
 	return n
 }
 
-// passportFixture is the shared golden fixture set (also consumed by the
-// frontend tests), so the Go exec tests assert exactly the bytes the
-// TypeScript parser accepts — the two sides cannot drift.
-type passportFixture struct {
-	EnvironmentID string `json:"environmentId"`
-	Passports     map[string]struct {
-		Sequence string `json:"sequence"`
-	} `json:"passports"`
-	Markers map[string]struct {
-		Sequence string `json:"sequence"`
-	} `json:"markers"`
-	Invalid struct {
-		EnvironmentIDs []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		} `json:"environmentIds"`
-	} `json:"invalid"`
-}
-
-func loadPassportFixtures(t *testing.T) passportFixture {
-	t.Helper()
-	// The fixture lives under frontend/src/test-support because the two
-	// readers run in containers with different mounts: the Go gate mounts the
-	// whole repo, the vitest gate mounts frontend/ alone. A copy in each tree
-	// is exactly the drift this fixture exists to prevent.
-	raw, err := os.ReadFile("../../frontend/src/test-support/passport-fixtures.json")
-	if err != nil {
-		t.Fatalf("read passport fixtures: %v", err)
-	}
-	var fx passportFixture
-	if err := json.Unmarshal(raw, &fx); err != nil {
-		t.Fatalf("parse passport fixtures: %v", err)
-	}
-	return fx
-}
-
-// TestBashEmitsPassportAndTaggedMarkers drives the real bash hooks with an
-// environment id set (the launcher's NOCX_ENVIRONMENT_ID) and asserts the
-// readiness passport (OSC 636 P) is emitted exactly once at source time and
-// every OSC 133 marker is tagged nocx_env=<id>, using the shared golden
-// fixture's exact sequences. Untagged emission is covered by every other
-// test in this file, which runs without an id.
-func TestBashEmitsPassportAndTaggedMarkers(t *testing.T) {
+// TestBashEmitsNoPassport drives the real bash hooks with an environment id
+// set (the launcher-era NOCX_ENVIRONMENT_ID): the readiness passport is
+// DELETED (nocx-u7uh.11) — the environment identity now rides the
+// authenticated lifecycle channel — so no OSC 636 P and no nocx_env= tagged
+// marker may reach the wire, whatever the environment carries. The A/B/C/D
+// markers stay untagged, exactly the pre-passport shape.
+func TestBashEmitsNoPassport(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
-	fx := loadPassportFixtures(t)
 
-	prog := fmt.Sprintf(`
+	prog := `
 export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
+export NOCX_ENVIRONMENT_ID=env-abc-123
 source "$1"
-printf 'PS1=%%s\n' "$PS1"
+printf 'PS1=%s\n' "$PS1"
 __nocx_prompt_command
 true
 __nocx_prompt_command
-`, fx.EnvironmentID)
+`
 	out := runShellProg(t, bash, prog, script)
 
-	passport := fx.Passports["enhanced"].Sequence
-	if n := strings.Count(out, passport); n != 1 {
-		t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, "]636;P") {
+		t.Errorf("the readiness passport must not be emitted (nocx-u7uh.11); output:\n%s", out)
 	}
-	for name, want := range map[string]string{
-		"tagged A":   fx.Markers["A"].Sequence,
-		"tagged C":   fx.Markers["C"].Sequence,
-		"tagged D;0": fx.Markers["D0"].Sequence,
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %s (%q); output:\n%s", name, want, out)
-		}
+	if strings.Contains(out, "nocx_env=") {
+		t.Errorf("no marker may carry a nocx_env= tag (nocx-u7uh.11); output:\n%s", out)
 	}
-	if !strings.Contains(out, "]133;B;nocx_env="+fx.EnvironmentID) {
-		t.Errorf("PS1 does not carry the tagged B marker; output:\n%s", out)
-	}
-
-	// The passport must precede the first tagged A (entry counts on
-	// passport → tagged A → B).
 	ms := extractOscMarkers(out)
-	passportPos, firstA := -1, -1
-	for _, m := range ms {
-		if m.kind == "P" && passportPos < 0 {
-			passportPos = m.pos
-		}
-		if m.kind == "A" && firstA < 0 {
-			firstA = m.pos
-		}
-	}
-	if passportPos < 0 {
-		t.Fatalf("no 636 P marker extracted; markers: %+v", ms)
-	}
-	if firstA < 0 || passportPos > firstA {
-		t.Errorf("passport must precede the first tagged A (passport at %d, first A at %d)", passportPos, firstA)
+	if countMarkers(ms, "A") == 0 || countMarkers(ms, "C") == 0 {
+		t.Errorf("the untagged A/C markers must still be emitted; markers: %+v", ms)
 	}
 }
 
-// TestZshEmitsPassportAndTaggedMarkers is the zsh half of the bash test: the
-// real zsh hooks emit the fixture's passport once and tagged A/B/C/D.
-func TestZshEmitsPassportAndTaggedMarkers(t *testing.T) {
+// TestZshEmitsNoPassport is the zsh half of the deletion.
+func TestZshEmitsNoPassport(t *testing.T) {
 	zsh := requireShell(t, "zsh")
 	script := writeScriptFile(t, "nocx.zsh", zshScript)
-	fx := loadPassportFixtures(t)
 
-	prog := fmt.Sprintf(`
+	prog := `
 autoload -Uz add-zsh-hook
 export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
+export NOCX_ENVIRONMENT_ID=env-abc-123
 source "$1"
-printf 'PS1=%%s\n' "$PS1"
+printf 'PS1=%s\n' "$PS1"
 __nocx_preexec
 true;  for f in $precmd_functions; do $f; done
-false; for f in $precmd_functions; do $f; done
-`, fx.EnvironmentID)
+`
 	out := runShellProg(t, zsh, prog, script)
 
-	passport := fx.Passports["enhanced"].Sequence
-	if n := strings.Count(out, passport); n != 1 {
-		t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, "]636;P") {
+		t.Errorf("the readiness passport must not be emitted (nocx-u7uh.11); output:\n%s", out)
 	}
-	for name, want := range map[string]string{
-		"tagged A":   fx.Markers["A"].Sequence,
-		"tagged C":   fx.Markers["C"].Sequence,
-		"tagged D;1": "\x1b]133;D;1;nocx_env=" + fx.EnvironmentID + "\x07",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %s (%q); output:\n%s", name, want, out)
-		}
-	}
-	if !strings.Contains(out, "]133;B;nocx_env="+fx.EnvironmentID) {
-		t.Errorf("PROMPT does not carry the tagged B marker; output:\n%s", out)
-	}
-}
-
-// TestBashRefusesPassportForMalformedEnvironmentId guards the fail-open side
-// of the passport: an environment id outside [A-Za-z0-9._-]{1,64} must not
-// reach the wire at all — no passport, and no tagged marker, so a session
-// with a malformed id degrades to exactly the pre-passport behaviour instead
-// of emitting sequences the renderer would reject.
-func TestBashRefusesPassportForMalformedEnvironmentId(t *testing.T) {
-	bash := requireShell(t, "bash")
-	script := writeScriptFile(t, "nocx.bash", bashScript)
-	for _, id := range loadPassportFixtures(t).Invalid.EnvironmentIDs {
-		t.Run(id.Name, func(t *testing.T) {
-			prog := fmt.Sprintf(`
-export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
-source "$1"
-__nocx_prompt_command
-true
-__nocx_prompt_command
-`, id.Value)
-			out := runShellProg(t, bash, prog, script)
-			if strings.Contains(out, "]636;P") {
-				t.Errorf("emitted a passport for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-			if strings.Contains(out, "nocx_env=") {
-				t.Errorf("tagged a marker for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-		})
-	}
-}
-
-// TestZshRefusesPassportForMalformedEnvironmentId is the zsh half of the
-// bash refusal test.
-func TestZshRefusesPassportForMalformedEnvironmentId(t *testing.T) {
-	zsh := requireShell(t, "zsh")
-	script := writeScriptFile(t, "nocx.zsh", zshScript)
-	for _, id := range loadPassportFixtures(t).Invalid.EnvironmentIDs {
-		t.Run(id.Name, func(t *testing.T) {
-			prog := fmt.Sprintf(`
-autoload -Uz add-zsh-hook
-export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
-source "$1"
-true;  for f in $precmd_functions; do $f; done
-`, id.Value)
-			out := runShellProg(t, zsh, prog, script)
-			if strings.Contains(out, "]636;P") {
-				t.Errorf("emitted a passport for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-			if strings.Contains(out, "nocx_env=") {
-				t.Errorf("tagged a marker for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-		})
+	if strings.Contains(out, "nocx_env=") {
+		t.Errorf("no marker may carry a nocx_env= tag (nocx-u7uh.11); output:\n%s", out)
 	}
 }

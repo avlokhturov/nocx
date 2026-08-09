@@ -291,11 +291,11 @@ func TestPrintfBEscapeRoundTripsThroughBashBuiltin(t *testing.T) {
 // TestShellQuoteEscapesEmbeddedQuotes: the escaper is real, not
 // concatenation that happens to work on today's payloads.
 func TestShellQuoteEscapesEmbeddedQuotes(t *testing.T) {
-	if got := shellQuote("a'b"); got != `'a'\''b'` {
-		t.Errorf("shellQuote(a'b) = %q", got)
+	if got := ShellQuote("a'b"); got != `'a'\''b'` {
+		t.Errorf("ShellQuote(a'b) = %q", got)
 	}
-	if got := shellQuote("plain"); got != "'plain'" {
-		t.Errorf("shellQuote(plain) = %q", got)
+	if got := ShellQuote("plain"); got != "'plain'" {
+		t.Errorf("ShellQuote(plain) = %q", got)
 	}
 }
 

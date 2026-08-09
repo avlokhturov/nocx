@@ -168,7 +168,7 @@ func TestAutoCommand_CarriesTiersAsSingleQuotedArgvWords(t *testing.T) {
 		t.Fatal("ShellAuto launcher refused")
 	}
 	if got := strings.Count(cmd, "'"); got != 10 {
-		t.Errorf("single-quote count = %d, want 10 (five shellQuote'd segments); command:\n%s", got, cmd)
+		t.Errorf("single-quote count = %d, want 10 (five ShellQuote'd segments); command:\n%s", got, cmd)
 	}
 	if !strings.Contains(cmd, ` "$0" `) {
 		t.Errorf("command does not pass the login shell's $0 through; command:\n%s", cmd)
@@ -245,7 +245,6 @@ func TestFullLauncherStaysUnderArgLimit(t *testing.T) {
 	opts := LaunchOptions{
 		SessionID:     "0123456789abcdef0123456789abcdef",
 		Enhanced:      true,
-		EnvironmentID: "env-0123456789abcdef",
 		Lane:          "lane-01234567",
 		Domain:        "dom-01234567",
 		Epoch:         42,

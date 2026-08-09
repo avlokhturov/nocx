@@ -301,11 +301,19 @@ func portOf(addr net.Addr) int {
 }
 
 // Send implements lifecycle.Port: it routes one outbound envelope (accept,
-// refresh_request — the only two kinds the kernel sends) to the connection
-// that owns the addressed domain. accept routes to the handshake claimant
-// (its hello was accepted); refresh_request routes to the authenticated
-// speaker. Failures are best-effort: the kernel ignores them and the shell
-// times out its handshake in the safe direction.
+// refresh_request, domain_grant — the three kinds the kernel sends) to the
+// connection that owns the addressed domain. accept routes to the handshake
+// claimant (its hello was accepted); refresh_request routes to the
+// authenticated speaker; a domain_grant is addressed to the PARENT and
+// routes to its speaker. Failures are best-effort: the kernel ignores them
+// and the shell times out its handshake in the safe direction.
+// TransportID returns the adapter's own transport id, for the composition
+// root's transport-kind registry (the grant builder needs to know whether a
+// parent's domains ride the inherited descriptor or a forwarded port).
+func (a *Adapter) TransportID() lifecycle.TransportID {
+	return a.id
+}
+
 func (a *Adapter) Send(env lifecycle.Envelope) error {
 	a.mu.Lock()
 	if a.closed {

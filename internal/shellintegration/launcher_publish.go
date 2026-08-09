@@ -126,9 +126,9 @@ const (
 // bundle that outgrows the cap must refuse rather than emit a command the far
 // host cannot exec.
 func fullBootstrapLauncher(tail string, payloads ...string) (string, bool) {
-	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + shellQuote(buildPublishPrelude(version)+"; "+tail) + ` "$0"`
+	cmd := "/usr/bin/env -u BASH_ENV /bin/sh -c " + ShellQuote(buildPublishPrelude(version)+"; "+tail) + ` "$0"`
 	for _, p := range payloads {
-		cmd += " " + shellQuote(p)
+		cmd += " " + ShellQuote(p)
 	}
 	if len(cmd) > maxFullLauncherLen {
 		return "", false

@@ -5,19 +5,18 @@
 // live in conformance.test.ts and authority-expectations.ts, because today
 // most of these cases are the live vulnerability, not a passing property.
 //
-// A Frame is one unit the session seam can dispatch: an OSC 133 / OSC 636 /
-// OSC 7 payload (the string between the introducer and ST/BEL), a CSI sequence
+// A Frame is one unit the session seam can dispatch: an OSC 133 / OSC 7
+// payload (the string between the introducer and ST/BEL), a CSI sequence
 // (e.g. ?1049h), a private OSC or DCS payload, or an app-side action (the
 // editor submit that synchronously creates the attempt — ADR-0024 §5).
 
-type StreamChannel = 'osc133' | 'osc636' | 'osc7' | 'csi' | 'private-osc' | 'dcs' | 'app'
+type StreamChannel = 'osc133' | 'osc7' | 'csi' | 'private-osc' | 'dcs' | 'app'
 
 export interface CorpusFrame {
   channel: StreamChannel
-  /** For OSC 133/636/7, private OSC and DCS: the payload between introducer and ST/BEL.
+  /** For OSC 133/7, private OSC and DCS: the payload between introducer and ST/BEL.
    *  For csi: the sequence body (e.g. '?1049h').
-   *  For app: 'submit:<command>' creates an app-owned attempt, and
-   *  'mint-env:<id>' mints the environment id for the attempt in flight. */
+   *  For app: 'submit:<command>' creates an app-owned attempt. */
   payload: string
 }
 
@@ -42,8 +41,6 @@ const OSC = {
   D0: 'D;0',
   taggedA: 'A;nocx_env=env-ab12',
   taggedB: 'B;nocx_env=env-ab12',
-  enhancedPassport: 'P;1;env-ab12;-;11;enhanced;-',
-  otherPassport: 'P;1;env-zzzz;-;11;enhanced;-',
 } as const
 
 const PASSIVE_CORPUS: CorpusCase[] = [
@@ -84,36 +81,6 @@ const PASSIVE_CORPUS: CorpusCase[] = [
       { channel: 'osc133', payload: OSC.taggedB },
     ],
     note: 'A tag authenticates nothing — the bytes are still on the tty (ADR-0024 §2). Today the tagged cycle grants DOM ownership exactly like an untagged one: the laundered trust path.',
-  },
-  {
-    id: 'passport-enhanced',
-    name: 'enhanced-tier OSC 636 passport for the expected environment',
-    context: 'mid-command',
-    prelude: [{ channel: 'app', payload: 'mint-env:env-ab12' }],
-    frames: [{ channel: 'osc636', payload: OSC.enhancedPassport }],
-    note: 'A passport matching the app-minted expected id is accepted by the tracker. This is the surviving expected-id invariant, NOT authenticated authority (ADR-0024 §2: a passport is tty bytes and cannot activate a domain).',
-  },
-  {
-    id: 'passport-no-expected',
-    name: 'OSC 636 passport with no minted environment',
-    context: 'idle',
-    frames: [{ channel: 'osc636', payload: OSC.enhancedPassport }],
-    note: 'With no expected id, a passport must be ignored — it cannot mint an environment for itself.',
-  },
-  {
-    id: 'passport-unexpected',
-    name: 'OSC 636 passport for a foreign environment id',
-    context: 'mid-command',
-    prelude: [{ channel: 'app', payload: 'mint-env:env-ab12' }],
-    frames: [{ channel: 'osc636', payload: OSC.otherPassport }],
-    note: 'A passport whose id is not the minted one must be reported unexpected and never accepted.',
-  },
-  {
-    id: 'passport-overlong',
-    name: 'oversized OSC 636 passport (parser bound)',
-    context: 'idle',
-    frames: [{ channel: 'osc636', payload: 'P;' + 'x'.repeat(600) }],
-    note: 'The passport parser bounds the sequence at 512 bytes; an overlong payload is rejected before any field is read.',
   },
   {
     id: 'private-osc-1337',
@@ -211,7 +178,6 @@ export const HOSTILE_CORPUS: CorpusCase[] = [
     name: 'the same hostile cycle at a suppressed prompt',
     context: 'suppressed-prompt',
     prelude: [
-      { channel: 'app', payload: 'mint-env:env-ab12' },
       { channel: 'app', payload: 'submit:echo hi' },
       { channel: 'osc133', payload: OSC.A },
       { channel: 'osc133', payload: OSC.B },

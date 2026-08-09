@@ -261,8 +261,10 @@ describe('parseOsc133 nocx_env tags', () => {
   })
 })
 
-describe('onEnvironmentPassport fan-out', () => {
-  const stubBrowser = () => {
+describe('onCommandMarker fan-out', () => {
+  it('exposes a tagged marker through the real parser into the enriched event', async () => {
+    // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
+    // code uses during init. Stub them so the terminal can initialise.
     window.matchMedia = (query: string) => ({
       matches: false,
       media: query,
@@ -278,90 +280,13 @@ describe('onEnvironmentPassport fan-out', () => {
       unobserve() {}
       disconnect() {}
     }
-  }
 
-  async function mountRenderer(): Promise<XtermRenderer> {
-    stubBrowser()
     const r = new XtermRenderer()
     const container = document.createElement('div')
     Object.defineProperty(container, 'clientWidth', { value: 800 })
     Object.defineProperty(container, 'clientHeight', { value: 600 })
     await r.mount(container)
-    return r
-  }
 
-  it('accepts a passport matching the expected id through the real parser', async () => {
-    const r = await mountRenderer()
-    r.setExpectedEnvironmentId('env-ab12')
-
-    let resolveDone: () => void
-    const done = new Promise<void>((res) => {
-      resolveDone = res
-    })
-    let received: unknown
-    r.onEnvironmentPassport((d) => {
-      received = d
-      resolveDone()
-    })
-
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await done
-
-    expect(received).toMatchObject({ status: 'accepted' })
-    r.dispose()
-  })
-
-  it('reports an unexpected id and never accepts it', async () => {
-    const r = await mountRenderer()
-    r.setExpectedEnvironmentId('env-minted-for-this-attempt')
-
-    let resolveDone: () => void
-    const done = new Promise<void>((res) => {
-      resolveDone = res
-    })
-    let received: unknown
-    r.onEnvironmentPassport((d) => {
-      received = d
-      resolveDone()
-    })
-
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await done
-
-    expect(received).toMatchObject({ status: 'unexpected' })
-    r.dispose()
-  })
-
-  it('a duplicate passport for an accepted id is reported, never re-accepted', async () => {
-    const r = await mountRenderer()
-    r.setExpectedEnvironmentId('env-ab12')
-
-    const seen: string[] = []
-    let resolveFirst: () => void
-    const first = new Promise<void>((res) => {
-      resolveFirst = res
-    })
-    let resolveSecond: () => void
-    const second = new Promise<void>((res) => {
-      resolveSecond = res
-    })
-    r.onEnvironmentPassport((d) => {
-      seen.push(d.status)
-      if (seen.length === 1) resolveFirst()
-      else resolveSecond()
-    })
-
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await first
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await second
-
-    expect(seen).toEqual(['accepted', 'duplicate'])
-    r.dispose()
-  })
-
-  it('exposes a tagged marker through the real parser into the enriched event', async () => {
-    const r = await mountRenderer()
     let resolveDone: () => void
     const done = new Promise<void>((res) => {
       resolveDone = res
@@ -377,9 +302,6 @@ describe('onEnvironmentPassport fan-out', () => {
     expect(ev?.nocxEnv).toBe('env-ab12')
     r.dispose()
   })
-})
-
-describe('onCommandMarker fan-out', () => {
   it('fans out one enriched event per marker to every subscriber', async () => {
     // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
     // code uses during init. Stub them so the terminal can initialise.

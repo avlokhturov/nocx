@@ -59,6 +59,7 @@ import {
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { LOCAL_TARGET_ID } from './ports-client'
+import { DomainEnvironmentProjection } from './lifecycle/domain-environment'
 import {
   deriveActions,
   shellStateFromLifecycle,
@@ -304,17 +305,31 @@ export class TerminalContent extends BaseTabContent {
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
   private _markers = new Map<number, MarkerAdapter>()
-  private _pendingCommand = ''
   private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
   private _cwd = '~'
   /** True only when _cwd came from a verified OSC 7 report (AD-5): the one
    *  cwd a composition layer may hand to files.open as rootPath (D2). A
-   *  session-open cwd is the provider's fallback question, not a claim. */
+   *  session-open cwd is the provider's fallback question, not a claim.
+   *
+   *  `_cwd`, `_cwdVerified`, `_host` and `_user` are the VIEW of the
+   *  domain-environment projection (lifecycle/domain-environment.ts): they
+   *  always carry the ACTIVE domain's values, blanked over a lane gap —
+   *  never ambient state, and never a suspended parent's values (ADR-0024
+   *  §6, protocol §9). `_applyEnvironmentView` copies the projection's
+   *  current view into these fields on every environment change. */
   private _cwdVerified = false
   /** True once the session's exit was observed — the tab is closing, and an
    *  origin that names this session would name a machine that is gone. */
   private _sessionExited = false
   private _host = ''
+  /** The ssh user of `_host` ('' for local shells) — the location line's
+   *  `user@host`, from the same projection view. */
+  private _user = ''
+  /** The domain-scoped environment projection (bead nocx-u7uh.11): cwd,
+   *  host, the tab title and the completion scope follow the ACTIVE domain.
+   *  Created at session open (it needs the session facts to seed the lane
+   *  tier), detached at dispose. */
+  private env: DomainEnvironmentProjection | null = null
   private _bufferType: 'normal' | 'alternate' = 'normal'
   private nativeMode = false
   private _disposed = false
@@ -419,16 +434,18 @@ export class TerminalContent extends BaseTabContent {
   }
   /** The machine this tab's content speaks for (B.9) — the session it was
    *  opened with, answered only while that session is live and in front.
-   *
-   *  Null when there is no honest answer:
-   *  - no session yet, or a session that has exited;
-   *  - inside an environment entered by a command we submitted (a
-   *    hand-typed `ssh` is a child process of the local shell): naming the
-   *    local session there would show one machine's files while the user
-   *    acts on another's (§0), the same rule the ports target applies.
-   *
-   *  `kind` and `host` are how the session was opened, never inferred from
-   *  the cwd or the title. `cwd` is the verified-flag pair from _cwd /
+   *  Null when there is no honest answer: no session yet, or a session
+   *  that has exited. Inside a nested environment the origin answers with
+   *  the ACTIVE domain's view instead — blank (cwd and host null) for a
+   *  child that has not reported, never the local session's values, which
+   *  would show one machine's files while the user acts on another's
+   *  (§0, the same rule the ports target applies).
+   *  `kind` is how the session was opened, never inferred from the cwd or
+   *  the title. `cwd`, `cwdVerified` and `host` are the ACTIVE domain's
+   *  view (lifecycle/domain-environment.ts) — they follow the domain the
+   *  lane's published fact names as active, blank over a lane gap, and the
+   *  host never claims a remote target a fact did not name (bead
+   *  nocx-u7uh.11). `cwd` is the verified-flag pair from _cwd /
    *  _cwdVerified: the composition layer may hand a VERIFIED cwd to
    *  files.open as rootPath (D2) and must surface an unverified one (AD-5). */
   activeOrigin(): Omit<ActiveOrigin, 'tabId'> | null {
@@ -437,11 +454,11 @@ export class TerminalContent extends BaseTabContent {
       sessionId: this.session.sessionId,
       kind: this.sshOpts === undefined ? 'local' : 'ssh',
       // '' is "no cwd yet" inside the live session (a session opened with
-      // no cwd, or syncLocation's blank inside an environment we left).
+      // no cwd, a fresh domain that has not reported yet, or a lane gap).
       cwd: this._cwd === '' ? null : this._cwd,
       cwdVerified: this._cwdVerified,
       cwdFollow: true,
-      host: this.sshOpts?.host ?? null,
+      host: this._host || null,
     }
   }
   /** Push the composed title to the host: program title, else the cwd label. */
@@ -455,22 +472,54 @@ export class TerminalContent extends BaseTabContent {
     this.hooks.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
   }
 
-  /** Where this tab is: the nested environment if we are inside one, else
-   *  `user@host` for SSH, else the working directory.
-   *
-   *  The nested case is the one that was missing and it is the common one:
-   *  a user types `ssh pi@192.168.0.93` in a local tab, and every surface
-   *  that named a place went on naming the local machine — the tab title
-   *  kept whatever the remote shell's OSC 2 last set, the location chip
-   *  stayed hidden because a local session grows none, and the cwd chip
-   *  went on showing the local directory while the prompt was elsewhere
-   *  (owner, 2026-08-04, three times). We know the destination because we
-   *  submitted the line (ADR-0004 §2) — no integration, no sniffing. */
+  /** Where this tab is, following the ACTIVE domain (bead nocx-u7uh.11):
+   *  `user@host` when the active domain has a host (the session-open ssh
+   *  binding; a child domain has no authenticated host source and shows
+   *  none), else the active domain's working directory. The pre-severance
+   *  destination-from-the-submitted-line behaviour (owner, 2026-08-04,
+   *  three times) is deliberately NOT re-added here: a parsed command line
+   *  never populates an authenticated domain's identity, and a nested
+   *  environment is a place with no directory until it tells us otherwise
+   *  (nocx-695k.2). */
   private locationLine(): string {
-    if (this.sshOpts) {
-      return this.sshOpts.user ? `${this.sshOpts.user}@${this.sshOpts.host}` : this.sshOpts.host
-    }
+    if (this._host) return this._user ? `${this._user}@${this._host}` : this._host
     return this._cwd
+  }
+
+  /** Copy the environment projection's current view into the fields every
+   *  derivation reads (`_cwd`, `_cwdVerified`, `_host`, `_user`,
+   *  `programTitle` — the completion scope, the origin answer, the ledger
+   *  records and the title all read these), then push every surface that
+   *  presents them. Called by the projection on every environment change:
+   *  an active-domain switch, an OSC 7 cwd, an OSC 0/2 title. */
+  private _applyEnvironmentView(): void {
+    const view = this.env?.view()
+    if (!view) return
+    this._cwd = view.cwd
+    this._cwdVerified = view.cwdVerified
+    this._host = view.host
+    this._user = view.user
+    this.programTitle = view.programTitle
+    this.cwdTitle = directoryLabel(view.cwd)
+    this.editor?.setCwd(view.cwd)
+    this.onTooltipChange(
+      view.host
+        ? `SSH ${view.user ? view.user + '@' : ''}${view.host}`
+        : cwdTooltip(view.cwd, view.cwdVerified),
+    )
+    // The block header's `user@host`. Empty for a local shell, where the
+    // machine is implied and printing it on every block would be noise —
+    // and empty for a child domain that has no authenticated host. ONE
+    // derivation, routed to both chips — the block header's frozen record
+    // and the prompt's live destination must never disagree.
+    const location = this._host ? this.locationLine() : ''
+    this.scrollback?.blockManager.setLocation(location)
+    this.editor?.setLocation(location)
+    this.pushTitle()
+    // The origin answer changed (cwd, host, or the active domain itself):
+    // origin-following surfaces (the Files panel's reveal) follow it live,
+    // not on the next tab switch.
+    this.hooks.onActiveOriginChange?.()
   }
 
   // ── The ssh environment boundary (nocx-mlm7 P9) — SEVERED ────────────
@@ -480,9 +529,12 @@ export class TerminalContent extends BaseTabContent {
   // passport observation report) rode the byte stream — expected passport →
   // tagged A → B → local D. ADR-0024 §1 cuts every one of those paths:
   // nothing stream-derived may activate, suspend or restore an environment.
-  // The environment projection (environment-commands.ts, the passport
-  // tracker) stays for the migration bead, which reconnects it to
-  // authenticated domains.
+  // The migration bead (nocx-u7uh.11) reconnected the projection to
+  // authenticated domains: the domain-environment projection
+  // (lifecycle/domain-environment.ts) scopes cwd, host, title and
+  // completion to the ACTIVE domain, and the passport machinery is deleted.
+  // environment-commands.ts stays as the label classifier for environments
+  // nocx could not integrate — it never names an authenticated domain.
 
   // ── TabContent ──────────────────────────────────────────────────────────
 
@@ -675,7 +727,6 @@ export class TerminalContent extends BaseTabContent {
             // _syncLifecycleOwnership reconciles this on every fact.
             this.renderer?.setReadOnly(false)
             const recordLine = plan?.recordLine ?? doc
-            this._pendingCommand = recordLine
             // Where the command RUNS, captured before anything below can
             // change it. Entering an environment blanks `_cwd` (we know the
             // host, not the remote directory), and the ledger and the block
@@ -980,32 +1031,6 @@ export class TerminalContent extends BaseTabContent {
         // activate an environment or enable rewriting — every one of those
         // paths was deleted with the marker cycle (nocx-u7uh.1).
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
-      })
-      renderer.onEnvironmentPassport((disposition) => {
-        // SEVERED (ADR-0024 §2): a passport is tty bytes — inert observation
-        // at most. It may not activate, suspend or restore anything. The
-        // tracker's expected-id invariant is the only judgment left; its
-        // verdicts are logged here and nowhere else.
-        if (disposition.status === 'accepted') {
-          logDecision('passport accepted', {
-            environmentId: disposition.passport.environmentId,
-          })
-        } else if (disposition.status === 'duplicate') {
-          logDecision('passport duplicate', {
-            environmentId: disposition.passport.environmentId,
-          })
-        } else if (disposition.status === 'unexpected') {
-          // A passport whose id is not the one minted for the attempt in
-          // flight: ignored and logged (spec §5.2).
-          log.warn('nocx: unexpected environment passport', {
-            environmentId: disposition.passport.environmentId,
-          })
-          logDecision('passport unexpected', {
-            environmentId: disposition.passport.environmentId,
-          })
-        } else {
-          logDecision('passport ignored', { reason: disposition.reason })
-        }
       })
 
       renderer.onBufferChange((type) => {
@@ -1414,37 +1439,30 @@ export class TerminalContent extends BaseTabContent {
       // session honestly reads "Native input" — the launcher may be
       // mid-start, and the first prompt flips it to command blocks.
       this._updateCapability()
-      this._cwd = session.cwd || ''
-      // The open ack's cwd is the provider's guess, not a verified claim:
-      // nothing has been verified yet at session open (AD-5).
-      this._cwdVerified = false
-      this._host = this.sshOpts?.host || ''
+      // The domain-scoped environment projection (bead nocx-u7uh.11):
+      // cwd, host, the tab title and the completion scope follow the ACTIVE
+      // domain. The lane tier is seeded from the session-open facts — the
+      // provider's cwd guess (unverified, AD-5) and the ssh binding — and
+      // the root domain inherits them at establishment, so integration
+      // takes over seamlessly. A fresh CHILD domain starts blank and is
+      // populated by its own reports, exactly as the parent was.
+      this.env = new DomainEnvironmentProjection(this.lifecycle, () => this._applyEnvironmentView())
+      this.env.seedLane({
+        cwd: session.cwd || '',
+        cwdVerified: false,
+        host: this.sshOpts?.host || '',
+        user: this.sshOpts?.user ?? '',
+        isLocal: !this.sshOpts,
+        programTitle: this.sshOpts?.host || '',
+      })
+      this.env.attach()
       // The origin answer changed from null to a live session: an
       // already-active tab whose session (re)opens must push the change
       // without a tab switch, the same as a cwd or an environment change.
-      // Fired after every field activeOrigin() reads is initialised.
-      this.hooks.onActiveOriginChange?.()
-      // The block header's `user@host`. Empty for a local shell, where the
-      // machine is implied and printing it on every block would be noise.
-      // ONE derivation, routed to both chips — the block header's frozen
-      // record and the prompt's live destination must never disagree.
-      const location = this.sshOpts ? this.locationLine() : ''
-      this.scrollback?.blockManager.setLocation(location)
-      this.editor?.setLocation(location)
-      // The trusted-prompt chip is gone with the `trusted` boolean
-      // (ADR-0024 §6): no stream sequence may promote the machine's trust.
-      this.editor?.setCwd(session.cwd || '')
-
-      // Push initial title + tooltip. Title composition lives here.
-      if (this.sshOpts) {
-        this.programTitle = this.sshOpts.host
-        this.onTooltipChange(
-          `SSH ${this.sshOpts.user ? this.sshOpts.user + '@' : ''}${this.sshOpts.host}`,
-        )
-      } else {
-        this.cwdTitle = directoryLabel(session.cwd)
-        this.onTooltipChange(cwdTooltip(session.cwd, false))
-      }
+      // _applyEnvironmentView fires it after every field activeOrigin()
+      // reads is initialised (the projection's first reconcile applies the
+      // lane seed above).
+      this._applyEnvironmentView()
 
       // Signal adoptability for alias tabs (no saved profile yet).
       // Must come after the session opens so adoption is only offered
@@ -1497,28 +1515,23 @@ export class TerminalContent extends BaseTabContent {
       })
 
       renderer.onTitle((title: string) => {
-        this.programTitle = title.trim()
-        this.pushTitle()
+        // An OSC 0/2 title is attributed to the ACTIVE domain (the stream
+        // has no writer identity; the domain that was active when the bytes
+        // arrived is the only honest attribution) and the projection's
+        // change callback re-composes the tab title.
+        this.env?.recordTitle(title.trim())
       })
       renderer.onCwd(({ path }) => {
         // An OSC 7 report is the shell's verified claim of where it is:
         // the one cwd the composition layer may hand to files.open (D2).
-        this._cwd = path
-        this._cwdVerified = true
-        this.editor?.setCwd(path)
-        this.cwdTitle = directoryLabel(path)
-        this.onTooltipChange(cwdTooltip(path, true))
-        this.pushTitle()
-        // The verified cwd is the origin answer's most frequent change:
-        // origin-following surfaces (the Files panel's reveal) follow it
-        // live, not on the next tab switch.
-        this.hooks.onActiveOriginChange?.()
+        // Scoped to the ACTIVE domain — a child's report never touches the
+        // parent's record, and the parent's values return only on the
+        // parent's authenticated activation (bead nocx-u7uh.11).
+        this.env?.recordCwd(path)
       })
-
       renderer.onBell(() => {
         host.requestAttention()
       })
-
       // ── Clipboard ────────────────────────────────────────────────────
       renderer.onSelectionChange((text) => {
         if (shouldCopy(text)) {
@@ -1863,9 +1876,10 @@ export class TerminalContent extends BaseTabContent {
     const actions = deriveActions({
       shellState: this._shellState,
       presentation: this._presentation,
-      // The renderer cannot yet tell bootstrap from installed delivery —
-      // that needs the passport (P2); markers present means the launcher
-      // delivered by one of the script carriers.
+      // The renderer cannot tell bootstrap from installed delivery without
+      // an accepted observation (the passport that used to carry it is
+      // deleted); markers present means the launcher delivered by one of
+      // the script carriers.
       observedDelivery: 'none',
       authorized,
       eligible,
@@ -1982,6 +1996,8 @@ export class TerminalContent extends BaseTabContent {
     this._lifecycleChangeUnsub = null
     this._projections?.detach()
     this._projections = null
+    this.env?.detach()
+    this.env = null
     if (this._globalKeydown) {
       document.removeEventListener('keydown', this._globalKeydown)
       this._globalKeydown = null

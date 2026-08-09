@@ -288,6 +288,20 @@ type wireEnvelope struct {
 	ActiveAttempt *string           `json:"active_attempt,omitempty"`
 	LastCompleted *wireCompletedRef `json:"last_completed,omitempty"`
 	NextSeq       *uint64           `json:"next_seq,omitempty"`
+
+	// Domain request/grant payload fields (§3). Env is the nested
+	// environment kind; host/user/port the ssh destination; grant_domain/
+	// grant_epoch the child's identity. Bootstrap is deliberately LAST: the
+	// shell extracts it by substring (everything between "bootstrap":" and
+	// the closing "}), and a fixed trailing position makes that extraction
+	// robust against the content's own escaped quotes.
+	Env         *string `json:"env,omitempty"`
+	Host        *string `json:"host,omitempty"`
+	User        *string `json:"user,omitempty"`
+	Port        *int    `json:"port,omitempty"`
+	GrantDomain *string `json:"grant_domain,omitempty"`
+	GrantEpoch  *uint64 `json:"grant_epoch,omitempty"`
+	Bootstrap   *string `json:"bootstrap,omitempty"`
 }
 
 // wireCompletedRef is the snapshot's last_completed payload.
@@ -354,6 +368,25 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 		env.Event.DomainSuspended = &lifecycle.DomainSuspendedEvent{}
 	case lifecycle.KindDomainClosed:
 		env.Event.DomainClosed = &lifecycle.DomainClosedEvent{}
+	case lifecycle.KindDomainRequest:
+		env.Event.DomainRequest = &lifecycle.DomainRequest{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Env:       str(w.Env),
+			Host:      str(w.Host),
+			User:      str(w.User),
+			Port:      derefInt(w.Port),
+		}
+	case lifecycle.KindDomainGrant:
+		env.Event.DomainGrant = &lifecycle.DomainGrant{
+			RequestID: lifecycle.RequestID(str(w.Request)),
+			Env:       str(w.Env),
+			Host:      str(w.Host),
+			User:      str(w.User),
+			Port:      derefInt(w.Port),
+			Domain:    lifecycle.DomainID(str(w.GrantDomain)),
+			Epoch:     derefU64(w.GrantEpoch),
+			Bootstrap: str(w.Bootstrap),
+		}
 	default:
 		return lifecycle.Envelope{}, errFraming
 	}
@@ -407,6 +440,41 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 			we.LastCompleted = encodeCompletedRef(p.LastCompleted)
 			we.NextSeq = new(p.NextSequence)
 		}
+	case lifecycle.KindDomainRequest:
+		if p := env.Event.DomainRequest; p != nil {
+			we.Request = new(string(p.RequestID))
+			we.Env = new(p.Env)
+			if p.Host != "" {
+				we.Host = new(p.Host)
+			}
+			if p.User != "" {
+				we.User = new(p.User)
+			}
+			if p.Port != 0 {
+				we.Port = new(p.Port)
+			}
+		}
+	case lifecycle.KindDomainGrant:
+		if p := env.Event.DomainGrant; p != nil {
+			we.Request = new(string(p.RequestID))
+			if p.Env != "" {
+				we.Env = new(p.Env)
+			}
+			if p.Host != "" {
+				we.Host = new(p.Host)
+			}
+			if p.User != "" {
+				we.User = new(p.User)
+			}
+			if p.Port != 0 {
+				we.Port = new(p.Port)
+			}
+			we.GrantDomain = new(string(p.Domain))
+			we.GrantEpoch = new(p.Epoch)
+			if p.Bootstrap != "" {
+				we.Bootstrap = new(p.Bootstrap)
+			}
+		}
 	}
 	body, err := json.Marshal(&we)
 	if err != nil {
@@ -425,6 +493,13 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	}
 	n, err := w.Write(body)
 	return 4 + n, err
+}
+
+func derefInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 func str(p *string) string {

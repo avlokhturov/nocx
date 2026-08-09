@@ -33,12 +33,6 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
-	// EnvironmentID is the environment-transition id minted for this attempt
-	// (design §5.3). Exported as NOCX_ENVIRONMENT_ID; P2's scripts emit the
-	// readiness passport and tag their markers only when it is set and
-	// well-formed, so an empty value is the fail-open default (no passport,
-	// no tagged marker) rather than a refusal.
-	EnvironmentID string
 	// The authenticated lifecycle channel (ADR-0024). Capability is the
 	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
 	// exported to the environment. Lane, Domain and Epoch are names, not
@@ -109,20 +103,14 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	b.WriteString("NOCX_SHELL_INTEGRATION=1\n")
 	if opts.Enhanced {
 		b.WriteString("NOCX_PROMPT_MODE=marker-only\n")
-		b.WriteString("NOCX_SESSION_ID=" + shellQuote(opts.SessionID) + "\n")
-	}
-	if opts.EnvironmentID != "" {
-		// Independent of Enhanced on purpose: the passport is gated on the
-		// environment id, never on the prompt mode (design §5.2), so a
-		// baseline session that carries an id still announces it.
-		b.WriteString("NOCX_ENVIRONMENT_ID=" + shellQuote(opts.EnvironmentID) + "\n")
+		b.WriteString("NOCX_SESSION_ID=" + ShellQuote(opts.SessionID) + "\n")
 	}
 	// Lifecycle channel addressing and transport (ADR-0024). The capability
 	// is deliberately NOT here: it rides the rcfile text (see @CAP@) and must
 	// never appear in /proc/<pid>/environ.
 	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
-		b.WriteString("NOCX_LIFECYCLE_LANE=" + shellQuote(opts.Lane) + "\n")
-		b.WriteString("NOCX_LIFECYCLE_DOMAIN=" + shellQuote(opts.Domain) + "\n")
+		b.WriteString("NOCX_LIFECYCLE_LANE=" + ShellQuote(opts.Lane) + "\n")
+		b.WriteString("NOCX_LIFECYCLE_DOMAIN=" + ShellQuote(opts.Domain) + "\n")
 		b.WriteString("NOCX_LIFECYCLE_EPOCH=" + fmt.Sprintf("%d\n", opts.Epoch))
 		if opts.LifecycleFD > 0 {
 			b.WriteString("NOCX_LIFECYCLE_FD=" + fmt.Sprintf("%d\n", opts.LifecycleFD))
@@ -134,9 +122,6 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	b.WriteString("export NOCX_SHELL_INTEGRATION")
 	if opts.Enhanced {
 		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
-	}
-	if opts.EnvironmentID != "" {
-		b.WriteString(" NOCX_ENVIRONMENT_ID")
 	}
 	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
 		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")
@@ -151,14 +136,14 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	return b.String()
 }
 
-// shellQuote wraps s in single quotes, escaping embedded quotes with the
+// ShellQuote wraps s in single quotes, escaping embedded quotes with the
 // POSIX '\” idiom. This is a real escaper, not concatenation that happens
 // to work on today's payloads: the launcher strings are built quote-free by
 // construction (see printfBEscape), so under a POSIX login shell this is
 // usually the identity, but any future payload change that introduces a
 // quote stays correct under dash/ash/bash and the other POSIX login shells
 // sshd may hand the remote command to.
-func shellQuote(s string) string {
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 

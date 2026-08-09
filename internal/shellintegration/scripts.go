@@ -50,7 +50,20 @@ var (
 // prompt at all; the bounded wait now polls with `read -t 0 -N 0` and a
 // sleep loop, and a silent peer times out with the native prompt visible
 // (ADR-0024 decision 3/9).
-const version = "21"
+//
+// 22: nested environments (nocx-u7uh.11): the parent detects sudo/su/ssh in
+// its preexec hook, requests a child domain (domain_request), reads the
+// grant (the opaque bootstrap), suspends, and launches the child; the
+// parent re-activates only after the child closes. extdebug is on so the
+// DEBUG trap can skip the original command, the refresh poll hands the
+// channel stream to the child (the §9 ownership interval), and a JSON
+// decoder for the grant's bootstrap rides here.
+//
+// 23: the readiness passport is deleted (nocx-u7uh.11): no OSC 636 P, no
+// NOCX_ENVIRONMENT_ID, no nocx_env= tagged marker — the environment
+// identity now rides the authenticated lifecycle channel (ADR-0024), and
+// the env-id machinery that fed the passport-era renderer is gone.
+const version = "23"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

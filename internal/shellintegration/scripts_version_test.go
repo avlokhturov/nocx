@@ -100,6 +100,8 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// prompt (decisions 8/9) was invisible, because readline writes the
 		// prompt to stderr.
 		"21": "94b686e116c401b4d393319972333bf49e406b2c2021344e550f878b9ad256ca",
+		"22": "21de58ea754f1d0099c63934b2916704aa92eab74da2d29975dd2df8e2ec2dd6",
+		"23": "0ea2de4602addb7f5240a62b3490981ee34332e90a257b0bc7490d2f039d6d31",
 	}
 
 	h := sha256.New()

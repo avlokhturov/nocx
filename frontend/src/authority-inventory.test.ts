@@ -195,7 +195,7 @@ const MANIFEST: AuthorityEntry[] = [
     authorityTypes: ['IntegrationDomain'],
     state: 'live',
     bead: BEAD,
-    note: 'ADR-0024 §2, §6: the domain stack transitions only on authenticated events; a passport is tty bytes and cannot activate a domain (today EnvironmentPassportTracker.ingest accepts stream passports against an expected id — a surviving invariant, not authority).',
+    note: 'ADR-0024 §2, §6: the domain stack transitions only on authenticated events. The OSC 636 readiness passport that once carried an expected-id invariant is deleted (bead nocx-u7uh.11) — nothing stream-derived can name a domain at all, which is strictly stronger than the tracker invariant it replaced.',
   },
   {
     op: 'enable integration-sensitive ssh rewriting',

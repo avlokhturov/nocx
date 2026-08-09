@@ -238,6 +238,7 @@ type Option func(*options)
 
 type options struct {
 	establishTimeout time.Duration
+	grantBuilder     GrantBuilder
 }
 
 // WithEstablishmentTimeout bounds how long a minted accept may wait for the
@@ -246,6 +247,47 @@ type options struct {
 // handshake wait (protocol §5): the backend never outwaits the shell.
 func WithEstablishmentTimeout(d time.Duration) Option {
 	return func(o *options) { o.establishTimeout = d }
+}
+
+// GrantBuilder composes the bootstrap for a child domain requested over the
+// authenticated channel (protocol doc §9): it mints the child (via
+// kernel.RequestDomain — the kernel stays the sole minter), picks the
+// child's transport, and returns the opaque, already-substituted bootstrap
+// the parent executes. Wired at the composition root, where the rcfile
+// builders and the ssh launcher live; nil (tests, or a server without the
+// wiring) delivers the request echo as the empty-bootstrap refusal and the
+// parent runs its command conventionally — the honest fallback.
+type GrantBuilder func(req GrantRequest) (GrantBootstrap, error)
+
+// GrantRequest is the context a domain_request carries, echoed by the
+// kernel into the grant outbound: the parent's lane and domain (the child
+// is minted under them) and the nested environment the parent is entering.
+type GrantRequest struct {
+	Lane      lifecycle.LaneID
+	Parent    lifecycle.DomainID
+	RequestID lifecycle.RequestID
+	Env       string
+	Host      string
+	User      string
+	Port      int
+}
+
+// GrantBootstrap is the builder's answer: the child's identity and the
+// opaque launch text the parent executes. An empty Bootstrap is the
+// refusal — the parent runs its command conventionally, never suspended
+// under a child that cannot exist.
+type GrantBootstrap struct {
+	Domain    lifecycle.DomainID
+	Epoch     uint64
+	Bootstrap string
+}
+
+// WithGrantBuilder wires the child-domain bootstrap builder behind the
+// domain_grant outbound (protocol doc §9). Every domain_request the kernel
+// validates is answered through it; without it, requests are answered with
+// the empty-bootstrap refusal.
+func WithGrantBuilder(b GrantBuilder) Option {
+	return func(o *options) { o.grantBuilder = b }
 }
 
 // Establishment sentinel errors, returned by AcknowledgeEstablishment.
@@ -298,6 +340,7 @@ type Publisher struct {
 	gen              map[estKey]string        // current establishment generation per episode
 	pending          map[estKey]pendingAccept // accepts awaiting the renderer's ack (decision 9)
 	establishTimeout time.Duration
+	grantBuilder     GrantBuilder
 }
 
 // New builds a Publisher over the kernel. The emitter is bound separately
@@ -314,6 +357,7 @@ func New(k Kernel, opts ...Option) *Publisher {
 		gen:              make(map[estKey]string),
 		pending:          make(map[estKey]pendingAccept),
 		establishTimeout: o.establishTimeout,
+		grantBuilder:     o.grantBuilder,
 	}
 }
 
@@ -345,12 +389,11 @@ func (p *Publisher) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.Domai
 	p.mu.Lock()
 	p.known[lane] = struct{}{}
 	p.mu.Unlock()
-	// Seed the dedupe baseline with the lane's current projection instead of
-	// announcing it: a fresh lane is native, and telling the renderer
-	// "native" about a lane it has never heard of would be noise. The seed
-	// is also what keeps TransportLost from announcing every unrelated lane
-	// that merely exists on another transport — only lanes whose projection
-	// actually changed emit a fact.
+	// Seed the projection without announcing it: a fresh lane is native, and
+	// telling the renderer "native" about a lane it has never heard of would
+	// be noise. The seed is also what keeps TransportLost from announcing
+	// every unrelated lane that merely exists on another transport — only
+	// lanes whose projection actually changed emit a fact.
 	if f, ok := p.derive(lane); ok {
 		p.mu.Lock()
 		p.last[lane] = f
@@ -359,7 +402,45 @@ func (p *Publisher) RequestDomain(lane lifecycle.LaneID, parent *lifecycle.Domai
 	return h, nil
 }
 
-// Ingest forwards one authenticated envelope and publishes the lane's
+// buildAndDeliverGrant answers one validated domain_request: the builder
+// (composition root) mints the child on the transport of its choice via
+// kernel.RequestDomain and composes the opaque bootstrap; the grant is then
+// delivered to the parent, enriched with the child's identity. A builder
+// refusal (an unsupported environment, a failed ssh transport) delivers the
+// request echo with an empty bootstrap: the parent runs its command
+// conventionally — never suspended under a child that cannot exist. The
+// child's minting is published: a new Pending domain on a known lane is a
+// change the renderer must see (its projection follows the active domain).
+func (p *Publisher) buildAndDeliverGrant(out lifecycle.Outbound) {
+	grant := out.Envelope.Event.DomainGrant
+	if grant == nil {
+		_ = p.kernel.Deliver(out)
+		return
+	}
+	req := GrantRequest{
+		Lane:      out.Envelope.Lane,
+		Parent:    out.Envelope.Domain,
+		RequestID: grant.RequestID,
+		Env:       grant.Env,
+		Host:      grant.Host,
+		User:      grant.User,
+		Port:      grant.Port,
+	}
+	if p.grantBuilder != nil {
+		if b, err := p.grantBuilder(req); err == nil {
+			grant.Domain = b.Domain
+			grant.Epoch = b.Epoch
+			grant.Bootstrap = b.Bootstrap
+		}
+		// A builder refusal delivers the echo with an empty bootstrap: the
+		// parent runs its command conventionally, never suspended under a
+		// child that cannot exist, and the builder's log line carries the
+		// reason (fail-open: the pump never panics).
+	}
+	p.publishLane(out.Envelope.Lane)
+	_ = p.kernel.Deliver(out)
+}
+
 // projection, ordering the replies (decision 9): mutation → publish → only
 // then the accept, and the accept only on a real acknowledgement. Published
 // on failure as well as success: the one mutation a kernel makes on a
@@ -383,15 +464,24 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 		return err
 	}
 	for _, out := range outs {
-		if out.Envelope.Event.Kind == lifecycle.KindAccept {
+		switch out.Envelope.Event.Kind {
+		case lifecycle.KindAccept:
 			p.beginEstablishment(out)
+		case lifecycle.KindDomainGrant:
+			// The grant is the answer to the parent's own request — it
+			// grants no suppression authority and no new state, so it is
+			// never deferred behind an acknowledgement (unlike accept):
+			// the parent is blocked waiting for it before it can launch
+			// the child.
+			p.buildAndDeliverGrant(out)
 		}
 	}
 	p.publishLane(env.Lane)
 	for _, out := range outs {
-		if out.Envelope.Event.Kind != lifecycle.KindAccept {
-			_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
+		if out.Envelope.Event.Kind == lifecycle.KindAccept || out.Envelope.Event.Kind == lifecycle.KindDomainGrant {
+			continue // accept is deferred (decision 9); grants were delivered by buildAndDeliverGrant
 		}
+		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
 	}
 	return nil
 }
