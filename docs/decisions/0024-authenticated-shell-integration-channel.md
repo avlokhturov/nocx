@@ -446,6 +446,19 @@ ends the domain, the capability, the listener and the attempt, and a new session
 gets a new epoch. **Frontend/backend reconnect** must either resume the existing
 domain or report ambiguity and revoke it.
 
+This decision fixes the property and leaves the mechanism open on purpose. The
+mechanism chosen — a one-shot recovery fence pre-provisioned during the
+authenticated bootstrap, matched by the renderer without inspecting the grid, and
+acknowledged only once the conventional presentation is also applied — is recorded
+in [`docs/lifecycle-protocol.md`](../lifecycle-protocol.md) §12.1, which is where
+mechanisms live. Two alternatives were rejected there and are worth naming here,
+because both would have contradicted decisions this ADR makes: the renderer
+**observing** a repainted native prompt in the grid is untrusted inference and
+reintroduces the render-state → control-plane edge decision 1 exists to sever; and
+an acknowledgement that the renderer merely **applied** the conventional
+presentation acknowledges the wrong thing, leaving reachable the suppressed prompt
+taking raw input that this decision names as the worst of both.
+
 ### 9. Marker-only prompt requires a live authoritative channel
 
 Prompt suppression is forbidden unless a domain is live in the sense of decision 3

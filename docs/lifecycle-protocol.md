@@ -342,6 +342,12 @@ attempts `unknown`, and stops accepting events for the dead domain.
 
 ### 12.1 Restoration: the composite acknowledgement
 
+This section is the home of the mechanism ADR-0024 decision 8 deliberately left
+open (`nocx-u7uh.20`): the ADR fixes the property — restoration is acknowledged
+before a session is treated as a usable conventional terminal — and the composite
+acknowledgement below is how it is met. The ADR carries a pointer and the two
+rejected alternatives; the bytes stay here.
+
 Decision 8 distinguishes two losses, and the **session coordinator** (the
 transport, not the kernel) tells them apart by two independent signals:
 
