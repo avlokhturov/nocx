@@ -770,9 +770,17 @@ export class TerminalContent extends BaseTabContent {
             // bytes and before any fact can arrive — so the published
             // running fact (which the backend emits BEFORE the RPC response,
             // inside SubmitAttempt) always finds the block it binds to
-            // (ADR-0024 §5, §7).
+            // (ADR-0024 §5, §7). That ordering is why the block's CREATION
+            // line is the prompt line, and why its OUTPUT range starts one
+            // row later (nocx-4yhi): the bytes go out after this call, and
+            // the shell's echo of the typed command lands on the creation
+            // line itself. The header already shows the command; a body
+            // that repeats it is the defect — so the range and the
+            // creation time are two different things, and the record
+            // carries both.
             if (this.scrollback && this.renderer) {
-              this.scrollback.beginBlock(recordLine, submitCwd, this.renderer.cursorLine())
+              const startLine = this.renderer.cursorLine()
+              this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1)
             }
             const write = (): void => {
               submitCommand(doc, {
@@ -1176,6 +1184,12 @@ export class TerminalContent extends BaseTabContent {
             // command structure; its text is already on the terminal and
             // never persists (the command-text decision).
             if (!this.scrollback || !this.renderer) return
+            // No outputStart override here — unlike the app-owned submit,
+            // this block opens at the cursor line at fact time, AFTER the
+            // echo: the user typed the command at the shell and it was
+            // echoed as they typed, and the running fact (which the shell
+            // emits as the command starts) lands on or past the echo line.
+            // outputStart therefore defaults to startLine (nocx-4yhi).
             this.scrollback.beginBlock(
               attempt.command || '(empty)',
               this._cwd,

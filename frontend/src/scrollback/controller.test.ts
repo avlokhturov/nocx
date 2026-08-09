@@ -227,3 +227,133 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     controller.blockManager.clearAll()
   })
 })
+
+describe('the frozen block\u2019s rows leave the grid (nocx-m87n live-region window)', () => {
+  // The live region is the xterm grid clipped to the box `setLiveHeight`
+  // sizes. A block's rows are serialized into its DOM element at freeze,
+  // but they STAY in the grid — unless the viewport is cleared at the
+  // freeze boundary. On a grid that has not scrolled, the box then
+  // re-displays those rows inside the running command: `ls`, its output,
+  // `pwd`, its output, and only then the running command's own rows, each
+  // row on screen twice (once frozen, once live). This describe block
+  // pins the seam that prevents it: every freeze hands the rows to the DOM
+  // and clears them from the grid, and the clear never fires while a newer
+  // command owns the running slot (its rows share the buffer below the
+  // frozen ones — wiping the grid would wipe its serialization window).
+  const FENCE = 'ab'.repeat(32)
+  const FENCE2 = 'cd'.repeat(32)
+  // The fence-rendezvous describe above scopes its own renderer factory,
+  // domain and attempt helper — this sibling describe needs its own.
+  function rendererWithFence(): {
+    renderer: TerminalRenderer
+    sight: (ev: RenderFenceEvent) => void
+  } {
+    const renderer = makeRenderer()
+    let fenceCb: ((ev: RenderFenceEvent) => void) | null = null
+    renderer.onRenderFence = (cb: (ev: RenderFenceEvent) => void) => {
+      fenceCb = cb
+    }
+    return {
+      renderer,
+      sight: (ev) => fenceCb?.(ev),
+    }
+  }
+  const domain = mintDomain({
+    lane: 'l',
+    lifecycle: 'prompt_ready',
+    domain: 'd1',
+    epoch: 1,
+  }) as IntegrationDomain
+  function completedAttempt(fence: string): ExecutionAttempt {
+    return {
+      id: 'att-1',
+      domain,
+      state: 'completed',
+      exitCode: 0,
+      fence,
+    }
+  }
+
+  it('clears the grid when a block freezes, so the live region never re-displays rows the DOM block owns', () => {
+    const { renderer, sight } = rendererWithFence()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const clearViewport = renderer.clearViewport
+    /* eslint-enable @typescript-eslint/unbound-method */
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    // `ls` runs and finishes: the block freezes at the sighted fence line
+    // and its rows leave the grid.
+    controller.beginBlock('ls', '~', 0)
+    controller.blockManager.bindAttempt('att-1')
+    expect(controller.mode).toBe('running')
+    sight({ hex: FENCE, line: 2, buffer: 'normal' })
+    expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(true)
+    expect(controller.mode).toBe('idle')
+    expect(clearViewport).toHaveBeenCalledTimes(1)
+
+    // `pwd` runs and finishes the same way — a second freeze, a second clear.
+    controller.beginBlock('pwd', '~', 3)
+    controller.blockManager.bindAttempt('att-2')
+    sight({ hex: FENCE2, line: 4, buffer: 'normal' })
+    expect(controller.freezeFromAttempt({ ...completedAttempt(FENCE2), id: 'att-2' }, 4)).toBe(true)
+    expect(clearViewport).toHaveBeenCalledTimes(2)
+
+    // `codex` runs: its rows are the ONLY rows in the grid (both earlier
+    // blocks were cleared at their freezes), and nothing clears mid-run.
+    controller.beginBlock('codex', '~', 5)
+    controller.blockManager.bindAttempt('att-3')
+    expect(controller.mode).toBe('running')
+    expect(clearViewport).toHaveBeenCalledTimes(2)
+    controller.blockManager.clearAll()
+  })
+
+  it('a deferred freeze clears the grid only when no newer command owns the running slot', () => {
+    const { renderer, sight } = rendererWithFence()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const clearViewport = renderer.clearViewport
+    /* eslint-enable @typescript-eslint/unbound-method */
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    // The first command completes with its fence still in flight: the
+    // VISUAL freeze defers and the grid is untouched.
+    controller.beginBlock('codex', '~', 0)
+    controller.blockManager.bindAttempt('att-1')
+    expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
+    expect(clearViewport).not.toHaveBeenCalled()
+
+    // A second command starts while the first's boundary is pending: its
+    // rows sit BELOW the first block's rows in the buffer. The first
+    // fence landing must serialize the first block WITHOUT clearing —
+    // clearing would wipe the second command's still-unserialized rows.
+    controller.beginBlock('codex', '~', 4)
+    controller.blockManager.bindAttempt('att-2')
+    sight({ hex: FENCE, line: 3, buffer: 'normal' })
+    expect(
+      controller.blockManager.blockForAttempt('att-1')?.el.classList.contains('cmd-block-running'),
+    ).toBe(false)
+    expect(controller.blockManager.runningBlock).toBe(
+      controller.blockManager.blockForAttempt('att-2'),
+    )
+    expect(clearViewport).not.toHaveBeenCalled()
+
+    // The second command completes and its fence is already sighted: the
+    // rec path freezes it and NOW the grid clears — its rows were the last
+    // in the buffer.
+    sight({ hex: FENCE2, line: 7, buffer: 'normal' })
+    expect(controller.freezeFromAttempt({ ...completedAttempt(FENCE2), id: 'att-2' }, 7)).toBe(true)
+    expect(clearViewport).toHaveBeenCalledTimes(1)
+    controller.blockManager.clearAll()
+  })
+})

@@ -98,9 +98,11 @@ export class ScrollbackController {
       now,
       snapshotStore: opts.snapshotStore,
       // A DEFERRED freeze landed inside the manager (the fence arrived, or
-      // the FENCE_DEFER_MS window elapsed): settle the live region exactly
-      // like a direct freeze, since freezeFromAttempt already returned.
+      // the FENCE_DEFER_MS window elapsed): hand the block's rows to the
+      // DOM and settle the live region exactly like a direct freeze, since
+      // freezeFromAttempt already returned.
       onDeferredFreeze: () => {
+        this._clearFrozenRows()
         this.setIdle()
         this._scrollToLastBlockStart()
       },
@@ -347,11 +349,36 @@ export class ScrollbackController {
    * Called at editor submit time (nocx-atyf.4): start a running block
    * from the app-owned half of the lifecycle. The block is marked as
    * running immediately; when C arrives later the cReceived flag is set.
+   * `outputStart` is the block's OUTPUT range start — the first row
+   * serialized at freeze — which the app-owned submit sets to
+   * startLine + 1 because the shell's echo lands on the creation line
+   * (nocx-4yhi). It defaults to startLine for shell-originated blocks.
    */
-  beginBlock(command: string, cwd: string, startLine: number): void {
+  beginBlock(command: string, cwd: string, startLine: number, outputStart?: number): void {
     const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine)
+    this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
     this.setRunning()
+  }
+
+  /**
+   * Hand a frozen block's rows back to the DOM: the block's element now
+   * owns them, so they must leave the grid — otherwise the live region
+   * re-displays them below the block, and on a grid that has never
+   * scrolled every finished command's rows appear a second time inside
+   * the running one (nocx-m87n). The marker paths cleared the viewport at
+   * every freeze before the attempt-driven lifecycle; restoring that is
+   * this call.
+   *
+   * Guarded two ways. No NEWER command may own the running slot: a newer
+   * command's rows sit BELOW the frozen ones in the same buffer, and
+   * clearing would wipe its still-unserialized serialization window (the
+   * deferred-fence overlap, nocx-m87n). And an alt-screen program owns
+   * the pane: clearing would blank its screen.
+   */
+  private _clearFrozenRows(): void {
+    if (this._blockManager.runningBlock !== null) return
+    if (this._mode === 'fullscreen') return
+    this._renderer.clearViewport()
   }
 
   /**
@@ -363,6 +390,7 @@ export class ScrollbackController {
   onCommandEnd(getLine: GetLineFn, endLine: number, exitCode: number | null): void {
     const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
     if (rec) {
+      this._clearFrozenRows()
       this.setIdle()
       this._scrollToLastBlockStart()
     }
@@ -443,6 +471,7 @@ export class ScrollbackController {
       this._renderer.cursorLine(),
     )
     if (rec) {
+      this._clearFrozenRows()
       this.setIdle()
       this._scrollToLastBlockStart()
       return true
@@ -456,6 +485,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
     if (rec) {
+      this._clearFrozenRows()
       this.setIdle()
       this._scrollToLastBlockStart()
       return true

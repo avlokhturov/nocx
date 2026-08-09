@@ -1950,6 +1950,61 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it('the app-owned submit opens the block before the bytes and marks the echo line outside the output range (nocx-4yhi)', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      ed.insertText('ls')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The block opened at submit — BEFORE the bytes — on the prompt line
+      // (fixture cursorLine is 0). The shell's echo of `ls` will land on
+      // that same line, so the block's OUTPUT range starts one row later;
+      // the creation line and the output range are two different things.
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(block!.startLine).toBe(0)
+      expect(block!.outputStart).toBe(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a shell-originated block\u2019s output range starts at the cursor line — its echo preceded the running fact (nocx-4yhi)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'pwd' },
+      })
+      const block = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
+      expect(block).not.toBeNull()
+      // The user typed at the shell: the command was echoed as they typed,
+      // and the running fact landed after it — so the block's output range
+      // is exactly where the block opened, no echo to skip.
+      expect(block!.startLine).toBe(block!.outputStart)
+    } finally {
+      teardown()
+    }
+  })
+
   it('the running grid is fitted to the live region cap, so a tall inline TUI keeps its last row reachable (nocx-zn4d)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)

@@ -1573,3 +1573,59 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     }
   })
 })
+
+describe('the serialized output range vs the block creation line (nocx-4yhi)', () => {
+  // The app-owned submit opens the block BEFORE the bytes go out, so the
+  // shell's echo of the typed command lands on the creation line itself.
+  // The block's OUTPUT range therefore starts one row after it — the
+  // header already shows the command, and a body that repeats it is the
+  // defect this describe pins. Shell-originated blocks open at the cursor
+  // line at fact time, which is already past the echo: their output range
+  // starts where the block opened.
+  let manager: BlockManager
+  let inner: HTMLElement
+  let xtermContainer: HTMLElement
+
+  beforeEach(() => {
+    _resetThemeState()
+    inner = document.createElement('div')
+    xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    document.body.appendChild(inner)
+    manager = new BlockManager(inner, xtermContainer, {
+      snapshotStore: freshStore(),
+    })
+  })
+
+  it('serializes from outputStart when the creation line carries the shell echo', () => {
+    const rec = manager.startBlock('ls', '~', 5, 6)
+    expect(rec.outputStart).toBe(6)
+    // Line 5 is the prompt line the echo lands on; 6-7 are the output.
+    const lines = [
+      new BufferLine('$ ls'),
+      new BufferLine('file1'),
+      new BufferLine('file2'),
+      new BufferLine(''),
+    ]
+    const getLine = (y: number) => lines[y - 5]
+    const frozen = manager.freezeBlock(getLine, 8, 0)
+    expect(frozen).not.toBeNull()
+    const text = blockOutputText(frozen!.el.querySelector('.cmd-output'))
+    expect(text).toContain('file1')
+    expect(text).toContain('file2')
+    expect(text).not.toContain('$ ls')
+  })
+
+  it('defaults the output range to the creation line — the shell-originated case', () => {
+    // The running fact lands after the echo (the user typed at the shell),
+    // so the cursor line is already past it and the block serializes from
+    // exactly where it opened.
+    const rec = manager.startBlock('pwd', '~', 7)
+    expect(rec.outputStart).toBe(7)
+    const getLine = (y: number) => (y === 7 ? new BufferLine('out1') : undefined)
+    const frozen = manager.freezeBlock(getLine, 7, 0)
+    expect(frozen).not.toBeNull()
+    const text = blockOutputText(frozen!.el.querySelector('.cmd-output'))
+    expect(text).toContain('out1')
+  })
+})

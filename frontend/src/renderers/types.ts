@@ -229,9 +229,13 @@ export interface TerminalRenderer {
   cursorLine(): number
 
   /**
-   * Clear the visible xterm viewport. Used after freezing a block to
-   * prevent output duplication between DOM blocks and the xterm grid.
-   * Does NOT clear scrollback — only the visible viewport rows.
+   * Clear the visible xterm viewport. Used after freezing a block, so the
+   * rows the block's DOM element now owns do not stay in the grid and get
+   * re-displayed by the live region (nocx-m87n). The underlying
+   * `Terminal.clear()` clears the whole buffer — "making the prompt line
+   * the new first line" — which is exactly what the DOM block model
+   * wants: the DOM owns the scrollback now, and the grid only ever holds
+   * the running command's rows.
    */
   clearViewport(): void
 }

@@ -668,6 +668,10 @@ export class XtermRenderer implements TerminalRenderer {
     return buf.baseY + buf.cursorY
   }
 
+  /** Clear the whole buffer — "making the prompt line the new first
+   *  line" (xterm's own contract). Called at a block freeze so the rows
+   *  the DOM block now owns leave the grid; the grid only ever holds the
+   *  running command's rows, and the DOM owns the scrollback (nocx-m87n). */
   clearViewport(): void {
     this.term?.clear()
   }

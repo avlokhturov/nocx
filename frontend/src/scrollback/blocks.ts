@@ -88,8 +88,21 @@ export interface BlockRecord {
    *  attempt, kept when the block freezes. Absent only for a block that
    *  never bound (cleared scrollback, never seen running). */
   attemptId?: string
-  /** IMarker line for C boundary. */
+  /** IMarker line for C boundary — the absolute buffer line where the
+   *  block was CREATED: the prompt line at app-owned submit, or the cursor
+   *  line when a shell-originated attempt's running fact landed. The
+   *  published running fact binds to the block by this line's lifetime,
+   *  never by its value (ADR-0024 §5 attachment semantics). */
   startLine: number
+  /** The absolute buffer line where the block's OUTPUT begins — the first
+   *  row serialized at freeze. Differs from `startLine` exactly when the
+   *  creation line carries the shell's echo of the command: the app-owned
+   *  submit opens the block BEFORE the bytes, and the echo lands on the
+   *  creation line, so the output range starts one row later (nocx-4yhi).
+   *  The range and the creation time are two different things, and this
+   *  is the record of that; a shell-originated block opens after its echo
+   *  and defaults to `startLine`. */
+  outputStart: number
   /** IMarker line for D boundary (approx). */
   endLine: number
   /** Whether OSC 133 C was received for this command. False when the
@@ -867,7 +880,12 @@ export class BlockManager {
     this._location = location
   }
 
-  startBlock(command: string, cwd: string, startLine: number): BlockRecord {
+  startBlock(
+    command: string,
+    cwd: string,
+    startLine: number,
+    outputStart = startLine,
+  ): BlockRecord {
     if (this._runningBlock) {
       this._finalizeRunningUnsafe()
     }
@@ -897,6 +915,13 @@ export class BlockManager {
       exitCode: null,
       status: 'running',
       startLine,
+      // The output range and the creation line are two different things
+      // (nocx-4yhi): the app-owned submit opens the block before the bytes
+      // and passes outputStart = startLine + 1, because the shell's echo
+      // of the command lands on the creation line and the block's body
+      // must not repeat the command its header already shows. A
+      // shell-originated block opens after its echo and keeps the default.
+      outputStart,
       endLine: startLine,
       cReceived: false,
       el,
@@ -987,7 +1012,7 @@ export class BlockManager {
   ): void {
     rec.endLine = endLine
     const snapshot = fromITheme(getCurrentTheme())
-    const outputHtml = serializeRange(snapshot, getLine, rec.startLine, endLine)
+    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine)
 
     const newEl = freezeBlock(
       rec.el,
