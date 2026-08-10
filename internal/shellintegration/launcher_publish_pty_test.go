@@ -190,3 +190,47 @@ func TestFullLauncher_ForeignRoot_RefusedAndConventional(t *testing.T) {
 		t.Errorf("foreign file touched: %v", err)
 	}
 }
+
+// TestFullLauncher_SecondConnection_StillIntegrates is the case every proof
+// above misses and every real host is in: a $HOME that already carries the
+// bundle (nocx-tr2n).
+//
+// The rcfile the full launcher installs sources
+// integration/$NOCX_GENERATION/nocx.bash with stderr suppressed, and the
+// prelude only named a generation on the path where it published one. On the
+// second connection the version is already installed, the prelude skipped,
+// NOCX_GENERATION came out empty, the source resolved to a directory that
+// does not exist and said nothing — an ordinary terminal with the
+// integration environment set and no integration in it. That is what the
+// owner saw over ssh: markers on the first connection to a host, never
+// again.
+//
+// The fixture runs the SAME launcher twice against one $HOME. The first run
+// is the installing one; the assertions are all on the second.
+func TestFullLauncher_SecondConnection_StillIntegrates(t *testing.T) {
+	requireBinBash(t)
+	home := writeBashFixtureHome(t, "")
+	tmp := t.TempDir()
+	cmd, _, ok := NewRemoteLauncher().StartCommand(ShellBash, LaunchOptions{
+		SessionID: "sess-bash", Enhanced: true,
+	})
+	if !ok {
+		t.Fatal("bash launcher refused")
+	}
+	env := []string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}
+
+	first := runLauncherOnPTY(t, "/bin/sh", cmd, env, "echo hello", "exit")
+	if ms := extractOscMarkers(first); countMarkers(ms, "A") == 0 {
+		t.Fatalf("the installing connection was not integrated, so the second proves nothing; output:\n%s", first)
+	}
+
+	second := runLauncherOnPTY(t, "/bin/sh", cmd, env, "echo hello", "exit")
+	ms := extractOscMarkers(second)
+	if countMarkers(ms, "A") == 0 || countMarkers(ms, "B") == 0 {
+		t.Errorf("a connection to a host that already has the bundle came up unintegrated "+
+			"(no A/B markers): NOCX_GENERATION was not named, so the rcfile sourced nothing; output:\n%s", second)
+	}
+	if !strings.Contains(second, "USER_RC_RAN") {
+		t.Errorf("user rc did not run on the second connection; output:\n%s", second)
+	}
+}

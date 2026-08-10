@@ -38,6 +38,7 @@ const publishPreludeTemplate = `__nocx_publish() { :
 __nocx_root="${HOME}/.nocx"
 __nocx_skip=
 __nocx_gen=
+__nocx_adoptable=
 __nocx_have_lock=
 __nocx_version="@VERSION@"
 [ -n "${HOME:-}" ] || __nocx_skip=1
@@ -49,13 +50,13 @@ if [ -d "$__nocx_root" ]; then __nocx_ours=0; for __nocx_m in manifest.json laun
 [ ! -L "$__nocx_root/lock" ] || __nocx_skip=1
 [ ! -L "$__nocx_root/manifest.json" ] || __nocx_skip=1
 [ ! -L "$__nocx_root/launch" ] || __nocx_skip=1
-if [ "$__nocx_skip" != 1 ]; then if [ -f "$__nocx_root/manifest.json" ]; then __nocx_m=$(tr -d "[:space:]" < "$__nocx_root/manifest.json" 2>/dev/null); fi; __nocx_installed_protocol=$(__nocx_jnum protocol); __nocx_installed_version=$(__nocx_jstr version); if [ -n "$__nocx_installed_protocol" ] && [ "$__nocx_installed_protocol" != 1 ]; then __nocx_skip=1; fi; if [ -n "$__nocx_installed_protocol" ] && [ -n "$__nocx_installed_version" ] && __nocx_ver_ge "$__nocx_installed_version" "$__nocx_version"; then __nocx_skip=1; fi; fi
+if [ "$__nocx_skip" != 1 ]; then if [ -f "$__nocx_root/manifest.json" ]; then __nocx_m=$(tr -d "[:space:]" < "$__nocx_root/manifest.json" 2>/dev/null); fi; __nocx_installed_protocol=$(__nocx_jnum protocol); __nocx_installed_version=$(__nocx_jstr version); if [ -n "$__nocx_installed_protocol" ] && [ "$__nocx_installed_protocol" != 1 ]; then __nocx_skip=1; fi; if [ -n "$__nocx_installed_protocol" ] && [ -n "$__nocx_installed_version" ] && __nocx_ver_ge "$__nocx_installed_version" "$__nocx_version"; then __nocx_skip=1; __nocx_adoptable=1; fi; fi
 if [ "$__nocx_skip" != 1 ]; then mkdir -p "$__nocx_root/tmp" "$__nocx_root/integration" || __nocx_skip=1; fi
 if [ "$__nocx_skip" != 1 ]; then chmod 700 "$__nocx_root" "$__nocx_root/tmp" "$__nocx_root/integration" || __nocx_skip=1; fi
 if [ "$__nocx_skip" != 1 ]; then __nocx_d=$(mktemp -d "$__nocx_root/tmp/nocx.XXXXXX" 2>/dev/null) || __nocx_skip=1; fi
 if [ "$__nocx_skip" != 1 ]; then chmod 700 "$__nocx_d" || __nocx_skip=1; fi
 if [ "$__nocx_skip" != 1 ]; then if __nocx_lock; then __nocx_have_lock=1; else __nocx_skip=1; fi; fi
-if [ "$__nocx_skip" != 1 ]; then if [ -f "$__nocx_root/manifest.json" ]; then __nocx_m=$(tr -d "[:space:]" < "$__nocx_root/manifest.json" 2>/dev/null); fi; __nocx_installed_protocol=$(__nocx_jnum protocol); __nocx_installed_version=$(__nocx_jstr version); if [ -n "$__nocx_installed_protocol" ] && [ "$__nocx_installed_protocol" != 1 ]; then __nocx_skip=1; fi; if [ -n "$__nocx_installed_protocol" ] && [ -n "$__nocx_installed_version" ] && __nocx_ver_ge "$__nocx_installed_version" "$__nocx_version"; then __nocx_skip=1; fi; fi
+if [ "$__nocx_skip" != 1 ]; then if [ -f "$__nocx_root/manifest.json" ]; then __nocx_m=$(tr -d "[:space:]" < "$__nocx_root/manifest.json" 2>/dev/null); fi; __nocx_installed_protocol=$(__nocx_jnum protocol); __nocx_installed_version=$(__nocx_jstr version); if [ -n "$__nocx_installed_protocol" ] && [ "$__nocx_installed_protocol" != 1 ]; then __nocx_skip=1; fi; if [ -n "$__nocx_installed_protocol" ] && [ -n "$__nocx_installed_version" ] && __nocx_ver_ge "$__nocx_installed_version" "$__nocx_version"; then __nocx_skip=1; __nocx_adoptable=1; fi; fi
 if [ "$__nocx_skip" != 1 ]; then printf %b "@NOCX_BASH@" > "$__nocx_d/nocx.bash" && chmod 600 "$__nocx_d/nocx.bash" || __nocx_skip=1; fi
 if [ "$__nocx_skip" != 1 ]; then printf %b "@NOCX_ZSH@" > "$__nocx_d/nocx.zsh" && chmod 600 "$__nocx_d/nocx.zsh" || __nocx_skip=1; fi
 if [ "$__nocx_skip" != 1 ]; then printf %b "@NOCX_POSIX@" > "$__nocx_d/nocx.posix" && chmod 600 "$__nocx_d/nocx.posix" || __nocx_skip=1; fi
@@ -66,8 +67,10 @@ if [ "$__nocx_skip" != 1 ]; then printf @MANIFEST_JSON@ > "$__nocx_root/tmp/mani
 if [ "$__nocx_skip" != 1 ]; then if [ ! -e "$__nocx_root/launch" ]; then printf %b "@NOCX_LAUNCH@" > "$__nocx_root/launch" && chmod 700 "$__nocx_root/launch" || __nocx_skip=1; fi; fi
 if [ "$__nocx_skip" != 1 ]; then mv "$__nocx_root/tmp/manifest.$$" "$__nocx_root/manifest.json" || __nocx_skip=1; fi
 if [ "$__nocx_skip" != 1 ]; then __nocx_gen="v@VERSION@"; for __nocx_g in "$__nocx_root"/integration/v*; do if [ -e "$__nocx_g" ]; then if [ "$__nocx_g" != "$__nocx_root/integration/v@VERSION@" ]; then rm -rf "$__nocx_g"; fi; fi; done; for __nocx_t in "$__nocx_root"/tmp/*; do if [ -e "$__nocx_t" ]; then rm -rf "$__nocx_t"; fi; done; fi
+if [ "$__nocx_adoptable" = 1 ] && [ -z "$__nocx_gen" ]; then __nocx_adopt || __nocx_gen=; fi
 if [ "$__nocx_have_lock" = 1 ]; then rm -rf "$__nocx_root/lock" 2>/dev/null; fi
 }
+__nocx_adopt() { __nocx_g=$(__nocx_jstr generation); case "$__nocx_g" in [A-Za-z0-9][A-Za-z0-9._-]*) ;; *) return 1 ;; esac; [ "${#__nocx_g}" -le 64 ] || return 1; for __nocx_f in nocx.bash nocx.zsh nocx.posix; do __nocx_e=$(printf "%s" "$__nocx_m" | grep -o "\"$__nocx_f\":{\"hash\":\"[^\"]*\"" | head -n 1 | cut -d\" -f6); [ -n "$__nocx_e" ] || return 1; __nocx_p="$__nocx_root/integration/$__nocx_g/$__nocx_f"; [ -f "$__nocx_p" ] && [ ! -L "$__nocx_p" ] || return 1; __nocx_a=$(__nocx_sha "$__nocx_p"); [ -n "$__nocx_a" ] || return 1; [ "$__nocx_e" = "sha256:$__nocx_a" ] || return 1; done; __nocx_gen="$__nocx_g"; return 0; }
 __nocx_jnum() { printf "%s" "$__nocx_m" | grep -o "\"$1\":[0-9][0-9]*" | head -n 1 | cut -d: -f2; }
 __nocx_jstr() { printf "%s" "$__nocx_m" | grep -o "\"$1\":\"[^\"]*\"" | head -n 1 | cut -d\" -f4; }
 __nocx_sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" 2>/dev/null | cut -d" " -f1; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | cut -d" " -f1; fi; }
