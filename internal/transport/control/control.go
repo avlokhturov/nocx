@@ -42,7 +42,7 @@ type Admission interface {
 // The marker method is unexported, so only types in this package satisfy the
 // interface: NewSemaphore and NewCompositeNonblocking produce values of it,
 // and NewWaitingSemaphore deliberately does not. A waiting admission wired
-// into a Submission is a compile error, not a runtime surprise (ADR-0024).
+// into a Submission is a compile error, not a runtime surprise (ADR-0026).
 type NonblockingAdmission interface {
 	Admission
 	nonblocking()

@@ -13,6 +13,7 @@ interface MockCellData {
   bgMode: number
   bold: boolean
   italic: boolean
+  dim: boolean
   underline: boolean
   inverse: boolean
   blink: boolean
@@ -30,6 +31,7 @@ function defaultCell(ch: string, width: number = 1): MockCellData {
     bgMode: 0, // default
     bold: false,
     italic: false,
+    dim: false,
     underline: false,
     inverse: false,
     blink: false,
@@ -37,6 +39,14 @@ function defaultCell(ch: string, width: number = 1): MockCellData {
     overline: false,
   }
 }
+
+// The colour-mode flags xterm's getFgColorMode()/getBgColorMode() actually
+// return — the raw attribute bits (CM_P16/CM_P256/CM_RGB), measured from a
+// real 5.5.0 buffer (nocx-07o7). The mock models the real contract: a
+// fixture with one of these values is a cell exactly as xterm hands it over.
+export const XTERM_CM_P16 = 0x01000000
+export const XTERM_CM_P256 = 0x02000000
+export const XTERM_CM_RGB = 0x03000000
 
 /** Create a mock IBufferCell from MockCellData. */
 function toBufferCell(d: MockCellData): IBufferCell {
@@ -50,17 +60,19 @@ function toBufferCell(d: MockCellData): IBufferCell {
     getBgColorMode: () => d.bgMode,
     isBold: () => (d.bold ? 1 : 0),
     isItalic: () => (d.italic ? 1 : 0),
-    isDim: () => 0,
+    isDim: () => (d.dim ? 1 : 0),
     isUnderline: () => (d.underline ? 1 : 0),
     isBlink: () => (d.blink ? 1 : 0),
     isInverse: () => (d.inverse ? 1 : 0),
     isInvisible: () => 0,
     isStrikethrough: () => (d.strikethrough ? 1 : 0),
     isOverline: () => (d.overline ? 1 : 0),
-    isFgRGB: () => d.fgMode === 2,
-    isBgRGB: () => d.bgMode === 2,
-    isFgPalette: () => d.fgMode === 1,
-    isBgPalette: () => d.bgMode === 1,
+    // xterm's getFgColorMode() returns the raw attribute bits, not small
+    // integers — model that here so a fixture cell IS an xterm cell.
+    isFgRGB: () => d.fgMode === XTERM_CM_RGB,
+    isBgRGB: () => d.bgMode === XTERM_CM_RGB,
+    isFgPalette: () => d.fgMode === XTERM_CM_P16 || d.fgMode === XTERM_CM_P256,
+    isBgPalette: () => d.bgMode === XTERM_CM_P16 || d.bgMode === XTERM_CM_P256,
     isFgDefault: () => d.fgMode === 0,
     isBgDefault: () => d.bgMode === 0,
     isAttributeDefault: () => false,
@@ -113,6 +125,7 @@ export function lineWith(
     fgMode?: number
     bgMode?: number
     italic?: boolean
+    dim?: boolean
     underline?: boolean
     inverse?: boolean
     width?: number
@@ -122,11 +135,12 @@ export function lineWith(
     chars: s.chars,
     width: s.width ?? 1,
     fg: s.fg ?? 7,
-    fgMode: s.fgMode ?? 1,
+    fgMode: s.fgMode ?? XTERM_CM_P16,
     bg: s.bg ?? 0,
-    bgMode: s.bgMode ?? 1,
+    bgMode: s.bgMode ?? XTERM_CM_P16,
     bold: s.bold ?? false,
     italic: s.italic ?? false,
+    dim: s.dim ?? false,
     underline: s.underline ?? false,
     inverse: s.inverse ?? false,
     blink: false,

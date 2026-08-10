@@ -1,6 +1,6 @@
 {
   "internal/transport/ws.go:func() {": "the HTTP server's Serve loop (Start): one goroutine per server, the listener owner; the read loop invariant does not apply to it",
-  "internal/transport/ws.go:s.readLoop(ctx, wconn, state, readErr)": "the per-connection read loop itself: the goroutine that owns the read-loop invariant (ADR-0024 item 1) is spawned here, not by a handler",
+  "internal/transport/ws.go:s.readLoop(ctx, wconn, state, readErr)": "the per-connection read loop itself: the goroutine that owns the read-loop invariant (ADR-0026 item 1) is spawned here, not by a handler",
   "internal/transport/ws_control.go:func() {": "inflight.waitDrained's helper: waits on the WaitGroup and closes a done channel so Stop can bound the drain; a pure waiter with no store access",
   "internal/transport/ws_files.go:h.machine.filesPollLoop(w)": "the files panel's per-connection poll loop (fm-w8): one persistent goroutine per attached connection, torn down when the connection closes; spawned by the files-binding machine, never by a control handler",
   "internal/transport/ws_files.go:s.filesBindingClosed(w.bindingID)": "fire-and-forget binding teardown when a connection drops: unregisters the binding and stops its poll loop off the disconnect path",

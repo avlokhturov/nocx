@@ -15,7 +15,7 @@
 // takes. The editor is reached through the same private-field escape hatch
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
-import { describe, expect, it, vi, type Mock } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -35,31 +35,31 @@ import {
   makeBanner,
   makeSession,
   type ClipboardFake,
+  type ClientFake,
+  type LiveContentHeightSpy,
   type RendererMock,
   type SessionFake,
-  type ClientFake,
   FIXTURE_CWD,
 } from './test-support/tabs-fixtures'
-import { XtermRenderer } from './renderers/xterm'
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
+import { CommandLedger } from './command-ledger'
 import { TerminalContent, type TerminalContentHooks } from './terminal-content'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
+import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { DesiredMode } from './capability'
-import { CommandLedger } from './command-ledger'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
-import type { PassportDisposition, EnvironmentPassport } from './environment-passport'
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
 // The shared fixture mock implements the full TerminalRenderer surface,
-// including P2's passport methods and the _firePassport test seam.
+// including the recovery-fence seam and the _fire* test helpers.
 vi.mock('./renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
 }))
@@ -87,60 +87,17 @@ const rendererOf = (content: TerminalContent): RendererMock => {
   return withRenderer.renderer
 }
 
+/** The live session mock behind TerminalContent's private field — the same
+ *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
+const sessionOf = (content: TerminalContent): SessionFake =>
+  (content as unknown as { session: SessionFake }).session
+
 /** The editor's internal CM6 view — reached only to seed selections. */
 const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
   return withView.view
 }
 
-/** The passport surface added to the renderer mock in the vi.mock factory. */
-interface PassportRenderer {
-  setExpectedEnvironmentId: Mock<(id: string | null) => void>
-  _firePassport: (d: PassportDisposition) => void
-}
-
-const passportRendererOf = (content: TerminalContent): RendererMock & PassportRenderer =>
-  rendererOf(content) as unknown as RendererMock & PassportRenderer
-/** A valid readiness passport (spec §5.2), the shape the tracker accepts. */
-const PASSPORT = (environmentId: string): EnvironmentPassport => ({
-  protocolVersion: '1',
-  environmentId,
-  parentEnvironmentId: '-',
-  scriptVersion: '11',
-  tier: 'enhanced',
-  generation: '-',
-})
-
-/** Drive a full accepted entry: expected passport → tagged A → tagged B.
- *  The renderer mock carries the passport surface (augmented in the mock
- *  factory), so the cast is to the runtime shape, not a fabrication. */
-const enterEnvironment = (renderer: RendererMock, envId: string): void => {
-  const passport = renderer as unknown as PassportRenderer
-  passport._firePassport({ status: 'accepted', passport: PASSPORT(envId) })
-  renderer._fireCommandMarker({ kind: 'A', line: 1, col: 0, buffer: 'normal', nocxEnv: envId })
-  renderer._fireCommandMarker({ kind: 'B', line: 1, col: 0, buffer: 'normal', nocxEnv: envId })
-}
-
-/** A shell.launcherCommand result in the P7 shape (mode + fresh env id). */
-const LAUNCH = (
-  over: Partial<{
-    mode: 'bootstrap' | 'installed' | 'raw'
-    environmentId: string
-    launcherPath: string | null
-    reason: string | null
-  }> = {},
-): {
-  mode: 'bootstrap' | 'installed' | 'raw'
-  environmentId: string
-  launcherPath: string | null
-  reason: string | null
-} => ({
-  mode: 'bootstrap',
-  environmentId: 'env-ab12',
-  launcherPath: "'/home/u/.nocx/run/launcher-12345'",
-  reason: null,
-  ...over,
-})
 /** Mount options. */
 interface MountOpts {
   /** Append the tab's pane to document.body. The document-level keydown
@@ -305,75 +262,6 @@ describe('the editor never copies on selection (nocx-w7h.17)', () => {
       view.dispatch({ selection: { anchor: 5, head: 10 } }) // "hello"
       mouseupOn(view)
       expect(clipboard.writeText).not.toHaveBeenCalled()
-    } finally {
-      teardown()
-    }
-  })
-})
-
-describe('document-level keydown redirect with a block selected (W4)', () => {
-  it('a printable key lands exactly one character and deselects the block', async () => {
-    const { view, ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
-      attachToDocument: true,
-    })
-    const results = vi.mocked(XtermRenderer).mock.results
-    const renderer = results[results.length - 1].value as RendererMock
-    try {
-      // jsdom does not implement Element.scrollTo (or, in some versions,
-      // scrollIntoView); the controller uses both to pin the scrollback when
-      // the layout changes. Real browsers have them — stub the missing DOM
-      // APIs the way this suite stubs ResizeObserver, and restore after.
-      // unbound-method is about calling a detached method with the wrong
-      // `this`. These two are never called — they are saved so the prototype
-      // can be put back in `finally`, which is the opposite concern.
-      /* eslint-disable @typescript-eslint/unbound-method */
-      const protoScrollTo = Element.prototype.scrollTo
-      const protoScrollIntoView = Element.prototype.scrollIntoView
-      /* eslint-enable @typescript-eslint/unbound-method */
-      Element.prototype.scrollTo = () => {}
-      Element.prototype.scrollIntoView = () => {}
-      try {
-        // No TabManager activated this tab, and the handler is gated on the
-        // active flag: drive what setActive would have driven.
-        content.setVisible(true)
-
-        // A complete shell cycle through the renderer seam: A/B opens the
-        // editor, C starts a block, D freezes it, A/B returns to a fresh prompt.
-        const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
-          renderer._fireCommandMarker({
-            kind,
-            line,
-            col: 0,
-            buffer: 'normal',
-            ...(exitCode === undefined ? {} : { exitCode }),
-          })
-        marker('A')
-        marker('B')
-        marker('C')
-        marker('D', 0, 0)
-        marker('A')
-        marker('B')
-
-        // Select the block the way a user does: click it.
-        const block = tab.pane.querySelector<HTMLElement>('.cmd-block')
-        expect(block).not.toBeNull()
-        block!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-        block!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
-        expect(tab.pane.querySelector('.cmd-block-selected')).not.toBeNull()
-        expect(ed.isVisible).toBe(true)
-
-        // Type one printable character with focus on <body>.
-        const ev = new KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true })
-        document.body.dispatchEvent(ev)
-
-        // Exactly one character in the document; the block is deselected.
-        expect(view.state.doc.toString()).toBe('x')
-        expect(ev.defaultPrevented).toBe(true)
-        expect(tab.pane.querySelector('.cmd-block-selected')).toBeNull()
-      } finally {
-        Element.prototype.scrollTo = protoScrollTo
-        Element.prototype.scrollIntoView = protoScrollIntoView
-      }
     } finally {
       teardown()
     }
@@ -549,59 +437,6 @@ describe('Escape with the editor visible but unfocused (focus-loss rescue)', () 
       expect(ed.getDoc()).toBe('ls -la')
     } finally {
       popOverlay(entry)
-      teardown()
-    }
-  })
-
-  it('Escape with the block action menu open closes the menu, not the draft', async () => {
-    const { view, ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
-      attachToDocument: true,
-    })
-    const results = vi.mocked(XtermRenderer).mock.results
-    const renderer = results[results.length - 1].value as RendererMock
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-      // A completed shell cycle paints a frozen block with its ⋮ button.
-      const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
-        renderer._fireCommandMarker({
-          kind,
-          line,
-          col: 0,
-          buffer: 'normal',
-          ...(exitCode === undefined ? {} : { exitCode }),
-        })
-      marker('A')
-      marker('B')
-      marker('C')
-      marker('D', 0, 0)
-      marker('A')
-      marker('B')
-
-      ed.insertText('ls -la')
-      const overflowBtn = tab.pane.querySelector<HTMLElement>('.cmd-overflow-btn')
-      expect(overflowBtn).not.toBeNull()
-      overflowBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-      expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
-
-      // The pane's focus bounce returned focus to the editor on the click;
-      // a click on the scrollback then moves it to <body>, menu still open.
-      view.contentDOM.blur()
-      expect(document.activeElement).not.toBe(view.contentDOM)
-      const ev = escapeOnBody()
-      // The menu's own document listener closes it; the rescue stood down
-      // and the draft survives.
-      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
-      expect(ev.defaultPrevented).toBe(false)
-      expect(ed.getDoc()).toBe('ls -la')
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })
@@ -916,6 +751,83 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
   })
 })
 
+describe('inserting a saved secret into the pane in front (nocx-fk32)', () => {
+  /** A client whose vault.resolveLine answers with a resolved value. */
+  function resolvingClient(value: string) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({ line: value, refs: [{ name: 'pi@far', resolved: true }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  it('writes the VALUE to the pty when the terminal owns input, and sends it', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      // The terminal owns input — a raw password prompt, an ssh handshake.
+      // There is no reference machinery on the other side of the pty, so
+      // the value goes across, WITH its newline: choosing a secret at a
+      // password prompt is the answer to that prompt (owner, 2026-08-10).
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('value')
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      expect(sent).toEqual(['hunter2\n'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('never writes a value the vault could not resolve — the far side must not receive the reference text', async () => {
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'vault.resolveLine') {
+        const line = (params as { line?: string })?.line ?? ''
+        return Promise.resolve({ line, refs: [{ name: 'gone', resolved: false }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('gone')).resolves.toBe('unavailable')
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('puts the REFERENCE in the draft when the editor owns the prompt, and resolves nothing', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      ed.show()
+      const session = sessionOf(content)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('reference')
+      // ADR-0021: a command carrying a reference moves to another machine
+      // and resolves that machine's secret; a command carrying a pasted key
+      // is both dead and dangerous. So the draft gets the reference...
+      expect(view.state.doc.toString()).toContain('{{secret:pi@far}}')
+      // ...the value is never in the draft...
+      expect(view.state.doc.toString()).not.toContain('hunter2')
+      // ...and nothing was resolved or sent: that waits for submit.
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+})
+
 describe('vault references in the prompt (ADR-0021, the renderer half)', () => {
   it('an unresolved reference is NOT sent: the draft stays and the editor stays up', async () => {
     // The real submit seam: Enter -> beforeSubmit -> planSubmit ->
@@ -1012,246 +924,35 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
 
   /** jsdom lacks scrollTo/scrollIntoView; the scrollback controller calls
    *  both when blocks are created and the layout changes. */
-  function stubScroll(): () => void {
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    return () => {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
-    }
-  }
 
-  it('an SSH prompt shows the same location chip the block header shows', async () => {
-    const { ed, content, tab, teardown } = await mountSshTerminal()
-    const restoreScroll = stubScroll()
+  it('an SSH prompt shows the location chip the block header would carry', async () => {
+    const { content, tab, teardown } = await mountSshTerminal()
     try {
       content.setVisible(true)
-      const renderer = rendererOf(content)
-      const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
-        renderer._fireCommandMarker({
-          kind,
-          line,
-          col: 0,
-          buffer: 'normal',
-          ...(exitCode === undefined ? {} : { exitCode }),
-        })
-
-      marker('A')
-      marker('B')
-      expect(ed.isVisible).toBe(true)
+      // The chip is fed at session open from ONE derivation
+      // (this.locationLine()); no stream marker may change it (ADR-0024 §1).
       const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
       expect(chip).not.toBeNull()
       expect(chip!.style.display).not.toBe('none')
       expect(chip!.textContent).toBe('root@192.168.0.57')
-
-      // Run a command to completion: the frozen block header must carry the
-      // SAME string — one derivation, routed to both chips.
-      marker('C')
-      marker('D', 0, 0)
-      const headerLoc = tab.pane.querySelector<HTMLElement>('.cmd-header-location')
-      expect(headerLoc?.textContent).toBe('root@192.168.0.57')
-      expect(chip!.textContent).toBe(headerLoc!.textContent)
-
-      // And the next prompt still shows it.
-      marker('A')
-      marker('B')
-      expect(ed.isVisible).toBe(true)
-      expect(chip!.textContent).toBe('root@192.168.0.57')
+      // The block header never appears in the severed product: blocks are
+      // a completion projection with no stream (or app) trigger.
+      expect(tab.pane.querySelector('.cmd-header-location')).toBeNull()
     } finally {
-      restoreScroll()
       teardown()
     }
   })
 
-  it('a local session grows no location chip, in the prompt or the block header', async () => {
-    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+  it('a local session grows no location chip', async () => {
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
-    const restoreScroll = stubScroll()
     try {
       content.setVisible(true)
-      const renderer = rendererOf(content)
-      const marker = (kind: 'A' | 'B' | 'C' | 'D', line = 0, exitCode?: number): void =>
-        renderer._fireCommandMarker({
-          kind,
-          line,
-          col: 0,
-          buffer: 'normal',
-          ...(exitCode === undefined ? {} : { exitCode }),
-        })
-
-      marker('A')
-      marker('B')
-      expect(ed.isVisible).toBe(true)
       const chip = tab.pane.querySelector<HTMLElement>('.nocx-editor-location')
       expect(chip).not.toBeNull()
       expect(chip!.style.display).toBe('none')
       expect(chip!.textContent).toBe('')
-
-      marker('C')
-      marker('D', 0, 0)
-      expect(tab.pane.querySelector('.cmd-header-location')).toBeNull()
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-})
-
-describe('in-band integration (nocx-ynsx)', () => {
-  // The plan shape the backend serves; the assertions only ever compare
-  // against this fixture, never against a field the test invented.
-  const plan = {
-    wrapper:
-      'saved=$(stty -g); NOCX_IB_SRC=$(mktemp) && stty raw -echo && printf "\\033]1337;NOCX_IB_READY\\a" && sed -n "/^NOCX_IB_EOF$/q;p" > "$NOCX_IB_SRC"; stty "$saved"',
-    payload: '# nocx in-band integration — dispatcher\n# nocx-ib-complete\n',
-    terminator: 'NOCX_IB_EOF',
-  }
-
-  const clientWithPlan = (): ClientFake => makeClient({ call: vi.fn().mockResolvedValue(plan) })
-
-  /** Drive the machine to a trusted owned prompt the way markers do. */
-  const trustedPrompt = (renderer: RendererMock): void => {
-    renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-    renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-  }
-
-  const sessionSend = (content: TerminalContent): ReturnType<typeof vi.fn> => {
-    const withSession = content as unknown as { session: SessionFake }
-    return withSession.session.send
-  }
-
-  it('a markerless shell at rest is its own authorisation: the wrapper is typed', async () => {
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
-    try {
-      content.setVisible(true)
-      const send = sessionSend(content)
-      // Fresh mount: RAW, markerless, normal buffer. The explicit call IS
-      // the consent for this path (nocx-4t37.2, ADR-0004 §1 note): the
-      // one-line wrapper is typed, and only READY lets the payload follow.
-      content.integrateShell()
-      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(plan.wrapper + '\r'))
-    } finally {
-      teardown()
-    }
-  })
-
-  it('a full-screen program (ALT_SCREEN) refuses even on a markerless shell', async () => {
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
-    try {
-      content.setVisible(true)
-      // vim/less/htop take the alternate buffer — xterm reports it
-      // positively, so the one fact that matters is never inferred.
-      rendererOf(content)._fireBufferChange('alternate')
-      const send = sessionSend(content)
-      content.integrateShell()
-      expect(send).not.toHaveBeenCalled()
-    } finally {
-      teardown()
-    }
-  })
-
-  it('an integrated shell outside the trusted A→B window is refused too', async () => {
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
-    try {
-      content.setVisible(true)
-      const renderer = rendererOf(content)
-      // A alone: PROMPT_READY, trusted, but NOT owned (ADR-0006 §4) — and
-      // markers have arrived, so the markerless path does not apply.
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      const send = sessionSend(content)
-      content.integrateShell()
-      expect(send).not.toHaveBeenCalled()
-    } finally {
-      teardown()
-    }
-  })
-
-  it('streams the payload only after READY and restores the draft byte-for-byte', async () => {
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
-    try {
-      content.setVisible(true)
-      const renderer = rendererOf(content)
-      trustedPrompt(renderer)
-      ed.insertText('echo half-typed')
-      const draft = ed.getDoc()
-
-      content.integrateShell()
-      const send = sessionSend(content)
-      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(plan.wrapper + '\r'))
-      // The lease hides the editor while the wrapper runs.
-      expect(ed.isVisible).toBe(false)
-
-      // No user byte interleaves: a printable key at document level is
-      // swallowed at capture phase, never sent to the pty.
-      const key = new KeyboardEvent('keydown', { key: 'x', cancelable: true, bubbles: true })
-      document.dispatchEvent(key)
-      expect(key.defaultPrevented).toBe(true)
-      expect(send.mock.calls.every((call) => call[0] !== 'x')).toBe(true)
-
-      // READY proves raw -echo is on: only now does the payload flow.
-      renderer._fireInBandReady()
-      expect(send).toHaveBeenCalledWith(plan.payload + plan.terminator + '\n')
-
-      // The next A completes the attempt; B re-shows the editor with the
-      // byte-for-byte draft.
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
-      expect(ed.getDoc()).toBe(draft)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('Esc cancels via the terminator and restores the draft', async () => {
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPlan())
-    try {
-      content.setVisible(true)
-      const renderer = rendererOf(content)
-      trustedPrompt(renderer)
-      ed.insertText('echo keep me')
-      const draft = ed.getDoc()
-
-      content.integrateShell()
-      const send = sessionSend(content)
-      await vi.waitFor(() => expect(send).toHaveBeenCalledWith(plan.wrapper + '\r'))
-      renderer._fireInBandReady()
-      expect(send).toHaveBeenCalledWith(plan.payload + plan.terminator + '\n')
-
-      // Esc sends the terminator alone — the pty-test cancel shape — and
-      // the shell's own `stty "$saved"` restore runs on the other end.
-      document.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Escape', cancelable: true, bubbles: true }),
-      )
-      expect(send).toHaveBeenCalledWith('\n' + plan.terminator + '\n')
-      // No marker followed, so the machine still declares ownership: the
-      // editor comes straight back with the byte-for-byte draft.
-      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
-      expect(ed.getDoc()).toBe(draft)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('a failed plan fetch releases the lease and types nothing', async () => {
-    const client = makeClient({ call: vi.fn().mockRejectedValue(new Error('backend down')) })
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      content.setVisible(true)
-      trustedPrompt(rendererOf(content))
-      ed.insertText('echo safe')
-      const draft = ed.getDoc()
-
-      content.integrateShell()
-      const send = sessionSend(content)
-      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
-      expect(send).not.toHaveBeenCalled()
-      expect(ed.getDoc()).toBe(draft)
     } finally {
       teardown()
     }
@@ -1317,22 +1018,6 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
     }
   })
 
-  it('raw refuses integrateShell even at a trusted prompt — nothing is typed', async () => {
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, clientWithPolicy('raw'))
-    try {
-      content.setVisible(true)
-      const renderer = rendererOf(content)
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      const withSession = content as unknown as { session: SessionFake }
-      const send = withSession.session.send
-      content.integrateShell()
-      expect(send).not.toHaveBeenCalled()
-    } finally {
-      teardown()
-    }
-  })
-
   it('the nocx-capability-rail element is gone', async () => {
     const { tab, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -1349,393 +1034,227 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
   })
 })
 
-describe('the environment stack (nocx-695k.1)', () => {
-  /** Access _shellIntegrated through the private-field escape hatch. */
-  const shellIntegrated = (content: TerminalContent): boolean => {
-    const withField = content as unknown as { _shellIntegrated: boolean }
-    return withField._shellIntegrated
-  }
+// Regression table for the two-axis lifecycle kernel (ADR-0024 §6). The
+// authority axis moves only on published facts; the buffer axis is a
+// renderer-owned presentation fact; no stream marker, submit or passport
+// event can reach the reducer. This table pins every transition the kernel
+// is allowed to make, so a state or event change must extend it
+// deliberately.
+describe('lifecycle kernel transition table (ADR-0024 §6)', () => {
+  const promptReady = { lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
 
-  const previousIntegrated = (content: TerminalContent): boolean[] => {
-    const withField = content as unknown as { _previousIntegrated: boolean[] }
-    return withField._previousIntegrated
-  }
+  it('every allowed kernel transition is pinned in the table', () => {
+    const k = new LifecycleKernel()
+    // Native: a conventional terminal, raw input, no ownership.
+    expect(k.state.kind).toBe('native')
+    expect(shouldShowEditor(k.state)).toBe(false)
 
-  const shellStateOf = (content: TerminalContent): string => content.shellState
+    // buffer alternate → the buffer axis moves; ownership never follows.
+    k.setBuffer('alternate')
+    expect(k.buffer).toBe('alternate')
+    expect(k.state.kind).toBe('native')
+    expect(shouldShowEditor(k.state)).toBe(false)
 
-  // What the owner asked for three times (2026-08-04): typing `ssh host` in
-  // a local tab left every surface naming the local machine — the tab title
-  // was whatever the remote shell's OSC 2 last set, the location chip stayed
-  // hidden because a local session grows none, and the cwd chip went on
-  // showing the local directory under a remote prompt.
-  // P9: the entry moved from submit-time to `expected passport → tagged
-  // A → B` (§5.3) — so the surfaces change only when the passport says the
-  // remote shell is nocx's own, and the local D brings them back.
-  it('the tab title, the location chip and the ports target follow the environment', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-    const { ed, content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const renderer = rendererOf(content)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
+    // buffer normal → back; still no ownership.
+    k.setBuffer('normal')
+    expect(k.buffer).toBe('normal')
+    expect(k.state.kind).toBe('native')
+
+    // reset → Native from any state, buffer restored.
+    k.setBuffer('alternate')
+    k.applyFact(promptReady)
+    expect(shouldShowEditor(k.state)).toBe(true)
+    k.reset()
+    expect(k.state.kind).toBe('native')
+    expect(k.buffer).toBe('normal')
+    expect(shouldShowEditor(k.state)).toBe(false)
+
+    // No marker, submit or passport event exists on the kernel
+    // (compile-time proof; never invoked, so the @ts-expect-error is the
+    // point and no runtime TypeError follows).
+    const noStreamPath = (): void => {
+      // @ts-expect-error ADR-0024 §1: the marker event is deleted.
+      k.applyMarker('A') // eslint-disable-line @typescript-eslint/no-unsafe-call -- ADR-0024 §1: no stream input exists
+      // @ts-expect-error ADR-0024 §1: the submit event is deleted.
+      k.submit('echo hi') // eslint-disable-line @typescript-eslint/no-unsafe-call -- ADR-0024 §1
+      // @ts-expect-error ADR-0024 §1: the passport event is deleted.
+      k.applyPassport('636;...') // eslint-disable-line @typescript-eslint/no-unsafe-call -- ADR-0024 §1
+    }
+    void noStreamPath
+  })
+})
+
+describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
+  it('a prompt_ready fact shows the editor and a native fact hides it — through the dispatcher seam', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      content.setVisible(true)
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      // A local tab scopes ports to the local target and shows no location.
-      expect(content.portsTargetId).toBe('local')
-      expect(content.portsUnavailableReason).toBe('')
-
-      ed.insertText('ssh pi@192.168.0.93')
-      ed.root.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      // The beforeSubmit is async (ssh rewrite RPC); drain microtasks.
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // NOT yet inside: submit no longer enters the environment — the
-      // passport has not arrived, so every surface still names the local
-      // machine (§5.3: nothing changes until passport → tagged A → B).
-      const loc = ed.root.querySelector('.nocx-editor-location')
-      expect(loc?.textContent ?? '').not.toContain('pi@')
-      expect(content.portsTargetId).toBe('local')
-
-      enterEnvironment(renderer, 'env-ab12')
-
-      // Inside: the pane refuses to speak for its ports — there is no
-      // managed connection to a child ssh process — and the cwd is NOT
-      // invented: we know the host, not the directory. The block for the
-      // ssh command carries the destination and NO folder — `📁 home/dev`
-      // beside a remote host reads as a place that does not exist (owner,
-      // 2026-08-04).
-      expect(content.portsTargetId).toBeNull()
-      expect(content.portsUnavailableReason).toBe('pi@192.168.0.93')
-      const cwd = ed.root.querySelector('.nocx-editor-cwd')
-      expect(cwd?.textContent ?? '').not.toContain('home')
-      // Entry (passport → tagged A → B) hands keyboard ownership to the
-      // editor immediately (spec §5.3: nothing changes until entry — at
-      // entry it changes): the editor is present and the chip names the
-      // host. Before the P0 fix the remote's first A arrived while the
-      // machine was still RUNNING_RAW, its B granted no ownership, and
-      // the marker-only remote prompt left no input surface at all.
+      const ed = editorOf(content)
+      // The kernel starts Native: a conventional terminal, editor hidden.
+      expect(ed.isVisible).toBe(false)
+      // The LifecycleClient subscribed through the fake dispatcher.
+      const subscribe = client.dispatcher.subscribe
+      expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      // An authenticated prompt_ready fact for a live domain gives the
+      // editor the keyboard.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(true)
-      const loc2 = ed.root.querySelector('.nocx-editor-location')
-      expect(loc2?.textContent).toBe('pi@192.168.0.93')
-
-      // A full tagged remote command cycle (C…D→A→B) keeps the chip naming
-      // the host and re-grants ownership after the command.
-
-      renderer._fireCommandMarker({
-        kind: 'C',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 0,
-        nocxEnv: 'env-ab12',
-      })
-      renderer._fireCommandMarker({
-        kind: 'A',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      renderer._fireCommandMarker({
-        kind: 'B',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      const loc3 = ed.root.querySelector('.nocx-editor-location')
-      expect(loc3?.textContent).toBe('pi@192.168.0.93')
-
-      // The REMOTE shell titles the tab the moment you land. This is the
-      // one that outlived its program: nothing sends another OSC 2 on the
-      // way out, so the tab kept naming a machine it had left, for as long
-      // as the tab lived (owner, 2026-08-04, four times).
-      renderer._fireTitle('pi@raspberrypi: ~')
-      expect(tab.title).toBe('pi@raspberrypi: ~')
-
-      // The local D: ssh exited — everything goes back, within one prompt —
-      // including the title, because a title set by a program does not
-      // outlive it.
-      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-      expect(content.portsTargetId).toBe('local')
-      expect(content.portsUnavailableReason).toBe('')
-      expect(tab.title).not.toBe('pi@raspberrypi: ~')
+      // A native fact revokes it again.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      expect(ed.isVisible).toBe(false)
     } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
-      teardown()
-    }
-  })
-
-  it('a non-ssh environment entry still pushes at submit and the D marker restores it', async () => {
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
-      attachToDocument: true,
-    })
-    const renderer = rendererOf(content)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-
-      // Drive to a trusted owned prompt with markers flowing.
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(shellIntegrated(content)).toBe(true)
-      expect(previousIntegrated(content)).toHaveLength(0)
-
-      // Submit a NON-ssh environment-entry command: docker has no passport
-      // machinery in this epic, so it keeps the submit-time heuristic
-      // (nocx-695k.2) — pushed on submit, popped on the D.
-      ed.insertText('docker exec -it alpine sh')
-      ed.root.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The marker fact is cleared: the pane is now on a different host.
-      expect(shellIntegrated(content)).toBe(false)
-      expect(previousIntegrated(content)).toHaveLength(1)
-      expect(previousIntegrated(content)[0]).toBe(true)
-
-      // The shell state follows: unsupported (markers cleared).
-      expect(shellStateOf(content)).toBe('unsupported')
-
-      // The command runs; the D marker finishes it.
-      renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-
-      // The marker fact is restored from the stack.
-      expect(shellIntegrated(content)).toBe(true)
-      expect(previousIntegrated(content)).toHaveLength(0)
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
-      teardown()
-    }
-  })
-
-  it('sleep 5 is not an environment entry: _shellIntegrated and capability are unchanged', async () => {
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
-      attachToDocument: true,
-    })
-    const renderer = rendererOf(content)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(shellIntegrated(content)).toBe(true)
-
-      ed.insertText('sleep 5')
-      ed.root.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-
-      // Not an environment entry: the marker fact and the stack are untouched.
-      expect(shellIntegrated(content)).toBe(true)
-      expect(previousIntegrated(content)).toHaveLength(0)
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
-      teardown()
-    }
-  })
-
-  it('nested non-ssh environments push and pop correctly', async () => {
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
-      attachToDocument: true,
-    })
-    const renderer = rendererOf(content)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-
-      // Local shell has markers.
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(shellIntegrated(content)).toBe(true)
-
-      // Enter container a via docker exec (the legacy non-ssh path: push at
-      // submit, pop on the D).
-      ed.insertText('docker exec -it a sh')
-      ed.root.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      expect(shellIntegrated(content)).toBe(false)
-      expect(previousIntegrated(content)).toEqual([true])
-      renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-      expect(shellIntegrated(content)).toBe(true)
-      expect(previousIntegrated(content)).toHaveLength(0)
-
-      // Markers from container a arrive — the shell there is integrated.
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(shellIntegrated(content)).toBe(true)
-
-      // Now inside a, docker exec into b.
-      ed.insertText('docker exec -it b sh')
-      ed.root.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      expect(shellIntegrated(content)).toBe(false)
-      expect(previousIntegrated(content)).toEqual([true])
-      renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-      expect(shellIntegrated(content)).toBe(true)
-      expect(previousIntegrated(content)).toHaveLength(0)
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
-      teardown()
-    }
-  })
-
-  it('a markerless shell does not push: the stack stays empty', async () => {
-    const { content, teardown } = await mountTerminal(makeClipboard(), {
-      attachToDocument: true,
-    })
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    try {
-      content.setVisible(true)
-
-      // No markers have arrived — the shell is markerless.
-      expect(shellIntegrated(content)).toBe(false)
-
-      // Enter the editor by submitting through the… wait, in a markerless
-      // shell the editor is not visible. We test this path through
-      // integrateShell's markerless path, but the submit callback is only
-      // reachable from the editor. In a markerless shell with the editor
-      // hidden, the submit path is not taken. The guard
-      // `this._shellIntegrated` on the push means it is always safe —
-      // even if reached from an unusual path, it only pushes when markers
-      // are flowing.
-
-      // The guard is tested by the cases above: when _shellIntegrated is
-      // false, isEnvironmentEntry() && false is false, so nothing pushes.
-      // The additional assertion here is that the initial state is correct.
-      expect(previousIntegrated(content)).toHaveLength(0)
-    } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })
 })
 
-// Regression table for input-state.ts transitions (nocx-695k.1 acceptance,
-// extended by nocx-mlm7 P0). The environment stack in terminal-content.ts
-// reads input-state — it never writes to it. This table pins every
-// transition the machine is allowed to make, so a state or event change
-// must extend it deliberately.
-describe('input-state.ts transition table (nocx-695k.1 + nocx-mlm7 P0)', () => {
-  it('every allowed machine transition is pinned in the table', async () => {
-    // The reducer table from input-state.test.ts, replicated here as a
-    // cross-check.
-    const { reduce, initialMachine } = await import('./input-state')
+describe('the restoration episode (ADR-0024 decision 8)', () => {
+  const LOST_WITH_RECOVERY = {
+    lane: 'lane-1',
+    lifecycle: 'lost',
+    recovery: { fence: 'ab'.repeat(32), generation: 'ab'.repeat(32) },
+  } as const
+  const WRONG_FENCE = 'cd'.repeat(32)
 
-    // A → PROMPT_READY (trusted from RAW)
-    const a = reduce(initialMachine(), { type: 'marker', kind: 'A' })
-    expect(a).toEqual({ state: 'PROMPT_READY', trusted: true, owned: false })
+  it('a lost fact with a recovery contract suppresses the restore-editor action across the whole span', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const setAction = vi.spyOn(ed, 'setRecoveryAction')
 
-    // B → ownership granted
-    const b = reduce(a, { type: 'marker', kind: 'B' })
-    expect(b).toEqual({ state: 'PROMPT_READY', trusted: true, owned: true })
+      // The interval: from the lost fact until the acknowledgement lands,
+      // the session is neither an authenticated terminal nor advertised as
+      // a usable conventional one — no editor may be offered at any point
+      // inside it.
+      handler(LOST_WITH_RECOVERY)
+      const calls = setAction.mock.calls
+      const last = calls[calls.length - 1]
+      expect(last).toBeDefined()
+      expect(last[0]).toBeNull() // the action is suppressed, never offered
+      // A native fact ends the episode (the ack landed; the backend
+      // published the transition).
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+    } finally {
+      teardown()
+    }
+  })
 
-    // submit → RUNNING_RAW
-    const s = reduce(b, { type: 'submit' })
-    expect(s).toEqual({ state: 'RUNNING_RAW', trusted: true, owned: false })
+  it('only the exact pre-provisioned fence is acknowledged, once, with the session id and generation', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const renderer = rendererOf(content)
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const call = client.dispatcher.call
+      handler(LOST_WITH_RECOVERY)
 
-    // passport (accepted readiness passport, §5.3) → clean cycle from
-    // RUNNING_RAW: the remote's following A is trusted through it, and its
-    // B grants ownership (nocx-mlm7 P0).
-    const pp = reduce(s, { type: 'passport' })
-    expect(pp).toEqual({ state: 'RAW', trusted: false, owned: false })
-    const ppA = reduce(pp, { type: 'marker', kind: 'A' })
-    expect(ppA).toEqual({ state: 'PROMPT_READY', trusted: true, owned: false })
-    expect(reduce(ppA, { type: 'marker', kind: 'B' }).owned).toBe(true)
-    // The clean cycle is spent: a nested prompt mid-command stays untrusted.
-    const ppRunning = reduce(reduce(ppA, { type: 'marker', kind: 'B' }), {
-      type: 'marker',
-      kind: 'C',
-    })
-    expect(reduce(ppRunning, { type: 'marker', kind: 'A' }).trusted).toBe(false)
+      // A wrong fence — a hostile byte, a different episode — changes
+      // nothing: the renderer never pattern-matches, it matches the nonce.
+      renderer._fireRecoveryFence(WRONG_FENCE)
+      expect(call).not.toHaveBeenCalledWith('lifecycle.recoverAck', expect.anything())
 
-    // C → RUNNING_RAW (trusted from clean prompt)
-    const c = reduce(b, { type: 'marker', kind: 'C' })
-    expect(c).toEqual({ state: 'RUNNING_RAW', trusted: true, owned: false })
+      // The shell's one-shot fence (the exact pre-provisioned nonce)
+      // triggers exactly one acknowledgement, carrying only the session id
+      // and the generation — nothing else.
+      renderer._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      renderer._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence) // a repeat sighting must not double-ack
+      const sid = client._sessions[0].sessionId
+      expect(call).toHaveBeenCalledTimes(1)
+      expect(call).toHaveBeenCalledWith('lifecycle.recoverAck', {
+        sessionId: sid,
+        generation: LOST_WITH_RECOVERY.recovery.generation,
+      })
+    } finally {
+      teardown()
+    }
+  })
 
-    // D → RAW
-    const d = reduce(c, { type: 'marker', kind: 'D' })
-    expect(d).toEqual({ state: 'RAW', trusted: true, owned: false })
+  it('a refused acknowledgement keeps the pending guard: no editor is offered until the episode ends', async () => {
+    const client = makeClient()
+    client.dispatcher.call = vi.fn().mockRejectedValue(new Error('session is not open'))
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const setAction = vi.spyOn(ed, 'setRecoveryAction')
+      handler(LOST_WITH_RECOVERY)
+      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      await Promise.resolve()
+      await Promise.resolve()
+      // The refusal left the episode pending: the action stays suppressed.
+      const calls = setAction.mock.calls
+      const last = calls[calls.length - 1]
+      expect(last[0]).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
 
-    // ALT_SCREEN
-    const alt = reduce(b, { type: 'buffer', buffer: 'alternate' })
-    expect(alt).toEqual({ state: 'ALT_SCREEN', trusted: false, owned: false })
+describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
+  // The renderer half of the gate: the backend withholds the shell's ACCEPT
+  // — and therefore the shell's authority to suppress its native prompt —
+  // until this acknowledgement says the editor presentation is committed.
+  // Silence here is the fail-open direction, not a no-op: the handshake
+  // times out and the session stays a conventional terminal.
+  it('acknowledges a prompt_ready generation exactly once, after the fact is applied', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const call = client.dispatcher.call
 
-    // reset
-    const rst = reduce(b, { type: 'reset' })
-    expect(rst).toEqual({ state: 'RAW', trusted: false, owned: false })
+      // No generation on the fact: there is no establishment episode open,
+      // so there is nothing to release and nothing is acknowledged.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
 
-    // exit
-    const ext = reduce(b, { type: 'exit' })
-    expect(ext).toEqual({ state: 'RAW', trusted: false, owned: false })
+      // The establishment fact carries the backend-minted generation.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+      const sid = client._sessions[0].sessionId
+      expect(call).toHaveBeenCalledWith('lifecycle.establishAck', {
+        sessionId: sid,
+        lane: 'lane-1',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+      expect(
+        call.mock.calls.filter((c: unknown[]) => c[0] === 'lifecycle.establishAck'),
+      ).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
 
-    // orphan C → RUNNING_RAW, untrusted
-    const orc = reduce(initialMachine(), { type: 'marker', kind: 'C' })
-    expect(orc).toEqual({ state: 'RUNNING_RAW', trusted: false, owned: false })
-
-    // orphan D → no change from RAW
-    const ord = reduce(initialMachine(), { type: 'marker', kind: 'D' })
-    expect(ord).toEqual(initialMachine())
-
-    // B without A → untrusted, not owned
-    const bNoA = reduce(initialMachine(), { type: 'marker', kind: 'B' })
-    expect(bNoA).toEqual({ state: 'PROMPT_READY', trusted: false, owned: false })
+  it('never acknowledges a fact that names no live domain', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const subscribe = client.dispatcher.subscribe
+      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const call = client.dispatcher.call
+      // native and lost carry no establishment; a running fact is past the
+      // gate. None of them may release an accept.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({ lane: 'lane-1', lifecycle: 'running', domain: 'd1', epoch: 1, generation: 'est-1' })
+      expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
+    } finally {
+      teardown()
+    }
   })
 })
 
@@ -1872,1313 +1391,49 @@ describe('the command editor chrome pins the clock to the right edge without dis
 })
 
 describe('terminal/editor input switching (nocx-atyf.5)', () => {
-  it('switching to terminal input hides the editor and is reversible', async () => {
+  it('no stream sequence can flip the presentation to editor — it is always terminal', async () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
     const renderer = rendererOf(content)
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const protoScrollTo = Element.prototype.scrollTo
-    const protoScrollIntoView = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
     try {
       content.setVisible(true)
-
-      // Start with editor (integrated + trusted).
+      // Even a full marker cycle cannot reach 'editor': the presentation
+      // axis is severed (ADR-0024 §1) — no ownership, no editor.
       renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
       renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(content.presentation).toBe('editor')
-
-      // Switch to terminal input.
+      expect(content.presentation).toBe('terminal')
+      // The user gestures still exist and leave the presentation alone.
       content.switchToTerminalInput()
       expect(content.presentation).toBe('terminal')
-
-      // Switch back to editor.
       content.switchToEditorInput()
-      expect(content.presentation).toBe('editor')
+      expect(content.presentation).toBe('terminal')
     } finally {
-      Element.prototype.scrollTo = protoScrollTo
-      Element.prototype.scrollIntoView = protoScrollIntoView
       teardown()
     }
   })
 
-  it('the choice is session-scoped — a new session is unaffected', async () => {
+  it('the choice is session-scoped — every session starts terminal', async () => {
     const { content: first, teardown: teardown1 } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
     try {
       first.setVisible(true)
-      const renderer1 = rendererOf(first)
-      renderer1._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer1._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      // Switch the first session to terminal input.
       first.switchToTerminalInput()
       expect(first.presentation).toBe('terminal')
     } finally {
       teardown1()
     }
 
-    // A brand-new session starts with the default (editor, if integrated).
+    // A brand-new session starts with the same default.
     const { content: second, teardown: teardown2 } = await mountTerminal(makeClipboard(), {
       attachToDocument: true,
     })
     try {
       second.setVisible(true)
-      const renderer2 = rendererOf(second)
-      renderer2._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer2._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      // The new session is unaffected — it starts in editor mode.
-      expect(second.presentation).toBe('editor')
+      expect(second.presentation).toBe('terminal')
     } finally {
       teardown2()
-    }
-  })
-})
-
-// ── nocx-pu4.6: ssh rewrite rides the launcher ────────────────────────────
-
-/* eslint-disable @typescript-eslint/unbound-method */
-describe('nocxify: ssh command rewrite (nocx-pu4.6)', () => {
-  // The backend answers with a staged PATH, never the launcher: the launcher
-  // is ~35 KB and the submitted line has only the tty, whose canonical buffer
-  // is 4096 bytes (nocx-pu4.6, reopened).
-  const LAUNCHER_PATH = "'/home/u/.nocx/run/launcher-12345'"
-
-  /** jsdom does not implement scrollTo/scrollIntoView; the
-   *  ScrollbackController calls both. */
-  function stubScroll(): () => void {
-    const pst = Element.prototype.scrollTo
-    const psiv = Element.prototype.scrollIntoView
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    return () => {
-      Element.prototype.scrollTo = pst
-      Element.prototype.scrollIntoView = psiv
-    }
-  }
-
-  it('rewrites an interactive ssh command at submit', async () => {
-    const callMock = vi.fn()
-    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      // An INTEGRATED local tab is the bead's precondition: a marker has
-      // arrived, so this shell speaks our protocol and its syntax is known.
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      ed.insertText('ssh testhost')
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-
-      // The rewrite is async (RPC call): drain microtasks.
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The RPC was called with the TYPED PLAN (nocx-c5az): the oracle argv
-      // is the complete `ssh -G` argv, so the typed -F/-o/-J/-l/-p reach the
-      // oracle — never a bare destination.
-      expect(callMock).toHaveBeenCalledWith(
-        'shell.launcherCommand',
-        expect.objectContaining({
-          sessionId: session.sessionId,
-          oracleArgv: ['ssh', '-G', 'testhost'],
-        }),
-      )
-
-      // The minted environment id was registered as expected BEFORE the
-      // line reached the pty (§5.3) — a passport carrying it can be
-      // accepted; nothing else can.
-      expect(passportRendererOf(content).setExpectedEnvironmentId).toHaveBeenCalledWith('env-ab12')
-
-      // The paste received the REWRITTEN command, not the original.
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER_PATH))
-      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('-t'))
-      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('ssh'))
-
-      // What reaches the pty is a line the pty can carry. This is the defect
-      // the bead was reopened for: 35 KB went in and 27 KB arrived, so the
-      // shell ran the fragments of a truncated script.
-      // The paste mock is a vitest spy; read its recorded call arguments.
-      const pasteMock = renderer.paste as unknown as { mock: { calls: string[][] } }
-      const pasted = pasteMock.mock.calls[0][0]
-      expect(new TextEncoder().encode(pasted).byteLength).toBeLessThanOrEqual(4095)
-      // And it names the launcher rather than carrying it.
-      expect(pasted).not.toContain('BASH_ENV')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('mode installed sends the compact guard-travelling line with the environment id', async () => {
-    const callMock = vi.fn()
-    callMock.mockResolvedValue(
-      LAUNCH({ mode: 'installed', environmentId: 'env-zz99', launcherPath: null }),
-    )
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      ed.insertText('ssh testhost')
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The compact line (§3.3): the guard travels to the far side, and the
-      // environment id reaches the carrier as its first argument.
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith(
-        expect.stringContaining('"$HOME/.nocx/launch" env-zz99'),
-      )
-      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining('ssh -t testhost'))
-      // The session id rides along as the carrier's second argument.
-      expect(renderer.paste).toHaveBeenCalledWith(
-        expect.stringContaining(`env-zz99 ${session.sessionId}`),
-      )
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  // The rewritten line is POSIX/bash/zsh syntax — `if …; then …; else …; fi`.
-  // Those are exactly the shells nocx ships integration scripts for, so an
-  // integrated tab is by construction one of them, and a tab with no markers
-  // may be anything: a fish or csh login shell would take `then` as a command
-  // and the ssh would never run at all. That is worse than not rewriting, so
-  // an unintegrated tab is not a tab we rewrite in. It is also the bead's own
-  // precondition — "in an integrated local tab".
-  it('does NOT rewrite in a tab that is not integrated', async () => {
-    const callMock = vi.fn()
-    callMock.mockResolvedValue(LAUNCH())
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      // No marker is ever fired: this shell does not speak our protocol and
-      // we do not know what its syntax is.
-      ed.insertText('ssh testhost')
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('does NOT rewrite when mode is raw', async () => {
-    const callMock = vi.fn()
-    const client = makeClient({ call: callMock })
-    const session = makeSession({ desiredMode: 'raw' })
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      ed.insertText('ssh testhost')
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // shell.launcherCommand was never called.
-      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
-
-      // The paste received the ORIGINAL line.
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('does NOT rewrite when launcher is null (fail-open)', async () => {
-    const callMock = vi.fn()
-    callMock.mockResolvedValue(
-      LAUNCH({ mode: 'raw', launcherPath: null, reason: 'remote-command' }),
-    )
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      ed.insertText('ssh testhost')
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The paste received the ORIGINAL line — fail-open.
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith('ssh testhost')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('does NOT rewrite a non-ssh command', async () => {
-    const callMock = vi.fn()
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      ed.insertText('ls -la')
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // shell.launcherCommand was never called for non-ssh lines.
-      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
-
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith('ls -la')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('does NOT rewrite inside an environment (depth > 0 ⇒ raw, §6.1)', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH())
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const renderer = rendererOf(content)
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      // Enter the environment the passport-gated way.
-      ed.insertText('ssh host1')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      enterEnvironment(renderer, 'env-ab12')
-
-      // Now inside the environment: a nested ssh must NOT be rewritten — a
-      // local staged path would be read by a remote shell (§3.1, §6.1).
-      // Entry already handed input to the editor (P0), so the nested line
-      // is typed there without any manual re-show.
-      ed.insertText('ssh host2')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // Only the FIRST ssh consulted the planner — the nested one was
-      // refused by depth before any RPC. (The environmentObserved report
-      // for the accepted passport is a separate, expected call.)
-      const launcherCalls = callMock.mock.calls.filter(([m]) => m === 'shell.launcherCommand')
-      expect(launcherCalls).toHaveLength(1)
-      expect(renderer.paste).toHaveBeenLastCalledWith('ssh host2')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('does NOT rewrite a remote command like `ssh -t host tmux attach` (§6.1)', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH())
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      ed.insertText('ssh -t host tmux attach')
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The parser refuses (a remote command, not a login); the planner is
-      // never consulted and the typed line goes out unchanged.
-      expect(callMock).not.toHaveBeenCalledWith('shell.launcherCommand', expect.anything())
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledWith('ssh -t host tmux attach')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('sends exactly one line — no write between submit and first marker (safety property)', async () => {
-    const callMock = vi.fn()
-    callMock.mockResolvedValue(LAUNCH())
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-
-    const { view, ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      // An INTEGRATED local tab is the bead's precondition: a marker has
-      // arrived, so this shell speaks our protocol and its syntax is known.
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      ed.insertText('ssh testhost')
-
-      const sendCallsBefore = session.send.mock.calls.length
-
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The submit path calls paste (which writes to the renderer, not
-      // session.send) and sendRaw('\r') (calls session.send). The rewrite
-      // path sends exactly ONE line — the rewritten ssh command — followed
-      // by CR. Nothing else is typed. This is the safety property: unlike
-      // the in-band family, no wrapper is typed AFTER submit into an
-      // unknown foreground process.
-      const renderer = rendererOf(content)
-      expect(renderer.paste).toHaveBeenCalledTimes(1)
-      expect(renderer.paste).toHaveBeenCalledWith(expect.stringContaining(LAUNCHER_PATH))
-
-      // No additional deferred writes after submit — no in-band injection.
-      const sendCallsAfter = session.send.mock.calls.length
-      expect(sendCallsAfter - sendCallsBefore).toBeLessThanOrEqual(2)
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-})
-/* eslint-enable @typescript-eslint/unbound-method */
-
-describe('connection offer on ssh block (nocx-pu4.7)', () => {
-  /** jsdom does not implement scrollTo/scrollIntoView; the
-   *  ScrollbackController calls both. */
-  function stubScroll(): () => void {
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const pst = Element.prototype.scrollTo
-    const psiv = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    return () => {
-      Element.prototype.scrollTo = pst
-      Element.prototype.scrollIntoView = psiv
-    }
-  }
-
-  /** Create a minimal ProfileClient mock with listProfiles stubbed. */
-  function mockProfileClient(
-    profiles: ReadonlyArray<{ name: string; host: string }> = [],
-  ): ProfileClient {
-    return {
-      listProfiles: vi.fn().mockResolvedValue(
-        profiles.map((p) => ({
-          id: `p_${p.name}`,
-          type: 'ssh',
-          name: p.name,
-          options: { host: p.host },
-        })),
-      ),
-      getSnapshot: vi.fn().mockResolvedValue({ values: {}, overridden: [], revision: 0 }),
-      setSetting: vi.fn().mockResolvedValue({ ok: true }),
-      createProfile: vi
-        .fn()
-        .mockImplementation((p: { name: string }) =>
-          Promise.resolve({ ...p, id: `new_${p.name}` }),
-        ),
-    } as unknown as ProfileClient
-  }
-
-  it('offers to save on block after ssh to unknown host', async () => {
-    const callMock = vi.fn()
-    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-    const pc = mockProfileClient([])
-
-    const { view, ed, content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-      pc,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      // The rewrite gate requires an integrated local shell: a marker must
-      // have arrived before the planner is consulted.
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      // Submit ssh to an UNKNOWN host.
-      ed.insertText('ssh pi@newbox')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-      // Submit drains one hop further when a profile client is wired: the
-      // saved-connection overlay lists profiles before the launcher call
-      // (nocx-pv3h). Without a client the path stays synchronous.
-      for (let i = 0; i < 8; i++) await Promise.resolve()
-
-      const renderer = rendererOf(content)
-      // Entry freezes the ssh block (passport → tagged A → B), and the
-      // connection offer rides on that freeze — exactly where the block
-      // used to end at the session's D.
-      enterEnvironment(renderer, 'env-ab12')
-      // The offer is async (profile list + settings): drain.
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // A receipt should appear on the block.
-      const blocks = tab.pane.querySelectorAll('.cmd-block')
-      expect(blocks.length).toBeGreaterThan(0)
-      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
-      const receipt = lastBlock?.querySelector('.ui-block-receipt')
-      expect(receipt).not.toBeNull()
-
-      // Kind badge says "SSH host".
-      const kind = receipt?.querySelector('.ui-block-receipt__kind')
-      expect(kind?.textContent).toBe('SSH host')
-
-      // The destination is shown.
-      const value = receipt?.querySelector('.ui-block-receipt__value')
-      expect(value?.textContent).toBe('pi@newbox')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('does NOT offer when the destination is already a saved profile', async () => {
-    const callMock = vi.fn()
-    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
-    // newbox is a KNOWN profile.
-    const pc = mockProfileClient([{ name: 'my-box', host: 'newbox' }])
-
-    const { view, ed, content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-      pc,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      ed.insertText('ssh pi@newbox')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      const renderer = rendererOf(content)
-      enterEnvironment(renderer, 'env-ab12')
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // No receipt — the host is already a profile.
-      const blocks = tab.pane.querySelectorAll('.cmd-block')
-      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
-      expect(lastBlock?.querySelector('.ui-block-receipt')).toBeNull()
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('does NOT offer for non-ssh commands', async () => {
-    const pc = mockProfileClient([])
-    const client = makeClient()
-
-    const { view, ed, content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-      pc,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-
-      ed.insertText('ls -la')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      const renderer = rendererOf(content)
-      renderer._fireCommandMarker({
-        kind: 'C',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-      })
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 0,
-      })
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // No receipt for non-ssh.
-      const blocks = tab.pane.querySelectorAll('.cmd-block')
-      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
-      expect(lastBlock?.querySelector('.ui-block-receipt')).toBeNull()
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('dismissal persists in settings', async () => {
-    const setSettingsMock = vi.fn().mockResolvedValue({ ok: true })
-    const pc = {
-      listProfiles: vi.fn().mockResolvedValue([]),
-      getSnapshot: vi.fn().mockResolvedValue({ values: {}, overridden: [], revision: 0 }),
-      setSetting: setSettingsMock,
-      createProfile: vi.fn(),
-    } as unknown as ProfileClient
-    const client = makeClient()
-    const callMock = client.call
-    callMock.mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-
-    const { view, ed, content, tab, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-      pc,
-    )
-    const restoreScroll = stubScroll()
-    try {
-      content.setVisible(true)
-      ed.show()
-      rendererOf(content)._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-
-      ed.insertText('ssh box')
-      view.contentDOM.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          key: 'Enter',
-          bubbles: true,
-          cancelable: true,
-        }),
-      )
-      // One hop further with a profile client wired — see the note in the
-      // sibling test (nocx-pv3h).
-      for (let i = 0; i < 8; i++) await Promise.resolve()
-
-      const renderer = rendererOf(content)
-      enterEnvironment(renderer, 'env-ab12')
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // Receipt appears.
-      const blocks = tab.pane.querySelectorAll('.cmd-block')
-      const lastBlock = blocks[blocks.length - 1] as HTMLElement | undefined
-      const dismissBtn = lastBlock?.querySelector<HTMLButtonElement>('.ui-block-receipt__drop')
-      expect(dismissBtn).not.toBeNull()
-
-      // Click Dismiss.
-      dismissBtn?.click()
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // Settings were persisted with the destination.
-      expect(setSettingsMock).toHaveBeenCalledWith(
-        'nocx.connectionOffers.dismissed',
-        expect.stringContaining('box'),
-      )
-
-      // Receipt is gone.
-      expect(lastBlock?.querySelector('.ui-block-receipt')).toBeNull()
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-})
-
-// ── nocx-mlm7 P9: the environment boundary (spec §6.1) ────────────────────
-
-describe('the environment boundary (nocx-mlm7 P9, spec §6.1)', () => {
-  /** Access the ledger through the private-field escape hatch. */
-  const ledgerOf = (content: TerminalContent): CommandLedger => {
-    const withLedger = content as unknown as { ledger: CommandLedger }
-    return withLedger.ledger
-  }
-
-  const envStackOf = (content: TerminalContent): unknown[] => {
-    const withStack = content as unknown as { _envStack: unknown[] }
-    return withStack._envStack
-  }
-
-  const attemptOf = (content: TerminalContent): unknown => {
-    const withAttempt = content as unknown as { _attempt: unknown }
-    return withAttempt._attempt
-  }
-
-  /** The scrollback block records — command, cwd and paint, oldest first. */
-  const blocksOf = (
-    content: TerminalContent,
-  ): Array<{
-    command: string
-    cwd: string
-    status: string
-    exitCode: number | null
-  }> => {
-    const withBlocks = content as unknown as {
-      scrollback: {
-        blockManager: {
-          blocks: Array<{
-            command: string
-            cwd: string
-            status: string
-            exitCode: number | null
-          }>
-        }
-      } | null
-    }
-    return withBlocks.scrollback?.blockManager.blocks ?? []
-  }
-
-  /** The shell.environmentObserved reports, in order. */
-  const observedCalls = (
-    callMock: Mock<(method: string, params: unknown) => Promise<unknown>>,
-  ): Array<{ environmentId: string; passport: unknown }> =>
-    callMock.mock.calls
-      .filter(([m]) => m === 'shell.environmentObserved')
-      .map(([, p]) => p as { environmentId: string; passport: unknown })
-
-  /** Submit a line through the editor's real keydown path. */
-  const submitLine = (view: EditorView, ed: CommandEditor, text: string): void => {
-    ed.insertText(text)
-    view.contentDOM.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-    )
-  }
-
-  /** jsdom does not implement scrollTo/scrollIntoView; the controller uses
-   *  both on every block start and freeze. */
-  function stubScroll(): () => void {
-    /* eslint-disable @typescript-eslint/unbound-method */
-    const pst = Element.prototype.scrollTo
-    const psiv = Element.prototype.scrollIntoView
-    /* eslint-enable @typescript-eslint/unbound-method */
-    Element.prototype.scrollTo = () => {}
-    Element.prototype.scrollIntoView = () => {}
-    return () => {
-      Element.prototype.scrollTo = pst
-      Element.prototype.scrollIntoView = psiv
-    }
-  }
-
-  /** Mount an integrated local tab with a working planner, drive to a
-   *  trusted prompt, and submit `ssh host1` (bootstrap, env-ab12). */
-  async function mountWithSsh(
-    callMock: Mock<(method: string, params: unknown) => Promise<unknown>>,
-  ): Promise<{
-    view: EditorView
-    ed: CommandEditor
-    content: TerminalContent
-    tab: Tab
-    renderer: RendererMock
-    teardown: () => void
-  }> {
-    const restoreScroll = stubScroll()
-    try {
-      const client = makeClient({ call: callMock })
-      const session = makeSession()
-      client.openSession.mockResolvedValue(session)
-      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
-      mounted.content.setVisible(true)
-      mounted.ed.show()
-      const renderer = rendererOf(mounted.content)
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      submitLine(mounted.view, mounted.ed, 'ssh host1')
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      return {
-        ...mounted,
-        renderer,
-        teardown: () => {
-          restoreScroll()
-          mounted.teardown()
-        },
-      }
-    } catch (err) {
-      restoreScroll()
-      throw err
-    }
-  }
-
-  it('row 1: auth fails / Ctrl-C at password: — no passport, the block runs to the local D with the real exit status', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, tab, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      // The local shell runs the ssh line: C starts it, and ssh dies at the
-      // password prompt (130 = Ctrl-C). No passport ever arrived.
-      renderer._fireCommandMarker({ kind: 'C', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 130,
-      })
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The block lived to the local D and got the REAL exit status.
-      const exitChip = tab.pane.querySelector('.cmd-header-exit-fail')
-      expect(exitChip?.textContent).toBe('exit 130')
-      // No environment was entered, nothing was reported as accepted.
-      expect(envStackOf(content)).toHaveLength(0)
-      const observed = observedCalls(callMock)
-      expect(observed).toHaveLength(1)
-      expect(observed[0].passport).toBeNull()
-      // The ledger record closed with the real code too.
-      const rec = ledgerOf(content)
-        .records()
-        .find((r) => r.command === 'ssh host1')
-      expect(rec?.exitCode).toBe(130)
-      expect(rec?.status).toBe('failure')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('row 2: banner before password: — everything up to the passport belongs to the running ssh block', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, tab, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      // While ssh is still connecting (banner, host-key prompt, password:,
-      // 2FA), the block is RUNNING — no marker froze it yet.
-      expect(tab.pane.querySelector('.cmd-block-running')).not.toBeNull()
-      expect(envStackOf(content)).toHaveLength(0)
-
-      // The passport arrives only after the password succeeded.
-      enterEnvironment(renderer, 'env-ab12')
-      expect(tab.pane.querySelector('.cmd-block-running')).toBeNull()
-      expect(tab.pane.querySelector('.cmd-block-entered')).not.toBeNull()
-      expect(envStackOf(content)).toHaveLength(1)
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('row 3: the POSIX tier orphan D;0 before its first A closes nothing and pops nothing', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, tab, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      // The launcher ran and the passport was accepted — then the remote
-      // tier's first emission is an orphan untagged D;0.
-      ;(renderer as unknown as PassportRenderer)._firePassport({
-        status: 'accepted',
-        passport: PASSPORT('env-ab12'),
-      })
-      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-
-      // Closes nothing (the ssh block is still running), pops nothing, and
-      // the attempt is still alive with nothing reported.
-      expect(tab.pane.querySelector('.cmd-block-running')).not.toBeNull()
-      expect(envStackOf(content)).toHaveLength(0)
-      expect(attemptOf(content)).not.toBeNull()
-      expect(observedCalls(callMock)).toHaveLength(0)
-
-      // The tagged A→B that follows still enters normally.
-      renderer._fireCommandMarker({
-        kind: 'A',
-        line: 1,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      renderer._fireCommandMarker({
-        kind: 'B',
-        line: 1,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      expect(envStackOf(content)).toHaveLength(1)
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('row 4: markers from an integrated tmux carry no expected id and create no transition', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      // A tagged A→B carrying a FOREIGN id (an already-integrated tmux
-      // inside the connecting ssh) must not enter the environment.
-      renderer._fireCommandMarker({
-        kind: 'A',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'tmux-9',
-      })
-      renderer._fireCommandMarker({
-        kind: 'B',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'tmux-9',
-      })
-      expect(envStackOf(content)).toHaveLength(0)
-      expect(observedCalls(callMock)).toHaveLength(0)
-
-      // Our own passport + tagged A→B still enter.
-      enterEnvironment(renderer, 'env-ab12')
-      expect(envStackOf(content)).toHaveLength(1)
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('row 6: sudo -i on the remote is a raw child shell with no transition', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, view, ed, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      enterEnvironment(renderer, 'env-ab12')
-      ed.show()
-      submitLine(view, ed, 'sudo -i')
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      // The legacy heuristic still labels the raw child shell, and it is
-      // NOT an attempt: the dormant transition record is still the ssh's.
-      expect(envStackOf(content)).toHaveLength(2)
-      expect(ledgerOf(content).transitionRecord?.command).toBe('ssh host1')
-
-      // The sudo shell ends on the remote tier's tagged D; the sudo level
-      // pops, the ssh environment stays.
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 0,
-        nocxEnv: 'env-ab12',
-      })
-      expect(envStackOf(content)).toHaveLength(1)
-      expect(ledgerOf(content).transitionRecord?.command).toBe('ssh host1')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('row 7: connection lost — the running remote command is interrupted/transition-lost; the transition record takes the local D code', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, view, ed, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      enterEnvironment(renderer, 'env-ab12')
-      ed.show()
-      submitLine(view, ed, 'top')
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      renderer._fireCommandMarker({
-        kind: 'C',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-
-      // The network drops: ssh exits 255 and the LOCAL shell emits its D.
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 255,
-      })
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      const records = ledgerOf(content).records()
-      const top = records.find((r) => r.command === 'top')
-      expect(top?.status).toBe('interrupted')
-      expect(top?.reason).toBe('transition-lost')
-      const ssh = records.find((r) => r.command === 'ssh host1')
-      expect(ssh?.transition).toBe('completed')
-      expect(ssh?.exitCode).toBe(255)
-      // The local D's code was never assigned to the remote command.
-      expect(top?.exitCode).toBeNull()
-      // The environment is gone with the connection.
-      expect(envStackOf(content)).toHaveLength(0)
-      // The observation was reported once, at entry, with the passport.
-      const observed = observedCalls(callMock)
-      expect(observed).toHaveLength(1)
-      expect(observed[0].passport).not.toBeNull()
-      // The running remote block froze with NO exit code.
-      const last = blocksOf(content)[blocksOf(content).length - 1]
-      expect(last?.status).toBe('entered')
-      expect(last?.exitCode).toBeNull()
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('row 8: Ctrl-D with no running remote block — the local D restores the parent environment and the editor', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, ed, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      enterEnvironment(renderer, 'env-ab12')
-      expect(envStackOf(content)).toHaveLength(1)
-
-      // Ctrl-D at the remote prompt: ssh exits cleanly, the local D arrives
-      // with no remote block running.
-      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-
-      expect(envStackOf(content)).toHaveLength(0)
-      const ssh = ledgerOf(content)
-        .records()
-        .find((r) => r.command === 'ssh host1')
-      expect(ssh?.transition).toBe('completed')
-      expect(ssh?.exitCode).toBe(0)
-
-      // The local shell's next prompt restores the editor.
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(ed.isVisible).toBe(true)
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('the ssh block carries the LOCAL host and cwd (entry happens after ledger.open and beginBlock)', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      enterEnvironment(renderer, 'env-ab12')
-      const block = blocksOf(content)[0]
-      expect(block.command).toBe('ssh host1')
-      // The block was started with the LOCAL cwd — the environment was not
-      // applied before beginBlock (that was the defect this epic fixes: the
-      // block carried the destination and no folder).
-      expect(block.cwd).toBe(FIXTURE_CWD)
-      expect(block.status).toBe('entered')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('entry counts only on expected passport → tagged A → B', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      // A tagged A alone (passport not yet accepted): nothing.
-      renderer._fireCommandMarker({
-        kind: 'A',
-        line: 1,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      expect(envStackOf(content)).toHaveLength(0)
-      // Passport accepted, then an UNTAGGED A→B: not the entry pair.
-      ;(renderer as unknown as PassportRenderer)._firePassport({
-        status: 'accepted',
-        passport: PASSPORT('env-ab12'),
-      })
-      renderer._fireCommandMarker({ kind: 'A', line: 1, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 1, col: 0, buffer: 'normal' })
-      expect(envStackOf(content)).toHaveLength(0)
-
-      // The tagged A→B pair completes entry.
-      renderer._fireCommandMarker({
-        kind: 'A',
-        line: 1,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      renderer._fireCommandMarker({
-        kind: 'B',
-        line: 1,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      expect(envStackOf(content)).toHaveLength(1)
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('P0: entry hands input to the editor and a typed command reaches the remote pty', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { view, ed, content, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      // NO manual ed.show(): after the accepted passport → tagged A → B the
-      // editor must be present on its own. Before the fix, the remote's
-      // first A arrived while the machine was still RUNNING_RAW (submit
-      // never finished for ssh), its B granted no ownership, and the
-      // marker-only remote prompt left no input surface at all.
-      enterEnvironment(renderer, 'env-ab12')
-      expect(ed.isVisible).toBe(true)
-      expect(content.presentation).toBe('editor')
-
-      // Type a command through that editor: it reaches the remote pty as
-      // the pasted document plus the raw CR accept (ADR-0004 §2 handoff).
-      const withSession = content as unknown as { session: SessionFake }
-      // unbound-method guards against calling a detached method with the
-      // wrong `this`. These are vi.fn() spies read for their call record and
-      // never invoked, which is the opposite concern.
-      /* eslint-disable @typescript-eslint/unbound-method */
-      const send = withSession.session.send
-      submitLine(view, ed, 'ls -la')
-      expect(renderer.paste).toHaveBeenLastCalledWith('ls -la')
-      expect(send).toHaveBeenCalledWith('\r')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('P0: without an accepted passport, input stays native — no editor, writable grid', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { ed, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      // mountWithSsh already submitted `ssh host1`: the machine sits in
-      // RUNNING_RAW while ssh connects. The remote authenticates and runs
-      // a PLAIN shell — no passport ever arrives. The grid stays writable
-      // and the editor never appears: the remote shell's own visible
-      // prompt is the input surface.
-      expect(ed.isVisible).toBe(false)
-      expect(renderer.setReadOnly).toHaveBeenLastCalledWith(false)
-      /* eslint-enable @typescript-eslint/unbound-method */
-
-      // A foreign/untagged prompt while the ssh command runs (an orphan
-      // resync) must not take ownership either — the RUNNING_RAW rule is
-      // the nested/orphan protection the passport must not loosen.
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      expect(ed.isVisible).toBe(false)
-      /* eslint-disable-next-line @typescript-eslint/unbound-method */
-      expect(renderer.setReadOnly).toHaveBeenLastCalledWith(false)
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('a tagged remote D closes the remote command and never pops the environment', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { content, view, ed, renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      enterEnvironment(renderer, 'env-ab12')
-      ed.show()
-      submitLine(view, ed, 'ls')
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      renderer._fireCommandMarker({
-        kind: 'C',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        nocxEnv: 'env-ab12',
-      })
-      renderer._fireCommandMarker({
-        kind: 'D',
-        line: 0,
-        col: 0,
-        buffer: 'normal',
-        exitCode: 0,
-        nocxEnv: 'env-ab12',
-      })
-
-      // Still inside: the tagged D closed the remote command only.
-      expect(envStackOf(content)).toHaveLength(1)
-      const ls = ledgerOf(content)
-        .records()
-        .find((r) => r.command === 'ls')
-      expect(ls?.status).toBe('success')
-      expect(ledgerOf(content).transitionRecord?.command).toBe('ssh host1')
-    } finally {
-      restoreScroll()
-      teardown()
-    }
-  })
-
-  it('the observation is reported exactly once, with the accepted passport or null', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const { renderer, teardown } = await mountWithSsh(callMock)
-    const restoreScroll = stubScroll()
-    try {
-      enterEnvironment(renderer, 'env-ab12')
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      expect(observedCalls(callMock)).toHaveLength(1)
-      expect(observedCalls(callMock)[0].passport).not.toBeNull()
-
-      // The local D does not report a second time — the first observation
-      // per attempt decides it (§5.4).
-      renderer._fireCommandMarker({ kind: 'D', line: 0, col: 0, buffer: 'normal', exitCode: 0 })
-      for (let i = 0; i < 5; i++) await Promise.resolve()
-      expect(observedCalls(callMock)).toHaveLength(1)
-    } finally {
-      restoreScroll()
-      teardown()
     }
   })
 })
@@ -3304,49 +1559,1111 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       teardown()
     }
   })
+})
 
-  // ── The §0 test ─────────────────────────────────────────────────────────
-  it('a local tab whose user entered an ssh session does not answer with the local sessionId', async () => {
-    const callMock = vi.fn().mockResolvedValue(LAUNCH({ environmentId: 'env-ab12' }))
-    const client = makeClient({ call: callMock })
-    const session = makeSession()
-    client.openSession.mockResolvedValue(session)
+describe('the projections consume the kernel through the composition root (ADR-0024 §5–§7, bead nocx-u7uh.7)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  it('the native escape holds through a later prompt_ready fact — the input router (ADR-0024 §6)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      // The user's own escape: the editor hides, keys route raw.
+      content.switchToTerminalInput()
+      expect(ed.isVisible).toBe(false)
+      // A native fact and ANOTHER authenticated prompt must not undo the
+      // escape — the latch is the user's, the authority stays the kernel's.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(false)
+      // The explicit switch back restores the editor at the authenticated prompt.
+      content.switchToEditorInput()
+      expect(ed.isVisible).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the capability rail reports the kernel state — integrated only from an authenticated prompt', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // The kernel starts Native: a conventional terminal, unsupported.
+      expect(content.shellState).toBe('unsupported')
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(content.shellState).toBe('integrated')
+      handler({ lane: 'lane-1', lifecycle: 'lost' })
+      expect(content.shellState).toBe('lost')
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+      expect(content.shellState).toBe('integrated')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a submitted command freezes its block and persists history from the authenticated completion', async () => {
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'make',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
     /* eslint-disable @typescript-eslint/unbound-method */
-    const pst = Element.prototype.scrollTo
-    const psiv = Element.prototype.scrollIntoView
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
     /* eslint-enable @typescript-eslint/unbound-method */
     Element.prototype.scrollTo = () => {}
     Element.prototype.scrollIntoView = () => {}
     try {
-      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
-      const { view, ed, content, teardown } = mounted
-      const renderer = rendererOf(content)
       content.setVisible(true)
-      ed.show()
-      renderer._fireCommandMarker({ kind: 'A', line: 0, col: 0, buffer: 'normal' })
-      renderer._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
-      // The user types `ssh somewhere` inside the LOCAL tab.
-      ed.insertText('ssh pi@192.168.0.93')
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      ed.insertText('make')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      for (let i = 0; i < 5; i++) await Promise.resolve()
+      // The app-owned submit opened a ledger record and a running block.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
 
-      // NOT yet inside: the passport has not arrived, so the origin still
-      // honestly names the local machine (entry is passport → tagged A → B).
-      expect(content.activeOrigin()?.sessionId).toBe(session.sessionId)
+      // The published attempt: the shell start attaches, then completes.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+      })
+      // The published running fact must NOT tear the block model down: the
+      // pane stays in the running layout with the block visible. It used to
+      // call setUnstructured unconditionally here, which put the pane back
+      // into the full-pane conventional grid on every fact — the block was
+      // in the DOM but hidden (inner-fullscreen-mode), so a live session
+      // showed a flat stream with no block, no freeze, no exit status
+      // (nocx-u7uh.25).
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(
+        withScrollback.scrollback.scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
 
-      enterEnvironment(renderer, 'env-ab12')
+      // The block froze with the authenticated status.
+      const frozen = withScrollback.scrollback.blockManager.blocks[0]
+      expect(frozen.status).toBe('success')
+      expect(frozen.exitCode).toBe(0)
+      expect(frozen.attemptId).toBe('att-1')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
 
-      // Inside the ssh session the tab's session is STILL the local one;
-      // naming it would show one machine's files while the user acts on
-      // another's (§0). An empty panel is correct; the wrong machine's
-      // files are not.
-      expect(content.activeOrigin()).toBeNull()
-      teardown()
+      // History persisted the app-owned text, authorized by the attempt.
+      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
+      expect(recordCall).toBeTruthy()
+      const params = recordCall![1] as { command: string; status: string; exitCode: number }
+      expect(params.command).toBe('make')
+      expect(params.status).toBe('success')
     } finally {
-      Element.prototype.scrollTo = pst
-      Element.prototype.scrollIntoView = psiv
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('the whole authenticated cycle: submit attaches, output stays visible, the completion freezes the block, the status persists exactly once, and the next command reaches the shell', async () => {
+    // The epic's positive criterion, watched end to end through the real
+    // composition root (ADR-0024 §5–§7): in an authenticated session the
+    // user submits a command, the authenticated start attaches to the app
+    // attempt, ALL output stays visible, Complete plus fence freezes the
+    // complete block, the exit status persists exactly once, PromptReady
+    // returns the editor, and the next submitted command reaches the shell.
+    const client = makeClient()
+    const callMock = client.call
+    let recordCalls = 0
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        recordCalls++
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'echo hello',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const pasteSpy = renderer.paste
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+
+      // 1. The authenticated prompt gives the editor the keyboard.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+
+      // 2. The user submits; the command reaches the shell BEFORE any
+      //    published start, and the app-owned attempt opens a running block.
+      ed.insertText('echo hello')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      // The app-owned attempt opens BEFORE the pty write; the write itself
+      // lands in the microtask after the submit RPC settles.
+      await vi.waitFor(() => expect(pasteSpy).toHaveBeenCalledWith('echo hello'))
+
+      // 3. The authenticated start attaches to the app attempt; the pane
+      //    stays in the running layout with the block visible — output is
+      //    never hidden by the lifecycle (nocx-u7uh.25).
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'echo hello' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(
+        withScrollback.scrollback.scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
+
+      // 4. Output lands and stays visible while the command runs.
+      renderer.write('hello\n')
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+
+      // 5. Complete plus fence freezes the complete block with the
+      //    authenticated status.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 1,
+          fence: 'b'.repeat(64),
+          completedAt: '2026-08-09T00:00:02Z',
+        },
+      })
+      const frozen = withScrollback.scrollback.blockManager.blocks[0]
+      expect(frozen.status).toBe('failure')
+      expect(frozen.exitCode).toBe(1)
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+
+      // 6. The exit status persists exactly once — one history.record for
+      //    the completed app-owned attempt.
+      await vi.waitFor(() => expect(recordCalls).toBe(1))
+      const recordCall = callMock.mock.calls.find((c) => c[0] === 'history.record')
+      const params = recordCall![1] as { command: string; status: string; exitCode: number }
+      expect(params.command).toBe('echo hello')
+      expect(params.status).toBe('failure')
+      expect(params.exitCode).toBe(1)
+
+      // 7. PromptReady returns the editor.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+
+      // 8. The next submitted command reaches the shell and opens a fresh
+      //    attempt — the cycle restarts, not the previous block.
+      ed.insertText('echo again')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(pasteSpy).toHaveBeenLastCalledWith('echo again'))
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(2)
+      expect(withScrollback.scrollback.blockManager.blocks[1].status).toBe('running')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a desynchronized or lost domain keeps the conventional unstructured grid (ADR-0024 §4, §9)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      // The kernel starts Native: a conventional terminal, full-pane grid.
+      expect(withScrollback.scrollback.mode).toBe('unstructured')
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // A desynchronized domain is not live (decision 9): its terminal
+      // stays visible and the block model never takes over — the pane is
+      // the conventional unstructured grid, blocks hidden.
+      handler({ lane: 'lane-1', lifecycle: 'desynchronized', domain: 'd1', epoch: 1 })
+      expect(withScrollback.scrollback.mode).toBe('unstructured')
+      expect(
+        withScrollback.scrollback.scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(true)
+      // Loss is conventional too: the grid stays, the block model stays out.
+      handler({ lane: 'lane-1', lifecycle: 'lost' })
+      expect(withScrollback.scrollback.mode).toBe('unstructured')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the grid turns writable when the command starts — raw input is never dropped (nocx-u7uh.23)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      // The typed interface says setReadOnly(boolean); the mock clears its
+      // call history — reached through a cast, like the existing tests do.
+      const readOnlyMock = (renderer as unknown as { setReadOnly: ReturnType<typeof vi.fn> })
+        .setReadOnly
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(true)
+      readOnlyMock.mockClear()
+
+      // The atomic handoff: the editor hides ITSELF at commit, and the
+      // submit callback makes the grid writable in the SAME synchronous
+      // step the bytes go out — keys typed before the running fact lands
+      // must reach the pty, never be dropped (the u7uh.23 vanish).
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(ed.isVisible).toBe(false)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(false)
+
+      // The published attempt opens the running interval; the sync keeps
+      // the grid writable — a program waiting on stdin (read, ssh, less)
+      // is fed by raw keys with no editor and no input surface lost.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'read x' },
+      })
+      expect(ed.isVisible).toBe(false)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(false)
+      // The completion closes the interval, and back at the prompt the
+      // editor returns and the grid locks again.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      expect(readOnlyMock).toHaveBeenLastCalledWith(true)
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+})
+
+describe('two attempts and the live region stay separate while running (nocx-m87n, nocx-zn4d, nocx-mu8s)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  it('two shell-originated attempts keep their own blocks while the first is still settling its fence (nocx-m87n)', async () => {
+    // The owner's report: run `codex` (an inline TUI, no alternate buffer),
+    // Ctrl-C it, type `codex` again. While the second run is live the pane
+    // showed ONE running block whose body held both runs' content; on exit
+    // the same content rendered as two correct frozen blocks. The attempt
+    // model was right the whole time (both completions landed with the
+    // right durations) — the defect is in the render: the first block must
+    // freeze while the second command runs, each with its own exit status.
+    // The second command is SHELL-originated (keys were raw), so it opens
+    // through the openBlock port, not the editor submit.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      // The authenticated prompt; the first command is typed at the shell.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'codex' },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      expect(withScrollback.scrollback.mode).toBe('running')
+
+      // Ctrl-C: the authenticated completion lands with its fence still in
+      // flight — the LOGICAL freeze flips the status and frees the running
+      // slot; the VISUAL boundary defers (u7uh.8) and the live region stays
+      // up until it settles.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 130,
+          fence: 'f'.repeat(64),
+          completedAt: '2026-08-09T00:00:08Z',
+        },
+      })
+      const first = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
+      expect(first?.status).toBe('failure')
+      expect(first?.exitCode).toBe(130)
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+
+      // The shell is back at the prompt and the user types `codex` again:
+      // a SECOND shell-originated attempt opens its own block — the first
+      // block's visual boundary is still pending, so the running slot must
+      // be free for it.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-2', state: 'open', origin: 'shell', command: 'codex' },
+      })
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(2)
+      const second = withScrollback.scrollback.blockManager.blockForAttempt('att-2')
+      expect(second).not.toBeNull()
+      expect(second!.status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBe(second)
+
+      // The first fence lands while the second command runs: the first
+      // block freezes with its own exit status, the second stays running,
+      // and the live region belongs to the second command.
+      rendererOf(content)._fireRenderFence({
+        hex: 'f'.repeat(64),
+        line: 3,
+        buffer: 'normal',
+      })
+      const firstAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
+      expect(firstAfter?.status).toBe('failure')
+      expect(firstAfter?.exitCode).toBe(130)
+      expect(firstAfter?.endLine).toBe(3)
+      expect(firstAfter?.el.classList.contains('cmd-block-running')).toBe(false)
+      const secondAfter = withScrollback.scrollback.blockManager.blockForAttempt('att-2')
+      expect(secondAfter?.status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBe(secondAfter)
+      expect(withScrollback.scrollback.mode).toBe('running')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('the app-owned submit opens the block before the bytes and marks the echo line outside the output range (nocx-4yhi)', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      ed.insertText('ls')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // The block opened at submit — BEFORE the bytes — on the prompt line
+      // (fixture cursorLine is 0). The shell's echo of `ls` will land on
+      // that same line, so the block's OUTPUT range starts one row later;
+      // the creation line and the output range are two different things.
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      expect(block!.startLine).toBe(0)
+      expect(block!.outputStart).toBe(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a shell-originated block\u2019s output range starts at the cursor line — its echo preceded the running fact (nocx-4yhi)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    try {
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'pwd' },
+      })
+      const block = withScrollback.scrollback.blockManager.blockForAttempt('att-1')
+      expect(block).not.toBeNull()
+      // The user typed at the shell: the command was echoed as they typed,
+      // and the running fact landed after it — so the block's output range
+      // is exactly where the block opened, no echo to skip.
+      expect(block!.startLine).toBe(block!.outputStart)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the running grid is fitted to the live region cap, so a tall inline TUI keeps its last row reachable (nocx-zn4d)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const raf = globalThis.requestAnimationFrame
+    const fitViewport = renderer.fitViewport
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      content.setVisible(true)
+      // The initial fit uses the delivered viewport (jsdom reports no
+      // layout, so clientHeight is 0 at this point).
+      content.viewportChanged({ width: 800, height: 400, devicePixelRatio: 1 })
+      expect(fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 800, height: 400 }),
+      )
+
+      // A real scroller height, and a running block header that occupies
+      // part of it: grid and live box share the scroller, so the grid must
+      // be fitted to scroller MINUS header — the same cap setLiveHeight
+      // clamps the box to. A taller grid's last rows sit outside the box
+      // (overflow: hidden) and are unreachable: the omp report, where the
+      // composer at the bottom of the program could not be scrolled to.
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'omp' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      block!.el.getBoundingClientRect = () => ({
+        height: 24,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: 24,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+
+      // Output taller than the pane: the box is capped at scroller minus
+      // header (276) and the grid must be fitted to the SAME 276 — not the
+      // bare scroller, which would leave the last rows clipped and
+      // unscrollable inside the box.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(1000)
+      client._sessions[0].fireData('repaint')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
+      expect(fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 800, height: 276 }),
+      )
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a program repainting the same rows does not yank the scroll (nocx-6w4z)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const raf = globalThis.requestAnimationFrame
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      content.setVisible(true)
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'top' },
+      })
+      const block = withScrollback.scrollback.blockManager.runningBlock
+      expect(block).not.toBeNull()
+      block!.el.getBoundingClientRect = () => ({
+        height: 24,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: 24,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+      // jsdom does no layout, so a measured height never reflects the
+      // inline height setLiveHeight wrote. A real browser applies it next
+      // frame; the guard reads it. Emulate that so the guard is exercised.
+      const live = withScrollback.scrollback.xtermLiveContainer
+      live.getBoundingClientRect = () => ({
+        height: parseFloat(live.style.height) || 0,
+        width: 800,
+        top: 0,
+        left: 0,
+        right: 800,
+        bottom: parseFloat(live.style.height) || 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      })
+      const scrollTo = vi.fn()
+      withScrollback.scrollback.scrollbackArea.scrollTo = scrollTo
+
+      // The first sizing sets the height; the box grows to the cap.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
+      client._sessions[0].fireData('top frame')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
+      expect(scrollTo).toHaveBeenCalled()
+      scrollTo.mockClear()
+
+      // `top` repaints the same rows: the height does not change, so the
+      // early return holds and the scroll is NOT yanked while the user
+      // reads (nocx-6w4z).
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
+      client._sessions[0].fireData('top frame')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
+      expect(scrollTo).not.toHaveBeenCalled()
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a foreign OSC 133 B/A repaint (omp writing its own prompt marks) no longer blanks the live region (nocx-mu8s)', async () => {
+    // The mu8s report: omp writes ESC]133;B then ESC]133;A during the
+    // repaint where it starts working on a message. The old marker cycle
+    // read that as prompt-ready → setIdle() → `.live-idle { height: 0 }` —
+    // the running program became invisible while still taking keys. The
+    // lifecycle left the byte stream (ADR-0024 §1, nocx-u7uh.1): markers
+    // are render-only, so the live region must stay up while the
+    // authenticated attempt runs.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'omp' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+
+      // omp's repaint writes its own prompt marks. Under the severed
+      // lifecycle these are render-only: no setIdle, no zero-height live
+      // region, no editor, no keyboard handoff.
+      renderer._fireCommandMarker({ kind: 'B', line: 12, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({ kind: 'A', line: 12, col: 0, buffer: 'normal' })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      expect(withScrollback.scrollback.xtermLiveContainer.className).not.toContain('live-idle')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).not.toBe('0px')
+      // The editor never takes the keyboard from a stream mark — ownership
+      // is the lifecycle axis (prompt_ready) alone (ADR-0024 §6).
+      expect(content.presentation).toBe('terminal')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+})
+
+describe('alt-screen exit and the ready prompt present the structured layout (nocx-u7uh.26, nocx-u7uh.27)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  const scrollbackOf = (content: TerminalContent): ScrollbackController =>
+    (content as unknown as { scrollback: ScrollbackController }).scrollback
+
+  it('a ready prompt with a live domain presents the structured idle layout (nocx-u7uh.27)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      // The kernel starts Native: a conventional terminal, flat grid.
+      expect(scrollbackOf(content).mode).toBe('unstructured')
+      // Integration establishes at the first prompt boundary. A live domain
+      // entitles the session to the block model (ADR-0024 §4), so the pane
+      // must move to the idle/structured layout — it used to stay on the
+      // conventional grid until the first command opened a block, so the
+      // first impression of an integrated session was a flat terminal.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(scrollbackOf(content).mode).toBe('idle')
+      expect(
+        scrollbackOf(content).scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaving the alternate buffer in an integrated session restores the structured layout (nocx-u7uh.26)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      const renderer = rendererOf(content)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // vim enters the alternate buffer: the program takes the pane.
+      renderer._fireBufferChange('alternate')
+      expect(scrollbackOf(content).mode).toBe('fullscreen')
+      // vim quits: leaving the alternate buffer must land on the structured
+      // idle layout, not the flat conventional grid — the live domain
+      // entitles the session to the block model on the way out too.
+      renderer._fireBufferChange('normal')
+      expect(scrollbackOf(content).mode).toBe('idle')
+      expect(
+        scrollbackOf(content).scrollbackInner.classList.contains('inner-fullscreen-mode'),
+      ).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaving the alternate buffer while the attempt still runs keeps the live region up (nocx-u7uh.26)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // A shell-originated attempt opens a running block.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'vim file' },
+      })
+      expect(scrollbackOf(content).mode).toBe('running')
+      renderer._fireBufferChange('alternate')
+      expect(scrollbackOf(content).mode).toBe('fullscreen')
+      // vim exits before the completion fact lands: the command cycle still
+      // owns the live region, so the pane stays in the running layout until
+      // the authenticated completion freezes the block.
+      renderer._fireBufferChange('normal')
+      expect(scrollbackOf(content).mode).toBe('running')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('a conventional session still lands unstructured after the alternate buffer (nocx-u7uh.26)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const renderer = rendererOf(content)
+      // Native: no domain, a conventional terminal. The alt-screen path
+      // must leave it exactly as it found it — a flat grid.
+      renderer._fireBufferChange('alternate')
+      expect(scrollbackOf(content).mode).toBe('fullscreen')
+      renderer._fireBufferChange('normal')
+      expect(scrollbackOf(content).mode).toBe('unstructured')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the editor submit opens the attempt before the pty write (ADR-0024 §5, nocx-u7uh.18)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  /** Dispatch a keydown exactly where a user's keystroke lands. */
+  const key = (view: EditorView, init: KeyboardEventInit): void => {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+    )
+  }
+
+  /** jsdom does not implement scrollTo/scrollIntoView; the block model
+   *  calls them on submit. Stub them for the duration — the same trade the
+   *  projections tests make. Returns the restore. */
+  function stubScrolling(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+    }
+  }
+  it('a submit at a live prompt opens the attempt with the app-owned text BEFORE the pty write', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
+    // the resolver is captured via the executor form (the codebase pattern).
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    submitAttempt.mockImplementation(() => attemptPromise)
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // The attempt-open call went out synchronously at submit, with the
+      // app-owned text, cwd and host — and the pty write has NOT happened.
+      // The ordering is asserted, not assumed: the backend emits the
+      // running fact INSIDE SubmitAttempt, so the bytes must wait for the
+      // answer or the shell's start could open a second attempt first.
+      expect(submitAttempt).toHaveBeenCalledWith('lifecycle.submitAttempt', {
+        domain: 'd1',
+        command: 'make deploy',
+        cwd: FIXTURE_CWD,
+        host: '',
+      })
+      expect(session.send).not.toHaveBeenCalled()
+      // The running block opened at submit, before any fact could arrive —
+      // the published running fact always finds the block it binds to.
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+
+      // The backend answers: only now do the bytes go out.
+      resolveAttempt({
+        id: 'att-9',
+        domain: 'd1',
+        state: 'open',
+        command: 'make deploy',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('the attempt receives the reference-intact record line, never the resolved send line', async () => {
+    const client = makeClient()
+    // vault.resolveLine goes over the WSClient seam (client.call); the
+    // attempt-open goes over the dispatcher (client.dispatcher.call).
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({
+          line: 'make --token=SECRETVALUE',
+          refs: [{ name: 'TOKEN', resolved: true }],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const submitAttempt = client.dispatcher.call
+    // Promise.withResolvers needs ES2024 and this project targets ES2021, so
+    // the resolver is captured via the executor form (the codebase pattern).
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    submitAttempt.mockImplementation(() => attemptPromise)
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const renderer = rendererOf(content)
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make --token={{secret:TOKEN}}')
+      key(view, { key: 'Enter' })
+
+      // The line with references resolves first (ADR-0021); the attempt
+      // then opens with the RECORD line — reference intact (decision 5's
+      // privacy rule) — while the RESOLVED line goes to the pty and
+      // nowhere else.
+      await vi.waitFor(() =>
+        expect(submitAttempt).toHaveBeenCalledWith('lifecycle.submitAttempt', {
+          domain: 'd1',
+          command: 'make --token={{secret:TOKEN}}',
+          cwd: FIXTURE_CWD,
+          host: '',
+        }),
+      )
+      expect(session.send).not.toHaveBeenCalled()
+      resolveAttempt({
+        id: 'att-10',
+        domain: 'd1',
+        state: 'open',
+        command: 'make --token={{secret:TOKEN}}',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
+      expect(pasteMock.paste).toHaveBeenCalledWith('make --token=SECRETVALUE')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('a submit with no live domain opens no attempt — the terminal stays conventional', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // No fact was delivered: the kernel is Native, the session is a
+      // conventional terminal.
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // The write goes out on the synchronous path and no attempt-open call
+      // was ever made — nothing is fabricated for a conventional terminal.
+      expect(submitAttempt).not.toHaveBeenCalled()
+      expect(session.send).toHaveBeenCalledTimes(1)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('an empty line is a bare newline: no attempt, no ledger record, but the shell still gets its newline', async () => {
+    const client = makeClient()
+    const submitAttempt = client.dispatcher.call
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const withLedger = content as unknown as { ledger: CommandLedger }
+    const handler = factHandler(client)
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      key(view, { key: 'Enter' }) // empty draft
+
+      // A bare newline is not an execution: no attempt-open call, no ledger
+      // record (CommandLedger.open refuses empty commands), no crash — and
+      // the shell still receives its newline.
+      expect(submitAttempt).not.toHaveBeenCalled()
+      expect(withLedger.ledger.records()).toHaveLength(0)
+      expect(session.send).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a refused attempt never swallows the command: the bytes still go out', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockRejectedValue(new RpcError('lifecycle: no prompt is ready', -32602))
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The escape hatch TerminalContent keeps `session` private (the
+    // editorOf/rendererOf pattern).
+    const withSession = content as unknown as { session: SessionFake }
+    const session = withSession.session
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.show()
+      ed.insertText('make deploy')
+      key(view, { key: 'Enter' })
+
+      // Fail-open: the domain lost its prompt between the last fact and the
+      // Enter, the attempt was refused — and the command still runs.
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+    } finally {
+      restoreScroll()
+      teardown()
     }
   })
 })

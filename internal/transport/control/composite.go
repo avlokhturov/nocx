@@ -40,7 +40,7 @@ func NewComposite(admissions ...Admission) Admission {
 // The operation path composes WAITING domain gates with the lane through the
 // plain NewComposite, whose result is a plain Admission acquired inside the
 // task goroutine (operation Run); the two constructors encode the two
-// admission classes (ADR-0024). A composite containing a waiting admission
+// admission classes (ADR-0026). A composite containing a waiting admission
 // must not satisfy NonblockingAdmission, so it cannot be passed to
 // NewBoundedSubmission by accident.
 func NewCompositeNonblocking(admissions ...NonblockingAdmission) NonblockingAdmission {

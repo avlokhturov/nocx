@@ -33,6 +33,7 @@ import {
   AdHocQuickConnectProvider,
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
+  SecretsQuickConnectProvider,
   type DrillCommand,
   type QuickConnectProvider,
 } from './quick-connect'
@@ -710,11 +711,6 @@ async function main() {
     new ActionsQuickConnectProvider(
       () => tm.newTab(),
       () => openSettingsTab().startNewConnection(),
-      // "Integrate this shell" (nocx-ynsx): route to the ACTIVE tab's
-      // terminal content — the shell at the current prompt. The content
-      // itself owns the PROMPT_READY && trusted && owned gate and refuses
-      // with a stated reason outside it.
-      () => void tm.activeTerminalContent()?.integrateShell(),
       forwardPortCommand,
     ),
     sshProvider,
@@ -725,13 +721,59 @@ async function main() {
     // neither a saved profile nor an alias. Same host path as aliases — the
     // dialog only reaches it after every real match missed.
     new AdHocQuickConnectProvider((host, user, port) => tm.newSSHTab('', host, user, port)),
+    // The vault half (nocx-fk32). It contributes only to the 'secrets'
+    // variant — the dialog admits one kind set per variant — so these rows
+    // never appear in the server list or the palette.
+    new SecretsQuickConnectProvider({
+      status: () => vaultClient.status(),
+      inventory: () => vaultClient.inventory(),
+      insert: (name) => void insertSecretIntoActivePane(name),
+      // The create dialog is the vault's own, and it is the SAME one the
+      // prompt's '@' picker opens (nocx-fk32.1): a secret needs a name and a
+      // value, and neither picker is where a value gets typed.
+      create: (name) => openSettingsTab().startNewSecret(name),
+      // The vault layer owns both prompts (nocx-fk32.3); the picker only
+      // says which one this state calls for.
+      requestUnseal: () => vaultController.openUnlock('use its secrets'),
+      requestSetup: () => vaultController.openSetup(),
+    }),
   ]
+
+  /** Insert a saved secret where the user is typing in the pane in front
+   *  (nocx-fk32). The pane decides WHAT is inserted by asking who owns
+   *  input — the reference into the editor's draft, the resolved value into
+   *  the pty — because only there is the answer known. This composition
+   *  root only routes the name and reports the outcome, and the outcome
+   *  needs reporting: a password prompt echoes nothing, so an insert the
+   *  user cannot see is an insert they will do twice. */
+  async function insertSecretIntoActivePane(name: string): Promise<void> {
+    const content = tm.activeTerminalContent()
+    if (content === null) {
+      showToast({ message: 'Open a terminal to insert a secret into', level: 'warning' })
+      return
+    }
+    try {
+      const where = await content.insertSecret(name)
+      // The newline goes with the value (fc189136), so the toast reports a
+      // completed send rather than asking for the keystroke that is no
+      // longer needed. It still has to say something: a password prompt
+      // echoes nothing, and an answer the user cannot see is an answer they
+      // will give twice.
+      if (where === 'value') showToast({ message: 'Secret sent — the prompt echoes nothing' })
+      else if (where === 'unavailable')
+        showToast({ message: `"${name}" could not be inserted`, level: 'danger' })
+    } catch (err) {
+      log.warn('nocx: inserting a secret failed', { error: err })
+      showToast({ message: `"${name}" could not be inserted`, level: 'danger' })
+    }
+  }
 
   const qc = new QuickConnectController()
   qc.mount(qcContainer, qcProviders)
 
   function wireQuickConnect(strip: typeof tabStrip) {
     strip.onQuickConnect = () => qc.show()
+    strip.onInsertSecret = () => qc.showSecrets()
   }
   wireQuickConnect(tabStrip)
 
@@ -745,22 +787,6 @@ async function main() {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
       e.preventDefault()
       qc.showPalette()
-    }
-  })
-
-  // Ctrl/Cmd+Shift+I — "Integrate this shell" (nocx-ynsx). The same entry
-  // the quick-connect palette lists, reachable without opening the picker.
-  // The gate (PROMPT_READY && trusted && owned) lives in
-  // TerminalContent.integrateShell and refuses with a stated reason outside
-  // it. Intercepted only while the ACTIVE tab is a terminal, so the chord
-  // stays free elsewhere (it collides with WebKit's devtools shortcut, and
-  // in a release build there is no inspector to open; the tradeoff is
-  // named here deliberately).
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'I') {
-      if (tm.activeTerminalContent() === null) return
-      e.preventDefault()
-      tm.activeTerminalContent()?.integrateShell()
     }
   })
 

@@ -125,7 +125,7 @@ async function connectedSession(): Promise<{
   socket().serverAccepts()
   await connecting
 
-  const opening = client.openSession(80, 24, false)
+  const opening = client.openSession(80, 24)
   const openID = socket().requests()[0].id
   socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
   const session = await opening
@@ -144,13 +144,13 @@ async function twoSessions(): Promise<{
   socket().serverAccepts()
   await connecting
 
-  const openingA = client.openSession(80, 24, false)
+  const openingA = client.openSession(80, 24)
   const reqsAfterA = socket().requests()
   const idA = reqsAfterA[reqsAfterA.length - 1].id
   socket().deliverText({ jsonrpc: '2.0', id: idA, result: { sessionId: SID } })
   const sessionA = await openingA
 
-  const openingB = client.openSession(80, 24, false)
+  const openingB = client.openSession(80, 24)
   const reqsAfterB = socket().requests()
   const idB = reqsAfterB.find((r) => r.method === 'open' && r.id !== idA)!.id
   socket().deliverText({ jsonrpc: '2.0', id: idB, result: { sessionId: OTHER_SID } })
@@ -236,24 +236,32 @@ describe('openSession', () => {
     socket().serverAccepts()
     await connecting
 
-    void client.openSession(132, 43, false)
+    void client.openSession(132, 43)
     const [req] = socket().requests()
 
     expect(req.method).toBe('open')
     expect(typeof req.id).toBe('number')
-    expect(req.params).toEqual({ cols: 132, rows: 43, xpixel: 0, ypixel: 0, enhanced: false })
+    expect(req.params).toEqual({ cols: 132, rows: 43, xpixel: 0, ypixel: 0 })
   })
 
-  it('sends enhanced:true when openSession requests enhanced input (nocx-4ff.10)', async () => {
+  // nocx-tr2n, superseding nocx-4ff.10: the renderer no longer says whether
+  // a session may be integrated. It asked with `enhanced`, and the two ssh
+  // openers below never did — so an ssh tab never got a lifecycle channel
+  // and could never show a block. The backend asks for every session now,
+  // and the renderer must not reintroduce a way to answer.
+  it('never asks for integration — every opener sends the same params (nocx-tr2n)', async () => {
     const client = new WSClient(mockDispatcher())
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
 
-    void client.openSession(80, 24, true)
-    const [req] = socket().requests()
+    void client.openSession(80, 24)
+    void client.openSSHSession(80, 24, 'ssh:test:1')
+    void client.openSSHSessionByHost(80, 24, 'pi@192.168.0.93')
 
-    expect(req.params).toEqual({ cols: 80, rows: 24, xpixel: 0, ypixel: 0, enhanced: true })
+    for (const req of socket().requests()) {
+      expect(req.params).not.toHaveProperty('enhanced')
+    }
   })
 
   it('resolves with a SessionHandle carrying the server-assigned id (AD-7)', async () => {
@@ -267,7 +275,7 @@ describe('openSession', () => {
     socket().serverAccepts()
     await connecting
 
-    const opening = client.openSession(80, 24, false)
+    const opening = client.openSession(80, 24)
     const id = socket().requests()[0].id
     socket().deliverText({
       jsonrpc: '2.0',
@@ -284,7 +292,7 @@ describe('openSession', () => {
     socket().serverAccepts()
     await connecting
 
-    const opening = client.openSession(80, 24, false)
+    const opening = client.openSession(80, 24)
     const id = socket().requests()[0].id
     socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: 'not-a-session-id' } })
 
@@ -297,7 +305,7 @@ describe('openSession', () => {
     socket().serverAccepts()
     await connecting
 
-    const opening = client.openSession(80, 24, false)
+    const opening = client.openSession(80, 24)
     socket().serverHangsUp()
 
     await expect(opening).rejects.toThrow('ws closed')
@@ -310,7 +318,7 @@ describe('openSession', () => {
     await connecting
 
     let settled = false
-    const opening = client.openSession(80, 24, false).finally(() => (settled = true))
+    const opening = client.openSession(80, 24).finally(() => (settled = true))
     const id = socket().requests()[0].id ?? 0
     socket().deliverText({ jsonrpc: '2.0', id: id + 999, result: { sessionId: SID } })
     await Promise.resolve()
@@ -327,7 +335,7 @@ describe('openSession', () => {
     socket().serverAccepts()
     await connecting
 
-    const opening = client.openSession(80, 24, false)
+    const opening = client.openSession(80, 24)
     expect(() => socket().deliverText('}{ not json')).not.toThrow()
 
     const id = socket().requests()[0].id
@@ -420,7 +428,7 @@ describe('inbound data', () => {
     const connecting = client.connect(9876)
     socket().serverAccepts()
     await connecting
-    const opening = client.openSession(80, 24, false)
+    const opening = client.openSession(80, 24)
     socket().deliverText({
       jsonrpc: '2.0',
       id: socket().requests()[0].id,
@@ -433,7 +441,7 @@ describe('inbound data', () => {
     const reconnected = client.connect(9876)
     socket().serverAccepts()
     await reconnected
-    const reopening = client.openSession(80, 24, false)
+    const reopening = client.openSession(80, 24)
     const reqs = socket().requests()
     const id = reqs[reqs.length - 1]?.id
     socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
@@ -742,7 +750,7 @@ describe('reconnect and reattach', () => {
     socket().serverAccepts()
     await connecting
 
-    const opening = client.openSession(80, 24, false)
+    const opening = client.openSession(80, 24)
     const openID = socket().requests()[0].id
     socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
     const session = await opening
@@ -985,14 +993,14 @@ describe('reconnect and reattach', () => {
     socket().serverAccepts()
     await connecting
 
-    const openingA = client.openSession(80, 24, false)
+    const openingA = client.openSession(80, 24)
     const openIdA = socket()
       .requests()
       .find((r) => r.method === 'open')!.id!
     socket().deliverText({ jsonrpc: '2.0', id: openIdA, result: { sessionId: SID } })
     await openingA
 
-    const openingB = client.openSession(80, 24, false)
+    const openingB = client.openSession(80, 24)
     const reqsAfterB = socket().requests()
     const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
     socket().deliverText({ jsonrpc: '2.0', id: openIdB, result: { sessionId: OTHER_SID } })

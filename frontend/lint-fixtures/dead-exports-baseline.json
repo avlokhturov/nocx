@@ -35,21 +35,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/environment-passport.ts",
-      "symbol": "MAX_PASSPORT_PAYLOAD_LENGTH"
-    },
-    {
-      "kind": "exports",
-      "file": "src/environment-passport.ts",
-      "symbol": "PASSPORT_TIERS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/environment-passport.ts",
-      "symbol": "PASSPORT_VALUE_RE"
-    },
-    {
-      "kind": "exports",
       "file": "src/log.ts",
       "symbol": "DECISION_PREFIX"
     },
@@ -100,18 +85,8 @@
     },
     {
       "kind": "exports",
-      "file": "src/scrollback/blocks.ts",
-      "symbol": "blockOutputText"
-    },
-    {
-      "kind": "exports",
       "file": "src/scrollback/serializer.ts",
       "symbol": "cellAttrs"
-    },
-    {
-      "kind": "exports",
-      "file": "src/scrollback/test-helpers.ts",
-      "symbol": "lineWith"
     },
     {
       "kind": "exports",
@@ -332,26 +307,6 @@
       "kind": "types",
       "file": "src/authentication-editor.tsx",
       "symbol": "AuthMethodEditorProps"
-    },
-    {
-      "kind": "types",
-      "file": "src/command-ledger.ts",
-      "symbol": "InterruptReason"
-    },
-    {
-      "kind": "types",
-      "file": "src/command-ledger.ts",
-      "symbol": "TransitionLifecycle"
-    },
-    {
-      "kind": "types",
-      "file": "src/environment-passport.ts",
-      "symbol": "PassportParseFailure"
-    },
-    {
-      "kind": "types",
-      "file": "src/environment-passport.ts",
-      "symbol": "PassportTier"
     },
     {
       "kind": "types",

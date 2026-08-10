@@ -13,7 +13,7 @@ import (
 // terminator line, the completion marker checked before ANY source, and the
 // staging file removed on every path.
 func TestInBandBootstrap_WrapperShape(t *testing.T) {
-	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef")
+	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef", nil)
 	if err != nil {
 		t.Fatalf("InBandBootstrap: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestInBandBootstrap_WrapperShape(t *testing.T) {
 // never source a partial hook script, and stray bytes after the payload
 // land outside every section range.
 func TestInBandBootstrap_PayloadFraming(t *testing.T) {
-	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef")
+	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef", nil)
 	if err != nil {
 		t.Fatalf("InBandBootstrap: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestInBandBootstrap_PayloadFraming(t *testing.T) {
 // must be refused, never embedded.
 func TestInBandBootstrap_RejectsBadSessionID(t *testing.T) {
 	for _, sid := range []string{"", "short", strings.Repeat("g", 32), "0123456789abcdef0123456789abcdef "} {
-		if _, err := New(nil).InBandBootstrap(sid); err == nil {
+		if _, err := New(nil).InBandBootstrap(sid, nil); err == nil {
 			t.Errorf("InBandBootstrap(%q): expected an error", sid)
 		}
 	}
@@ -164,7 +164,7 @@ func TestInBandBootstrap_RejectsBadSessionID(t *testing.T) {
 // worst an injection. The launcher payloads already guarantee this; the
 // in-band payload must too.
 func TestInBandBootstrap_NeverNUL(t *testing.T) {
-	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef")
+	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef", nil)
 	if err != nil {
 		t.Fatalf("InBandBootstrap: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestInBandBootstrap_NeverNUL(t *testing.T) {
 // and the terminator, i.e. outside every extraction range, so the sourced
 // script is byte-identical to the embedded one.
 func TestInBandBootstrap_DispatcherFramingExtra(t *testing.T) {
-	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef")
+	p, err := New(nil).InBandBootstrap("0123456789abcdef0123456789abcdef", nil)
 	if err != nil {
 		t.Fatalf("InBandBootstrap: %v", err)
 	}

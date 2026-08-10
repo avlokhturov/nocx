@@ -11,6 +11,8 @@ import type {
   CwdCallback,
   DataCallback,
   MarkerAdapter,
+  RenderFenceCallback,
+  RenderFenceEvent,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -19,7 +21,6 @@ import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
 import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
-import { EnvironmentPassportTracker, type PassportDisposition } from '../environment-passport'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -29,6 +30,11 @@ type ClipboardWriteCallback = (text: string) => void
 // glyph atlas on every reflow. WebGL → Canvas → built-in DOM as fallbacks.
 
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
+
+// The readability floor applied to every cell (nocx-3lrm). WCAG AA; xterm's
+// own default is 1, documented as "do nothing". See the Terminal options for
+// why a floor is needed at all.
+const MINIMUM_CONTRAST_RATIO = 4.5
 
 // On WebKitGTK (Linux/Wails) the compositor may not present a frame until the
 // window receives a user interaction, so xterm.js's rAF-scheduled repaint of
@@ -41,6 +47,33 @@ const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
 // (WKWebView) and in browsers the compositor is healthy and the pump is a
 // waste of CPU.
 const FORCED_REFRESH_MS = 42
+
+// ── Shift+Enter must reach the program as its own chord (nocx-nt70) ──────
+// A program that owns the keyboard cannot tell Shift+Enter from Enter: xterm
+// encodes both as a bare CR (\r) and drops the modifier. There are two
+// conventions for fixing that:
+//
+//  1. Legacy ESC CR — Shift+Enter sends ESC followed by CR (\x1b\r). One
+//     mapping, no negotiation, understood by the editors that historically
+//     adopted it. It fixes exactly this one chord and nothing else.
+//  2. A negotiated modifier encoding — xterm's modifyOtherKeys or the kitty
+//     keyboard protocol — where the program asks for the mode and every
+//     modified chord then arrives as an explicit CSI-u sequence. xterm.js
+//     5.5.0 ships neither (verified: no modifyOtherKeys option, no kitty
+//     protocol in the bundle), so the mode-set handshake and the key table
+//     would be hand-rolled beside the library — the shape this repo avoids —
+//     and the default state would need a byte-identity test of its own.
+//
+// Chosen: legacy ESC CR. xterm's own hook for "a key xterm must not process"
+// (attachCustomKeyEventHandler) is the existing answer for exactly this, and
+// the alternative buys nothing for the one reported chord while shipping a
+// hand-written key table. The cost is named: Alt+Enter already encodes as
+// ESC CR in xterm, so a program still cannot distinguish Shift+Enter from
+// Alt+Enter; Ctrl+Enter still sends a bare CR; Shift+Tab already arrives as
+// ESC [ Z and is untouched. If chords beyond Shift+Enter are ever needed,
+// the negotiated protocol is the upgrade path, and its first test must be
+// the default-state byte identity this hook preserves.
+const SHIFT_ENTER_SEQUENCE = '\x1b\r'
 
 function isLinuxWebKit(): boolean {
   if (typeof navigator === 'undefined') return false
@@ -138,6 +171,42 @@ export function parseOsc133(payload: string): CommandMarker | null {
   return marker
 }
 
+// ── Render fence parser (ADR-0024 §7 carve-out) ──────────────────────────
+// The shell writes ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER the
+// command's output and carries the same 64 hex chars in the authenticated
+// `complete` event (docs/lifecycle-protocol.md §8). The renderer reports
+// where the fence landed — a rendezvous for render ordering, never an
+// authority: a fence with no authenticated event behind it does nothing.
+// OSC 1337 is a private namespace other software also uses (iTerm2 file
+// transfer), so only an exact NOCX_FENCE; prefix with exactly 64 lowercase
+// hex chars parses; everything else is nothing.
+const FENCE_PREFIX = 'NOCX_FENCE;'
+const FENCE_HEX_RE = /^[0-9a-f]{64}$/
+
+/** Parses an OSC 1337 payload into the fence nonce. Returns null unless the
+ *  payload is exactly `NOCX_FENCE;<64 lowercase hex>`. */
+export function parseRenderFence(payload: string): { hex: string } | null {
+  if (!payload.startsWith(FENCE_PREFIX)) return null
+  const hex = payload.slice(FENCE_PREFIX.length)
+  if (!FENCE_HEX_RE.test(hex)) return null
+  return { hex }
+}
+
+/** Parses an OSC 1337 payload into the recovery fence nonce (ADR-0024
+ *  decision 8). Returns null unless the payload is exactly
+ *  `NOCX_RECOVERY;<64 lowercase hex>`. The shell writes this to the pty at
+ *  the first prompt boundary after the lifecycle channel died, restoring a
+ *  visible native prompt; the consumer matches it against the pre-provisioned
+ *  nonce the backend published in the lost fact. Parse-and-report only: the
+ *  renderer never inspects the grid and never pattern-matches a prompt — it
+ *  matches this explicit fence, exactly as the completion fence. */
+export function parseRecoveryFence(payload: string): { hex: string } | null {
+  if (!payload.startsWith('NOCX_RECOVERY;')) return null
+  const hex = payload.slice('NOCX_RECOVERY;'.length)
+  if (!FENCE_HEX_RE.test(hex)) return null
+  return { hex }
+}
+
 export class XtermRenderer implements TerminalRenderer {
   private term: Terminal | null = null
   private webgl?: WebglAddon
@@ -148,19 +217,21 @@ export class XtermRenderer implements TerminalRenderer {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
-  private inBandReadySubs: Array<() => void> = []
-  private inBandReadyDisposable?: { dispose(): void }
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
+  private fenceSubs: Array<(event: RenderFenceEvent) => void> = []
+  private recoverySubs: Array<(hex: string) => void> = []
+  private fenceOscDisposable?: { dispose(): void }
   private snapshotOscDisposable?: { dispose(): void }
   private scrollDisposable?: { dispose(): void }
   private renderDisposable?: { dispose(): void }
   private _cachedCellHeight: number | null = null
-  /** This tab's readiness-passport tracker (OSC 636 P). Per-renderer, like
-   *  the snapshot store — tab 2 is never judged against tab 1's expected id.
-   *  Parse-and-report only; the consumer decides what acceptance means. */
-  readonly passportTracker = new EnvironmentPassportTracker()
-  private passportSubs: Array<(d: PassportDisposition) => void> = []
+  /** Subscribers to "the cell dimensions may have changed" (nocx-yy9g) —
+   *  the frozen block layout re-publishes its metric on this. */
+  private _cellDimsSubs: Array<() => void> = []
+  /** The device-pixel-ratio watch, kept so dispose can detach it. */
+  private _dprMedia: MediaQueryList | null = null
+  private _dprChangeHandler: (() => void) | null = null
   /** This tab's command-existence store (OSC 636). Created per renderer so
    *  two tabs never share a snapshot; the editor and frozen headers of this
    *  tab read the same instance this OSC handler feeds. */
@@ -198,6 +269,19 @@ export class XtermRenderer implements TerminalRenderer {
       // (word-selection.ts): xterm's default separator set, made explicit so
       // double-click selects the same token on both surfaces (nocx-w7h.8).
       wordSeparator: WORD_SEPARATORS,
+      // A readability floor under the theme's palette (nocx-3lrm). Without
+      // it xterm renders the palette literally, and the one class of program
+      // that uses an ANSI colour as a large BACKGROUND — mc paints its
+      // panels `lightgray;blue` — becomes unreadable: under the default
+      // theme that pair is 1.19:1, because a modern palette lightens blue
+      // for TEXT on a dark ground. Warp raises the foreground against the
+      // actual cell background, which is why the same mc reads there and
+      // did not here.
+      //
+      // 4.5 is WCAG AA. Only pairs that fall below it are adjusted, so the
+      // palette a theme declares still renders exactly as declared wherever
+      // it is already legible; this raises a floor rather than restyling.
+      minimumContrastRatio: MINIMUM_CONTRAST_RATIO,
       theme: getCurrentTheme(),
     })
     this.term = term
@@ -206,6 +290,31 @@ export class XtermRenderer implements TerminalRenderer {
     term.unicode.activeVersion = '11'
 
     term.open(container)
+
+    // Shift+Enter as its own chord (nocx-nt70) — see SHIFT_ENTER_SEQUENCE.
+    // xterm's blessed hook runs before any key processing; returning false
+    // for the one chord we encode hands the bytes to the program via the
+    // same data path a keystroke takes (onData → transport → pty), and
+    // every other key returns true so xterm encodes it exactly as before.
+    term.attachCustomKeyEventHandler((event) => {
+      // The plain chord only: Enter + Shift alone. A Ctrl/Alt/Meta-modified
+      // Enter must not be collapsed into the Shift bytes — that would lie
+      // about the chord. Keyup passes through so xterm's own cursor-style
+      // bookkeeping still runs after the key is released.
+      if (
+        event.type === 'keydown' &&
+        event.key === 'Enter' &&
+        event.shiftKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
+        event.preventDefault()
+        term.input(SHIFT_ENTER_SEQUENCE, false)
+        return false
+      }
+      return true
+    })
 
     await document.fonts?.ready
     this.attachWebGL()
@@ -219,9 +328,12 @@ export class XtermRenderer implements TerminalRenderer {
       }, FORCED_REFRESH_MS)
     }
 
-    // Invalidate cellHeight cache on resize (M1).
+    // Invalidate the cellHeight cache and re-publish the cell metric on
+    // resize (M1 + nocx-yy9g): xterm re-measures its char size on some
+    // resize paths, and a republish is cheap even when nothing changed.
     this.term?.onResize(() => {
       this._cachedCellHeight = null
+      this._fireCellDimsChange()
     })
 
     // Subscribe to theme changes BEFORE construction completes. Re-apply the
@@ -230,25 +342,70 @@ export class XtermRenderer implements TerminalRenderer {
     // be missed). ADR-0013 §8, design spec §5.4.
     this._themeUnsub = subscribeThemeChanges((t: ITheme) => this.applyTheme(t))
 
-    // OSC 636 — command-existence snapshot (command-snapshot.ts) and the
-    // readiness passport (environment-passport.ts). The stores own parse +
-    // policy; the renderer is just the wire, exactly like OSC 7/52/133. One
-    // handler feeds both: the snapshot store sees H/S, the passport tracker
-    // only P payloads. Each renderer owns its own stores, so tab 2 is never
-    // judged against tab 1's command set or expected id — the editor and
-    // frozen headers receive this same instance at the composition point
-    // (terminal-content.ts).
+    // OSC 636 — command-existence snapshot (command-snapshot.ts). The store
+    // owns parse + policy; the renderer is just the wire, exactly like OSC
+    // 7/52/133. Each renderer owns its own store, so tab 2 is never judged
+    // against tab 1's command set — the editor and frozen headers receive
+    // this same instance at the composition point (terminal-content.ts).
     this.snapshotOscDisposable = term.parser.registerOscHandler(636, (data: string) => {
       this.snapshotStore.ingest(data)
-      if (data.startsWith('P;')) {
-        const disposition = this.passportTracker.ingest(data)
-        for (const sub of this.passportSubs) sub(disposition)
+      return false
+    })
+
+    // OSC 1337 — the render fence (ADR-0024 §7 carve-out). The shell writes
+    // NOCX_FENCE;<64hex> after a command's output; the renderer reports
+    // where it landed. Render-only: the fence matches an authenticated
+    // completion, it never creates one. Registered here (like OSC 636) and
+    // lazily in onRenderFence, so a subscriber that mounts first or last
+    // always lands on a live handler.
+    this._ensureFenceOsc()
+    this.applyTheme(getCurrentTheme())
+
+    // Cell-dims change watch (nocx-yy9g): a device-pixel-ratio change
+    // re-snaps xterm's cell width (xterm re-measures its char size on the
+    // same resolution query), so the frozen block layout must re-publish.
+    // Guarded: jsdom's matchMedia stub may lack addEventListener.
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+      if (typeof mql.addEventListener === 'function') {
+        this._dprChangeHandler = () => this._fireCellDimsChange()
+        mql.addEventListener('change', this._dprChangeHandler)
+        this._dprMedia = mql
+      }
+    }
+
+    // Publish the initial metric: fonts have loaded, the atlas is attached,
+    // and the char-size measurement is real now (mount awaited
+    // document.fonts.ready above).
+    this._fireCellDimsChange()
+  }
+
+  /** Register the OSC 1337 fence handler exactly once, when the terminal
+   *  exists. The handler parses the payload and fans the sighting out to
+   *  the subscribers with the absolute buffer line it landed on. */
+  private _ensureFenceOsc(): void {
+    if (this.fenceOscDisposable || !this.term) return
+    this.fenceOscDisposable = this.term.parser.registerOscHandler(1337, (data: string) => {
+      const parsed = parseRenderFence(data)
+      if (parsed && this.term) {
+        const buf = this.term.buffer.active
+        const event: RenderFenceEvent = {
+          hex: parsed.hex,
+          line: buf.baseY + buf.cursorY,
+          buffer: buf.type,
+        }
+        for (const sub of this.fenceSubs) sub(event)
+      }
+      // One handler owns OSC 1337 (ADR-8): the recovery fence is the same
+      // ident with a different payload kind, so it dispatches from here —
+      // a second handler for the same ident would fight for the sequence.
+      const recovery = parseRecoveryFence(data)
+      if (recovery) {
+        for (const sub of this.recoverySubs) sub(recovery.hex)
       }
       return false
     })
-    this.applyTheme(getCurrentTheme())
   }
-
   /**
    * Fit the terminal grid to an explicit viewport from the presentation layer
    * (B.5). Computes cols/rows from real cell metrics and the given CSS-pixel
@@ -288,6 +445,25 @@ export class XtermRenderer implements TerminalRenderer {
       if (rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height }
     }
     return null
+  }
+
+  /** CSS-pixel width of one grid cell — xterm's real cell advance, snapped
+   *  to whole device pixels (nocx-yy9g). 0 when the render service cannot
+   *  measure yet (not mounted, no layout) — the frozen block layout treats
+   *  0 as "keep the previous metric". */
+  get cellWidth(): number {
+    return this._getCellDims()?.width ?? 0
+  }
+
+  /** Subscribe to "the cell dimensions may have changed" — the frozen block
+   *  layout re-publishes its metric on this. Fired at mount end, on grid
+   *  resize and on device-pixel-ratio change. */
+  onCellDimsChange(cb: () => void): void {
+    this._cellDimsSubs.push(cb)
+  }
+
+  private _fireCellDimsChange(): void {
+    for (const cb of this._cellDimsSubs) cb()
   }
 
   private attachWebGL(): void {
@@ -379,31 +555,18 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  onEnvironmentPassport(cb: (disposition: PassportDisposition) => void): void {
-    this.passportSubs.push(cb)
+  onRenderFence(cb: RenderFenceCallback): void {
+    this.fenceSubs.push(cb)
+    this._ensureFenceOsc()
   }
 
-  setExpectedEnvironmentId(id: string | null): void {
-    this.passportTracker.setExpectedEnvironmentId(id)
-  }
-
-  onInBandReady(cb: () => void): () => void {
-    this.inBandReadySubs.push(cb)
-    if (!this.inBandReadyDisposable && this.term) {
-      this.inBandReadyDisposable = this.term.parser.registerOscHandler(1337, (data: string) => {
-        // Strict whitelist: the wrapper emits exactly this payload once raw
-        // -echo is on. Any other 1337 content (or a forged echo of the
-        // literal) is discarded — the ready signal must mean raw mode is
-        // provably active, or the payload would be printed to the user.
-        if (data !== 'NOCX_IB_READY') return false
-        for (const sub of this.inBandReadySubs) sub()
-        return false
-      })
-    }
-    return () => {
-      const i = this.inBandReadySubs.indexOf(cb)
-      if (i >= 0) this.inBandReadySubs.splice(i, 1)
-    }
+  /** Subscribe to recovery-fence sightings: the shell wrote the one-shot
+   *  NOCX_RECOVERY OSC after restoring a visible native prompt (ADR-0024
+   *  decision 8). The consumer matches the hex against the nonce the lost
+   *  fact published and acknowledges the restoration. */
+  onRecoveryFence(cb: (hex: string) => void): void {
+    this.recoverySubs.push(cb)
+    this._ensureFenceOsc()
   }
 
   onBell(cb: BellCallback): void {
@@ -432,7 +595,21 @@ export class XtermRenderer implements TerminalRenderer {
   paste(text: string): void {
     // term.paste() owns bracketed-paste wrapping: when the running program
     // has enabled mode 2004, it wraps the payload in the escape sequences.
-    this.term?.paste(text)
+    const term = this.term
+    if (!term) return
+    // A submitted command must reach the program while the grid is
+    // read-only: disableStdin guards USER input (keystrokes land in the
+    // editor instead), and the editor's submit delivers its document
+    // through this same method. xterm's paste() is dropped when
+    // disableStdin is set, so lift the guard for the synchronous delivery
+    // and restore it (nocx-u7uh.23).
+    const wasDisabled = term.options.disableStdin
+    if (wasDisabled) term.options.disableStdin = false
+    try {
+      term.paste(text)
+    } finally {
+      term.options.disableStdin = wasDisabled
+    }
   }
 
   refreshAtlas(): void {
@@ -480,7 +657,12 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
-    this.passportSubs = []
+    if (this._dprMedia !== null && this._dprChangeHandler !== null) {
+      this._dprMedia.removeEventListener('change', this._dprChangeHandler)
+      this._dprMedia = null
+      this._dprChangeHandler = null
+    }
+    this._cellDimsSubs = []
     this.scrollDisposable?.dispose()
     this.scrollDisposable = undefined
     this.scrollSubs = []
@@ -608,6 +790,10 @@ export class XtermRenderer implements TerminalRenderer {
     return buf.baseY + buf.cursorY
   }
 
+  /** Clear the whole buffer — "making the prompt line the new first
+   *  line" (xterm's own contract). Called at a block freeze so the rows
+   *  the DOM block now owns leave the grid; the grid only ever holds the
+   *  running command's rows, and the DOM owns the scrollback (nocx-m87n). */
   clearViewport(): void {
     this.term?.clear()
   }

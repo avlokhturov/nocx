@@ -34,7 +34,7 @@ import (
 // loop's synchronous path) must not call it; the composition root places this
 // admission inside the task goroutine's acquisition (operation Run), never in
 // a submission's TrySubmit. The two admission classes and the reason they
-// differ are ADR-0024 item 4.
+// differ are ADR-0026 item 4.
 
 type waitingSemaphore struct {
 	name     string

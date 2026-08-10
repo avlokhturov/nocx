@@ -223,12 +223,13 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		}
 	} else {
 		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
-			Cwd:      cfg.Cwd,
-			Cols:     cfg.Cols,
-			Rows:     cfg.Rows,
-			XPixel:   cfg.XPixel,
-			YPixel:   cfg.YPixel,
-			Enhanced: cfg.Enhanced,
+			Cwd:       cfg.Cwd,
+			Cols:      cfg.Cols,
+			Rows:      cfg.Rows,
+			XPixel:    cfg.XPixel,
+			YPixel:    cfg.YPixel,
+			Enhanced:  cfg.Enhanced,
+			SessionID: string(id),
 		})
 		if perr != nil {
 			return nil, fmt.Errorf("open session: %w", perr)
@@ -413,6 +414,9 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	}
 	if cfg.RemoteLauncher != nil {
 		opts = append(opts, ssh.WithRemoteLauncher(cfg.RemoteLauncher))
+	}
+	if cfg.RemoteLifecycle != nil {
+		opts = append(opts, ssh.WithRemoteLifecycle(cfg.RemoteLifecycle))
 	}
 	// The resolved destination mode rides the same path (nocx-mlm7):
 	// without this the profile's effective desiredMode dies here and every

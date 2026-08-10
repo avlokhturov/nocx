@@ -151,6 +151,34 @@ func (f *realPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, err
 	return pty.NewLocal(f.log, cfg)
 }
 
+// capturePTYFactory records the pty.Config each Open passes to NewPTY — the
+// seam that carries the session id to the lifecycle lane registration.
+type capturePTYFactory struct {
+	last pty.Config
+}
+
+func (f *capturePTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	f.last = cfg
+	return pty.NewStub(log.NewSlogAdapter(nil)), nil
+}
+
+func TestOpenCarriesSessionIDToPTYFactory(t *testing.T) {
+	f := &capturePTYFactory{}
+	reg := New(log.NewSlogAdapter(nil), f)
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind: KindLocal, Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if f.last.SessionID != string(sess.ID()) {
+		t.Fatalf("NewPTY received SessionID %q, want the session's own id %q", f.last.SessionID, sess.ID())
+	}
+}
+
 func TestRealRegistry_DoneChannel(t *testing.T) {
 	reg := New(log.NewSlogAdapter(nil), &realPTYFactory{log: log.NewSlogAdapter(nil)})
 

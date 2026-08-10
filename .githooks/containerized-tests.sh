@@ -95,6 +95,12 @@ go_test_containerized() {
         "$GO_TEST_IMAGE" \
         sh -euc '
             chown "$RUN_UID:$RUN_GID" /cache/gomod /cache/gobuild
+            # The live-sshd suite (nocx-u7uh.17) spawns a real OpenSSH server
+            # as the setpriv-dropped test user; a non-root sshd serves only a
+            # user the passwd database knows, so the test uid needs a passwd
+            # entry with a login shell. Idempotent and scoped to this run.
+            groupadd --gid "$RUN_GID" nocx-sshtest 2>/dev/null || true
+            useradd -M -u "$RUN_UID" -g "$RUN_GID" -s /bin/bash -d /tmp/nocx-sshd-home nocx-sshtest 2>/dev/null || true
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \
                 go test -race ./...
         '

@@ -26,7 +26,7 @@ type boundedSubmission struct {
 // The parameter type is the guard: only a NonblockingAdmission can be wired
 // here, so a waiting admission (NewWaitingSemaphore — TryAcquire may block up
 // to its wait timeout) cannot reach a Submission's TrySubmit, which the read
-// loop calls. The miswiring is a compile error (ADR-0024).
+// loop calls. The miswiring is a compile error (ADR-0026).
 func NewBoundedSubmission(a NonblockingAdmission) Submission {
 	return &boundedSubmission{admission: a}
 }

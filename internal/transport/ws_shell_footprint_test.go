@@ -13,6 +13,53 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 )
 
+// launcherTestResolver is a stub ssh.ConfigResolver for the footprint tests
+// (same shape as the deleted P7 planner's): it resolves the destination
+// positional against a static map, and can be told to fail (a failed or
+// unavailable oracle) or to answer with a RemoteCommand. The status handler
+// runs the same ssh -G oracle path to decide which facts a saved connection
+// can remove, so the stub's ResolveConfig answers what the oracle would.
+type launcherTestResolver struct {
+	entries  map[string]ssh.HostConfig
+	lastArgv []string
+	fail     bool
+}
+
+func newLauncherTestResolver() *launcherTestResolver {
+	return &launcherTestResolver{entries: make(map[string]ssh.HostConfig)}
+}
+
+func (r *launcherTestResolver) add(host string, cfg ssh.HostConfig) { r.entries[host] = cfg }
+
+func (r *launcherTestResolver) ResolveHost(_ context.Context, host string) (string, error) {
+	if e, ok := r.entries[host]; ok && e.HostName != "" {
+		return e.HostName, nil
+	}
+	return host, nil
+}
+
+func (r *launcherTestResolver) ResolveConfig(_ context.Context, host string) (*ssh.HostConfig, error) {
+	if r.fail {
+		return nil, ssh.ErrSSHConfigFailed
+	}
+	if e, ok := r.entries[host]; ok {
+		cfg := e
+		return &cfg, nil
+	}
+	return &ssh.HostConfig{HostName: host, User: "testuser", Port: 22}, nil
+}
+
+func (r *launcherTestResolver) ResolveArgv(_ context.Context, argv []string) (*ssh.HostConfig, error) {
+	r.lastArgv = append([]string(nil), argv...)
+	if r.fail {
+		return nil, ssh.ErrSSHConfigFailed
+	}
+	if len(argv) == 0 {
+		return nil, ssh.ErrSSHConfigFailed
+	}
+	return r.ResolveConfig(context.Background(), argv[len(argv)-1])
+}
+
 // footprintTestProfileRepo is the smallest profile.ProfileRepository: the
 // status handler reads profiles only to resolve which saved connections can
 // remove a destination.

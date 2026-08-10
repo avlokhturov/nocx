@@ -94,6 +94,17 @@ fi
 # nocx installs last. Re-sourcing after an installer-era gate in the
 # user's file is idempotent (add-zsh-hook dedupes; state is unset first).
 unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session
+# The per-epoch capability, substituted into this .zshrc's TEXT by the
+# launcher (@CAP@) — never exported, never in the environment. The hook
+# drops any export attribute again at source time (a user rc under
+# 'set -a' would auto-export it); zsh has no 'export -n' — 'typeset +x'
+# removes the attribute, and 'typeset -n' is a nameref and must never be
+# used here. An empty value means no authenticated channel and a
+# conventional session.
+__nocx_cap='@CAP@'
+typeset +x __nocx_cap 2>/dev/null
+__nocx_lc_recovery='@RECOVERY@'
+typeset +x __nocx_lc_recovery 2>/dev/null
 @NOCX_ZSH@
 `
 
@@ -140,12 +151,20 @@ exec zsh -l
 // The umask is captured before the bootstrap and restored before every
 // exec: the session must inherit the user's umask, not the bootstrap's.
 // zshRcfile renders the generated .zshrc from its template: @ENV@ is the
-// session environment block and @NOCX_ZSH@ the nocx.zsh body (embedded for
-// the argv launchers, a source of the installed generation file for the
-// launch carrier).
-func zshRcfile(envBlock, scriptSource string) string {
+// session environment block, @CAP@ the per-epoch capability and @RECOVERY@
+// the one-shot recovery fence (both substituted into the script text, never
+// the environment) and @NOCX_ZSH@ the nocx.zsh body (embedded for the argv
+// launchers, a source of the installed generation file for the carrier).
+func zshRcfile(envBlock, scriptSource, capability, recovery string) string {
 	rc := strings.ReplaceAll(zshRcfileTemplate, "@ENV@", envBlock)
-	return strings.ReplaceAll(rc, "@NOCX_ZSH@", scriptSource)
+	rc = strings.ReplaceAll(rc, "@CAP@", capability)
+	rc = strings.ReplaceAll(rc, "@RECOVERY@", recovery)
+	rc = strings.ReplaceAll(rc, "@NOCX_ZSH@", scriptSource)
+	// Comment-stripped like the generation scripts: the generated .zshrc
+	// ships inside the bootstrap payload, and the far shell never reads
+	// the template's prose (nocx-z9s9.17). Stripping the rendered text
+	// also covers the substituted bodies.
+	return stripShellComments(rc)
 }
 
 // zshArgFor wraps a rendered .zshrc in the zsh tier's pinned transport: the
@@ -166,11 +185,16 @@ func (remoteLauncher) zshArg(opts LaunchOptions) (string, bool) {
 		// ownership protocol — rather than emit one that half-works.
 		return "", false
 	}
-	return zshArgFor(zshRcfile(launcherEnvBlock(opts), zshScript)), true
+	// The .zshrc SOURCES the installed generation file rather than
+	// embedding the script — same reasoning and same failure semantics as
+	// the bash tier (see launcher_bash.go bashArg): the publish prelude has
+	// already published the bundle, and a failed publish leaves a
+	// conventional terminal, never a partial integration.
+	return zshArgFor(zshRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.zsh"), opts.Capability, opts.Recovery)), true
 }
 
-// zshCommand builds the zsh remote command: the pinned single-tier form,
-// sent when the far shell is already known to be zsh. The outer form is
+// zshCommand builds the zsh remote command, sent when the far shell is
+// already known to be zsh. The outer form is
 // `/usr/bin/env -u BASH_ENV /bin/sh -c '<script>'`: -u BASH_ENV so a
 // bash-as-/bin/sh host (macOS) cannot execute BASH_ENV code in the outer
 // sh, the same spec §4.3 protection the bash launcher gets. `exec zsh -l`

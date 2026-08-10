@@ -412,7 +412,7 @@ func portsCallParams(t *testing.T, conn *websocket.Conn, method string, params m
 
 func waitPortsFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(wantWithin)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

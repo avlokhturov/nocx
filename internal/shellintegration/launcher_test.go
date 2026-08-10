@@ -291,11 +291,11 @@ func TestPrintfBEscapeRoundTripsThroughBashBuiltin(t *testing.T) {
 // TestShellQuoteEscapesEmbeddedQuotes: the escaper is real, not
 // concatenation that happens to work on today's payloads.
 func TestShellQuoteEscapesEmbeddedQuotes(t *testing.T) {
-	if got := shellQuote("a'b"); got != `'a'\''b'` {
-		t.Errorf("shellQuote(a'b) = %q", got)
+	if got := ShellQuote("a'b"); got != `'a'\''b'` {
+		t.Errorf("ShellQuote(a'b) = %q", got)
 	}
-	if got := shellQuote("plain"); got != "'plain'" {
-		t.Errorf("shellQuote(plain) = %q", got)
+	if got := ShellQuote("plain"); got != "'plain'" {
+		t.Errorf("ShellQuote(plain) = %q", got)
 	}
 }
 
@@ -333,8 +333,8 @@ func TestBashLauncher_EmitsMarkersAndRunsUserRc(t *testing.T) {
 	if !strings.Contains(out, "ZERO=bash") {
 		t.Errorf("$0 = %q, want bash (non-login)", out)
 	}
-	if strings.Contains(out, "FIXTURE-PROMPT") {
-		t.Errorf("marker-only mode left the fixture prompt visible: %q", out)
+	if !strings.Contains(out, "FIXTURE-PROMPT") {
+		t.Errorf("marker-only mode suppressed the fixture prompt without a live channel (ADR-0024 decision 9): %q", out)
 	}
 }
 
@@ -651,7 +651,7 @@ func TestZshLauncher_TransientDirRemovedDespiteAForeignFile(t *testing.T) {
 	if err := os.MkdirAll(bootstrap, 0o700); err != nil {
 		t.Fatalf("mkdir bootstrap: %v", err)
 	}
-	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript)
+	rc := zshRcfile(launcherEnvBlock(LaunchOptions{Enhanced: true, SessionID: "s1"}), zshScript, "", "")
 	if err := os.WriteFile(filepath.Join(bootstrap, ".zshrc"), []byte(rc), 0o600); err != nil {
 		t.Fatalf("write bootstrap rc: %v", err)
 	}

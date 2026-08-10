@@ -93,12 +93,55 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
-	// EnvironmentID is the environment-transition id minted for this
-	// attempt (2026-08-05 delivery-modes design §5.3). Exported as
-	// NOCX_ENVIRONMENT_ID; the far shell emits the readiness passport and
-	// tags its markers only when it is set and well-formed, so an empty
-	// value is the fail-open default (no passport, no tagged marker).
-	EnvironmentID string
+	// The authenticated lifecycle channel (ADR-0024). Capability is the
+	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
+	// exported to the environment. Lane, Domain and Epoch are names, not
+	// secrets, and travel in the environment like the other NOCX_* fields.
+	// The transport is a loopback TCP port (LifecyclePort, the remote
+	// path); zero means that side is absent. Empty Capability means no
+	// channel: the session is conventional. Mirrors
+	// shellintegration.LaunchOptions field for field; the composition
+	// root maps the two at wiring time.
+	Capability string
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
+	// substituted into the rcfile text like the capability.
+	Recovery      string
+	Lane          string
+	Domain        string
+	Epoch         uint64
+	LifecyclePort int
+}
+
+// RemoteLifecycleLaunch is what the launcher embeds: the addressing tuple
+// plus the allocated loopback port and the per-epoch capability. Only the
+// capability is never exported to the environment; the port travels as the
+// non-secret NOCX_LIFECYCLE_PORT name, exactly as the local path's launch
+// block exports its non-secret names.
+type RemoteLifecycleLaunch struct {
+	Lane       string
+	Domain     string
+	Epoch      uint64
+	Port       int
+	Capability string // 64 lowercase hex chars
+	// Recovery is the one-shot recovery fence (ADR-0024 decision 8),
+	// substituted into the rcfile text like the capability, never exported.
+	Recovery string // 64 lowercase hex chars
+}
+
+// RemoteLifecycle establishes the authenticated lifecycle channel for a
+// remote session (ADR-0024 decision 2 "Over SSH"): it acquires a tunnel
+// lease on the pooled connection, asks the remote sshd to listen on
+// 127.0.0.1, and mints the domain. The composition root implements it with
+// the lifecycle kernel; nil on the ConnectConfig means no channel (the
+// session is conventional).
+type RemoteLifecycle interface {
+	// Establish acquires the lease and mints the domain. Refusal
+	// (AllowTcpForwarding off, bind outside PermitListen) is an error,
+	// detectable synchronously and NOT distinguishable — the caller opens
+	// a conventional terminal and promises no diagnostic naming a policy.
+	// The returned closer releases the lease and ends the domain when the
+	// session ends.
+	Establish(ctx context.Context, host string, opts ...ConnectOption) (RemoteLifecycleLaunch, io.Closer, error)
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's Start()
@@ -137,6 +180,16 @@ type ConnectConfig struct {
 	// channel. The RemoteInstaller is consulted before it in script mode so
 	// a saved connection publishes the bundle over SFTP.
 	RemoteLauncher RemoteLauncher
+
+	// RemoteLifecycle establishes the authenticated lifecycle channel for
+	// the session (ADR-0024 decision 2 "Over SSH"), when one is wired.
+	// openShell consults it before building the start command: the
+	// allocated loopback port and the per-epoch capability must be
+	// substituted into the launch text. Refusal — the remote sshd will not
+	// forward — is detectable synchronously and NOT distinguishable; the
+	// session opens as a conventional terminal with a visible native
+	// prompt. Nil means no channel.
+	RemoteLifecycle RemoteLifecycle
 
 	// DesiredMode is the resolved destination mode (raw|script|relay,
 	// nocx-mlm7) stamped by the profile resolver. It is the open-time gate:
@@ -325,6 +378,17 @@ func WithKeepalive(interval time.Duration, countMax int) ConnectOption {
 // Zero means the default of 30 seconds.
 func WithTimeout(timeout time.Duration) ConnectOption {
 	return func(c *ConnectConfig) { c.ReadyTimeout = timeout }
+}
+
+// WithRemoteLifecycle attaches the lifecycle-channel establisher for the
+// session (ADR-0024 decision 2 "Over SSH"). openShell consults it before
+// building the launch command and substitutes the allocated loopback port
+// and per-epoch capability into the launch text; refusal (the remote sshd
+// will not forward) is detectable synchronously and leaves a conventional
+// terminal. When nil, no channel is established and the session is
+// conventional.
+func WithRemoteLifecycle(l RemoteLifecycle) ConnectOption {
+	return func(c *ConnectConfig) { c.RemoteLifecycle = l }
 }
 
 // WithAgentForward enables SSH agent forwarding on the session. It is only

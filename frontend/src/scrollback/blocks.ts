@@ -13,6 +13,7 @@ import { createSecretChipUnresolved } from '../ui/secret-chip'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
+import type { ExecutionAttempt } from '../lifecycle/state'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 function clipboardFallback(text: string): void {
@@ -34,6 +35,39 @@ function clipboardFallback(text: string): void {
   }
 }
 
+// ── Render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8) ──
+// The lifecycle channel and the pty are independent streams, so an
+// authenticated completion can reach nocx before the command's last output
+// bytes do. The shell writes a 32-random-byte nonce (64 hex chars) to the
+// pty AFTER the output and carries the same nonce in the `complete` event;
+// the block's VISUAL freeze waits for both, while the LOGICAL completion
+// (exit status, history) lands on the event alone.
+
+/** How long a completed attempt's VISUAL boundary waits for its fence bytes
+ *  before the visual freeze settles at the current output end. The LOGICAL
+ *  freeze (status, exit code) lands on the event alone; the fence is printed
+ *  by the shell immediately after the output on the same pty channel, so it
+ *  lands within the same write burst — this window is generous for a slow
+ *  link and only bounds how long a finished command keeps its running look
+ *  when the fence never arrives. Named: the deferral is a policy, not a
+ *  magic number, and the no-fence path is a degrade, never a truncation. */
+export const FENCE_DEFER_MS = 500
+
+/** Upper bound on remembered fence sightings (hex → line). Sightings are
+ *  kept only so a completion that lands after its fence can match it; a
+ *  crypto-random nonce makes collisions impossible, so a small ring is
+ *  more than enough and bounds the memory of a hostile stream. */
+const MAX_FENCE_SIGHTINGS = 8
+
+/** Deferral-timer handle — named so the pending-fence contract never
+ *  couples to setTimeout's implementation type. */
+type FenceTimer = ReturnType<typeof setTimeout>
+
+/** A block status that has left `running` — the terminal set the DOM
+ *  freeze and the block record share. The LOGICAL freeze produces it and
+ *  hands it to the VISUAL freeze, so serialization is typed to follow a
+ *  terminalized record. */
+export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
 // ── Block model ────────────────────────────────────────────────────────────
 
 export interface BlockRecord {
@@ -45,10 +79,30 @@ export interface BlockRecord {
   exitCode: number | null
   /** Presentation state. 'entered' = frozen on environment entry (N6):
    *  neither success nor failure, no exit code — the block the ssh command
-   *  froze into when the remote session began. */
-  status: 'running' | 'success' | 'failure' | 'entered'
-  /** IMarker line for C boundary. */
+   *  froze into when the remote session began. 'unknown' = the bound
+   *  attempt was abandoned (ADR-0024 §5): frozen, never successful, no
+   *  reported exit code. */
+  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown'
+  /** The authenticated attempt this block is bound to (ADR-0024 §7
+   *  projection): set when the running block binds to the published
+   *  attempt, kept when the block freezes. Absent only for a block that
+   *  never bound (cleared scrollback, never seen running). */
+  attemptId?: string
+  /** IMarker line for C boundary — the absolute buffer line where the
+   *  block was CREATED: the prompt line at app-owned submit, or the cursor
+   *  line when a shell-originated attempt's running fact landed. The
+   *  published running fact binds to the block by this line's lifetime,
+   *  never by its value (ADR-0024 §5 attachment semantics). */
   startLine: number
+  /** The absolute buffer line where the block's OUTPUT begins — the first
+   *  row serialized at freeze. Differs from `startLine` exactly when the
+   *  creation line carries the shell's echo of the command: the app-owned
+   *  submit opens the block BEFORE the bytes, and the echo lands on the
+   *  creation line, so the output range starts one row later (nocx-4yhi).
+   *  The range and the creation time are two different things, and this
+   *  is the record of that; a shell-originated block opens after its echo
+   *  and defaults to `startLine`. */
+  outputStart: number
   /** IMarker line for D boundary (approx). */
   endLine: number
   /** Whether OSC 133 C was received for this command. False when the
@@ -148,7 +202,7 @@ function createHeader(
   location: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'running' | 'success' | 'failure' | 'entered',
+  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown',
   store: CommandSnapshotStore,
 ): HTMLElement {
   const header = div('cmd-header')
@@ -472,7 +526,7 @@ export function createCommandBlock(
   outputHtml: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'success' | 'failure' | 'entered',
+  status: 'success' | 'failure' | 'entered' | 'unknown',
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
@@ -598,7 +652,7 @@ export function freezeBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
-  status: 'success' | 'failure' | 'entered',
+  status: 'success' | 'failure' | 'entered' | 'unknown',
 ): HTMLElement {
   const newEl = createCommandBlock(
     id,
@@ -673,6 +727,11 @@ export interface BlockManagerOpts {
   /** The tab's command-existence snapshot store (OSC 636), passed through to
    *  every frozen header this manager creates. */
   snapshotStore: CommandSnapshotStore
+  /** Fired when a DEFERRED freeze lands — the fence arrived, or the
+   *  FENCE_DEFER_MS window elapsed and the block settled at the current
+   *  output end. The freeze originated inside the manager (sightFence /
+   *  the deferral timer), so the caller learns to settle the live region. */
+  onDeferredFreeze?: () => void
 }
 
 export class BlockManager {
@@ -686,12 +745,53 @@ export class BlockManager {
   /** Currently selected block id, or null if none selected (P1-8). */
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
+  private _onDeferredFreeze?: () => void
+  /** The attempt id the running block is bound to (ADR-0024 §7 projection).
+   *  Set when the published running fact binds the block; cleared when the
+   *  block freezes or the scrollback is cleared. */
+  private _attemptId: string | null = null
+  /** Recent fence sightings keyed by hex (the buffer line they landed on),
+   *  bounded by MAX_FENCE_SIGHTINGS. A sighting already present is a replay
+   *  and is ignored; an entry is consumed when a completion's fence matches.
+   *  This is the render-only half of the rendezvous — a fence with no
+   *  authenticated event behind it changes nothing (ADR-0024 §1). */
+  private _fences = new Map<string, number>()
+  /** A completion whose LOGICAL freeze has landed but whose output boundary
+   *  (the VISUAL freeze) is still waiting on the render fence: the rows are
+   *  serialized when the fence bytes are sighted (hex set), or when the
+   *  FENCE_DEFER_MS window settles at the current output end. A completion
+   *  that carried no fence at all (hex null — unreachable from the kernel,
+   *  which requires the nonce on completed attempts) still defers by the
+   *  window rather than truncating at the event-time end: the boundary is
+   *  never cut on the event alone. Only the settle path fires
+   *  onDeferredFreeze, and only while no newer command owns the running
+   *  slot. */
+  private _pendingFence: {
+    hex: string | null
+    /** The block whose boundary is pending — already logically frozen,
+     *  still in `_blocks`, never the running block. */
+    rec: BlockRecord
+    /** The output end at completion time — the fallback boundary when a
+     *  newer command owns the cursor and `getEndLine` would serialize
+     *  the newer command's output into this block. */
+    endLine: number
+    /** The terminal status the logical freeze already applied — the
+     *  visual freeze hands it to the DOM exactly as the event decided. */
+    status: FrozenStatus
+    getLine: GetLineFn
+    getEndLine: () => number
+    timer: FenceTimer
+  } | null = null
+  /** The fence hex consumed by the last freeze — a replay of it (one seen
+   *  for an already-frozen block) does nothing. */
+  private _consumedFence: string | null = null
 
   constructor(scrollbackInner: HTMLElement, xtermContainer: HTMLElement, opts: BlockManagerOpts) {
     this._scrollbackInner = scrollbackInner
     this._xtermContainer = xtermContainer
     this._now = opts.now ?? (() => performance.now())
     this._snapshotStore = opts.snapshotStore
+    this._onDeferredFreeze = opts.onDeferredFreeze
   }
 
   get blocks(): readonly BlockRecord[] {
@@ -755,6 +855,20 @@ export class BlockManager {
       this._selectedBlockId = null
     }
   }
+  /**
+   * Bind the running block to an authenticated attempt (ADR-0024 §7
+   *  projection): the block opened at app submit binds when the published
+   *  running fact arrives, and the freeze/abandon paths require the match.
+   */
+  bindAttempt(attemptId: string): void {
+    this._attemptId = attemptId
+    if (this._runningBlock) this._runningBlock.attemptId = attemptId
+  }
+
+  /** The block bound to an attempt id — running or frozen. */
+  blockForAttempt(attemptId: string): BlockRecord | null {
+    return this._blocks.find((b) => b.attemptId === attemptId) ?? null
+  }
 
   /**
    * Start a new running block. Called on OSC 133 C.
@@ -766,7 +880,12 @@ export class BlockManager {
     this._location = location
   }
 
-  startBlock(command: string, cwd: string, startLine: number): BlockRecord {
+  startBlock(
+    command: string,
+    cwd: string,
+    startLine: number,
+    outputStart = startLine,
+  ): BlockRecord {
     if (this._runningBlock) {
       this._finalizeRunningUnsafe()
     }
@@ -796,6 +915,13 @@ export class BlockManager {
       exitCode: null,
       status: 'running',
       startLine,
+      // The output range and the creation line are two different things
+      // (nocx-4yhi): the app-owned submit opens the block before the bytes
+      // and passes outputStart = startLine + 1, because the shell's echo
+      // of the command lands on the creation line and the block's body
+      // must not repeat the command its header already shows. A
+      // shell-originated block opens after its echo and keeps the default.
+      outputStart,
       endLine: startLine,
       cReceived: false,
       el,
@@ -831,13 +957,12 @@ export class BlockManager {
     clearInterval(this._ticker)
     this._ticker = null
   }
-
-  /**
-   * Freeze the running block on OSC 133 D, painted success/failure from the
-   * real exit code. Signature unchanged: the scrollback controller drives it.
-   */
   freezeBlock(getLine: GetLineFn, endLine: number, exitCode: number | null): BlockRecord | null {
-    return this._freeze(getLine, endLine, exitCode, exitCode === 0 ? 'success' : 'failure')
+    const rec = this._runningBlock
+    if (!rec) return null
+    const status = this._logicalFreeze(rec, exitCode, exitCode === 0 ? 'success' : 'failure')
+    this._freezeVisual(rec, getLine, endLine, status)
+    return rec
   }
 
   /**
@@ -848,24 +973,46 @@ export class BlockManager {
    * via the ledger's completeTransition — this only paints the block.
    */
   freezeEntered(getLine: GetLineFn, endLine: number): BlockRecord | null {
-    return this._freeze(getLine, endLine, null, 'entered')
-  }
-
-  private _freeze(
-    getLine: GetLineFn,
-    endLine: number,
-    exitCode: number | null,
-    status: 'success' | 'failure' | 'entered',
-  ): BlockRecord | null {
     const rec = this._runningBlock
     if (!rec) return null
+    const status = this._logicalFreeze(rec, null, 'entered')
+    this._freezeVisual(rec, getLine, endLine, status)
+    return rec
+  }
 
-    rec.endLine = endLine
-    const durationMs = this._cmdStartTime !== null ? this._now() - this._cmdStartTime : null
+  /** The LOGICAL freeze (u7uh.8): flip the block's record to its terminal
+   *  state — status, exit code and duration land on the authenticated event
+   *  alone; the running slot is freed and the ticker stops. The DOM is
+   *  untouched: which rows belong to the block is the VISUAL freeze's
+   *  question, and it waits for the render fence or the deferral window. */
+  private _logicalFreeze(
+    rec: BlockRecord,
+    exitCode: number | null,
+    status: FrozenStatus,
+  ): FrozenStatus {
+    this._stopTicker()
+    rec.durationMs = this._cmdStartTime !== null ? this._now() - this._cmdStartTime : null
     this._cmdStartTime = null
+    rec.exitCode = exitCode
+    rec.status = status
+    this._runningBlock = null
+    return status
+  }
 
+  /** The VISUAL freeze: serialize the block's output region up to a boundary
+   *  line and replace its running element with the frozen one. The boundary
+   *  is the render fence's line when it was sighted, or the current output
+   *  end when the deferral window settles; until this runs the block's rows
+   *  are not yet fixed. */
+  private _freezeVisual(
+    rec: BlockRecord,
+    getLine: GetLineFn,
+    endLine: number,
+    status: FrozenStatus,
+  ): void {
+    rec.endLine = endLine
     const snapshot = fromITheme(getCurrentTheme())
-    const outputHtml = serializeRange(snapshot, getLine, rec.startLine, endLine)
+    const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine)
 
     const newEl = freezeBlock(
       rec.el,
@@ -874,8 +1021,8 @@ export class BlockManager {
       rec.cwd,
       this._location,
       outputHtml,
-      durationMs ?? 0,
-      exitCode,
+      rec.durationMs ?? 0,
+      rec.exitCode,
       this._getContainer,
       (bid, sel) => {
         if (sel) this._onBlockSelected(bid)
@@ -885,18 +1032,183 @@ export class BlockManager {
       status,
     )
 
-    this._stopTicker()
     rec.el = newEl
-    rec.durationMs = durationMs
-    rec.exitCode = exitCode
-    rec.status = status
-    this._runningBlock = null
+  }
 
+  /** Freeze the block bound to the attempt, from the attempt's authenticated
+   *  completion (ADR-0024 §5, §7). Guards itself: only a COMPLETED attempt
+   *  may freeze a block as success/failure, and only the block bound to that
+   *  attempt — the kernel derivation freezeBlock() is the authority, and
+   *  this keeps the DOM operation honest if a caller bypasses it.
+   *
+   *  Render fence (u7uh.8): the LOGICAL freeze — status, exit code,
+   *  duration, freeing the running slot — lands on the authenticated event
+   *  ALONE; the ledger and history have already landed (the projection
+   *  order guarantees it). Only the VISUAL freeze — which rows belong to
+   *  the block — waits for the fence bytes: when the fence was already
+   *  sighted, this serializes at its line and returns the record; otherwise
+   *  it defers (returns null) and `sightFence` resolves the boundary, or
+   *  the FENCE_DEFER_MS window settles it at the current output end. The
+   *  caller keeps the live region up while the boundary is pending, so the
+   *  in-flight tail renders live instead of vanishing; `getEndLine`
+   *  supplies the fresh output end for the no-fence settle. */
+  freezeFromAttempt(
+    attempt: ExecutionAttempt,
+    getLine: GetLineFn,
+    endLine: number,
+    getEndLine: () => number,
+  ): BlockRecord | null {
+    if (attempt.state !== 'completed') return null
+    if (this._attemptId !== attempt.id) return null
+    const code = attempt.exitCode ?? null
+    const status = code === 0 ? 'success' : 'failure'
+    const fence = attempt.fence
+    const sighted = fence !== undefined ? this._fences.get(fence) : undefined
+    const rec = this._runningBlock
+    if (!rec) return null
+
+    if (this._pendingFence !== null) {
+      // Another completion wants the slot while one is pending. The pty
+      // order means the older fence should have landed already; if it has
+      // not, settle the older block at its completion-time end (never at
+      // the newer command's cursor) rather than stranding it, then defer
+      // this completion the same way. The newer block is still running
+      // here, so the settle does not touch the live region.
+      this._settlePendingFence()
+    }
+
+    // LOGICAL freeze — the authenticated event alone flips the block's
+    // status, exit code and duration and frees the running slot.
+    const terminal = this._logicalFreeze(rec, code, status)
+    this._attemptId = null
+
+    if (fence !== undefined && sighted !== undefined) {
+      // Rendezvous complete: the fence bytes landed before the completion.
+      // Its line IS the output end — serialize now, boundary included.
+      this._fences.delete(fence)
+      this._consumedFence = fence
+      this._freezeVisual(rec, getLine, sighted, terminal)
+      return rec
+    }
+
+    // The fence bytes are still in flight — or the completion carried no
+    // fence at all (hex null; unreachable from the kernel, which requires
+    // the nonce on completed attempts). Either way the visual freeze
+    // defers: a sighting resolves a non-null fence, and the FENCE_DEFER_MS
+    // window settles both at the current output end. The boundary is never
+    // cut on the event alone. Null tells the caller the live region stays
+    // up until the boundary settles.
+    this._pendingFence = {
+      hex: fence ?? null,
+      rec,
+      endLine,
+      status: terminal,
+      getLine,
+      getEndLine,
+      timer: setTimeout(() => this._settlePendingFence(), FENCE_DEFER_MS),
+    }
+    return null
+  }
+
+  /** Report where a fence landed. A fence with no authenticated event behind
+   *  it changes nothing at all (ADR-0024 §1): the sighting is remembered for
+   *  a completion that arrives later, and consumed — never applied — when
+   *  it matches. A replay (the same hex twice, or one for an already-frozen
+   *  block) does nothing. */
+  sightFence(hex: string, line: number): void {
+    if (this._consumedFence === hex) return // already-frozen block's fence
+    if (this._fences.has(hex)) return // same value seen twice — a replay
+
+    const pending = this._pendingFence
+    if (pending !== null && pending.hex === hex) {
+      // The deferred boundary's fence landed: serialize the block at the
+      // fence's line. The block's STATUS flipped on the completion event —
+      // this settles only which rows belong to it. A fence for a block that
+      // has since been cleared changes nothing.
+      this._pendingFence = null
+      clearTimeout(pending.timer)
+      if (!this._blocks.includes(pending.rec)) return
+      this._freezeVisual(pending.rec, pending.getLine, line, pending.status)
+      this._consumedFence = hex
+      // Settle the live region only if no newer command owns the running
+      // slot — a new command's live region must stay up.
+      if (this._runningBlock === null) this._onDeferredFreeze?.()
+      return
+    }
+
+    this._fences.set(hex, line)
+    if (this._fences.size > MAX_FENCE_SIGHTINGS) {
+      const oldest = this._fences.keys().next().value
+      if (oldest !== undefined) this._fences.delete(oldest)
+    }
+  }
+
+  /** The FENCE_DEFER_MS window elapsed with no fence: settle the visual
+   *  freeze. While no newer command owns the running slot, the boundary is
+   *  the CURRENT output end — the tail that was in flight at the completion
+   *  has had the window to arrive, so this defers the boundary rather than
+   *  truncating it. If a newer command owns the cursor, the current end
+   *  would serialize the newer command's output into this block, so the
+   *  boundary falls back to the completion-time end. The cost of a fence
+   *  that never arrived is that the boundary is approximate. */
+  private _settlePendingFence(): void {
+    const pending = this._pendingFence
+    if (pending === null) return
+    this._pendingFence = null
+    if (!this._blocks.includes(pending.rec)) return // block moved on (cleared)
+    const boundary = this._runningBlock === null ? pending.getEndLine() : pending.endLine
+    this._freezeVisual(pending.rec, pending.getLine, boundary, pending.status)
+    this._consumedFence = pending.hex
+    if (this._runningBlock === null) this._onDeferredFreeze?.()
+  }
+
+  private _cancelPendingFence(): void {
+    if (this._pendingFence === null) return
+    clearTimeout(this._pendingFence.timer)
+    this._pendingFence = null
+  }
+
+  /** Freeze the running block bound to the attempt as abandoned: the
+   *  attempt went `unknown` (loss, closure, native escape) — frozen, never
+   *  successful, no reported exit code (ADR-0024 §5). Abandonment carries
+   *  no fence and waits for none. */
+  abandonAttempt(
+    attempt: ExecutionAttempt,
+    getLine: GetLineFn,
+    endLine: number,
+  ): BlockRecord | null {
+    if (attempt.state !== 'unknown') return null
+    if (this._attemptId !== attempt.id) return null
+    const rec = this._runningBlock
+    if (!rec) return null
+    // No pending-boundary cancel here: a pending fence belongs to an older,
+    // already logically frozen block (a lost fence), never to the running
+    // block being abandoned — its timer settles it independently.
+    const status = this._logicalFreeze(rec, null, 'unknown')
+    this._freezeVisual(rec, getLine, endLine, status)
+    this._attemptId = null
+    return rec
+  }
+
+  /** Freeze a running block that never bound to an attempt at all. The
+   *  block opened at the app-owned submit and the domain it was submitted
+   *  under has ended, so no start and no completion can ever name it: `exit`
+   *  destroys the shell that would have sent both, and against a real sshd
+   *  the start frame does not get out before the transport dies (nocx-mlyu).
+   *  A BOUND block is not this method's business — its attempt goes unknown
+   *  and abandonAttempt freezes it, with the attempt as the authority. */
+  abandonUnbound(getLine: GetLineFn, endLine: number): BlockRecord | null {
+    if (this._attemptId !== null) return null
+    const rec = this._runningBlock
+    if (!rec) return null
+    const status = this._logicalFreeze(rec, null, 'unknown')
+    this._freezeVisual(rec, getLine, endLine, status)
     return rec
   }
 
   clearAll(): void {
     this._stopTicker()
+    this._cancelPendingFence()
     for (const b of this._blocks) {
       b.el.remove()
     }
@@ -904,15 +1216,22 @@ export class BlockManager {
     this._runningBlock = null
     this._cmdStartTime = null
     this._selectedBlockId = null
+    this._attemptId = null
+    this._fences.clear()
+    this._consumedFence = null
   }
 
   private _finalizeRunningUnsafe(): void {
+    // Note: a pending render-fence boundary belongs to an ALREADY logically
+    // frozen block, never to the running block this finalizes — its timer
+    // settles it independently, guarded by the running slot.
     this._stopTicker()
     if (!this._runningBlock) return
     this._runningBlock.status = 'failure'
     this._runningBlock.exitCode = null
     this._runningBlock = null
     this._cmdStartTime = null
+    this._attemptId = null
   }
 
   dispose(): void {

@@ -6,12 +6,13 @@
 //
 // See AD-7: sessionId is server-authoritative, cwd is set once at session
 // open. The fake must carry both.
-
-import { vi } from 'vitest'
+import { vi, type Mock } from 'vitest'
 import type {
   CommandMarkerCallback,
   CwdCallback,
   DataCallback,
+  RenderFenceCallback,
+  RenderFenceEvent,
   ResizeCallback,
   TitleCallback,
   TerminalRenderer,
@@ -22,7 +23,6 @@ import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { TabManager } from '../tabs'
 import type { DesiredMode } from '../capability'
-import type { PassportDisposition } from '../environment-passport'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -35,8 +35,10 @@ export const FIXTURE_CWD = '~/Documents/repos/nocx'
 export const FIXTURE_DIRECTORY_LABEL = 'repos/nocx'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Renderer mock — factory called once per tab by createRenderer().
-// ═══════════════════════════════════════════════════════════════════════════
+/** The renderer mock's live-content-height measurer: a spy the tests
+ *  program to stand in for the real renderer measuring the grid (the
+ *  TerminalRenderer interface types it as a plain function). */
+export type LiveContentHeightSpy = Mock<() => number>
 export interface RendererMock extends TerminalRenderer {
   /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
   snapshotStore: CommandSnapshotStore
@@ -46,7 +48,6 @@ export interface RendererMock extends TerminalRenderer {
     onTitle?: TitleCallback
     onCwd?: CwdCallback
     onCommandMarker?: CommandMarkerCallback
-    onInBandReady?: () => void
     onBell?: () => void
     onBufferChange?: (type: 'normal' | 'alternate') => void
     onSelectionChange?: (text: string) => void
@@ -63,8 +64,10 @@ export interface RendererMock extends TerminalRenderer {
   _fireSelectionChange(text: string): void
   /** Fire an OSC 52 write event — used by clipboard policy tests. */
   _fireClipboardWrite(text: string): void
-  /** Fire an OSC 636 P readiness-passport disposition (P2). */
-  _firePassport(d: PassportDisposition): void
+  /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
+  _fireRecoveryFence(hex: string): void
+  /** Fire a render-fence sighting (ADR-0024 §7 carve-out, u7uh.8). */
+  _fireRenderFence(ev: RenderFenceEvent): void
 }
 
 /**
@@ -74,7 +77,8 @@ export interface RendererMock extends TerminalRenderer {
  */
 export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
-  const passportSubs: Array<(d: PassportDisposition) => void> = []
+  const recoverySubs: Array<(hex: string) => void> = []
+  const fenceSubs: Array<(ev: RenderFenceEvent) => void> = []
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -95,21 +99,17 @@ export function createRendererMock(): RendererMock {
     onCommandMarker: vi.fn((cb: CommandMarkerCallback) => {
       cbs.onCommandMarker = cb
     }),
-    onEnvironmentPassport: vi.fn((cb: (d: PassportDisposition) => void) => {
-      passportSubs.push(cb)
-    }),
-    setExpectedEnvironmentId: vi.fn(),
-    onInBandReady: vi.fn((cb: () => void) => {
-      cbs.onInBandReady = cb
-      return () => {
-        cbs.onInBandReady = undefined
-      }
-    }),
     onBell: vi.fn((cb: () => void) => {
       cbs.onBell = cb
     }),
     onBufferChange: vi.fn((cb: (type: 'normal' | 'alternate') => void) => {
       cbs.onBufferChange = cb
+    }),
+    onRecoveryFence: vi.fn((cb: (hex: string) => void) => {
+      recoverySubs.push(cb)
+    }),
+    onRenderFence: vi.fn((cb: RenderFenceCallback) => {
+      fenceSubs.push(cb)
     }),
     onSelectionChange: vi.fn((cb: (text: string) => void) => {
       cbs.onSelectionChange = cb
@@ -125,6 +125,8 @@ export function createRendererMock(): RendererMock {
     registerMarker: vi.fn().mockReturnValue(undefined),
     cellHeight: 16,
     viewportTopLine: 0,
+    cellWidth: 8,
+    onCellDimsChange: vi.fn(),
     onScroll: vi.fn(),
     onRender: vi.fn(),
     paneElement: document.createElement('div'),
@@ -156,9 +158,6 @@ export function createRendererMock(): RendererMock {
     _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]) {
       cbs.onCommandMarker?.(marker)
     },
-    _fireInBandReady() {
-      cbs.onInBandReady?.()
-    },
     _fireBell() {
       cbs.onBell?.()
     },
@@ -168,8 +167,12 @@ export function createRendererMock(): RendererMock {
     _fireClipboardWrite(text: string) {
       cbs.onClipboardWrite?.(text)
     },
-    _firePassport(d: PassportDisposition) {
-      for (const sub of passportSubs) sub(d)
+    /** Fire a recovery-fence sighting (ADR-0024 decision 8). */
+    _fireRecoveryFence(hex: string) {
+      for (const sub of recoverySubs) sub(hex)
+    },
+    _fireRenderFence(ev: RenderFenceEvent) {
+      for (const sub of fenceSubs) sub(ev)
     },
   }
   return mock as unknown as RendererMock
@@ -237,6 +240,18 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
 // ═══════════════════════════════════════════════════════════════════════════
 // WSClient fake
 // ═══════════════════════════════════════════════════════════════════════════
+/** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
+ *  subscribe(method, handler) returns the unsubscribe, and tests capture
+ *  the handler to deliver published facts (lifecycle.changed). `call` is
+ *  the request half (lifecycle.submitAttempt): it resolves by default so a
+ *  submit at a live prompt proceeds to the pty write; tests override it to
+ *  control or record the attempt-open ordering. Not exported — it is a
+ *  shape of ClientFake, never named by consumers. */
+interface DispatcherFake {
+  subscribe: ReturnType<typeof vi.fn>
+  call: ReturnType<typeof vi.fn>
+}
+
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
   openSession: ReturnType<typeof vi.fn>
@@ -256,6 +271,10 @@ export interface ClientFake {
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
+  /** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
+   *  subscribe(method, handler) returns the unsubscribe, and tests capture
+   *  the handler to deliver published facts (lifecycle.changed). */
+  dispatcher: DispatcherFake
 }
 /**
  * Create a fake WSClient whose openSession() returns a new makeSession()
@@ -280,6 +299,21 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
+    dispatcher: {
+      subscribe: vi.fn(() => () => undefined),
+      // A live prompt opens the attempt before the pty write; the default
+      // resolves so the write always proceeds (fail-open).
+      call: vi.fn().mockResolvedValue({
+        id: 'att-0',
+        domain: 'd1',
+        state: 'open',
+        command: '',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      }),
+    },
     call: vi.fn().mockRejectedValue(new Error('no store wired (fake)')),
     get connected() {
       return true

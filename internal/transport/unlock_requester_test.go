@@ -36,7 +36,7 @@ func TestUnlockRequest_NotifiesConnectedClient(t *testing.T) {
 	}()
 
 	// The connected client must receive a vault.unlockRequest notification.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("expected unlock request notification, got error: %v", err)
@@ -106,7 +106,7 @@ func TestUnlockRequest_ResolvedUnsealed(t *testing.T) {
 		done <- ws.RequestUnlock(ctx, "test unlock")
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("expected notification: %v", err)
@@ -139,7 +139,7 @@ func TestUnlockRequest_ResolvedUnsealed(t *testing.T) {
 		if err != nil {
 			t.Errorf("expected nil, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestUnlock did not resolve")
 	}
 }
@@ -167,7 +167,7 @@ func TestUnlockRequest_ResolvedCancelled(t *testing.T) {
 		done <- ws.RequestUnlock(ctx, "test unlock")
 	}()
 
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, raw, readErr := conn.ReadMessage()
 	if readErr != nil {
 		t.Fatalf("expected notification: %v", readErr)
@@ -196,7 +196,7 @@ func TestUnlockRequest_ResolvedCancelled(t *testing.T) {
 		if err != ErrUnlockCancelled {
 			t.Errorf("expected ErrUnlockCancelled, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestUnlock did not resolve")
 	}
 }
@@ -226,7 +226,7 @@ func TestUnlockRequest_ContextCancelled(t *testing.T) {
 	}()
 
 	// Drain the notification so we know it was sent.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, _, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("expected notification: %v", err)
@@ -240,7 +240,7 @@ func TestUnlockRequest_ContextCancelled(t *testing.T) {
 		if err != context.Canceled {
 			t.Errorf("expected context.Canceled, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("RequestUnlock did not resolve after cancel")
 	}
 }

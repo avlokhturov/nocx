@@ -315,7 +315,7 @@ func cleanEnv(extra ...string) []string {
 // plan builds the in-band plan for the test.
 func plan(t *testing.T, sid string) InBandPlan {
 	t.Helper()
-	p, err := New(nil).InBandBootstrap(sid)
+	p, err := New(nil).InBandBootstrap(sid, nil)
 	if err != nil {
 		t.Fatalf("InBandBootstrap: %v", err)
 	}

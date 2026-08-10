@@ -11,22 +11,6 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
-// wantWithin is how long these tests wait for a notification or an answer that
-// the code under test hands over immediately.
-//
-// It is not a performance budget and must not be read as one. Nothing here
-// measures latency; every wait is for an event the implementation produces
-// without doing work, so the only question the deadline answers is "did it
-// arrive at all". The number therefore has to be large enough that a busy
-// machine cannot be mistaken for a broken one — the whole file used to say
-// 2 seconds, and the container gate duly failed at exactly 2.00s on a
-// notification that was merely late (nocx-yht3, the same family as nocx-zlvw).
-//
-// Thirty seconds still bounds a genuinely absent event well inside the
-// package's own runtime, and costs nothing when the event arrives, which is
-// every run where the code is correct.
-const wantWithin = 30 * time.Second
-
 // ── connection-password ask, server → client ────────────────────────────
 
 func TestPasswordRequest_NotifiesConnectedClient(t *testing.T) {
@@ -411,5 +395,5 @@ func waitForConns(t *testing.T, ws *WSServer, n int) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("server registered no connection within 2s")
+	t.Fatalf("server registered no connection within %s", wantWithin)
 }

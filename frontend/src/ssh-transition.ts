@@ -140,13 +140,6 @@ const FLAG_LETTERS: Record<string, true> = {
   y: true,
 }
 
-/**
- * The environment id minted per attempt (§5.3 of the delivery-modes spec):
- * the passport charset `[A-Za-z0-9._-]{1,64}`, which is also exactly what is
- * safe to splice into the single-quoted remote command of the installed form.
- */
-const ENVIRONMENT_ID_RE = /^[A-Za-z0-9._-]{1,64}$/
-
 /** The largest line a canonical-mode tty carries intact. The kernel's buffer
  *  is N_TTY_BUF_SIZE = 4096; measured on a real Linux pty, 4095 bytes on one
  *  line survive and 8000 already lose data, so the usable ceiling is 4095. */
@@ -586,48 +579,6 @@ export function buildBootstrapRewrite(plan: SshPlan, launcherPath: string): stri
   // PATH_MAX (4096) by itself, so "it is only a path, it must be short" is
   // not a property. If it would not survive the line discipline there is no
   // rewrite to make.
-  if (new TextEncoder().encode(rewritten).byteLength > MAX_CANONICAL_LINE) return null
-  return rewritten
-}
-
-/**
- * The installed-host form of §3.3, generated when the bundle is committed on
- * the far side:
- *
- *     ssh -t <flags> <dest> 'if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" <environment-id> <session-id>; else exec "${SHELL:-/bin/sh}" -l; fi'
- *
- * The guard travels inside the remote command because the only machine whose
- * `~/.nocx` is in question is the far one — a local `[ -x ~/.nocx/launch ]`
- * test asks this machine about that host, and on a developer's box it answers
- * about nocx's own local staging directory. There is no local guard and no
- * local `else` branch; ssh is called unconditionally.
- *
- * The remote command is single-quoted so the LOCAL shell passes it as one
- * argv element and leaves `$HOME` and `$SHELL` unexpanded for the FAR shell.
- * The remote `else` covers the one case the launch script cannot cover — its
- * own absence — by exec'ing a native login shell, which is what ssh would
- * have provided without a command.
- *
- * `environmentId` must match the passport charset (§5.2); anything else is
- * refused by returning null. `sessionId`, when given, becomes the carrier's
- * second argument and is exported as NOCX_SESSION_ID on the far side (the
- * nocx-mlm7 P7 amendment: the compact path carries the session id exactly
- * like the argv launchers do). It is validated against the same charset.
- */
-export function buildInstalledRewrite(
-  plan: SshPlan,
-  environmentId: string,
-  sessionId?: string,
-): string | null {
-  if (!ENVIRONMENT_ID_RE.test(environmentId)) return null
-  if (sessionId !== undefined && !ENVIRONMENT_ID_RE.test(sessionId)) return null
-  const integrated = integratedSsh(plan, rawAfterSsh(plan))
-  const launchArgs = sessionId ? `${environmentId} ${sessionId}` : environmentId
-  const remote =
-    `if [ -x "$HOME/.nocx/launch" ]; then exec "$HOME/.nocx/launch" ${launchArgs}; ` +
-    `else exec "\${SHELL:-/bin/sh}" -l; fi`
-  const rewritten = `${integrated} '${remote}'`
-
   if (new TextEncoder().encode(rewritten).byteLength > MAX_CANONICAL_LINE) return null
   return rewritten
 }

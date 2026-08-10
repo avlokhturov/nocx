@@ -591,7 +591,7 @@ func callAndReadAll(t *testing.T, conn *websocket.Conn, method string, params ma
 	}
 
 	var notifications []*rpcResult
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -672,7 +672,7 @@ func TestSettingsChanged_TwoClientsBothReceive(t *testing.T) {
 	}
 
 	// conn2 must also receive the notification.
-	_ = conn2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_ = conn2.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn2.ReadMessage()
 	if err != nil {
 		t.Fatalf("conn2 read: %v", err)

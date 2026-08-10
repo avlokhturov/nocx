@@ -142,11 +142,23 @@ func waitFor(t *testing.T, what string, d time.Duration, cond func() bool) {
 func readNotification(t *testing.T, conn *websocket.Conn, method string, d time.Duration) json.RawMessage {
 	t.Helper()
 	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(d))
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("timed out waiting for %s notification", method)
+		}
+		// The deadline is the REMAINING budget, so one failed read has
+		// already spent it and there is nothing left to retry with. The
+		// loop used to set the full budget every pass and `continue` on
+		// error, which was wrong twice over: gorilla makes a read error
+		// permanent (c.readErr), so every later pass returned instantly and
+		// the loop spun at full speed for the whole bound — burning a core
+		// beside every other test in the package — and then reported "timed
+		// out" for a socket that had failed at the first read (nocx-2bvy).
+		_ = conn.SetReadDeadline(time.Now().Add(remaining))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			continue // a read timeout or a closed socket both mean "keep waiting"
+			t.Fatalf("waiting for %s notification: %v", method, err)
 		}
 		var n struct {
 			ID     *json.RawMessage `json:"id"`
@@ -160,8 +172,6 @@ func readNotification(t *testing.T, conn *websocket.Conn, method string, d time.
 			return n.Params
 		}
 	}
-	t.Fatalf("timed out waiting for %s notification", method)
-	return nil
 }
 
 // drainFilesChanged collects every files.changed params that arrives on
@@ -295,7 +305,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	w := e.watchDir(t, bid, []string{dir}, 3)
 
 	// Baseline: the first poll tick lists the directory silently.
-	waitFor(t, "watch baseline", 5*time.Second, func() bool {
+	waitFor(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -309,7 +319,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	waitFor(t, "dirty path", 5*time.Second, func() bool {
+	waitFor(t, "dirty path", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok := w.dirty[dir]
@@ -333,7 +343,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 		t.Fatalf("attach: %+v", atEnv.Error)
 	}
 
-	raw := readNotification(t, connB, "files.changed", 5*time.Second)
+	raw := readNotification(t, connB, "files.changed", wantWithin)
 	var params map[string]any
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("files.changed: unmarshal: %v", err)
@@ -356,7 +366,7 @@ func TestFilesChanged_DirtyPathsDeliveredOnceOnReattach(t *testing.T) {
 	bid := e.openBinding(t, sid, dir1, 2)
 	w := e.watchDir(t, bid, []string{dir1, dir2}, 3)
 
-	waitFor(t, "watch baseline", 5*time.Second, func() bool {
+	waitFor(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir1] != "" && w.paths[dir2] != ""
@@ -372,7 +382,7 @@ func TestFilesChanged_DirtyPathsDeliveredOnceOnReattach(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir2, "f2.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	waitFor(t, "both dirty paths", 5*time.Second, func() bool {
+	waitFor(t, "both dirty paths", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok1 := w.dirty[dir1]
@@ -426,7 +436,7 @@ func TestFilesWatch_EmptySetStopsTheLoop(t *testing.T) {
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
-	waitFor(t, "watch baseline", 5*time.Second, func() bool {
+	waitFor(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -489,7 +499,7 @@ func TestFilesChanged_ChangeImmediatelyAfterWatchIsAnnounced(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	raw := readNotification(t, e.conn, "files.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "files.changed", wantWithin)
 	var params map[string]any
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("files.changed: unmarshal: %v", err)
@@ -534,7 +544,7 @@ func TestFilesChanged_ChangeImmediatelyAfterWatchReplacementIsAnnounced(t *testi
 		t.Fatalf("write: %v", err)
 	}
 
-	raw := readNotification(t, e.conn, "files.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "files.changed", wantWithin)
 	var params map[string]any
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("files.changed: unmarshal: %v", err)
@@ -834,7 +844,7 @@ func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
-	waitFor(t, "watch baseline", 5*time.Second, func() bool {
+	waitFor(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -865,7 +875,7 @@ func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 	if err = e.conn.WriteMessage(websocket.TextMessage, req); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err = e.conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err = e.conn.SetReadDeadline(time.Now().Add(wantWithin)); err != nil {
 		t.Fatalf("set deadline: %v", err)
 	}
 	_, resp, err := e.conn.ReadMessage()

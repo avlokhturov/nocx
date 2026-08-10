@@ -1,6 +1,9 @@
 package shellintegration
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // ShellKind names the far shell a launcher builds a start command for.
 type ShellKind string
@@ -30,12 +33,27 @@ const (
 type LaunchOptions struct {
 	SessionID string // NOCX_SESSION_ID for this session; never empty when Enhanced
 	Enhanced  bool   // request marker-only prompt mode (ADR-0006)
-	// EnvironmentID is the environment-transition id minted for this attempt
-	// (design §5.3). Exported as NOCX_ENVIRONMENT_ID; P2's scripts emit the
-	// readiness passport and tag their markers only when it is set and
-	// well-formed, so an empty value is the fail-open default (no passport,
-	// no tagged marker) rather than a refusal.
-	EnvironmentID string
+	// The authenticated lifecycle channel (ADR-0024). Capability is the
+	// per-epoch bearer: substituted into the rcfile TEXT (@CAP@), never
+	// exported to the environment. Lane, Domain and Epoch are names, not
+	// secrets, and travel in the environment like the other NOCX_* fields.
+	// The transport is either an inherited descriptor (LifecycleFD, the
+	// local path) or a loopback TCP port (LifecyclePort, the remote path);
+	// zero means that side is absent. Empty Capability means no channel:
+	// the session is conventional.
+	Capability string
+	// Recovery is the per-domain one-shot recovery fence (ADR-0024 decision
+	// 8): substituted into the rcfile TEXT (@RECOVERY@) like the capability,
+	// never exported to the environment. The shell writes it to the pty at
+	// the next prompt boundary if the lifecycle channel dies mid-session;
+	// nocx matches it as the restoration acknowledgement. Empty means no
+	// recovery is offered.
+	Recovery      string
+	Lane          string
+	Domain        string
+	Epoch         uint64
+	LifecycleFD   int
+	LifecyclePort int
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's
@@ -85,33 +103,47 @@ func launcherEnvBlock(opts LaunchOptions) string {
 	b.WriteString("NOCX_SHELL_INTEGRATION=1\n")
 	if opts.Enhanced {
 		b.WriteString("NOCX_PROMPT_MODE=marker-only\n")
-		b.WriteString("NOCX_SESSION_ID=" + shellQuote(opts.SessionID) + "\n")
+		b.WriteString("NOCX_SESSION_ID=" + ShellQuote(opts.SessionID) + "\n")
 	}
-	if opts.EnvironmentID != "" {
-		// Independent of Enhanced on purpose: the passport is gated on the
-		// environment id, never on the prompt mode (design §5.2), so a
-		// baseline session that carries an id still announces it.
-		b.WriteString("NOCX_ENVIRONMENT_ID=" + shellQuote(opts.EnvironmentID) + "\n")
+	// Lifecycle channel addressing and transport (ADR-0024). The capability
+	// is deliberately NOT here: it rides the rcfile text (see @CAP@) and must
+	// never appear in /proc/<pid>/environ.
+	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
+		b.WriteString("NOCX_LIFECYCLE_LANE=" + ShellQuote(opts.Lane) + "\n")
+		b.WriteString("NOCX_LIFECYCLE_DOMAIN=" + ShellQuote(opts.Domain) + "\n")
+		b.WriteString("NOCX_LIFECYCLE_EPOCH=" + fmt.Sprintf("%d\n", opts.Epoch))
+		if opts.LifecycleFD > 0 {
+			b.WriteString("NOCX_LIFECYCLE_FD=" + fmt.Sprintf("%d\n", opts.LifecycleFD))
+		}
+		if opts.LifecyclePort > 0 {
+			b.WriteString("NOCX_LIFECYCLE_PORT=" + fmt.Sprintf("%d\n", opts.LifecyclePort))
+		}
 	}
 	b.WriteString("export NOCX_SHELL_INTEGRATION")
 	if opts.Enhanced {
 		b.WriteString(" NOCX_PROMPT_MODE NOCX_SESSION_ID")
 	}
-	if opts.EnvironmentID != "" {
-		b.WriteString(" NOCX_ENVIRONMENT_ID")
+	if opts.Lane != "" && opts.Domain != "" && opts.Epoch != 0 && opts.Capability != "" {
+		b.WriteString(" NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH")
+		if opts.LifecycleFD > 0 {
+			b.WriteString(" NOCX_LIFECYCLE_FD")
+		}
+		if opts.LifecyclePort > 0 {
+			b.WriteString(" NOCX_LIFECYCLE_PORT")
+		}
 	}
 	b.WriteString("\n")
 	return b.String()
 }
 
-// shellQuote wraps s in single quotes, escaping embedded quotes with the
+// ShellQuote wraps s in single quotes, escaping embedded quotes with the
 // POSIX '\” idiom. This is a real escaper, not concatenation that happens
 // to work on today's payloads: the launcher strings are built quote-free by
 // construction (see printfBEscape), so under a POSIX login shell this is
 // usually the identity, but any future payload change that introduces a
 // quote stays correct under dash/ash/bash and the other POSIX login shells
 // sshd may hand the remote command to.
-func shellQuote(s string) string {
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
@@ -171,7 +203,8 @@ func printfBEscape(s string) string {
 // So the number moved, and TestFullLauncherStaysUnderArgLimit now asserts the
 // MARGIN rather than the ceiling — erosion is the failure mode, and only a
 // test that watches the gap can report it while there is still room to act.
-// The real fix is smaller payloads: 62% of nocx.bash is comments, ~22 KB of
-// prose across the three scripts that the remote host is sent and never
-// reads (nocx-z9s9.17).
+// The real fix landed with nocx-z9s9.17: the shipped payloads are
+// comment-stripped at embed time (stripShellComments), so the remote host
+// receives the code and none of the ~22 KB of prose the three scripts used
+// to carry — every tier now sits ~64 KB under this cap.
 var maxFullLauncherLen = 120 * 1024

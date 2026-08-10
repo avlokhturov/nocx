@@ -6,10 +6,12 @@ import {
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
   AdHocQuickConnectProvider,
+  SecretsQuickConnectProvider,
   QuickConnectController,
   type QuickConnectItem,
   type DrillSelection,
   type QuickConnectProvider,
+  type SecretsProviderDeps,
 } from './quick-connect'
 
 afterEach(() => {
@@ -19,26 +21,21 @@ afterEach(() => {
 /* ── Actions provider ───────────────────────────────────────────────── */
 
 describe('ActionsQuickConnectProvider', () => {
-  it('offers the local shell, new connection and integrate-this-shell, in that order', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+  it('offers the local shell and new connection, in that order', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
     // The order is the contract, not an accident: these are the palette's
     // first group and the separator below them is drawn from the group
     // boundary.
-    expect(items.map((i) => i.id)).toEqual([
-      '__local__',
-      '__new_connection__',
-      '__integrate_shell__',
-    ])
+    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__'])
     expect(items[0].label).toBe('Local shell')
     expect(items[0].detail).toContain('local terminal')
     expect(items[1].label).toBe('New connection')
-    expect(items[2].label).toBe('Integrate this shell')
   })
 
   it('every item is typed Command — the palette badge vocabulary (nocx-4t37)', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
     expect(items.every((i) => i.kind === 'command')).toBe(true)
@@ -56,42 +53,27 @@ describe('ActionsQuickConnectProvider', () => {
       ],
       run,
     }
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn(), drillCommand)
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), drillCommand)
 
     const items = await Promise.resolve(provider.getItems())
     // Last, not first: the first row is what Enter activates on open, and
     // that stays the muscle-memory "Local shell".
-    expect(items.map((i) => i.id)).toEqual([
-      '__local__',
-      '__new_connection__',
-      '__integrate_shell__',
-      '__forward_port__',
-    ])
-    expect(items[3].label).toBe('Forward a port')
-    expect(items[3].kind).toBe('command')
-    expect(items[3].drill).toBe(drillCommand)
+    expect(items.map((i) => i.id)).toEqual(['__local__', '__new_connection__', '__forward_port__'])
+    expect(items[2].label).toBe('Forward a port')
+    expect(items[2].kind).toBe('command')
+    expect(items[2].drill).toBe(drillCommand)
     // Activating the drill item never runs it directly — the surface walks
     // the steps instead.
-    items[3].run()
+    items[2].run()
     expect(run).not.toHaveBeenCalled()
   })
 
-  it('calls integrateShell when the integrate-this-shell item runs', () => {
-    const integrateShell = vi.fn()
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), integrateShell)
-
-    provider.getItems()[2].run()
-
-    expect(integrateShell).toHaveBeenCalledOnce()
-  })
-
   it('does not offer Ports in the palette — it is a sidebar view now (nocx-wzc4.7)', async () => {
-    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn())
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn())
     const items = await Promise.resolve(provider.getItems())
 
     // Ports is a surface you keep open beside the terminal, not a one-shot
-    // verb; the palette is for verbs. "Integrate this shell" above is the
-    // verb that stays.
+    // verb; the palette is for verbs.
     expect(items.some((i) => i.label === 'Ports')).toBe(false)
   })
 
@@ -1065,7 +1047,7 @@ describe('palette and drill-in', () => {
       run,
     }
     const providers: QuickConnectProvider[] = [
-      new ActionsQuickConnectProvider(vi.fn(), vi.fn(), vi.fn(), drillCommand),
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn(), drillCommand),
       new SSHQuickConnectProvider(
         {
           listProfiles: vi.fn().mockResolvedValue([
@@ -1272,5 +1254,201 @@ describe('palette and drill-in', () => {
     await waitForItems()
     expect(labels().some((l) => l.includes('SSH config: no-ssh-binary'))).toBe(true)
     expect(labels().some((l) => l.includes('Local shell'))).toBe(true)
+  })
+})
+
+describe('the secret picker (nocx-fk32)', () => {
+  let container: HTMLDivElement
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.append(container)
+  })
+  afterEach(() => {
+    container.remove()
+  })
+
+  const inventory = () =>
+    Promise.resolve({
+      entries: [
+        { id: 'secrow:1', name: 'pi@192.168.0.93', kind: 'password' },
+        { id: 'secrow:2', name: 'deploy key', kind: 'private-key' },
+      ],
+    })
+
+  function mountSecrets(deps: Partial<SecretsProviderDeps> = {}) {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    ctrl.mount(container, [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SecretsQuickConnectProvider({
+        status: () => Promise.resolve({ state: 'unsealed' as const }),
+        inventory,
+        insert: vi.fn(),
+        create: vi.fn(),
+        requestUnseal: vi.fn(),
+        requestSetup: vi.fn(),
+        ...deps,
+      }),
+    ])
+    return ctrl
+  }
+
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+
+  const rowTexts = () =>
+    [...container.querySelectorAll('[role="option"]')].map((el) => (el.textContent ?? '').trim())
+
+  const typeFilter = async (text: string) => {
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    if (!input) throw new Error('no filter field')
+    input.value = text
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await settle()
+  }
+
+  it('lists the vault names and hands the chosen NAME to the insert seam', async () => {
+    const insert = vi.fn()
+    const ctrl = mountSecrets({ insert })
+    ctrl.showSecrets()
+    await settle()
+
+    const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(true)
+    expect(rows.some((r) => r.includes('deploy key'))).toBe(true)
+    // Commands are not secrets: the variant admits one kind set.
+    expect(rows.some((r) => r.includes('Local shell'))).toBe(false)
+
+    const target = [...container.querySelectorAll<HTMLElement>('[role="option"]')].find((el) =>
+      (el.textContent ?? '').includes('pi@192.168.0.93'),
+    )
+    target?.click()
+    // The picker never sees material — only the name the reference carries.
+    expect(insert).toHaveBeenCalledWith('pi@192.168.0.93')
+  })
+
+  it('keeps secrets out of the palette — one Enter must not mean two things', async () => {
+    const insert = vi.fn()
+    const ctrl = mountSecrets({ insert })
+    ctrl.showPalette()
+    await settle()
+
+    const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(rows.some((r) => r.includes('Local shell'))).toBe(true)
+    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(false)
+  })
+
+  it('keeps secrets out of the plain server list too', async () => {
+    const ctrl = mountSecrets()
+    ctrl.show()
+    await settle()
+    const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(false)
+  })
+
+  // The secret the vault does not hold yet is the one the user came to type
+  // (nocx-fk32.1). Without this row the picker's answer to "it is not here"
+  // is silence plus a Settings page they have to know about.
+  it('offers to create the secret, as the last row, with what was typed', async () => {
+    const create = vi.fn()
+    const ctrl = mountSecrets({ create })
+    ctrl.showSecrets()
+    await settle()
+
+    const initial = rowTexts()
+    expect(initial[initial.length - 1]).toContain('Add a secret')
+
+    await typeFilter('gitlab token')
+    // Nothing matched, and the offer is still there — closing it at exactly
+    // the keystroke that names a new secret takes the offer away as the user
+    // reaches for it.
+    const rows = rowTexts()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toContain('gitlab token')
+
+    const row = container.querySelector<HTMLElement>('[role="option"]')
+    row?.click()
+    expect(create).toHaveBeenCalledWith('gitlab token')
+  })
+
+  it('offers it on an empty vault, where the list has nothing else to say', async () => {
+    const ctrl = mountSecrets({ inventory: () => Promise.resolve({ entries: [] }) })
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts()).toEqual([expect.stringContaining('Add a secret')])
+  })
+
+  it('never offers to create from the palette or the server list', async () => {
+    const ctrl = mountSecrets()
+    ctrl.showPalette()
+    await settle()
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+
+    ctrl.show()
+    await settle()
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+  })
+
+  // "No secrets" and "there is no vault" are different facts, and an empty
+  // list tells the user the first one (nocx-fk32.3).
+  it('offers to set protection up when there is no vault yet', async () => {
+    const requestSetup = vi.fn()
+    const create = vi.fn()
+    const ctrl = mountSecrets({
+      status: () => Promise.resolve({ state: 'uninitialized' as const }),
+      inventory: () => Promise.reject(new Error('vault-uninitialized')),
+      requestSetup,
+      create,
+    })
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts()).toEqual([expect.stringContaining('Set up the vault')])
+    // Nothing to add a secret TO yet: the offer to create would be a second
+    // answer to the same question, and the wrong one.
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+
+    container.querySelector<HTMLElement>('[role="option"]')?.click()
+    expect(requestSetup).toHaveBeenCalledTimes(1)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  // The dispatcher raises the unlock dialog for a sealed vault and retries,
+  // so a successful unlock fills the list. This is the path where it did
+  // not: the prompt was dismissed, and the vault is locked, not empty.
+  it('names the condition when the inventory could not be read', async () => {
+    const requestUnseal = vi.fn()
+    const ctrl = mountSecrets({
+      status: () => Promise.resolve({ state: 'sealed' as const }),
+      inventory: () => Promise.reject(new Error('cancelled')),
+      requestUnseal,
+    })
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts()).toEqual([expect.stringContaining('Unlock the vault')])
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+
+    container.querySelector<HTMLElement>('[role="option"]')?.click()
+    expect(requestUnseal).toHaveBeenCalledTimes(1)
+  })
+
+  it('lists the secrets after an unlock the dispatcher retried for it', async () => {
+    // A sealed vault whose inventory call resolves is exactly what the
+    // dispatcher's unlock-and-retry seam produces; no offer row belongs in
+    // front of a list that arrived.
+    const ctrl = mountSecrets({ status: () => Promise.resolve({ state: 'sealed' as const }) })
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts().some((r) => r.includes('pi@192.168.0.93'))).toBe(true)
+    expect(rowTexts().some((r) => r.includes('Unlock the vault'))).toBe(false)
   })
 })

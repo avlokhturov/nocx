@@ -141,8 +141,12 @@ echo NOCX_SOURCED_OK
 
 // TestBashMarkerOnlyBeatsHostilePrompt spawns a bash that sources nocx.bash
 // with NOCX_PROMPT_MODE=marker-only, with a hostile PROMPT_COMMAND that sets
-// PS1='HOSTILE$ ', calls __nocx_prompt_command, and asserts HOSTILE does not
-// appear in the rendered prompt.
+// PS1='HOSTILE$ ', and asserts the B-marker overlay wins — but ONLY once the
+// authenticated channel is live. ADR-0024 decision 9: suppressing the native
+// prompt without a live domain is the phishing primitive, so a shell whose
+// handshake never completed keeps the framework's visible prompt. The live
+// state is injected here (the accept path itself is exercised end to end by
+// the channel tests); the no-channel arm below pins the new fail-open half.
 func TestBashMarkerOnlyBeatsHostilePrompt(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
@@ -152,6 +156,13 @@ func TestBashMarkerOnlyBeatsHostilePrompt(t *testing.T) {
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 PROMPT_COMMAND='PS1="HOSTILE$ "'
 source "$1"
+exec 9>/dev/null
+__nocx_lc_fd=9
+__nocx_lc_lane_esc=L
+__nocx_lc_dom_esc=D
+__nocx_lc_epoch=1
+__nocx_cap=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+__nocx_lc_active=1
 __nocx_prompt_command
 echo "PS1=[$PS1]"
 `
@@ -164,10 +175,31 @@ echo "PS1=[$PS1]"
 	}
 }
 
+// TestBashMarkerOnlyKeepsNativePromptWithoutChannel pins decision 9's other
+// half: a marker-only shell whose channel never became live must NOT
+// suppress the prompt. Before the channel, this test asserted the B marker
+// won unconditionally — the exact failure ADR-0024 decision 9 forbids.
+func TestBashMarkerOnlyKeepsNativePromptWithoutChannel(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+	prog := `
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+PROMPT_COMMAND='PS1="HOSTILE$ "'
+source "$1"
+__nocx_prompt_command
+echo "PS1=[$PS1]"
+`
+	out := runShellProg(t, bash, prog, script)
+	if !strings.Contains(out, "HOSTILE") {
+		t.Errorf("bash suppressed its prompt without a live channel; the framework's prompt must stand (ADR-0024 decision 9):\n%s", out)
+	}
+}
+
 // TestZshMarkerOnlyBeatsHostilePrompt spawns a zsh that sources nocx.zsh
 // with NOCX_PROMPT_MODE=marker-only, registers a hostile precmd that sets
 // PROMPT='HOSTILE$ ', runs the precmd hooks, and asserts HOSTILE does not
-// appear in the rendered prompt.
+// appear in the rendered prompt once the channel is live (injected here;
+// the accept path is covered by the channel tests).
 func TestZshMarkerOnlyBeatsHostilePrompt(t *testing.T) {
 	zsh := requireShell(t, "zsh")
 	script := writeScriptFile(t, "nocx.zsh", zshScript)
@@ -180,6 +212,13 @@ __hostile() { PROMPT='HOSTILE$ '; }
 add-zsh-hook precmd __hostile
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 source "$1"
+exec 9>/dev/null
+__nocx_lc_fd=9
+__nocx_lc_lane_esc=L
+__nocx_lc_dom_esc=D
+__nocx_lc_epoch=1
+__nocx_cap=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+__nocx_lc_active=1
 for f in $precmd_functions; do $f; done
 builtin printf 'PROMPT=[%s]' "$PROMPT"
 `
@@ -190,6 +229,26 @@ builtin printf 'PROMPT=[%s]' "$PROMPT"
 	// The prompt must still carry the B marker.
 	if !strings.Contains(out, "]133;B") {
 		t.Errorf("marker-only prompt missing OSC 133 B marker:\n%s", out)
+	}
+}
+
+// TestZshMarkerOnlyKeepsNativePromptWithoutChannel is the zsh half of the
+// decision-9 fail-open: no live channel, no prompt suppression.
+func TestZshMarkerOnlyKeepsNativePromptWithoutChannel(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+	script := writeScriptFile(t, "nocx.zsh", zshScript)
+	prog := `
+autoload -Uz add-zsh-hook
+__hostile() { PROMPT='HOSTILE$ '; }
+add-zsh-hook precmd __hostile
+export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
+source "$1"
+for f in $precmd_functions; do $f; done
+builtin printf 'PROMPT=[%s]' "$PROMPT"
+`
+	out := runShellProg(t, zsh, prog, script)
+	if !strings.Contains(out, "HOSTILE") {
+		t.Errorf("zsh suppressed its prompt without a live channel (ADR-0024 decision 9):\n%s", out)
 	}
 }
 
@@ -204,10 +263,12 @@ func TestZshNativeModeRestoresVisiblePrompt(t *testing.T) {
 autoload -Uz add-zsh-hook
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 source "$1"
+__nocx_lc_active=1
 
 # First run precmd — the marker-only overlay should be active.
 for f in $precmd_functions; do $f; done
 builtin printf 'BEFORE=[%s]\n' "$PROMPT"
+
 
 # Escape to native mode.
 __nocx_native_mode
@@ -255,6 +316,7 @@ func TestBashNativeModeRestoresVisiblePrompt(t *testing.T) {
 	prog := `
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only
 source "$1"
+__nocx_lc_active=1
 
 # First run prompt command — the marker-only overlay should be active.
 __nocx_prompt_command
@@ -300,10 +362,21 @@ func TestBashTopLevelMarkerOnlyArmsBMarker(t *testing.T) {
 	script := writeScriptFile(t, "nocx.bash", bashScript)
 
 	// Simulate a TOP-LEVEL enhanced session: NOCX_SESSION_ID is set by the
-	// backend and NO parent __nocx_owned_session exists.
+	// backend and NO parent __nocx_owned_session exists. The marker-only
+	// prompt is suppressed only when the channel is live (ADR-0024 decision
+	// 9), so the channel state is injected after sourcing, writing to
+	// /dev/null (the accept path itself is exercised end to end by the
+	// channel tests).
 	prog := `
 export NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=deadbeefdeadbeef
 source "$1"
+exec 9>/dev/null
+__nocx_lc_fd=9
+__nocx_lc_lane_esc=L
+__nocx_lc_dom_esc=D
+__nocx_lc_epoch=1
+__nocx_cap=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+__nocx_lc_active=1
 
 # Run two prompt cycles — the second must set the marker-only PS1.
 __nocx_prompt_command
@@ -1037,188 +1110,99 @@ func countMarkers(ms []oscMarker, kind string) int {
 	return n
 }
 
-// passportFixture is the shared golden fixture set (also consumed by the
-// frontend tests), so the Go exec tests assert exactly the bytes the
-// TypeScript parser accepts — the two sides cannot drift.
-type passportFixture struct {
-	EnvironmentID string `json:"environmentId"`
-	Passports     map[string]struct {
-		Sequence string `json:"sequence"`
-	} `json:"passports"`
-	Markers map[string]struct {
-		Sequence string `json:"sequence"`
-	} `json:"markers"`
-	Invalid struct {
-		EnvironmentIDs []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		} `json:"environmentIds"`
-	} `json:"invalid"`
-}
-
-func loadPassportFixtures(t *testing.T) passportFixture {
-	t.Helper()
-	// The fixture lives under frontend/src/test-support because the two
-	// readers run in containers with different mounts: the Go gate mounts the
-	// whole repo, the vitest gate mounts frontend/ alone. A copy in each tree
-	// is exactly the drift this fixture exists to prevent.
-	raw, err := os.ReadFile("../../frontend/src/test-support/passport-fixtures.json")
-	if err != nil {
-		t.Fatalf("read passport fixtures: %v", err)
-	}
-	var fx passportFixture
-	if err := json.Unmarshal(raw, &fx); err != nil {
-		t.Fatalf("parse passport fixtures: %v", err)
-	}
-	return fx
-}
-
-// TestBashEmitsPassportAndTaggedMarkers drives the real bash hooks with an
-// environment id set (the launcher's NOCX_ENVIRONMENT_ID) and asserts the
-// readiness passport (OSC 636 P) is emitted exactly once at source time and
-// every OSC 133 marker is tagged nocx_env=<id>, using the shared golden
-// fixture's exact sequences. Untagged emission is covered by every other
-// test in this file, which runs without an id.
-func TestBashEmitsPassportAndTaggedMarkers(t *testing.T) {
+// TestBashEmitsNoPassport drives the real bash hooks with an environment id
+// set (the launcher-era NOCX_ENVIRONMENT_ID): the readiness passport is
+// DELETED (nocx-u7uh.11) — the environment identity now rides the
+// authenticated lifecycle channel — so no OSC 636 P and no nocx_env= tagged
+// marker may reach the wire, whatever the environment carries. The A/B/C/D
+// markers stay untagged, exactly the pre-passport shape.
+func TestBashEmitsNoPassport(t *testing.T) {
 	bash := requireShell(t, "bash")
 	script := writeScriptFile(t, "nocx.bash", bashScript)
-	fx := loadPassportFixtures(t)
 
-	prog := fmt.Sprintf(`
+	prog := `
 export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
+export NOCX_ENVIRONMENT_ID=env-abc-123
 source "$1"
-printf 'PS1=%%s\n' "$PS1"
+printf 'PS1=%s\n' "$PS1"
 __nocx_prompt_command
 true
 __nocx_prompt_command
-`, fx.EnvironmentID)
+`
 	out := runShellProg(t, bash, prog, script)
 
-	passport := fx.Passports["enhanced"].Sequence
-	if n := strings.Count(out, passport); n != 1 {
-		t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, "]636;P") {
+		t.Errorf("the readiness passport must not be emitted (nocx-u7uh.11); output:\n%s", out)
 	}
-	for name, want := range map[string]string{
-		"tagged A":   fx.Markers["A"].Sequence,
-		"tagged C":   fx.Markers["C"].Sequence,
-		"tagged D;0": fx.Markers["D0"].Sequence,
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %s (%q); output:\n%s", name, want, out)
-		}
+	if strings.Contains(out, "nocx_env=") {
+		t.Errorf("no marker may carry a nocx_env= tag (nocx-u7uh.11); output:\n%s", out)
 	}
-	if !strings.Contains(out, "]133;B;nocx_env="+fx.EnvironmentID) {
-		t.Errorf("PS1 does not carry the tagged B marker; output:\n%s", out)
-	}
-
-	// The passport must precede the first tagged A (entry counts on
-	// passport → tagged A → B).
 	ms := extractOscMarkers(out)
-	passportPos, firstA := -1, -1
-	for _, m := range ms {
-		if m.kind == "P" && passportPos < 0 {
-			passportPos = m.pos
-		}
-		if m.kind == "A" && firstA < 0 {
-			firstA = m.pos
-		}
-	}
-	if passportPos < 0 {
-		t.Fatalf("no 636 P marker extracted; markers: %+v", ms)
-	}
-	if firstA < 0 || passportPos > firstA {
-		t.Errorf("passport must precede the first tagged A (passport at %d, first A at %d)", passportPos, firstA)
+	if countMarkers(ms, "A") == 0 || countMarkers(ms, "C") == 0 {
+		t.Errorf("the untagged A/C markers must still be emitted; markers: %+v", ms)
 	}
 }
 
-// TestZshEmitsPassportAndTaggedMarkers is the zsh half of the bash test: the
-// real zsh hooks emit the fixture's passport once and tagged A/B/C/D.
-func TestZshEmitsPassportAndTaggedMarkers(t *testing.T) {
+// TestZshEmitsNoPassport is the zsh half of the deletion.
+func TestZshEmitsNoPassport(t *testing.T) {
 	zsh := requireShell(t, "zsh")
 	script := writeScriptFile(t, "nocx.zsh", zshScript)
-	fx := loadPassportFixtures(t)
 
-	prog := fmt.Sprintf(`
+	prog := `
 autoload -Uz add-zsh-hook
 export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
+export NOCX_ENVIRONMENT_ID=env-abc-123
 source "$1"
-printf 'PS1=%%s\n' "$PS1"
+printf 'PS1=%s\n' "$PS1"
 __nocx_preexec
 true;  for f in $precmd_functions; do $f; done
-false; for f in $precmd_functions; do $f; done
-`, fx.EnvironmentID)
+`
 	out := runShellProg(t, zsh, prog, script)
 
-	passport := fx.Passports["enhanced"].Sequence
-	if n := strings.Count(out, passport); n != 1 {
-		t.Errorf("passport emitted %d times, want exactly once; output:\n%s", n, out)
+	if strings.Contains(out, "]636;P") {
+		t.Errorf("the readiness passport must not be emitted (nocx-u7uh.11); output:\n%s", out)
 	}
-	for name, want := range map[string]string{
-		"tagged A":   fx.Markers["A"].Sequence,
-		"tagged C":   fx.Markers["C"].Sequence,
-		"tagged D;1": "\x1b]133;D;1;nocx_env=" + fx.EnvironmentID + "\x07",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("missing %s (%q); output:\n%s", name, want, out)
-		}
-	}
-	if !strings.Contains(out, "]133;B;nocx_env="+fx.EnvironmentID) {
-		t.Errorf("PROMPT does not carry the tagged B marker; output:\n%s", out)
+	if strings.Contains(out, "nocx_env=") {
+		t.Errorf("no marker may carry a nocx_env= tag (nocx-u7uh.11); output:\n%s", out)
 	}
 }
 
-// TestBashRefusesPassportForMalformedEnvironmentId guards the fail-open side
-// of the passport: an environment id outside [A-Za-z0-9._-]{1,64} must not
-// reach the wire at all — no passport, and no tagged marker, so a session
-// with a malformed id degrades to exactly the pre-passport behaviour instead
-// of emitting sequences the renderer would reject.
-func TestBashRefusesPassportForMalformedEnvironmentId(t *testing.T) {
-	bash := requireShell(t, "bash")
-	script := writeScriptFile(t, "nocx.bash", bashScript)
-	for _, id := range loadPassportFixtures(t).Invalid.EnvironmentIDs {
-		t.Run(id.Name, func(t *testing.T) {
-			prog := fmt.Sprintf(`
-export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
-source "$1"
-__nocx_prompt_command
-true
-__nocx_prompt_command
-`, id.Value)
-			out := runShellProg(t, bash, prog, script)
-			if strings.Contains(out, "]636;P") {
-				t.Errorf("emitted a passport for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-			if strings.Contains(out, "nocx_env=") {
-				t.Errorf("tagged a marker for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-		})
-	}
-}
-
-// TestZshRefusesPassportForMalformedEnvironmentId is the zsh half of the
-// bash refusal test.
-func TestZshRefusesPassportForMalformedEnvironmentId(t *testing.T) {
+// TestZshNestedJsonUnescape decodes the grant's bootstrap field exactly as
+// the wire carries it (nocx-u7uh.28): the frame is built by Go's JSON
+// encoder — the same bytes lifecyclecodec writes for the domain_grant — and
+// the payload deliberately carries backslashes, quotes, newlines, tabs, an
+// OSC escape and non-ASCII. A broken decoder corrupts the child rcfile,
+// which makes the child a conventional shell — the safe direction, but
+// invisible in the pty test unless the corruption is exact. The decoded
+func TestZshNestedJsonUnescape(t *testing.T) {
 	zsh := requireShell(t, "zsh")
 	script := writeScriptFile(t, "nocx.zsh", zshScript)
-	for _, id := range loadPassportFixtures(t).Invalid.EnvironmentIDs {
-		t.Run(id.Name, func(t *testing.T) {
-			prog := fmt.Sprintf(`
-autoload -Uz add-zsh-hook
+
+	// \x01 exercises the \uXXXX wire form (Go escapes it as \u0001); the
+	// other bytes cover the backslash, quote, newline, tab and OSC cases.
+	payload := "# rc\nprintf '\\e]133;B\\a' \"q\\\"q\" \\\n\tline\né done\x01x\n"
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	frame := []byte(`{"v":1,"lane":"L","dom":"D","epoch":1,"seq":9,"cap":"abc","evt":"domain_grant","request":"r-1","env":"sudo","bootstrap":` + string(b) + `}`)
+	framePath := filepath.Join(t.TempDir(), "frame")
+	if err := os.WriteFile(framePath, frame, 0o600); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	prog := `
 export NOCX_SHELL_INTEGRATION=1
-export NOCX_ENVIRONMENT_ID=%q
 source "$1"
-true;  for f in $precmd_functions; do $f; done
-`, id.Value)
-			out := runShellProg(t, zsh, prog, script)
-			if strings.Contains(out, "]636;P") {
-				t.Errorf("emitted a passport for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-			if strings.Contains(out, "nocx_env=") {
-				t.Errorf("tagged a marker for malformed environment id %q; output:\n%s", id.Value, out)
-			}
-		})
+frame=$(cat "$NOCX_TEST_FRAME_PATH")
+bootstrap="${frame##*\"bootstrap\":\"}"
+bootstrap="${bootstrap%?}"
+bootstrap="${bootstrap%\"}"
+__nocx_lc_json_unescape "$bootstrap"
+builtin printf '%s' "$__nocx_lc_json_unescaped"
+`
+	out := runShellProgEnv(t, zsh, prog, script, "NOCX_TEST_FRAME_PATH="+framePath)
+	if out != payload {
+		t.Errorf("unescaped bootstrap mismatch:\n got %q\nwant %q", out, payload)
 	}
 }

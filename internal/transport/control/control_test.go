@@ -1,7 +1,7 @@
 // Package control_test exercises the scheduling contract through its public
 // surface only. The third-Admission AD-8 proof lives in
 // third_admission_test.go (package control, internal): the NonblockingAdmission
-// marker is unexported by design (ADR-0024), so only the package itself — its
+// marker is unexported by design (ADR-0026), so only the package itself — its
 // internal tests included — may define a submission-path admission.
 package control_test
 

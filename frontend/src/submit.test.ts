@@ -12,11 +12,14 @@ describe('submitCommand', () => {
   it('dispatches submit, refocuses the grid, then sends — in order (nocx-4ff.12)', () => {
     const calls: string[] = []
     submitCommand('echo hi', {
-      dispatchSubmit: () => calls.push('dispatch'),
       focusGrid: () => calls.push('focus'),
       sendDoc: (d) => calls.push(`send:${d}`),
     })
-    expect(calls).toEqual(['dispatch', 'focus', 'send:echo hi'])
+    // The submit ordering that survives the severance: refocus the grid so
+    // PS2 continuation + running-program keys reach the PTY, THEN send the
+    // renderer-owned paste handoff. The state-machine dispatch (dispatchSubmit)
+    // is deleted with the marker cycle (ADR-0024).
+    expect(calls).toEqual(['focus', 'send:echo hi'])
   })
 })
 

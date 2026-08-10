@@ -7,10 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/completion"
@@ -18,6 +18,8 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -2125,467 +2127,6 @@ func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) 
 	}
 }
 
-// ── shell.launcherCommand ──────────────────────────────────────────────────
-
-func TestShellLauncherCommand_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "shell.launcherCommand.schema.json")
-
-	// Bootstrap: a staged path returned, mode bootstrap, reason null.
-	path := "'/home/u/.nocx/run/launcher-123456'"
-	raw, err := json.Marshal(shellLauncherCommandResult{
-		Mode:          launcherModeBootstrap,
-		EnvironmentID: "env-abc-123",
-		LauncherPath:  &path,
-		Reason:        nil,
-	})
-	if err != nil {
-		t.Fatalf("marshal bootstrap: %v", err)
-	}
-	validateJSON(t, schema, raw, "shell.launcherCommand DTO (bootstrap)")
-
-	// Installed: compact form, no path, no reason.
-	raw, err = json.Marshal(shellLauncherCommandResult{
-		Mode:          launcherModeInstalled,
-		EnvironmentID: "env-def-456",
-		LauncherPath:  nil,
-		Reason:        nil,
-	})
-	if err != nil {
-		t.Fatalf("marshal installed: %v", err)
-	}
-	validateJSON(t, schema, raw, "shell.launcherCommand DTO (installed)")
-
-	// Every refusal the handler can state must satisfy the schema's enum;
-	// a reason the renderer receives and the contract rejects is a refusal
-	// that reaches the product as a decode failure.
-	for _, reason := range []string{"remote-command", "oracle-failed", "unsupported", "stage-failed"} {
-		r := reason
-		raw, err = json.Marshal(shellLauncherCommandResult{
-			Mode:          launcherModeRaw,
-			EnvironmentID: "env-ghi-789",
-			LauncherPath:  nil,
-			Reason:        &r,
-		})
-		if err != nil {
-			t.Fatalf("marshal refused %s: %v", reason, err)
-		}
-		validateJSON(t, schema, raw, "shell.launcherCommand DTO (refused: "+reason+")")
-	}
-}
-
-// OverTheWire: the real handler, the real RemoteLauncher, the real stager
-// and a stub resolver that records the oracle argv — the bytes the far shell
-// runs must be the bytes the product builds, and the typed line must be what
-// the oracle answers about (nocx-c5az).
-func TestShellLauncherCommand_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "shell.launcherCommand.schema.json")
-	ctx := context.Background()
-
-	home := t.TempDir()
-	resolver := newLauncherTestResolver()
-	ws := NewWSServer(
-		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithRemoteLauncher(&realRemoteLauncher{}),
-		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
-		WithSSHConfigResolver(resolver, "/nonexistent/config"),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	sid := openSessionForLauncher(t, conn)
-	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
-		"sessionId":  sid,
-		"oracleArgv": []string{"ssh", "-G", "-p", "2222", "testhost"},
-	}, 2)
-	if resp.Error != nil {
-		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
-	}
-	validateJSON(t, schema, resp.Result, "shell.launcherCommand result (real socket)")
-
-	var got shellLauncherCommandResult
-	if err := json.Unmarshal(resp.Result, &got); err != nil {
-		t.Fatalf("decode shell.launcherCommand result: %v", err)
-	}
-	if got.Mode != launcherModeBootstrap {
-		t.Errorf("mode = %q, want bootstrap (no installed fact on a fresh store)", got.Mode)
-	}
-	if got.LauncherPath == nil || *got.LauncherPath == "" {
-		t.Fatal("launcherPath is nil or empty; the real launcher must be staged and named")
-	}
-	if got.Reason != nil {
-		t.Errorf("reason = %q, want nil when a path is present", *got.Reason)
-	}
-	// The environment id is fresh per attempt and never the tab session id.
-	if got.EnvironmentID == "" {
-		t.Error("environmentId is empty; the planner must mint one per attempt")
-	}
-	if got.EnvironmentID == sid {
-		t.Error("environmentId equals the tab session id; two attempts would be indistinguishable")
-	}
-	// The path is shell-quoted: the renderer splices it into a shell line.
-	if !strings.HasPrefix(*got.LauncherPath, "'") || !strings.HasSuffix(*got.LauncherPath, "'") {
-		t.Errorf("launcherPath not shell-quoted: %q", *got.LauncherPath)
-	}
-
-	// The oracle saw the exact typed argv, options included.
-	if len(resolver.lastArgv) != 5 || resolver.lastArgv[0] != "ssh" || resolver.lastArgv[1] != "-G" ||
-		resolver.lastArgv[2] != "-p" || resolver.lastArgv[3] != "2222" || resolver.lastArgv[4] != "testhost" {
-		t.Errorf("oracle argv = %v, want [ssh -G -p 2222 testhost] as typed", resolver.lastArgv)
-	}
-
-	// The response carries a PATH, not a payload. This is the whole fix:
-	// the launcher is ~35 KB and the line the renderer types has only the
-	// tty, whose canonical buffer is 4096 bytes. A response that grew back
-	// into a payload would truncate on the wire into the shell again.
-	if n := len(resp.Result); n > 512 {
-		t.Errorf("result is %d bytes; shell.launcherCommand must return a path, not the launcher", n)
-	}
-
-	// And the file it names holds the real launcher, byte for byte, with
-	// the freshly minted environment id embedded (NOCX_ENVIRONMENT_ID).
-	staged := strings.Trim(*got.LauncherPath, "'")
-	body, err := os.ReadFile(staged) // #nosec G304 — path came from our own stager.
-	if err != nil {
-		t.Fatalf("read staged launcher at %s: %v", staged, err)
-	}
-	wantLauncher, _, ok := shellintegration.NewRemoteLauncher().StartCommand(
-		shellintegration.ShellAuto,
-		shellintegration.LaunchOptions{
-			SessionID:     sid,
-			Enhanced:      true,
-			EnvironmentID: got.EnvironmentID,
-		},
-	)
-	if !ok {
-		t.Fatal("the real RemoteLauncher refused ShellAuto")
-	}
-	if string(body) != wantLauncher {
-		t.Errorf("staged launcher differs from the product's: got %d bytes, want %d", len(body), len(wantLauncher))
-	}
-	// The equality above is the embed proof: a handler that passed a
-	// different or empty environment id to the launcher would produce a
-	// different command, and the comparison would fail.
-
-	// A second attempt mints a SECOND environment id: the renderer's
-	// tracker can tell a stale passport from a live one.
-	second := launcherCommandCall(t, conn, sid, 3)
-	if second.EnvironmentID == got.EnvironmentID {
-		t.Error("two attempts minted the same environmentId; a stale passport would be accepted")
-	}
-
-	// Unknown sessionId is refused (AD-7).
-	unknown := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
-		"sessionId":  "0123456789abcdef0123456789abcdef",
-		"oracleArgv": []string{"ssh", "-G", "testhost"},
-	}, 4)
-	if unknown.Error == nil || unknown.Error.Code != -32602 {
-		t.Fatalf("unknown sessionId: got %+v, want -32602", unknown.Error)
-	}
-
-	// Missing or malformed params are rejected.
-	missing := vaultCall(t, conn, "shell.launcherCommand", map[string]any{}, 5)
-	if missing.Error == nil || missing.Error.Code != -32602 {
-		t.Fatalf("missing params: got %+v, want -32602", missing.Error)
-	}
-	badArgv := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
-		"sessionId":  sid,
-		"oracleArgv": []string{"scp", "-G", "testhost"},
-	}, 6)
-	if badArgv.Error == nil || badArgv.Error.Code != -32602 {
-		t.Fatalf("malformed oracleArgv: got %+v, want -32602", badArgv.Error)
-	}
-}
-
-// ── shell.environmentObserved ───────────────────────────────────────────────
-
-func TestShellEnvironmentObserved_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "shell.environmentObserved.schema.json")
-
-	raw, err := json.Marshal(environmentObservedResult{Processed: true, FactUpdated: true})
-	if err != nil {
-		t.Fatalf("marshal recorded: %v", err)
-	}
-	validateJSON(t, schema, raw, "shell.environmentObserved DTO (recorded)")
-
-	raw, err = json.Marshal(environmentObservedResult{Processed: false, FactUpdated: false})
-	if err != nil {
-		t.Fatalf("marshal unknown: %v", err)
-	}
-	validateJSON(t, schema, raw, "shell.environmentObserved DTO (unknown id)")
-}
-
-// OverTheWire: the real handler, the real launcher and stager, a stub
-// resolver, and a real fact store — an accepted passport for a minted
-// attempt records the fact, and a duplicate report is a no-op.
-func TestShellEnvironmentObserved_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "shell.environmentObserved.schema.json")
-	ctx := context.Background()
-
-	ws := NewWSServer(
-		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithRemoteLauncher(&realRemoteLauncher{}),
-		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), t.TempDir())),
-		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
-		WithInstalledFactStore(ssh.NewInstalledFactStore(
-			log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "installed-facts.json")),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	sid := openSessionForLauncher(t, conn)
-	first := launcherCommandCall(t, conn, sid, 2)
-	if first.Mode != launcherModeBootstrap {
-		t.Fatalf("first attempt mode = %q, want bootstrap", first.Mode)
-	}
-
-	passport := map[string]any{
-		"protocolVersion":     "1",
-		"environmentId":       first.EnvironmentID,
-		"parentEnvironmentId": "-",
-		"scriptVersion":       "0.6.0",
-		"tier":                "enhanced",
-		"generation":          "v10",
-	}
-	resp := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
-		"environmentId": first.EnvironmentID,
-		"passport":      passport,
-	}, 3)
-	if resp.Error != nil {
-		t.Fatalf("shell.environmentObserved: %+v", resp.Error)
-	}
-	validateJSON(t, schema, resp.Result, "shell.environmentObserved result (real socket)")
-	var got environmentObservedResult
-	if err := json.Unmarshal(resp.Result, &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !got.Processed || !got.FactUpdated {
-		t.Errorf("first observation = %+v, want processed+factUpdated", got)
-	}
-
-	// The next launcherCommand takes the compact line: the fact was written.
-	second := launcherCommandCall(t, conn, sid, 4)
-	if second.Mode != launcherModeInstalled {
-		t.Errorf("second attempt mode = %q, want installed after the passport was accepted", second.Mode)
-	}
-
-	// A duplicate observation satisfies the schema and changes nothing.
-	dup := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
-		"environmentId": first.EnvironmentID,
-		"passport":      passport,
-	}, 5)
-	if dup.Error != nil {
-		t.Fatalf("duplicate observation: %+v", dup.Error)
-	}
-	validateJSON(t, schema, dup.Result, "shell.environmentObserved duplicate (real socket)")
-
-	// An unknown id is processed=false, and still satisfies the schema.
-	unknown := vaultCall(t, conn, "shell.environmentObserved", map[string]any{
-		"environmentId": "00000000000000000000000000000000",
-		"passport":      nil,
-	}, 6)
-	if unknown.Error != nil {
-		t.Fatalf("unknown-id observation: %+v", unknown.Error)
-	}
-	validateJSON(t, schema, unknown.Result, "shell.environmentObserved unknown-id (real socket)")
-
-	// Missing params are rejected.
-	missing := vaultCall(t, conn, "shell.environmentObserved", map[string]any{}, 7)
-	if missing.Error == nil || missing.Error.Code != -32602 {
-		t.Fatalf("missing params: got %+v, want -32602", missing.Error)
-	}
-}
-
-// No resolver wired: the oracle is missing, so the rewrite is refused with
-// "oracle-failed" (nocx-qwhp) rather than a silent bypass — a rewrite built
-// without the oracle's answer is a guess. The renderer sends the original
-// line.
-func TestShellLauncherCommand_NoResolverRefuses(t *testing.T) {
-	ctx := context.Background()
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	sid := openSessionForLauncher(t, conn)
-	got := launcherCommandCall(t, conn, sid, 2)
-	if got.Mode != launcherModeRaw {
-		t.Errorf("mode = %q, want raw", got.Mode)
-	}
-	if got.LauncherPath != nil {
-		t.Errorf("launcherPath = %q, want nil when the oracle is missing", *got.LauncherPath)
-	}
-	if got.Reason == nil || *got.Reason != "oracle-failed" {
-		t.Errorf("reason = %v, want oracle-failed", got.Reason)
-	}
-}
-
-// Launcher and stager not wired: with a working oracle the bootstrap path
-// has nowhere to put the payload, so the handler refuses with "unsupported".
-func TestShellLauncherCommand_LauncherNotWiredRefuses(t *testing.T) {
-	ctx := context.Background()
-	ws := NewWSServer(
-		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	sid := openSessionForLauncher(t, conn)
-	got := launcherCommandCall(t, conn, sid, 2)
-	if got.LauncherPath != nil {
-		t.Errorf("launcherPath = %q, want nil when not wired", *got.LauncherPath)
-	}
-	if got.Reason == nil || *got.Reason != "unsupported" {
-		t.Errorf("reason = %v, want unsupported", got.Reason)
-	}
-}
-
-// The launcher builds but cannot be staged: without a place the LOCAL shell
-// can read, there is no rewrite to make. The handler says so rather than
-// returning a path that does not exist, and the renderer sends the line the
-// user typed (ADR-0004 §1). This is the failure path that did not exist
-// while the payload travelled inline.
-func TestShellLauncherCommand_StageFailureRefuses(t *testing.T) {
-	ctx := context.Background()
-
-	// A regular file where the staging directory must go.
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".nocx"), []byte("not a directory"), 0o600); err != nil {
-		t.Fatalf("write blocker: %v", err)
-	}
-
-	ws := NewWSServer(
-		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithRemoteLauncher(&realRemoteLauncher{}),
-		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), home)),
-		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	sid := openSessionForLauncher(t, conn)
-	got := launcherCommandCall(t, conn, sid, 2)
-	if got.LauncherPath != nil {
-		t.Errorf("launcherPath = %q, want nil when staging failed", *got.LauncherPath)
-	}
-	if got.Reason == nil || *got.Reason != "stage-failed" {
-		t.Errorf("reason = %v, want stage-failed", got.Reason)
-	}
-}
-
-// A stager without a launcher, and a launcher without a stager, are both
-// "we cannot build a rewrite" — neither may answer with a path.
-func TestShellLauncherCommand_StagerWithoutLauncherRefuses(t *testing.T) {
-	ctx := context.Background()
-	ws := NewWSServer(
-		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
-		WithLauncherStager(shellintegration.NewLauncherStager(log.NewSlogAdapter(nil), t.TempDir())),
-		WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"),
-	)
-	if err := ws.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer func() { _ = ws.Stop(ctx) }()
-	conn := connectWS(t, ws)
-	defer func() { _ = conn.Close() }()
-
-	sid := openSessionForLauncher(t, conn)
-	got := launcherCommandCall(t, conn, sid, 2)
-	if got.LauncherPath != nil {
-		t.Errorf("launcherPath = %q, want nil without a launcher", *got.LauncherPath)
-	}
-	if got.Reason == nil || *got.Reason != "unsupported" {
-		t.Errorf("reason = %v, want unsupported", got.Reason)
-	}
-}
-
-// openSessionForLauncher opens a local session and returns its id.
-func openSessionForLauncher(t *testing.T, conn *websocket.Conn) string {
-	t.Helper()
-	openResp := vaultCall(t, conn, "open", map[string]any{
-		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
-	}, 1)
-	if openResp.Error != nil {
-		t.Fatalf("open: %+v", openResp.Error)
-	}
-	var opened struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
-		t.Fatalf("decode open result: %v", err)
-	}
-	return opened.SessionID
-}
-
-// launcherCommandCall makes one shell.launcherCommand call and decodes it.
-func launcherCommandCall(t *testing.T, conn *websocket.Conn, sid string, id int) shellLauncherCommandResult {
-	t.Helper()
-	resp := vaultCall(t, conn, "shell.launcherCommand", map[string]any{
-		"sessionId":  sid,
-		"oracleArgv": []string{"ssh", "-G", "testhost"},
-	}, id)
-	if resp.Error != nil {
-		t.Fatalf("shell.launcherCommand: %+v", resp.Error)
-	}
-	var got shellLauncherCommandResult
-	if err := json.Unmarshal(resp.Result, &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	return got
-}
-
-// realRemoteLauncher is the production adapter in miniature: it returns
-// the real launcher command so the over-the-wire test exercises the real
-// payload the renderer will append.
-type realRemoteLauncher struct{}
-
-func (realRemoteLauncher) StartCommand(kind ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.RefusalReason, bool) {
-	// Use the real shellintegration launcher, adapted through the ssh types.
-	// The composition root adapts shellintegration.RemoteLauncher to
-	// ssh.RemoteLauncher; for the test we call the real one directly.
-	l := shellintegration.NewRemoteLauncher()
-	// Map the ssh ShellKind to the shellintegration ShellKind.
-	var sk shellintegration.ShellKind
-	switch kind {
-	case ssh.ShellBash:
-		sk = shellintegration.ShellBash
-	case ssh.ShellZsh:
-		sk = shellintegration.ShellZsh
-	case ssh.ShellUnknown:
-		sk = shellintegration.ShellUnknown
-	case ssh.ShellAuto:
-		sk = shellintegration.ShellAuto
-	default:
-		return "", ssh.ReasonUnsupportedShell, false
-	}
-	lo := shellintegration.LaunchOptions{
-		SessionID:     opts.SessionID,
-		Enhanced:      opts.Enhanced,
-		EnvironmentID: opts.EnvironmentID,
-	}
-	cmd, reason, ok := l.StartCommand(sk, lo)
-	return cmd, ssh.RefusalReason(reason), ok
-}
-
 // ── shell.footprint.status ────────────────────────────────────────────────
 
 func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
@@ -3176,7 +2717,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
 
-	waitFor(t, "watch baseline", 5*time.Second, func() bool {
+	waitFor(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -3188,7 +2729,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "changed.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	waitFor(t, "dirty path", 5*time.Second, func() bool {
+	waitFor(t, "dirty path", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok := w.dirty[dir]
@@ -3211,7 +2752,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("attach: %+v", atEnv.Error)
 	}
 
-	raw := readNotification(t, connB, "files.changed", 5*time.Second)
+	raw := readNotification(t, connB, "files.changed", wantWithin)
 	validateJSON(t, schema, raw, "files.changed params (real socket)")
 
 	var params filesChangedParams
@@ -3832,7 +3373,7 @@ func TestGitChanged_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("close: %+v", closeEnv.Error)
 	}
 
-	raw := readNotification(t, e.conn, "git.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "git.changed", wantWithin)
 	validateJSON(t, schema, raw, "git.changed params (real socket)")
 	var params gitChangedParams
 	if err := json.Unmarshal(raw, &params); err != nil {
@@ -3843,5 +3384,493 @@ func TestGitChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if params.Reason != "sessionClosed" {
 		t.Errorf("reason = %q, want sessionClosed", params.Reason)
+	}
+}
+
+// ── lifecycle.changed ─────────────────────────────────────────────────────
+
+// The lifecycle.changed notification gets the same three checks as a method
+// (AGENTS.md rule 5; ADR-0024 decision 7). It is the published fact of the
+// authenticated lifecycle protocol — what the kernel concluded, projected by
+// internal/lifecyclepub — and an unsolicited notification is exactly where an
+// addressing or shape defect hides. Its schema covers the params object only,
+// exactly as files.changed's and git.changed's do.
+
+func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.changed.schema.json")
+	started := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	completed := started.Add(2 * time.Second)
+	code := 0
+	code3 := 3
+	fence := strings.Repeat("51", 32)
+	cases := map[string]lifecyclepub.Fact{
+		// The handshake's product: PromptReady(domain), carrying the domain
+		// and its epoch — the fact the frontend keys enhanced mode on.
+		"prompt ready": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecyclePromptReady,
+			Domain: "dom-1", Epoch: 3,
+		},
+		// An app-originated attempt awaiting its authenticated start.
+		"running open attempt": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptOpen,
+				Command: "make", Origin: lifecyclepub.OriginApp, StartedAt: started,
+			},
+		},
+		// The completion: exit status, completion timestamp and the render
+		// fence present exactly when the attempt completed.
+		"completed attempt": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptCompleted,
+				Command: "make", Origin: lifecyclepub.OriginApp,
+				StartedAt: started, ExitCode: &code, CompletedAt: &completed, Fence: fence,
+			},
+		},
+		// A non-zero exit status must survive the wire.
+		"completed with nonzero exit": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptCompleted,
+				Command: "false", Origin: lifecyclepub.OriginShell,
+				StartedAt: started, ExitCode: &code3, CompletedAt: &completed, Fence: fence,
+			},
+		},
+		// An ssh child domain names where it is (nocx-ax79): the
+		// destination its parent's domain_request carried, and nothing the
+		// user typed (ADR-0025). Descriptive, never authority — the wire
+		// test below is what proves the capability still never travels.
+		"ssh child names its destination": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecyclePromptReady,
+			Domain: "dom-2", Epoch: 4,
+			Destination: &lifecyclepub.Destination{Host: "192.168.0.93", User: "pi", Port: 22},
+		},
+		// A destination with no user and no port: the ssh client resolves
+		// its own defaults, which nocx does not model, so the fact says only
+		// what the request said.
+		"destination host only": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecyclePromptReady,
+			Domain: "dom-2", Epoch: 4,
+			Destination: &lifecyclepub.Destination{Host: "build-box"},
+		},
+		// Abandoned: the lane stays running, the attempt is unknown, and no
+		// exit status is invented.
+		"abandoned attempt": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleRunning,
+			Domain: "dom-1", Epoch: 3,
+			Attempt: &lifecyclepub.Attempt{
+				ID: "att-1", State: lifecyclepub.AttemptUnknown,
+				Command: "sleep 1000", Origin: lifecyclepub.OriginShell, StartedAt: started,
+			},
+		},
+		// A lane with no live domain: no domain, no epoch, no attempt.
+		"native lane": {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleNative},
+		"lost lane":   {Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleLost},
+		// A lost lane opening a restoration episode (ADR-0024 decision 8):
+		// the recovery contract rides the fact, carrying both halves of the
+		// composite ack — the fence to match and the generation to echo.
+		"lost with recovery": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecycleLost,
+			Recovery: &lifecyclepub.Recovery{
+				Fence:      strings.Repeat("51", 32),
+				Generation: strings.Repeat("51", 32),
+			},
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			n := lifecycleChangedNotification{
+				JSONRPC: "2.0",
+				Method:  "lifecycle.changed",
+				Params:  params,
+			}
+			raw, err := json.Marshal(n)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var frame struct {
+				Params json.RawMessage `json:"params"`
+			}
+			if err := json.Unmarshal(raw, &frame); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			validateJSON(t, schema, frame.Params, "lifecycle.changed DTO")
+		})
+	}
+}
+
+// The over-the-wire notification test: the real publisher, the real server,
+// the real socket. The publisher is driven with authenticated envelopes
+// exactly as a lifecycle adapter would (the kernel's own test seam — the
+// adapter is proven separately in internal/lifecyclechannel); everything from
+// the projection to the writeJSON frame is the production code path. This is
+// the test that catches the server not sending what the DTO could have.
+func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.changed.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t)
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
+	validateJSON(t, schema, raw, "lifecycle.changed params (real socket)")
+	var params lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if params.Lifecycle != lifecyclepub.LifecyclePromptReady {
+		t.Errorf("lifecycle = %q, want prompt_ready", params.Lifecycle)
+	}
+	if params.Domain != string(h.Domain) || params.Epoch != h.Epoch {
+		t.Errorf("domain/epoch = %q/%d, want %q/%d", params.Domain, params.Epoch, h.Domain, h.Epoch)
+	}
+}
+
+// lifecycleRecordingPort records every outbound envelope the publisher
+// flushed to the transport, for the decision-9 acceptance assertions.
+type lifecycleRecordingPort struct {
+	mu   sync.Mutex
+	sent []lifecycle.Envelope
+}
+
+func (r *lifecycleRecordingPort) Send(env lifecycle.Envelope) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent = append(r.sent, env)
+	return nil
+}
+
+func (r *lifecycleRecordingPort) kinds() []lifecycle.EventKind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]lifecycle.EventKind, 0, len(r.sent))
+	for _, e := range r.sent {
+		out = append(out, e.Event.Kind)
+	}
+	return out
+}
+
+// ── lifecycle.recoverAck (ADR-0024 decision 8) ───────────────────────────
+
+// The DTO's own conformance: the result is exactly {ok: true} — the schema
+// pins the key set and the value, so a future refactor that adds fields to
+// the acknowledgement (a domain, an epoch, an attempt, a status) fails here
+// before any renderer could depend on it. The params' narrowness (session
+// identity + generation, nothing else) is enforced by the handler's
+// rejection tests and by the over-the-wire call below.
+func TestLifecycleRecoverAck_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.recoverAck.schema.json")
+	raw, err := json.Marshal(map[string]bool{"ok": true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "lifecycle.recoverAck DTO")
+}
+
+// The real method through the real socket: a lost lane with a pending
+// restoration episode, the renderer's exact two-field payload, and the
+// actual result bytes validated against the schema.
+func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.recoverAck.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
+	if err := pub.TransportLost("T"); err != nil {
+		t.Fatalf("TransportLost: %v", err)
+	}
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
+	var lost lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &lost); err != nil {
+		t.Fatalf("decode lost: %v", err)
+	}
+	if lost.Recovery == nil {
+		t.Fatal("a live session's lost fact must carry the recovery contract")
+	}
+
+	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.recoverAck", map[string]any{
+		"sessionId": sid, "generation": lost.Recovery.Generation,
+	}, 2)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("recoverAck: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if env.Error != nil {
+		t.Fatalf("recoverAck: %+v", env.Error)
+	}
+	validateJSON(t, schema, env.Result, "lifecycle.recoverAck result (real socket)")
+}
+
+// ── lifecycle.establishAck (ADR-0024 decision 9) ─────────────────────────
+
+// The DTO's own conformance: the result is exactly {ok: true} — the schema
+// pins the key set and the value, so a future refactor that adds fields to
+// the acknowledgement fails here before any renderer could depend on it.
+func TestLifecycleEstablishAck_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.establishAck.schema.json")
+	raw, err := json.Marshal(map[string]bool{"ok": true})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "lifecycle.establishAck DTO")
+}
+
+// The real method through the real socket: a pending establishment, the
+// renderer's exact five-field payload (the generation the published fact
+// carried), the actual result bytes validated against the schema — and the
+// accept reaching the transport ONLY after that acknowledgement, never
+// before (decision 9).
+func TestLifecycleEstablishAck_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.establishAck.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	port := &lifecycleRecordingPort{}
+	if err := pub.BindTransport("T", port); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
+	var ready lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &ready); err != nil {
+		t.Fatalf("decode prompt_ready: %v", err)
+	}
+	if ready.Generation == "" {
+		t.Fatal("the published prompt_ready fact must carry the establishment generation")
+	}
+	// No acknowledgement yet: the accept has not reached the transport.
+	if got := port.kinds(); len(got) != 0 {
+		t.Fatalf("accept flushed before the acknowledgement: %v", got)
+	}
+	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.establishAck", map[string]any{
+		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
+		"epoch": h.Epoch, "generation": ready.Generation,
+	}, 2)
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("establishAck: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if env.Error != nil {
+		t.Fatalf("establishAck: %+v", env.Error)
+	}
+	validateJSON(t, schema, env.Result, "lifecycle.establishAck result (real socket)")
+	// The acknowledgement was the closing event: the accept went out once.
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("after ack: %v, want exactly one accept", got)
+	}
+}
+
+// TestLifecycleEstablishAck_ReplacedSubscriberCantRelease: an old
+// connection's acknowledgement must not release an accept after the
+// subscriber has been replaced (decision 9; the brief's frontend-reconnect
+// item). connA opens the session and the establishment is pending; connB
+// attaches (the subscriber slot moves to connB); connA's late ack is
+// refused — only connB's ack flushes.
+func TestLifecycleEstablishAck_ReplacedSubscriberCantRelease(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	connA := e.conn
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	port := &lifecycleRecordingPort{}
+	if err := pub.BindTransport("T", port); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	raw := readNotification(t, connA, "lifecycle.changed", wantWithin)
+	var ready lifecyclepub.Fact
+	if err := json.Unmarshal(raw, &ready); err != nil {
+		t.Fatalf("decode prompt_ready: %v", err)
+	}
+
+	// connB attaches to the session: it becomes the current subscriber.
+	connB := connectWS(t, e.ws)
+	defer func() { _ = connB.Close() }()
+	at := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": sid, "offset": 0}, 7)
+	var atEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(at, &atEnv); err != nil {
+		t.Fatalf("attach: unmarshal: %v", err)
+	}
+	if atEnv.Error != nil {
+		t.Fatalf("attach: %+v", atEnv.Error)
+	}
+
+	// connA's late ack must not release the accept: it is no longer the
+	// subscriber.
+	resp := jsonrpcCallWithID(t, connA, "lifecycle.establishAck", map[string]any{
+		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
+		"epoch": h.Epoch, "generation": ready.Generation,
+	}, 8)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("old ack: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if env.Error == nil {
+		t.Fatal("a replaced connection's ack must be refused")
+	}
+	if got := port.kinds(); len(got) != 0 {
+		t.Fatalf("old connection's ack flushed the accept: %v", got)
+	}
+
+	// The current subscriber's ack (after its attach replay) is the only
+	// one that flushes.
+	_ = readNotification(t, connB, "lifecycle.changed", wantWithin) // the attach replay
+	resp = jsonrpcCallWithID(t, connB, "lifecycle.establishAck", map[string]any{
+		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
+		"epoch": h.Epoch, "generation": ready.Generation,
+	}, 9)
+	// A FRESH struct: unmarshaling a success does not clear the Error
+	// pointer of the struct connA's refusal populated.
+	var env2 struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env2); err != nil {
+		t.Fatalf("new ack: unmarshal: %v", err)
+	}
+	if env2.Error != nil {
+		t.Fatalf("current subscriber's ack: %+v", env2.Error)
+	}
+	if got := port.kinds(); len(got) != 1 || got[0] != lifecycle.KindAccept {
+		t.Fatalf("after current ack: %v, want exactly one accept", got)
+	}
+}
+
+// ── lifecycle.submitAttempt ────────────────────────────────────────────────
+
+// The DTO's own conformance: field tags, enum spelling, and the exact key
+// set (additionalProperties:false plus required makes it exact in both
+// directions). The state is always "open" and the origin always "app" —
+// this call is the app-originated half of decision 5 — and cwd and host are
+// present even when empty (a local session has no host).
+func TestLifecycleSubmitAttempt_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.submitAttempt.schema.json")
+	started := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	cases := map[string]lifecycleSubmitAttemptResult{
+		// An SSH session: host and cwd both known.
+		"remote attempt": {
+			ID: "att-1", Domain: "dom-1", State: lifecyclepub.AttemptOpen,
+			Command: "make", Cwd: "/srv/app", Host: "build.example.com",
+			Origin: lifecyclepub.OriginApp, StartedAt: started,
+		},
+		// A local session: no host, and the cwd may be unknown.
+		"local attempt": {
+			ID: "att-2", Domain: "dom-2", State: lifecyclepub.AttemptOpen,
+			Command: "ls", Cwd: "", Host: "",
+			Origin: lifecyclepub.OriginApp, StartedAt: started,
+		},
+	}
+	for name, dto := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "lifecycle.submitAttempt DTO")
+		})
+	}
+}
+
+// The real method through the real socket: a live domain at a ready prompt,
+// the renderer's exact payload, and the actual result bytes validated
+// against the schema. Nothing here names a field, so nothing here can omit
+// one — a future refactor that drops cwd, host or origin from the response
+// fails right here.
+func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "lifecycle.submitAttempt.schema.json")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-1")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h, e.conn)
+
+	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", map[string]string{
+		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+	}, 41)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("submitAttempt: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("submitAttempt: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "lifecycle.submitAttempt result (real socket)")
+
+	// The result is not just schema-shaped: it is the actual kernel attempt,
+	// and the domain the renderer addressed is the one the attempt opened on.
+	var got lifecycleSubmitAttemptResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Domain != string(h.Domain) {
+		t.Errorf("domain = %q, want %q", got.Domain, h.Domain)
+	}
+	if att, ok := kernel.Attempt(lifecycle.AttemptID(got.ID)); !ok || att.Command != "make" {
+		t.Errorf("kernel attempt = %+v (ok=%v), want the submitted command", att, ok)
 	}
 }

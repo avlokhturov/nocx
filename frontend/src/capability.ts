@@ -1,3 +1,6 @@
+import type { IntegrationDomain } from './lifecycle/domains'
+import type { LifecycleState } from './lifecycle/state'
+
 // Three independent axes replaced the single 'capability' value on
 // 2026-08-04, after codex diagnosed the root cause of the rejected rail's
 // offer-gate disagreement (nocx-atyf.1).
@@ -49,6 +52,8 @@ export type ShellState =
   // yet authorised for this destination
   | 'integrating' // In-band bootstrap is running
   | 'integrated' // Shell is fully integrated and providing markers
+  | 'handover' // No domain owns the lane, but one is suspended below:
+  // ownership is passing between two domains (nocx-mlyu)
   | 'lost' // Markers stopped unexpectedly (nested env, broken hook)
   | 'failed' // Integration attempt failed
 
@@ -64,10 +69,7 @@ export type InputPresentation = 'editor' | 'terminal'
  *  authorisation and technical eligibility are resolved — never disabled
  *  and never rejected at click time. */
 export type RecoveryAction =
-  | { kind: 'integrate'; label: string }
-  | { kind: 'enable-editor'; label: string }
-  | { kind: 'retry-integration'; label: string }
-  | { kind: 'restore-editor'; label: string }
+  { kind: 'enable-editor'; label: string } | { kind: 'restore-editor'; label: string }
 
 /** The facts the action set is derived from. Authorisation and technical
  *  eligibility are separate gates, resolved BEFORE the action set is
@@ -91,21 +93,15 @@ export interface ActionFacts {
  * a chip or menu item should appear at all.
  */
 export function deriveActions(f: ActionFacts): RecoveryAction[] {
+  // SEVERED (ADR-0024 §4): there is no in-band fallback tier, so no action
+  // may offer integration or retry — a click that toasts "unavailable" is
+  // exactly the disabled-then-rejected anti-pattern this module exists to
+  // prevent. The integrate/retry branches are deleted with the in-band
+  // machinery (nocx-u7uh.1); the migration bead reconnects the remaining
+  // editor-presentation actions to authenticated facts.
   if (!f.authorized || !f.eligible) return []
 
   const actions: RecoveryAction[] = []
-
-  // A shell that has never been integrated: offer the integration path.
-  if (f.shellState === 'unsupported' || f.shellState === 'eligible') {
-    actions.push({ kind: 'integrate', label: 'Integrate this shell' })
-    return actions
-  }
-
-  // A failed integration: offer retry.
-  if (f.shellState === 'failed') {
-    actions.push({ kind: 'retry-integration', label: 'Retry integration' })
-    return actions
-  }
 
   // Integrated but the user is in terminal input: offer to switch back.
   if (f.shellState === 'integrated' && f.presentation === 'terminal') {
@@ -123,18 +119,50 @@ export function deriveActions(f: ActionFacts): RecoveryAction[] {
   return actions
 }
 
+/** Does the pane fall back to the conventional, unstructured grid? Exactly
+ *  when no domain owns the lane and none is waiting below it. A handover is
+ *  the carve-out (nocx-mlyu): ownership is PASSING between two domains, not
+ *  absent, so the structured presentation stays up. Tearing it down there
+ *  is what showed the whole terminal buffer — the previous attempt's output
+ *  and its password prompt — twice per nested session. */
+export function fallsToConventionalGrid(state: ShellState): boolean {
+  return state !== 'integrated' && state !== 'handover'
+}
+
 // ── Derivation helpers ─────────────────────────────────────────────────
 
-/** Derive the observed shell state from the facts the renderer holds. */
-export function deriveShellState(opts: {
-  integrated: boolean
-  integrating: boolean
-  integrationFailed: boolean
-  trusted: boolean
-}): ShellState {
-  if (opts.integrating) return 'integrating'
-  if (opts.integrationFailed) return 'failed'
-  if (!opts.integrated) return 'unsupported'
-  if (!opts.trusted) return 'lost'
-  return 'integrated'
+/** Derive the observed shell state from the kernel's lifecycle axis
+ *  (ADR-0024 §6, the projection bead nocx-u7uh.7). The kernel is fed ONLY
+ *  by the published fact, so this is what the authenticated channel
+ *  concluded: a live domain — at a ready prompt or running an attempt — is
+ *  the kernel's word that the shell is integrated; a Desynchronized domain
+ *  is not live (decision 9) and Lost is dead, both reported as lost.
+ *  Stream-derived markers never reach this derivation, and the boolean
+ *  `trusted` it replaced is deleted.
+ *
+ *  Native alone cannot answer the question, which is why the lane's domain
+ *  stack is the second argument (nocx-mlyu). The published fact says
+ *  'native' for three different conditions — the shell never integrated,
+ *  the active domain suspended, the top domain closed — and the renderer
+ *  cannot tell them apart from the fact (protocol §9). The stack can: a
+ *  suspended domain still sits on it, so Native over a non-empty stack is
+ *  a handover between two domains, and only Native over an EMPTY stack is
+ *  a genuinely conventional terminal. Answering the handover with
+ *  'unsupported' is what tore the structured presentation down twice per
+ *  nested ssh and showed the whole terminal buffer. A lane that fell to
+ *  Lost has an emptied stack, so it stays lost. */
+export function shellStateFromLifecycle(
+  state: LifecycleState,
+  stack: readonly IntegrationDomain[],
+): ShellState {
+  switch (state.kind) {
+    case 'prompt_ready':
+    case 'running':
+      return 'integrated'
+    case 'desynchronized':
+    case 'lost':
+      return 'lost'
+    case 'native':
+      return stack.length > 0 ? 'handover' : 'unsupported'
+  }
 }

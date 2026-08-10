@@ -228,7 +228,7 @@ export class WSClient {
   // Ack throttle: one per session.
   private acks = new Map<string, AckThrottle>()
 
-  constructor(private dispatcher: Dispatcher) {
+  constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
       const ws = this.dispatcher.socket!
@@ -306,6 +306,14 @@ export class WSClient {
     })
   }
 
+  /** The shared control-plane dispatcher (the sealed-access seam installed
+   *  at the app root). Exposed for server-initiated notification
+   *  subscriptions (lifecycle.changed) that ride the same socket; RPC stays
+   *  behind the typed methods above. */
+  get dispatcher(): Dispatcher {
+    return this.dispatcherImpl
+  }
+
   // connect resolves when the WebSocket handshake completes. Sessions are
   // not open yet — call openSession() next to get a SessionHandle. The host
   // defaults to loopback (the Wails shell serves the page locally); the
@@ -366,17 +374,21 @@ export class WSClient {
   // SessionHandle carrying the server-assigned sessionId. Per AD-7, the
   // server assigns the authoritative id — nothing may be sent on the data
   // plane for this session before this resolves.
-  // enhanced tells the backend to spawn the shell in marker-only prompt mode
-  // (ADR-0006); the frontend wires the editor BEFORE this call so no invisible
+  //
+  // Whether the session tries to become integrated is NOT ours to say
+  // (nocx-tr2n): the backend asks for every session and falls back to a
+  // plain terminal where it cannot. It used to be an `enhanced` argument
+  // here, which both ssh openers below silently omitted — so an ssh tab
+  // never established a lifecycle channel and could never show a block. The
+  // renderer still wires the editor BEFORE this call, so no invisible
   // prompt gap can occur (nocx-4ff.10).
-  openSession(cols: number, rows: number, enhanced: boolean): Promise<SessionHandle> {
+  openSession(cols: number, rows: number): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
         ypixel: 0,
-        enhanced,
       })
       .then((result) => this._registerHandle(result))
   }

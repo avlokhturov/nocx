@@ -1,11 +1,18 @@
 // DOM scrollback controller — wires the renderer's OSC 133 markers to block
 // creation, manages the live region visibility, alt-screen transitions, and
 // `clear` detection. Owns the scrollback DOM structure inside the pane.
+//
+// ADR-0024 (bead nocx-u7uh.7): the block model is an attempt projection —
+// the freeze/abandon paths below are driven by authenticated attempts, never
+// by OSC 133 C/D (which the renderer now treats as render-only). The
+// authority checks (kernel freezeBlock) run at the composition site; these
+// methods paint the attempt's verdict.
 
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type GetLineFn } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
-
+import { publishCellMetric } from './cell-metric'
+import type { ExecutionAttempt } from '../lifecycle/state'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 export interface ScrollbackControllerOpts {
@@ -91,6 +98,39 @@ export class ScrollbackController {
     this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
       now,
       snapshotStore: opts.snapshotStore,
+      // A DEFERRED freeze landed inside the manager (the fence arrived, or
+      // the FENCE_DEFER_MS window elapsed): hand the block's rows to the
+      // DOM and settle the live region exactly like a direct freeze, since
+      // freezeFromAttempt already returned.
+      onDeferredFreeze: () => {
+        this._clearFrozenRows()
+        this.setIdle()
+        this._scrollToLastBlockStart()
+      },
+    })
+
+    // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────
+    // The frozen block layout must reproduce xterm's cell width exactly,
+    // so the renderer's real measurement is published as custom properties
+    // on the scrollback container (see cell-metric.ts for why the DOM
+    // cannot be trusted to match on its own). Subscribed BEFORE the
+    // renderer mounts, so the mount-end notification lands on a live
+    // subscription; the publish itself is a no-op until the renderer can
+    // measure (cellWidth 0), so the first real publish is the mount-end
+    // fire. Old blocks adopt the current geometry on every republish —
+    // deliberate, see the module comment.
+    this._renderer.onCellDimsChange?.(() => this._republishCellMetric())
+    this._republishCellMetric()
+
+    // ── Render fence rendezvous (nocx-u7uh.8, ADR-0024 §7 carve-out) ────
+    // The renderer reports where the fence landed; the block manager matches
+    // it against the pending authenticated completion. A fence in the
+    // alternate buffer has no scrollback line to serialize — ignored here.
+    // Optional on the renderer: without it, every freeze takes the defined
+    // no-fence path (defer, then settle at the current output end).
+    opts.renderer.onRenderFence?.((ev) => {
+      if (ev.buffer !== 'normal') return
+      this._blockManager.sightFence(ev.hex, ev.line)
     })
 
     // ── Follow state ─────────────────────────────────────────────────────
@@ -152,6 +192,8 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
+    // The echo shift is a running-mode property: clear it with the region.
+    this._applyEchoShift()
     this._updateSeparator()
   }
 
@@ -163,6 +205,9 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-running'
     this.xtermInner.className = 'xterm-inner'
+    // The block just opened; its echo row is the grid's top row, so the
+    // shift applies from the first frame (nocx-w1n4).
+    this._applyEchoShift()
     this._updateSeparator()
     this._scrollToBottom()
   }
@@ -180,8 +225,25 @@ export class ScrollbackController {
     this.xtermLiveContainer.className = 'xterm-live-container live-unstructured'
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
+    this._applyEchoShift()
     const max = this.scrollbackArea.clientHeight
     if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
+  }
+
+  /**
+   * The height the live region is capped at while a command runs: the
+   * scroller's client height less the running block's header, which share
+   * the viewport (nocx-6w4z). `setLiveHeight` clamps the box to this, and
+   * the grid must be fitted to the SAME number — a grid taller than the
+   * box leaves its last rows outside the clipping container, unreachable
+   * rather than merely off-screen (nocx-zn4d). Null outside `running` or
+   * when the scroller cannot be measured.
+   */
+  get runningLiveCap(): number | null {
+    if (this._mode !== 'running') return null
+    const header = this._blockManager.runningBlock?.el.getBoundingClientRect().height ?? 0
+    const max = this.scrollbackArea.clientHeight - header
+    return max > 0 ? max : null
   }
 
   /**
@@ -202,8 +264,14 @@ export class ScrollbackController {
    * Ignored outside `running`: `idle` is a zero-height region by definition and
    * `fullscreen` is owned by the alt-screen path (nocx-6w4z).
    */
+
   setLiveHeight(px: number): void {
     if (this._mode !== 'running') return
+    // nocx-w1n4: the echoed command line leaves the LIVE region the same
+    // way it leaves the frozen body — the first shown row is the running
+    // block's outputStart. Applied before the height guards so a viewport
+    // scroll that leaves the box size unchanged still releases the shift.
+    this._applyEchoShift()
     if (px <= 0) return
     // The ceiling is the SCROLLER's client height, not the pane's. They are the
     // same number while a command runs — the editor takes its box away when it
@@ -213,10 +281,10 @@ export class ScrollbackController {
     // against the bare scroller instead, header plus region came to more than
     // the space available and the last rows of a program that filled the pane
     // had nowhere to be drawn — the same defect as the editor's reserved box,
-    // one element along.
-    const header = this._blockManager.runningBlock?.el.getBoundingClientRect().height ?? 0
-    const max = this.scrollbackArea.clientHeight - header
-    if (max <= 0) return
+    // one element along. This is `runningLiveCap`, the one number both the box
+    // and the grid fit to (nocx-zn4d).
+    const max = this.runningLiveCap
+    if (max === null) return
     const previous = this.xtermLiveContainer.getBoundingClientRect().height
     const h = Math.min(px, max)
     if (Math.abs(h - previous) < 0.5) return
@@ -234,6 +302,55 @@ export class ScrollbackController {
     // enough to fill the pane the header arrives at the top of its own accord
     // and can go no further (nocx-6w4z).
     if (this._following) this._scrollToBottom()
+  }
+
+  /**
+   * The vertical offset, in CSS pixels, that moves the live region's first
+   * SHOWN row to the running block's outputStart (nocx-w1n4).
+   *
+   * The frozen body already skips the shell's echo of the command: the
+   * app-owned submit opens the block before the bytes, the echo lands on
+   * the creation line, and the output range starts one row later
+   * (nocx-4yhi). The live region is the grid itself, which still holds
+   * that echoed line on the creation row — so the running block showed one
+   * row more than the frozen one will. The box clips the grid's TOP rows,
+   * which is why offsetting the measured height does nothing useful: it
+   * hides the bottom rows, never the echo. The grid itself must move.
+   *
+   * The offset is `outputStart - viewportTopLine`: exactly the rows between
+   * the top of the viewport and the first row the frozen block will
+   * contain. While the echo is the top visible row that is one cell; the
+   * moment the output outgrows the viewport and the echo scrolls above the
+   * grid, the offset drops to zero and the first real output row is left
+   * alone.
+   */
+  private _echoShiftPx(): number {
+    if (this._mode !== 'running') return 0
+    const rec = this._blockManager.runningBlock
+    if (!rec) return 0
+    const cell = this._renderer.cellHeight
+    if (!cell || cell <= 0) return 0
+    const top = this._renderer.viewportTopLine ?? 0
+    const rows = rec.outputStart - top
+    return rows > 0 ? rows * cell : 0
+  }
+
+  /** Apply the echo shift to the grid, or clear it. The write is guarded:
+   *  identical values are skipped so the per-frame sizing pass does not
+   *  rewrite the style on every chunk of output. */
+  private _applyEchoShift(): void {
+    const px = this._echoShiftPx()
+    const next = px > 0 ? `translateY(-${px}px)` : ''
+    if (this.xtermInner.style.transform === next) return
+    this.xtermInner.style.transform = next
+  }
+
+  /** Re-read the renderer's cell width and republish the frozen block
+   *  metric (nocx-yy9g). No-op while the renderer cannot measure; a
+   *  republish is cheap, so it runs on every cell-dims notification
+   *  without trying to detect whether anything actually changed. */
+  private _republishCellMetric(): void {
+    publishCellMetric(this.scrollbackInner, this._renderer.cellWidth)
   }
 
   /**
@@ -277,6 +394,7 @@ export class ScrollbackController {
     this.xtermLiveContainer.className = 'xterm-live-container live-fullscreen'
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
+    this._applyEchoShift()
     const max = this.scrollbackArea.clientHeight
     if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
   }
@@ -288,6 +406,7 @@ export class ScrollbackController {
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
+    this._applyEchoShift()
     this.scrollbackInner.classList.remove('inner-fullscreen-mode')
     this._updateSeparator()
   }
@@ -307,11 +426,36 @@ export class ScrollbackController {
    * Called at editor submit time (nocx-atyf.4): start a running block
    * from the app-owned half of the lifecycle. The block is marked as
    * running immediately; when C arrives later the cReceived flag is set.
+   * `outputStart` is the block's OUTPUT range start — the first row
+   * serialized at freeze — which the app-owned submit sets to
+   * startLine + 1 because the shell's echo lands on the creation line
+   * (nocx-4yhi). It defaults to startLine for shell-originated blocks.
    */
-  beginBlock(command: string, cwd: string, startLine: number): void {
+  beginBlock(command: string, cwd: string, startLine: number, outputStart?: number): void {
     const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine)
+    this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
     this.setRunning()
+  }
+
+  /**
+   * Hand a frozen block's rows back to the DOM: the block's element now
+   * owns them, so they must leave the grid — otherwise the live region
+   * re-displays them below the block, and on a grid that has never
+   * scrolled every finished command's rows appear a second time inside
+   * the running one (nocx-m87n). The marker paths cleared the viewport at
+   * every freeze before the attempt-driven lifecycle; restoring that is
+   * this call.
+   *
+   * Guarded two ways. No NEWER command may own the running slot: a newer
+   * command's rows sit BELOW the frozen ones in the same buffer, and
+   * clearing would wipe its still-unserialized serialization window (the
+   * deferred-fence overlap, nocx-m87n). And an alt-screen program owns
+   * the pane: clearing would blank its screen.
+   */
+  private _clearFrozenRows(): void {
+    if (this._blockManager.runningBlock !== null) return
+    if (this._mode === 'fullscreen') return
+    this._renderer.clearViewport()
   }
 
   /**
@@ -323,6 +467,7 @@ export class ScrollbackController {
   onCommandEnd(getLine: GetLineFn, endLine: number, exitCode: number | null): void {
     const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
     if (rec) {
+      this._clearFrozenRows()
       this.setIdle()
       this._scrollToLastBlockStart()
     }
@@ -386,6 +531,73 @@ export class ScrollbackController {
   private _updateSeparator(): void {
     const hasBlocks = this._blockManager.blocks.length > 0
     this.separator.style.display = hasBlocks && this._mode !== 'fullscreen' ? '' : 'none'
+  }
+
+  /** The attempt-driven freeze (ADR-0024 §7 projection, bead nocx-u7uh.8):
+   *  the LOGICAL freeze — the block's status, exit code and attempt
+   *  binding — lands on the authenticated completion event alone (history
+   *  and the ledger have already landed); only the VISUAL boundary (which
+   *  rows belong to the block) waits for the matching render fence. When
+   *  the fence bytes have not arrived, this returns false and the live
+   *  region stays up — the manager's onDeferredFreeze settles it on the
+   *  sighting, or after FENCE_DEFER_MS at the current output end. The
+   *  authority check (kernel freezeBlock) is the caller's. */
+  freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine, () =>
+      this._renderer.cursorLine(),
+    )
+    if (rec) {
+      this._clearFrozenRows()
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
+  }
+
+  /** The attempt-driven abandonment: the attempt went `unknown`, the block
+   *  freezes as abandoned — never successful (ADR-0024 §5). */
+  abandonAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
+    if (rec) {
+      this._clearFrozenRows()
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
+  }
+
+  /** Abandon a running block that never bound to an attempt: its domain
+   *  ended before any start frame arrived, so nothing will ever complete it
+   *  (nocx-mlyu). Unknown, never successful. */
+  abandonUnbound(endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.abandonUnbound(getLine, endLine)
+    if (rec) {
+      this._clearFrozenRows()
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
+  }
+
+  /** Freeze the running block as ENTERED (nocx-95kt): the command opened a
+   *  nested environment, so it ends here, painted as neither success nor
+   *  failure, and the running slot is freed for the blocks that follow. */
+  enterBlock(endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.freezeEntered(getLine, endLine)
+    if (rec) {
+      this._clearFrozenRows()
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
   }
 
   dispose(): void {

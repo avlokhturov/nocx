@@ -79,6 +79,22 @@ fi
 unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session \
       __nocx_arm_marker_only __nocx_preexec_done __nocx_in_prompt_command \
       __nocx_first_prompt
+# The per-epoch capability, substituted into this rcfile's TEXT by the
+# launcher (@CAP@) — never exported, never in the environment. The hook
+# drops any export attribute again at source time (a user rc under
+# 'set -a' would auto-export it); an empty value means no authenticated
+# channel and a conventional session.
+__nocx_cap='@CAP@'
+export -n __nocx_cap 2>/dev/null
+# The one-shot recovery fence (ADR-0024 decision 8): substituted into this
+# rcfile's TEXT like the capability, never exported, never in the
+# environment. If the lifecycle channel dies mid-session, the shell writes
+# this fence to the pty at the next prompt boundary; nocx matches it as the
+# restoration acknowledgement. A hostile program cannot forge what it never
+# saw, and the worst a forged fence can do is force a safe transition to
+# native mode — an availability loss the ADR already accepts.
+__nocx_lc_recovery='@RECOVERY@'
+export -n __nocx_lc_recovery 2>/dev/null
 @NOCX_BASH@
 case "${__nocx_old_opts}" in *e*) set -e;; esac
 case "${__nocx_old_opts}" in *x*) set -x;; esac
@@ -117,14 +133,24 @@ unset __nocx_old_opts
 // Naming bash explicitly is the point: sshd hands the remote command to the
 // user's login shell, which may be dash, ash, csh or a restricted shell, and
 // the rcfile this writes is bash's.
+//
 // bashRcfile renders the bash rcfile from its template: @ENV@ is the session
 // environment block (launcherEnvBlock for the argv launchers, empty for the
-// launch carrier, which exports the stable variables itself before exec) and
-// @NOCX_BASH@ is the nocx.bash body — the embedded script for the argv
-// launchers, a source of the installed generation file for the carrier.
-func bashRcfile(envBlock, scriptSource string) string {
+// launch carrier, which exports the stable variables itself before exec),
+// @CAP@ is the per-epoch capability and @RECOVERY@ the one-shot recovery
+// fence — both substituted into the script text, never the environment —
+// and @NOCX_BASH@ is the nocx.bash body (embedded for the argv launchers, a
+// source of the installed generation file for the carrier).
+func bashRcfile(envBlock, scriptSource, capability, recovery string) string {
 	rc := strings.ReplaceAll(bashRcfileTemplate, "@ENV@", envBlock)
-	return strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
+	rc = strings.ReplaceAll(rc, "@CAP@", capability)
+	rc = strings.ReplaceAll(rc, "@RECOVERY@", recovery)
+	rc = strings.ReplaceAll(rc, "@NOCX_BASH@", scriptSource)
+	// The rendered rcfile ships inside the bootstrap payload, so its
+	// template comments are stripped like the generation scripts'
+	// (nocx-z9s9.17): the far shell never reads them. The strip runs on
+	// the rendered text so the substituted bodies are covered too.
+	return stripShellComments(rc)
 }
 
 // bashOuterScript is the bash tier's transport: write the rcfile to a real
@@ -181,7 +207,17 @@ func (remoteLauncher) bashArg(opts LaunchOptions) (string, bool) {
 		// ownership protocol — rather than emit one that half-works.
 		return "", false
 	}
-	return bashArgFor(bashRcfile(launcherEnvBlock(opts), bashScript)), true
+	// The rcfile SOURCES the installed generation file rather than
+	// embedding the script: the publish prelude that always precedes this
+	// tier in the full launcher has already published the bundle, so the
+	// file exists — and embedding the script would double the payload
+	// (prelude + rcfile), which the 120 KiB cap cannot absorb (measured:
+	// 171,678 bytes over the 122,880 cap before this change; ~95 KB after).
+	// A failed publish leaves NOCX_GENERATION unset, the source line names
+	// no file, and the session is a conventional terminal with a visible
+	// native prompt (ADR-0024 decision 4 — the transient-integrated middle
+	// tier is deleted, not degraded to).
+	return bashArgFor(bashRcfile(launcherEnvBlock(opts), launchSourceLine("nocx.bash"), opts.Capability, opts.Recovery)), true
 }
 
 // bashCommand builds the bash remote command: the pinned single-tier form,

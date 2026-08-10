@@ -48,6 +48,18 @@ type RemoteUninstaller interface {
 	UninstallIntegration(ctx context.Context, host string, opts ...ssh.ConnectOption) (removed, conflicts []string, err error)
 }
 
+// WithInstalledFactStore attaches the backend-owned, persisted installed
+// fact (P7, design §5.4): the memory that makes the second connection to a
+// host cheaper than the first. shell.footprint.status reads it to report
+// what nocx wrote and where; when not wired, the surface answers an empty
+// list. The observation RPC that used to WRITE the store was severed with
+// the P7 delivery surface (ADR-0024 §1 — a passport is tty bytes and cannot
+// activate a domain), so the transport only ever reads; the migration bead
+// reconnects the writers to authenticated facts.
+func WithInstalledFactStore(store *ssh.InstalledFactStore) WSServerOption {
+	return func(s *WSServer) { s.installedFacts = store }
+}
+
 // WithRemoteUninstaller attaches the uninstall capability behind the
 // shell.footprint.uninstall JSON-RPC method. Without it the method refuses:
 // an uninstall offered but not wired would fail at click time, which
