@@ -41,20 +41,27 @@ trap 'rm -rf "$TMP"' EXIT
 # name lands dangling and the next `cp` dies on "cannot stat" — which is
 # exactly how this step failed on the runner while the Dockerfile's own
 # COPY --from resolved it. -h dereferences.
+# The musl loader is named for the architecture (ld-musl-x86_64.so.1 on
+# Intel, ld-musl-aarch64.so.1 on Apple Silicon), so the name is discovered
+# rather than assumed and staged under a fixed one — hardcoding x86_64 made
+# this a no-op-then-fail on every arm64 machine.
+LOADER="$(docker run --rm --entrypoint sh bash:3.2 -c 'ls /lib/ld-musl-*.so.1 | head -1')"
+LOADER="${LOADER#/}"
+
 docker run --rm --entrypoint tar bash:3.2 \
     -ch -C / -f - \
-    usr/local/bin/bash lib/ld-musl-x86_64.so.1 usr/lib/libncursesw.so.6 \
+    usr/local/bin/bash "$LOADER" usr/lib/libncursesw.so.6 \
     | tar -x -C "$TMP"
 
 mkdir -p "$LIBDIR" "$PREFIX/bin"
 cp "$TMP/usr/local/bin/bash" "$LIBDIR/bash"
-cp "$TMP/lib/ld-musl-x86_64.so.1" "$LIBDIR/"
+cp "$TMP/$LOADER" "$LIBDIR/loader"
 cp "$TMP/usr/lib/libncursesw.so.6" "$LIBDIR/"
-chmod +x "$LIBDIR/bash"
+chmod +x "$LIBDIR/bash" "$LIBDIR/loader"
 
 cat > "$PREFIX/bin/bash32" <<EOF
 #!/bin/sh
-exec $LIBDIR/ld-musl-x86_64.so.1 --library-path $LIBDIR $LIBDIR/bash "\$@"
+exec $LIBDIR/loader --library-path $LIBDIR $LIBDIR/bash "\$@"
 EOF
 chmod +x "$PREFIX/bin/bash32"
 

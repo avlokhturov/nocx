@@ -42,27 +42,76 @@ const DEADCODE_CMD = process.env.DEADCODE || 'deadcode'
 const UNREACHABLE_RE = /^(.+?):\d+:\d+: unreachable func: (.+)$/
 
 /**
- * Run deadcode from the repo root and return the normalized violation list.
- * Deterministic: one spawn, stdout and stderr both captured, keys sorted, and
- * any output line the parser does not understand fails loudly rather than
- * silently passing (a format change in a newer deadcode must not look like a
- * clean tree). A nonzero exit is a tool failure (module does not compile, the
- * binary is missing) and is never a pass.
+ * The platforms the baseline is defined over — the two this product ships to.
+ *
+ * deadcode analyses ONE GOOS at a time, so a build-tag-gated pair
+ * (secretservice_linux.go / secretservice_other.go) only ever has one half
+ * compiled. A baseline generated on one machine therefore listed that
+ * machine's halves and nobody else's, and the other platform's halves read as
+ * NEW violations — which made the ratchet unpassable on macOS while CI, which
+ * never runs deadcode at all, said nothing (nocx-0odm). Regenerating on the
+ * other machine only mirrored the failure.
+ *
+ * The answer is to stop asking the host. Both platforms are analysed from
+ * wherever this runs, and the baseline is their UNION, so the gate gives the
+ * same answer on every machine and the "free shrink" caveat this file used to
+ * carry is gone rather than documented.
+ *
+ * CGO_ENABLED=0 for the same reason: cgo gates whole files, so leaving it to
+ * the host would reintroduce host-dependence one layer down. It is set for
+ * BOTH platforms so the two runs are comparable, and it is what makes a
+ * cross-GOOS analysis possible without a cross-compiler at all.
  */
-export function collectDeadcodeViolations() {
+const TARGET_PLATFORMS = [
+  { GOOS: 'darwin', GOARCH: 'arm64' },
+  { GOOS: 'linux', GOARCH: 'amd64' },
+]
+
+/**
+ * Run deadcode from the repo root for one platform and return its raw stdout.
+ * A nonzero exit is a tool failure (module does not compile, the binary is
+ * missing) and is never a pass.
+ */
+function runDeadcode(platform) {
   const proc = spawnSync(DEADCODE_CMD, ['./...'], {
     cwd: PROJECT_ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, ...platform, CGO_ENABLED: '0' },
   })
 
   if (proc.status !== 0) {
     const detail = (proc.stderr || proc.stdout || '').trim()
-    throw new Error(`deadcode exited ${proc.status}${detail ? `:\n${detail}` : ''}`)
+    throw new Error(
+      `deadcode exited ${proc.status} for ${platform.GOOS}/${platform.GOARCH}` +
+        `${detail ? `:\n${detail}` : ''}`,
+    )
   }
+  return proc.stdout
+}
 
+/**
+ * Return the normalized violation list: the union across TARGET_PLATFORMS,
+ * deduplicated and sorted. Deterministic, and independent of the host —
+ * stdout and stderr both captured, keys sorted, and any output line the parser
+ * does not understand fails loudly rather than silently passing (a format
+ * change in a newer deadcode must not look like a clean tree).
+ */
+export function collectDeadcodeViolations() {
+  const seen = new Map()
+  for (const platform of TARGET_PLATFORMS) {
+    for (const v of parseDeadcodeOutput(runDeadcode(platform))) {
+      seen.set(violationKey(v), v)
+    }
+  }
+  const violations = [...seen.values()]
+  violations.sort((a, b) => `${a.file}:${a.func}`.localeCompare(`${b.file}:${b.func}`))
+  return violations
+}
+
+function parseDeadcodeOutput(stdout) {
   const violations = []
-  for (const line of proc.stdout.split('\n')) {
+  for (const line of stdout.split('\n')) {
     if (line === '') continue
     // node_modules ships third-party Go (e.g. flatted/golang), which deadcode
     // picks up whenever npm has run. It is not our code and not ours to
@@ -81,7 +130,6 @@ export function collectDeadcodeViolations() {
     violations.push({ file: m[1], func: m[2] })
   }
 
-  violations.sort((a, b) => `${a.file}:${a.func}`.localeCompare(`${b.file}:${b.func}`))
   return violations
 }
 

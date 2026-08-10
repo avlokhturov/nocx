@@ -25,11 +25,18 @@
 # is run by hand from scripts/ci-linux.sh before a push that matters.
 # See the hook image's Dockerfile: `cp -L` because libncursesw.so.6 is a
 # symlink in that image and COPY --from would carry the link, not the file.
-FROM bash:3.2 AS bash32
+# --platform is deliberate, and the opposite call from the go-tests image.
+# This image exists to BE the runner: GitHub's ubuntu-latest for a public repo
+# is linux/amd64, and the Go toolchain below is fetched as linux-amd64. Left
+# to the host it would have become an arm64 Ubuntu holding an amd64 Go on an
+# Apple Silicon machine, which is neither the runner nor a working image.
+# Emulated and slow on arm64 is the correct trade here: a job that reproduces
+# CI is worth more than a fast one that does not.
+FROM --platform=linux/amd64 bash:3.2 AS bash32
 RUN mkdir -p /out \
  && cp -L /usr/local/bin/bash /lib/ld-musl-x86_64.so.1 /usr/lib/libncursesw.so.6 /out/
 
-FROM ubuntu:24.04
+FROM --platform=linux/amd64 ubuntu:24.04
 
 ARG GO_VERSION=1.26.5
 

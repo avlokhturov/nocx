@@ -42,9 +42,17 @@
 # Staged through `cp -L` rather than copied straight out with COPY --from,
 # because libncursesw.so.6 is a symlink over there and a COPY of a symlink is
 # a symlink — one that points at a path this image does not have.
+# The musl loader is named for the architecture — ld-musl-x86_64.so.1 on an
+# Intel machine, ld-musl-aarch64.so.1 on Apple Silicon — so it is staged under
+# a fixed name instead. Naming it x86_64 made this image unbuildable on an
+# arm64 host, which is to say on the developer machines this product targets
+# first, and the hook that builds it fails before running a single test.
+# Nothing links against the loader by soname; it is only ever exec'd, so the
+# rename costs nothing.
 FROM bash:3.2 AS bash32
 RUN mkdir -p /out \
- && cp -L /usr/local/bin/bash /lib/ld-musl-x86_64.so.1 /usr/lib/libncursesw.so.6 /out/
+ && cp -L /usr/local/bin/bash /usr/lib/libncursesw.so.6 /out/ \
+ && cp -L /lib/ld-musl-*.so.1 /out/loader
 
 FROM golang:1.26-bookworm
 
@@ -53,7 +61,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=bash32 /out/ /opt/bash32/
-RUN printf '#!/bin/sh\nexec /opt/bash32/ld-musl-x86_64.so.1 --library-path /opt/bash32 /opt/bash32/bash "$@"\n' \
+RUN printf '#!/bin/sh\nexec /opt/bash32/loader --library-path /opt/bash32 /opt/bash32/bash "$@"\n' \
       > /usr/local/bin/bash32 \
- && chmod +x /opt/bash32/bash /usr/local/bin/bash32 \
+ && chmod +x /opt/bash32/bash /opt/bash32/loader /usr/local/bin/bash32 \
  && bash32 --version | grep -q 'version 3\.2'
