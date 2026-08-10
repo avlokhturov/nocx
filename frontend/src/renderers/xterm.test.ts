@@ -789,3 +789,31 @@ describe('XtermRenderer cell metric (nocx-yy9g)', () => {
     r.dispose()
   })
 })
+
+describe('XtermRenderer contrast floor', () => {
+  // nocx-3lrm. xterm.js renders the palette literally, and mc's default skin
+  // paints its panels with an ANSI colour as the BACKGROUND
+  // (`_default_ = lightgray;blue`). Under tokyo-night that pair is 1.19:1 —
+  // the owner's mc over ssh was unreadable, while the same mc in Warp was
+  // fine, because Warp raises the foreground against the actual cell
+  // background. xterm.js has the same mechanism as an option whose default is
+  // documented as "1: do nothing", and we never set it.
+  //
+  // The assertion is on the live Terminal, not on a constant: a constant
+  // proves someone typed a number, not that the renderer ships it.
+  it('applies a minimum contrast ratio to the terminal it creates', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const term = (r as unknown as Record<string, unknown>).term as
+      { options: { minimumContrastRatio?: number } } | undefined
+    expect(term).toBeDefined()
+    // 4.5 is the WCAG AA floor — the threshold the theme audit measured
+    // against. Anything at or below 1 is xterm's "do nothing".
+    expect(term!.options.minimumContrastRatio).toBe(4.5)
+  })
+})

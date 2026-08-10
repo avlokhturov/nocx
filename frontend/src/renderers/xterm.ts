@@ -31,6 +31,11 @@ type ClipboardWriteCallback = (text: string) => void
 
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3
 
+// The readability floor applied to every cell (nocx-3lrm). WCAG AA; xterm's
+// own default is 1, documented as "do nothing". See the Terminal options for
+// why a floor is needed at all.
+const MINIMUM_CONTRAST_RATIO = 4.5
+
 // On WebKitGTK (Linux/Wails) the compositor may not present a frame until the
 // window receives a user interaction, so xterm.js's rAF-scheduled repaint of
 // the just-written data never runs — the initial shell prompt stays invisible
@@ -264,6 +269,19 @@ export class XtermRenderer implements TerminalRenderer {
       // (word-selection.ts): xterm's default separator set, made explicit so
       // double-click selects the same token on both surfaces (nocx-w7h.8).
       wordSeparator: WORD_SEPARATORS,
+      // A readability floor under the theme's palette (nocx-3lrm). Without
+      // it xterm renders the palette literally, and the one class of program
+      // that uses an ANSI colour as a large BACKGROUND — mc paints its
+      // panels `lightgray;blue` — becomes unreadable: under the default
+      // theme that pair is 1.19:1, because a modern palette lightens blue
+      // for TEXT on a dark ground. Warp raises the foreground against the
+      // actual cell background, which is why the same mc reads there and
+      // did not here.
+      //
+      // 4.5 is WCAG AA. Only pairs that fall below it are adjusted, so the
+      // palette a theme declares still renders exactly as declared wherever
+      // it is already legible; this raises a floor rather than restyling.
+      minimumContrastRatio: MINIMUM_CONTRAST_RATIO,
       theme: getCurrentTheme(),
     })
     this.term = term
