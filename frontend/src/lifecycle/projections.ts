@@ -48,6 +48,12 @@ export interface BlockProjectionPort {
    *  opened at the app-owned submit and the domain it was submitted under
    *  has ended, so nothing can ever complete it. */
   abandonPending(): void
+  /** Freeze the running block as ENTERED: a child domain took the lane, so
+   *  the command that opened it — the `ssh` line — has done its local job
+   *  and the running slot belongs to the far host's blocks now. No exit
+   *  status: the process is still alive and reports its own at the local D
+   *  (nocx-95kt). */
+  enterBlock(): void
 }
 
 /** The history half: persists a completed app-owned record, authorized by
@@ -68,6 +74,10 @@ export class LifecycleProjections {
   /** The kernel's ended-domain count as of the last pump. A change means a
    *  domain ended since — the moment an unbound submit became unfinishable. */
   private _endedSeen = 0
+  /** The lane's domain-stack depth as of the last pump. A GROWTH is an
+   *  environment entry — a child took the lane — which is the moment the
+   *  command that opened it stops being the pane's running block. */
+  private _depthSeen = 0
   private _unsub: (() => void) | null = null
 
   constructor(
@@ -114,6 +124,18 @@ export class LifecycleProjections {
       this._endedSeen = this.kernel.endedDomains
       if (this.ledger.abandonPending() !== null) this.blocks.abandonPending()
     }
+    // A child domain took the lane: the remote session has begun, so the
+    // local `ssh` block ends HERE rather than waiting for a completion that
+    // will not come until the far session is over (nocx-95kt, nocx-z5k9).
+    // Suspension alone is deliberately not enough — the stack does not grow
+    // until the child is live, so a handshake that fails freezes nothing.
+    // Only growth counts: a parent reclaiming the lane shrinks the stack and
+    // must not freeze anything a second time.
+    // Depth 1 is the FIRST domain of the lane integrating, which is not an
+    // entry into anything — there is no command below it that opened it.
+    const depth = this.kernel.domainStack.length
+    if (depth >= 2 && depth > this._depthSeen) this.blocks.enterBlock()
+    this._depthSeen = depth
     if (state.kind !== 'running') return
     const attempt = state.attempt
 

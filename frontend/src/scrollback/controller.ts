@@ -585,6 +585,21 @@ export class ScrollbackController {
     return false
   }
 
+  /** Freeze the running block as ENTERED (nocx-95kt): the command opened a
+   *  nested environment, so it ends here, painted as neither success nor
+   *  failure, and the running slot is freed for the blocks that follow. */
+  enterBlock(endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.freezeEntered(getLine, endLine)
+    if (rec) {
+      this._clearFrozenRows()
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
+  }
+
   dispose(): void {
     this._followObserver?.disconnect()
     this._followObserver = null

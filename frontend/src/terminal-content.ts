@@ -1228,6 +1228,16 @@ export class TerminalContent extends BaseTabContent {
             if (!this.scrollback || !this.renderer) return
             this.scrollback.abandonAttempt(attempt, this.renderer.cursorLine())
           },
+          enterBlock: () => {
+            // The far session began: the local `ssh` block ends here with
+            // no exit status — the process is alive and reports its own at
+            // the local D (nocx-95kt) — and the running slot is freed for
+            // the far host's blocks. Wired here for the first time: the
+            // block manager has always had freezeEntered and nothing ever
+            // called it, so every ssh block ran forever (nocx-z5k9).
+            if (!this.scrollback || !this.renderer) return
+            this.scrollback.enterBlock(this.renderer.cursorLine())
+          },
           abandonPending: () => {
             // The block opened at the submit and its domain ended before any
             // attempt arrived — `exit` is the case, and the start frame it
@@ -2014,9 +2024,11 @@ export class TerminalContent extends BaseTabContent {
    *    mysql -p): there is no reference machinery on the other side, so the
    *    value is resolved and written to the pty. vault.resolveLine exists
    *    for exactly this — 'the resolved value goes to the caller for the
-   *    PTY write and nowhere else'. No newline is appended: the user
-   *    presses Enter, because sending a password nobody asked for yet is
-   *    not ours to decide.
+   *    PTY write and nowhere else'. The newline goes WITH it (owner,
+   *    2026-08-10): picking a secret at a password prompt IS the answer to
+   *    that prompt, and making the user press Enter afterwards adds a step
+   *    to every use to guard a case — the pane not being at a prompt at all
+   *    — that the user ruled out the moment they opened the picker.
    *
    *  Nothing here reads the byte stream to decide anything (AD-6): the
    *  question 'who owns input' is answered by the input presentation, which
@@ -2034,7 +2046,7 @@ export class TerminalContent extends BaseTabContent {
     // side would receive `{{secret:…}}` as the password. resolveLine reports
     // every reference it could not resolve, and this line has exactly one.
     if (resolved.refs.some((r) => !r.resolved)) return 'unavailable'
-    this.session.send(resolved.line)
+    this.session.send(resolved.line + '\n')
     return 'value'
   }
 

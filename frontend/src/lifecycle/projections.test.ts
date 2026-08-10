@@ -57,6 +57,9 @@ class FakeBlocks implements BlockProjectionPort {
   abandonPending(): void {
     this.events.push('abandon-pending')
   }
+  enterBlock(): void {
+    this.events.push('enter')
+  }
 }
 
 function makeEnv() {
@@ -234,8 +237,12 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
         fence: FENCE,
       }),
     )
+    // 'enter' sits between them: the ssh block ended when the far session
+    // began (nocx-95kt), which is also what freed the running slot for the
+    // far host's own blocks.
     expect(blocks.events).toEqual([
       'open:att-ssh:ssh pi@far',
+      'enter',
       'open:att-exit:exit',
       'abandon:att-exit',
       'freeze:att-ssh:0',
@@ -264,7 +271,9 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
 
     expect(rec.status).toBe('unknown')
     expect(rec.exitCode).toBeNull()
-    expect(blocks.events).toEqual(['abandon-pending'])
+    // 'enter' is the child taking the lane; 'abandon-pending' is the submit
+    // it left unfinishable when it closed again.
+    expect(blocks.events).toEqual(['enter', 'abandon-pending'])
     expect(persist).not.toHaveBeenCalled() // an abandoned record persists nothing
   })
 
@@ -277,7 +286,49 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     kernel.applyFact(promptReady('child', 2))
 
     expect(rec.status).toBe('running')
-    expect(blocks.events).toEqual(['bind:att-ssh'])
+    // The RECORD stays running — the ssh process is alive and reports its
+    // own status at the local D — while the BLOCK ends at entry. Those are
+    // two different things, and this is the pair nocx-y5v5 named.
+    expect(blocks.events).toEqual(['bind:att-ssh', 'enter'])
+  })
+
+  // nocx-z5k9, reproduced by the owner 2026-08-10: after `exit` the `exit`
+  // blocks froze correctly but the parent's `ssh pi@…` blocks kept the
+  // running dot and a climbing timer (1m18s, 9s). The block manager has
+  // always known how to freeze the ssh block as `entered` when the remote
+  // session begins — nocx-95kt designed it, freezeEntered implements it —
+  // and it had NO caller outside its own file. The epic's own rule: a
+  // reachable read path hid an unreachable write path.
+  it('the ssh block freezes as entered when a child domain takes the lane', () => {
+    const { kernel, blocks } = makeEnv()
+    kernel.applyFact(promptReady('parent', 1))
+    kernel.applyFact(
+      running('parent', 1, { id: 'att-ssh', origin: 'shell', command: 'ssh pi@far' }),
+    )
+    expect(blocks.events).toEqual(['open:att-ssh:ssh pi@far'])
+
+    kernel.applyFact(nativeFact()) // the parent suspends for the handshake
+    // Suspension alone is not entry: the far session has not begun, and the
+    // ssh block must not freeze on a handshake that may yet fail.
+    expect(blocks.events).toEqual(['open:att-ssh:ssh pi@far'])
+
+    // The child establishes: the remote session HAS begun, so the local ssh
+    // block ends here and frees the running slot for the far host's blocks.
+    kernel.applyFact(promptReady('child', 2))
+    expect(blocks.events).toEqual(['open:att-ssh:ssh pi@far', 'enter'])
+  })
+
+  it('a parent reclaiming the lane is not an entry — nothing freezes a second time', () => {
+    const { kernel, blocks } = makeEnv()
+    kernel.applyFact(promptReady('parent', 1))
+    kernel.applyFact(
+      running('parent', 1, { id: 'att-ssh', origin: 'shell', command: 'ssh pi@far' }),
+    )
+    kernel.applyFact(nativeFact())
+    kernel.applyFact(promptReady('child', 2))
+    kernel.applyFact(nativeFact())
+    kernel.applyFact(promptReady('parent', 1)) // back home: the stack shrank
+    expect(blocks.events.filter((e) => e === 'enter')).toHaveLength(1)
   })
 
   it('the kernel exposes its attempts read-only — the projection lookup after loss', () => {

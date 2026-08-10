@@ -764,20 +764,20 @@ describe('inserting a saved secret into the pane in front (nocx-fk32)', () => {
     return client
   }
 
-  it('writes the VALUE to the pty when the terminal owns input, with no newline', async () => {
+  it('writes the VALUE to the pty when the terminal owns input, and sends it', async () => {
     const client = resolvingClient('hunter2')
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       const session = sessionOf(content)
       // The terminal owns input — a raw password prompt, an ssh handshake.
       // There is no reference machinery on the other side of the pty, so
-      // the value goes across, and NOT the newline: sending a password
-      // nobody asked for yet is not ours to decide.
+      // the value goes across, WITH its newline: choosing a secret at a
+      // password prompt is the answer to that prompt (owner, 2026-08-10).
       editorOf(content).hide()
       const sentBefore = session.send.mock.calls.length
       await expect(content.insertSecret('pi@far')).resolves.toBe('value')
       const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
-      expect(sent).toEqual(['hunter2'])
+      expect(sent).toEqual(['hunter2\n'])
     } finally {
       teardown()
     }
