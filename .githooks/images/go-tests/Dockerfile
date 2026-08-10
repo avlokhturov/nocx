@@ -39,16 +39,21 @@
 # soname. Nothing in the image links against it — it exists to be run by
 # TestBashScript_ParsesUnderBash32, which is a `bash -n` parse check
 # (nocx-cn86).
+# Staged through `cp -L` rather than copied straight out with COPY --from,
+# because libncursesw.so.6 is a symlink over there and a COPY of a symlink is
+# a symlink — one that points at a path this image does not have.
+FROM bash:3.2 AS bash32
+RUN mkdir -p /out \
+ && cp -L /usr/local/bin/bash /lib/ld-musl-x86_64.so.1 /usr/lib/libncursesw.so.6 /out/
+
 FROM golang:1.26-bookworm
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends dash zsh openssh-server \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=bash:3.2 /usr/local/bin/bash /opt/bash32/bash
-COPY --from=bash:3.2 /lib/ld-musl-x86_64.so.1 /opt/bash32/lib/
-COPY --from=bash:3.2 /usr/lib/libncursesw.so.6 /opt/bash32/lib/
-RUN printf '#!/bin/sh\nexec /opt/bash32/lib/ld-musl-x86_64.so.1 --library-path /opt/bash32/lib /opt/bash32/bash "$@"\n' \
+COPY --from=bash32 /out/ /opt/bash32/
+RUN printf '#!/bin/sh\nexec /opt/bash32/ld-musl-x86_64.so.1 --library-path /opt/bash32 /opt/bash32/bash "$@"\n' \
       > /usr/local/bin/bash32 \
- && chmod +x /usr/local/bin/bash32 \
+ && chmod +x /opt/bash32/bash /usr/local/bin/bash32 \
  && bash32 --version | grep -q 'version 3\.2'

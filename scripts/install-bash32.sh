@@ -36,15 +36,20 @@ fi
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-CID="$(docker create bash:3.2)"
-docker cp "$CID:/usr/local/bin/bash" "$TMP/bash"
-docker cp "$CID:/lib/ld-musl-x86_64.so.1" "$TMP/ld-musl-x86_64.so.1"
-docker cp "$CID:/usr/lib/libncursesw.so.6" "$TMP/libncursesw.so.6"
-docker rm -f "$CID" >/dev/null
+# `tar -ch`, not `docker cp`: libncursesw.so.6 is a SYMLINK in that image, and
+# docker cp copies the link rather than what it points at, so the extracted
+# name lands dangling and the next `cp` dies on "cannot stat" — which is
+# exactly how this step failed on the runner while the Dockerfile's own
+# COPY --from resolved it. -h dereferences.
+docker run --rm --entrypoint tar bash:3.2 \
+    -ch -C / -f - \
+    usr/local/bin/bash lib/ld-musl-x86_64.so.1 usr/lib/libncursesw.so.6 \
+    | tar -x -C "$TMP"
 
 mkdir -p "$LIBDIR" "$PREFIX/bin"
-cp "$TMP/bash" "$LIBDIR/bash"
-cp "$TMP/ld-musl-x86_64.so.1" "$TMP/libncursesw.so.6" "$LIBDIR/"
+cp "$TMP/usr/local/bin/bash" "$LIBDIR/bash"
+cp "$TMP/lib/ld-musl-x86_64.so.1" "$LIBDIR/"
+cp "$TMP/usr/lib/libncursesw.so.6" "$LIBDIR/"
 chmod +x "$LIBDIR/bash"
 
 cat > "$PREFIX/bin/bash32" <<EOF

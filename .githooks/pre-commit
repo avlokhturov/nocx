@@ -218,3 +218,15 @@ export_beads_snapshot
 ok "beads export"
 
 printf "\nAll checks passed.\n"
+
+# What "all checks passed" does NOT mean. AGENTS.md carries this warning for the
+# e2e container and carried nothing of the kind for this hook, so it read as a
+# faithful pre-flight and is not: the Go tests above ran in Debian with Go from
+# the golang image, no Secret Service, every core this host has, and the test
+# cache intact — where CI runs Ubuntu, setup-go, two keyring variants, 4 cores
+# and -count=1. A release attempt and its follow-up PR both came back red from a
+# job this hook had just called green (nocx-cn86). The e2e suite is not run here
+# at all; only its types are checked.
+printf "  NOT covered here: macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`backend\` job\n"
+printf "                    Ubuntu + both keyring variants — scripts/ci-linux.sh\n"
+printf "                    the e2e suite itself           — e2e/run-in-container.sh\n"
