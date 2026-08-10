@@ -16,16 +16,18 @@ import (
 // launch (or a refusal) and records the establishment call and whether the
 // returned closer was closed.
 type fakeRemoteLifecycle struct {
-	mu       sync.Mutex
-	refuse   error
-	launch   RemoteLifecycleLaunch
-	closed   bool
-	estabCtx context.Context
+	mu         sync.Mutex
+	refuse     error
+	launch     RemoteLifecycleLaunch
+	closed     bool
+	estabCalls int
+	estabCtx   context.Context
 }
 
 func (f *fakeRemoteLifecycle) Establish(ctx context.Context, _ string, _ ...ConnectOption) (RemoteLifecycleLaunch, io.Closer, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.estabCalls++
 	f.estabCtx = ctx
 	if f.refuse != nil {
 		return RemoteLifecycleLaunch{}, nil, f.refuse
@@ -42,6 +44,12 @@ func (f *fakeRemoteLifecycle) wasClosed() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closed
+}
+
+func (f *fakeRemoteLifecycle) establishCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.estabCalls
 }
 
 type closeFunc func() error
@@ -118,6 +126,80 @@ func TestConnect_LifecycleRefusalStaysConventional(t *testing.T) {
 	_ = ch.Close()
 	if lc.wasClosed() {
 		t.Fatal("a refused lifecycle must not leave a closer to close")
+	}
+}
+
+// TestConnect_LifecycleRawMode_NeverEstablished proves the mode half of
+// the gate (nocx-tr2n). raw and relay integrate nothing — shellStartCommand
+// returns before the launcher is consulted and the session runs a plain
+// shell that will never dial the forwarded port. Establishing a channel for
+// it would allocate a remote listener and a domain that the very next
+// statement closes unused. Every session asks for integration now, so this
+// is a raw tab's cost per open, not a path nothing takes.
+func TestConnect_LifecycleRawMode_NeverEstablished(t *testing.T) {
+	for _, mode := range []string{"raw", "relay"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := startTestSSHServer(t)
+			defer srv.close()
+
+			lc := &fakeRemoteLifecycle{launch: RemoteLifecycleLaunch{
+				Lane: "lane-1", Domain: "dom-1", Epoch: 7, Port: 4242,
+				Capability: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			}}
+			launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
+
+			ch := launcherConnect(
+				t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+				WithRemoteLauncher(launcher),
+				WithRemoteLifecycle(lc),
+				WithSessionID("sess-abc123"),
+				WithDesiredMode(mode),
+				WithEnhanced(),
+			)
+
+			assertUsable(t, srv, ch)
+			if n := lc.establishCalls(); n != 0 {
+				t.Fatalf("%s destination established %d lifecycle channels, want 0", mode, n)
+			}
+			if n := launcher.callCount(); n != 0 {
+				t.Fatalf("%s destination consulted the launcher %d times, want 0", mode, n)
+			}
+		})
+	}
+}
+
+// TestConnect_LifecycleScriptMode_Established is the paired positive: the
+// mode gate must not swallow the integrating destinations it was added
+// beside. script and the empty direct-host default both establish.
+func TestConnect_LifecycleScriptMode_Established(t *testing.T) {
+	for _, mode := range []string{"script", ""} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			srv := startTestSSHServer(t)
+			defer srv.close()
+
+			lc := &fakeRemoteLifecycle{launch: RemoteLifecycleLaunch{
+				Lane: "lane-1", Domain: "dom-1", Epoch: 7, Port: 4242,
+				Capability: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			}}
+			launcher := &fakeLauncher{cmd: "exec bash -i", reason: ReasonNone, ok: true}
+
+			ch := launcherConnect(
+				t, srv, []RealClientOption{WithConfigResolver(NewStubConfigResolver())},
+				WithRemoteLauncher(launcher),
+				WithRemoteLifecycle(lc),
+				WithSessionID("sess-abc123"),
+				WithDesiredMode(mode),
+				WithEnhanced(),
+			)
+
+			assertUsable(t, srv, ch)
+			if n := lc.establishCalls(); n != 1 {
+				t.Fatalf("mode %q established %d lifecycle channels, want 1", mode, n)
+			}
+			if _, opts := launcher.lastCall(); opts.LifecyclePort != 4242 {
+				t.Fatalf("mode %q: launcher got port %d, want the established 4242", mode, opts.LifecyclePort)
+			}
+		})
 	}
 }
 

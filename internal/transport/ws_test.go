@@ -111,15 +111,19 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 	}
 }
 
-// TestOpenParamsUnmarshalsEnhanced verifies that the openParams struct
-// deserialises the `enhanced` boolean from the open RPC params (nocx-4ff.10).
-func TestOpenParamsUnmarshalsEnhanced(t *testing.T) {
+// TestOpenParamsIgnoresEnhanced pins the removal (nocx-tr2n, superseding
+// nocx-4ff.10): integration is requested by the backend for every session,
+// so a renderer that still sends `enhanced` — an old build, a script — is
+// neither obeyed nor rejected. The field simply no longer exists, and the
+// open still succeeds. What the backend does instead is asserted in
+// ws_open_enhanced_test.go, at the layer the flag actually reaches.
+func TestOpenParamsIgnoresEnhanced(t *testing.T) {
 	var p openParams
-	if err := json.Unmarshal([]byte(`{"cols":80,"rows":24,"enhanced":true}`), &p); err != nil {
+	if err := json.Unmarshal([]byte(`{"cols":80,"rows":24,"enhanced":false}`), &p); err != nil {
 		t.Fatal(err)
 	}
-	if !p.Enhanced {
-		t.Fatalf("openParams.Enhanced = false, want true")
+	if p.Cols != 80 || p.Rows != 24 {
+		t.Fatalf("openParams = %+v, want cols/rows preserved alongside the ignored field", p)
 	}
 }
 

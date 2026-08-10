@@ -170,8 +170,17 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 	// no diagnostic names a policy. Established only for enhanced sessions
 	// with a launcher: without the channel the shell keeps its native
 	// prompt (ADR-0024 decision 9).
+	//
+	// The desired mode is part of the gate for the same reason it gates
+	// shellStartCommand (nocx-tr2n): raw and relay integrate nothing, so
+	// their start command is a plain shell that will never dial the
+	// forwarded port. Establishing anyway allocated a remote listener and
+	// a domain that openShell closed unused on the next statement — free
+	// while no ssh session was ever enhanced, and a round trip and a
+	// remote listener per raw tab now that every session asks.
 	var lc *lifecycleHandle
-	if acq.cfg.Enhanced && acq.cfg.RemoteLifecycle != nil && acq.cfg.RemoteLauncher != nil {
+	if acq.cfg.Enhanced && modeAllowsIntegration(acq.cfg.DesiredMode) &&
+		acq.cfg.RemoteLifecycle != nil && acq.cfg.RemoteLauncher != nil {
 		launch, closer, lerr := acq.cfg.RemoteLifecycle.Establish(ctx, host, opts...)
 		if lerr != nil {
 			rc.log.Warn("ssh: lifecycle channel refused; session stays conventional",

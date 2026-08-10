@@ -540,7 +540,7 @@ export class TerminalContent extends BaseTabContent {
 
   private openRequestedSession(): Promise<SessionHandle> {
     if (!this.sshOpts) {
-      return this.client.openSession(this.cols, this.rows, true)
+      return this.client.openSession(this.cols, this.rows)
     }
     if (this.sshOpts.profileId) {
       return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)

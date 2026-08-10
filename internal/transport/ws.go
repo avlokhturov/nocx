@@ -904,12 +904,15 @@ func isJSONObject(data []byte) bool {
 }
 
 // openParams is the payload of the "open" RPC method.
+//
+// There is deliberately no `enhanced` field (nocx-tr2n): whether a session
+// tries to become integrated is the backend's decision, not the renderer's.
+// See handleOpen.
 type openParams struct {
-	Cols     uint16 `json:"cols"`
-	Rows     uint16 `json:"rows"`
-	XPixel   uint16 `json:"xpixel"`
-	YPixel   uint16 `json:"ypixel"`
-	Enhanced bool   `json:"enhanced"`
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
 
 	// SSH fields — when Kind="ssh", the session opens an SSH channel.
 	// ProfileID identifies the SSH profile to connect to; the backend
@@ -1221,12 +1224,23 @@ func (s *WSServer) handleOpen(ctx context.Context, wconn *wsConn, state *connSta
 	}
 
 	cfg := session.Config{
-		Kind:     session.KindLocal,
-		Cols:     params.Cols,
-		Rows:     params.Rows,
-		XPixel:   params.XPixel,
-		YPixel:   params.YPixel,
-		Enhanced: params.Enhanced,
+		Kind:   session.KindLocal,
+		Cols:   params.Cols,
+		Rows:   params.Rows,
+		XPixel: params.XPixel,
+		YPixel: params.YPixel,
+		// Every session asks to be integrated, and the ones that cannot be
+		// fall back to an ordinary terminal (nocx-tr2n). This is not a
+		// policy the renderer may express: it arrived as an `enhanced` open
+		// parameter, both ssh openers omitted it, and the result was a
+		// second — silent, always-negative — answer to the question
+		// `desiredMode` (raw|script|relay) already answers per connection
+		// (AD-8). Nothing below fails closed on the request: a launcher
+		// that declines, a channel the far sshd refuses, a raw destination
+		// all end at a visible native prompt, so asking always is the safe
+		// direction and forgetting to ask is the one that shipped a tab
+		// with no blocks and no diagnostic.
+		Enhanced: true,
 	}
 	// ProfileID is deliberately NOT set here. It is recorded below, only once
 	// the resolver has accepted it, because a local PTY has no profile and
