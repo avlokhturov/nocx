@@ -127,6 +127,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// the longest-match form is quadratic and cost ten seconds on a
 		// grant-sized frame (nocx-beib).
 		"28": "acdddb0681bfb3ea80974d9ae348c2f0d4150275ef426150e4ae7cf525fea559",
+		// v29: the bash-4-only staging constructs are `eval`ed, so bash 3.2
+		// — macOS's /bin/bash — can parse the file it is being asked to
+		// source. Before this, every macOS shell died on the `coproc` token
+		// and started with no integration at all (nocx-cn86).
+		"29": "8d73196b2b55a9635abea8f19962d68a122fce22fa6547565a1a5d97cd7b4ba7",
 	}
 
 	h := sha256.New()

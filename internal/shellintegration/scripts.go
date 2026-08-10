@@ -103,7 +103,13 @@ var (
 // seconds between reading the child's grant and using it, and the tab sat
 // still after the user typed `ssh host`. The first occurrence is also the
 // correct one: the field name precedes its own value.
-const version = "28"
+// 29: the bash-4-only staging constructs (`coproc NAME { }`, `exec {var}>&-`)
+// are `eval`ed rather than written inline (nocx-cn86). A version guard cannot
+// protect SYNTAX — bash parses a function body whole before running any of it
+// — so macOS's bash 3.2 rejected the script at the `coproc` token and every
+// shell on the platform this product ships to first came up with no
+// integration at all.
+const version = "29"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

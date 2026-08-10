@@ -147,6 +147,17 @@ jobs:
           echo "=== compaudit after fix (empty is correct) ==="
           zsh -c 'autoload -Uz compaudit; compaudit 2>/dev/null || true'
 
+      # The third shell this job must carry, and the only one that is not a
+      # shell anybody here runs: macOS's /bin/bash is GNU bash 3.2.57, and the
+      # integration script has to PARSE there. A bash-4 construct is rejected
+      # while the file is being read, so no runtime version guard inside it
+      # can help — which is how every macOS shell came up with no integration
+      # while all of Linux stayed green (nocx-cn86). The macOS job proves the
+      # behaviour against a real 3.2; this makes the parse check run on the
+      # side that a Linux developer and this job can both see.
+      - name: Install bash 3.2 (macOS's /bin/bash)
+        run: sudo scripts/install-bash32.sh
+
       - name: Install Secret Service & dbus-x11
         if: matrix.with-keyring
         run: sudo apt-get install -y -qq gnome-keyring dbus-x11

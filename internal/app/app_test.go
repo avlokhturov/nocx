@@ -373,16 +373,10 @@ func TestLocalEnhancedChildEnv_SecretNeverReachesIt(t *testing.T) {
 	if pid == 0 {
 		t.Fatal("shell pid unavailable")
 	}
-	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	// Per-OS: /proc on linux, sysctl on darwin (childenviron_*_test.go).
+	env, err := readChildEnviron(pid)
 	if err != nil {
 		t.Fatalf("read child environ: %v", err)
-	}
-	env := map[string]string{}
-	for _, kv := range bytes.Split(raw, []byte{0}) {
-		parts := bytes.SplitN(kv, []byte("="), 2)
-		if len(parts) == 2 {
-			env[string(parts[0])] = string(parts[1])
-		}
 	}
 	if env["NOCX_SHELL_INTEGRATION"] != "1" {
 		t.Fatal("the child's actual environment must carry the activation gate (proving this is the right process)")

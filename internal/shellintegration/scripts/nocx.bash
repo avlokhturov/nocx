@@ -543,10 +543,17 @@ __nocx_nested_launch() {
         # read end via /dev/fd/N — an OPEN never sets CLOEXEC, where a dup
         # (N<&src) preserves the source's. A busy user fd is never clobbered
         # (the /dev/fd check first).
+        # The `coproc NAME { ...; }` form is bash 4.0+ SYNTAX, and a version
+        # test cannot guard syntax: bash parses a function body whole before
+        # it runs a line of it, so 3.2 rejected the file at this token and
+        # every shell on macOS started with no integration at all. It is
+        # `eval`ed for that reason and no other — the string is parsed only
+        # when this branch is actually taken, which 3.2 never does. Same rule
+        # for `exec {var}>&-` below (bash 4.1+).
         __nocx_stage_ok=0
         __nocx_boot_fd=0
         if (( ${BASH_VERSINFO[0]:-0} > 4 || (${BASH_VERSINFO[0]:-0} == 4 && ${BASH_VERSINFO[1]:-0} >= 1) )); then
-            coproc __nocx_boot { builtin printf '%s' "$__nocx_grant_bootstrap" 2>/dev/null; }
+            eval "coproc __nocx_boot { builtin printf '%s' \"\$__nocx_grant_bootstrap\" 2>/dev/null; }"
             for __nocx_cand in 4 5 6 7 8 9; do
                 if [[ ! -e /dev/fd/$__nocx_cand ]]; then
                     case $__nocx_cand in
@@ -562,7 +569,7 @@ __nocx_nested_launch() {
                         # the child — then wait for the writer: the pipe is
                         # complete before the child ever reads it.
                         __nocx_boot_w="${__nocx_boot[1]}"
-                        exec {__nocx_boot_w}>&-
+                        eval 'exec {__nocx_boot_w}>&-'
                         wait "$__nocx_boot_PID" 2>/dev/null
                         __nocx_stage_ok=1
                     fi

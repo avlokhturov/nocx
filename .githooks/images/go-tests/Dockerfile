@@ -27,8 +27,28 @@
 # stock image carries bash/dash/ssh/ssh-keygen but not sshd; the same
 # fail-not-skip rule that put zsh here requires the fixture to be provable
 # inside the container the hook runs.
+#
+# bash32: macOS ships GNU bash 3.2.57 as /bin/bash and this product is
+# macOS-first, so 3.2 is the oldest bash the integration script must load in.
+# Debian has no 3.2 package and building 3.2.57 from source on a modern
+# toolchain does not go in one command, so the binary is taken from the
+# official `bash:3.2` image. That image is Alpine, so the binary is
+# musl-linked: it and its two shared libraries live under a private prefix
+# and are invoked through the musl loader explicitly, because dropping a musl
+# libncursesw into /lib would sit next to Debian's glibc copy of the same
+# soname. Nothing in the image links against it — it exists to be run by
+# TestBashScript_ParsesUnderBash32, which is a `bash -n` parse check
+# (nocx-cn86).
 FROM golang:1.26-bookworm
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends dash zsh openssh-server \
  && rm -rf /var/lib/apt/lists/*
+
+COPY --from=bash:3.2 /usr/local/bin/bash /opt/bash32/bash
+COPY --from=bash:3.2 /lib/ld-musl-x86_64.so.1 /opt/bash32/lib/
+COPY --from=bash:3.2 /usr/lib/libncursesw.so.6 /opt/bash32/lib/
+RUN printf '#!/bin/sh\nexec /opt/bash32/lib/ld-musl-x86_64.so.1 --library-path /opt/bash32/lib /opt/bash32/bash "$@"\n' \
+      > /usr/local/bin/bash32 \
+ && chmod +x /usr/local/bin/bash32 \
+ && bash32 --version | grep -q 'version 3\.2'

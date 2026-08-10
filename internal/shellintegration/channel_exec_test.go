@@ -684,8 +684,9 @@ func TestBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T) {
 		t.Errorf("capability not held in the non-exported shell variable:\n%s", out)
 	}
 
-	// /proc/<pid>/environ of the shell and of the LIVE child must not
-	// contain the capability.
+	// The kernel's own view of the environment of the shell and of the LIVE
+	// child must not contain the capability. Read per-OS
+	// (childenviron_*_test.go): /proc on linux, sysctl on darwin.
 	childPID := parseLastPID(t, out, "CHILD_PID=")
 	shellPID := s.cmd.Process.Pid
 	defer func() {
@@ -693,12 +694,14 @@ func TestBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T) {
 		_, _ = s.ptmx.Write([]byte("kill " + strconv.Itoa(childPID) + " 2>/dev/null\n"))
 	}()
 	for name, pid := range map[string]int{"shell": shellPID, "child": childPID} {
-		environ, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid)) // #nosec G304 — pid is the test's own child
+		environ, err := readChildEnviron(pid)
 		if err != nil {
-			t.Fatalf("read /proc/%d/environ (%s): %v", pid, name, err)
+			t.Fatalf("read environ of pid %d (%s): %v", pid, name, err)
 		}
-		if strings.Contains(string(environ), testCap) {
-			t.Errorf("capability present in /proc/%d/environ (%s)", pid, name)
+		for key, val := range environ {
+			if strings.Contains(val, testCap) {
+				t.Errorf("capability present in the environment of pid %d (%s), under %s", pid, name, key)
+			}
 		}
 	}
 }
