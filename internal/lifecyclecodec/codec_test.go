@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -443,10 +444,25 @@ func TestMaxFrameBytes_ShellsDeclareTheSameBound(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		decl := `"max_frame":` + want
+		decl := "__nocx_lc_max_frame=" + want
 		if !strings.Contains(string(body), decl) {
 			t.Errorf("%s does not declare %s; the shell and lifecycle.MaxFrameBytes "+
 				"must name the same bound or frames are refused on one side only", name, decl)
+		}
+		// And it must be the ONLY bound in the file. Raising the advertised
+		// max_frame while a second literal still guarded the reader is what
+		// made the ssh child's grant unreadable: the shell rejected a frame
+		// the kernel was entitled to send, instantly and silently
+		// (nocx-beib). Any bare 5-or-6-digit number next to a frame length
+		// is that mistake coming back.
+		for _, line := range strings.Split(string(body), "\n") {
+			if !strings.Contains(line, "__len") || strings.Contains(line, "__nocx_lc_max_frame") {
+				continue
+			}
+			if regexp.MustCompile(`[0-9]{4,}`).MatchString(line) {
+				t.Errorf("%s bounds a frame length against a literal, not the single "+
+					"declaration: %s", name, strings.TrimSpace(line))
+			}
 		}
 	}
 }

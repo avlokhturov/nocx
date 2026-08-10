@@ -117,6 +117,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// never written, so the parent sat out its grant timeout and ran the
 		// user's ssh conventionally (nocx-beib).
 		"26": "ddc204fcee1a2e640b9f58dcbdb75dcd8bd3cf8a56621fc9a6ce0de45e86bc37",
+		// v27: the reader is bounded by the same declaration the hello
+		// advertises. v26 raised only the advertised number and left the
+		// length check at 65536, so the grant frame was rejected before it
+		// was parsed (nocx-beib).
+		"27": "4e88fad6351032bb90b94c3e2c72774cb0c35d5473ee5dd793ee1e1a649d7482",
 	}
 
 	h := sha256.New()

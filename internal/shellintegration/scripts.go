@@ -88,7 +88,15 @@ var (
 // conventionally — the five silent seconds the owner reported. The Go side
 // is lifecycle.MaxFrameBytes; the two are held together by
 // lifecyclecodec's TestMaxFrameBytes_ShellsDeclareTheSameBound.
-const version = "26"
+//
+// 27: the same bound now guards the READER too (nocx-beib). v26 raised the
+// advertised max_frame and left `__len <= 65536` in __nocx_lc_read_frame, so
+// the shell rejected the ssh child's grant — a whole remote launcher, ~77
+// KiB — before parsing it. read_grant failed instantly, the parent ran the
+// user's ssh conventionally, and the only visible symptom was that blocks
+// never appeared. Each script declares __nocx_lc_max_frame once and uses it
+// in both places.
+const version = "27"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

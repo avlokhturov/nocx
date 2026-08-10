@@ -34,6 +34,13 @@ __nocx_cap="${__nocx_cap:-}"
 # export attribute explicitly (the capability is assigned exactly once, so
 # this sticks — same pattern as __nocx_snapshot_nonce).
 export -n __nocx_cap 2>/dev/null
+# The frame bound, declared ONCE and used both in the hello this shell sends
+# and in the length check below. It was two literals, and raising only the
+# advertised one left the reader rejecting frames the kernel was entitled to
+# send: the ssh child's grant is a whole remote launcher (~77 KiB), so the
+# read failed instantly and the parent ran the user's ssh conventionally with
+# no diagnostic (nocx-beib). Keep in step with lifecycle.MaxFrameBytes.
+__nocx_lc_max_frame=262144
 __nocx_lc_lane="${NOCX_LIFECYCLE_LANE:-}"
 __nocx_lc_dom="${NOCX_LIFECYCLE_DOMAIN:-}"
 __nocx_lc_epoch="${NOCX_LIFECYCLE_EPOCH:-}"
@@ -141,7 +148,7 @@ __nocx_lc_read_frame() {
     __hdr="$(dd bs=1 count=4 2>/dev/null <&"$__nocx_lc_fd" | od -An -tx1 | tr -d ' \n')"
     [[ "$__hdr" =~ ^[0-9a-f]{8}$ ]] || return 1
     __len=$(( 16#$__hdr ))
-    (( __len > 0 && __len <= 65536 )) || return 1
+    (( __len > 0 && __len <= __nocx_lc_max_frame )) || return 1
     __nocx_lc_wait_readable "${__t:-$__nocx_lc_timeout_s}" || return 1
     __nocx_lc_frame="$(dd bs=1 count="$__len" 2>/dev/null <&"$__nocx_lc_fd")"
     (( ${#__nocx_lc_frame} == __len )) || return 1
@@ -275,7 +282,7 @@ __nocx_lc_init() {
     __nocx_lc_lane_esc=$__nocx_lc_json_escaped
     __nocx_lc_json_escape "$__nocx_lc_dom"
     __nocx_lc_dom_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"bash","max_frame":262144'
+    __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"
     if ! __nocx_lc_read_frame; then
         return 1
     fi

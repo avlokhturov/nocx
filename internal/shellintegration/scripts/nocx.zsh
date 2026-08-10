@@ -108,6 +108,10 @@ __nocx_lc_send() {
 # is binary-safe (unlike bash's), so the NUL-containing prefix is read
 # directly; the length bytes are parsed through od. Any framing failure
 # (EOF, garbage, oversize) returns non-zero and the caller fails open.
+# The frame bound: one declaration for the hello and for the length check
+# (nocx-beib). Keep in step with lifecycle.MaxFrameBytes.
+__nocx_lc_max_frame=262144
+
 __nocx_lc_read_frame() {
     # $1, when given, is the per-read timeout in seconds (the refresh poll
     # bounds the prompt); it defaults to the handshake timeout.
@@ -118,7 +122,7 @@ __nocx_lc_read_frame() {
     __hex=$(printf %s "$__hdr" | od -An -tx1 | tr -d ' \n')
     [[ "$__hex" =~ ^[0-9a-f]{8}$ ]] || return 1
     __len=$(( 16#$__hex ))
-    (( __len > 0 && __len <= 65536 )) || return 1
+    (( __len > 0 && __len <= __nocx_lc_max_frame )) || return 1
     if ! read -t "$__t" -k "$__len" -u "$__nocx_lc_fd" __nocx_lc_frame 2>/dev/null; then
         return 1
     fi
@@ -242,7 +246,7 @@ __nocx_lc_init() {
     __nocx_lc_lane_esc=$__nocx_lc_json_escaped
     __nocx_lc_json_escape "$__nocx_lc_dom"
     __nocx_lc_dom_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"zsh","max_frame":262144'
+    __nocx_lc_send hello ',"shell":"zsh","max_frame":'"$__nocx_lc_max_frame"
     if ! __nocx_lc_read_frame; then
         return 1
     fi
