@@ -749,7 +749,12 @@ async function main() {
     }
     try {
       const where = await content.insertSecret(name)
-      if (where === 'value') showToast({ message: 'Secret inserted — press Enter to send it' })
+      // The newline goes with the value (fc189136), so the toast reports a
+      // completed send rather than asking for the keystroke that is no
+      // longer needed. It still has to say something: a password prompt
+      // echoes nothing, and an answer the user cannot see is an answer they
+      // will give twice.
+      if (where === 'value') showToast({ message: 'Secret sent — the prompt echoes nothing' })
       else if (where === 'unavailable')
         showToast({ message: `"${name}" could not be inserted`, level: 'danger' })
     } catch (err) {
