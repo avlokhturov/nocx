@@ -724,14 +724,19 @@ async function main() {
     // The vault half (nocx-fk32). It contributes only to the 'secrets'
     // variant — the dialog admits one kind set per variant — so these rows
     // never appear in the server list or the palette.
-    new SecretsQuickConnectProvider(
-      () => vaultClient.inventory(),
-      (name) => void insertSecretIntoActivePane(name),
+    new SecretsQuickConnectProvider({
+      status: () => vaultClient.status(),
+      inventory: () => vaultClient.inventory(),
+      insert: (name) => void insertSecretIntoActivePane(name),
       // The create dialog is the vault's own, and it is the SAME one the
       // prompt's '@' picker opens (nocx-fk32.1): a secret needs a name and a
       // value, and neither picker is where a value gets typed.
-      (name) => openSettingsTab().startNewSecret(name),
-    ),
+      create: (name) => openSettingsTab().startNewSecret(name),
+      // The vault layer owns both prompts (nocx-fk32.3); the picker only
+      // says which one this state calls for.
+      requestUnseal: () => vaultController.openUnlock('use its secrets'),
+      requestSetup: () => vaultController.openSetup(),
+    }),
   ]
 
   /** Insert a saved secret where the user is typing in the pane in front

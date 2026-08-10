@@ -11,6 +11,7 @@ import {
   type QuickConnectItem,
   type DrillSelection,
   type QuickConnectProvider,
+  type SecretsProviderDeps,
 } from './quick-connect'
 
 afterEach(() => {
@@ -1275,16 +1276,20 @@ describe('the secret picker (nocx-fk32)', () => {
       ],
     })
 
-  function mountSecrets(
-    insert: (name: string) => void,
-    create: (name: string) => void = vi.fn(),
-    entries: () => Promise<{ entries: { id: string; name: string; kind: string }[] }> = inventory,
-  ) {
+  function mountSecrets(deps: Partial<SecretsProviderDeps> = {}) {
     const ctrl = new QuickConnectController()
     afterEach(() => ctrl.destroy())
     ctrl.mount(container, [
       new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
-      new SecretsQuickConnectProvider(entries, insert, create),
+      new SecretsQuickConnectProvider({
+        status: () => Promise.resolve({ state: 'unsealed' as const }),
+        inventory,
+        insert: vi.fn(),
+        create: vi.fn(),
+        requestUnseal: vi.fn(),
+        requestSetup: vi.fn(),
+        ...deps,
+      }),
     ])
     return ctrl
   }
@@ -1304,7 +1309,7 @@ describe('the secret picker (nocx-fk32)', () => {
 
   it('lists the vault names and hands the chosen NAME to the insert seam', async () => {
     const insert = vi.fn()
-    const ctrl = mountSecrets(insert)
+    const ctrl = mountSecrets({ insert })
     ctrl.showSecrets()
     await settle()
 
@@ -1326,7 +1331,7 @@ describe('the secret picker (nocx-fk32)', () => {
 
   it('keeps secrets out of the palette — one Enter must not mean two things', async () => {
     const insert = vi.fn()
-    const ctrl = mountSecrets(insert)
+    const ctrl = mountSecrets({ insert })
     ctrl.showPalette()
     await settle()
 
@@ -1338,7 +1343,7 @@ describe('the secret picker (nocx-fk32)', () => {
   })
 
   it('keeps secrets out of the plain server list too', async () => {
-    const ctrl = mountSecrets(vi.fn())
+    const ctrl = mountSecrets()
     ctrl.show()
     await settle()
     const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
@@ -1352,7 +1357,7 @@ describe('the secret picker (nocx-fk32)', () => {
   // is silence plus a Settings page they have to know about.
   it('offers to create the secret, as the last row, with what was typed', async () => {
     const create = vi.fn()
-    const ctrl = mountSecrets(vi.fn(), create)
+    const ctrl = mountSecrets({ create })
     ctrl.showSecrets()
     await settle()
 
@@ -1373,8 +1378,7 @@ describe('the secret picker (nocx-fk32)', () => {
   })
 
   it('offers it on an empty vault, where the list has nothing else to say', async () => {
-    const create = vi.fn()
-    const ctrl = mountSecrets(vi.fn(), create, () => Promise.resolve({ entries: [] }))
+    const ctrl = mountSecrets({ inventory: () => Promise.resolve({ entries: [] }) })
     ctrl.showSecrets()
     await settle()
 
@@ -1382,7 +1386,7 @@ describe('the secret picker (nocx-fk32)', () => {
   })
 
   it('never offers to create from the palette or the server list', async () => {
-    const ctrl = mountSecrets(vi.fn(), vi.fn())
+    const ctrl = mountSecrets()
     ctrl.showPalette()
     await settle()
     expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
@@ -1390,5 +1394,61 @@ describe('the secret picker (nocx-fk32)', () => {
     ctrl.show()
     await settle()
     expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+  })
+
+  // "No secrets" and "there is no vault" are different facts, and an empty
+  // list tells the user the first one (nocx-fk32.3).
+  it('offers to set protection up when there is no vault yet', async () => {
+    const requestSetup = vi.fn()
+    const create = vi.fn()
+    const ctrl = mountSecrets({
+      status: () => Promise.resolve({ state: 'uninitialized' as const }),
+      inventory: () => Promise.reject(new Error('vault-uninitialized')),
+      requestSetup,
+      create,
+    })
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts()).toEqual([expect.stringContaining('Set up the vault')])
+    // Nothing to add a secret TO yet: the offer to create would be a second
+    // answer to the same question, and the wrong one.
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+
+    container.querySelector<HTMLElement>('[role="option"]')?.click()
+    expect(requestSetup).toHaveBeenCalledTimes(1)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  // The dispatcher raises the unlock dialog for a sealed vault and retries,
+  // so a successful unlock fills the list. This is the path where it did
+  // not: the prompt was dismissed, and the vault is locked, not empty.
+  it('names the condition when the inventory could not be read', async () => {
+    const requestUnseal = vi.fn()
+    const ctrl = mountSecrets({
+      status: () => Promise.resolve({ state: 'sealed' as const }),
+      inventory: () => Promise.reject(new Error('cancelled')),
+      requestUnseal,
+    })
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts()).toEqual([expect.stringContaining('Unlock the vault')])
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+
+    container.querySelector<HTMLElement>('[role="option"]')?.click()
+    expect(requestUnseal).toHaveBeenCalledTimes(1)
+  })
+
+  it('lists the secrets after an unlock the dispatcher retried for it', async () => {
+    // A sealed vault whose inventory call resolves is exactly what the
+    // dispatcher's unlock-and-retry seam produces; no offer row belongs in
+    // front of a list that arrived.
+    const ctrl = mountSecrets({ status: () => Promise.resolve({ state: 'sealed' as const }) })
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts().some((r) => r.includes('pi@192.168.0.93'))).toBe(true)
+    expect(rowTexts().some((r) => r.includes('Unlock the vault'))).toBe(false)
   })
 })

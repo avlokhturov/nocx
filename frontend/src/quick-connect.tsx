@@ -65,6 +65,7 @@ import { parseQuickConnect, type ProfileClient } from './profiles'
 import type { Tab } from './tabs'
 import { Dialog } from './ui/dialog'
 import { SearchField } from './ui/search-field'
+import { VAULT_OFFER_SETUP, VAULT_OFFER_UNSEAL, addSecretLabel } from './ui/secret-picker'
 import { aliasRows, profileRows } from './quick-connect-assembly'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -334,56 +335,111 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
 // moment.
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface SecretsProviderDeps {
+  /** The vault's lifecycle state. Read BEFORE the inventory, because
+   *  "there is no vault" and "the vault holds nothing" are different facts
+   *  and only one of them is an empty list. */
+  status(): Promise<{ state: 'uninitialized' | 'sealed' | 'unsealed' }>
+  inventory(): Promise<{ entries: { id: string; name: string; kind: string }[] }>
+  /** Insert the named secret where the user is typing. The provider never
+   *  sees the value — resolution and the pty write belong to the pane. */
+  insert(name: string): void
+  /** "Add a secret…" was activated: the host opens the vault's own create
+   *  dialog, which owns the surface from there. The SAME seam the prompt's
+   *  '@' picker creates through (secret-picker.ts requestCreate) — a second
+   *  way to make a secret would be a second set of rules about names, kinds
+   *  and collisions. */
+  create(name: string): void
+  /** The inventory could not be read: raise the unlock dialog. */
+  requestUnseal(): void
+  /** No vault yet: raise the vault's own setup dialog. */
+  requestSetup(): void
+}
+
 export class SecretsQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'secrets'
   readonly label = 'Secrets'
 
-  constructor(
-    private inventory: () => Promise<{ entries: { id: string; name: string; kind: string }[] }>,
-    /** Insert the named secret where the user is typing. The provider never
-     *  sees the value — resolution and the pty write belong to the pane. */
-    private insert: (name: string) => void,
-    /** "Add a secret…" was activated: the host opens the vault's own create
-     *  dialog, which owns the surface from there. The SAME seam the prompt's
-     *  '@' picker creates through (secret-picker.ts requestCreate) — a
-     *  second way to make a secret would be a second set of rules about
-     *  names, kinds and collisions. */
-    private create: (name: string) => void,
-  ) {}
+  /** Whether the last getItems saw a vault that can hold a new secret. The
+   *  create row is offered from getTrailingItems, which is synchronous and
+   *  runs on every keystroke, so the asynchronous answer is carried here
+   *  rather than re-asked. False until the inventory has actually been
+   *  read: offering to add a secret to a vault that does not exist, or to
+   *  one still locked, is an offer that cannot be kept. */
+  private canHoldSecrets = false
+
+  constructor(private deps: SecretsProviderDeps) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
-    const inv = await this.inventory()
-    return inv.entries.map((e) => ({
-      id: e.id,
-      kind: 'secret' as const,
-      label: e.name,
-      detail: SECRET_KIND_DETAIL[e.kind] ?? e.kind,
-      run: () => this.insert(e.name),
-    }))
+    this.canHoldSecrets = false
+    // A vault that was never set up has no inventory to fail to read — say
+    // that, and offer the one thing that changes it.
+    const state = await this.deps.status().then(
+      (s) => s.state,
+      () => null,
+    )
+    if (state === 'uninitialized') {
+      return [
+        {
+          id: SETUP_VAULT_ROW_ID,
+          kind: 'secret',
+          label: VAULT_OFFER_SETUP,
+          run: () => this.deps.requestSetup(),
+        },
+      ]
+    }
+    // Sealed is deliberately NOT an offer row here: the dispatcher's global
+    // seam raises the unlock prompt for any RPC that lands on a sealed
+    // vault and retries the call, so the ordinary path through a locked
+    // vault ends with the list. The catch below is where that path did not
+    // end there — a dismissed prompt, or any other failure — and an empty
+    // list would report it as "you have no secrets".
+    try {
+      const inv = await this.deps.inventory()
+      this.canHoldSecrets = true
+      return inv.entries.map((e) => ({
+        id: e.id,
+        kind: 'secret' as const,
+        label: e.name,
+        detail: SECRET_KIND_DETAIL[e.kind] ?? e.kind,
+        run: () => this.deps.insert(e.name),
+      }))
+    } catch {
+      return [
+        {
+          id: UNSEAL_VAULT_ROW_ID,
+          kind: 'secret',
+          label: VAULT_OFFER_UNSEAL,
+          run: () => this.deps.requestUnseal(),
+        },
+      ]
+    }
   }
 
   /** The offer that outlives an empty list: the secret the vault does not
    *  hold yet is the one the person came here to type. It carries the typed
-   *  filter as the name, because that is almost always the name they were
-   *  reaching for — asking them to type it again in Settings is how a
-   *  feature goes unused (the same judgement, and the same words, as the
-   *  prompt picker's create row). */
+   *  filter as the name — the same judgement, and the same words, as the
+   *  prompt picker's create row. Absent while the vault cannot hold one;
+   *  the offer row above is the whole answer in that state. */
   getTrailingItems(query: string): QuickConnectItem[] {
+    if (!this.canHoldSecrets) return []
     const typed = query.trim()
     return [
       {
         id: CREATE_SECRET_ROW_ID,
         kind: 'secret',
-        label: typed === '' ? 'Add a secret…' : `Add "${typed}" to the vault…`,
-        run: () => this.create(typed),
+        label: addSecretLabel(typed),
+        run: () => this.deps.create(typed),
       },
     ]
   }
 }
 
-/** The create row is not a vault entry, so it is addressed by a reserved id
+/** Rows that are not vault entries, so they are addressed by reserved ids
  *  rather than by an inventory handle. */
 const CREATE_SECRET_ROW_ID = '__create_secret__'
+const SETUP_VAULT_ROW_ID = '__setup_vault__'
+const UNSEAL_VAULT_ROW_ID = '__unseal_vault__'
 
 /** What each vault kind is, in the words a person picking one would use.
  *  The vocabulary is the registry's closed set (contracts/vault.inventory). */
