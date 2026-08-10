@@ -631,6 +631,18 @@ func TestOneLaneSeveralDomainsNoCurrentDomain(t *testing.T) {
 	})
 
 	root.suspend()
+	// Wait for the suspension to be APPLIED, not merely written. The
+	// kernel refuses a child whose parent is still live (ErrParentActive,
+	// kernel.go), and the suspend travels on the root's connection while
+	// the child's hello arrives on its own — two adapter goroutines, no
+	// ordering between them. On a many-core machine the suspend won every
+	// time; on a CI runner with few cores the child's hello got there
+	// first and was rejected, so the test read EOF instead of an accept
+	// (nocx-x8ol). Synchronise on the observable state, not on luck.
+	waitFor(t, "root suspended", func() bool {
+		d, ok := k.Domain(cfg.Domain)
+		return ok && d.State == lifecycle.DomainSuspended
+	})
 	child, err := k.RequestDomain(cfg.Lane, &cfg.Domain, a.id)
 	if err != nil {
 		t.Fatalf("RequestDomain child on the same transport: %v", err)

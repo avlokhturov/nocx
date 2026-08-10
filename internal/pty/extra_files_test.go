@@ -3,6 +3,7 @@ package pty
 import (
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -16,7 +17,18 @@ import (
 // spawned shell as fd 3, and the shell can write to it. The child end's
 // parent copy must be closed after spawn, or EOF never arrives.
 func TestLocalPty_ExtraFilesReachTheShell(t *testing.T) {
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	// SOCK_CLOEXEC is a Linux-only flag, and naming it here is what kept
+	// this package's tests from building on macOS (nocx-1w69). The portable
+	// form is create-then-mark under ForkLock — the same dance the standard
+	// library does — and it is what the product's own socketpair helper does
+	// off Linux.
+	syscall.ForkLock.RLock()
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+	if err == nil {
+		unix.CloseOnExec(fds[0])
+		unix.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.RUnlock()
 	if err != nil {
 		t.Fatalf("socketpair: %v", err)
 	}

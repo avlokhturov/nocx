@@ -299,19 +299,6 @@ func (s *ptySession) waitForPromptAgain(timeout time.Duration) {
 	}
 }
 
-// cleanEnv strips NOCX_* and __nocx_* variables so the test shell starts
-// unintegrated — the far end of a plain `ssh somehost`.
-func cleanEnv(extra ...string) []string {
-	var env []string
-	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "NOCX_") || strings.HasPrefix(e, "__nocx_") {
-			continue
-		}
-		env = append(env, e)
-	}
-	return append(env, extra...)
-}
-
 // plan builds the in-band plan for the test.
 func plan(t *testing.T, sid string) InBandPlan {
 	t.Helper()
