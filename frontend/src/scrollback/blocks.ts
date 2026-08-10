@@ -1190,6 +1190,22 @@ export class BlockManager {
     return rec
   }
 
+  /** Freeze a running block that never bound to an attempt at all. The
+   *  block opened at the app-owned submit and the domain it was submitted
+   *  under has ended, so no start and no completion can ever name it: `exit`
+   *  destroys the shell that would have sent both, and against a real sshd
+   *  the start frame does not get out before the transport dies (nocx-mlyu).
+   *  A BOUND block is not this method's business — its attempt goes unknown
+   *  and abandonAttempt freezes it, with the attempt as the authority. */
+  abandonUnbound(getLine: GetLineFn, endLine: number): BlockRecord | null {
+    if (this._attemptId !== null) return null
+    const rec = this._runningBlock
+    if (!rec) return null
+    const status = this._logicalFreeze(rec, null, 'unknown')
+    this._freezeVisual(rec, getLine, endLine, status)
+    return rec
+  }
+
   clearAll(): void {
     this._stopTicker()
     this._cancelPendingFence()

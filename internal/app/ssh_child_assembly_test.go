@@ -36,6 +36,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -190,6 +191,59 @@ type sshChildHarness struct {
 	childCap   lifecycle.Capability
 	childLPort int // the listener transport's local port (the -R target)
 	childRPort int // the remote bind the sshd opens (CPORT)
+	// Every fact the publisher emitted, in order — the renderer's whole
+	// input (nocx-mlyu). An attempt the kernel abandons as its domain
+	// closes is never named by a later fact, so the sequence is the only
+	// place its id survives.
+	facts *factLog
+}
+
+// factLog records the published facts while acknowledging establishments
+// exactly as ackingEmitter does — the renderer's two jobs, in the order it
+// does them.
+type factLog struct {
+	pub *lifecyclepub.Publisher
+	mu  sync.Mutex
+	all []lifecyclepub.Fact
+}
+
+func (l *factLog) PublishLifecycle(f lifecyclepub.Fact) {
+	l.mu.Lock()
+	l.all = append(l.all, f)
+	l.mu.Unlock()
+	if f.Generation == "" || f.Domain == "" {
+		return
+	}
+	_ = l.pub.AcknowledgeEstablishment(
+		lifecycle.LaneID(f.Lane), lifecycle.DomainID(f.Domain), f.Epoch, f.Generation)
+}
+
+// attemptFor returns the id of the first attempt the given domain published
+// under the given command, and whether one was ever published at all.
+func (l *factLog) attemptFor(domain lifecycle.DomainID, command string) (lifecycle.AttemptID, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, f := range l.all {
+		if f.Domain != string(domain) || f.Attempt == nil {
+			continue
+		}
+		if f.Attempt.Command == command {
+			return lifecycle.AttemptID(f.Attempt.ID), true
+		}
+	}
+	return "", false
+}
+
+func (l *factLog) commands(domain lifecycle.DomainID) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []string
+	for _, f := range l.all {
+		if f.Domain == string(domain) && f.Attempt != nil && f.Attempt.Command != "" {
+			out = append(out, f.Attempt.Command)
+		}
+	}
+	return out
 }
 
 func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
@@ -208,7 +262,8 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	pub = lifecyclepub.New(k,
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
 			func() *lifecyclepub.Publisher { return pub }, transports, sessions)))
-	pub.SetEmitter(ackingEmitter{pub: pub})
+	facts := &factLog{pub: pub}
+	pub.SetEmitter(facts)
 	kernel := &recordingKernel{Publisher: pub}
 
 	parentLn, err := lifecyclechannel.NewListener(logger, pub)
@@ -239,6 +294,7 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 		parent:      h.Domain,
 		parentEpoch: h.Epoch,
 		parentCap:   h.Capability,
+		facts:       facts,
 	}
 }
 
@@ -327,6 +383,41 @@ func (h *sshChildHarness) requestChild(host string, port int, user string) {
 	if _, err := fmt.Sscanf(ports[2], "%d", &h.childLPort); err != nil {
 		h.t.Fatalf("local -R port %q: %v", ports[2], err)
 	}
+}
+
+// promptReadyParent puts the parent at a ready prompt — the only lane state
+// a shell-originated start is admitted from (kernel decision 5).
+func (h *sshChildHarness) promptReadyParent() {
+	h.send(lifecycle.Event{Kind: lifecycle.KindPromptReady, PromptReady: &lifecycle.PromptReady{}})
+	waitFor(h.t, "parent at a ready prompt", 10*time.Second, func() bool {
+		return h.laneSnapshot().Lifecycle == lifecycle.LifecyclePromptReady
+	})
+}
+
+// startParentAttempt opens a shell-originated attempt on the parent, the way
+// the parent's own start hook does for a hand-typed line.
+func (h *sshChildHarness) startParentAttempt(id, command string) lifecycle.AttemptID {
+	att := lifecycle.AttemptID(id)
+	h.send(lifecycle.Event{
+		Kind:  lifecycle.KindStart,
+		Start: &lifecycle.Start{AttemptID: &att, Command: command},
+	})
+	waitFor(h.t, "the parent's attempt opened", 10*time.Second, func() bool {
+		a, ok := h.kernel.Attempt(att)
+		return ok && a.State == lifecycle.AttemptOpen
+	})
+	return att
+}
+
+// completeParentAttempt reports the parent's own exit status with a render
+// fence, as the parent shell's completion hook does.
+func (h *sshChildHarness) completeParentAttempt(att lifecycle.AttemptID, code int) {
+	var f lifecycle.FenceNonce
+	f[0] = 0xA1
+	h.send(lifecycle.Event{
+		Kind:     lifecycle.KindComplete,
+		Complete: &lifecycle.Complete{AttemptID: &att, ExitCode: &code, Fence: f},
+	})
 }
 
 func (h *sshChildHarness) suspendParent() {
@@ -515,6 +606,135 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 		if st := h.domainState(h.parent); st != lifecycle.DomainEstablished {
 			return false
 		}
+		ls := h.laneSnapshot()
+		return ls.Domain == h.parent && ls.Lifecycle == lifecycle.LifecyclePromptReady
+	})
+}
+
+// TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
+// watches the BLOCKS through the whole nested cycle, which the assembly proof
+// above deliberately does not: it stops at the activation frame, and every
+// symptom the owner reported (nocx-mlyu) is about what a block does after
+// that frame.
+//
+// The interval this pins is the one no unit can reach: the parent opens the
+// attempt for its own `ssh` line, suspends, a REAL far shell runs a command
+// and then `exit` — destroying the very shell that would have sent the
+// completion for it — and the parent comes back. Two blocks must end, and
+// only one of them can end with a status the far side reported.
+func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent(t *testing.T) {
+	fx := startLiveSshd(t, true)
+	h := newSSHChildHarness(t, fx)
+	h.establishParent()
+	h.promptReadyParent()
+
+	// The user typed `ssh …` at an integrated local prompt: the parent's own
+	// block opens before anything nested exists.
+	const parentLine = "ssh far-host"
+	parentAtt := h.startParentAttempt("att-parent-ssh", parentLine)
+
+	h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
+	h.suspendParent()
+	waitFor(t, "parent Suspended", 10*time.Second, func() bool {
+		return h.domainState(h.parent) == lifecycle.DomainSuspended
+	})
+	// Suspension is not completion: the parent's block is still open, and it
+	// must stay open for the whole nested interval.
+	if a, _ := h.kernel.Attempt(parentAtt); a.State != lifecycle.AttemptOpen {
+		t.Fatalf("parent attempt = %v while suspended, want still open", a.State)
+	}
+
+	agentSock := startInProcessAgent(t, fx)
+	wrapperDir := installSSHWrapper(t, fx)
+	proc := h.runComposedLine(agentSock, wrapperDir)
+	t.Cleanup(proc.kill)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("composed-line terminal:\n%s", proc.out.String())
+			t.Logf("child attempts published: %v", h.facts.commands(h.child))
+		}
+	})
+	waitFor(t, "child domain Established via its own hello", 30*time.Second, func() bool {
+		return h.domainState(h.child) == lifecycle.DomainEstablished
+	})
+
+	// A command on the far host gets a block that closes normally — the
+	// baseline the abandoned one is measured against.
+	if _, err := proc.ptmx.Write([]byte("printf nocx-far\n")); err != nil {
+		t.Fatalf("type far command: %v", err)
+	}
+	var farAtt lifecycle.AttemptID
+	waitFor(t, "the far command completed on the child domain", 30*time.Second, func() bool {
+		id, ok := h.facts.attemptFor(h.child, "printf nocx-far")
+		if !ok {
+			return false
+		}
+		farAtt = id
+		a, ok := h.kernel.Attempt(id)
+		return ok && a.State == lifecycle.AttemptCompleted
+	})
+	if a, _ := h.kernel.Attempt(farAtt); a.ExitCode == nil || *a.ExitCode != 0 {
+		t.Fatalf("far command exit = %v, want 0", a.ExitCode)
+	}
+
+	// `exit` is the command that destroys the shell which would report its
+	// own completion. Its block can never receive one — but it must still
+	// END, with a stated unknown rather than a running dot that never stops.
+	proc.typeExit()
+	waitFor(t, "child ended and left the stack", 30*time.Second, func() bool {
+		st := h.domainState(h.child)
+		return st == lifecycle.DomainClosed || st == lifecycle.DomainLost
+	})
+	// Whether `exit` ever becomes an ATTEMPT is a race the product cannot
+	// win and must not depend on: the shell emits its start frame and then
+	// destroys itself, so the frame reaches the kernel or dies with the
+	// transport. Measured here, it usually dies — the far terminal shows the
+	// prompt's B mark, the echoed `exit`, and no C mark after it. So the
+	// invariant is stated over the DOMAIN, which is authenticated either
+	// way: nothing of a closed domain is left open. The renderer's two
+	// answers to the two outcomes are pinned in
+	// frontend/src/lifecycle/projections.test.ts — an attempt that arrived
+	// goes unknown, and a submit that never got one is abandoned.
+	if _, open := h.kernel.OpenAttempt(h.child); open {
+		t.Fatal("the closed child domain still has an open attempt: a block that can never end")
+	}
+	if exitAtt, published := h.facts.attemptFor(h.child, "exit"); published {
+		a, ok := h.kernel.Attempt(exitAtt)
+		if !ok {
+			t.Fatalf("attempt %s vanished from the kernel", exitAtt)
+		}
+		if a.State != lifecycle.AttemptUnknown {
+			t.Fatalf("the `exit` attempt = %v after its domain closed, want unknown", a.State)
+		}
+		if a.ExitCode != nil {
+			t.Fatalf("the `exit` attempt carries exit code %d; a status nobody reported "+
+				"must never be invented", *a.ExitCode)
+		}
+	} else {
+		t.Logf("no attempt was published for `exit` (the start frame died with the shell); "+
+			"the child published: %v", h.facts.commands(h.child))
+	}
+
+	// The parent comes back and completes its own block with the status the
+	// ssh client really exited with — the local D of the ssh line, which the
+	// child's departure neither supplies nor invalidates.
+	h.activateParent()
+	waitFor(t, "parent re-established and owning the lane", 10*time.Second, func() bool {
+		if st := h.domainState(h.parent); st != lifecycle.DomainEstablished {
+			return false
+		}
+		return h.laneSnapshot().Domain == h.parent
+	})
+	h.completeParentAttempt(parentAtt, 0)
+	waitFor(t, "the parent's ssh block froze with its real status", 10*time.Second, func() bool {
+		a, ok := h.kernel.Attempt(parentAtt)
+		return ok && a.State == lifecycle.AttemptCompleted && a.ExitCode != nil && *a.ExitCode == 0
+	})
+	// And the lane is the parent's again, structured, ready for the next
+	// command — a second `ssh` starts from a clean block, not from whatever
+	// the pane was left holding.
+	h.send(lifecycle.Event{Kind: lifecycle.KindPromptReady, PromptReady: &lifecycle.PromptReady{}})
+	waitFor(t, "lane back at the parent's ready prompt", 10*time.Second, func() bool {
 		ls := h.laneSnapshot()
 		return ls.Domain == h.parent && ls.Lifecycle == lifecycle.LifecyclePromptReady
 	})

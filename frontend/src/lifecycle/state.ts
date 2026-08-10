@@ -128,6 +128,14 @@ export class LifecycleKernel {
   /** Domain ids that have ended (closed, or lost with their lane). Ids are
    *  never reused, so a fact naming a closed id is stale and rejected. */
   private readonly _closed = new Set<string>()
+  /** How many domains of this lane have ENDED. Only ever grows, and it is
+   *  deliberately a count rather than a set: the projections need to know
+   *  THAT one ended, not which — a block opened at an app submit carries no
+   *  domain until an attempt binds it, and the whole point is the case
+   *  where no attempt ever arrives (nocx-mlyu). A suspension never touches
+   *  it: suspend and close are the two readings of the same 'native' fact,
+   *  and only one of them makes an unfinished block unfinishable. */
+  private _ended = 0
   private readonly _subs = new Set<(k: LifecycleKernel) => void>()
 
   get state(): LifecycleState {
@@ -147,6 +155,14 @@ export class LifecycleKernel {
   /** The lane's domain stack, bottom → top (protocol §9). */
   get domainStack(): readonly IntegrationDomain[] {
     return this._stack.domains
+  }
+
+  /** How many domains of this lane have ended. The projections watch it for
+   *  change: a domain ending is the moment anything still unfinished under
+   *  it became unfinishable, including a block that never reached an
+   *  attempt at all. */
+  get endedDomains(): number {
+    return this._ended
   }
 
   /** One attempt this lane has seen, by id — read-only kernel state for
@@ -249,6 +265,7 @@ export class LifecycleKernel {
         const dead = this._stack.domains
         for (const d of dead) {
           this._closed.add(d.id)
+          this._ended++
           this.unknownAttemptsOf(d.id)
         }
         this._stack = emptyStack()
@@ -409,6 +426,7 @@ export class LifecycleKernel {
       this._stack = { domains: this._stack.domains.slice(0, idx + 1) }
       for (const c of closed) {
         this._closed.add(c.id)
+        this._ended++
         this.unknownAttemptsOf(c.id)
       }
     }

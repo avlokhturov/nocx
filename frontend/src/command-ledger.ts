@@ -141,6 +141,24 @@ export class CommandLedger {
     return id === undefined ? undefined : this.resolveID(id)
   }
 
+  /** Abandon the single unbound running record: the domain it was submitted
+   *  under has ended, so no attempt will ever arrive to carry its status.
+   *  Measured against a real sshd (nocx-mlyu): `exit` destroys the shell
+   *  that would have sent the start frame, so the record opened at the
+   *  submit is never bound to anything — it is not a record awaiting a
+   *  completion, it is one that can never receive one. Unknown, never
+   *  successful, and it persists nothing (only a completed record does).
+   *  Returns the abandoned record, or null when nothing was pending. */
+  abandonPending(): CommandRecord | null {
+    const bound = this._boundRecordIds()
+    const rec = this._records.find((r) => r.status === 'running' && !bound.has(r.id))
+    if (rec === undefined) return null
+    rec.status = 'unknown'
+    rec.exitCode = null
+    rec.endedAt = this._now()
+    return rec
+  }
+
   /** Complete the record bound to the attempt from the authenticated
    *  attempt (ADR-0024 §5): the exit status is set exactly once, only by an
    *  authenticated same-domain completion, and an abandoned attempt is

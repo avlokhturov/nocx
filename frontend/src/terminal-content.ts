@@ -62,6 +62,7 @@ import { LOCAL_TARGET_ID } from './ports-client'
 import { DomainEnvironmentProjection } from './lifecycle/domain-environment'
 import {
   deriveActions,
+  fallsToConventionalGrid,
   shellStateFromLifecycle,
   type ShellState,
   type InputPresentation,
@@ -1056,7 +1057,11 @@ export class TerminalContent extends BaseTabContent {
           // setUnstructured declines while an alt-screen program owns the
           // pane.
           this.scrollback?.exitFullscreen()
-          if (shellStateFromLifecycle(this.lifecycle.state) !== 'integrated') {
+          if (
+            fallsToConventionalGrid(
+              shellStateFromLifecycle(this.lifecycle.state, this.lifecycle.domainStack),
+            )
+          ) {
             this.scrollback?.setUnstructured()
           } else if (this.lifecycle.state.kind === 'running') {
             // A command still in flight (the completion fact has not
@@ -1143,8 +1148,17 @@ export class TerminalContent extends BaseTabContent {
         // (prompt_ready / running) the command cycle owns the live region —
         // beginBlock, freezeFromAttempt and the fullscreen path — and an
         // unconditional setUnstructured here tore that layout down on every
-        // fact, so no block ever showed (nocx-u7uh.25).
-        if (shellStateFromLifecycle(this.lifecycle.state) !== 'integrated') {
+        // fact, so no block ever showed (nocx-u7uh.25). A handover — the
+        // parent suspended for the ssh handshake, or the child's domain
+        // closed and the parent has not yet reclaimed the lane — is NOT
+        // conventional: the lane still has a domain waiting below, and
+        // dropping the structure there is what showed the previous
+        // attempt's output as one continuous terminal (nocx-mlyu).
+        if (
+          fallsToConventionalGrid(
+            shellStateFromLifecycle(this.lifecycle.state, this.lifecycle.domainStack),
+          )
+        ) {
           this.scrollback?.setUnstructured()
         } else if (this.lifecycle.state.kind === 'prompt_ready') {
           // A ready prompt with a live domain presents the structured idle
@@ -1211,6 +1225,14 @@ export class TerminalContent extends BaseTabContent {
             // block freezes as abandoned — never successful.
             if (!this.scrollback || !this.renderer) return
             this.scrollback.abandonAttempt(attempt, this.renderer.cursorLine())
+          },
+          abandonPending: () => {
+            // The block opened at the submit and its domain ended before any
+            // attempt arrived — `exit` is the case, and the start frame it
+            // would have needed dies with the shell (nocx-mlyu). Nothing can
+            // complete it, so it freezes as unknown rather than climbing.
+            if (!this.scrollback || !this.renderer) return
+            this.scrollback.abandonUnbound(this.renderer.cursorLine())
           },
         },
         (rec, attempt) =>
@@ -1837,7 +1859,10 @@ export class TerminalContent extends BaseTabContent {
    *  presentation fact — what the user sees. Nothing stream-derived reaches
    *  either axis. */
   private _updateCapability(): void {
-    const shellState: ShellState = shellStateFromLifecycle(this.lifecycle.state)
+    const shellState: ShellState = shellStateFromLifecycle(
+      this.lifecycle.state,
+      this.lifecycle.domainStack,
+    )
     const presentation: InputPresentation = this.editor?.isVisible ? 'editor' : 'terminal'
     // The open-ack integration decline is still worth the tab's warning
     // mark: it is the backend's own fact about this session, not a

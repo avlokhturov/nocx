@@ -570,6 +570,21 @@ export class ScrollbackController {
     return false
   }
 
+  /** Abandon a running block that never bound to an attempt: its domain
+   *  ended before any start frame arrived, so nothing will ever complete it
+   *  (nocx-mlyu). Unknown, never successful. */
+  abandonUnbound(endLine: number): boolean {
+    const getLine = (y: number) => this._renderer.getBufferLine(y)
+    const rec = this._blockManager.abandonUnbound(getLine, endLine)
+    if (rec) {
+      this._clearFrozenRows()
+      this.setIdle()
+      this._scrollToLastBlockStart()
+      return true
+    }
+    return false
+  }
+
   dispose(): void {
     this._followObserver?.disconnect()
     this._followObserver = null

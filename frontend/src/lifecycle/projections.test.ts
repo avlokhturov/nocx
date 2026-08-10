@@ -54,6 +54,9 @@ class FakeBlocks implements BlockProjectionPort {
   abandonBlock(a: ExecutionAttempt): void {
     this.events.push(`abandon:${a.id}`)
   }
+  abandonPending(): void {
+    this.events.push('abandon-pending')
+  }
 }
 
 function makeEnv() {
@@ -197,6 +200,84 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     expect(rec?.exitCode).toBeNull()
     expect(persist).not.toHaveBeenCalled()
     expect(blocks.events).toEqual(['bind:att-1', 'abandon:att-1'])
+  })
+
+  it('a nested session that ends freezes the block it left behind, not only the lane it hands back (nocx-mlyu)', () => {
+    const { kernel, blocks } = makeEnv()
+    // The whole nested-ssh cycle: parent at a prompt, the ssh attempt opens,
+    // the parent suspends, the child runs `exit`, the child's domain closes,
+    // the parent reclaims the lane and its own attempt completes.
+    kernel.applyFact(promptReady('parent', 1))
+    kernel.applyFact(
+      running('parent', 1, { id: 'att-ssh', origin: 'shell', command: 'ssh pi@far' }),
+    )
+    kernel.applyFact(nativeFact()) // parent suspends: the handshake is a conventional terminal
+    kernel.applyFact(promptReady('child', 2))
+    kernel.applyFact(running('child', 2, { id: 'att-exit', origin: 'shell', command: 'exit' }))
+    kernel.applyFact(nativeFact()) // the child's domain closed
+    kernel.applyFact(
+      running('parent', 1, { id: 'att-ssh', origin: 'shell', command: 'ssh pi@far' }),
+    )
+
+    // The kernel has already concluded it: the shell that would have sent
+    // `exit`'s completion is the one the command destroyed, so the attempt
+    // is unknown. The block must follow — a block whose domain is gone can
+    // never complete, and a running dot that can never stop is a lie.
+    expect(kernel.attempt('att-exit')?.state).toBe('unknown')
+    expect(blocks.events).toContain('abandon:att-exit')
+
+    kernel.applyFact(
+      running('parent', 1, {
+        id: 'att-ssh',
+        state: 'completed',
+        exitCode: 0,
+        fence: FENCE,
+      }),
+    )
+    expect(blocks.events).toEqual([
+      'open:att-ssh:ssh pi@far',
+      'open:att-exit:exit',
+      'abandon:att-exit',
+      'freeze:att-ssh:0',
+    ])
+  })
+
+  // The measured case (nocx-mlyu): against a real sshd the far shell's start
+  // frame for `exit` never reaches the kernel at all — the command destroys
+  // the shell that would have sent it, and the transport dies first. So the
+  // block has NO attempt to go unknown with: it was opened at the app-owned
+  // submit and nothing downstream can ever finish it. That is the block the
+  // owner watched climb to 1m1s.
+  it('a submit whose domain ends before any attempt arrives is abandoned, not left running', () => {
+    const { kernel, ledger, blocks, persist } = makeEnv()
+    kernel.applyFact(promptReady('parent', 1))
+    kernel.applyFact(nativeFact()) // the parent suspends for the handshake
+    kernel.applyFact(promptReady('child', 2))
+
+    // The user submits `exit` in the editor: a record and a running block
+    // open at the submit, before any byte goes out (ADR-0024 §5).
+    const rec = ledger.open('exit', '/home/pi', 'far-host', () => undefined)
+    expect(rec.status).toBe('running')
+
+    kernel.applyFact(nativeFact()) // the child's domain closed
+    kernel.applyFact(promptReady('parent', 1)) // the parent reclaims the lane
+
+    expect(rec.status).toBe('unknown')
+    expect(rec.exitCode).toBeNull()
+    expect(blocks.events).toEqual(['abandon-pending'])
+    expect(persist).not.toHaveBeenCalled() // an abandoned record persists nothing
+  })
+
+  it('a domain that merely suspends abandons nothing — the parent block outlives the nested session', () => {
+    const { kernel, ledger, blocks } = makeEnv()
+    kernel.applyFact(promptReady('parent', 1))
+    const rec = ledger.open('ssh pi@far', '/home/me', '', () => undefined)
+    kernel.applyFact(running('parent', 1, { id: 'att-ssh', origin: 'app' }))
+    kernel.applyFact(nativeFact()) // suspended, NOT closed
+    kernel.applyFact(promptReady('child', 2))
+
+    expect(rec.status).toBe('running')
+    expect(blocks.events).toEqual(['bind:att-ssh'])
   })
 
   it('the kernel exposes its attempts read-only — the projection lookup after loss', () => {

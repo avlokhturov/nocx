@@ -29,7 +29,7 @@ describe('three axes (nocx-atyf.1)', () => {
     // integrated (ADR-0024 §6; the old `trusted` boolean is deleted).
     const k = new LifecycleKernel()
     k.applyFact({ lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-    expect(shellStateFromLifecycle(k.state)).toBe('integrated')
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
 
     // With authorisation and eligibility resolved, the user should be
     // offered a way back to the editor.
@@ -95,14 +95,15 @@ describe('three axes (nocx-atyf.1)', () => {
 describe('shellStateFromLifecycle — the kernel is the integration authority (ADR-0024 §6)', () => {
   const promptReady = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
 
-  it('Native is unsupported: no domain, a conventional terminal', () => {
-    expect(shellStateFromLifecycle(new LifecycleKernel().state)).toBe('unsupported')
+  it('Native with nothing below it is unsupported: no domain ever arrived, a conventional terminal', () => {
+    const k = new LifecycleKernel()
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('unsupported')
   })
 
   it('a live authenticated domain is integrated — at the prompt and while running', () => {
     const k = new LifecycleKernel()
     k.applyFact({ ...promptReady })
-    expect(shellStateFromLifecycle(k.state)).toBe('integrated')
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
     k.applyFact({
       lane: 'l',
       lifecycle: 'running',
@@ -110,19 +111,53 @@ describe('shellStateFromLifecycle — the kernel is the integration authority (A
       epoch: 1,
       attempt: { id: 'a1', state: 'open' },
     })
-    expect(shellStateFromLifecycle(k.state)).toBe('integrated')
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
   })
 
   it('lost and desynchronized are lost — neither is live, ownership is revoked', () => {
     const lost = new LifecycleKernel()
     lost.applyFact({ ...promptReady })
     lost.applyFact({ lane: 'l', lifecycle: 'lost' })
-    expect(shellStateFromLifecycle(lost.state)).toBe('lost')
+    expect(shellStateFromLifecycle(lost.state, lost.domainStack)).toBe('lost')
 
     const desync = new LifecycleKernel()
     desync.applyFact({ ...promptReady })
     desync.applyFact({ lane: 'l', lifecycle: 'desynchronized', domain: 'd1', epoch: 1 })
-    expect(shellStateFromLifecycle(desync.state)).toBe('lost')
+    expect(shellStateFromLifecycle(desync.state, desync.domainStack)).toBe('lost')
+  })
+
+  // nocx-mlyu: 'native' says three different things, and the pane answered
+  // all three as 'a conventional terminal'. A lane hands ownership over
+  // twice per nested session — once when the parent suspends for the ssh
+  // handshake, once when the child's domain closes — and each time the
+  // structured presentation was torn down and the whole buffer shown.
+  it('Native with a domain suspended below it is a handover, not a conventional terminal', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady }) // the parent integrates
+    k.applyFact({ lane: 'l', lifecycle: 'native' }) // it suspends for the ssh handshake
+    expect(k.domainStack).toHaveLength(1)
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('handover')
+  })
+
+  it('the handover ends when the child claims the lane, and again when the parent takes it back', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady })
+    k.applyFact({ lane: 'l', lifecycle: 'native' })
+    k.applyFact({ lane: 'l', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
+
+    k.applyFact({ lane: 'l', lifecycle: 'native' }) // the child's domain closed
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('handover')
+
+    k.applyFact({ ...promptReady }) // the parent reclaims the lane
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
+  })
+
+  it('a lane that fell to Lost is lost, never a handover — its stack is dead, not suspended', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady })
+    k.applyFact({ lane: 'l', lifecycle: 'lost' })
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('lost')
   })
 })
 

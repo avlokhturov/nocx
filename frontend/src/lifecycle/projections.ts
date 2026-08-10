@@ -44,6 +44,10 @@ export interface BlockProjectionPort {
   freezeBlock(attempt: ExecutionAttempt): void
   /** Freeze the bound block as abandoned — the attempt went `unknown`. */
   abandonBlock(attempt: ExecutionAttempt): void
+  /** Freeze the running block that never bound to an attempt at all: it was
+   *  opened at the app-owned submit and the domain it was submitted under
+   *  has ended, so nothing can ever complete it. */
+  abandonPending(): void
 }
 
 /** The history half: persists a completed app-owned record, authorized by
@@ -61,6 +65,9 @@ export class LifecycleProjections {
   /** Attempt ids already terminal-processed (completed or abandoned) —
    *  an attempt's exit status is applied exactly once. */
   private readonly _done = new Set<string>()
+  /** The kernel's ended-domain count as of the last pump. A change means a
+   *  domain ended since — the moment an unbound submit became unfinishable. */
+  private _endedSeen = 0
   private _unsub: (() => void) | null = null
 
   constructor(
@@ -87,12 +94,25 @@ export class LifecycleProjections {
    *  input is kernel state; a stream event can never reach this method. */
   pump(): void {
     const state = this.kernel.state
-    if (state.kind === 'lost') {
-      // The kernel abandoned every open attempt of the lane (decision 8):
-      // the bound projections must not keep a running slot, and the bound
-      // records must leave `running` — as `unknown`, never success.
-      this.abandonBound()
-      return
+    // Close out every bound attempt the kernel concluded while some OTHER
+    // domain held the lane. Two paths reach it: a lane that fell to Lost
+    // abandoned all of them (decision 8), and a nested domain that closed
+    // abandoned its own — the shell that would have sent `exit`'s
+    // completion is the one `exit` destroyed, so the kernel unknowns the
+    // attempt as the domain closes and the lane moves straight on to the
+    // parent (nocx-mlyu). Reading only the lane's current attempt left that
+    // block with a running dot that could never stop.
+    this.reconcileBound(state.kind === 'running' ? state.attempt.id : null)
+    // A domain ended. Anything submitted under it that never reached an
+    // attempt can be completed by nobody: measured against a real sshd, the
+    // far shell's start frame for `exit` never leaves — the command destroys
+    // the shell that would have sent it — so the block opened at the submit
+    // has no attempt to go unknown with, and used to climb forever
+    // (nocx-mlyu). A suspension is not an ending and touches none of this:
+    // the parent's own block outlives the whole nested session.
+    if (this.kernel.endedDomains !== this._endedSeen) {
+      this._endedSeen = this.kernel.endedDomains
+      if (this.ledger.abandonPending() !== null) this.blocks.abandonPending()
     }
     if (state.kind !== 'running') return
     const attempt = state.attempt
@@ -126,14 +146,17 @@ export class LifecycleProjections {
     }
   }
 
-  /** Abandon every bound projection: the lane fell to Lost, so each bound
-   *  attempt is `unknown` in the kernel and the records must follow. */
-  private abandonBound(): void {
+  /** Abandon every bound attempt the kernel has already concluded as
+   *  `unknown` — a lane that fell to Lost, or a domain that closed under
+   *  the attempt. `current` is skipped: pump() processes the lane's own
+   *  attempt in order below, so each attempt reaches the ledger and the
+   *  block exactly once, in the order the kernel produced it. */
+  private reconcileBound(current: string | null): void {
     for (const id of this._bound) {
-      if (this._done.has(id)) continue
-      this._done.add(id)
+      if (id === current || this._done.has(id)) continue
       const attempt = this.kernel.attempt(id)
-      if (attempt === undefined) continue
+      if (attempt === undefined || attempt.state !== 'unknown') continue
+      this._done.add(id)
       this.ledger.complete(attempt)
       this.blocks.abandonBlock(attempt)
     }
