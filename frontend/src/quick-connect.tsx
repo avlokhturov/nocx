@@ -116,6 +116,15 @@ export interface QuickConnectProvider {
    * Runs on every keystroke, so it must stay synchronous.
    */
   getQueryItems?(query: string): QuickConnectItem[]
+  /**
+   * Optional rows that always sit LAST, whether or not anything matched — the
+   * "the one you want is not here" offer, which is precisely the answer to an
+   * empty list and must therefore survive one. Distinct from getQueryItems,
+   * which is a fallback: a fallback that only appears when nothing matched
+   * cannot offer to create the name you typed while a near-match is still on
+   * screen. Runs on every keystroke, so it must stay synchronous.
+   */
+  getTrailingItems?(query: string): QuickConnectItem[]
 }
 
 // ── Drill-in (nocx-4t37) ────────────────────────────────────────────────
@@ -334,6 +343,12 @@ export class SecretsQuickConnectProvider implements QuickConnectProvider {
     /** Insert the named secret where the user is typing. The provider never
      *  sees the value — resolution and the pty write belong to the pane. */
     private insert: (name: string) => void,
+    /** "Add a secret…" was activated: the host opens the vault's own create
+     *  dialog, which owns the surface from there. The SAME seam the prompt's
+     *  '@' picker creates through (secret-picker.ts requestCreate) — a
+     *  second way to make a secret would be a second set of rules about
+     *  names, kinds and collisions. */
+    private create: (name: string) => void,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -346,7 +361,29 @@ export class SecretsQuickConnectProvider implements QuickConnectProvider {
       run: () => this.insert(e.name),
     }))
   }
+
+  /** The offer that outlives an empty list: the secret the vault does not
+   *  hold yet is the one the person came here to type. It carries the typed
+   *  filter as the name, because that is almost always the name they were
+   *  reaching for — asking them to type it again in Settings is how a
+   *  feature goes unused (the same judgement, and the same words, as the
+   *  prompt picker's create row). */
+  getTrailingItems(query: string): QuickConnectItem[] {
+    const typed = query.trim()
+    return [
+      {
+        id: CREATE_SECRET_ROW_ID,
+        kind: 'secret',
+        label: typed === '' ? 'Add a secret…' : `Add "${typed}" to the vault…`,
+        run: () => this.create(typed),
+      },
+    ]
+  }
 }
+
+/** The create row is not a vault entry, so it is addressed by a reserved id
+ *  rather than by an inventory handle. */
+const CREATE_SECRET_ROW_ID = '__create_secret__'
 
 /** What each vault kind is, in the words a person picking one would use.
  *  The vocabulary is the registry's closed set (contracts/vault.inventory). */
@@ -620,10 +657,21 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
       if (props.variant === 'secrets') return kind === 'secret'
       return kind !== 'secret'
     }
+    // Rows that always sit last — the vault's "Add a secret…". Admitted by
+    // the same kind rule as everything else, so the offer to create a secret
+    // cannot appear in the palette or the server list.
+    const trailing: GroupedItem[] = []
+    for (const provider of props.providers) {
+      const providerItems = (provider.getTrailingItems?.(query()) ?? []).filter((it) =>
+        admits(it.kind),
+      )
+      trailing.push(...providerItems.map((item) => ({ ...item, providerId: provider.id })))
+    }
+
     const matched = items().filter(
       (it) => admits(it.kind) && (q === '' || matchesText(it.label, it.detail, q)),
     )
-    if (matched.length > 0) return matched
+    if (matched.length > 0) return [...matched, ...trailing]
 
     // Nothing static matched — consult the query-dependent providers (the
     // ad-hoc "Connect to <host>" fallback). Only reached when every real
@@ -635,7 +683,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
       const providerItems = provider.getQueryItems?.(query()) ?? []
       queryItems.push(...providerItems.map((item) => ({ ...item, providerId: provider.id })))
     }
-    return queryItems
+    return [...queryItems, ...trailing]
   })
 
   // Parse-failure notice for the empty state. Reuses the connections.tsx

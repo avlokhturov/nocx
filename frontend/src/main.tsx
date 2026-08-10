@@ -727,6 +727,10 @@ async function main() {
     new SecretsQuickConnectProvider(
       () => vaultClient.inventory(),
       (name) => void insertSecretIntoActivePane(name),
+      // The create dialog is the vault's own, and it is the SAME one the
+      // prompt's '@' picker opens (nocx-fk32.1): a secret needs a name and a
+      // value, and neither picker is where a value gets typed.
+      (name) => openSettingsTab().startNewSecret(name),
     ),
   ]
 

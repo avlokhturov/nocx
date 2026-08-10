@@ -1275,17 +1275,32 @@ describe('the secret picker (nocx-fk32)', () => {
       ],
     })
 
-  function mountSecrets(insert: (name: string) => void) {
+  function mountSecrets(
+    insert: (name: string) => void,
+    create: (name: string) => void = vi.fn(),
+    entries: () => Promise<{ entries: { id: string; name: string; kind: string }[] }> = inventory,
+  ) {
     const ctrl = new QuickConnectController()
     afterEach(() => ctrl.destroy())
     ctrl.mount(container, [
       new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
-      new SecretsQuickConnectProvider(inventory, insert),
+      new SecretsQuickConnectProvider(entries, insert, create),
     ])
     return ctrl
   }
 
   const settle = () => new Promise((r) => setTimeout(r, 0))
+
+  const rowTexts = () =>
+    [...container.querySelectorAll('[role="option"]')].map((el) => (el.textContent ?? '').trim())
+
+  const typeFilter = async (text: string) => {
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    if (!input) throw new Error('no filter field')
+    input.value = text
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await settle()
+  }
 
   it('lists the vault names and hands the chosen NAME to the insert seam', async () => {
     const insert = vi.fn()
@@ -1330,5 +1345,50 @@ describe('the secret picker (nocx-fk32)', () => {
       (el.textContent ?? '').trim(),
     )
     expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(false)
+  })
+
+  // The secret the vault does not hold yet is the one the user came to type
+  // (nocx-fk32.1). Without this row the picker's answer to "it is not here"
+  // is silence plus a Settings page they have to know about.
+  it('offers to create the secret, as the last row, with what was typed', async () => {
+    const create = vi.fn()
+    const ctrl = mountSecrets(vi.fn(), create)
+    ctrl.showSecrets()
+    await settle()
+
+    const initial = rowTexts()
+    expect(initial[initial.length - 1]).toContain('Add a secret')
+
+    await typeFilter('gitlab token')
+    // Nothing matched, and the offer is still there — closing it at exactly
+    // the keystroke that names a new secret takes the offer away as the user
+    // reaches for it.
+    const rows = rowTexts()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toContain('gitlab token')
+
+    const row = container.querySelector<HTMLElement>('[role="option"]')
+    row?.click()
+    expect(create).toHaveBeenCalledWith('gitlab token')
+  })
+
+  it('offers it on an empty vault, where the list has nothing else to say', async () => {
+    const create = vi.fn()
+    const ctrl = mountSecrets(vi.fn(), create, () => Promise.resolve({ entries: [] }))
+    ctrl.showSecrets()
+    await settle()
+
+    expect(rowTexts()).toEqual([expect.stringContaining('Add a secret')])
+  })
+
+  it('never offers to create from the palette or the server list', async () => {
+    const ctrl = mountSecrets(vi.fn(), vi.fn())
+    ctrl.showPalette()
+    await settle()
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
+
+    ctrl.show()
+    await settle()
+    expect(rowTexts().some((r) => r.includes('Add a secret'))).toBe(false)
   })
 })
