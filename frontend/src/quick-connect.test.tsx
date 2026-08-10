@@ -6,6 +6,7 @@ import {
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
   AdHocQuickConnectProvider,
+  SecretsQuickConnectProvider,
   QuickConnectController,
   type QuickConnectItem,
   type DrillSelection,
@@ -1252,5 +1253,82 @@ describe('palette and drill-in', () => {
     await waitForItems()
     expect(labels().some((l) => l.includes('SSH config: no-ssh-binary'))).toBe(true)
     expect(labels().some((l) => l.includes('Local shell'))).toBe(true)
+  })
+})
+
+describe('the secret picker (nocx-fk32)', () => {
+  let container: HTMLDivElement
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.append(container)
+  })
+  afterEach(() => {
+    container.remove()
+  })
+
+  const inventory = () =>
+    Promise.resolve({
+      entries: [
+        { id: 'secrow:1', name: 'pi@192.168.0.93', kind: 'password' },
+        { id: 'secrow:2', name: 'deploy key', kind: 'private-key' },
+      ],
+    })
+
+  function mountSecrets(insert: (name: string) => void) {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    ctrl.mount(container, [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SecretsQuickConnectProvider(inventory, insert),
+    ])
+    return ctrl
+  }
+
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+
+  it('lists the vault names and hands the chosen NAME to the insert seam', async () => {
+    const insert = vi.fn()
+    const ctrl = mountSecrets(insert)
+    ctrl.showSecrets()
+    await settle()
+
+    const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(true)
+    expect(rows.some((r) => r.includes('deploy key'))).toBe(true)
+    // Commands are not secrets: the variant admits one kind set.
+    expect(rows.some((r) => r.includes('Local shell'))).toBe(false)
+
+    const target = [...container.querySelectorAll<HTMLElement>('[role="option"]')].find((el) =>
+      (el.textContent ?? '').includes('pi@192.168.0.93'),
+    )
+    target?.click()
+    // The picker never sees material — only the name the reference carries.
+    expect(insert).toHaveBeenCalledWith('pi@192.168.0.93')
+  })
+
+  it('keeps secrets out of the palette — one Enter must not mean two things', async () => {
+    const insert = vi.fn()
+    const ctrl = mountSecrets(insert)
+    ctrl.showPalette()
+    await settle()
+
+    const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(rows.some((r) => r.includes('Local shell'))).toBe(true)
+    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(false)
+  })
+
+  it('keeps secrets out of the plain server list too', async () => {
+    const ctrl = mountSecrets(vi.fn())
+    ctrl.show()
+    await settle()
+    const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(rows.some((r) => r.includes('pi@192.168.0.93'))).toBe(false)
   })
 })

@@ -24,3 +24,12 @@ export function findReferences(input: string): ReferenceSpan[] {
   }
   return out
 }
+
+/** Build the reference for a vault inventory name — the one writer of the
+ *  grammar, beside its one reader above (nocx-fk32). The name is not
+ *  escaped and must not be: the grammar has exactly one structural
+ *  character, `}`, and a vault name containing one cannot be referenced at
+ *  all, which findReferences already states by refusing to match it. */
+export function secretReference(name: string): string {
+  return `{{secret:${name}}}`
+}

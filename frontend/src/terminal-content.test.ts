@@ -87,6 +87,11 @@ const rendererOf = (content: TerminalContent): RendererMock => {
   return withRenderer.renderer
 }
 
+/** The live session mock behind TerminalContent's private field — the same
+ *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
+const sessionOf = (content: TerminalContent): SessionFake =>
+  (content as unknown as { session: SessionFake }).session
+
 /** The editor's internal CM6 view — reached only to seed selections. */
 const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
@@ -740,6 +745,83 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
       expect(block.classList.contains('cmd-block-selected')).toBe(false)
       expect(session.send.mock.calls.length).toBe(sentBefore)
       expect(ev.defaultPrevented).toBe(false) // native paste still runs
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('inserting a saved secret into the pane in front (nocx-fk32)', () => {
+  /** A client whose vault.resolveLine answers with a resolved value. */
+  function resolvingClient(value: string) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({ line: value, refs: [{ name: 'pi@far', resolved: true }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  it('writes the VALUE to the pty when the terminal owns input, with no newline', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      // The terminal owns input — a raw password prompt, an ssh handshake.
+      // There is no reference machinery on the other side of the pty, so
+      // the value goes across, and NOT the newline: sending a password
+      // nobody asked for yet is not ours to decide.
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('value')
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      expect(sent).toEqual(['hunter2'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('never writes a value the vault could not resolve — the far side must not receive the reference text', async () => {
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'vault.resolveLine') {
+        const line = (params as { line?: string })?.line ?? ''
+        return Promise.resolve({ line, refs: [{ name: 'gone', resolved: false }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('gone')).resolves.toBe('unavailable')
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('puts the REFERENCE in the draft when the editor owns the prompt, and resolves nothing', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const ed = editorOf(content)
+      ed.show()
+      const session = sessionOf(content)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('reference')
+      // ADR-0021: a command carrying a reference moves to another machine
+      // and resolves that machine's secret; a command carrying a pasted key
+      // is both dead and dangerous. So the draft gets the reference...
+      expect(view.state.doc.toString()).toContain('{{secret:pi@far}}')
+      // ...the value is never in the draft...
+      expect(view.state.doc.toString()).not.toContain('hunter2')
+      // ...and nothing was resolved or sent: that waits for submit.
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(session.send.mock.calls.length).toBe(sentBefore)
     } finally {
       teardown()
     }

@@ -58,6 +58,7 @@ import {
 } from './tab-content'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
+import { secretReference } from './secret-reference'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { DomainEnvironmentProjection } from './lifecycle/domain-environment'
 import {
@@ -1999,6 +2000,44 @@ export class TerminalContent extends BaseTabContent {
    *  stops the A marker), so a fresh integration — not a presentation
    *  toggle — is what returns to command blocks. The capability chip still
    *  states "Native input" and the popover offers nothing while latched. */
+  /** Insert a vault secret where the user is actually typing (nocx-fk32).
+   *  The target is chosen by who owns input, and the difference is the
+   *  point:
+   *
+   *  - The EDITOR owns the prompt: the REFERENCE goes into the draft, never
+   *    the value. That is ADR-0021's whole argument — a command carrying a
+   *    reference moves to another machine and resolves that machine's
+   *    secret, while a command carrying a pasted key is both dead and
+   *    dangerous — and the draft already renders it as the secret chip.
+   *    Nothing resolves until submit.
+   *  - The TERMINAL owns input (a password prompt, an ssh handshake, sudo,
+   *    mysql -p): there is no reference machinery on the other side, so the
+   *    value is resolved and written to the pty. vault.resolveLine exists
+   *    for exactly this — 'the resolved value goes to the caller for the
+   *    PTY write and nowhere else'. No newline is appended: the user
+   *    presses Enter, because sending a password nobody asked for yet is
+   *    not ours to decide.
+   *
+   *  Nothing here reads the byte stream to decide anything (AD-6): the
+   *  question 'who owns input' is answered by the input presentation, which
+   *  the lifecycle axis owns. Returns what happened, so the caller can say
+   *  so — a password prompt echoes nothing, and an insert the user cannot
+   *  see is an insert they will do twice. */
+  async insertSecret(name: string): Promise<'reference' | 'value' | 'unavailable'> {
+    if (this.editor?.isVisible === true) {
+      this.editor.insertText(secretReference(name))
+      return 'reference'
+    }
+    if (!this.session || !this.vault) return 'unavailable'
+    const resolved = await this.vault.resolveLine(secretReference(name))
+    // An unresolved name must never be written as literal text: the far
+    // side would receive `{{secret:…}}` as the password. resolveLine reports
+    // every reference it could not resolve, and this line has exactly one.
+    if (resolved.refs.some((r) => !r.resolved)) return 'unavailable'
+    this.session.send(resolved.line)
+    return 'value'
+  }
+
   private enterNativeMode(): void {
     this.nativeMode = true
     this.editor?.hide()

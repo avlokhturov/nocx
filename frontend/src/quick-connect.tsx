@@ -73,12 +73,13 @@ import { aliasRows, profileRows } from './quick-connect-assembly'
 
 /** The palette's type vocabulary — rendered as the badge on the right of
  *  each row in palette mode (nocx-4t37). */
-export type QuickConnectItemKind = 'command' | 'host' | 'setting'
+export type QuickConnectItemKind = 'command' | 'host' | 'setting' | 'secret'
 
 const KIND_LABELS: Record<QuickConnectItemKind, string> = {
   command: 'Command',
   host: 'Host',
   setting: 'Setting',
+  secret: 'Secret',
 }
 
 export interface QuickConnectItem {
@@ -310,6 +311,54 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Secrets provider — insert a saved secret into the pane in front (nocx-fk32)
+//
+// Names only. vault.inventory is the list a person can read and the only
+// identifier a reference can carry (ADR-0016); no material passes through
+// this provider, and the row's run hands the NAME to the insert seam, which
+// decides what actually happens by asking who owns input.
+//
+// Nothing here infers anything about what is on screen. nocx cannot know
+// that a program is reading stdin (ADR-0004) and does not try: this is a
+// surface the user reaches when they want it, which is why it is a picker
+// beside quick connect rather than an offer that appears at a guessed
+// moment.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export class SecretsQuickConnectProvider implements QuickConnectProvider {
+  readonly id = 'secrets'
+  readonly label = 'Secrets'
+
+  constructor(
+    private inventory: () => Promise<{ entries: { id: string; name: string; kind: string }[] }>,
+    /** Insert the named secret where the user is typing. The provider never
+     *  sees the value — resolution and the pty write belong to the pane. */
+    private insert: (name: string) => void,
+  ) {}
+
+  async getItems(): Promise<QuickConnectItem[]> {
+    const inv = await this.inventory()
+    return inv.entries.map((e) => ({
+      id: e.id,
+      kind: 'secret' as const,
+      label: e.name,
+      detail: SECRET_KIND_DETAIL[e.kind] ?? e.kind,
+      run: () => this.insert(e.name),
+    }))
+  }
+}
+
+/** What each vault kind is, in the words a person picking one would use.
+ *  The vocabulary is the registry's closed set (contracts/vault.inventory). */
+const SECRET_KIND_DETAIL: Record<string, string> = {
+  password: 'Password',
+  'key-passphrase': 'Key passphrase',
+  'private-key': 'Private key',
+  'public-key': 'Public key',
+  'otp-seed': 'One-time-password seed',
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Free-form connect provider — "I know this host and you do not"
 //
 // Contributes nothing to the static list. It answers the dialog's
@@ -362,14 +411,19 @@ export class AdHocQuickConnectProvider implements QuickConnectProvider {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Which presentation of the one surface is showing. */
-export type PaletteVariant = 'hosts' | 'palette'
+export type PaletteVariant = 'hosts' | 'palette' | 'secrets'
 
 interface QuickConnectDialogProps {
   open: boolean
   onClose: () => void
   providers: QuickConnectProvider[]
   /** 'hosts' (the tab-strip caret): the plain server list — no commands, no
-   *  type badges. 'palette' (the chord): commands and hosts mixed, typed. */
+   *  type badges. 'palette' (the chord): commands and hosts mixed, typed.
+   *  'secrets' (the tab-strip key icon, nocx-fk32): vault names only,
+   *  inserted into whatever owns input in the pane in front. Secrets are
+   *  deliberately absent from the palette — a list that mixes 'open a
+   *  connection' with 'type a password into what is in front of you' would
+   *  make one Enter mean two very different things. */
   variant: PaletteVariant
 }
 
@@ -558,10 +612,16 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     }
 
     const q = query().trim().toLowerCase()
-    const hostsOnly = props.variant === 'hosts'
+    // Each variant admits exactly one kind set, and 'secret' is in exactly
+    // one of them: the palette must not offer a row whose Enter types into
+    // the pane in front.
+    const admits = (kind: QuickConnectItemKind): boolean => {
+      if (props.variant === 'hosts') return kind === 'host'
+      if (props.variant === 'secrets') return kind === 'secret'
+      return kind !== 'secret'
+    }
     const matched = items().filter(
-      (it) =>
-        (!hostsOnly || it.kind === 'host') && (q === '' || matchesText(it.label, it.detail, q)),
+      (it) => admits(it.kind) && (q === '' || matchesText(it.label, it.detail, q)),
     )
     if (matched.length > 0) return matched
 
@@ -703,14 +763,18 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                 ? `Filter ${currentStep()?.name}s…`
                 : props.variant === 'hosts'
                   ? 'Type to filter…'
-                  : 'Search commands and hosts…'
+                  : props.variant === 'secrets'
+                    ? 'Type to filter secrets…'
+                    : 'Search commands and hosts…'
             }
             ariaLabel={
               drill()
                 ? `Filter ${currentStep()?.name}s`
                 : props.variant === 'hosts'
                   ? 'Quick connect filter'
-                  : 'Command palette filter'
+                  : props.variant === 'secrets'
+                    ? 'Secret filter'
+                    : 'Command palette filter'
             }
           />
         </div>
@@ -808,6 +872,13 @@ export class QuickConnectController {
    *  row typed, target-needing commands drilling in (nocx-4t37). */
   showPalette(): void {
     this._setVariant?.('palette')
+    this._setOpen?.(true)
+  }
+
+  /** Open the secret list — the tab-strip key icon (nocx-fk32): vault names
+   *  only, inserted into whatever owns input in the pane in front. */
+  showSecrets(): void {
+    this._setVariant?.('secrets')
     this._setOpen?.(true)
   }
 

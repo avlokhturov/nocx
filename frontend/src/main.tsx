@@ -33,6 +33,7 @@ import {
   AdHocQuickConnectProvider,
   SSHQuickConnectProvider,
   SSHAliasQuickConnectProvider,
+  SecretsQuickConnectProvider,
   type DrillCommand,
   type QuickConnectProvider,
 } from './quick-connect'
@@ -720,13 +721,45 @@ async function main() {
     // neither a saved profile nor an alias. Same host path as aliases — the
     // dialog only reaches it after every real match missed.
     new AdHocQuickConnectProvider((host, user, port) => tm.newSSHTab('', host, user, port)),
+    // The vault half (nocx-fk32). It contributes only to the 'secrets'
+    // variant — the dialog admits one kind set per variant — so these rows
+    // never appear in the server list or the palette.
+    new SecretsQuickConnectProvider(
+      () => vaultClient.inventory(),
+      (name) => void insertSecretIntoActivePane(name),
+    ),
   ]
+
+  /** Insert a saved secret where the user is typing in the pane in front
+   *  (nocx-fk32). The pane decides WHAT is inserted by asking who owns
+   *  input — the reference into the editor's draft, the resolved value into
+   *  the pty — because only there is the answer known. This composition
+   *  root only routes the name and reports the outcome, and the outcome
+   *  needs reporting: a password prompt echoes nothing, so an insert the
+   *  user cannot see is an insert they will do twice. */
+  async function insertSecretIntoActivePane(name: string): Promise<void> {
+    const content = tm.activeTerminalContent()
+    if (content === null) {
+      showToast({ message: 'Open a terminal to insert a secret into', level: 'warning' })
+      return
+    }
+    try {
+      const where = await content.insertSecret(name)
+      if (where === 'value') showToast({ message: 'Secret inserted — press Enter to send it' })
+      else if (where === 'unavailable')
+        showToast({ message: `"${name}" could not be inserted`, level: 'danger' })
+    } catch (err) {
+      log.warn('nocx: inserting a secret failed', { error: err })
+      showToast({ message: `"${name}" could not be inserted`, level: 'danger' })
+    }
+  }
 
   const qc = new QuickConnectController()
   qc.mount(qcContainer, qcProviders)
 
   function wireQuickConnect(strip: typeof tabStrip) {
     strip.onQuickConnect = () => qc.show()
+    strip.onInsertSecret = () => qc.showSecrets()
   }
   wireQuickConnect(tabStrip)
 

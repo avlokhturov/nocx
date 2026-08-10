@@ -2,7 +2,7 @@ import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
-import { ChevronDownIcon, PlusIcon } from './ui/icons'
+import { ChevronDownIcon, KeyIcon, PlusIcon } from './ui/icons'
 import type { Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
@@ -63,6 +63,7 @@ export interface TabStrip {
   onNewTab: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
   onQuickConnect: (() => void) | null
+  onInsertSecret: (() => void) | null
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -98,6 +99,7 @@ abstract class TabStripBase implements TabStrip {
   onNewTab: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
+  onInsertSecret: (() => void) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -148,6 +150,14 @@ abstract class TabStripBase implements TabStrip {
                   tabIndex={-1}
                 >
                   <ChevronDownIcon />
+                </IconButton>
+                <IconButton
+                  ariaLabel="Insert a secret"
+                  title="Insert a secret"
+                  onClick={() => this.onInsertSecret?.()}
+                  tabIndex={-1}
+                >
+                  <KeyIcon />
                 </IconButton>
               </div>
             </div>
@@ -203,6 +213,14 @@ abstract class TabStripBase implements TabStrip {
                 tabIndex={-1}
               >
                 <ChevronDownIcon />
+              </IconButton>
+              <IconButton
+                ariaLabel="Insert a secret"
+                title="Insert a secret"
+                onClick={() => this.onInsertSecret?.()}
+                tabIndex={-1}
+              >
+                <KeyIcon />
               </IconButton>
             </div>
             <div class="tabbar-spacer" />
