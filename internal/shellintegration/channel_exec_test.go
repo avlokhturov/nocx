@@ -293,6 +293,17 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 	}
 	scriptPath := writeScriptFile(t, scriptName, script)
 
+	// The shell FAMILY, which is what the rc layout and the prompt variable
+	// depend on — never the binary name, which since the version matrix is a
+	// variant: "bash32" is a bash and matches no `case "bash"`. When it did,
+	// the rc file was silently not written at all, so the bash32 leg started
+	// with no integration and "failed" for a reason that was not the product.
+	// The script being driven is the exact answer: nocx.bash is bash's.
+	family := "bash"
+	if strings.HasSuffix(scriptName, ".zsh") {
+		family = "zsh"
+	}
+
 	// #nosec G204 — sh is the requireShell-resolved path, not input; a
 	// real interactive shell on a real pty is the only way to exercise the
 	// channel hooks (same annotation as the in-band pty suite).
@@ -302,7 +313,7 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 		// The sentinel rides the shell's own prompt variable, so the
 		// assertion is on the fixture's prompt text — what a person sees —
 		// not on marker bytes.
-		if shell == "zsh" {
+		if family == "zsh" {
 			promptEnv = "PROMPT=" + sentinelPrompt
 		} else {
 			promptEnv = "PS1=" + sentinelPrompt
@@ -332,13 +343,13 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 	// sentinel silently loses and the assertion checks the wrong prompt.
 	promptLine := ""
 	if sentinelPrompt != "" {
-		if shell == "zsh" {
+		if family == "zsh" {
 			promptLine = "PROMPT='" + sentinelPrompt + "'\n"
 		} else {
 			promptLine = "PS1='" + sentinelPrompt + "'\n"
 		}
 	}
-	switch shell {
+	switch family {
 	case "bash":
 		rc := filepath.Join(home, ".bashrc")
 		if err := os.WriteFile(rc, []byte(promptLine+". "+ShellQuote(gate)+"\n"), 0o600); err != nil {
@@ -471,8 +482,15 @@ func (s *channelShell) close() {
 // command produces start → complete (with a fence) → prompt_ready, every
 // frame carrying the capability and a strictly increasing sequence, and the
 // fence bytes reaching the pty after the command's output.
+//
+// It runs against every bash on the machine (forEachBash): the hooks are one
+// script, and the oldest bash it must work on is macOS's 3.2.
 func TestBashChannel_HandshakeAndLifecycle(t *testing.T) {
-	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	forEachBash(t, testBashChannelHandshakeAndLifecycle)
+}
+
+func testBashChannelHandshakeAndLifecycle(t *testing.T, shell string) {
+	s := startChannelShell(t, shell, "nocx.bash", bashScript)
 	defer s.close()
 
 	// The handshake completed: hello accepted, then prompt_ready at the
@@ -573,7 +591,11 @@ func TestBashChannel_HandshakeAndLifecycle(t *testing.T) {
 // domain is not live, and the suppressed marker-only prompt would be
 // invisible raw input).
 func TestBashChannel_AnswersRefreshWithSnapshot(t *testing.T) {
-	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	forEachBash(t, testBashChannel_AnswersRefreshWithSnapshot)
+}
+
+func testBashChannel_AnswersRefreshWithSnapshot(t *testing.T, shell string) {
+	s := startChannelShell(t, shell, "nocx.bash", bashScript)
 	defer s.close()
 
 	// The kernel desynchronizes the domain and demands an authenticated
@@ -649,7 +671,11 @@ func TestBashChannel_AnswersRefreshWithSnapshot(t *testing.T) {
 // /proc/<pid>/environ of the shell, and not of a child of the shell — and it
 // lives in a non-exported shell variable a child cannot read.
 func TestBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T) {
-	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	forEachBash(t, testBashChannel_CapabilityNeverInAnyEnvironment)
+}
+
+func testBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T, shell string) {
+	s := startChannelShell(t, shell, "nocx.bash", bashScript)
 	defer s.close()
 
 	if _, err := s.ptmx.Write([]byte("echo SHELL_ENV_HAS_CAP=$(env | grep -c " + testCap + ")\n")); err != nil {
@@ -747,7 +773,11 @@ func parseLastPID(t *testing.T, out, name string) int {
 // obtain the capability by any normal means — not from its environment and
 // not from the parent's /proc/<pid>/environ.
 func TestBashChannel_ChildProcessCannotReadTheCapability(t *testing.T) {
-	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	forEachBash(t, testBashChannel_ChildProcessCannotReadTheCapability)
+}
+
+func testBashChannel_ChildProcessCannotReadTheCapability(t *testing.T, shell string) {
+	s := startChannelShell(t, shell, "nocx.bash", bashScript)
 	defer s.close()
 	if _, err := s.ptmx.Write([]byte("echo CHILD_CAP_READ=$(bash -c 'env | grep -c " + testCap + "')\n")); err != nil {
 		t.Fatalf("write: %v", err)
@@ -772,7 +802,11 @@ func TestBashChannel_ChildProcessCannotReadTheCapability(t *testing.T) {
 // produce no accepted event and leave the live domain untouched: the shell's
 // next command still completes.
 func TestBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent(t *testing.T) {
-	s := startChannelShell(t, "bash", "nocx.bash", bashScript)
+	forEachBash(t, testBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent)
+}
+
+func testBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent(t *testing.T, shell string) {
+	s := startChannelShell(t, shell, "nocx.bash", bashScript)
 	defer s.close()
 
 	port := tcpPort(t, s.listener)
@@ -943,7 +977,11 @@ func TestZshChannel_NoTransportFailsOpen(t *testing.T) {
 // shape: the transport is an inherited descriptor (socketpair, handed over
 // the way exec.Cmd.ExtraFiles does at spawn) instead of a loopback port.
 func TestBashChannel_LocalDescriptorTransport(t *testing.T) {
-	bash := requireShell(t, "bash")
+	forEachBash(t, testBashChannelLocalDescriptorTransport)
+}
+
+func testBashChannelLocalDescriptorTransport(t *testing.T, shell string) {
+	bash := requireShell(t, shell)
 
 	// A connected unix socketpair: one end is the shell's inherited
 	// descriptor, the other the kernel's.
@@ -1275,9 +1313,13 @@ func assertConventionalAfterHandshakeFault(t *testing.T, s *channelShell, sentin
 // kernel never reads). No accept can come; the bounded handshake wait
 // expires and the native prompt stays visible (acceptance criterion 1).
 func TestBashChannel_HelloNeverArrivesKeepsVisiblePrompt(t *testing.T) {
+	forEachBash(t, testBashChannel_HelloNeverArrivesKeepsVisiblePrompt)
+}
+
+func testBashChannel_HelloNeverArrivesKeepsVisiblePrompt(t *testing.T, shell string) {
 	k := newFakeKernel(t, testCap)
 	k.readFrames = false
-	s := startChannelShellCfg(t, "bash", "nocx.bash", bashScript, k, "BASH_PROMPT_SENTINEL> ", false)
+	s := startChannelShellCfg(t, shell, "nocx.bash", bashScript, k, "BASH_PROMPT_SENTINEL> ", false)
 	assertConventionalAfterHandshakeFault(t, s, "BASH_PROMPT_SENTINEL> ")
 }
 
@@ -1286,9 +1328,13 @@ func TestBashChannel_HelloNeverArrivesKeepsVisiblePrompt(t *testing.T) {
 // and answers nothing). The shell's bounded wait expires and the native
 // prompt stays visible (acceptance criterion 1).
 func TestBashChannel_AcceptNeverComesKeepsVisiblePrompt(t *testing.T) {
+	forEachBash(t, testBashChannel_AcceptNeverComesKeepsVisiblePrompt)
+}
+
+func testBashChannel_AcceptNeverComesKeepsVisiblePrompt(t *testing.T, shell string) {
 	k := newFakeKernel(t, testCap)
 	k.answerHello = false
-	s := startChannelShellCfg(t, "bash", "nocx.bash", bashScript, k, "BASH_PROMPT_SENTINEL> ", false)
+	s := startChannelShellCfg(t, shell, "nocx.bash", bashScript, k, "BASH_PROMPT_SENTINEL> ", false)
 	assertConventionalAfterHandshakeFault(t, s, "BASH_PROMPT_SENTINEL> ")
 }
 

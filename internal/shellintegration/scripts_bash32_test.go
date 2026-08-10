@@ -2,7 +2,7 @@ package shellintegration
 
 import (
 	"os/exec"
-	"strings"
+	"regexp"
 	"testing"
 )
 
@@ -40,31 +40,103 @@ func TestBashScript_ParsesUnderBash32(t *testing.T) {
 	}
 }
 
-// requireBash32 returns a path to a GNU bash 3.2. It prefers /bin/bash when
-// that IS 3.2 (macOS), and otherwise takes `bash32` from PATH, which the
-// pre-commit test image provides (.githooks/images/go-tests/Dockerfile).
-//
-// It fails rather than skips, for the reason nocx-gd84 gave for zsh: a skip
-// here reports green on every Linux machine in the project, which is every
-// machine except the CI runner that found the bug in the first place.
+// bashCandidates are the names this package looks for a GNU bash under: the
+// PATH bash (a developer's own shell, and the 5.x side of the matrix on
+// Linux), the fixture both CI images and scripts/install-bash32.sh install,
+// and macOS's frozen /bin/bash. One list, because "which bashes exist here"
+// is one question — requireBash32 and bashVariants are two readings of it,
+// not two implementations.
+var bashCandidates = []string{"bash", "bash32", "/bin/bash"}
+
+var bashVersionRe = regexp.MustCompile(`GNU bash, version (\d+\.\d+)`)
+
+// resolveBash resolves one candidate name to its path and major.minor version
+// ("3.2", "5.2"). ok is false when the name is not on PATH or does not answer
+// --version as a GNU bash.
+func resolveBash(name string) (path, version string, ok bool) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", "", false
+	}
+	// #nosec G204 — name comes from bashCandidates, a fixed list, never input.
+	out, err := exec.Command(path, "--version").Output()
+	if err != nil {
+		return "", "", false
+	}
+	m := bashVersionRe.FindStringSubmatch(string(out))
+	if m == nil {
+		return "", "", false
+	}
+	return path, m[1], true
+}
+
+// noBash32 is what both readings say when the platform's oldest bash is
+// absent. It fails rather than skips, for the reason nocx-gd84 gave for zsh:
+// a skip here reports green on every Linux machine in the project, which is
+// every machine except the CI runner that found the bug in the first place.
+const noBash32 = "no GNU bash 3.2 found (looked for `bash`, `bash32` and /bin/bash).\n" +
+	"3.2 is macOS's /bin/bash and the OLDEST bash this product must work on, so a run\n" +
+	"without it is not a run. The container images install the fixture:\n" +
+	"  sh -c '. ./.githooks/containerized-tests.sh; go_test_containerized' .githooks/pre-commit"
+
+// requireBash32 returns a path to a GNU bash 3.2 — macOS's /bin/bash, or the
+// `bash32` fixture on Linux.
 func requireBash32(t *testing.T) string {
 	t.Helper()
-	for _, cand := range []string{"bash32", "/bin/bash"} {
-		path, err := exec.LookPath(cand)
-		if err != nil {
-			continue
-		}
-		// #nosec G204 — path came from exec.LookPath over a fixed candidate list.
-		out, err := exec.Command(path, "--version").Output()
-		if err != nil {
-			continue
-		}
-		if strings.Contains(string(out), "version 3.2") {
+	for _, cand := range bashCandidates {
+		if path, version, ok := resolveBash(cand); ok && version == "3.2" {
 			return path
 		}
 	}
-	t.Fatal("no GNU bash 3.2 found (looked for `bash32` on PATH and a 3.2 /bin/bash).\n" +
-		"Run the tests the way the hook does — the container image installs it:\n" +
-		"  sh -c '. ./.githooks/containerized-tests.sh; go_test_containerized' .githooks/pre-commit")
+	t.Fatal(noBash32)
 	return ""
+}
+
+// bashVariant is one bash the suite drives the shipped script through: the
+// name startChannelShell resolves, and the version that names the subtest.
+type bashVariant struct {
+	name    string
+	version string
+}
+
+// bashVariants returns every DISTINCT GNU bash on this machine, deduped by
+// version so a name that is another name's build runs the body once.
+//
+// It exists because a parse check cannot report what 3.2 DOES. The version
+// guard that shipped in nocx-cn86 made the script parse under 3.2 and stop
+// there: `read -N` is bash 4.1+, it is an OPTION rather than syntax, so
+// `bash -n` accepts it and the handshake then hangs on a probe that can never
+// succeed — every macOS bash session a conventional terminal, with 12 tests
+// red on the one CI job that runs a real 3.2 and nothing red anywhere a
+// developer looks. Running the SAME bodies against both bashes is what closes
+// that: on Linux the fixture makes the defect reproducible without a Mac.
+func bashVariants(t *testing.T) []bashVariant {
+	t.Helper()
+	var variants []bashVariant
+	seen := make(map[string]bool)
+	has32 := false
+	for _, cand := range bashCandidates {
+		_, version, ok := resolveBash(cand)
+		if !ok || seen[version] {
+			continue
+		}
+		seen[version] = true
+		if version == "3.2" {
+			has32 = true
+		}
+		variants = append(variants, bashVariant{name: cand, version: version})
+	}
+	if !has32 {
+		t.Fatal(noBash32)
+	}
+	return variants
+}
+
+// forEachBash runs body once per distinct bash, as a subtest named for the
+// version — so a failure says WHICH bash broke, in its own name.
+func forEachBash(t *testing.T, body func(t *testing.T, shell string)) {
+	t.Helper()
+	for _, v := range bashVariants(t) {
+		t.Run("bash"+v.version, func(t *testing.T) { body(t, v.name) })
+	}
 }

@@ -65,6 +65,11 @@ __nocx_lc_desynced=0
 __nocx_lc_frame=''
 __nocx_lc_lane_esc=''
 __nocx_lc_dom_esc=''
+# How this shell answers "is the channel readable right now, consuming
+# nothing" — resolved ONCE by __nocx_lc_resolve_probe, never per call. See it
+# for why the answer is per-bash-version and why it is cached.
+__nocx_lc_probe_mode=''
+__nocx_lc_probe_helper=''
 
 # JSON-escape one string into __nocx_lc_json_escaped. Backslash, quote and
 # the C0/DEL bytes JSON forbids are escaped; raw UTF-8 passes through (the
@@ -109,15 +114,83 @@ __nocx_lc_send() {
     builtin printf "\\$(printf '%03o' "$__b0")\\$(printf '%03o' "$__b1")\\$(printf '%03o' "$__b2")\\$(printf '%03o' "$__b3")%s" "$__json" >&"$__nocx_lc_fd" 2>/dev/null
 }
 
+# Decide, once per shell, how to ask "is the channel readable right now?"
+# without consuming a byte. Consuming is not allowed: the frame's 4-byte
+# length prefix is mostly NULs, `read` cannot hold a NUL, and dd must see the
+# prefix whole — a probe that took one byte would corrupt the frame it was
+# probing for.
+#
+#   builtin  bash 4.1+: `read -t 0 -N 0` is exactly this operation.
+#   helper   bash 3.2 (macOS's /bin/bash) has NO such operation at all —
+#            `-N` is 4.1+ and `-t 0` in 3.2 is a zero-second timeout, not a
+#            poll. perl's select() is, and perl is part of the macOS base
+#            system. Measured at 2ms per call, against ~2ms for the fence's
+#            own od+tr, and the child inherits the descriptor with no
+#            redirection (both measured on a real 3.2).
+#   none     neither: the channel cannot be read, so it is never activated
+#            and the session is a conventional terminal with its native
+#            prompt — the honest floor, reached on no machine this product
+#            ships to, and present so the refusal is stated rather than
+#            silent.
+#
+# Cached rather than re-tested per call because the shell's version is a
+# constant for the life of the process, and the refresh poll runs at EVERY
+# prompt — the user's critical path.
+#
+# This replaced the same `read -r -t 0 -N 0` inlined at three call sites,
+# which is how bash 3.2 came to hang its handshake in three places at once
+# (nocx-sw4p): the hello was sent, the accept could never be read, the domain
+# never activated, and every macOS bash session was a conventional terminal.
+__nocx_lc_resolve_probe() {
+    if (( ${BASH_VERSINFO[0]:-0} > 4 || (${BASH_VERSINFO[0]:-0} == 4 && ${BASH_VERSINFO[1]:-0} >= 1) )); then
+        __nocx_lc_probe_mode=builtin
+        return 0
+    fi
+    local __cand
+    for __cand in /usr/bin/perl perl; do
+        if command -v "$__cand" >/dev/null 2>&1; then
+            __nocx_lc_probe_helper="$__cand"
+            __nocx_lc_probe_mode=helper
+            return 0
+        fi
+    done
+    __nocx_lc_probe_mode=none
+    return 1
+}
+
+# Succeeds iff a byte is available on the channel right now. Consumes
+# nothing, blocks never — both arms are non-blocking by construction.
+#
+# The helper arm interpolates the descriptor NUMBER into a perl program, so
+# __nocx_lc_fd must be digits; __nocx_lc_init's config gate is what
+# guarantees that, and it is a hard requirement of this function rather than
+# a nicety.
+__nocx_lc_probe_readable() {
+    case "$__nocx_lc_probe_mode" in
+        builtin)
+            LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null
+            ;;
+        helper)
+            # vec() builds the select() read-set with our descriptor's bit
+            # set; a 0 timeout makes it a pure poll. The child inherits the
+            # descriptor without a redirection, which matters because a
+            # `$fd<&$fd` form does not exist in 3.2 (variable descriptors are
+            # 4.1+) and would have forced an eval.
+            "$__nocx_lc_probe_helper" -e \
+                'vec($r,'"$__nocx_lc_fd"',1)=1; exit(select($r,undef,undef,0)>0 ? 0 : 1)' \
+                2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Wait for the transport to become readable, bounded by the handshake
 # timeout, consuming nothing. bash's `read` cannot hold NUL bytes, so the
-# binary length prefix must be read by dd|od instead. The bound is a poll:
-# `read -N 0` with a NONZERO `-t` returns immediately on an open fd
-# (verified empirically — it only detects EOF, so it cannot bound a silent
-# peer), while `read -t 0 -N 0` is a true non-blocking probe that succeeds
-# iff data is available right now. The sleep loop is the bound, and a
-# closed channel fails on the first probe instead of waiting it out
-# (fail-open, decision 3).
+# binary length prefix must be read by dd|od instead. The sleep loop is the
+# bound, and a closed channel fails on the first probe instead of waiting it
+# out (fail-open, decision 3).
 __nocx_lc_wait_readable() {
     # $1 = timeout in seconds (defaults to the handshake timeout). The
     # refresh poll passes a short bound: the prompt is the user's critical
@@ -129,7 +202,7 @@ __nocx_lc_wait_readable() {
     # a sleep, and a premature give-up.
     local __t="${1:-$__nocx_lc_timeout_s}" __round=0
     while :; do
-        if LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+        if __nocx_lc_probe_readable; then
             return 0 # data is available; the caller reads it
         fi
         (( __round >= __t )) && return 1 # the bound expired: fail open
@@ -190,7 +263,7 @@ __nocx_lc_ans_refresh() {
     if [[ "${__nocx_nested_active:-0}" == "1" ]]; then
         return 1
     fi
-    if ! LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+    if ! __nocx_lc_probe_readable; then
         return 1
     fi
     # A frame is buffered (the kernel writes each envelope in one write);
@@ -251,13 +324,24 @@ __nocx_lc_fence() {
 __nocx_lc_init() {
     local __cfg_ok=0
     __nocx_lc_active=0
+    # The descriptor and the port are DIGITS or they are nothing. Both come
+    # from the environment, and both are interpolated into something that
+    # executes: the descriptor into the probe helper's program text, the port
+    # into a /dev/tcp path. Every other field here was already pinned to a
+    # shape; these two were checked only for being non-empty.
     if [[ -n "$__nocx_cap" ]] && [[ "$__nocx_cap" =~ ^[0-9a-f]{64}$ ]] \
         && [[ -n "$__nocx_lc_lane" ]] && [[ -n "$__nocx_lc_dom" ]] \
         && [[ "$__nocx_lc_epoch" =~ ^[0-9]+$ ]] \
+        && [[ -z "$__nocx_lc_fd" || "$__nocx_lc_fd" =~ ^[0-9]+$ ]] \
+        && [[ -z "$__nocx_lc_port" || "$__nocx_lc_port" =~ ^[0-9]+$ ]] \
         && [[ -n "$__nocx_lc_fd" || -n "$__nocx_lc_port" ]]; then
         __cfg_ok=1
     fi
     if [[ "$__cfg_ok" != "1" ]]; then
+        return 1
+    fi
+    # Before the first read of any kind — __nocx_lc_read_frame below is one.
+    if ! __nocx_lc_resolve_probe; then
         return 1
     fi
     if [[ -n "$__nocx_lc_port" ]]; then
@@ -375,7 +459,7 @@ __nocx_lc_read_grant() {
     __nocx_grant_bootstrap=
     __nocx_grant_env=
     while (( __t < __nocx_lc_grant_timeout_s )); do
-        if ! LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+        if ! __nocx_lc_probe_readable; then
             sleep 1
             __t=$(( __t + 1 ))
             continue

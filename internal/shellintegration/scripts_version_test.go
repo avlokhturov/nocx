@@ -132,6 +132,7 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// source. Before this, every macOS shell died on the `coproc` token
 		// and started with no integration at all (nocx-cn86).
 		"29": "8d73196b2b55a9635abea8f19962d68a122fce22fa6547565a1a5d97cd7b4ba7",
+		"30": "e66d393681bfe9edccd1db4ab75ac2b2c54514e749e68c781842c0ff0012f46c",
 	}
 
 	h := sha256.New()
