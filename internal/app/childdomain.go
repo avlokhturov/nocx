@@ -117,7 +117,26 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // the closure — the first real domain_request would dereference nil
 // (nocx-u7uh.29). The accessor resolves the variable at grant time.
 func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry) lifecyclepub.GrantBuilder {
-	return func(req lifecyclepub.GrantRequest) (lifecyclepub.GrantBootstrap, error) {
+	return func(req lifecyclepub.GrantRequest) (boot lifecyclepub.GrantBootstrap, err error) {
+		// Every outcome is logged, refusals loudest. A refusal here is
+		// invisible by construction — the publisher answers it with an
+		// empty-bootstrap echo, so the parent silently runs its command
+		// conventionally — and the comment on that path claimed "the
+		// builder's log line carries the reason" while no builder path
+		// logged anything at all. Two separate defects then had to be
+		// diagnosed by instrumenting the binary by hand (nocx-beib).
+		defer func() {
+			switch {
+			case err != nil:
+				lg.Warn("child domain refused; the command runs conventionally",
+					"env", req.Env, "host", req.Host, "lane", req.Lane, "error", err)
+			default:
+				lg.Info("child domain granted",
+					"env", req.Env, "host", req.Host, "lane", req.Lane,
+					"domain", boot.Domain, "epoch", boot.Epoch, "bootstrapBytes", len(boot.Bootstrap))
+			}
+		}()
+
 		p := pub()
 		parent, ok := p.Domain(req.Parent)
 		if !ok {
