@@ -96,7 +96,14 @@ var (
 // user's ssh conventionally, and the only visible symptom was that blocks
 // never appeared. Each script declares __nocx_lc_max_frame once and uses it
 // in both places.
-const version = "27"
+//
+// 28: the grant frame is parsed with a shortest-match expansion (nocx-beib).
+// `${frame##*"bootstrap":"}` walks every position of a ~78 KiB frame —
+// measured 1.65 s per expansion against 1 ms — so the shell spent ten
+// seconds between reading the child's grant and using it, and the tab sat
+// still after the user typed `ssh host`. The first occurrence is also the
+// correct one: the field name precedes its own value.
+const version = "28"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

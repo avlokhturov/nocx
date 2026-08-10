@@ -397,7 +397,15 @@ __nocx_lc_read_grant() {
         # closing quote and brace. Its own escaped quotes are untouched.
         # The strips are %? (one char) — a pattern of } would be read by
         # bash as an empty pattern plus a literal brace, stripping nothing.
-        __bootstrap="${__nocx_lc_frame##*\"bootstrap\":\"}"
+        # SHORTEST match, deliberately: ## scans the whole frame for the
+        # LAST occurrence, which on a ~78 KiB grant costs seconds of CPU in
+        # the shell — measured 1.65 s for one such expansion against 1 ms
+        # for this one, and the ssh child's grant hit several of them, which
+        # is where the eleven seconds before the ssh prompt went (nocx-beib).
+        # It is also the more correct match: the field precedes its own
+        # value, so the FIRST occurrence is the real one, while ## would
+        # prefer a lookalike inside the bootstrap text.
+        __bootstrap="${__nocx_lc_frame#*\"bootstrap\":\"}"
         __bootstrap="${__bootstrap%?}"
         __bootstrap="${__bootstrap%\"}"
         __nocx_lc_json_unescape "$__bootstrap"

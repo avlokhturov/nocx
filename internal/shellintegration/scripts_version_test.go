@@ -3,6 +3,7 @@ package shellintegration
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -122,6 +123,10 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// length check at 65536, so the grant frame was rejected before it
 		// was parsed (nocx-beib).
 		"27": "4e88fad6351032bb90b94c3e2c72774cb0c35d5473ee5dd793ee1e1a649d7482",
+		// v28: the grant frame is parsed with a shortest-match expansion —
+		// the longest-match form is quadratic and cost ten seconds on a
+		// grant-sized frame (nocx-beib).
+		"28": "acdddb0681bfb3ea80974d9ae348c2f0d4150275ef426150e4ae7cf525fea559",
 	}
 
 	h := sha256.New()
@@ -162,5 +167,30 @@ func scriptFor(t *testing.T, path string) string {
 	default:
 		t.Fatalf("no embedded script for %q", path)
 		return ""
+	}
+}
+
+// TestFrameParseAvoidsLongestMatch pins the one expansion that made the ssh
+// child feel broken (nocx-beib).
+//
+// `${frame##*pat}` scans for the LAST occurrence, which bash does by walking
+// every position: measured 1.65 s on a 78 KiB frame, against 1 ms for the
+// shortest-match form. The grant carrying a remote launcher is exactly that
+// size, so the shell burned ten seconds between reading the frame and using
+// it — the user saw a tab that sat still after typing `ssh host`, with
+// everything else already fixed and no hint that the delay was ours.
+//
+// The check is deliberately narrow: only the frame variable, only the
+// longest-match form. Elsewhere ## is on short strings and is the right
+// tool.
+func TestFrameParseAvoidsLongestMatch(t *testing.T) {
+	for name, body := range scripts {
+		for _, line := range strings.Split(body, "\n") {
+			if !strings.Contains(line, "__nocx_lc_frame##") {
+				continue
+			}
+			t.Errorf("%s parses the frame with a longest-match expansion, which is "+
+				"quadratic on a grant-sized frame: %s", name, strings.TrimSpace(line))
+		}
 	}
 }
