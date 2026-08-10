@@ -7,10 +7,14 @@ package transport
 // its own. This file serves the plan from the shellintegration seam.
 
 import (
+	"context"
 	"encoding/json"
 
+	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // InBandBootstrapper builds the in-band integration plan for a live session.
@@ -64,7 +68,21 @@ func shellIntegrateResultFromPlan(plan shellintegration.InBandPlan) shellIntegra
 	}
 }
 
-// handleShellIntegrate serves the shell.integrate method.
+// sessionShellHandlers answers shell.complete and shell.integrate. Both are
+// per-session operations (SessionOperation via ForSession) whose registry
+// liveness check runs inside the capability; the completion and integration
+// logic itself stays in the handler, on the completion / in-band seams. It
+// holds the operation factory, the Responder and its seams — never the
+// *WSServer.
+type sessionShellHandlers struct {
+	ops    *capability.SessionOperations // session gate; nil → session store not wired
+	r      Responder
+	local  completion.Completer // shell.complete for KindLocal sessions
+	remote completion.Completer // shell.complete for KindRemote sessions
+	inBand InBandBootstrapper   // shell.integrate plan builder
+}
+
+// handleIntegrate serves the shell.integrate method.
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"shell.integrate","params":{"sessionId":"0123456789abcdef0123456789abcdef"}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"wrapper":"saved=$(stty -g); …","payload":"# nocx in-band integration — dispatcher…","terminator":"NOCX_IB_EOF"}}
@@ -79,27 +97,87 @@ func shellIntegrateResultFromPlan(plan shellintegration.InBandPlan) shellIntegra
 // mints the domain passes the config here and writes the capability line
 // into the pty after READY; neither step ever routes the capability through
 // this result.
-func (s *WSServer) handleShellIntegrate(wconn *wsConn, req jsonrpcRequest) {
+func (h sessionShellHandlers) handleIntegrate(ctx context.Context, req jsonrpcRequest) {
 	var params struct {
 		SessionID string `json:"sessionId"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
-	if _, err := s.registry.Get(sid); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
-		return
-	}
-	if s.inBand == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "shell.integrate: in-band bootstrap not available"))
-		return
-	}
-	plan, err := s.inBand.InBandBootstrap(params.SessionID, nil)
+	op, err := h.ops.ForSession(sid)
 	if err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "shell.integrate: ", err))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(shellIntegrateResultFromPlan(plan))))
+	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
+		if _, getErr := svc.Get(sid); getErr != nil {
+			// The session closed between ForSession and the run: same
+			// refusal as a session the registry never held.
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
+			return nil
+		}
+		if h.inBand == nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "shell.integrate: in-band bootstrap not available"})
+			return nil
+		}
+		plan, planErr := h.inBand.InBandBootstrap(params.SessionID, nil)
+		if planErr != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "shell.integrate: ", planErr))
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(shellIntegrateResultFromPlan(plan)))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
+	}
+}
+
+// shellSpecs declares the shell-plane control methods (migration map, "The
+// rest"): shell.complete and shell.integrate run under the per-session
+// SessionOperation (the session gate — the registry liveness check is the
+// capability's) and register on the operation queue; the launcher /
+// footprint methods are seam handlers on the ordinary lane under no
+// operation, holding only the seams the migration map names. The
+// SessionOperations factory is built here from the wired stores and shared
+// across the shell methods.
+func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
+	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
+	shellSub := s.operationQueue("shell")
+	return []methodSpec{
+		regResponder(shellSub, "shell.complete", func(r Responder) handlerFunc {
+			h := sessionShellHandlers{ops: sessionOps, r: r, local: s.localCompleter, remote: s.sshCompleter}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleComplete(ctx, req) }
+		}),
+		regResponder(shellSub, "shell.integrate", func(r Responder) handlerFunc {
+			h := sessionShellHandlers{ops: sessionOps, r: r, inBand: s.inBand}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleIntegrate(ctx, req) }
+		}),
+		// shell.launcherCommand and shell.environmentObserved are NOT
+		// registered: they were the P7 stream-and-passport surface, gated on
+		// the marker latch ADR-0024 forbids, and the branch deleted their
+		// handler, contracts and generated types (nocx-292k). The footprint
+		// methods below outlive them — they read the fact store, which stays.
+		regResponder(s.lane, "shell.footprint.status", func(r Responder) handlerFunc {
+			h := footprintHandlers{
+				r:        r,
+				facts:    s.installedFacts,
+				resolver: s.resolver,
+				sshCfg:   s.sshConfigResolver,
+				profiles: s.profiles,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
+		}),
+		regResponder(s.lane, "shell.footprint.uninstall", func(r Responder) handlerFunc {
+			h := footprintHandlers{
+				r:           r,
+				uninstaller: s.remoteUninstaller,
+				resolver:    s.resolver,
+				log:         s.log,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
+		}),
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"sync"
 )
 
 // UrlOpener opens a URL in the platform's default browser on behalf of the
@@ -34,6 +35,24 @@ type UrlOpener interface {
 	OpenURL(ctx context.Context, url string) error
 }
 
+// urlOpenerHolder is the transport's mutable url-opener seam: the mutex and
+// the opener it guards. The opener is assigned post-construction
+// (SetUrlOpener, below) while a handler may be reading it, so the handler
+// holds the holder — pointing at the WSServer's own url-opener state, one
+// mutex and one opener shared between the setter and the readers — and reads
+// the CURRENT opener per call.
+type urlOpenerHolder struct {
+	mu  *sync.RWMutex
+	svc *UrlOpener
+}
+
+// get returns the current url opener, or nil when none is wired.
+func (h *urlOpenerHolder) get() UrlOpener {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return *h.svc
+}
+
 // urlOpener is set post-construction: the Wails context it needs only exists
 // inside WailsApp.startup (main.go), which runs after the transport is
 // built. The handler may be reading it while startup assigns it, so the
@@ -48,33 +67,38 @@ type shellOpenUrlParams struct {
 	URL string `json:"url"`
 }
 
+// openUrlHandlers answers shell.openUrl. It holds the url opener holder and
+// its Responder; nothing else.
+type openUrlHandlers struct {
+	opener *urlOpenerHolder
+	r      Responder
+}
+
 // handleShellOpenUrl opens one URL in the system browser. The URL is
 // validated here, at the seam: only http(s) URLs with a host cross into the
 // browser — a scheme the shell would happily open (file:, javascript:) is
 // not a URL this panel may ever send a user to, and the renderer's
 // conversion module only ever emits https for a recognised host. The result
 // is the empty object, exactly like files.reveal.
-func (s *WSServer) handleShellOpenUrl(wconn *wsConn, req jsonrpcRequest) {
+func (h openUrlHandlers) handleShellOpenUrl(ctx context.Context, req jsonrpcRequest) {
 	var params shellOpenUrlParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.URL == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: url required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: url required"})
 		return
 	}
 	u, err := url.Parse(params.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: only http(s) URLs can be opened"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: only http(s) URLs can be opened"})
 		return
 	}
-	s.urlMu.RLock()
-	uo := s.urlOpener
-	s.urlMu.RUnlock()
+	uo := h.opener.get()
 	if uo == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "shell.openUrl not available"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "shell.openUrl not available"})
 		return
 	}
-	if err := uo.OpenURL(context.Background(), u.String()); err != nil {
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "shell.openUrl: ", err))
+	if err := uo.OpenURL(ctx, u.String()); err != nil {
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "shell.openUrl: ", err))
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
+	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 }

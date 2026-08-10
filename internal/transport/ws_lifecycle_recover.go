@@ -100,25 +100,25 @@ type lifecycleRecoverAckParams struct {
 //     transition already landed; idempotent by design).
 func (s *WSServer) handleLifecycleRecoverAck(wconn *wsConn, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "lifecycle not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
 	}
 	var params lifecycleRecoverAckParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" || params.Generation == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and generation required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId and generation required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
 	// (b,d) alive: the session must be open, and owned by this connection.
 	if _, err := s.registry.Get(sid); err != nil || !state.has(sid) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "session is not open"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
 		return
 	}
 	rec := s.recoveryOf(sid)
 	if rec == nil || rec.generation != params.Generation {
 		// (b) no pending episode for this generation — never promised, or
 		// superseded by a fresh domain's episode.
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "no pending recovery for this generation"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "no pending recovery for this generation"})
 		return
 	}
 	// The episode's own mutex serializes claim→recover→resolve (see
@@ -127,14 +127,14 @@ func (s *WSServer) handleLifecycleRecoverAck(wconn *wsConn, state *connState, re
 	defer rec.mu.Unlock()
 	if rec.resolved {
 		// (d) idempotent: the recovery already landed.
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+		_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 		return
 	}
 	// (c) the kernel permits only Lost → Native.
 	if err := s.lifecyclePub.RecoverLane(rec.lane); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
 	rec.resolved = true
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }

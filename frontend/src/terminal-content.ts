@@ -815,6 +815,11 @@ export class TerminalContent extends BaseTabContent {
               })
               .then(write, write)
           },
+          // A bare newline: the shell gets its keystroke and answers with a
+          // fresh prompt. Deliberately not routed through the submit path —
+          // no attempt is opened and no ledger record is written, because
+          // nothing was executed (ADR-0024 §5).
+          submitEmpty: () => this.session?.send('\r'),
           cancel: () => this.session?.send('\x03'),
           // A taller editor is a shorter scrollback. Keep the bottom of the
           // transcript where it belongs — just above the editor — instead of

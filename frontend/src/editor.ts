@@ -61,6 +61,12 @@ const MAX_ROWS = 30
 
 export interface EditorActions {
   submit: (doc: string, plan?: SubmitPlan) => void
+  /** Enter on an empty (or whitespace-only) draft. It is not a command — no
+   *  block, no attempt, no ledger record — but it IS a keystroke a shell
+   *  answers with a fresh prompt, so the newline still has to reach the pty.
+   *  Separate from submit() because the two differ in exactly that: one
+   *  opens an execution, the other only echoes a line (nocx-292k). */
+  submitEmpty?: () => void
   // cancel discards the composed line the way Ctrl-C does at a shell prompt:
   // the editor clears and the shell is interrupted so a fresh prompt returns.
   // Without it, Ctrl-C in the editor is a no-op and the stale text corrupts
@@ -452,6 +458,28 @@ export class CommandEditor {
    *  veto keeps the draft with the host's report already on screen. */
   submit(): void {
     const doc = this.view.state.doc.toString()
+    // An empty prompt is not a command, and this is the only place that can
+    // say so before any state moves. CommandLedger.open already owns the rule
+    // — it refuses an empty string — but it is downstream of commit(), which
+    // clears and hides FIRST (the atomic handoff below). So an empty Enter
+    // threw out of onKeydown with the editor already hidden and no input-state
+    // transition to show it again: the prompt vanished for the rest of the
+    // session. Asking the question here keeps one answer to "is this a
+    // command" and keeps it on the side of the handoff that can still decline.
+    // Whitespace alone counts as empty for the same reason — it would open a
+    // block for a command nobody typed. Only the DECISION trims; what a real
+    // command sends is still the document byte-for-byte, so a leading-space
+    // line (` ls`, kept out of shell history on purpose) is untouched.
+    // Not a command — but still a keystroke. The draft is cleared (it holds
+    // only whitespace) and the bare newline goes to the pty, so the shell
+    // answers with a fresh prompt exactly as it would in a plain terminal.
+    // Neither the ledger nor the attempt path is entered, which is what
+    // keeps the editor from being hidden by a handoff that then throws.
+    if (doc.trim() === '') {
+      this.clearDoc()
+      this.actions.submitEmpty?.()
+      return
+    }
     const hook = this.actions.beforeSubmit
     if (!hook) {
       this.commit(doc)

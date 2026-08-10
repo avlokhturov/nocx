@@ -8,47 +8,7 @@
     "",
     "Machine-specific in one respect: build-tag-gated files (e.g.",
     "secretservice_linux.go) only appear on the OS they build for, so an entry",
-    "that vanishes on another platform is a free shrink, not a violation.",
-    "",
-    "That cuts both ways, and only one direction was written down. The twin the",
-    "other OS compiles is a *new* file path, so the first run on that OS reports",
-    "it as a new violation rather than a free shrink. A per-OS pair therefore",
-    "needs BOTH halves listed, and this file is the union across the platforms",
-    "the gate runs on, not a snapshot of whichever one generated it. The update",
-    "script cannot do this for you: it sees one OS at a time, so the half it did",
-    "not compile looks like a shrink and it removes it.",
-    "",
-    "Two entries were added BY HAND on 2026-08-06 (nocx-708q), which the update",
-    "script refuses to do for you on purpose. Both are reasoned, not overlooked:",
-    "",
-    "  openability.go CanExpand \u2014 the expand half of the spec table. Its only",
-    "  callers are tests, which is the nocx-rtg0 shape and NOT acceptable long",
-    "  term: expansion is a UI act and the kit already decides it in",
-    "  ui/tree-row.tsx isExpandable, so the Go copy is a second answer to one",
-    "  question that will drift. Deleting it means rewriting three assertions in",
-    "  accepted packages, so it is filed rather than rushed.",
-    "",
-    "  ws.go WithFilesRevealer \u2014 the seam files.reveal needs from Wails, which",
-    "  does not exist yet; files.reveal answers -32601 until it does. Reachable",
-    "  the moment that wave lands.",
-    "",
-    "A fourth entry added BY HAND on 2026-08-07 (nocx-6lo9), the first time the",
-    "hook ran on macOS in this clone:",
-    "",
-    "  secretservice_other.go SecretServiceAvailable — the !linux half of the",
-    "  pair whose linux half is already listed below. Neither has a production",
-    "  caller on either OS; both are reached only from integration_test.go. The",
-    "  entry is the mirror image of an existing one, not a new concession.",
-    "",
-    "A third entry added BY HAND on 2026-08-06, when release/v0.1.0 merged in:",
-    "",
-    "  storagetest.go Isolate \u2014 a test-only helper in a non-_test file, which is",
-    "  what makes it unreachable from main(). It has to live outside _test.go so",
-    "  packages other than internal/storage can call it, and eleven test files do",
-    "  (internal/app, internal/storage). Its whole purpose is nocx-8ax9: a test",
-    "  that forgets to isolate must not reach the developer's real profile \u2014",
-    "  paths.go names it in the panic it raises. Same category as the vaulttest",
-    "  package and ws_test_helper.go already below."
+    "that vanishes on another platform is a free shrink, not a violation."
   ],
   "violations": [
     {
@@ -58,6 +18,14 @@
     {
       "file": "internal/app/app.go",
       "func": "WithLogFilePath"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "NewSecretOperations"
+    },
+    {
+      "file": "internal/capability/secret.go",
+      "func": "SecretOperations.ForSecret"
     },
     {
       "file": "internal/completion/ssh.go",
@@ -77,6 +45,10 @@
     },
     {
       "file": "internal/importer/tabby.go",
+      "func": "dedupKeySet"
+    },
+    {
+      "file": "internal/importer/tabby.go",
       "func": "ImportGroups"
     },
     {
@@ -88,24 +60,8 @@
       "func": "ImportTabbyWithService"
     },
     {
-      "file": "internal/importer/tabby.go",
-      "func": "dedupKeySet"
-    },
-    {
       "file": "internal/profile/profile.go",
       "func": "BuildGroupTree"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "Ptr"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "ResolveGroupPath"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "StoredOptionsFromDense"
     },
     {
       "file": "internal/profile/profile.go",
@@ -118,6 +74,18 @@
     {
       "file": "internal/profile/profile.go",
       "func": "parseNamespacedID"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "Ptr"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "ResolveGroupPath"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "StoredOptionsFromDense"
     },
     {
       "file": "internal/profile/store.go",
@@ -208,6 +176,10 @@
       "func": "Publisher.verifyFile"
     },
     {
+      "file": "internal/ssh/ssh_real.go",
+      "func": "WithKnownHostsFile"
+    },
+    {
       "file": "internal/ssh/ssh.go",
       "func": "NewStub"
     },
@@ -233,6 +205,10 @@
     },
     {
       "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.onceClose"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Read"
     },
     {
@@ -246,10 +222,6 @@
     {
       "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Write"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.onceClose"
     },
     {
       "file": "internal/ssh/ssh.go",
@@ -268,10 +240,6 @@
       "func": "WithTimeout"
     },
     {
-      "file": "internal/ssh/ssh_real.go",
-      "func": "WithKnownHostsFile"
-    },
-    {
       "file": "internal/storage/storagetest/storagetest.go",
       "func": "Isolate"
     },
@@ -286,18 +254,6 @@
     {
       "file": "internal/transport/transport.go",
       "func": "Stub.Stop"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithCaptureRegistry"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithFilesRevealer"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithProfileResolver"
     },
     {
       "file": "internal/transport/ws_auth.go",
@@ -332,6 +288,38 @@
       "func": "newTestStore"
     },
     {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "newWedgedSocket"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.Close"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.ReadMessage"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.SetWriteDeadline"
+    },
+    {
+      "file": "internal/transport/ws_test_helper.go",
+      "func": "wedgedSocket.WriteMessage"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithCaptureRegistry"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithFilesRevealer"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithProfileResolver"
+    },
+    {
       "file": "internal/vault/inventory.go",
       "func": "ProviderOf"
     },
@@ -344,16 +332,8 @@
       "func": "SecretServiceAvailable"
     },
     {
-      "file": "internal/vault/system/secretservice_other.go",
-      "func": "SecretServiceAvailable"
-    },
-    {
       "file": "internal/vault/system/secretservice_linux.go",
       "func": "secretServiceAvailableVia"
-    },
-    {
-      "file": "internal/vault/system/system.go",
-      "func": "WithKeyring"
     },
     {
       "file": "internal/vault/system/system.go",
@@ -397,11 +377,11 @@
     },
     {
       "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Status"
+      "func": "Fake.snapshot"
     },
     {
       "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.snapshot"
+      "func": "Fake.Status"
     },
     {
       "file": "internal/vault/vaulttest/fake.go",

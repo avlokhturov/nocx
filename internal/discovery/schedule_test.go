@@ -313,10 +313,18 @@ func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
 	conn.queueConn(f0)
 
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	waitFor(t, "refused sample", func() bool { return conn.execCount() == 1 })
-	st := s.Status("ssh:p1:1")
-	if st.Sample.State != StatePermissionOrPolicyRefused {
-		t.Fatalf("state after refusal = %q, want %q", st.Sample.State, StatePermissionOrPolicyRefused)
+	// Wait for the REFUSAL TO BE RECORDED, not for the exec to be issued.
+	// execCount rises when the command reaches the fake conn; Sample.State is
+	// written afterwards, once the scheduler has processed the error. Gating
+	// on the first while asserting the second read "pending" about 1% of the
+	// time (nocx-s8df).
+	waitFor(t, "refusal recorded in state", func() bool {
+		return s.Status("ssh:p1:1").Sample.State == StatePermissionOrPolicyRefused
+	})
+	// And it took exactly one exec to get there — the assertion the old
+	// execCount gate was carrying, kept rather than lost to the fix.
+	if got := conn.execCount(); got != 1 {
+		t.Fatalf("exec count for the refused sample = %d, want 1", got)
 	}
 
 	// Automatic sampling is disabled by the refusal; SampleNow (the panel's

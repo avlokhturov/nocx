@@ -61,21 +61,20 @@ type lifecycleEstablishAckParams struct {
 //     is refused at the publisher — stale or foreign acks release nothing.
 func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "lifecycle not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
 	}
 	var params lifecycleEstablishAckParams
 	if err := json.Unmarshal(req.Params, &params); err != nil ||
 		params.SessionID == "" || params.Lane == "" || params.Domain == "" ||
 		params.Epoch == 0 || params.Generation == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602,
-			"Invalid params: sessionId, lane, domain, epoch and generation required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId, lane, domain, epoch and generation required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
 	// (b) alive: the session must be open, and owned by this connection.
 	if _, err := s.registry.Get(sid); err != nil || !state.has(sid) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "session is not open"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
 		return
 	}
 	// (c) the lane must belong to this session.
@@ -83,7 +82,7 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 	registered, ok := s.lifecycleLanes[lifecycle.LaneID(params.Lane)]
 	s.lifecycleMu.Unlock()
 	if !ok || registered != sid {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "lane is not registered to this session"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "lane is not registered to this session"})
 		return
 	}
 	// (d) the acknowledging connection must still be the session's current
@@ -92,12 +91,12 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 	// connection's in-flight ack and a replaced connection's late ack.
 	rx := s.getRx(sid)
 	if rx == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "session is not open"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
 		return
 	}
 	sub, _ := rx.getSubscriber()
 	if sub != wconn {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "not the current subscriber"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "not the current subscriber"})
 		return
 	}
 	// (e) the publisher validates the pending establishment and flushes the
@@ -106,8 +105,8 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 	if err := s.lifecyclePub.AcknowledgeEstablishment(
 		lifecycle.LaneID(params.Lane), lifecycle.DomainID(params.Domain), params.Epoch, params.Generation,
 	); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(map[string]bool{"ok": true})))
+	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }

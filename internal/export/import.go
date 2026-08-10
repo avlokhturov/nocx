@@ -86,27 +86,6 @@ func ImportConfiguration(deps ImportDeps, data *ConfigExport) (*ImportResult, er
 	return result, nil
 }
 
-// ImportConfigurationWithService imports a ConfigExport through the
-// domain service, ensuring atomicity and validation. settings is the sink
-// for the settings the export carried; nil with a settings-carrying export
-// is an error, exactly as in ImportConfiguration.
-func ImportConfigurationWithService(svc *profile.ProfileService, data *ConfigExport, settings SettingsSink) (*ImportResult, error) {
-	svcResult := svc.AtomicImport(stripSecretBindings(data.Profiles), data.Groups)
-
-	if len(svcResult.ImportErrors) > 0 {
-		return nil, fmt.Errorf("import failed: %s", svcResult.ImportErrors[0])
-	}
-
-	if err := restoreSettings(settings, data.Settings); err != nil {
-		return nil, err
-	}
-
-	return &ImportResult{
-		ProfilesImported: svcResult.ProfilesImported,
-		GroupsImported:   svcResult.GroupsImported,
-	}, nil
-}
-
 // restoreSettings applies exported settings through the sink. An export that
 // carries settings but is imported without a sink fails: silently dropping
 // what export promised to carry is the defect this fixes (nocx-ojxa).

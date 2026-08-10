@@ -34,11 +34,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // gitBinding is the transport's bookkeeping for one binding it issued.
@@ -159,16 +161,6 @@ type gitRemoteResult struct {
 	URL   string `json:"url,omitempty"`
 }
 
-// gitChangedNotification is the server-initiated git.changed frame —
-// contracted like the methods because an unsolicited notification is
-// exactly where an addressing defect hides (spec §5.3). Its schema covers
-// the params object only, exactly as files.changed's does.
-type gitChangedNotification struct {
-	JSONRPC string           `json:"jsonrpc"`
-	Method  string           `json:"method"`
-	Params  gitChangedParams `json:"params"`
-}
-
 type gitChangedParams struct {
 	BindingID string `json:"bindingId"`
 	Reason    string `json:"reason"` // exactly one value: "sessionClosed"
@@ -276,129 +268,25 @@ func wireGitStatus(st git.Status) gitStatusWire {
 	}
 }
 
-// ── dispatcher ────────────────────────────────────────────────────────────
+// ── binding bookkeeping seam ───────────────────────────────────────────────
 
-// handleGitMethod dispatches the git.* control plane. Handlers run on the
-// read loop like the files.* handlers: the git operations are bounded by
-// the internal/git work ceilings, and a synchronous response keeps the
-// wire order the client's request stream expects.
-func (s *WSServer) handleGitMethod(wconn *wsConn, state *connState, req jsonrpcRequest) {
-	if s.git == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "git not available"))
-		return
-	}
-	switch req.Method {
-	case "git.open":
-		s.handleGitOpen(wconn, state, req)
-	case "git.status":
-		s.handleGitStatus(wconn, state, req)
-	case "git.diff":
-		s.handleGitDiff(wconn, state, req)
-	case "git.stage":
-		s.handleGitStage(wconn, state, req)
-	case "git.unstage":
-		s.handleGitUnstage(wconn, state, req)
-	case "git.stageAll":
-		s.handleGitStageAll(wconn, state, req)
-	case "git.unstageAll":
-		s.handleGitUnstageAll(wconn, state, req)
-	case "git.commit":
-		s.handleGitCommit(wconn, state, req)
-	case "git.remote":
-		s.handleGitRemote(wconn, state, req)
-	case "git.headMessage":
-		s.handleGitHeadMessage(wconn, state, req)
-	case "git.log":
-		s.handleGitLog(wconn, state, req)
-	case "git.close":
-		s.handleGitClose(wconn, state, req)
-	}
+// gitBindingsSeam is the transport-owned git binding bookkeeping surface the
+// git handlers are constructed with: the transport records which session each
+// binding belongs to (gitBindings/gitBySession, under gitMu) because
+// internal/git exposes neither a binding's session nor anything else the
+// notification addressing needs. git.open records at mint time; git.close
+// forgets. The git.changed emission and the session-teardown cleanup
+// (gitSessionClosed) stay in the transport — they are shared lifecycle, not a
+// handler capability (migration map, close finding).
+type gitBindingsSeam interface {
+	recordBinding(bid string, sid session.ID)
+	forgetBinding(bid string)
 }
 
-// handleGitOpen resolves a session the requesting connection owns and
-// registers a repository for it, minting the binding every later git.*
-// call carries. sessionId appears exactly once on the wire — here (D1) —
-// and the authorisation is connState's, not the global registry's (D15).
-//
-// noCwd and remoteUnsupported are decided HERE, from the session's origin,
-// before the factory is invoked; the factory itself answers ok,
-// notARepository, gitUnavailable or gitTooOld (spec §5.1). The remote
-// refusal is a RESULT state, not an error: on an SSH tab the panel shows
-// one honest state and offers nothing (D3, D14).
-func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcRequest) {
-	var params gitOpenParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required"))
-		return
-	}
-	sid := session.ID(params.SessionID)
-	if !state.has(sid) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
-		return
-	}
-	sess, err := s.registry.Get(sid)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
-		return
-	}
-	if sess.Kind() != session.KindLocal {
-		// D3: the remote case waits for the relay (nocx-if6 phase B).
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)})))
-		return
-	}
-	if params.Cwd == "" {
-		// No verified OSC 7 cwd to resolve from (D2).
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenNoCwd)})))
-		return
-	}
-	if s.gitFactory == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "git.open not available (no repo factory wired)"))
-		return
-	}
-	// The ownership-transfer rule (spec §5.1): Open can return a live Repo
-	// and Register can fail, and between those two moments the Repo belongs
-	// to nobody. Go cannot encode "repo is non-nil iff ok" in a three-value
-	// return, so both directions are checked here:
-	//
-	//  1. a nil Repo on an ok outcome is an internal error — nothing to
-	//     close, nothing registered;
-	//  2. a live Repo on a refusing outcome is closed before the refusal
-	//     is returned — it must not leak;
-	//  3. a Register failure closes the Repo (still ours) and surfaces
-	//     both errors, returning no binding;
-	//  4. after Register succeeds the registry owns it.
-	repo, outcome, err := s.gitFactory.Open(context.Background(), params.Cwd)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-	if outcome.State != git.OpenOK {
-		if repo != nil {
-			// Refusing outcome with a live repo: the repo is still ours,
-			// and it must not leak.
-			if cerr := repo.Close(); cerr != nil {
-				s.log.Warn("git.open: close repo after refusing outcome", "error", cerr)
-			}
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{
-			State:      string(outcome.State),
-			GitVersion: outcome.GitVersion,
-		})))
-		return
-	}
-	if repo == nil {
-		// The other direction of the same lie: ok with no repository.
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "git.open: factory answered ok without a repository"))
-		return
-	}
-	bid, err := s.git.Register(repo, sid)
-	if err != nil {
-		if cerr := repo.Close(); cerr != nil {
-			s.log.Warn("git.open: close repo after register failure", "error", cerr)
-		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, fmt.Sprintf("git.open: %v", err)))
-		return
-	}
+// recordBinding records that the registry just minted bid for sid — the
+// transport's own bookkeeping, kept here so a handler constructed without a
+// *WSServer still records the binding it handed to Register.
+func (s *WSServer) recordBinding(bid string, sid session.ID) {
 	s.gitMu.Lock()
 	s.gitBindings[bid] = &gitBinding{sessionID: sid}
 	set := s.gitBySession[sid]
@@ -408,131 +296,282 @@ func (s *WSServer) handleGitOpen(wconn *wsConn, state *connState, req jsonrpcReq
 	}
 	set[bid] = struct{}{}
 	s.gitMu.Unlock()
-
-	// The first status rides the open result (spec §5.2) — otherwise every
-	// open is two round trips and a guaranteed frame of empty lists. A
-	// failed inline read is not an open failure: the binding is live and
-	// the panel's first poll retries, so the status is omitted rather than
-	// failing the open.
-	var st *gitStatusWire
-	if h, release, aerr := s.git.Acquire(bid, state); aerr == nil {
-		status, serr := h.Status(context.Background())
-		release()
-		if serr == nil {
-			wire := wireGitStatus(status)
-			st = &wire
-		} else {
-			s.log.Debug("git.open: inline status failed", "binding_id", bid, "error", serr)
-		}
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitOpenResult{
-		State:      string(git.OpenOK),
-		BindingID:  bid,
-		Toplevel:   outcome.Toplevel,
-		GitVersion: outcome.GitVersion,
-		EnvState:   string(outcome.EnvState),
-		EnvReason:  outcome.EnvReason,
-		Status:     st,
-	})))
 }
 
-// handleGitStatus answers "what changed in this repository" — the poll the
+// forgetBinding drops bid from the transport's bookkeeping, the mirror of
+// recordBinding. It is a no-op for an unknown binding.
+func (s *WSServer) forgetBinding(bid string) {
+	s.gitMu.Lock()
+	b := s.gitBindings[bid]
+	delete(s.gitBindings, bid)
+	if b != nil {
+		if set := s.gitBySession[b.sessionID]; set != nil {
+			delete(set, bid)
+			if len(set) == 0 {
+				delete(s.gitBySession, b.sessionID)
+			}
+		}
+	}
+	s.gitMu.Unlock()
+}
+
+// gitOpenHandlers answers git.open. It holds the GitOpenOperation (session +
+// git gates — the session resolve and the open+register run inside the
+// callback), the Responder, the transport's binding bookkeeping seam and a
+// logger. It needs the connection's connState per call: git.open is
+// authorised by connState (D15), and the inline first status acquires with
+// it as the caller. wired distinguishes the two not-available answers:
+// false is the whole git plane missing ("git not available"); true with a
+// nil operation is a registry wired without a repo factory, which leaves
+// only git.open unavailable.
+type gitOpenHandlers struct {
+	op       capability.GitOpenOperation
+	r        Responder
+	bindings gitBindingsSeam
+	log      log.Logger
+	wired    bool
+}
+
+// handleOpen resolves a session the requesting connection owns and
+// registers a repository for it, minting the binding every later git.*
+// call carries. sessionId appears exactly once on the wire — here (D1) —
+// and the authorisation is connState's, not the global registry's (D15).
+//
+// noCwd and remoteUnsupported are decided HERE, from the session's origin,
+// before the factory is invoked; the factory itself answers ok,
+// notARepository, gitUnavailable or gitTooOld (spec §5.1). The remote
+// refusal is a RESULT state, not an error: on an SSH tab the panel shows
+// one honest state and offers nothing (D3, D14).
+func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		if h.wired {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "git.open not available (no repo factory wired)"})
+			return
+		}
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
+	var params gitOpenParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
+		return
+	}
+	sid := session.ID(params.SessionID)
+	if !state.has(sid) {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
+		return
+	}
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitOpenService) error {
+		sess, err := svc.Get(sid)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
+			return nil
+		}
+		if sess.Kind() != session.KindLocal {
+			// D3: the remote case waits for the relay (nocx-if6 phase B).
+			_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenRemoteUnsupported)}))
+			return nil
+		}
+		if params.Cwd == "" {
+			// No verified OSC 7 cwd to resolve from (D2).
+			_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{State: string(git.OpenNoCwd)}))
+			return nil
+		}
+		// OpenBinding owns the ownership-transfer rule (spec §5.1): a live
+		// repo on a refusing outcome is closed before the refusal is
+		// returned, a Register failure closes the repo, and after Register
+		// succeeds the registry owns it.
+		bid, outcome, err := svc.OpenBinding(ctx, sid, params.Cwd)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return nil
+		}
+		if outcome.State != git.OpenOK {
+			_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{
+				State:      string(outcome.State),
+				GitVersion: outcome.GitVersion,
+			}))
+			return nil
+		}
+		// The binding is now the registry's; the transport records which
+		// session it belongs to — the bookkeeping the notification
+		// addressing needs.
+		h.bindings.recordBinding(bid, sid)
+
+		// The first status rides the open result (spec §5.2) — otherwise
+		// every open is two round trips and a guaranteed frame of empty
+		// lists. A failed inline read is not an open failure: the binding
+		// is live and the panel's first poll retries, so the status is
+		// omitted rather than failing the open.
+		var st *gitStatusWire
+		if hnd, release, aerr := svc.Acquire(bid, state); aerr == nil {
+			status, serr := hnd.Status(ctx)
+			release()
+			if serr == nil {
+				wire := wireGitStatus(status)
+				st = &wire
+			} else {
+				h.log.Debug("git.open: inline status failed", "binding_id", bid, "error", serr)
+			}
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitOpenResult{
+			State:      string(git.OpenOK),
+			BindingID:  bid,
+			Toplevel:   outcome.Toplevel,
+			GitVersion: outcome.GitVersion,
+			EnvState:   string(outcome.EnvState),
+			EnvReason:  outcome.EnvReason,
+			Status:     st,
+		}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
+	}
+}
+
+// gitBindingHandlers answers the git.* binding methods — status, diff,
+// stage, unstage, stageAll, unstageAll, commit, headMessage, log, remote,
+// close. Each call acquires the binding per call through the
+// GitBindingOperation (git gate) with the connection's connState as the
+// caller: bindings close at any moment, so validity is checked per call, not
+// at construction, and Registry.Acquire re-checks that the binding's session
+// is in the REQUESTING connection's connState (D15) in exactly one place. It
+// holds the operation, the Responder and the transport's binding
+// bookkeeping seam (close forgets the binding); nothing else.
+type gitBindingHandlers struct {
+	op       capability.GitBindingOperation // nil → git not wired
+	r        Responder
+	bindings gitBindingsSeam
+}
+
+// handleStatus answers "what changed in this repository" — the poll the
 // panel runs while visible (spec §5.4, D13). A status on an unknown or
 // already-closed binding answers the unknownBinding error, never a panic:
 // Acquire either finds the binding and takes the use-guard, or returns the
 // domain error, and the handler maps it onto the wire.
-func (s *WSServer) handleGitStatus(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleStatus(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		status, err := hnd.Status(ctx)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		// The environment fact rides the poll (nocx-69ey): the panel switches
+		// on it, and only a repeating channel can withdraw a warning Open
+		// showed for the pre-settle window. The domain answers — never the
+		// shell (D16).
+		envState, envReason := hnd.EnvState()
+		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusPollResult{
+			Status:    wireGitStatus(status),
+			EnvState:  string(envState),
+			EnvReason: envReason,
+		}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	status, err := h.Status(context.Background())
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	// The environment fact rides the poll (nocx-69ey): the panel switches
-	// on it, and only a repeating channel can withdraw a warning Open
-	// showed for the pre-settle window. The domain answers — never the
-	// shell (D16).
-	envState, envReason := h.EnvState()
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusPollResult{
-		Status:    wireGitStatus(status),
-		EnvState:  string(envState),
-		EnvReason: envReason,
-	})))
 }
 
-// handleGitDiff diffs one file on one side. side is a closed enum — the
+// handleDiff diffs one file on one side. side is a closed enum — the
 // three diff forms (spec §5.1 "diff.go") — and the outcome is the four
 // RESULT states, never an error: a row can be clicked in the same second
 // an agent reverts the file (empty, gone), a binary file has nothing to
 // render (binary), and the byte bound is a state, not a failure (tooLarge).
-func (s *WSServer) handleGitDiff(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleDiff(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitDiffParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
 	if params.Side != string(git.SideStaged) && params.Side != string(git.SideUnstaged) && params.Side != string(git.SideUntracked) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: side must be staged, unstaged or untracked"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: side must be staged, unstaged or untracked"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		d, err := hnd.Diff(ctx, params.Path, git.Side(params.Side), params.MaxBytes)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitDiffResult{
+			State:     string(d.State),
+			Text:      d.Text,
+			Truncated: d.Truncated,
+		}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	d, err := h.Diff(context.Background(), params.Path, git.Side(params.Side), params.MaxBytes)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitDiffResult{
-		State:     string(d.State),
-		Text:      d.Text,
-		Truncated: d.Truncated,
-	})))
 }
 
-// handleGitStage stages exactly the given paths (D8: paths ride stdin as a
+// handleStage stages exactly the given paths (D8: paths ride stdin as a
 // pathspec stream, never argv) and returns the fresh status (D12). paths[]
 // never means "all": an empty array is a no-op that still returns the
 // current status, and "all" is git.stageAll (D19).
-func (s *WSServer) handleGitStage(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleStage(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitStageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		var status git.Status
+		if len(params.Paths) == 0 {
+			status, err = hnd.Status(ctx)
+		} else {
+			status, err = hnd.Stage(ctx, params.Paths)
+		}
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	var status git.Status
-	if len(params.Paths) == 0 {
-		status, err = h.Status(context.Background())
-	} else {
-		status, err = h.Stage(context.Background(), params.Paths)
-	}
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)})))
 }
 
-// handleGitUnstage unstages exactly the given paths. It is the one
+// handleUnstage unstages exactly the given paths. It is the one
 // mutation whose failure is a RESULT state rather than a transport error:
 // individual unstaging on an unborn branch fails with git's own error (git
 // reset with pathspecs resolves HEAD, which an unborn branch lacks — D19
@@ -541,181 +580,241 @@ func (s *WSServer) handleGitStage(wconn *wsConn, state *connState, req jsonrpcRe
 // (D11): when the unstage fails and a fresh status says the branch is
 // unborn, the answer is state "unborn" with that fresh status, and the
 // panel repaints and stops offering the control.
-func (s *WSServer) handleGitUnstage(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleUnstage(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitStageParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	defer release()
-	var status git.Status
-	if len(params.Paths) == 0 {
-		status, err = h.Status(context.Background())
-	} else {
-		status, err = h.Unstage(context.Background(), params.Paths)
-	}
-	if err != nil {
-		st, serr := h.Status(context.Background())
-		if serr == nil && st.Unborn {
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitUnstageResult{
-				State:  "unborn",
-				Status: wireGitStatus(st),
-			})))
-			return
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		defer release()
+		var status git.Status
+		if len(params.Paths) == 0 {
+			status, err = hnd.Status(ctx)
+		} else {
+			status, err = hnd.Unstage(ctx, params.Paths)
+		}
+		if err != nil {
+			st, serr := hnd.Status(ctx)
+			if serr == nil && st.Unborn {
+				_ = h.r.TryResult(req.ID, mustMarshal(gitUnstageResult{
+					State:  "unborn",
+					Status: wireGitStatus(st),
+				}))
+				return nil
+			}
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitUnstageResult{
+			State:  "ok",
+			Status: wireGitStatus(status),
+		}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitUnstageResult{
-		State:  "ok",
-		Status: wireGitStatus(status),
-	})))
 }
 
-// handleGitStageAll stages everything (git add -A, D19) and returns the
+// handleStageAll stages everything (git add -A, D19) and returns the
 // fresh status. While any entry is conflicted it is refused — the
 // ErrConflicted domain error, which the panel renders as a visible refusal
 // with the reason (a button that resolved conflicts by accident is the
 // measured hazard D19 exists to prevent).
-func (s *WSServer) handleGitStageAll(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleStageAll(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		status, err := hnd.StageAll(ctx)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	status, err := h.StageAll(context.Background())
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)})))
 }
 
-// handleGitUnstageAll unstages everything — bare git reset, no HEAD, no
+// handleUnstageAll unstages everything — bare git reset, no HEAD, no
 // pathspec — which is what makes it work on an unborn branch (D19,
 // measured; no special unborn path is needed or built). It is refused
 // while any entry is conflicted, like stage-all.
-func (s *WSServer) handleGitUnstageAll(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleUnstageAll(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		status, err := hnd.UnstageAll(ctx)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	status, err := h.UnstageAll(context.Background())
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitStatusResult{Status: wireGitStatus(status)})))
 }
 
-// handleGitCommit commits with the message on stdin (-F -, D8) and returns
+// handleCommit commits with the message on stdin (-F -, D8) and returns
 // the outcome: ok with the new head and the fresh status, or failed with
 // git's own account (D11 — we do not classify why). Hooks always run;
 // there is no --no-verify.
-func (s *WSServer) handleGitCommit(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleCommit(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitCommitParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		outcome, err := hnd.Commit(ctx, params.Message, params.Amend)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		res := gitCommitResult{
+			State:           string(outcome.State),
+			Head:            outcome.Head,
+			Output:          outcome.Output,
+			OutputTruncated: outcome.OutputTruncated,
+			StatusStale:     outcome.StatusStale,
+		}
+		if outcome.State == git.CommitOK && !outcome.StatusStale {
+			wire := wireGitStatus(outcome.Status)
+			res.Status = &wire
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(res))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	outcome, err := h.Commit(context.Background(), params.Message, params.Amend)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	res := gitCommitResult{
-		State:           string(outcome.State),
-		Head:            outcome.Head,
-		Output:          outcome.Output,
-		OutputTruncated: outcome.OutputTruncated,
-		StatusStale:     outcome.StatusStale,
-	}
-	if outcome.State == git.CommitOK && !outcome.StatusStale {
-		wire := wireGitStatus(outcome.Status)
-		res.Status = &wire
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(res)))
 }
 
-// handleGitHeadMessage is the Amend prefill (spec §5.2): the full HEAD
+// handleHeadMessage is the Amend prefill (spec §5.2): the full HEAD
 // message, fetched once when the box is ticked. An unborn branch has no
 // HEAD message to amend — that is the "none" state, not an error (local
 // maps it); an invocation that cannot be made is the error.
-func (s *WSServer) handleGitHeadMessage(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleHeadMessage(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		hm, err := hnd.HeadMessage(ctx)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitHeadMessageResult{
+			State:   string(hm.State),
+			Message: hm.Message,
+		}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	hm, err := h.HeadMessage(context.Background())
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitHeadMessageResult{
-		State:   string(hm.State),
-		Message: hm.Message,
-	})))
 }
 
-// handleGitLog answers "what has happened on this branch": the first
+// handleLog answers "what has happened on this branch": the first
 // MaxLogEntries commits of HEAD, newest first (brief, git.log). History
 // does not change under the user the way the working tree does, so the
 // panel reads it when it opens, on manual refresh and after a commit —
 // never on the poll (D13). The bound is policy: the implementation asks
 // git for one more than the cap, so the answer can say capped rather than
 // implying the branch has exactly N commits (D9).
-func (s *WSServer) handleGitLog(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleLog(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		lg, err := hnd.Log(ctx, git.MaxLogEntries)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	lg, err := h.Log(context.Background(), git.MaxLogEntries)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitLogResult{Log: wireGitLog(lg)})))
 }
 
-// handleGitRemote answers "what URL does the branch I am on track"
+// handleRemote answers "what URL does the branch I am on track"
 // (brief, nocx-hc0m): the raw remote URL, derived by Repo.RemoteURL from
 // HEAD and git's own upstream atom — never parsed from a client-supplied
 // branch. The none state is the ordinary answer — detached HEAD, no
@@ -724,78 +823,75 @@ func (s *WSServer) handleGitLog(wconn *wsConn, state *connState, req jsonrpcRequ
 // The URL conversion to a host's web page is the renderer's, in one module
 // with its own tests: the wire carries what git said, not a URL the backend
 // invented for a host it may not know.
-func (s *WSServer) handleGitRemote(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h gitBindingHandlers) handleRemote(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
+		return
+	}
 	var params gitBindingParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	h, release, err := s.git.Acquire(params.BindingID, state)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	defer release()
-	url, err := h.RemoteURL(context.Background())
-	if err != nil {
-		var noRemote *git.ErrNoRemote
-		if errors.As(err, &noRemote) {
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitRemoteResult{State: "none"})))
-			return
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		hnd, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
 		}
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitRemoteResult{State: "ok", URL: url})))
-}
-
-// handleGitClose closes the binding: its repository released, the use-guard
-// drained. Ownership is re-checked like every call (D15) — a binding is
-// closed by the connection that owns its session, not by whoever knows its
-// id.
-func (s *WSServer) handleGitClose(wconn *wsConn, state *connState, req jsonrpcRequest) {
-	var params gitBindingParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
-		return
-	}
-	_, release, err := s.git.Acquire(params.BindingID, state)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
-		return
-	}
-	release()
-
-	s.gitMu.Lock()
-	b := s.gitBindings[params.BindingID]
-	delete(s.gitBindings, params.BindingID)
-	if b != nil {
-		if set := s.gitBySession[b.sessionID]; set != nil {
-			delete(set, params.BindingID)
-			if len(set) == 0 {
-				delete(s.gitBySession, b.sessionID)
+		defer release()
+		url, err := hnd.RemoteURL(ctx)
+		if err != nil {
+			var noRemote *git.ErrNoRemote
+			if errors.As(err, &noRemote) {
+				_ = h.r.TryResult(req.ID, mustMarshal(gitRemoteResult{State: "none"}))
+				return nil
 			}
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
 		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitRemoteResult{State: "ok", URL: url}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	s.gitMu.Unlock()
-	if err := s.git.Close(params.BindingID); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, gitErrorCode(err), err.Error()))
+}
+
+// handleClose closes the binding: its repository released, the use-guard
+// drained, the transport's bookkeeping forgotten. Ownership is re-checked
+// like every call (D15) — a binding is closed by the connection that owns
+// its session, not by whoever knows its id.
+func (h gitBindingHandlers) handleClose(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "git not available"})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(gitCloseResult{Closed: true})))
-}
+	var params gitBindingParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
+		return
+	}
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.GitBindingService) error {
+		_, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		release()
 
-// ── notification delivery ─────────────────────────────────────────────────
-
-func gitChangedMessage(bindingID, reason string) gitChangedNotification {
-	return gitChangedNotification{
-		JSONRPC: "2.0",
-		Method:  "git.changed",
-		Params:  gitChangedParams{BindingID: bindingID, Reason: reason},
+		h.bindings.forgetBinding(params.BindingID)
+		if err := svc.Close(params.BindingID); err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: gitErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(gitCloseResult{Closed: true}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
 }
-
-// ── lifecycle ─────────────────────────────────────────────────────────────
 
 // gitSessionClosed tears down every git binding of a session and tells that
 // session's subscriber the bindings are gone — closing the terminal closes
@@ -820,11 +916,18 @@ func gitChangedMessage(bindingID, reason string) gitChangedNotification {
 // flight (D18), and an in-flight call that loses the race answers
 // unknownBinding, which is the correct answer.
 //
-// The write is asynchronous, deliberately: writeJSON has no deadline, and
-// a subscriber that stopped reading while its socket stays open would hang
-// whatever wrote it — which on the explicit-close path is the READ LOOP.
-// The blocked-write goroutine is the same best-effort hazard ringToConn
-// already has; it exits when the subscriber's socket dies.
+// The write is asynchronous and non-blocking, deliberately: a subscriber
+// that stopped reading while its socket stays open must not hang whatever
+// wrote it — which on the explicit-close path is the READ LOOP. The
+// enqueue is one channel send (the outbound pump owns the socket); the
+// frame is dropped if the connection is stalled or closed.
+// The subscriber stays a *wsConn rather than a Responder, and that is not an
+// oversight left over from the migration. Both callers get it from
+// rx.getSubscriber(), which returns a nil *wsConn when nobody is attached —
+// and a nil *wsConn stored in an interface is NOT equal to nil, so the guard
+// below silently passed and TryNotify dereferenced a nil receiver. The
+// parameter that can legitimately be absent keeps the concrete type, so
+// "absent" stays expressible as nil.
 func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 	s.gitMu.Lock()
 	ids := make([]string, 0, len(s.gitBySession[sid]))
@@ -844,7 +947,10 @@ func (s *WSServer) gitSessionClosed(sid session.ID, wconn *wsConn) {
 	}
 	go func() {
 		for _, id := range ids {
-			if err := wconn.writeJSON(gitChangedMessage(id, "sessionClosed")); err != nil {
+			if err := wconn.TryNotify("git.changed", mustMarshal(gitChangedParams{
+				BindingID: id,
+				Reason:    "sessionClosed",
+			})); err != nil {
 				s.log.Debug("write git.changed", "binding_id", id, "error", err)
 				return
 			}
@@ -867,5 +973,81 @@ func gitErrorCode(err error) int {
 		return -32602
 	default:
 		return -32603
+	}
+}
+
+// ── spec builder ───────────────────────────────────────────────────────────
+
+// gitSpecs declares the git.* control methods. Every handler needs the
+// connection's connState: git.open for the session-ownership check (D15)
+// and the inline first status, the binding methods as the caller for the
+// per-call Acquire. The operations are built here from the wired stores
+// (composition root for this domain), once per builder and shared across
+// the methods: GitOpenOperation (session + git gates) and
+// GitBindingOperation (git gate). When the git registry is absent every
+// handler answers the old not-available error; a registry wired without a
+// repo factory leaves only git.open unavailable.
+func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control.Admission) []methodSpec {
+	gitWired := s.git != nil
+	var openOp capability.GitOpenOperation
+	if gitWired && s.gitFactory != nil {
+		openOp = capability.NewGitOpenOperation(sessionGate, gitGate, lane, s.registry, s.gitFactory, s.git)
+	}
+	var bindingOp capability.GitBindingOperation
+	if gitWired {
+		bindingOp = capability.NewGitBindingOperation(gitGate, lane, s.git)
+	}
+	openSub := s.operationQueue("git-open")
+	bindingSub := s.operationQueue("git")
+
+	return []methodSpec{
+		reg(openSub, "git.open", func(w *wsConn, state *connState) handlerFunc {
+			h := gitOpenHandlers{op: openOp, r: w, bindings: s, log: s.log, wired: gitWired}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.status", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.diff", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDiff(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.stage", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStage(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.unstage", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstage(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.stageAll", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStageAll(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.unstageAll", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstageAll(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.commit", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleCommit(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.headMessage", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleHeadMessage(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.log", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleLog(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.remote", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleRemote(ctx, state, req) }
+		}),
+		reg(bindingSub, "git.close", func(w *wsConn, state *connState) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
+		}),
 	}
 }

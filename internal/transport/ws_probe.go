@@ -132,36 +132,71 @@ type connectionsTestHostKey struct {
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"host-key-unknown","detail":"unknown host key for 1.2.3.4:22: ecdsa-sha2-nistp256 SHA256:MKEj…","hostKey":{"host":"1.2.3.4:22","algorithm":"ecdsa-sha2-nistp256","fingerprint":"SHA256:MKEj…","key":"AAAAC…"}}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"host-key-changed","detail":"host key mismatch for 1.2.3.4:22: got SHA256:MKEj…, expected SHA256:OLd…","hostKey":{"host":"1.2.3.4:22","algorithm":"ecdsa-sha2-nistp256","fingerprint":"SHA256:MKEj…","storedFingerprint":"SHA256:OLd…","key":"AAAAC…"}}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"outcome":"needs-interactive","detail":"private key requires passphrase"}}
-func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
+//
+// probeHandlers answers connections.test. It holds the resolver holder, the
+// prober and the probe result store — the seams — and its Responder; nothing
+// else. The off-loop machinery (probe admission composed with the lane,
+// inflight registration) lives in the registration, not in the handler.
+type probeHandlers struct {
+	resolver         *resolverHolder
+	prober           Prober
+	probeResultStore *ProbeResultStore
+	r                Responder
+}
+
+func (h probeHandlers) handleConnectionsTest(ctx context.Context, req jsonrpcRequest) {
 	var params connectionsTestParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.ProfileID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: profileId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: profileId required"})
 		return
 	}
-	if !s.resolverOK {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Probing not available (no profile resolver wired)"))
+	if _, ok := h.resolver.get(); !ok {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Probing not available (no profile resolver wired)"})
 		return
 	}
-	if s.prober == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Probing not available (no prober wired)"))
+	if h.prober == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Probing not available (no prober wired)"})
 		return
 	}
 
-	host, connectCfg, err := s.resolver.Resolve(params.ProfileID)
+	host, connectCfg, err := h.resolver.Resolve(params.ProfileID)
 	if err != nil {
 		// Resolving reads the stored secret, so a sealed vault surfaces here —
 		// the renderer needs the reason to offer the unlock prompt (the vault
 		// owns it; no call site wraps its own vault calls).
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "Resolve failed: ", err))
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Resolve failed: ", err))
 		return
 	}
 
+	// The probe runs OFF the read loop under the probe admission
+	// (ws_control.go): a 30-second SSH probe must not freeze the socket that
+	// feeds every other tab, and a disconnect must be able to cancel it. The
+	// task context derives from the connection context, so the disconnect
+	// cancels the probe; the admission permit is released when the task
+	// returns, cancelled or not — that frees the slot for the next
+	// connection. A refused submit (one probe already in flight) answers the
+	// control-saturated error.
+	// The dispatch admitted this task via the probe submission (the probe
+	// admission composed with the lane, registered in the inflight set
+	// BEFORE TrySubmit so shutdown cancels it and waits, bounded, for it).
+	// The task context derives from the connection, so a disconnect cancels
+	// the probe; the admission permit frees when the task returns, cancelled
+	// or not — that frees the slot for the next connection. A refusal (one
+	// probe already in flight) was answered by the dispatcher with the
+	// control-saturated error.
+	h.runProbe(ctx, h.r, req.ID, host, connectCfg)
+}
+
+// runProbe runs one probe and answers its request. It executes on the probe
+// task's goroutine, never the read loop; the Responder is safe from any
+// goroutine and silently drops the response when the connection died.
+func (h probeHandlers) runProbe(ctx context.Context, wconn Responder, id json.RawMessage, host string, connectCfg *ssh.ConnectConfig) {
 	// Probe uses the same resolved parameters Connect would.
-	fingerprint, err := s.prober.ProbeWithResult(context.Background(), host, connectCfg)
+	fingerprint, err := h.prober.ProbeWithResult(ctx, host, connectCfg)
 	result := classifyProbeError(err)
 
 	// Record the probe result in the store for operational evidence.
@@ -169,22 +204,22 @@ func (s *WSServer) handleConnectionsTest(wconn *wsConn, req jsonrpcRequest) {
 	// unknown, host-key changed, needs-interactive) are stored; unclassifiable
 	// errors skip the store because they represent a probe bug, not a valid
 	// outcome.
-	if result.err == nil && s.probeResultStore != nil {
-		s.storeProbeResult(host, connectCfg, fingerprint, result.outcome, result.detail)
+	if result.err == nil && h.probeResultStore != nil {
+		h.storeProbeResult(host, connectCfg, fingerprint, result.outcome, result.detail)
 	}
 
 	if result.err != nil {
 		// A sealed vault surfaces here too — the renderer needs the reason to
 		// offer the unlock prompt instead of showing an error.
-		_ = wconn.writeJSON(rpcErrorFor(req.ID, -32603, "probe config: ", result.err))
+		_ = wconn.TryError(id, rpcErrorFor(-32603, "probe config: ", result.err))
 		return
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(connectionsTestResult{
+	_ = wconn.TryResult(id, mustMarshal(connectionsTestResult{
 		Outcome: result.outcome,
 		Detail:  result.detail,
 		HostKey: hostKeyInfoFromError(err),
-	})))
+	}))
 }
 
 // hostKeyInfoFromError builds the wire host-key evidence from the probe
@@ -228,7 +263,7 @@ func knownHostsAddr(displayAddr, lookupAddr string) string {
 
 // storeProbeResult builds a ProbeResultRecord from the probe output and
 // stores it. All classified outcomes are recorded.
-func (s *WSServer) storeProbeResult(host string, cfg *ssh.ConnectConfig, fingerprint string, outcome ProbeOutcome, detail string) {
+func (h probeHandlers) storeProbeResult(host string, cfg *ssh.ConnectConfig, fingerprint string, outcome ProbeOutcome, detail string) {
 	port := 22
 	if cfg.Port > 0 {
 		port = cfg.Port
@@ -240,7 +275,7 @@ func (s *WSServer) storeProbeResult(host string, cfg *ssh.ConnectConfig, fingerp
 		authPolicy = "auto"
 	}
 
-	s.probeResultStore.Store(ProbeResultRecord{
+	h.probeResultStore.Store(ProbeResultRecord{
 		Identity: ProbeResultIdentity{
 			Endpoint:           endpoint,
 			HostKeyFingerprint: fingerprint,
@@ -287,6 +322,13 @@ type connectionsTrustHostKeyResult struct {
 	Fingerprint string `json:"fingerprint"`
 }
 
+// trustHostKeyHandlers answers connections.trustHostKey. It holds the
+// host-key truster seam and its Responder; nothing else.
+type trustHostKeyHandlers struct {
+	truster HostKeyTruster
+	r       Responder
+}
+
 // handleConnectionsTrustHostKey appends the offered host key to known_hosts —
 // the accept half of accept-on-first-use. The renderer only ever echoes back
 // the host and key that a connections.test result carried; the write itself
@@ -294,34 +336,34 @@ type connectionsTrustHostKeyResult struct {
 //
 //	--> {"jsonrpc":"2.0","id":1,"method":"connections.trustHostKey","params":{"host":"1.2.3.4:22","key":"AAAAC…"}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"fingerprint":"SHA256:MKEj…"}}
-func (s *WSServer) handleConnectionsTrustHostKey(wconn *wsConn, req jsonrpcRequest) {
+func (h trustHostKeyHandlers) handleConnectionsTrustHostKey(ctx context.Context, req jsonrpcRequest) {
 	var params connectionsTrustHostKeyParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 	if params.Host == "" || params.Key == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: host and key required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: host and key required"})
 		return
 	}
-	if s.hostKeyTruster == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Host key trust not available (no truster wired)"))
+	if h.truster == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Host key trust not available (no truster wired)"})
 		return
 	}
 
 	keyBlob, err := base64.StdEncoding.DecodeString(params.Key)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Invalid key: not base64: "+err.Error()))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Invalid key: not base64: " + err.Error()})
 		return
 	}
 
-	fingerprint, err := s.hostKeyTruster.TrustHostKey(context.Background(), params.Host, keyBlob)
+	fingerprint, err := h.truster.TrustHostKey(ctx, params.Host, keyBlob)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "Trust host key failed: "+err.Error()))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Trust host key failed: " + err.Error()})
 		return
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(connectionsTrustHostKeyResult{
+	_ = h.r.TryResult(req.ID, mustMarshal(connectionsTrustHostKeyResult{
 		Fingerprint: fingerprint,
-	})))
+	}))
 }

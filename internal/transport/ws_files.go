@@ -40,8 +40,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // FilesystemProviderFactory builds the provider files.open registers for a
@@ -53,17 +55,6 @@ import (
 // way internal/discovery declares its consumer interfaces. When nil,
 // files.open answers an error.
 type FilesystemProviderFactory func(sess session.Session, rootPath string) (filesystem.Provider, error)
-
-// filesystemEndpointAttester is the optional attestation surface a provider
-// may carry (spec §5.1): the composition root wraps the sftp provider with
-// the v1 endpoint id so the binding's endpointId is backend-attested rather
-// than client-supplied. A local provider never implements it — an empty
-// attestation is what makes files.reveal a local-only capability (D4). The
-// transport only reads the seam; it never computes an attestation itself
-// (AD-8).
-type filesystemEndpointAttester interface {
-	EndpointID() string
-}
 
 // FilesRevealer shows a path in the OS file manager (files.reveal). The
 // Wails runtime seam is a later wave (design §6 step 6); the interface is
@@ -114,6 +105,50 @@ type filesWatcher struct {
 	stopOnce sync.Once
 	stop     chan struct{}
 	done     chan struct{}
+}
+
+// filesMachine is the transport-owned files.* surface the handlers reach
+// beyond their capability operations: the binding bookkeeping the filesystem
+// package deliberately exposes nowhere (a binding's session and endpoint
+// attestation), the watcher machinery files.watch drives, and the reveal
+// guard's inputs. WSServer implements it; a handler is constructed with the
+// interface, so it can reach exactly these operations and nothing else on
+// the server. This is transport-owned state, not a store — no capability
+// gates it (migration map, files.* rows).
+type filesMachine interface {
+	// recordFilesBinding adds the bookkeeping for a binding minted by
+	// files.open: the session it belongs to (notification addressing,
+	// spec §5.2) and the endpoint attestation (files.reveal's local-only
+	// guard, D4).
+	recordFilesBinding(bid string, sid session.ID, endpointID string)
+	// filesBindingOf returns the bookkeeping for a binding id, or nil. The
+	// session and endpoint fields are written once at creation and never
+	// change, so the returned pointer is safe to read; the watcher slot is
+	// only mutated under the bookkeeping lock (withFilesBinding).
+	filesBindingOf(bid string) *filesBinding
+	// removeFilesBinding drops the bookkeeping for a binding and returns it
+	// (nil when unknown) — files.close's bookkeeping half; the registry
+	// close is the handler's capability service.
+	removeFilesBinding(bid string) *filesBinding
+	// dropFilesBinding removes the bookkeeping and closes the binding in
+	// the registry: the files.open error paths, where the id never reached
+	// the client and the provider must not leak.
+	dropFilesBinding(bid string, sid session.ID)
+	// withFilesBinding runs f under the bookkeeping lock with the binding's
+	// bookkeeping entry; it reports false when the binding is gone. The
+	// closure runs with the lock held, so watcher installs and clears are
+	// atomic against files.close and filesSessionClosed, exactly like the
+	// inline handlers they replaced.
+	withFilesBinding(bid string, f func(b *filesBinding)) bool
+	// filesPollLoop runs the transport-side digest-poll change detector for
+	// one binding (see the poll section below). files.watch starts it; the
+	// loop keeps the handle that call acquired.
+	filesPollLoop(w *filesWatcher)
+	// stopFilesWatcher stops a binding's poll loop and releases its handle.
+	stopFilesWatcher(w *filesWatcher)
+	// filesBaseline takes the watch baseline synchronously: one listing per
+	// path in the new set, inside files.watch, before the response.
+	filesBaseline(h filesystem.Handle, paths []string) map[string]string
 }
 
 // ── wire shapes (contracts/files.*.schema.json) ──────────────────────────
@@ -219,438 +254,504 @@ type filesRevealParams struct {
 	Path      string `json:"path"`
 }
 
-// filesChangedNotification is the server-initiated files.changed frame —
-// the seventh wire shape of the files.* namespace, contracted like the
-// methods because an unsolicited notification is exactly where an
-// addressing defect hides (spec §5.3).
-type filesChangedNotification struct {
-	JSONRPC string             `json:"jsonrpc"`
-	Method  string             `json:"method"`
-	Params  filesChangedParams `json:"params"`
-}
-
 type filesChangedParams struct {
 	BindingID string `json:"bindingId"`
 	Path      string `json:"path"`
 	Rev       string `json:"rev,omitempty"` // absent when nothing has been re-listed
 }
 
-// ── dispatcher ────────────────────────────────────────────────────────────
+// ── handlers (constructed types) ───────────────────────────────────────────
 
-// handleFilesMethod dispatches the files.* control plane. Handlers run on
-// the read loop like handleResize and fs.complete: the provider operations
-// are bounded by the D14 caps, and a synchronous response keeps the wire
-// order the client's request stream expects.
-func (s *WSServer) handleFilesMethod(wconn *wsConn, state *connState, req jsonrpcRequest) {
-	if s.filesys == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "files not available"))
-		return
-	}
-	switch req.Method {
-	case "files.open":
-		s.handleFilesOpen(wconn, state, req)
-	case "files.list":
-		s.handleFilesList(wconn, state, req)
-	case "files.read":
-		s.handleFilesRead(wconn, state, req)
-	case "files.watch":
-		s.handleFilesWatch(wconn, state, req)
-	case "files.close":
-		s.handleFilesClose(wconn, state, req)
-	case "files.reveal":
-		s.handleFilesReveal(wconn, state, req)
-	}
+// filesOpenHandlers answers files.open. It holds the FilesystemOpenOperation
+// (session, filesystem gates — resolve, register and root all run inside the
+// callback), the provider-factory seam and the transport bookkeeping seam;
+// never the *WSServer. state arrives per call from the build closure: the
+// session-ownership check is connState's (D15), and Acquire re-checks it.
+type filesOpenHandlers struct {
+	op      capability.FilesystemOpenOperation // nil → filesystem not wired
+	factory capability.ProviderFactory         // nil → no provider factory wired
+	machine filesMachine
+	r       Responder
 }
 
-// handleFilesOpen resolves a session the requesting connection owns and
-// registers a provider for it, minting the binding every later files.*
-// call carries. sessionId appears exactly once on the wire — here (D1) —
-// and the authorisation is connState's, not the global registry's (D15):
-// the same gate handleResize applies, and a connection that learned
-// another connection's session id gets a refusal, not a filesystem.
-func (s *WSServer) handleFilesOpen(wconn *wsConn, state *connState, req jsonrpcRequest) {
+// handleOpen resolves a session the requesting connection owns and registers
+// a provider for it, minting the binding every later files.* call carries.
+// sessionId appears exactly once on the wire — here (D1) — and the
+// authorisation is connState's, not the global registry's (D15): the same
+// gate handleResize applies, and a connection that learned another
+// connection's session id gets a refusal, not a filesystem.
+func (h filesOpenHandlers) handleOpen(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
 	var params filesOpenParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sessionId required"})
 		return
 	}
 	sid := session.ID(params.SessionID)
 	if !state.has(sid) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
-	sess, err := s.registry.Get(sid)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
-		return
-	}
-	if s.filesProviderFor == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "files.open not available (no provider factory wired)"))
-		return
-	}
-	p, err := s.filesProviderFor(sess, params.RootPath)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-	// The endpoint attestation (spec §5.1): local providers carry none —
-	// empty is what makes files.reveal local-only (D4) — and the
-	// composition root's remote providers attest their destination through
-	// the optional seam. A provider that cannot attest registers with an
-	// empty id; the frontend keys its viewers on this value, so an empty
-	// remote id collapses into the local namespace and is reported loudly
-	// by the factory's tests rather than silently here.
-	endpointID := ""
-	if a, ok := p.(filesystemEndpointAttester); ok {
-		endpointID = a.EndpointID()
-	}
-	bid, err := s.filesys.Register(p, sid, endpointID)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-	s.filesMu.Lock()
-	s.filesBindings[bid] = &filesBinding{sessionID: sid, endpointID: endpointID}
-	set := s.filesBySession[sid]
-	if set == nil {
-		set = make(map[string]struct{})
-		s.filesBySession[sid] = set
-	}
-	set[bid] = struct{}{}
-	s.filesMu.Unlock()
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemOpenService) error {
+		sess, err := svc.Get(sid)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
+			return nil
+		}
+		if h.factory == nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "files.open not available (no provider factory wired)"})
+			return nil
+		}
+		// OpenBinding builds the provider through the wired factory and
+		// registers it, returning the minted binding id and the endpoint
+		// attestation (spec §5.1): local providers carry none — empty is
+		// what makes files.reveal local-only (D4) — and the composition
+		// root's remote providers attest their destination through the
+		// optional seam. A provider that cannot attest registers with an
+		// empty id; the frontend keys its viewers on this value, so an
+		// empty remote id collapses into the local namespace and is
+		// reported loudly by the factory's tests rather than silently here.
+		bid, endpointID, err := svc.OpenBinding(ctx, sess, params.RootPath)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return nil
+		}
+		h.machine.recordFilesBinding(bid, sid, endpointID)
 
-	// The root rides the open result — the panel needs a starting
-	// directory before any files.list. The handle is held only for this
-	// call: the use-guard covers the root acquisition, and release drops
-	// it (spec §5.1: hold it for the call, defer the release).
-	h, release, err := s.filesys.Acquire(bid, state)
-	if err != nil {
-		s.dropFilesBinding(bid, sid)
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
-	root, err := h.Root(context.Background())
-	release()
-	if err != nil {
-		s.dropFilesBinding(bid, sid)
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
+		// The root rides the open result — the panel needs a starting
+		// directory before any files.list. The handle is held only for this
+		// call: the use-guard covers the root acquisition, and release drops
+		// it (spec §5.1: hold it for the call, defer the release).
+		handle, release, err := svc.Acquire(bid, state)
+		if err != nil {
+			h.machine.dropFilesBinding(bid, sid)
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		root, err := handle.Root(ctx)
+		release()
+		if err != nil {
+			h.machine.dropFilesBinding(bid, sid)
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
 
-	var ep *string
-	if endpointID != "" {
-		ep = &endpointID
+		var ep *string
+		if endpointID != "" {
+			ep = &endpointID
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(filesOpenResult{
+			BindingID:  bid,
+			EndpointID: ep,
+			Root: filesRootResult{
+				Path:           root.Path,
+				Display:        root.Display,
+				Inferred:       root.Inferred,
+				InferredReason: root.InferredReason,
+			},
+		}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesOpenResult{
-		BindingID:  bid,
-		EndpointID: ep,
-		Root: filesRootResult{
-			Path:           root.Path,
-			Display:        root.Display,
-			Inferred:       root.Inferred,
-			InferredReason: root.InferredReason,
-		},
-	})))
 }
 
-// handleFilesList lists one page of one directory. The three D14 outcomes
-// are RESULT states, never errors: tooLarge and timedOut are refusals a
-// user can reason about, and the discriminated union is the contract.
-func (s *WSServer) handleFilesList(wconn *wsConn, state *connState, req jsonrpcRequest) {
+// filesBindingHandlers answers the per-binding methods after files.open:
+// files.list, files.read, files.watch, files.close and files.reveal. It
+// holds the FilesystemBindingOperation (filesystem gate), the transport
+// bookkeeping seam and the revealer; never the *WSServer. The binding id is
+// validated per call by Acquire — bindings close at any moment, so a
+// construction-time check would be a lie.
+type filesBindingHandlers struct {
+	op       capability.FilesystemBindingOperation // nil → filesystem not wired
+	machine  filesMachine
+	revealer FilesRevealer // nil → files.reveal answers -32601
+	r        Responder
+}
+
+// handleList lists one page of one directory. The three D14 outcomes are
+// RESULT states, never errors: tooLarge and timedOut are refusals a user can
+// reason about, and the discriminated union is the contract.
+func (h filesBindingHandlers) handleList(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
 	var params filesListParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
-	h, release, err := s.filesys.Acquire(params.BindingID, state)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
-	defer release()
-	listing, err := h.List(context.Background(), params.Path, filesystem.Page{Offset: params.Offset, Limit: params.Limit})
-	if err != nil {
-		var tooLarge *filesystem.ErrTooLarge
-		var timedOut *filesystem.ErrTimedOut
-		switch {
-		case errors.As(err, &tooLarge):
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesListTooLarge{
-				State:         "tooLarge",
-				ObservedCount: tooLarge.ObservedCount,
-				Limit:         tooLarge.Limit,
-			})))
-		case errors.As(err, &timedOut):
-			_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesListTimedOut{
-				State:   "timedOut",
-				Timeout: timedOut.Timeout.Milliseconds(),
-			})))
-		default:
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
+		// Authorisation: Acquire re-checks that THIS connection owns the
+		// binding's session (D15), and takes the use-guard that keeps the
+		// binding alive for the call.
+		handle, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
 		}
-		return
+		defer release()
+		listing, err := handle.List(ctx, params.Path, filesystem.Page{Offset: params.Offset, Limit: params.Limit})
+		if err != nil {
+			var tooLarge *filesystem.ErrTooLarge
+			var timedOut *filesystem.ErrTimedOut
+			switch {
+			case errors.As(err, &tooLarge):
+				_ = h.r.TryResult(req.ID, mustMarshal(filesListTooLarge{
+					State:         "tooLarge",
+					ObservedCount: tooLarge.ObservedCount,
+					Limit:         tooLarge.Limit,
+				}))
+			case errors.As(err, &timedOut):
+				_ = h.r.TryResult(req.ID, mustMarshal(filesListTimedOut{
+					State:   "timedOut",
+					Timeout: timedOut.Timeout.Milliseconds(),
+				}))
+			default:
+				_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			}
+			return nil
+		}
+		entries := make([]filesListEntry, 0, len(listing.Entries))
+		for _, e := range listing.Entries {
+			entries = append(entries, filesListEntry{
+				Name:       e.Name,
+				Path:       e.Path,
+				Kind:       wireKind(e.Kind),
+				LinkTarget: e.LinkTarget,
+				LinkKind:   wireKind(e.LinkKind),
+				Size:       e.Size,
+				ModTime:    wireTime(e.ModTime),
+				Mode:       e.Mode,
+			})
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(filesListOK{
+			State:     "ok",
+			Path:      listing.Path,
+			Canonical: listing.Canonical,
+			Entries:   entries,
+			Offset:    listing.Offset,
+			Total:     listing.Total,
+			HasMore:   listing.HasMore,
+			Rev:       listing.Rev,
+		}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	entries := make([]filesListEntry, 0, len(listing.Entries))
-	for _, e := range listing.Entries {
-		entries = append(entries, filesListEntry{
-			Name:       e.Name,
-			Path:       e.Path,
-			Kind:       wireKind(e.Kind),
-			LinkTarget: e.LinkTarget,
-			LinkKind:   wireKind(e.LinkKind),
-			Size:       e.Size,
-			ModTime:    wireTime(e.ModTime),
-			Mode:       e.Mode,
-		})
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesListOK{
-		State:     "ok",
-		Path:      listing.Path,
-		Canonical: listing.Canonical,
-		Entries:   entries,
-		Offset:    listing.Offset,
-		Total:     listing.Total,
-		HasMore:   listing.HasMore,
-		Rev:       listing.Rev,
-	})))
 }
 
-// handleFilesRead reads one file, bounded and streamed (spec §5.1): at
-// most min(requested, 2 MiB) plus one byte, so the memory guard holds for
-// a 40 GB file. Canonical is the identity the viewer's singletonKey is
-// built from.
-func (s *WSServer) handleFilesRead(wconn *wsConn, state *connState, req jsonrpcRequest) {
+// handleRead reads one file, bounded and streamed (spec §5.1): at most
+// min(requested, 2 MiB) plus one byte, so the memory guard holds for a 40 GB
+// file. Canonical is the identity the viewer's singletonKey is built from.
+func (h filesBindingHandlers) handleRead(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
 	var params filesReadParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
-	h, release, err := s.filesys.Acquire(params.BindingID, state)
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
+		handle, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		defer release()
+		content, err := handle.Read(ctx, params.Path, params.MaxBytes)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(filesReadResult{
+			Path:      content.Path,
+			Canonical: content.Canonical,
+			Text:      content.Text,
+			Size:      content.Size,
+			ModTime:   wireTime(content.ModTime),
+			Truncated: content.Truncated,
+			Binary:    content.Binary,
+			Lossy:     content.Lossy,
+			Changed:   content.Changed,
+		}))
+		return nil
+	})
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	defer release()
-	content, err := h.Read(context.Background(), params.Path, params.MaxBytes)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesReadResult{
-		Path:      content.Path,
-		Canonical: content.Canonical,
-		Text:      content.Text,
-		Size:      content.Size,
-		ModTime:   wireTime(content.ModTime),
-		Truncated: content.Truncated,
-		Binary:    content.Binary,
-		Lossy:     content.Lossy,
-		Changed:   content.Changed,
-	})))
 }
 
-// handleFilesWatch replaces the binding's watch set (spec §5.2): the
-// client sends the set it currently wants and the backend diffs, so
-// collapsing a directory cannot leak a watch. The provider-side set is
-// swapped atomically by the registry; when the provider refuses (the
-// watching wave has not landed), the transport degrades to its own
-// digest-poll loop and reports the degradation — the persistent "Polling"
-// badge (spec §5.5) — rather than a silent lie. The watch baseline is
-// taken synchronously inside the handler, before the response
-// (filesBaseline): from the instant the call returns every change is
-// delivered, and changes before it are not replayed — inotify semantics.
-func (s *WSServer) handleFilesWatch(wconn *wsConn, state *connState, req jsonrpcRequest) {
+// handleWatch replaces the binding's watch set (spec §5.2): the client sends
+// the set it currently wants and the backend diffs, so collapsing a
+// directory cannot leak a watch. The provider-side set is swapped atomically
+// by the registry; when the provider refuses (the watching wave has not
+// landed), the transport degrades to its own digest-poll loop and reports
+// the degradation — the persistent "Polling" badge (spec §5.5) — rather than
+// a silent lie. The watch baseline is taken synchronously inside the
+// handler, before the response (filesBaseline): from the instant the call
+// returns every change is delivered, and changes before it are not replayed
+// — inotify semantics.
+func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
 	var params filesWatchParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and paths required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and paths required"})
 		return
 	}
 	// The binding must be one this transport issued: the notification
 	// addressing needs the session it belongs to, and filesystem exposes
 	// none of that.
-	s.filesMu.Lock()
-	b := s.filesBindings[params.BindingID]
-	s.filesMu.Unlock()
+	b := h.machine.filesBindingOf(params.BindingID)
 	if b == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown bindingId"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
 		return
 	}
-	// Authorisation: Acquire re-checks that THIS connection owns the
-	// binding's session (D15) — one map lookup, and it is what holds if
-	// an id ever reaches a log, a screenshot or a crash report.
-	h, release, err := s.filesys.Acquire(params.BindingID, state)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
-	mode, err := h.Watch(context.Background(), params.Paths)
-	if err != nil {
-		var unavail *filesystem.ErrWatchUnavailable
-		if !errors.As(err, &unavail) {
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
+		// Authorisation: Acquire re-checks that THIS connection owns the
+		// binding's session (D15) — one map lookup, and it is what holds if
+		// an id ever reaches a log, a screenshot or a crash report.
+		handle, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		mode, err := handle.Watch(ctx, params.Paths)
+		if err != nil {
+			var unavail *filesystem.ErrWatchUnavailable
+			if !errors.As(err, &unavail) {
+				release()
+				_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+				return nil
+			}
+			// No reason: ErrWatchUnavailable says the watching wave (nocx-rkk9)
+			// has not landed, which is a build-time fact and not a degrade.
+			// Polling is the designed and only mode today, it delivers the
+			// change signal the user asked for, and the mechanism under it is
+			// not their business. A reason here lights the §5.5 badge for every
+			// user on every local binding forever — a warning that is always on
+			// warns about nothing and teaches the user to ignore the next one.
+			// When Live watching exists, a host that cannot have it will carry a
+			// reason from the provider and the badge lights for the first time
+			// meaningfully.
+			mode = filesystem.WatchMode{Kind: filesystem.WatchPolling}
+		}
+		if len(params.Paths) == 0 {
+			// The client wants no watches: the provider set is already empty
+			// (the swap above), so stop the loop and drop the guard.
 			release()
-			_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-			return
+			var w *filesWatcher
+			h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
+				w = b.watcher
+				b.watcher = nil
+			})
+			if w != nil {
+				h.machine.stopFilesWatcher(w)
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(filesWatchResultOf(mode)))
+			return nil
 		}
-		// No reason: ErrWatchUnavailable says the watching wave (nocx-rkk9)
-		// has not landed, which is a build-time fact and not a degrade.
-		// Polling is the designed and only mode today, it delivers the
-		// change signal the user asked for, and the mechanism under it is
-		// not their business. A reason here lights the §5.5 badge for every
-		// user on every local binding forever — a warning that is always on
-		// warns about nothing and teaches the user to ignore the next one.
-		// When Live watching exists, a host that cannot have it will carry a
-		// reason from the provider and the badge lights for the first time
-		// meaningfully.
-		mode = filesystem.WatchMode{Kind: filesystem.WatchPolling}
-	}
-	if len(params.Paths) == 0 {
-		// The client wants no watches: the provider set is already empty
-		// (the swap above), so stop the loop and drop the guard.
-		release()
-		s.filesMu.Lock()
-		if b.watcher != nil {
-			w := b.watcher
-			b.watcher = nil
-			s.filesMu.Unlock()
-			s.stopFilesWatcher(w)
-		} else {
-			s.filesMu.Unlock()
-		}
-		_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesWatchResultOf(mode))))
-		return
-	}
 
-	// Take the baseline synchronously, before the response: from the
-	// instant files.watch returns, every change is delivered; changes
-	// before it are not (inotify semantics). The old first-poll-tick
-	// baseline left a 500 ms window where a change was folded into the
-	// baseline and never announced. The listing runs on this call's
-	// fresh handle, whose guard is held until the branch below releases
-	// it (filesBaseline documents the cost shape).
-	baseline := s.filesBaseline(h, params.Paths)
+		// Take the baseline synchronously, before the response: from the
+		// instant files.watch returns, every change is delivered; changes
+		// before it are not (inotify semantics). The old first-poll-tick
+		// baseline left a 500 ms window where a change was folded into the
+		// baseline and never announced. The listing runs on this call's
+		// fresh handle, whose guard is held until the branch below releases
+		// it (filesBaseline documents the cost shape).
+		baseline := h.machine.filesBaseline(handle, params.Paths)
 
-	s.filesMu.Lock()
-	b = s.filesBindings[params.BindingID]
-	if b == nil {
-		// Raced with files.close; the binding is gone.
-		s.filesMu.Unlock()
-		release()
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown bindingId"))
-		return
-	}
-	if b.watcher == nil {
-		w := &filesWatcher{
-			bindingID: params.BindingID,
-			sessionID: b.sessionID,
-			paths:     baseline,
-			dirty:     make(map[string]string),
-			stop:      make(chan struct{}),
-			done:      make(chan struct{}),
+		installed := h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
+			if b.watcher == nil {
+				w := &filesWatcher{
+					bindingID: params.BindingID,
+					sessionID: b.sessionID,
+					paths:     baseline,
+					dirty:     make(map[string]string),
+					stop:      make(chan struct{}),
+					done:      make(chan struct{}),
+				}
+				w.mu.Lock()
+				w.handle = handle
+				w.release = release
+				w.mu.Unlock()
+				b.watcher = w
+				// Started under the bookkeeping lock so files.close can
+				// never observe a registered watcher whose loop is not yet
+				// running: stopping it would wait on a done channel nothing
+				// would close.
+				go h.machine.filesPollLoop(w)
+			} else {
+				// Replacement (spec §5.2): reset the poll baseline for the
+				// new set — every path baselined NOW, since the replace
+				// path had the same first-tick gap. The loop keeps its
+				// original handle — the guard is already taken — and this
+				// call's fresh handle is released, one guard in, one out.
+				b.watcher.mu.Lock()
+				b.watcher.paths = baseline
+				b.watcher.mu.Unlock()
+				release()
+			}
+		})
+		if !installed {
+			// Raced with files.close; the binding is gone.
+			release()
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
+			return nil
 		}
-		w.mu.Lock()
-		w.handle = h
-		w.release = release
-		w.mu.Unlock()
-		b.watcher = w
-		// Started under filesMu so files.close can never observe a
-		// registered watcher whose loop is not yet running: stopping it
-		// would wait on a done channel nothing would close.
-		go s.filesPollLoop(w)
-		s.filesMu.Unlock()
-	} else {
-		// Replacement (spec §5.2): reset the poll baseline for the new
-		// set — every path baselined NOW, since the replace path had the
-		// same first-tick gap. The loop keeps its original handle — the
-		// guard is already taken — and this call's fresh handle is
-		// released, one guard in, one out.
-		w := b.watcher
-		w.mu.Lock()
-		w.paths = baseline
-		w.mu.Unlock()
-		s.filesMu.Unlock()
-		release()
+		_ = h.r.TryResult(req.ID, mustMarshal(filesWatchResultOf(mode)))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(filesWatchResultOf(mode))))
 }
 
-// handleFilesClose closes the binding: its provider released, its watches
-// torn down. Ownership is re-checked like every call (D15) — a binding is
-// closed by the connection that owns its session, not by whoever knows
-// its id. The watcher stops first so the use-guard drains before Close's
-// teardown.
-func (s *WSServer) handleFilesClose(wconn *wsConn, state *connState, req jsonrpcRequest) {
+// handleClose closes the binding: its provider released, its watches torn
+// down. Ownership is re-checked like every call (D15) — a binding is closed
+// by the connection that owns its session, not by whoever knows its id. The
+// watcher stops first so the use-guard drains before Close's teardown.
+func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
 	var params filesCloseParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId required"})
 		return
 	}
-	_, release, err := s.filesys.Acquire(params.BindingID, state)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
-	release()
-
-	s.filesMu.Lock()
-	b := s.filesBindings[params.BindingID]
-	delete(s.filesBindings, params.BindingID)
-	if b != nil {
-		if set := s.filesBySession[b.sessionID]; set != nil {
-			delete(set, params.BindingID)
-			if len(set) == 0 {
-				delete(s.filesBySession, b.sessionID)
-			}
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
+		_, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
 		}
+		release()
+
+		b := h.machine.removeFilesBinding(params.BindingID)
+		if b != nil && b.watcher != nil {
+			h.machine.stopFilesWatcher(b.watcher)
+		}
+		if err := svc.Close(params.BindingID); err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	s.filesMu.Unlock()
-	if b != nil && b.watcher != nil {
-		s.stopFilesWatcher(b.watcher)
-	}
-	if err := s.filesys.Close(params.BindingID); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 }
 
-// handleFilesReveal shows a path in the OS file manager. Local bindings
-// only: the backend refuses a remote binding rather than silently doing
-// nothing, because a UI-only guard is one bug away from being no guard
-// (spec §5.2). Without a wired revealer the method answers -32601 — the
-// Wails runtime seam is a later wave, and a reveal that did nothing would
-// be a silent lie.
-func (s *WSServer) handleFilesReveal(wconn *wsConn, state *connState, req jsonrpcRequest) {
+// handleReveal shows a path in the OS file manager. Local bindings only: the
+// backend refuses a remote binding rather than silently doing nothing,
+// because a UI-only guard is one bug away from being no guard (spec §5.2).
+// Without a wired revealer the method answers -32601 — the Wails runtime
+// seam is a later wave, and a reveal that did nothing would be a silent lie.
+func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
 	var params filesRevealParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Path == "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: bindingId and path required"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and path required"})
 		return
 	}
-	_, release, err := s.filesys.Acquire(params.BindingID, state)
-	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, filesErrorCode(err), err.Error()))
-		return
-	}
-	release()
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.FilesystemBindingService) error {
+		_, release, err := svc.Acquire(params.BindingID, state)
+		if err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			return nil
+		}
+		release()
 
-	s.filesMu.Lock()
-	b := s.filesBindings[params.BindingID]
-	s.filesMu.Unlock()
-	if b == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: unknown bindingId"))
-		return
+		b := h.machine.filesBindingOf(params.BindingID)
+		if b == nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
+			return nil
+		}
+		if b.endpointID != "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "files.reveal: remote bindings cannot be revealed"})
+			return nil
+		}
+		if h.revealer == nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files.reveal not available"})
+			return nil
+		}
+		if err := h.revealer.Reveal(params.Path); err != nil {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req.ID, err)
 	}
-	if b.endpointID != "" {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, "files.reveal: remote bindings cannot be revealed"))
-		return
+}
+
+// filesSpecs declares the files.* control methods. Every method needs the
+// connection's connState — files.open for the session-ownership check (D15)
+// and the binding methods as the Acquire caller — so each is registered with
+// reg and runs on the ordinary lane. The FilesystemOpenOperation and
+// FilesystemBindingOperation are built here from the wired stores
+// (composition root for this domain); when no filesystem registry is wired,
+// every handler answers -32601 "files not available".
+func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate control.Admission) []methodSpec {
+	var openOp capability.FilesystemOpenOperation
+	var bindingOp capability.FilesystemBindingOperation
+	var factory capability.ProviderFactory
+	if s.filesys != nil {
+		// The transport-side and capability-side factory types have the
+		// same shape; this converts the wired one (AD-8, the dependency
+		// stays filesystem ← capability). nil converts to nil, preserving
+		// the old "no provider factory wired" answer.
+		factory = capability.ProviderFactory(s.filesProviderFor)
+		openOp = capability.NewFilesystemOpenOperation(sessionGate, fsGate, lane, s.registry, factory, s.filesys)
+		bindingOp = capability.NewFilesystemBindingOperation(fsGate, lane, s.filesys)
 	}
-	if s.revealer == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "files.reveal not available"))
-		return
+	openSub := s.operationQueue("files-open")
+	bindingSub := s.operationQueue("files")
+	return []methodSpec{
+		reg(openSub, "files.open", func(w *wsConn, state *connState) handlerFunc {
+			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.list", func(w *wsConn, state *connState) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.read", func(w *wsConn, state *connState) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.watch", func(w *wsConn, state *connState) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.close", func(w *wsConn, state *connState) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.reveal", func(w *wsConn, state *connState) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
+		}),
 	}
-	if err := s.revealer.Reveal(params.Path); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32603, err.Error()))
-		return
-	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(struct{}{})))
 }
 
 // ── notification delivery ─────────────────────────────────────────────────
@@ -675,7 +776,11 @@ func (s *WSServer) emitFilesChanged(w *filesWatcher, path, rev string) {
 		w.mu.Unlock()
 		return
 	}
-	if err := wconn.writeJSON(filesChangedMessage(w.bindingID, path, rev)); err != nil {
+	if err := wconn.TryNotify("files.changed", mustMarshal(filesChangedParams{
+		BindingID: w.bindingID,
+		Path:      path,
+		Rev:       rev,
+	})); err != nil {
 		// The subscriber's socket is going down; the change must not be
 		// lost with it. Keep the path dirty for the next attach.
 		w.mu.Lock()
@@ -694,7 +799,7 @@ func (s *WSServer) emitFilesChanged(w *filesWatcher, path, rev string) {
 // accumulation was a set, so a burst that meant one change delivers once
 // (spec §5.2). Called from handleAttach after setSubscriber, so the
 // notifications resolve to the new connection.
-func (s *WSServer) flushFilesChanged(sid session.ID, wconn *wsConn) {
+func (s *WSServer) flushFilesChanged(sid session.ID, wconn Responder) {
 	s.filesMu.Lock()
 	ids := make([]string, 0, len(s.filesBySession[sid]))
 	for id := range s.filesBySession[sid] {
@@ -715,25 +820,17 @@ func (s *WSServer) flushFilesChanged(sid session.ID, wconn *wsConn) {
 		}
 		w.mu.Unlock()
 		for p, rev := range dirty {
-			if err := wconn.writeJSON(filesChangedMessage(w.bindingID, p, rev)); err != nil {
+			if err := wconn.TryNotify("files.changed", mustMarshal(filesChangedParams{
+				BindingID: w.bindingID,
+				Path:      p,
+				Rev:       rev,
+			})); err != nil {
 				return // the socket is dying; whatever remains stays dirty
 			}
 			w.mu.Lock()
 			delete(w.dirty, p)
 			w.mu.Unlock()
 		}
-	}
-}
-
-func filesChangedMessage(bindingID, path, rev string) filesChangedNotification {
-	return filesChangedNotification{
-		JSONRPC: "2.0",
-		Method:  "files.changed",
-		Params: filesChangedParams{
-			BindingID: bindingID,
-			Path:      path,
-			Rev:       rev,
-		},
 	}
 }
 
@@ -786,6 +883,11 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 func (s *WSServer) filesBaseline(h filesystem.Handle, paths []string) map[string]string {
 	base := make(map[string]string, len(paths))
 	for _, p := range paths {
+		// The poll loop is binding-owned, never request-scoped: it runs for
+		// the life of the watch (owner: the files binding, bounded by its
+		// session per spec §5.1, never by a WebSocket), so it keeps a
+		// background context. The closing event is the binding teardown —
+		// stopFilesWatcher, filesSessionClosed or filesBindingClosed.
 		listing, err := h.List(context.Background(), p, filesystem.Page{Offset: 0, Limit: 1})
 		if err != nil {
 			s.log.Debug("files watch baseline failed", "path", p, "error", err)
@@ -830,6 +932,9 @@ func (s *WSServer) filesPollTick(w *filesWatcher) bool {
 // nobody saw). Returns false when the binding is gone and the loop must
 // stop.
 func (s *WSServer) filesPollPath(w *filesWatcher, h filesystem.Handle, path string) bool {
+	// Same owner and closing event as filesBaseline: the poll loop is
+	// binding-owned (spec §5.1) and outlives any connection, so it runs on
+	// a background context until the binding is torn down.
 	listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})
 	if err != nil {
 		var released *filesystem.ErrHandleReleased
@@ -895,12 +1000,11 @@ func (s *WSServer) filesPollPath(w *filesWatcher, h filesystem.Handle, path stri
 // their guards, and Close waits for the guards, not for the loop. So the
 // loop's next List after the release errors and stops it, and the registry
 // close never sees a guard held by the watcher. Waiting instead would let
-// a notification write hold a close path hostage forever: writeJSON has
-// no deadline, and a subscriber that stopped reading while its socket
-// stays open would hang <-w.done. The blocked-write goroutine itself is
-// the same best-effort hazard ringToConn already has (it exits when the
-// subscriber's socket dies); it just never blocks a close. w.done closes
-// when the loop exits; nothing waits on it.
+// a notification write hold a close path hostage forever. The enqueue is
+// non-blocking (the outbound pump owns the socket), and a subscriber that
+// stopped reading while its socket stays open cannot hang the poll loop —
+// the frame is dropped and the path stays dirty for the next attach. w.done
+// closes when the loop exits; nothing waits on it.
 func (s *WSServer) stopFilesWatcher(w *filesWatcher) {
 	w.stopOnce.Do(func() { close(w.stop) })
 	w.mu.Lock()
@@ -978,6 +1082,66 @@ func (s *WSServer) dropFilesBinding(bid string, sid session.ID) {
 	}
 	s.filesMu.Unlock()
 	_ = s.filesys.Close(bid)
+}
+
+// recordFilesBinding adds the transport bookkeeping for a binding minted by
+// files.open: the session it belongs to (notification addressing, spec §5.2)
+// and the endpoint attestation (files.reveal's local-only guard, D4).
+func (s *WSServer) recordFilesBinding(bid string, sid session.ID, endpointID string) {
+	s.filesMu.Lock()
+	s.filesBindings[bid] = &filesBinding{sessionID: sid, endpointID: endpointID}
+	set := s.filesBySession[sid]
+	if set == nil {
+		set = make(map[string]struct{})
+		s.filesBySession[sid] = set
+	}
+	set[bid] = struct{}{}
+	s.filesMu.Unlock()
+}
+
+// filesBindingOf returns the bookkeeping for a binding id, or nil. The
+// session and endpoint fields are written once at creation and never change,
+// so the returned pointer is safe to read; the watcher slot is only mutated
+// under the bookkeeping lock (withFilesBinding).
+func (s *WSServer) filesBindingOf(bid string) *filesBinding {
+	s.filesMu.Lock()
+	defer s.filesMu.Unlock()
+	return s.filesBindings[bid]
+}
+
+// removeFilesBinding drops a binding from the transport bookkeeping and
+// returns it (nil when unknown) — files.close's bookkeeping half. The
+// registry close is the handler's capability service.
+func (s *WSServer) removeFilesBinding(bid string) *filesBinding {
+	s.filesMu.Lock()
+	defer s.filesMu.Unlock()
+	b := s.filesBindings[bid]
+	delete(s.filesBindings, bid)
+	if b != nil {
+		if set := s.filesBySession[b.sessionID]; set != nil {
+			delete(set, bid)
+			if len(set) == 0 {
+				delete(s.filesBySession, b.sessionID)
+			}
+		}
+	}
+	return b
+}
+
+// withFilesBinding runs f under the bookkeeping lock with the binding's
+// bookkeeping entry; it reports false when the binding is gone. Watcher
+// installs and clears happen inside f, so they are atomic against
+// files.close and filesSessionClosed, exactly like the inline handlers they
+// replaced.
+func (s *WSServer) withFilesBinding(bid string, f func(b *filesBinding)) bool {
+	s.filesMu.Lock()
+	defer s.filesMu.Unlock()
+	b := s.filesBindings[bid]
+	if b == nil {
+		return false
+	}
+	f(b)
+	return true
 }
 
 // ── wire mapping helpers ──────────────────────────────────────────────────

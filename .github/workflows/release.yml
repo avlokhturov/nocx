@@ -76,7 +76,11 @@ jobs:
             echo "release=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  # Named for its platform, like build-linux. It was `build` back when macOS was
+  # the only target and the qualifier carried no information; once ADR-0007
+  # reversed D1 and added the AppImage, an unqualified `build` next to a
+  # `build-linux` read as "the build" and hid which platform had failed.
+  build-macos:
     needs: [ci, validate]
     runs-on: macos-15
     env:
@@ -198,7 +202,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+          # imagemagick resizes the one committed icon master to a resolution
+          # linuxdeploy accepts (see the Package AppImage step). Installed
+          # rather than assumed present on the runner image, so the job does
+          # not depend on something GitHub can drop.
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev imagemagick
 
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
@@ -210,7 +218,14 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
-          wails build -platform linux/amd64 -tags release -ldflags "$LDFLAGS"
+          # `webkit2_41` is not optional here, it is what makes the step above
+          # mean anything: Wails v2 defaults its cgo pkg-config to
+          # webkit2gtk-4.0, so a job that installs libwebkit2gtk-4.1-dev and
+          # says nothing else fails at "Package webkit2gtk-4.0 was not found"
+          # AFTER the whole CI gate has run. 4.1 is the decided target — ADR-0007
+          # and the README support envelope both name it — so the tag states the
+          # decision rather than the apt line implying it (nocx-xy9z).
+          wails build -platform linux/amd64 -tags release,webkit2_41 -ldflags "$LDFLAGS"
 
       - name: Smoke checks (binary)
         run: |
@@ -234,10 +249,16 @@ jobs:
           cp "$BIN" AppDir/usr/bin/nocx
 
           # .desktop file — required for linuxdeploy to recognise the app.
+          # `Icon` is not decoration: appimagetool refuses to package without
+          # one ("Icon entry not found in desktop file"), and the value must
+          # name an icon actually installed in the AppDir. It is `nocx`, and
+          # the resize below writes nocx.png so the basename answers it
+          # (nocx-zvd7).
           cat > AppDir/nocx.desktop << 'DESKTOP'
           [Desktop Entry]
           Name=nocx
           Exec=nocx
+          Icon=nocx
           Type=Application
           Categories=Utility;TerminalEmulator;
           DESKTOP
@@ -264,8 +285,36 @@ jobs:
             https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
           chmod +x linuxdeploy-plugin-gtk.sh
 
+          # linuxdeploy deploys icons into hicolor, so it accepts only that
+          # spec's resolutions and refuses anything else outright: "Icon
+          # build/appicon.png has invalid x resolution: 1024 … Valid
+          # resolutions are 8x8 … 512x512". The master is 1024x1024 because
+          # that is what macOS wants.
+          #
+          # Derived here rather than committed as a second file: build/appicon.png
+          # stays the one icon in the repository, and a resize cannot drift from
+          # its master the way a checked-in copy silently would. The basename is
+          # what answers the desktop file's Icon=nocx — linuxdeploy resolves the
+          # NAME, not the path — so it is nocx.png and needs no --icon-filename.
+          icondir="$(mktemp -d)"
+          convert build/appicon.png -resize 512x512 "$icondir/nocx.png"
+
           export LDAI_OUTPUT="${base}.AppImage"
-          ./linuxdeploy.AppImage --appdir AppDir --plugin gtk --output appimage
+          # --desktop-file and --icon-file are what INSTALL the two files
+          # linuxdeploy then links into the AppDir root; dropping the .desktop
+          # into AppDir/ by hand is not the same thing, and linuxdeploy said so
+          # ("Could not find desktop file in AppDir") right before appimagetool
+          # refused for want of an icon. --icon-filename renames appicon.png to
+          # `nocx` so it answers the desktop file's Icon= key — appimagetool
+          # resolves that name, not the path.
+          #
+          # build/appicon.png is in git precisely so a clean CI checkout has it
+          # (nocx-azxe.4); until now nothing on the Linux path used it, so even
+          # a successful AppImage would have carried no icon.
+          ./linuxdeploy.AppImage --appdir AppDir \
+            --desktop-file AppDir/nocx.desktop \
+            --icon-file "$icondir/nocx.png" \
+            --plugin gtk --output appimage
           mv "${base}.AppImage" dist/
 
           # ── Verify the result ────────────────────────────────────────
@@ -290,13 +339,21 @@ jobs:
           retention-days: 7
 
   # Separate from build so the signing key is never present in a job that runs
-  # build tooling (§5). Publishing is git/manifest work, so it runs on ubuntu.
-  publish:
-    needs: [validate, build, build-linux]
-    if: needs.validate.outputs.release == 'true'
+  # build tooling (§5). Manifest work, so it runs on ubuntu.
+  #
+  # Deliberately NOT gated on a tag. This job holds the one check nocx-1d54
+  # exists for — that RELEASE_SIGNING_KEY's public half is in the keyring the
+  # artefact ships — and while it lived inside the tag-gated publish job that
+  # check had never once run: every dry run reported publish "skipped" while
+  # the file's own header claimed a manual run "builds, signs and verifies
+  # everything and publishes nothing". The first execution would have been the
+  # release (nocx-94kl).
+  #
+  # Only `contents: write` and `gh release create` need the tag, and they stay
+  # behind it in the job below. This job keeps the workflow's read-only default.
+  sign:
+    needs: [validate, build-macos, build-linux]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
@@ -372,6 +429,43 @@ jobs:
       # the same commit that produced the artefacts (nocx-1d54).
       - name: Verify the signature against the keyring the release ships
         run: go run ./cmd/manifest-sign -verify -in dist/manifest.json -sig dist/manifest.json.sig
+
+      # Carried to publish rather than regenerated there: the bytes that were
+      # verified above must be the bytes that get uploaded, or the verification
+      # attested to a different file.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: manifest
+          path: |
+            dist/manifest.json
+            dist/manifest.json.sig
+          retention-days: 7
+
+  # The only tag-gated job, and the only one holding contents: write. It runs no
+  # build tooling and no signing — it uploads what the jobs above produced.
+  publish:
+    needs: [validate, build-macos, build-linux, sign]
+    if: needs.validate.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-universal
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-amd64
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: manifest
+          path: dist
 
       - name: Create release
         env:

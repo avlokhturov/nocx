@@ -593,6 +593,15 @@ func New(opts ...Option) (*App, error) {
 	if o.wsAddr != "" {
 		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
 	}
+	// The ordinary control lane's permit count, named here the way the D14
+	// bounds are named here: the number of control tasks that may run
+	// concurrently before new work is refused with the saturation error.
+	tpOpts = append(tpOpts, transport.WithControlLaneCapacity(transport.DefaultControlLaneCapacity))
+	// The domain-conflict wait bound, named here like the lane capacity: a
+	// conflict WAITS (bounded) rather than refusing instantly, so a
+	// sequential client's back-to-back requests are never told the control
+	// plane is busy; exhausting the wait is the only refusal.
+	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // askBroker is the shared backend→renderer ask machinery: a pending
@@ -100,13 +102,10 @@ func (s *WSServer) broadcastAsk(method string, params map[string]any, noClientEr
 		return noClientErr
 	}
 
-	notif := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
-	}
+	// One enqueue per connection, never a blocking write: an ask to N
+	// renderers costs N channel sends, not N write deadlines.
 	for _, wc := range conns {
-		_ = wc.writeJSON(notif)
+		_ = wc.TryNotify(method, mustMarshal(params))
 	}
 	return nil
 }
@@ -162,21 +161,34 @@ func (s *WSServer) RequestUnlock(ctx context.Context, reason string) error {
 	}
 }
 
+// askResolverHandlers answers the two resolver RPCs (vault.unlockResolved,
+// connections.passwordResolved). They are ingress-critical: the asks they
+// resolve (RequestUnlock, RequestConnectionPassword) block until the
+// resolution arrives over the same socket the read loop consumes, so the
+// resolvers run inline via the ImmediateSubmission and never queue behind
+// the lane (registration.go). They hold the ask broker (transport-owned
+// state — the migration map's "Ask machinery" row) and the Responder; no
+// capability, no stores.
+type askResolverHandlers struct {
+	asks *askBroker
+	r    Responder
+}
+
 // handleUnlockResolved handles the vault.unlockResolved RPC from the
 // renderer: it looks up the pending request and signals its channel.
-func (s *WSServer) handleUnlockResolved(wconn *wsConn, req jsonrpcRequest) {
+func (h askResolverHandlers) handleUnlockResolved(req jsonrpcRequest) {
 	var params struct {
 		RequestID string `json:"requestId"`
 		Outcome   string `json:"outcome"`
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
 
-	pa, ok := s.asks.consume(params.RequestID)
+	pa, ok := h.asks.consume(params.RequestID)
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Unknown request id"))
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Unknown request id"})
 		return
 	}
 
@@ -189,5 +201,20 @@ func (s *WSServer) handleUnlockResolved(wconn *wsConn, req jsonrpcRequest) {
 		pa.ch <- askResolution{err: fmt.Errorf("unlock resolved with unknown outcome: %q", params.Outcome)}
 	}
 
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, json.RawMessage("{}")))
+	_ = h.r.TryResult(req.ID, json.RawMessage("{}"))
+}
+
+// askResolverSpecs declares the two resolver methods, both ingress-critical
+// (ImmediateSubmission): a resolution must never wait for a lane permit.
+func (s *WSServer) askResolverSpecs(immediate control.ImmediateSubmission) []methodSpec {
+	return []methodSpec{
+		reg(immediate, "vault.unlockResolved", func(w *wsConn, _ *connState) handlerFunc {
+			h := askResolverHandlers{asks: &s.asks, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnlockResolved(req) }
+		}),
+		reg(immediate, "connections.passwordResolved", func(w *wsConn, _ *connState) handlerFunc {
+			h := askResolverHandlers{asks: &s.asks, r: w}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePasswordResolved(req) }
+		}),
+	}
 }

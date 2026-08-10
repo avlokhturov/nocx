@@ -5,44 +5,7 @@
     "Every entry is an unused file, export or exported type that knip reports",
     "from the entry points in knip.json. It may only shrink. A violation knip",
     "reports that is not listed here is a new violation and fails the",
-    "pre-commit hook.",
-    "",
-    "Three entries added BY HAND on 2026-08-06 (nocx-708q). The update script",
-    "refuses to grow the baseline for you, on purpose; these are reasoned.",
-    "",
-    "  src/generated/files.{changed,watch}.ts — the wire shapes of the watching",
-    "  wave. The backend already sends files.changed; the renderer subscribes when",
-    "  fsnotify and SFTP polling land. Generated from a contract that IS exercised",
-    "  by the Go over-the-wire conformance tests, so the shape is not unverified —",
-    "  only the renderer half is pending.",
-    "",
-    "  src/generated/files.reveal.ts — files.reveal answers -32601 until the Wails",
-    "  seam exists. Declared here so the contract is written down once rather than",
-    "  invented twice when it arrives.",
-    "",
-    "All three shrink out of this list the moment their consumer lands. If they are",
-    "still here after those waves, they are real dead code and should be deleted.",
-    "",
-    "Twelve entries added BY HAND on 2026-08-07 (the git panel). Same rule as",
-    "above: the update script refuses to grow the baseline, so these are reasoned.",
-    "",
-    "  src/generated/git.{open,commit,stage,stageAll,unstage,unstageAll}.ts —",
-    "  Status and Entry. The git.* contracts declare the status shape ONCE, in",
-    "  git.status.schema.json, and the six results that carry it reference it",
-    "  cross-file — the first contract in this repository to do so. The",
-    "  alternative was seven copies of one shape and six chances for five of them",
-    "  to be right. json-schema-to-typescript resolves that $ref by INLINING the",
-    "  referenced definitions into every output file, so each of the six declares",
-    "  its own Status and Entry while consumers import the canonical pair from",
-    "  git.status.ts. Measured, not assumed: setting declareExternallyReferenced",
-    "  to false suppresses the duplicates and breaks the output — every",
-    "  referencing file then names an undeclared type, including the existing",
-    "  files.list and fs.complete contracts. So this is the cost of declaring the",
-    "  shape once, and it is paid in generated code no human edits.",
-    "",
-    "  These shrink out of this list only if the generator learns to emit imports",
-    "  for cross-file refs. If a NON-generated file ever appears in this group, it",
-    "  is not this exemption and should be deleted instead."
+    "pre-commit hook."
   ],
   "violations": [
     {
@@ -72,21 +35,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/environment-passport.ts",
-      "symbol": "MAX_PASSPORT_PAYLOAD_LENGTH"
-    },
-    {
-      "kind": "exports",
-      "file": "src/environment-passport.ts",
-      "symbol": "PASSPORT_TIERS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/environment-passport.ts",
-      "symbol": "PASSPORT_VALUE_RE"
-    },
-    {
-      "kind": "exports",
       "file": "src/log.ts",
       "symbol": "DECISION_PREFIX"
     },
@@ -103,22 +51,22 @@
     {
       "kind": "exports",
       "file": "src/recall.ts",
-      "symbol": "MIN_USEFUL_ROWS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
-      "symbol": "SCOPE_LABELS"
-    },
-    {
-      "kind": "exports",
-      "file": "src/recall.ts",
       "symbol": "isRecallShortcut"
     },
     {
       "kind": "exports",
       "file": "src/recall.ts",
+      "symbol": "MIN_USEFUL_ROWS"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
       "symbol": "nextScope"
+    },
+    {
+      "kind": "exports",
+      "file": "src/recall.ts",
+      "symbol": "SCOPE_LABELS"
     },
     {
       "kind": "exports",
@@ -128,27 +76,17 @@
     {
       "kind": "exports",
       "file": "src/renderers/theme-bootstrap.ts",
-      "symbol": "STORAGE_KEY"
-    },
-    {
-      "kind": "exports",
-      "file": "src/renderers/theme-bootstrap.ts",
       "symbol": "cacheThemeId"
     },
     {
       "kind": "exports",
-      "file": "src/scrollback/blocks.ts",
-      "symbol": "blockOutputText"
+      "file": "src/renderers/theme-bootstrap.ts",
+      "symbol": "STORAGE_KEY"
     },
     {
       "kind": "exports",
       "file": "src/scrollback/serializer.ts",
       "symbol": "cellAttrs"
-    },
-    {
-      "kind": "exports",
-      "file": "src/scrollback/test-helpers.ts",
-      "symbol": "lineWith"
     },
     {
       "kind": "exports",
@@ -287,16 +225,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/ui/icons/PauseIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
-      "file": "src/ui/icons/PlayIcon.tsx",
-      "symbol": "default"
-    },
-    {
-      "kind": "exports",
       "file": "src/ui/icons/index.ts",
       "symbol": "PauseIcon"
     },
@@ -307,27 +235,22 @@
     },
     {
       "kind": "exports",
+      "file": "src/ui/icons/PauseIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
+      "file": "src/ui/icons/PlayIcon.tsx",
+      "symbol": "default"
+    },
+    {
+      "kind": "exports",
       "file": "src/unresolved-redactions.ts",
       "symbol": "hasUnresolved"
     },
     {
       "kind": "files",
       "file": "src/generated/export.importPortable.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.changed.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.reveal.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.watch.ts",
       "symbol": ""
     },
     {
@@ -384,26 +307,6 @@
       "kind": "types",
       "file": "src/authentication-editor.tsx",
       "symbol": "AuthMethodEditorProps"
-    },
-    {
-      "kind": "types",
-      "file": "src/command-ledger.ts",
-      "symbol": "InterruptReason"
-    },
-    {
-      "kind": "types",
-      "file": "src/command-ledger.ts",
-      "symbol": "TransitionLifecycle"
-    },
-    {
-      "kind": "types",
-      "file": "src/environment-passport.ts",
-      "symbol": "PassportParseFailure"
-    },
-    {
-      "kind": "types",
-      "file": "src/environment-passport.ts",
-      "symbol": "PassportTier"
     },
     {
       "kind": "types",

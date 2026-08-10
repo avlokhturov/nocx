@@ -2,6 +2,9 @@
 // correlation, notification routing, disconnect/reconnect behaviour, and
 // typed subscribe/unsubscribe.  WSClient and ProfileClient consume it.
 
+import type { ControlSaturated } from './generated/control.saturated'
+import type { ControlSaturatedNotification } from './generated/control.saturated.notification'
+import { log } from './log'
 export type NotificationHandler = (params: unknown) => void
 export type LifecycleHandler = () => void
 
@@ -30,6 +33,52 @@ export class RpcError extends Error {
     super(message)
     this.name = 'RpcError'
   }
+}
+
+/**
+ * One visible saturation toast per episode, not one per refusal. The bounded
+ * executor refuses a burst of requests while the control plane is saturated;
+ * stacking a toast per refusal would bury the message in itself. The first
+ * toast is sticky (danger level), so the user sees it, and a refusal after
+ * the window gets a fresh toast — the plane is saturated again, and the
+ * user may have dismissed the first.
+ *
+ * 10 s: an episode (executor refusals with retryAfterMs ~250 ms) resolves in
+ * seconds, so the window collapses the whole burst into one toast; a window
+ * much shorter would re-toast a user who is still reading the first.
+ */
+export const SATURATION_TOAST_WINDOW_MS = 10_000
+
+const SATURATION_TOAST_MESSAGE =
+  'The terminal is busy — that action was refused. Try again in a moment.'
+
+// null = no saturation toast raised yet. Nullable on purpose: a numeric
+// sentinel of 0 would suppress the FIRST toast under a fake clock that
+// starts at epoch (Date.now() === 0 in tests).
+let lastSaturationToastAt: number | null = null
+
+/**
+ * Test/teardown hook: forget the last saturation toast, so a fresh test (or
+ * a fresh app session) starts with a clean dedup window. The dedup state is
+ * module-global by design — one window per process, exactly like the toast
+ * queue itself — so it needs the same explicit reset the queue has.
+ */
+export function resetSaturationToastDedup(): void {
+  lastSaturationToastAt = null
+}
+
+/**
+ * True when `data` is the error payload of a refused control request
+ * (contracts/control.saturated.schema.json). Only the fixed `reason`
+ * discriminates: a payload field may grow without silencing the toast.
+ */
+function isSaturationData(data: unknown): data is Pick<ControlSaturated, 'reason'> {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'reason' in data &&
+    data.reason === 'control-saturated'
+  )
 }
 
 // Reconnect backoff: start at 250 ms, double each attempt, cap at 5 s.
@@ -175,6 +224,28 @@ export class Dispatcher {
     }
   }
 
+  /**
+   * Registered at construction: a refused notification (no id) cannot carry
+   * the -32004 error, so the server emits the control.saturated notification
+   * instead (rate-limited, with methodClass and scope only — the generated
+   * params type is consumed here, making the contract file reachable). It
+   * raises the same deduplicated saturation toast as the error path, with no
+   * calling surface opting in — a refused action must be visible in the
+   * product, not only in a log. close() is terminal (deliberate shutdown),
+   * so a constructor registration is not lost to a reconnect.
+   */
+  constructor() {
+    this.subscribe('control.saturated', (params: unknown) => {
+      // Consume the generated params type (the contract file must be
+      // reachable from main() — dead-exports ratchet). The notification's
+      // shape is the contract; the toast does not read it, so the cast is
+      // the consumption.
+      const _: ControlSaturatedNotification = params as ControlSaturatedNotification
+      void _
+      this.raiseSaturationToast()
+    })
+  }
+
   // --- Lifecycle subscriptions ---------------------------------------------
 
   onConnect(handler: LifecycleHandler): () => void {
@@ -268,6 +339,7 @@ export class Dispatcher {
           )
           return
         }
+        this.handleSaturationData(msg.error.data)
         p.reject(new RpcError(msg.error.message ?? 'rpc error', msg.error.code, msg.error.data))
       } else {
         p.resolve(msg.result)
@@ -329,5 +401,47 @@ export class Dispatcher {
     for (const h of this.disconnectHandlers) {
       h()
     }
+  }
+
+  /**
+   * The global fallback for a refused control request. A surface that
+   * forgets to show its refusal still degrades visibly — a soft degrade
+   * must be visible in the product, not only in a log. Individual surfaces
+   * may later disable an action or retry; this is what stops silence.
+   */
+  private handleSaturationData(data: unknown): void {
+    if (!isSaturationData(data)) return
+    this.raiseSaturationToast()
+  }
+
+  /**
+   * The deduplicated saturation toast, shared by the error path and the
+   * control.saturated notification path (a refused notification has no id,
+   * so the server emits the notification instead of an error — it must be
+   * visible the same way).
+   */
+  private raiseSaturationToast(): void {
+    const now = Date.now()
+    if (
+      lastSaturationToastAt !== null &&
+      now - lastSaturationToastAt < SATURATION_TOAST_WINDOW_MS
+    ) {
+      return
+    }
+    lastSaturationToastAt = now
+    // Lazy import, on purpose: the toast kit pulls in Solid's DOM runtime,
+    // which must not load in the node-env unit suites that import the
+    // dispatcher (vitest defaults to node; solid modules are jsdom-only by
+    // convention). The import resolves once and is cached. The dedup state
+    // above is set synchronously, so a burst cannot race the import. The
+    // If the chunk fails to load there is no toast to fall back to, so the
+    // failure is logged rather than swallowed. A refusal the user is never
+    // told about is the exact degrade this whole surface exists to prevent —
+    // it would be perverse for the notifier to go quiet without a trace.
+    void import('./ui/toast')
+      .then((m) => m.showToast({ level: 'danger', message: SATURATION_TOAST_MESSAGE }))
+      .catch((err: unknown) => {
+        log.error('saturation toast could not be shown', { error: String(err) })
+      })
   }
 }

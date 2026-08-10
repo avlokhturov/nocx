@@ -22,6 +22,7 @@ package transport
 // unregistered lane is a conventional terminal, which is the safe direction.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // lifecycleChangedNotification is the server-initiated lifecycle.changed
@@ -119,12 +121,10 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
 		s.openRecovery(sid, f)
 	}
-	n := lifecycleChangedNotification{
-		JSONRPC: "2.0",
-		Method:  "lifecycle.changed",
-		Params:  f,
-	}
-	if err := wconn.writeJSON(n); err != nil {
+	// The envelope is the Responder's now (nocx-292k): every write goes
+	// through the outbound queue and its pump, which is the only writer on
+	// the socket, so the notification is built from its params alone.
+	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(f)); err != nil {
 		s.log.Debug("write lifecycle.changed", "lane", f.Lane, "error", err)
 	}
 }
@@ -197,7 +197,7 @@ type lifecycleSubmitAttemptResult struct {
 // id guessed from another session.
 func (s *WSServer) handleLifecycleSubmitAttempt(wconn *wsConn, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32601, "lifecycle not available"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
 	}
 	var params submitAttemptParams
@@ -205,27 +205,27 @@ func (s *WSServer) handleLifecycleSubmitAttempt(wconn *wsConn, state *connState,
 		// An empty command is a bare newline, not an execution: it never
 		// opens an attempt (an unstarted attempt would hold the domain
 		// and poison the next attach).
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, -32602, "Invalid params: domain and command required"))
+		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
 		return
 	}
 	dom, ok := s.lifecyclePub.Domain(lifecycle.DomainID(params.Domain))
 	if !ok {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), lifecycle.ErrUnknownDomain.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
 	s.lifecycleMu.Lock()
 	sid, registered := s.lifecycleLanes[dom.Lane]
 	s.lifecycleMu.Unlock()
 	if !registered || !state.has(sid) {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), lifecycle.ErrUnknownDomain.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
 	att, err := s.lifecyclePub.SubmitAttempt(lifecycle.DomainID(params.Domain), params.Command, params.Cwd, params.Host)
 	if err != nil {
-		_ = wconn.writeJSON(newJSONRPCError(req.ID, lifecycleSubmitErrorCode(err), err.Error()))
+		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.writeJSON(newJSONRPCResult(req.ID, mustMarshal(lifecycleSubmitAttemptResult{
+	_ = wconn.TryResult(req.ID, mustMarshal(lifecycleSubmitAttemptResult{
 		ID:        string(att.ID),
 		Domain:    string(att.Domain),
 		State:     lifecyclepub.AttemptOpen,
@@ -234,7 +234,7 @@ func (s *WSServer) handleLifecycleSubmitAttempt(wconn *wsConn, state *connState,
 		Host:      att.Host,
 		Origin:    lifecyclepub.OriginApp,
 		StartedAt: att.StartedAt,
-	})))
+	}))
 }
 
 // lifecycleSubmitErrorCode maps a lifecycle.SubmitAttempt refusal to a
@@ -258,3 +258,52 @@ func lifecycleSubmitErrorCode(err error) int {
 		return -32603
 	}
 }
+
+// lifecycleSpecs declares the three lifecycle control methods (nocx-292k).
+//
+// They share ONE ordered submission, and the sharing is the point. The
+// renderer sends lifecycle.establishAck without awaiting it (it is
+// fire-and-forget in terminal-content.ts) and then awaits
+// lifecycle.submitAttempt before writing the command bytes to the pty — so
+// the two are adjacent on one socket, in that order. A concurrent
+// submission could start the submit first, and the kernel already reports
+// the domain PromptReady while its ACCEPT is still pending, so the attempt
+// would open before the shell was released from its handshake. The read
+// loop used to provide that ordering by accident, running everything
+// inline; control.NewOrderedSubmission is what states it.
+//
+// Not ImmediateSubmission: none of the three blocks waiting for a
+// resolution that arrives over the same socket, so they are outside the
+// closed ingress-critical set (registration.go), and claiming it would fail
+// the server build.
+//
+// No capability gate: the lifecycle kernel, its lane registry and the
+// recovery episodes are transport-owned state with their own mutexes — the
+// sessionMachine rule ("transport lifecycle, not a store"), not a store any
+// capability owns.
+//
+// reg rather than regResponder: submitAttempt checks session ownership via
+// connState, and establishAck additionally checks that this connection is
+// still the session's current subscriber, so the handlers need connection
+// identity, not just a writer.
+func (s *WSServer) lifecycleSpecs() []methodSpec {
+	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
+	return []methodSpec{
+		reg(sub, "lifecycle.submitAttempt", func(w *wsConn, state *connState) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(w, state, req) }
+		}),
+		reg(sub, "lifecycle.recoverAck", func(w *wsConn, state *connState) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(w, state, req) }
+		}),
+		reg(sub, "lifecycle.establishAck", func(w *wsConn, state *connState) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, state, req) }
+		}),
+	}
+}
+
+// lifecycleQueueDepth bounds the ordered lifecycle queue. The traffic is one
+// submit per command and one ack per prompt on a single connection, so the
+// depth only has to absorb a burst; beyond it the submission refuses with
+// the ordinary saturation contract, which every one of the three answers
+// fail-open.
+const lifecycleQueueDepth = 32

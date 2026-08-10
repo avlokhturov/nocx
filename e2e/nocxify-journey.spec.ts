@@ -34,10 +34,11 @@ import type { Page } from './harness'
 //   2. command blocks on the REMOTE host from its first prompt, labelled with
 //      the remote context (the typed destination);
 //   3. after `exit`, local blocks again and the editor back;
-//   4. a SECOND connection, the same option-bearing line, sends the compact
-//      ~/.nocx/launch line, not the argv-borne launcher — the installed fact
-//      keyed by the resolved identity (user@host:port) from the first run is
-//      what makes that true;
+//   4. a SECOND connection over the same option-bearing line is integrated
+//      from its first prompt. Which DELIVERY FORM it picks is no longer
+//      asserted here (nocx-292k): the installed fact that selected the
+//      compact carrier has no production writer on this branch, so the
+//      assertion would have described a route nothing can take;
 //   5. authentication failure leaves an ordinary terminal: no passport, the
 //      block runs to the local D and shows the real exit status;
 //   6. the host's rc files are byte-identical after all of it (.bashrc,
@@ -367,40 +368,10 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     // baseline. No local ssh config or known_hosts: the typed line carries
     // everything (an alias cannot resolve on this box — see typedSshLine).
     const rcBefore = seedRemoteHome()
-    // The wire is the observability for the launcher choice: the renderer
-    // writes the REWRITE (the bootstrap launcher splice, or the compact
-    // "$HOME/.nocx/launch" line) to the pty as binary WS frames, and the
-    // control plane carries the planner's decision. The terminal buffer
-    // never shows the rewrite — the app writes it with echo suppressed
-    // (observed in the run: the frozen block serializes only the recorded
-    // line, the ssh banner and the prompt; no launcher text).
-    const launcherModes: string[] = []
-    let sentBytes = Buffer.alloc(0)
-    page.on('websocket', (ws) => {
-      ws.on('framesent', (e) => {
-        const p = e.payload
-        sentBytes = Buffer.concat([sentBytes, typeof p === 'string' ? Buffer.from(p) : p])
-      })
-      ws.on('framereceived', (e) => {
-        const p = e.payload
-        if (typeof p !== 'string') return
-        try {
-          const msg = JSON.parse(p) as { result?: { mode?: string; environmentId?: string } }
-          // JSON-RPC responses carry no `method` field; the launcherCommand
-          // decision is identified by its result shape — mode plus a minted
-          // environmentId, which no other method's result combines.
-          if (
-            msg.result &&
-            typeof msg.result.mode === 'string' &&
-            typeof msg.result.environmentId === 'string'
-          ) {
-            launcherModes.push(msg.result.mode)
-          }
-        } catch {
-          // not a JSON-RPC text frame
-        }
-      })
-    })
+    // The wire observer that stood here watched the launcher CHOICE — which
+    // delivery form the planner picked — and both its consumers are gone
+    // with the surface they watched (nocx-292k). This journey now proves the
+    // part a user can see, which is what it should have proved all along.
 
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
@@ -441,17 +412,11 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await expect(sshBlock).toContainText('e2e@127.0.0.1')
     // No passport yet: nothing has entered an environment.
     await expect(pane(page).locator('.cmd-block.cmd-block-entered')).toHaveCount(0)
-    // The wire decided bootstrap: the first connection stages an argv
-    // launcher, and the bootstrap rewrite — the staged path spliced in with
-    // `$(cat …; rm …)` — reached the pty as binary frames.
-    await expect.poll(() => launcherModes[0], { timeout: 30_000 }).toBe('bootstrap')
-    await expect
-      .poll(() => sentBytes.includes(Buffer.from('.nocx/run/launcher-')), { timeout: 30_000 })
-      .toBe(true)
-    // End of connection 1's sent-window: connection 2 must not reuse the
-    // argv-borne staging form.
-    const sentMark = sentBytes.length
-
+    // The delivery-FORM assertions that stood here are gone with the surface
+    // they watched (nocx-292k): shell.launcherCommand was deleted with the
+    // P7 stream-and-passport path ADR-0024 forbids, and `.nocx/run/` was its
+    // staging directory. What this journey still proves is the part a user
+    // can see — the blocks, the banner, the prompt and the exits below.
     // Deterministic prompt readiness: the fixture prints CONN= when the
     // client's first userauth attempt reaches it (KEX done, one response
     // before the password prompt). The password is typed only after that —
@@ -485,8 +450,11 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     })
 
     // ── 2. command blocks on the REMOTE host from its first prompt ──
-    await page.keyboard.type('echo journey-1-ok')
-    await page.keyboard.press('Enter')
+    // Through the editor, like every other command this test submits: the
+    // remote prompt owns input here, and submitInEditor waits for the editor
+    // to be up before typing. Raw page.keyboard.type does not wait, so it
+    // raced the prompt's return — see the note at the second `exit` below.
+    await submitInEditor(page, 'echo journey-1-ok')
     const remote1 = pane(page).locator('.cmd-block', { hasText: 'journey-1-ok' })
     await expect(remote1).toBeVisible({ timeout: 30_000 })
     // The remote context is the TYPED destination (the env label), not an
@@ -497,8 +465,7 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await expect(remote1.locator('.cmd-header-cwd')).toHaveCount(0)
 
     // ── 3. exit: the remote session ends, local blocks again, editor back ──
-    await page.keyboard.type('exit')
-    await page.keyboard.press('Enter')
+    await submitInEditor(page, 'exit')
     // The exit block (remote context) closes with "Connection … closed." and
     // freezes with NO code — the local D owns the ssh command's status.
     const exitBlock = pane(page).locator('.cmd-block', {
@@ -532,20 +499,10 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     })
     await expect(secondRunning).toBeVisible({ timeout: 30_000 })
     await expect(secondRunning).toContainText(`-p ${primary.addr.split(':')[1]}`)
-    // The SECOND connection sends the compact installed line, not the
-    // argv-borne launcher: the wire decides 'installed' — the installed
-    // fact keyed by the resolved identity from the first run is what makes
-    // that true — and the pty receives `… "$HOME/.nocx/launch" …` with no
-    // staging and no `$(cat …)` splice.
-    await expect.poll(() => launcherModes[1], { timeout: 30_000 }).toBe('installed')
-    await expect
-      .poll(() => sentBytes.subarray(sentMark).includes(Buffer.from('"$HOME/.nocx/launch"')), {
-        timeout: 30_000,
-      })
-      .toBe(true)
-    const secondWindow = sentBytes.subarray(sentMark)
-    expect(secondWindow.includes(Buffer.from('.nocx/run/launcher-'))).toBe(false)
-    expect(secondWindow.includes(Buffer.from('$(cat'))).toBe(false)
+    // The compact-second-connection assertion is gone with its input: the
+    // installed fact that selected that path has no production writer on
+    // this branch (nocx-292k blocker A), so asserting it here would assert
+    // a route nothing can currently take.
     await primary.waitConn(2, 30_000)
     await page.keyboard.type(primaryPassword)
     await page.keyboard.press('Enter')
@@ -556,13 +513,18 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await expect(enteredBlocks).toHaveCount(3, { timeout: 30_000 })
     await expect(enteredBlocks.nth(2)).toContainText(primaryBanner)
     await expect(enteredBlocks.nth(2)).toContainText('password:')
-    await page.keyboard.type('echo journey-2-ok')
-    await page.keyboard.press('Enter')
+    await submitInEditor(page, 'echo journey-2-ok')
     await expect(pane(page).locator('.cmd-block', { hasText: 'journey-2-ok' })).toBeVisible({
       timeout: 30_000,
     })
-    await page.keyboard.type('exit')
-    await page.keyboard.press('Enter')
+    // The block being visible means the OUTPUT arrived, not that the prompt is
+    // back and owns input again — the editor is still hidden for a moment
+    // after it. Typing raw into that gap sent `exit` nowhere, and the Enter
+    // then landed on the editor the instant it appeared, empty: that empty
+    // submit used to throw with the editor already hidden and strand it for
+    // the rest of the session (nocx-axqs). submitInEditor waits for the thing
+    // it needs — the editor — instead of betting on the machine.
+    await submitInEditor(page, 'exit')
     await expect(editor).toBeVisible({ timeout: 20_000 })
 
     // ── 5. authentication failure: ordinary terminal, real exit status ──
