@@ -208,4 +208,56 @@ describe('nested domains — the renderer half (ADR-0024 §6, protocol §9)', ()
     kernel.applyFact(promptReady('d3', 3))
     expect(env.view()).toMatchObject({ cwd: '/var', programTitle: 'bash' })
   })
+
+  // nocx-ax79: inside a hand-typed ssh nothing said which machine the next
+  // command would run on. The cwd chip read home/pi, indistinguishable from
+  // a local /home/pi, and the answer lived only in the user's memory. The
+  // destination now rides the published fact (ADR-0025's three fields, and
+  // nothing the user typed), so the projection can state it without
+  // inferring anything from the stream (AD-6).
+  it('a child domain states the destination its fact carries, and the parent states none', () => {
+    const { kernel, env } = setup({ cwd: '/home/me', host: '', isLocal: true })
+    kernel.applyFact(promptReady('d1', 1))
+    expect(env.view()).toMatchObject({ host: '', user: '', isLocal: true })
+
+    kernel.applyFact(nativeFact()) // the parent suspends for the handshake
+    kernel.applyFact({
+      lane: 'lane-1',
+      lifecycle: 'prompt_ready',
+      domain: 'd2',
+      epoch: 2,
+      destination: { host: '192.168.0.93', user: 'pi', port: 22 },
+    })
+    expect(env.view()).toMatchObject({ host: '192.168.0.93', user: 'pi' })
+    // An authenticated ssh child is not the local machine, whatever the
+    // session started as — the flag may only ever get more conservative.
+    expect(env.view().isLocal).toBe(false)
+    // And nothing was invented about where it is: a child is a place with
+    // no directory until it says otherwise.
+    expect(env.view().cwd).toBe('')
+  })
+
+  it('the destination disappears in the same instant the domain does', () => {
+    const { kernel, env } = setup({ cwd: '/home/me', host: '', isLocal: true })
+    kernel.applyFact(promptReady('d1', 1))
+    kernel.applyFact(nativeFact())
+    kernel.applyFact({
+      lane: 'lane-1',
+      lifecycle: 'prompt_ready',
+      domain: 'd2',
+      epoch: 2,
+      destination: { host: 'far', user: 'pi' },
+    })
+    expect(env.view().host).toBe('far')
+
+    // The handover interval owns nobody: naming a destination over a gap
+    // would name a machine that is not taking the keystrokes.
+    kernel.applyFact(nativeFact())
+    expect(env.view()).toMatchObject({ host: '', user: '' })
+
+    // The parent reclaims the lane and is local again — its own record, not
+    // a cleared child's.
+    kernel.applyFact(promptReady('d1', 1))
+    expect(env.view()).toMatchObject({ host: '', user: '', cwd: '/home/me', isLocal: true })
+  })
 })

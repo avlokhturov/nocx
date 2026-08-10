@@ -71,6 +71,23 @@ export interface LifecycleChanged {
     fence?: string
   }
   /**
+   * Where the domain IS, present exactly when the fact names a domain minted for an ssh child (nocx-ax79). It answers the question a nested session could not otherwise answer — which machine will run the next command — because a child domain had no authenticated host source, so a cwd of /home/pi on a far host was indistinguishable from the same path locally. The values are the ones domain_request carried and nothing more (ADR-0025: the destination, never the user's typed options). Descriptive, never authority: the domain id and epoch remain the only authority the renderer is given, and the per-epoch capability and raw frames still never cross (ADR-0024 decision 7). A local domain carries none, and the field disappears in the same fact the domain does.
+   */
+  destination?: {
+    /**
+     * The destination host as the parent's request named it — a hostname, an alias or a literal address. Never re-derived from the prompt text or any other stream-derived guess (AD-6).
+     */
+    host: string
+    /**
+     * The ssh user at that host, absent when the request named none (the client resolves its own default, which nocx does not model).
+     */
+    user?: string
+    /**
+     * The ssh port, absent when the request named none.
+     */
+    port?: number
+  }
+  /**
    * The restoration-acknowledgement contract (ADR-0024 decision 8), present exactly when lifecycle is lost AND the session coordinator opened a restoration episode (the shell is still reachable — channel died, pty lives). fence is the one-shot nonce the shell will write to the pty at its next prompt boundary; generation is the same nonce the renderer echoes back in lifecycle.recoverAck. Both are pre-provisioned to the shell in the authenticated bootstrap and never reused; a hostile program cannot forge what it never saw, and the worst a forged fence can do is force a safe transition to native mode — an availability loss the ADR accepts. Absent on a dead connection: no restoration claim is made when the shell is unreachable.
    */
   recovery?: {

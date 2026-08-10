@@ -22,6 +22,12 @@ const integrationDomainBrand = Symbol('integrationDomain')
  *  what makes `PromptReady(domain)` unconstructible without a fact). */
 export type IntegrationDomain = {
   readonly id: string
+  /** Where this domain IS, when the fact that minted it said so: an ssh
+   *  child carries the destination its parent's request named (ADR-0025),
+   *  a local domain carries none (nocx-ax79). Descriptive only — the
+   *  authority is still the id and the epoch, and a domain minted without
+   *  one never acquires it later. */
+  readonly destination?: { readonly host: string; readonly user: string }
   /** The generation of the domain — monotonic per kernel instance, never
    *  reused, never resumed. A new establishment is a new domain with a new
    *  epoch, which is how a stale projection is recognised. */
@@ -54,7 +60,12 @@ export function mintDomain(fact: LifecycleChanged): IntegrationDomain | null {
     return null
   if (typeof fact.domain !== 'string' || fact.domain === '') return null
   if (typeof fact.epoch !== 'number' || fact.epoch < 1) return null
-  return { id: fact.domain, epoch: fact.epoch, [integrationDomainBrand]: true }
+  const d = fact.destination
+  const destination =
+    d !== undefined && typeof d.host === 'string' && d.host !== ''
+      ? { host: d.host, user: typeof d.user === 'string' ? d.user : '' }
+      : undefined
+  return { id: fact.domain, epoch: fact.epoch, destination, [integrationDomainBrand]: true }
 }
 
 /** ADR-0024 §2, §6: the domain stack transitions only on authenticated

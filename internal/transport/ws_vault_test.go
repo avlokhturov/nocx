@@ -191,7 +191,7 @@ func vaultCall(t *testing.T, conn *websocket.Conn, method string, params map[str
 		t.Fatalf("write request: %v", err)
 	}
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			t.Fatalf("read response: %v", err)

@@ -474,9 +474,9 @@ export class TerminalContent extends BaseTabContent {
   }
 
   /** Where this tab is, following the ACTIVE domain (bead nocx-u7uh.11):
-   *  `user@host` when the active domain has a host (the session-open ssh
-   *  binding; a child domain has no authenticated host source and shows
-   *  none), else the active domain's working directory. The pre-severance
+   *  `user@host` when the active domain has a host — the session-open ssh
+   *  binding, or an ssh child domain's own published destination
+   *  (nocx-ax79) — else the active domain's working directory. The pre-severance
    *  destination-from-the-submitted-line behaviour (owner, 2026-08-04,
    *  three times) is deliberately NOT re-added here: a parsed command line
    *  never populates an authenticated domain's identity, and a nested
@@ -509,8 +509,9 @@ export class TerminalContent extends BaseTabContent {
         : cwdTooltip(view.cwd, view.cwdVerified),
     )
     // The block header's `user@host`. Empty for a local shell, where the
-    // machine is implied and printing it on every block would be noise —
-    // and empty for a child domain that has no authenticated host. ONE
+    // machine is implied and printing it on every block would be noise;
+    // present for an ssh child, which is exactly the case where it is not
+    // implied — home/pi on a far host reads like /home/pi here. ONE
     // derivation, routed to both chips — the block header's frozen record
     // and the prompt's live destination must never disagree.
     const location = this._host ? this.locationLine() : ''

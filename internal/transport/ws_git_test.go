@@ -924,7 +924,7 @@ func TestGitChanged_DeliveredOnSessionClose(t *testing.T) {
 	sid := e.openSession(t, 1)
 	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
 
-	closeResp, raw := closeSessionCollectNotification(t, e.conn, sid, "git.changed", 3, 5*time.Second)
+	closeResp, raw := closeSessionCollectNotification(t, e.conn, sid, "git.changed", 3, wantWithin)
 	var closeEnv struct {
 		Error *jsonrpcErrorObj `json:"error"`
 	}
@@ -993,13 +993,15 @@ func closeSessionCollectNotification(t *testing.T, conn *websocket.Conn, sid, me
 	var resp json.RawMessage
 	var params json.RawMessage
 	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(d))
+		// The remaining budget, not the whole one: a read error is
+		// permanent in gorilla (c.readErr), so retrying after one spun this
+		// loop at full speed until the bound and then blamed the deadline
+		// for a socket that had already failed (nocx-2bvy). The loop below
+		// still reports whichever half is missing.
+		_ = conn.SetReadDeadline(deadline)
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			// A read timeout also poisons the connection (gorilla's
-			// permanent c.readErr), so once one half is missing after a
-			// timeout it will never arrive; the loop below reports it.
-			continue
+			break
 		}
 		var n struct {
 			ID     *json.RawMessage `json:"id"`

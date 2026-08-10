@@ -125,7 +125,7 @@ func mustLifecycleIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycl
 // is covered by the establishAck tests). The domain is not live before this.
 func ackEstablishmentFrom(t *testing.T, pub *lifecyclepub.Publisher, lane lifecycle.LaneID, h lifecycle.DomainHandle, conn *websocket.Conn) {
 	t.Helper()
-	raw := readNotification(t, conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, conn, "lifecycle.changed", wantWithin)
 	var ready lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &ready); err != nil {
 		t.Fatalf("decode prompt_ready: %v\nraw: %s", err, raw)
@@ -172,7 +172,7 @@ func TestLifecycleChanged_NoCapabilityOrRawFrameCrosses(t *testing.T) {
 	// and is itself checked for the no-capability/no-raw-frame property
 	// below, then acknowledged.
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	first := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	first := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	checkFactClean(t, first, capHex, fenceHex, fence)
 	var ready lifecyclepub.Fact
 	if derr := json.Unmarshal(first, &ready); derr != nil {
@@ -196,7 +196,7 @@ func TestLifecycleChanged_NoCapabilityOrRawFrameCrosses(t *testing.T) {
 	// the submit's running, the completion's running(completed), the
 	// prompt_ready.
 	for i := 0; i < 3; i++ {
-		raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+		raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 		if bytes.Contains(raw, []byte(capHex)) {
 			t.Fatalf("notification %d carries the domain capability %q: %s", i, capHex, raw)
 		}
@@ -252,7 +252,7 @@ func TestLifecycleChanged_RoutesToTheLaneSession(t *testing.T) {
 	e.ws.RegisterLifecycleLane("lane-B", session.ID(sidB))
 
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv("lane-A", hA, 1, lifecycleHelloEvt()))
-	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var params lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -262,7 +262,7 @@ func TestLifecycleChanged_RoutesToTheLaneSession(t *testing.T) {
 	}
 
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv("lane-B", hB, 1, lifecycleHelloEvt()))
-	raw = readNotification(t, connB, "lifecycle.changed", 5*time.Second)
+	raw = readNotification(t, connB, "lifecycle.changed", wantWithin)
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestLifecycleChanged_DroppedWithoutRegistrationAndAfterClose(t *testing.T) 
 	// The attach replays the current projection to connB; its generation is
 	// what the renderer would acknowledge (decision 9), making the domain
 	// live so the post-close event below is a REAL fact with no route.
-	rawReplay := readNotification(t, connB, "lifecycle.changed", 5*time.Second)
+	rawReplay := readNotification(t, connB, "lifecycle.changed", wantWithin)
 	var replay lifecyclepub.Fact
 	if err := json.Unmarshal(rawReplay, &replay); err != nil {
 		t.Fatalf("decode replay: %v", err)
@@ -385,7 +385,7 @@ func TestLifecycleChanged_ReplayOnAttach(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var params lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -411,7 +411,7 @@ func TestLifecycleChanged_ReplayOnAttach(t *testing.T) {
 		t.Fatalf("attach: %+v", atEnv.Error)
 	}
 
-	raw = readNotification(t, connB, "lifecycle.changed", 5*time.Second)
+	raw = readNotification(t, connB, "lifecycle.changed", wantWithin)
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -447,14 +447,14 @@ func TestLifecycleChanged_ReplayOnAttachAfterLoss(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
 
 	// The SSH transport dies while the frontend is detached. The lost fact
 	// is published (and consumed here); the domain is permanently lost.
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	lost := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	lost := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var lostParams lifecyclepub.Fact
 	if err := json.Unmarshal(lost, &lostParams); err != nil {
 		t.Fatalf("decode lost: %v", err)
@@ -477,7 +477,7 @@ func TestLifecycleChanged_ReplayOnAttachAfterLoss(t *testing.T) {
 	if atEnv.Error != nil {
 		t.Fatalf("attach: %+v", atEnv.Error)
 	}
-	raw := readNotification(t, connB, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, connB, "lifecycle.changed", wantWithin)
 	if err := json.Unmarshal(raw, &lostParams); err != nil {
 		t.Fatalf("decode replay: %v", err)
 	}
@@ -740,11 +740,11 @@ func recoverEnv(t *testing.T) (*lifecycleTestEnv, *lifecyclepub.Publisher, strin
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var lost lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &lost); err != nil {
 		t.Fatalf("decode lost: %v", err)
@@ -800,7 +800,7 @@ func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 	var nativeFact *lifecyclepub.Fact
 	ackSeen := false
 	for !ackSeen {
-		_ = e.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = e.conn.SetReadDeadline(time.Now().Add(wantWithin))
 		_, raw, rerr := e.conn.ReadMessage()
 		if rerr != nil {
 			t.Fatalf("read: %v", rerr)
@@ -908,7 +908,7 @@ func TestLifecycleRecoverAck_Rejections(t *testing.T) {
 			t.Fatalf("RequestDomain after loss: %v", err)
 		}
 		mustLifecycleIngest(t, pub, "T2", lifecycleEnv(lifecycle.LaneID(lost.Lane), h2, 1, lifecycleHelloEvt()))
-		_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready (fresh domain)
+		_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready (fresh domain)
 		errObj := recoverAckErr(t, e.conn, sid, lost.Recovery.Generation, 2)
 		if errObj.Code == 0 {
 			t.Fatalf("an ack over a live lane must be refused, got %+v", errObj)
@@ -978,7 +978,7 @@ func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
 
 	// The session channel is dead; the lane registration outlives it for a
 	// moment (the strictest race — the strip path must not depend on the
@@ -987,7 +987,7 @@ func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var lost lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &lost); err != nil {
 		t.Fatalf("decode lost: %v", err)
@@ -1029,12 +1029,12 @@ func TestLifecycleRecoverAck_DoubleAckLandsOnce(t *testing.T) {
 		t.Fatalf("write second ack: %v", err)
 	}
 	responses := 0
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(wantWithin)
 	for responses < 2 {
 		if time.Now().After(deadline) {
 			t.Fatalf("only %d ack responses arrived", responses)
 		}
-		_ = e.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_ = e.conn.SetReadDeadline(time.Now().Add(wantWithin))
 		_, raw, rerr := e.conn.ReadMessage()
 		if rerr != nil {
 			t.Fatalf("read: %v", rerr)

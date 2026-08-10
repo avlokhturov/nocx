@@ -48,9 +48,10 @@ export interface DomainEnvironment {
   /** True only when cwd came from a verified OSC 7 report (AD-5): the one
    *  cwd a composition layer may hand to files.open as rootPath (D2). */
   cwdVerified: boolean
-  /** The host, '' for the local machine. Only the session-open binding
-   *  writes it today; a child domain has no authenticated host source and
-   *  shows none until one exists. */
+  /** The host, '' for the local machine. Two authenticated sources write
+   *  it: the session-open ssh binding for the lane tier, and — since
+   *  nocx-ax79 — an ssh child domain's own published destination. Never a
+   *  parsed command line and never the prompt text (AD-6). */
   host: string
   /** The ssh user of `host`, for the location line — '' for local shells. */
   user: string
@@ -209,7 +210,30 @@ export class DomainEnvironmentProjection {
     if (root !== undefined && root.id === domain.id && root.epoch === domain.epoch) {
       return { ...this._lane }
     }
-    return blankEnvironment(this._lane.isLocal)
+    // A child starts blank, EXCEPT for what its own establishment
+    // authenticated: an ssh child's fact carries the destination its
+    // parent's request named (ADR-0025), which is the one thing about a
+    // nested session the backend definitively knows and the renderer must
+    // not guess (nocx-ax79). It is also the only honest answer to "which
+    // machine will run this", which the cwd alone cannot give — home/pi on
+    // a far host reads exactly like /home/pi here.
+    const blank = blankEnvironment(this._lane.isLocal)
+    if (domain.destination === undefined) return blank
+    // Remote is the conservative direction: a named ssh destination is
+    // never the local machine, and this flag may only ever get more
+    // conservative, never more optimistic.
+    return {
+      ...blank,
+      host: domain.destination.host,
+      user: domain.destination.user,
+      isLocal: false,
+      // The tab names the destination, exactly as a profile-opened ssh tab
+      // does: the lane seed sets programTitle to the ssh host at session
+      // open (terminal-content), and a nested session that reached the same
+      // kind of place should not read like a local one. The far shell's own
+      // OSC 0/2 replaces it the moment it sets one, same as it does there.
+      programTitle: domain.destination.host,
+    }
   }
 
   private _recordOf(domain: IntegrationDomain): DomainEnvironment {

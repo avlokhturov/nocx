@@ -106,12 +106,12 @@ func openTunnel(t *testing.T, conn *websocket.Conn, params map[string]any) (tunn
 // target's reply back — the observable proof a forward forwards.
 func roundTrip(t *testing.T, addr string) {
 	t.Helper()
-	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	c, err := net.DialTimeout("tcp", addr, wantWithin)
 	if err != nil {
 		t.Fatalf("dial forwarded address %s: %v", addr, err)
 	}
 	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = c.SetDeadline(time.Now().Add(wantWithin))
 	if _, err := c.Write([]byte("ping")); err != nil {
 		t.Fatalf("write through forward: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestTunnelTabTeardown_DoesNotStopOtherTabsForward(t *testing.T) {
 
 	// Teardown is asynchronous (the read loop notices the close); poll until
 	// A's port refuses connections.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(wantWithin)
 	for {
 		c, dErr := net.DialTimeout("tcp", addrA, 200*time.Millisecond)
 		if dErr != nil {

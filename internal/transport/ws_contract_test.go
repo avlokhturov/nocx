@@ -2725,7 +2725,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
 
-	waitFor(t, "watch baseline", 5*time.Second, func() bool {
+	waitFor(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -2737,7 +2737,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "changed.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	waitFor(t, "dirty path", 5*time.Second, func() bool {
+	waitFor(t, "dirty path", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok := w.dirty[dir]
@@ -2760,7 +2760,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("attach: %+v", atEnv.Error)
 	}
 
-	raw := readNotification(t, connB, "files.changed", 5*time.Second)
+	raw := readNotification(t, connB, "files.changed", wantWithin)
 	validateJSON(t, schema, raw, "files.changed params (real socket)")
 
 	var params filesChangedParams
@@ -3391,7 +3391,7 @@ func TestGitChanged_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("close: %+v", closeEnv.Error)
 	}
 
-	raw := readNotification(t, e.conn, "git.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "git.changed", wantWithin)
 	validateJSON(t, schema, raw, "git.changed params (real socket)")
 	var params gitChangedParams
 	if err := json.Unmarshal(raw, &params); err != nil {
@@ -3457,6 +3457,23 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 				Command: "false", Origin: lifecyclepub.OriginShell,
 				StartedAt: started, ExitCode: &code3, CompletedAt: &completed, Fence: fence,
 			},
+		},
+		// An ssh child domain names where it is (nocx-ax79): the
+		// destination its parent's domain_request carried, and nothing the
+		// user typed (ADR-0025). Descriptive, never authority — the wire
+		// test below is what proves the capability still never travels.
+		"ssh child names its destination": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecyclePromptReady,
+			Domain: "dom-2", Epoch: 4,
+			Destination: &lifecyclepub.Destination{Host: "192.168.0.93", User: "pi", Port: 22},
+		},
+		// A destination with no user and no port: the ssh client resolves
+		// its own defaults, which nocx does not model, so the fact says only
+		// what the request said.
+		"destination host only": {
+			Lane: "lane-1", Lifecycle: lifecyclepub.LifecyclePromptReady,
+			Domain: "dom-2", Epoch: 4,
+			Destination: &lifecyclepub.Destination{Host: "build-box"},
 		},
 		// Abandoned: the lane stays running, the attempt is unknown, and no
 		// exit status is invented.
@@ -3528,7 +3545,7 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	validateJSON(t, schema, raw, "lifecycle.changed params (real socket)")
 	var params lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &params); err != nil {
@@ -3603,11 +3620,11 @@ func TestLifecycleRecoverAck_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	_ = readNotification(t, e.conn, "lifecycle.changed", 5*time.Second) // prompt_ready
+	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var lost lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &lost); err != nil {
 		t.Fatalf("decode lost: %v", err)
@@ -3669,7 +3686,7 @@ func TestLifecycleEstablishAck_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	raw := readNotification(t, e.conn, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	var ready lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &ready); err != nil {
 		t.Fatalf("decode prompt_ready: %v", err)
@@ -3726,7 +3743,7 @@ func TestLifecycleEstablishAck_ReplacedSubscriberCantRelease(t *testing.T) {
 		t.Fatalf("RequestDomain: %v", err)
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
-	raw := readNotification(t, connA, "lifecycle.changed", 5*time.Second)
+	raw := readNotification(t, connA, "lifecycle.changed", wantWithin)
 	var ready lifecyclepub.Fact
 	if err := json.Unmarshal(raw, &ready); err != nil {
 		t.Fatalf("decode prompt_ready: %v", err)
@@ -3767,7 +3784,7 @@ func TestLifecycleEstablishAck_ReplacedSubscriberCantRelease(t *testing.T) {
 
 	// The current subscriber's ack (after its attach replay) is the only
 	// one that flushes.
-	_ = readNotification(t, connB, "lifecycle.changed", 5*time.Second) // the attach replay
+	_ = readNotification(t, connB, "lifecycle.changed", wantWithin) // the attach replay
 	resp = jsonrpcCallWithID(t, connB, "lifecycle.establishAck", map[string]any{
 		"sessionId": sid, "lane": string(lane), "domain": string(h.Domain),
 		"epoch": h.Epoch, "generation": ready.Generation,

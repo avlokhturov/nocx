@@ -50,6 +50,16 @@ type Fact struct {
 	Domain    string   `json:"domain,omitempty"`
 	Epoch     uint64   `json:"epoch,omitempty"`
 	Attempt   *Attempt `json:"attempt,omitempty"`
+	// Destination is where the domain IS, present exactly when the fact
+	// names a domain minted for an ssh child (nocx-ax79). It answers "which
+	// machine will run the next command", which the renderer could not
+	// otherwise ask: a child domain had no authenticated host source, so a
+	// cwd of /home/pi on a far host was indistinguishable from the same path
+	// locally. The values are the ones domain_request carried and nothing
+	// more (ADR-0025); they are descriptive, never authority — the domain id
+	// and epoch remain the only authority the renderer is given, and the
+	// capability and raw frames still never cross (decision 7).
+	Destination *Destination `json:"destination,omitempty"`
 	// Generation is the backend-minted establishment generation of the
 	// domain (decision 9): minted fresh for every accept-producing hello,
 	// present exactly when the fact names a domain. The renderer returns it
@@ -64,6 +74,15 @@ type Fact struct {
 	// stripped by the transport when the session is dead (no restoration
 	// claim over a dead connection).
 	Recovery *Recovery `json:"recovery,omitempty"`
+}
+
+// Destination is where an ssh child domain runs: the destination the
+// parent's domain_request named, echoed to the renderer so a nested session
+// can say which machine it is on. A local domain has none.
+type Destination struct {
+	Host string `json:"host"`
+	User string `json:"user,omitempty"`
+	Port int    `json:"port,omitempty"`
 }
 
 // Recovery is the restoration-acknowledgement contract of a lost fact. The
@@ -130,6 +149,12 @@ func (p *Publisher) derive(lane lifecycle.LaneID) (Fact, bool) {
 		if d, ok := p.kernel.Domain(st.Domain); ok {
 			f.Epoch = d.Epoch
 		}
+		p.mu.Lock()
+		if dst, ok := p.dest[st.Domain]; ok {
+			d := dst
+			f.Destination = &d
+		}
+		p.mu.Unlock()
 	}
 	if st.Attempt != "" {
 		if att, ok := p.kernel.Attempt(st.Attempt); ok {
@@ -337,8 +362,9 @@ type Publisher struct {
 	emitter          Emitter
 	last             map[lifecycle.LaneID]Fact
 	known            map[lifecycle.LaneID]struct{}
-	gen              map[estKey]string        // current establishment generation per episode
-	pending          map[estKey]pendingAccept // accepts awaiting the renderer's ack (decision 9)
+	dest             map[lifecycle.DomainID]Destination // ssh children's destinations (nocx-ax79)
+	gen              map[estKey]string                  // current establishment generation per episode
+	pending          map[estKey]pendingAccept           // accepts awaiting the renderer's ack (decision 9)
 	establishTimeout time.Duration
 	grantBuilder     GrantBuilder
 }
@@ -354,6 +380,7 @@ func New(k Kernel, opts ...Option) *Publisher {
 		kernel:           k,
 		last:             make(map[lifecycle.LaneID]Fact),
 		known:            make(map[lifecycle.LaneID]struct{}),
+		dest:             make(map[lifecycle.DomainID]Destination),
 		gen:              make(map[estKey]string),
 		pending:          make(map[estKey]pendingAccept),
 		establishTimeout: o.establishTimeout,
@@ -431,6 +458,17 @@ func (p *Publisher) buildAndDeliverGrant(out lifecycle.Outbound) {
 			grant.Domain = b.Domain
 			grant.Epoch = b.Epoch
 			grant.Bootstrap = b.Bootstrap
+			// The one point where the child's identity and its destination
+			// are both in hand (nocx-ax79). The kernel deliberately does not
+			// keep the destination — it validates the request and mints,
+			// and the composer owns the launch line — so the projection
+			// records it here, at the seam that already owns the fact's
+			// shape, rather than deriving it a second time anywhere else.
+			if req.Env == lifecycle.EnvSSH && b.Domain != "" {
+				p.mu.Lock()
+				p.dest[b.Domain] = Destination{Host: req.Host, User: req.User, Port: req.Port}
+				p.mu.Unlock()
+			}
 		}
 		// A builder refusal delivers the echo with an empty bootstrap: the
 		// parent runs its command conventionally, never suspended under a

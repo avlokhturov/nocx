@@ -144,3 +144,77 @@ func TestPublisherGrantWithoutBuilderDeliversEcho(t *testing.T) {
 		t.Fatalf("no-builder grant must be the empty-bootstrap echo, got %+v", g)
 	}
 }
+
+// TestPublisherPublishesTheChildsDestination is nocx-ax79: inside a nested
+// ssh, nothing on screen says which machine the next command will run on.
+// The cwd chip reads home/pi, which is indistinguishable from a local
+// /home/pi, and the answer lives only in the user's memory.
+//
+// The information exists and is authenticated — domain_request carries the
+// destination and nothing else (ADR-0025) — but it stopped at the grant
+// seam, so the renderer had no source for it and showed none (see the note
+// on `host` in frontend/src/lifecycle/domain-environment.ts). Publishing it
+// is inside decision 7, not against it: what may never cross are the
+// capability and raw frames; a schema-checked fact is the whole point of the
+// boundary. It carries no authority — the domain id and epoch remain the
+// only authority the renderer gets.
+func TestPublisherPublishesTheChildsDestination(t *testing.T) {
+	k := lifecycle.New(lifecycle.Options{})
+	var pub *lifecyclepub.Publisher
+	var child lifecycle.DomainHandle
+	pub = lifecyclepub.New(k, lifecyclepub.WithGrantBuilder(func(req lifecyclepub.GrantRequest) (lifecyclepub.GrantBootstrap, error) {
+		h, err := pub.RequestDomain(req.Lane, &req.Parent, "T")
+		if err != nil {
+			return lifecyclepub.GrantBootstrap{}, err
+		}
+		child = h
+		return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: "opaque-ssh-launch"}, nil
+	}))
+	r := &recorder{}
+	pub.SetEmitter(r)
+	port := &recordingPort{}
+	if err := pub.BindTransport("T", port); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := pub.RequestDomain("L", nil, "T")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustIngest(t, pub, "T", env("L", parent, 1, helloEvt()))
+	mustAckEstablishment(t, pub, r, "L", parent)
+
+	// The parent asks for a child at pi@192.168.0.93, suspends, and the far
+	// shell establishes the child.
+	mustIngest(t, pub, "T", env("L", parent, 2, requestEvt("r-dom-1-0", lifecycle.EnvSSH, "192.168.0.93", "pi", 22)))
+	mustIngest(t, pub, "T", env("L", parent, 3, lifecycle.Event{
+		Kind: lifecycle.KindDomainSuspended, DomainSuspended: &lifecycle.DomainSuspendedEvent{},
+	}))
+	mustIngest(t, pub, "T", env("L", child, 1, helloEvt()))
+	mustAckEstablishment(t, pub, r, "L", child)
+
+	// Every fact naming the child names where the child IS.
+	var named int
+	for _, f := range r.all() {
+		if f.Domain != string(child.Domain) {
+			continue
+		}
+		named++
+		if f.Destination == nil {
+			t.Fatalf("a fact naming the child carries no destination: %+v", f)
+		}
+		if f.Destination.Host != "192.168.0.93" || f.Destination.User != "pi" || f.Destination.Port != 22 {
+			t.Fatalf("destination = %+v, want pi@192.168.0.93:22", f.Destination)
+		}
+	}
+	if named == 0 {
+		t.Fatalf("no fact ever named the child; facts=%+v", r.all())
+	}
+
+	// And the parent's own facts carry none: it is the local machine, and a
+	// destination on it would be exactly the lie this bead is about.
+	for _, f := range r.all() {
+		if f.Domain == string(parent.Domain) && f.Destination != nil {
+			t.Fatalf("the local parent must carry no destination, got %+v", f.Destination)
+		}
+	}
+}

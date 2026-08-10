@@ -234,6 +234,19 @@ func (l *factLog) attemptFor(domain lifecycle.DomainID, command string) (lifecyc
 	return "", false
 }
 
+// destinationOf returns the destination the published facts carry for the
+// domain, and whether any fact named one.
+func (l *factLog) destinationOf(domain lifecycle.DomainID) (lifecyclepub.Destination, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, f := range l.all {
+		if f.Domain == string(domain) && f.Destination != nil {
+			return *f.Destination, true
+		}
+	}
+	return lifecyclepub.Destination{}, false
+}
+
 func (l *factLog) commands(domain lifecycle.DomainID) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -657,6 +670,18 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 	waitFor(t, "child domain Established via its own hello", 30*time.Second, func() bool {
 		return h.domainState(h.child) == lifecycle.DomainEstablished
 	})
+
+	// The child says WHERE it is (nocx-ax79). Without this the pane shows a
+	// cwd and nothing else, and a far /home/pi is indistinguishable from the
+	// local one — the destination is the only authenticated answer to "which
+	// machine will run the next command".
+	dest, ok := h.facts.destinationOf(h.child)
+	if !ok {
+		t.Fatal("no published fact named the child's destination")
+	}
+	if dest.Host != "127.0.0.1" || dest.User != fx.user || dest.Port != fx.fixturePort() {
+		t.Fatalf("destination = %+v, want %s@127.0.0.1:%d", dest, fx.user, fx.fixturePort())
+	}
 
 	// A command on the far host gets a block that closes normally — the
 	// baseline the abandoned one is measured against.
