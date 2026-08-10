@@ -275,7 +275,7 @@ __nocx_lc_init() {
     __nocx_lc_lane_esc=$__nocx_lc_json_escaped
     __nocx_lc_json_escape "$__nocx_lc_dom"
     __nocx_lc_dom_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"bash","max_frame":65536'
+    __nocx_lc_send hello ',"shell":"bash","max_frame":262144'
     if ! __nocx_lc_read_frame; then
         return 1
     fi

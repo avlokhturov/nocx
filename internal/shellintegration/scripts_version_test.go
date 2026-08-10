@@ -111,6 +111,12 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// runs the precmd chain at the widget's end (zle does not fire it
 		// for consumed lines) — nocx-u7uh.28.
 		"25": "9d9703fb279d9732d6db22ff1d89a2a4372a5c75714b739c032b4ebd288dc005",
+		// v26: the hello declares max_frame 262144. The kernel→shell
+		// direction carries the ssh child's bootstrap — a full remote
+		// launcher with the bundle embedded — and at 64 KiB that frame was
+		// never written, so the parent sat out its grant timeout and ran the
+		// user's ssh conventionally (nocx-beib).
+		"26": "ddc204fcee1a2e640b9f58dcbdb75dcd8bd3cf8a56621fc9a6ce0de45e86bc37",
 	}
 
 	h := sha256.New()

@@ -116,7 +116,7 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 // option), so a captured *Publisher value would be nil for the lifetime of
 // the closure — the first real domain_request would dereference nil
 // (nocx-u7uh.29). The accessor resolves the variable at grant time.
-func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, shint *shellintegration.Impl, transports *transportRegistry, sessions *sessionRegistry) lifecyclepub.GrantBuilder {
+func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, transports *transportRegistry, sessions *sessionRegistry) lifecyclepub.GrantBuilder {
 	return func(req lifecyclepub.GrantRequest) (lifecyclepub.GrantBootstrap, error) {
 		p := pub()
 		parent, ok := p.Domain(req.Parent)
@@ -131,7 +131,7 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, shi
 		case lifecycle.EnvSudo, lifecycle.EnvSu:
 			return buildLocalChildBootstrap(p, sessions, req, parent.Transport, kind)
 		case lifecycle.EnvSSH:
-			return buildSSHChildBootstrap(lg, p, shint, sessions, req, kind)
+			return buildSSHChildBootstrap(lg, p, sessions, req, kind)
 		default:
 			return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: unsupported environment %q", req.Env)
 		}
@@ -193,7 +193,7 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 // port is pre-picked because the payload must name it before ssh runs; a
 // server that refuses the bind (PermitListen) fails the forward, the child
 // never establishes, and the session is the honest conventional fallback.
-func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, shint *shellintegration.Impl, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentKind transportKind) (lifecyclepub.GrantBootstrap, error) {
+func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions *sessionRegistry, req lifecyclepub.GrantRequest, parentKind transportKind) (lifecyclepub.GrantBootstrap, error) {
 	if !parentKind.local {
 		// A remote parent runs ssh on the far host: the -R forward would
 		// terminate at that host, not at this backend's listener. The
@@ -221,65 +221,69 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, shint *s
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}
-	plan, err := shint.InBandBootstrap(sid, &shellintegration.ChannelConfig{
-		Lane:   string(req.Lane),
-		Domain: string(h.Domain),
-		Epoch:  h.Epoch,
-		Port:   remotePort,
-	})
-	if err != nil {
+	// The far shell is brought up by the SAME launcher the profile path
+	// uses (AD-8: one owner for "what command makes a remote shell
+	// integrated"), delivered as the command OpenSSH runs on the far side —
+	// which is what ADR-0022 decided the carrier is.
+	//
+	// It used to be delivered in-band instead, piped into the client's
+	// stdin ahead of the connection, and that is what nocx-beib was: the
+	// authentication phase belongs to the ssh client, and a client whose
+	// stdin is a pre-filled pipe cannot ask for a password, a passphrase, a
+	// host key or a second factor — it reads our wrapper as the answer. A
+	// key hides this completely, which is why every proof of this path
+	// (ssh_child_assembly_test.go, ADR-0025) authenticated with one.
+	cmd, reason, ok := shellintegration.NewRemoteLauncher().StartCommand(
+		shellintegration.ShellAuto,
+		shellintegration.LaunchOptions{
+			SessionID:     sid,
+			Enhanced:      true,
+			Lane:          string(req.Lane),
+			Domain:        string(h.Domain),
+			Epoch:         h.Epoch,
+			LifecyclePort: remotePort,
+			Capability:    hex.EncodeToString(h.Capability[:]),
+			Recovery:      hex.EncodeToString(h.Recovery[:]),
+		})
+	if !ok || cmd == "" {
 		_ = ln.Close()
-		return lifecyclepub.GrantBootstrap{}, err
+		if reason == shellintegration.ReasonNone {
+			reason = shellintegration.ReasonUnsupportedShell
+		}
+		return lifecyclepub.GrantBootstrap{}, fmt.Errorf("child domain: launcher declined (%s)", reason)
 	}
-	// The capability is the FIRST streamed line (the in-band contract:
-	// InBandPlan.Capability is what the backend writes into the raw-mode
-	// stream right after the wrapper's READY). InBandBootstrap leaves it
-	// unset — the local flow (shell.integrate) hands the plan to the
-	// renderer, which writes it — so THIS seam is where the child's
-	// per-epoch bearer enters the composed line. Without it the far shell
-	// receives an empty first line, treats it as payload, and integrates
-	// capability-free: no channel, conventional terminal (nocx-u7uh.29).
-	plan.Capability = hex.EncodeToString(h.Capability[:])
-	line := composeSSHChildLine(plan, remotePort, ln.Port(), req)
+	line := composeSSHChildLine(cmd, remotePort, ln.Port(), req)
 	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
 }
 
 // composeSSHChildLine builds the rewritten command line the parent executes
 // (ADR-0022: the ssh command line is the carrier). The shape:
 //
-//	stty-save; { printf wrapper; printf cap; printf payload; printf terminator;
-//	             stty raw -echo; cat; } | ssh -tt -R 127.0.0.1:CPORT:127.0.0.1:LPORT dst;
-//	rc=$?; stty-restore; (exit rc)
+//	ssh -t -R 127.0.0.1:CPORT:127.0.0.1:LPORT [-p N] dst '<launcher command>'
 //
-// The in-band stream (wrapper, capability as the first line, payload,
-// terminator) is typed into the remote login shell at its prompt; `cat`
-// bridges the user's keyboard after it and keeps the pipe open, and the
-// local raw-mode window makes the remote pty's echo authoritative. The
-// capability never touches a filesystem object (it rides the stream, as the
-// in-band contract requires).
+// Nothing wraps the client. Its stdin is the parent's terminal, so the whole
+// authentication phase — password, passphrase, host-key confirmation, a
+// second factor — is between the user and OpenSSH exactly as in a plain
+// terminal, and the integration rides in the command sshd runs afterwards.
 //
-// -tt, deliberately, and this is a measured requirement (nocx-u7uh.29):
-// the ssh client's own stdin is the pipe from the brace group, NEVER a
-// terminal — so a single -t makes OpenSSH print "Pseudo-terminal will not
-// be allocated because stdin is not a terminal" and run the far shell
-// NON-interactively, where the in-band wrapper's `stty raw -echo` fails and
-// its && chain stops before any byte is staged: the child could never
-// establish. -tt forces pty allocation regardless of the client's stdin,
-// which is what the whole in-band contract ("typing into the shell at its
-// prompt") depends on. The remote shell is a plain interactive login shell
-// — sshd passes no command — so the wrapper arrives at a real prompt.
-func composeSSHChildLine(plan shellintegration.InBandPlan, remotePort, localPort int, req lifecyclepub.GrantRequest) string {
+// This replaced an in-band delivery that piped the bootstrap into the
+// client's stdin before it had connected (nocx-beib). It worked with a key,
+// because the far side reaches a prompt immediately and consumes the staged
+// bytes; with an interactive prompt the client read our wrapper as the
+// user's password and the login could not succeed. The pipe was also why
+// `-tt` was needed — a client whose stdin is not a terminal refuses to
+// allocate one — so removing the pipe removes the reason for the second t
+// along with the termios save/restore that guarded the raw-mode window.
+//
+// The far shell is therefore started by sshd from this command rather than
+// as a bare login shell, which is the same shape the profile path already
+// uses. A destination configured with its own RemoteCommand is refused by
+// OpenSSH ("Cannot execute command-line and remote command") and falls back
+// conventionally, which is the honest degrade — the same one the profile
+// path names ReasonRemoteCommand.
+func composeSSHChildLine(startCmd string, remotePort, localPort int, req lifecyclepub.GrantRequest) string {
 	var b strings.Builder
-	b.WriteString("__nocx_ssh_saved=$(stty -g); { ")
-	b.WriteString("printf '%s\\n' ")
-	b.WriteString(shellintegration.ShellQuote(plan.Wrapper))
-	b.WriteString(" ")
-	b.WriteString(shellintegration.ShellQuote(plan.Capability))
-	b.WriteString("; printf '%s\\n' ")
-	b.WriteString(shellintegration.ShellQuote(plan.Payload))
-	b.WriteString("; printf '%s\\n' ")
-	b.WriteString(shellintegration.ShellQuote(plan.Terminator))
-	b.WriteString("; stty raw -echo; cat; } | ssh -tt -R 127.0.0.1:")
+	b.WriteString("ssh -t -R 127.0.0.1:")
 	b.WriteString(fmt.Sprintf("%d:127.0.0.1:%d", remotePort, localPort))
 	if req.Port != 0 {
 		b.WriteString(fmt.Sprintf(" -p %d", req.Port))
@@ -290,7 +294,8 @@ func composeSSHChildLine(plan shellintegration.InBandPlan, remotePort, localPort
 		dest = req.User + "@" + dest
 	}
 	b.WriteString(shellintegration.ShellQuote(dest))
-	b.WriteString("; __nocx_ssh_rc=$?; stty \"$__nocx_ssh_saved\" 2>/dev/null; (exit $__nocx_ssh_rc)")
+	b.WriteString(" ")
+	b.WriteString(shellintegration.ShellQuote(startCmd))
 	return b.String()
 }
 

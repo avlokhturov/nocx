@@ -569,7 +569,7 @@ func New(opts ...Option) (*App, error) {
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, shint, childTransports, childSessions)))
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.

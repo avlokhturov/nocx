@@ -79,7 +79,16 @@ var (
 // child shell to EOF — bash's EOF behaviour displays `exit` and the child
 // never established — and zle does not run the precmd hooks for a line a
 // widget consumed, which delayed domain_activated past §9's boundary.
-const version = "25"
+//
+// 26: the hello declares max_frame 262144 rather than 65536 (nocx-beib).
+// The kernel→shell direction carries the child domain's opaque bootstrap,
+// which is a full remote launcher with the bundle embedded (~77 KiB and
+// growing). At 64 KiB the grant frame was never written at all, and the
+// parent shell sat out its grant timeout before running the user's ssh
+// conventionally — the five silent seconds the owner reported. The Go side
+// is lifecycle.MaxFrameBytes; the two are held together by
+// lifecyclecodec's TestMaxFrameBytes_ShellsDeclareTheSameBound.
+const version = "26"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

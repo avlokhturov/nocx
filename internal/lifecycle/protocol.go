@@ -255,7 +255,19 @@ const (
 // transport adapter; the kernel enforces the handshake and desync budgets and
 // MaxCommandBytes itself.
 const (
-	MaxFrameBytes          = 64 * 1024
+	// MaxFrameBytes bounds one JSON frame in either direction. It is 256
+	// KiB because the kernel→shell direction carries the child domain's
+	// opaque bootstrap (§9), and that bootstrap is a full remote launcher:
+	// the publish prelude embeds the integration bundle, which measures
+	// ~77 KiB today and grows with the scripts. At the original 64 KiB the
+	// grant was not truncated and not refused — Encode returned
+	// ErrFrameTooLarge, the frame was never written, and the parent shell
+	// waited out its five-second grant timeout, lost the channel and ran
+	// the user's ssh conventionally, with no diagnostic anywhere
+	// (nocx-beib). The shells declare the same number in their hello;
+	// lifecyclecodec's TestMaxFrameBytes_ShellsDeclareTheSameBound is what
+	// keeps the two from drifting.
+	MaxFrameBytes          = 256 * 1024
 	MaxHelloBytes          = 1024
 	HelloTimeout           = 10 * time.Second
 	HandshakeFailureBudget = 8

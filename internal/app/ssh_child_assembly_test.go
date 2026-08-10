@@ -39,12 +39,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/shellintegration"
 	gosshagent "golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -207,8 +207,7 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	var pub *lifecyclepub.Publisher
 	pub = lifecyclepub.New(k,
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return pub },
-			shellintegration.New(logger), transports, sessions)))
+			func() *lifecyclepub.Publisher { return pub }, transports, sessions)))
 	pub.SetEmitter(ackingEmitter{pub: pub})
 	kernel := &recordingKernel{Publisher: pub}
 
@@ -362,48 +361,47 @@ func (h *sshChildHarness) laneSnapshot() lifecycle.LaneSnapshot {
 
 // composedLineProc is the local bash running the grant's composed line — the
 // "parent executes the bootstrap" step, with the real ssh client on PATH and
-// the fixture key in an agent. stdin is the keyboard bridge's input: the
-// test types through it to the far shell.
+// the fixture key in an agent. It runs on a REAL pty because the parent shell
+// always does, and because the composed line no longer wraps the client
+// (nocx-beib): the ssh client's stdin IS this terminal, which is what lets it
+// prompt a human and what makes `-t` allocate the far pty. The test types to
+// the far shell through the same terminal.
 type composedLineProc struct {
-	t     *testing.T
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
-	out   *outputBuffer
-	err   *outputBuffer
-	done  bool
+	t    *testing.T
+	cmd  *exec.Cmd
+	ptmx *os.File
+	out  *outputBuffer
+	done bool
 }
 
-// runComposedLine executes the grant bootstrap in a real bash, the way the
-// parent shell evals it, with stdin on a pipe (the composed line's ssh ALWAYS
-// has a pipe for stdin — the brace group — so the pty-allocation semantics
-// are the production ones; -tt forces the remote pty regardless). PATH is
-// prefixed with the ssh-wrapper dir so the composed line's `ssh` resolves to
-// the wrapper (which execs the real client with the fixture known_hosts).
+// runComposedLine executes the grant bootstrap in a real bash on a pty, the
+// way the parent shell evals it. The terminal is load-bearing: the composed
+// line hands the client the parent's own stdin, so a pipe here would make
+// OpenSSH refuse the remote pty ("Pseudo-terminal will not be allocated
+// because stdin is not a terminal") and the far shell would never come up
+// interactive. PATH is prefixed with the ssh-wrapper dir so the composed
+// line's `ssh` resolves to the wrapper (which execs the real client with the
+// fixture known_hosts).
 func (h *sshChildHarness) runComposedLine(agentSock, sshWrapperDir string) *composedLineProc {
 	h.t.Helper()
 	// #nosec G204 — the line is the production-composed bootstrap this test
 	// proves; running it under a real bash is the assertion, not an accident.
 	cmd := exec.Command("bash", "-c", h.bootstrap)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		h.t.Fatalf("stdin pipe: %v", err)
-	}
-	out := &outputBuffer{}
-	errBuf := &outputBuffer{}
-	cmd.Stdout = out
-	cmd.Stderr = errBuf
 	path := sshWrapperDir + string(os.PathListSeparator) + os.Getenv("PATH")
 	cmd.Env = append(os.Environ(), "SSH_AUTH_SOCK="+agentSock, "PATH="+path)
-	if err := cmd.Start(); err != nil {
-		h.t.Fatalf("start composed line: %v", err)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		h.t.Fatalf("start composed line on a pty: %v", err)
 	}
-	return &composedLineProc{t: h.t, cmd: cmd, stdin: stdin, out: out, err: errBuf}
+	out := &outputBuffer{}
+	go func() { _, _ = io.Copy(out, ptmx) }()
+	return &composedLineProc{t: h.t, cmd: cmd, ptmx: ptmx, out: out}
 }
 
 // kill is the failure-path cleanup: never leave the ssh child running.
 func (p *composedLineProc) kill() {
 	p.t.Helper()
-	_ = p.stdin.Close()
+	_ = p.ptmx.Close()
 	if p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
 	}
@@ -418,7 +416,7 @@ func (p *composedLineProc) wait() {
 		return
 	}
 	p.done = true
-	_ = p.stdin.Close()
+	_ = p.ptmx.Close()
 	_ = p.cmd.Wait()
 }
 
@@ -426,7 +424,7 @@ func (p *composedLineProc) wait() {
 // for the composed line to return.
 func (p *composedLineProc) typeExit() {
 	p.t.Helper()
-	if _, err := p.stdin.Write([]byte("exit\n")); err != nil {
+	if _, err := p.ptmx.Write([]byte("exit\n")); err != nil {
 		p.t.Fatalf("type exit: %v", err)
 	}
 	p.wait()
@@ -470,6 +468,14 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 	wrapperDir := installSSHWrapper(t, fx)
 	proc := h.runComposedLine(agentSock, wrapperDir)
 	t.Cleanup(proc.kill)
+	// A failure here used to say only "timed out": the terminal is the only
+	// place the far side reports why (a refused forward, a shell that died
+	// on the launcher command, an authentication prompt nobody answered).
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("composed-line terminal:\n%s", proc.out.String())
+		}
+	})
 
 	// The child establishes through the far shell's hello on the -R'd port.
 	waitFor(t, "child domain Established via its own hello", 30*time.Second, func() bool {
@@ -540,14 +546,15 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 	t.Cleanup(proc.kill)
 
 	// The refusal is observable: sshd rejects the tcpip-forward and the
-	// client reports it. This is the test's own stderr buffer, never the
-	// user-visible terminal (the refusal-leak contract is asserted by the
-	// conventional-session proof, which scans the terminal, not this).
+	// client reports it. The client shares the parent's terminal now
+	// (nocx-beib), so the report lands there — which is also what a user
+	// would see, and the refusal-leak contract for a CONVENTIONAL session
+	// is asserted separately by its own proof.
 	refused := waitForResult(t, "ssh reporting the refused reverse forward", 30*time.Second, func() bool {
-		return strings.Contains(proc.err.String(), "remote port forwarding failed")
+		return strings.Contains(proc.out.String(), "remote port forwarding failed")
 	})
 	if !refused {
-		t.Fatalf("ssh never reported the refused -R; stderr:\n%s", proc.err.String())
+		t.Fatalf("ssh never reported the refused -R; terminal:\n%s", proc.out.String())
 	}
 	// The stillborn child never establishes: give the far side time to have
 	// tried the in-band connect to the refused port and failed open.

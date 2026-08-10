@@ -151,12 +151,12 @@ candidate: it can neither mutate nor preempt.
 window; beyond that, new establishment requests on that lane are refused until the
 window drains. Connection count and handshake time are bounded at the transport
 adapter (the same numbers the kernel enforces for frames: `hello` ≤ 1 KiB, frame ≤
-64 KiB, handshake ≤ 10 s).
+256 KiB, handshake ≤ 10 s).
 
 ## 6. Frames and budgets
 
 - **Framing:** 4-byte big-endian length prefix, then the JSON bytes. Length is
-  the JSON byte count. Frames are size-bounded: **max_frame = 64 KiB**; `hello` is
+  the JSON byte count. Frames are size-bounded: **max_frame = 256 KiB**; `hello` is
   additionally bounded to **1 KiB**.
 - **Desynchronization** (decision 7): a framing gap or corruption does not revoke
   the epoch — every ordinary program would be a one-write kill switch. The domain

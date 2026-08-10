@@ -7,25 +7,24 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/lifecyclepub"
-	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 // TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward is the ssh
 // child's wire contract (ADR-0022: the ssh command line is the carrier):
 // the grant's bootstrap is a SINGLE self-contained command line the parent
-// evals — the -R reverse forward naming the child's listener, the in-band
-// stream (wrapper, capability, payload, terminator) piped into `ssh -t`,
-// the keyboard bridge after it, and the termios save/restore around the
-// raw-mode window. The line must parse under bash (the parent's shell) and
-// must never lose the payload bytes to quoting.
+// evals — the -R reverse forward naming the child's listener, the
+// destination, and the launcher command sshd runs on the far side. The line
+// must parse under bash (the parent's shell) and must never lose the
+// launcher command to quoting.
+//
+// What it must NOT do is wrap the client: nocx-beib. The bootstrap used to
+// be piped into the client's stdin ahead of the connection, which took the
+// terminal away from the authentication phase; the behavioural proof of
+// that lives in childdomain_password_test.go, and the shape assertions
+// here keep the pipe from creeping back.
 func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) {
-	plan := shellintegration.InBandPlan{
-		Wrapper:    `saved=$(stty -g); printf 'it'\''s "quoted"\n'`,
-		Capability: "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-		Payload:    "# nocx payload\nprintf '%s' \"a 'single' and a \\backslash\\\"\n",
-		Terminator: "NOCX_IB_EOF",
-	}
-	line := composeSSHChildLine(plan, 40123, 37777, lifecyclepub.GrantRequest{
+	startCmd := `env -u BASH_ENV bash -c 'printf "it'"'"'s"'`
+	line := composeSSHChildLine(startCmd, 40123, 37777, lifecyclepub.GrantRequest{
 		Env: "ssh", Host: "box.example.com", User: "alice", Port: 2222,
 	})
 
@@ -38,29 +37,24 @@ func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) 
 	if !strings.Contains(line, "'alice@box.example.com'") {
 		t.Errorf("line does not carry the quoted destination: %s", line)
 	}
-	if !strings.Contains(line, "stty raw -echo; cat; } | ssh -tt") {
-		t.Errorf("line lacks the keyboard bridge and the forced pty: %s", line)
+	// One -t: the client's stdin is the parent's terminal, so OpenSSH
+	// allocates the remote pty without being forced. -tt was a consequence
+	// of the pipe and must not return with it.
+	if !strings.Contains(line, "ssh -t -R") {
+		t.Errorf("line does not request a remote pty with a single -t: %s", line)
 	}
-	// The capability must ride the stream as the FIRST line after the
-	// wrapper (the in-band contract; nocx-u7uh.29 found the grant builder
-	// emitting an empty capability line, which integrates the far shell
-	// capability-free). The wrapper and capability are the first printf's
-	// two arguments — the capability precedes the payload's printf.
-	if !strings.Contains(line, "'"+plan.Capability+"'; printf '%s\\n'") {
-		t.Errorf("line does not stream the capability before the payload: %s", line)
+	if strings.Contains(line, "-tt") {
+		t.Errorf("line forces a pty with -tt, which is only needed when the client's "+
+			"stdin is not a terminal — the authentication phase needs it to be one: %s", line)
 	}
-	// -tt is load-bearing (nocx-u7uh.29): the ssh client's stdin is the
-	// pipe from the brace group, and a single -t would refuse to allocate
-	// the remote pty ("Pseudo-terminal will not be allocated because stdin
-	// is not a terminal"), leaving the far shell non-interactive where the
-	// in-band wrapper's `stty raw -echo` fails. Asserting the double -t
-	// keeps a future cleanup from silently reintroducing the defect.
-	if strings.Contains(line, "ssh -t ") || strings.Contains(line, "ssh -t'") {
-		t.Errorf("composed line uses a single -t; the in-band flow needs -tt to force the remote pty: %s", line)
+	// No pipeline into ssh, and no termios window around it: both are the
+	// in-band shape nocx-beib removed.
+	if strings.Contains(line, "| ssh") || strings.Contains(line, "stty") {
+		t.Errorf("line still wraps the client in a pipeline or a raw-mode window: %s", line)
 	}
 
 	// The line must parse under bash — the parent evals it verbatim, and a
-	// quoting slip in the payload is a dead remote shell.
+	// quoting slip in the launcher command is a dead remote shell.
 	f, err := os.CreateTemp(t.TempDir(), "line-*.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -77,34 +71,24 @@ func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) 
 	}
 }
 
-// TestComposeSSHChildLine_PayloadBytesSurviveQuoting proves the round trip
-// of the payload's nastiest bytes through the composed line's quoting: the
-// parent evals the line, and the printed stream must be byte-identical to
-// the payload the remote wrapper reads. This is the ADR-0022 carrier
-// contract at the quoting layer.
-func TestComposeSSHChildLine_PayloadBytesSurviveQuoting(t *testing.T) {
-	payload := "line one\nline two with 'quotes' and \"double\" and \\backslashes\\ and $dollars\n"
-	line := composeSSHChildLine(shellintegration.InBandPlan{
-		Wrapper:    "w",
-		Capability: "cap",
-		Payload:    payload,
-		Terminator: "NOCX_IB_EOF",
-	}, 40123, 37777, lifecyclepub.GrantRequest{Env: "ssh", Host: "h"})
+// TestComposeSSHChildLine_StartCommandSurvivesQuoting proves the round trip
+// of the launcher command's nastiest bytes: sshd must receive it byte for
+// byte as ONE argument. The launcher command is ~38 KiB of shell with
+// embedded quotes and newlines, so a quoting slip here is a far shell that
+// dies on a syntax error with the user watching.
+func TestComposeSSHChildLine_StartCommandSurvivesQuoting(t *testing.T) {
+	startCmd := "line one\nline two with 'quotes' and \"double\" and \\backslashes\\ and $dollars\n"
+	line := composeSSHChildLine(startCmd, 40123, 37777, lifecyclepub.GrantRequest{Env: "ssh", Host: "h"})
 
-	// The line evals to: stty save; { printf ...; } | ssh ... — extract the
-	// payload by evaluating the printf it contains: run the whole line under
-	// bash but with a fake ssh on PATH that cats its stdin.
+	// A stand-in ssh that prints its LAST argument — the command sshd would
+	// run — so the bytes can be compared against what went in.
 	binDir := t.TempDir()
-	fakeSSH := "#!/bin/sh\ncat\n"
+	fakeSSH := "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\nprintf '%s' \"$last\"\n"
 	// #nosec G306 — a stand-in for ssh must be executable to be found through
 	// PATH; temp dir, no secret.
 	if err := os.WriteFile(binDir+"/ssh", []byte(fakeSSH), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	// The line's ssh -t -R ... 'h' — the fake ssh ignores args and cats
-	// stdin; the pipeline's stdout is the stream. The stty calls fail
-	// harmlessly outside a tty; the whole line is wrapped so its status
-	// dance does not abort.
 	prog := "PATH=" + binDir + ":$PATH\n" + line + "\n"
 	// #nosec G204 — prog is the composed line under test plus a PATH pointing
 	// at this test's temp dir; evaluating it under a real bash is the
@@ -114,10 +98,7 @@ func TestComposeSSHChildLine_PayloadBytesSurviveQuoting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("evaluating the composed line: %v\n%s", err, out)
 	}
-	got := string(out)
-	for _, want := range []string{"w\n", "cap\n", payload, "NOCX_IB_EOF\n"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("stream missing %q; got:\n%s", want, got)
-		}
+	if string(out) != startCmd {
+		t.Errorf("sshd would receive %q, want the launcher command verbatim %q", string(out), startCmd)
 	}
 }

@@ -5,7 +5,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -326,7 +329,10 @@ func TestScanFrameBudgetExhausted(t *testing.T) {
 // TestEncodeRefusesOversizeFrame proves the encoder refuses to emit a frame
 // beyond max_frame before writing anything.
 func TestEncodeRefusesOversizeFrame(t *testing.T) {
-	env := env(lifecycle.KindHello, helloEvt(strings.Repeat("x", 70*1024)), 1)
+	// Derived from the bound, never a literal: max_frame moved once already
+	// (64 KiB → 256 KiB, nocx-beib) and a hard-coded 70 KiB turned this from
+	// "refuses oversize" into "refuses a size that is now legal".
+	env := env(lifecycle.KindHello, helloEvt(strings.Repeat("x", lifecycle.MaxFrameBytes+1024)), 1)
 	var buf bytes.Buffer
 	if _, err := Encode(&buf, env); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("want ErrFrameTooLarge, got %v", err)
@@ -416,5 +422,31 @@ func TestDomainRequestFieldPresence(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("request round trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestMaxFrameBytes_ShellsDeclareTheSameBound is the anti-drift check on the
+// one number two sides have to agree about (nocx-beib).
+//
+// The shells announce max_frame in their hello and the Go side enforces
+// lifecycle.MaxFrameBytes on every Encode. Nothing ties them together at
+// build time, so a bump on one side is invisible: a frame the shell would
+// accept is refused before it is written, or — worse — the backend writes
+// one the shell will not read. The failure is silent in the direction that
+// matters, which is how the ssh child came to hang for five seconds with no
+// diagnostic: the grant simply never arrived.
+func TestMaxFrameBytes_ShellsDeclareTheSameBound(t *testing.T) {
+	want := strconv.Itoa(lifecycle.MaxFrameBytes)
+	for _, name := range []string{"nocx.bash", "nocx.zsh"} {
+		path := filepath.Join("..", "shellintegration", "scripts", name)
+		body, err := os.ReadFile(path) // #nosec G304 — a repo-relative script path.
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		decl := `"max_frame":` + want
+		if !strings.Contains(string(body), decl) {
+			t.Errorf("%s does not declare %s; the shell and lifecycle.MaxFrameBytes "+
+				"must name the same bound or frames are refused on one side only", name, decl)
+		}
 	}
 }
