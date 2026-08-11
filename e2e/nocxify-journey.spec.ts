@@ -476,11 +476,22 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
 
     // ── 3. exit: the remote session ends, local blocks again, editor back ──
     await submitInEditor(page, 'exit')
-    // The exit block (remote context) closes with "Connection … closed." and
-    // freezes with NO code — the local D owns the ssh command's status.
-    const exitBlock = pane(page).locator('.cmd-block', {
-      hasText: 'Connection to 127.0.0.1 closed',
-    })
+    // The exit block (remote context) freezes with NO code — the local D owns
+    // the ssh command's status.
+    //
+    // Located by the COMMAND the user typed, not by the ssh client's
+    // "Connection … closed." farewell. That text is printed by the LOCAL ssh
+    // client after the far shell has already died, while the block freezes on
+    // the far domain ending — two events on opposite sides of the connection
+    // with nothing ordering them. Whether the farewell lands inside the block
+    // or after it is therefore undetermined, and asserting it asserted which
+    // way the race went: the journey passed when run alone and failed in the
+    // full suite, on both engines, for as long as that locator stood
+    // (nocx-8tf6).
+    //
+    // `.last()` because `exit` is the only command typed so far whose text
+    // could match, and the most recent match is the block just submitted.
+    const exitBlock = pane(page).locator('.cmd-block').filter({ hasText: 'exit' }).last()
     await expect(exitBlock).toBeVisible({ timeout: 30_000 })
     await expect(exitBlock.locator('.cmd-header-exit')).toHaveCount(0)
     await expect(editor).toBeVisible({ timeout: 20_000 })
