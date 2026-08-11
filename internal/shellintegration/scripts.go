@@ -109,13 +109,19 @@ var (
 // — so macOS's bash 3.2 rejected the script at the `coproc` token and every
 // shell on the platform this product ships to first came up with no
 // integration at all.
+// 31: the grant's JSON is decoded by the same helper (nocx-aupk). bash 3.2's
+// ${var//pattern/replacement} is quadratic and this decodes a whole rcfile —
+// measured 4655ms for 22 KiB against 8ms on bash 5, a factor of 580 — so a
+// nested launch spent seconds decoding while the user watched a frozen
+// terminal. Same cliff as nocx-beib, different string operation.
+//
 // 30: the readable-probe has one owner and a per-version answer
 // (nocx-sw4p). `read -N` is bash 4.1+, so on macOS's 3.2 the probe could
 // never succeed, the accept was never read and the channel never activated —
 // a defect a parse check cannot see, because `-N` is an option and not
 // syntax. bash 3.2 gets perl's select(); the descriptor and port are now
 // pinned to digits, since the first of those is interpolated into a program.
-const version = "30"
+const version = "31"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

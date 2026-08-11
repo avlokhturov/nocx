@@ -421,6 +421,57 @@ fi
 # decoding failure corrupts the rcfile, which makes the child conventional —
 # the safe direction — so the decoder is best-effort by construction.
 __nocx_lc_json_unescape() {
+    # bash 3.2's ${var//pattern/replacement} is quadratic, and this decodes a
+    # whole rcfile: measured 4655ms for 22 KiB against 8ms on bash 5, a factor
+    # of 580, and the grant is larger than that. That is not a slow prompt, it
+    # is a nested launch that misses its window — the user types `sudo -i` and
+    # watches a frozen terminal while the shell decodes (nocx-aupk). Same
+    # shape as nocx-beib, where a `${frame##*...}` scan cost 1.65s per
+    # expansion; different string operation, same cliff.
+    #
+    # The helper resolved for the readable-probe decodes it in one pass
+    # instead. The condition is the same condition — this bash is a 3.2 — so
+    # it is read off the same latch rather than tested twice.
+    if [[ "$__nocx_lc_probe_mode" == "helper" ]]; then
+        __nocx_lc_json_unescape_helper "$1" && return 0
+        # Falling through on helper failure is deliberate: a corrupted decode
+        # makes the child conventional, which is the safe direction, but a
+        # SLOW correct decode is better than a wrong one.
+    fi
+    __nocx_lc_json_unescape_native "$1"
+}
+
+# One left-to-right pass, which is also what makes it correct: a lone `\\`
+# followed by `u0041` is a literal backslash then the text "u0041", and any
+# decoder that resolves \uXXXX in a separate earlier pass gets that wrong.
+# The trailing sentinel survives command substitution's newline stripping —
+# the bootstrap legitimately ends in a newline, and losing it truncates the
+# rcfile's last line.
+__nocx_lc_json_unescape_helper() {
+    local __out
+    # The program is q{}/qq{} throughout so it can live inside a shell
+    # single-quoted string without a quote of its own: one stray ' would end
+    # the shell quoting and the rest would be parsed as shell.
+    __out="$(
+        builtin printf '%s' "$1" | "$__nocx_lc_probe_helper" -e '
+            local $/; my $s = <STDIN>;
+            my %m = (q{"},q{"}, q{\\},q{\\}, q{/},q{/}, q{b},qq{\b}, q{f},qq{\f},
+                     q{n},qq{\n}, q{r},qq{\r}, q{t},qq{\t});
+            $s =~ s{\\(?:u([0-9a-fA-F]{4})|(.))}
+                   {defined $1 ? chr(hex $1) : (exists $m{$2} ? $m{$2} : $2)}gse;
+            utf8::encode($s) if utf8::is_utf8($s);
+            print $s, qq{\1};
+        ' 2>/dev/null
+    )" || return 1
+    case "$__out" in
+        *$'\1') : ;;
+        *) return 1 ;; # no sentinel: the helper died mid-write
+    esac
+    __nocx_lc_json_unescaped="${__out%$'\1'}"
+    return 0
+}
+
+__nocx_lc_json_unescape_native() {
     local s="$1" LC_ALL=C hex oct
     # Protect literal backslashes (\\ in JSON) before the single-char
     # escapes: a literal backslash must not be consumed by the \" or \n
