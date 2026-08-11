@@ -118,6 +118,13 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		s.cancelRecovery(sid)
 		return
 	}
+	// The installed fact (nocx-ak2d): what the far shell said it was brought
+	// up from, recorded once per domain. Before the routing decisions below,
+	// because the fact is about the HOST and does not depend on anybody being
+	// attached to watch it — a session whose renderer has gone away has still
+	// integrated the host it connected to.
+	s.recordInstalledFact(f)
+
 	// An episode without a subscriber is not opened: the next attach replays
 	// the fact, and the episode opens then, when the ack can actually come
 	// back.

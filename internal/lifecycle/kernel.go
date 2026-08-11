@@ -509,6 +509,10 @@ func (k *Kernel) applyHello(d *Domain, ls *laneState, env Envelope) ([]Outbound,
 				return nil, ErrParentNotTop
 			}
 		}
+		// What the far shell says is installed on its host, kept before the
+		// state moves so the fact is available from the moment the domain is
+		// established rather than a frame later.
+		d.BundleGeneration = env.Event.Hello.Generation
 		d.State = DomainEstablished
 		// The accept is minted but NOT delivered — the caller owns delivery
 		// ordering (decision 9), and the domain is not live until the

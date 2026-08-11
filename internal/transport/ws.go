@@ -163,6 +163,11 @@ type WSServer struct {
 	// the footprint surface answers an empty list (the P7 observation RPC
 	// that used to write it was severed — ADR-0024 §1).
 	installedFacts *ssh.InstalledFactStore
+	// installedFactSeen bounds the write to once per domain: a lane
+	// publishes a fact at every prompt, and the installation it reports does
+	// not change while the shell that reported it is alive.
+	installedFactMu   sync.Mutex
+	installedFactSeen map[string]struct{}
 
 	// remoteUninstaller removes the integration bundle on a remote host,
 	// owning the dial-and-call (P10). Wired through WithRemoteUninstaller;

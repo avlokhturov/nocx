@@ -175,7 +175,7 @@ var (
 // recognises and sends them as `opts`; -p is excluded because it is modelled
 // as the port, and -t because the composer adds its own and ssh reads a
 // second one as -tt.
-const version = "35"
+const version = "36"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

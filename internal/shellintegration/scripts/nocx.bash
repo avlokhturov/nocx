@@ -377,7 +377,16 @@ __nocx_lc_init() {
     __nocx_lc_lane_esc=$__nocx_lc_json_escaped
     __nocx_lc_json_escape "$__nocx_lc_dom"
     __nocx_lc_dom_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"
+    # The bundle this shell was brought up from, so the backend can record
+    # which hosts carry an installation without guessing. Only the far side
+    # knows it: the publish prelude installs "v<version>" when it publishes
+    # and ADOPTS whatever the manifest names when a newer bundle is already
+    # there. Escaped rather than trusted — the launcher's own value is a
+    # validated safe name, but NOCX_GENERATION is an ordinary environment
+    # variable and anyone can set it before starting a shell.
+    __nocx_lc_json_escape "${NOCX_GENERATION-}"
+    __nocx_lc_gen_esc=$__nocx_lc_json_escaped
+    __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'
     if ! __nocx_lc_read_frame; then
         return 1
     fi

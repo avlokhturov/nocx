@@ -130,9 +130,29 @@ func (e Event) validInbound() bool {
 // (length-delimited JSON — see the doc's framing section).
 type (
 	// Hello is the first frame of a connection. The capability is in the
-	// envelope; the payload names the shell.
+	// envelope; the payload names the shell and, when the shell was brought
+	// up from a committed bundle, the generation of that bundle.
 	Hello struct {
 		Shell string `json:"shell"`
+		// Generation is the far side's NOCX_GENERATION: the generation of
+		// the integration bundle the launcher committed on that host, or
+		// adopted there when a newer one was already installed. Empty for a
+		// shell that was not launched from a bundle at all (the local tier,
+		// and any launcher that published nothing).
+		//
+		// It is reported rather than assumed because only the far shell
+		// knows it. The publish prelude installs "v<our version>" when it
+		// publishes, but when the host already carries a version >= ours it
+		// SKIPS the publish and adopts the generation named in the manifest
+		// that is there — a value this side never chose. Deriving the
+		// generation locally would therefore be right until the first host
+		// touched by a newer nocx, and wrong silently after it.
+		//
+		// Descriptive, never authority: it names what is on a disk we cannot
+		// see, and nothing is granted on the strength of it. The domain id,
+		// the epoch and the capability remain the only authority (ADR-0024
+		// decision 7).
+		Generation string `json:"gen,omitempty"`
 	}
 
 	// Accept is the kernel's answer: the domain is live, and only now may

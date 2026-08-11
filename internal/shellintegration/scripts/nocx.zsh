@@ -246,7 +246,11 @@ __nocx_lc_init() {
     __nocx_lc_lane_esc=$__nocx_lc_json_escaped
     __nocx_lc_json_escape "$__nocx_lc_dom"
     __nocx_lc_dom_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"zsh","max_frame":'"$__nocx_lc_max_frame"
+    # The bundle this shell was brought up from — see the same block in
+    # nocx.bash for why only the far side can name it and why it is escaped.
+    __nocx_lc_json_escape "${NOCX_GENERATION-}"
+    __nocx_lc_gen_esc=$__nocx_lc_json_escaped
+    __nocx_lc_send hello ',"shell":"zsh","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'
     if ! __nocx_lc_read_frame; then
         return 1
     fi

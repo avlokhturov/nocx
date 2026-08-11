@@ -32,6 +32,16 @@ type Domain struct {
 	Lane      LaneID
 	Transport TransportID
 	State     DomainState
+	// BundleGeneration is the integration bundle the far shell reported in
+	// its hello — what is actually installed on that host, committed by this
+	// connection's launcher or adopted from a newer one already there. Empty
+	// when the shell named none.
+	//
+	// Read by the composition root to record the installed fact, which is
+	// what makes the footprint surface able to say which hosts carry an
+	// installation (nocx-ak2d). Descriptive only: it is a claim about a
+	// remote disk, and no decision that matters is taken on it.
+	BundleGeneration string
 
 	capability     Capability
 	recovery       FenceNonce // the one-shot recovery fence, minted with the capability

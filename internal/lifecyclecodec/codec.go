@@ -277,7 +277,11 @@ type wireEnvelope struct {
 	Evt     string `json:"evt"`
 
 	// Event payload fields (§3).
-	Shell         *string           `json:"shell,omitempty"`
+	Shell *string `json:"shell,omitempty"`
+	// Gen is the hello's bundle generation — what the far shell says it was
+	// brought up from. Optional: a shell launched from no bundle names none,
+	// and every shell built before the field existed sends nothing.
+	Gen           *string           `json:"gen,omitempty"`
 	MaxFrame      *int              `json:"max_frame,omitempty"`
 	Attempt       *string           `json:"attempt,omitempty"`
 	Command       *string           `json:"command,omitempty"`
@@ -335,7 +339,7 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 	copy(env.Capability[:], capBytes)
 	switch env.Event.Kind {
 	case lifecycle.KindHello:
-		env.Event.Hello = &lifecycle.Hello{Shell: str(w.Shell)}
+		env.Event.Hello = &lifecycle.Hello{Shell: str(w.Shell), Generation: str(w.Gen)}
 	case lifecycle.KindAccept:
 		env.Event.Accept = &lifecycle.Accept{}
 	case lifecycle.KindStart:
@@ -418,6 +422,9 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	case lifecycle.KindHello:
 		if p := env.Event.Hello; p != nil {
 			we.Shell = new(p.Shell)
+			if p.Generation != "" {
+				we.Gen = new(p.Generation)
+			}
 		}
 	case lifecycle.KindStart:
 		if p := env.Event.Start; p != nil {
