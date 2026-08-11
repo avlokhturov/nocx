@@ -1857,6 +1857,23 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 		// The frame is dropped — and the tab is TOLD, because input
 		// that silently disappears is indistinguishable from a terminal
 		// that ignores you.
+		// The data plane's arrival log. Debug, so it costs nothing until
+		// somebody asks — and somebody does: "were the keystrokes sent at
+		// all, or did the renderer swallow them?" is the first question of
+		// every input-routing defect, and without this it can only be
+		// guessed at from the far side of the socket.
+		//
+		// This is the one plane carrying exactly what the user typed, so it
+		// carries their passwords: every password for a host nocx holds no
+		// credentials for is typed into a running ssh and arrives here as an
+		// ordinary frame. log.Sensitive is what decides whether the bytes
+		// reach a file — shown in a development build, redacted to a length
+		// in a shipped one — and that decision is the logger's, not this
+		// call site's, precisely so no call site can get it wrong.
+		s.log.Debug("data frame",
+			"session_id", string(sid),
+			"bytes", len(frame.Payload),
+			"payload", log.Sensitive(frame.Payload))
 		if !sess.EnqueueWrite(frame.Payload) {
 			s.log.Warn("session write queue full or closed, dropping frame",
 				"session_id", string(sid))
