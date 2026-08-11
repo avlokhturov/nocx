@@ -784,10 +784,24 @@ func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 		t.Fatalf("lane before ack = %v, want Lost throughout the span", st.Lifecycle)
 	}
 	// The ack carries session identity and the generation — nothing else.
-	// The native transition is published DURING the ack (RecoverLane
-	// publishes before the response is written), so it is collected from
-	// the same read loop instead of being consumed as a skipped
-	// notification by a separate call.
+	// Both the response and the native transition are collected from one
+	// read loop, in WHICHEVER ORDER THEY ARRIVE.
+	//
+	// This used to stop reading at the response, on the reasoning that
+	// RecoverLane publishes before the response is written. That is true of
+	// the calling order and false of the wire: outbound.Conn holds
+	// notifications and JSON-RPC responses in SEPARATE channels, and its
+	// pump drains respQueue ahead of the refreshable queue on purpose — "a
+	// response is never stuck behind a burst of data the caller is not
+	// waiting on". So the response overtaking the notification is the
+	// designed behaviour, not a race to be tolerated, and the old loop
+	// asserted the opposite of the transport's contract. It passed on this
+	// developer's Mac and on the runner, and failed every time in the
+	// linux/amd64 container, which is emulated on an arm64 host and simply
+	// lost the coin toss consistently (nocx-2h08 is the sibling finding).
+	//
+	// Bounded by a whole-loop deadline rather than a per-read one: what is
+	// being waited for is two observable messages, not a duration.
 	req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "lifecycle.recoverAck", "params": map[string]any{
 		"sessionId": sid, "generation": lost.Recovery.Generation,
 	}})
@@ -797,13 +811,18 @@ func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 	if err := e.conn.WriteMessage(websocket.TextMessage, req); err != nil {
 		t.Fatalf("write ack: %v", err)
 	}
-	var nativeFact *lifecyclepub.Fact
+	// The loop condition IS the assertion: it ends only once both the
+	// response and the lane's native fact have been seen, so there is
+	// nothing left to check afterwards.
+	var nativeFact, lastFact *lifecyclepub.Fact
 	ackSeen := false
-	for !ackSeen {
-		_ = e.conn.SetReadDeadline(time.Now().Add(wantWithin))
+	loopUntil := time.Now().Add(wantWithin)
+	for !ackSeen || nativeFact == nil {
+		_ = e.conn.SetReadDeadline(loopUntil)
 		_, raw, rerr := e.conn.ReadMessage()
 		if rerr != nil {
-			t.Fatalf("read: %v", rerr)
+			t.Fatalf("recoverAck did not produce both the response and the native fact: "+
+				"response seen = %v, last lifecycle.changed = %+v: %v", ackSeen, lastFact, rerr)
 		}
 		var check struct {
 			ID     *json.RawMessage `json:"id"`
@@ -827,13 +846,18 @@ func TestLifecycleRecoverAck_CompositeFlow(t *testing.T) {
 			}
 			if err := json.Unmarshal(raw, &notif); err == nil {
 				if err := json.Unmarshal(notif.Params, &f); err == nil {
-					nativeFact = &f
+					// Only the native transition ends the wait. Any other
+					// fact for this lane is recorded for the failure
+					// message and read past: settling for the first
+					// lifecycle.changed to arrive would make the loop
+					// order-dependent again, in a subtler way.
+					lastFact = &f
+					if f.Lifecycle == lifecyclepub.LifecycleNative {
+						nativeFact = &f
+					}
 				}
 			}
 		}
-	}
-	if nativeFact == nil || nativeFact.Lifecycle != lifecyclepub.LifecycleNative {
-		t.Fatalf("post-ack fact = %+v, want native (the published transition)", nativeFact)
 	}
 	// The lane is a usable conventional terminal now, and the domain stays
 	// permanently lost.
@@ -959,9 +983,26 @@ func TestLifecycleRecoverAck_Rejections(t *testing.T) {
 }
 
 // TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim is AC4's negative
-// branch at the routing seam: when the session is dead, the lost fact is
-// delivered WITHOUT the recovery contract — no restoration is claimed over a
-// dead connection — and no episode is opened, so no ack can land.
+// branch at the routing seam: once the session is dead, NO lifecycle fact
+// goes to the wire at all, no episode is opened, and no ack can land. The
+// kernel still makes its transition — that authority is never suppressed —
+// but the session's remaining wire contract is `exit` and nothing else.
+//
+// This test used to assert that a stripped lost fact was DELIVERED, and that
+// is a guarantee the protocol never gave. lifecycle-protocol.md §12.1 is
+// explicit about the two losses: the lifecycle adapter dying while the
+// session channel's Done() is still open is the one that runs the
+// restoration sequence; "the pty/SSH channel Done() closes → the session is
+// dead: emit `exit`, cancel any pending restoration, reject late
+// acknowledgements ... and make no restoration claim. If the two race,
+// session death wins."
+//
+// Asserting delivery made the test depend on which of two unordered
+// goroutines won — monitorExit removing the receiver, or the lifecycle
+// channel's reader noticing EOF and publishing — so it passed on this
+// developer's Mac and on the runner and failed in the emulated container,
+// where the coin lands the same way every time (nocx-2h08). Neither side was
+// wrong about the product; the test was wrong about the contract.
 func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
@@ -980,28 +1021,71 @@ func TestLifecycleChanged_DeadSessionGetsNoRecoveryClaim(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
 	_ = readNotification(t, e.conn, "lifecycle.changed", wantWithin) // prompt_ready
 
-	// The session channel is dead; the lane registration outlives it for a
-	// moment (the strictest race — the strip path must not depend on the
-	// registration having been cleaned up).
+	// The session channel is dead; the lane registration deliberately
+	// outlives it, which is the strictest case — suppression must not depend
+	// on the registration having been cleaned up first.
 	_ = e.ws.registry.Close(session.ID(sid))
 	if err := pub.TransportLost("T"); err != nil {
 		t.Fatalf("TransportLost: %v", err)
 	}
-	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
-	var lost lifecyclepub.Fact
-	if err := json.Unmarshal(raw, &lost); err != nil {
-		t.Fatalf("decode lost: %v", err)
+
+	// TransportLost publishes synchronously, so by the line above the routing
+	// decision is already made: a lifecycle.changed for this lane either sits
+	// in the outbound queue or was never enqueued. Two round-trips fence the
+	// difference WITHOUT waiting out a duration — outbound.Conn's pump drains
+	// respQueue ahead of the refreshable queue, but it drains the refreshable
+	// one whenever respQueue is empty, and respQueue is necessarily empty at
+	// some point between two sequential responses. So anything enqueued
+	// before the first request has been written by the time the second
+	// response arrives.
+	//
+	// Both acks are refused — that is the second half of the assertion: no
+	// episode exists over a dead session, so no acknowledgement can land.
+	for _, id := range []int{2, 3} {
+		req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "lifecycle.recoverAck", "params": map[string]any{
+			"sessionId": sid, "generation": strings.Repeat("33", 32),
+		}})
+		if err != nil {
+			t.Fatalf("marshal ack %d: %v", id, err)
+		}
+		if err := e.conn.WriteMessage(websocket.TextMessage, req); err != nil {
+			t.Fatalf("write ack %d: %v", id, err)
+		}
 	}
-	if lost.Lifecycle != lifecyclepub.LifecycleLost {
-		t.Fatalf("fact = %+v, want lost", lost)
+	seen := map[int]bool{}
+	deadline := time.Now().Add(wantWithin)
+	for !seen[2] || !seen[3] {
+		_ = e.conn.SetReadDeadline(deadline)
+		_, raw, rerr := e.conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("waiting for both ack responses (seen %v): %v", seen, rerr)
+		}
+		var msg struct {
+			ID     *int             `json:"id"`
+			Method string           `json:"method"`
+			Error  *jsonrpcErrorObj `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if msg.Method == "lifecycle.changed" {
+			t.Fatalf("a dead session must receive NO lifecycle fact, got %s", raw)
+		}
+		if msg.ID == nil {
+			continue
+		}
+		if msg.Error == nil {
+			t.Fatalf("ack %d over a dead session must be refused, got a result", *msg.ID)
+		}
+		seen[*msg.ID] = true
 	}
-	if lost.Recovery != nil {
-		t.Fatalf("a dead session must get NO recovery claim, got %+v", lost.Recovery)
-	}
-	// And no episode exists: a late ack is refused.
-	errObj := recoverAckErr(t, e.conn, sid, strings.Repeat("33", 32), 2)
-	if errObj.Code == 0 {
-		t.Fatalf("ack over a dead session must be refused, got %+v", errObj)
+
+	// The kernel's own transition is NOT suppressed: suppression is about the
+	// wire, never about the backend's authority state.
+	if st, err := pub.State(lane); err != nil {
+		t.Fatalf("State: %v", err)
+	} else if st.Lifecycle != lifecycle.LifecycleLost {
+		t.Fatalf("lane after transport loss = %v, want Lost", st.Lifecycle)
 	}
 }
 

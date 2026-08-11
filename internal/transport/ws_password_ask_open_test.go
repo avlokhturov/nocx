@@ -129,32 +129,57 @@ func TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop(t *testing.T) {
 
 	// Now answer the ask over the same socket. Before the fix this message
 	// sat unread and the open never completed.
-	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
-	resp := vaultCall(t, conn, "connections.passwordResolved", map[string]any{
-		"requestId": notif.Params.RequestID,
-		"outcome":   "submitted",
-		"password":  "hunter2",
-		"remember":  false,
-	}, 2)
-	if resp.Error != nil {
-		t.Fatalf("passwordResolved error: %s", resp.Error.Message)
+	answer, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "connections.passwordResolved",
+		"params": map[string]any{
+			"requestId": notif.Params.RequestID,
+			"outcome":   "submitted",
+			"password":  "hunter2",
+			"remember":  false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal passwordResolved: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, answer); err != nil {
+		t.Fatalf("write passwordResolved: %v", err)
 	}
 
-	// The open completes with the answer the ask returned.
-	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
-	_, openData, err := conn.ReadMessage()
-	if err != nil {
-		t.Fatalf("read open response: %v", err)
+	// BOTH responses are collected in ONE loop, in whichever order they
+	// arrive. They are produced by two goroutines that hand off to each
+	// other — connections.passwordResolved delivers the answer to the
+	// parked open and then enqueues its own response, while the woken open
+	// enqueues id 100 — so either can reach the socket first.
+	//
+	// Reading them as two sequential calls is what failed: vaultCall hunts
+	// for one id and DISCARDS every other response on the way, so an open
+	// response that won the race was eaten, and the direct read that
+	// followed waited out its 30 seconds for a frame already gone. Worse,
+	// gorilla stores the first read error permanently, so the wait could
+	// not recover even in principle.
+	var resolvedResp, openResp vaultRPCResult
+	for resolvedResp.ID == 0 || openResp.ID == 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
+		_, data, rerr := conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("waiting for both responses (passwordResolved seen: %v, open seen: %v): %v",
+				resolvedResp.ID != 0, openResp.ID != 0, rerr)
+		}
+		var msg vaultRPCResult
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue // a notification or a frame this test does not read
+		}
+		switch msg.ID {
+		case 2:
+			resolvedResp = msg
+		case 100:
+			openResp = msg
+		}
 	}
-	var openResp struct {
-		Error *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-		Result map[string]any `json:"result"`
-	}
-	if err := json.Unmarshal(openData, &openResp); err != nil {
-		t.Fatalf("unmarshal open response: %v", err)
+	if resolvedResp.Error != nil {
+		t.Fatalf("passwordResolved error: %s", resolvedResp.Error.Message)
 	}
 	if openResp.Error != nil {
 		t.Fatalf("open failed: %s", openResp.Error.Message)

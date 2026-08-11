@@ -1972,6 +1972,25 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	s.removeRx(sess.ID())
 	_ = s.registry.Close(sess.ID())
 
+	// The two responsibilities this path used to drop. closeSession has had
+	// both since it was written; monitorExit is the OTHER teardown owner and
+	// carried neither, so everything below held only for a session the user
+	// closed by hand and not for one whose shell simply exited — which is
+	// the ordinary way a session ends.
+	//
+	// cancelRecovery: protocol §12.1 says that when the pty/SSH channel's
+	// Done() closes the session is dead, and the backend must "cancel any
+	// pending restoration, reject late acknowledgements ... and make no
+	// restoration claim". Without this an episode opened moments earlier
+	// outlived the session, so a late lifecycle.recoverAck could still be
+	// accepted for a lane whose shell was gone.
+	//
+	// unregisterLifecycleLanes: without it the lane→session map kept an
+	// entry per dead session for the life of the process, and PublishLifecycle
+	// went on resolving that lane to a session nobody can reach.
+	s.cancelRecovery(sess.ID())
+	s.unregisterLifecycleLanes(sess.ID())
+
 	// Port discovery (nocx-wzc4.2): if this was the last session on its
 	// profile, forget the target and release its lease.
 	s.discoverySessionClosed(sess)
