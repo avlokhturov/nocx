@@ -9,8 +9,24 @@
 #   - the repo is public, so macos-latest runner minutes are free.
 # (Note: wails/v2 also requires GTK3/WebKit2GTK on Linux; the decision stands
 # on the target-OS argument alone, without measuring ubuntu.)
-# The pre-commit hook and the Makefile `ci` target mirror this same set of
-# checks so "green" is identical locally and in CI.
+# Every job here has a local runner that IS the job, and `make ci-full` runs
+# them all:
+#
+#   backend        make ci                   (this host, macOS — see below)
+#   backend-linux  scripts/ci-linux.sh       ubuntu-24.04, both keyring variants
+#   frontend       scripts/ci-frontend.sh    node 24, frontend/ AND the repo root
+#   e2e            e2e/run-in-container.sh   the same image and the same command
+#
+# `make ci` alone is the host-side half only. The Makefile used to be described
+# here as mirroring "this same set of checks so green is identical locally and
+# in CI"; it covered one of the four jobs, and a release attempt and its
+# follow-up PR both came back red from a job the local gate had just reported
+# green (2026-08-10, nocx-cn86). The claim is now a list, and each line of it is
+# a command somebody can run.
+#
+# `backend` is the one job with no container, and deliberately: macos-latest is
+# the target OS. That makes it the one place where local and CI can still
+# disagree — and they do (nocx-58gq, nocx-65v6). See the Makefile's `ci` target.
 #
 # Trigger decision: CI runs on pull requests to main, on release branches
 # (release/**) and manual workflow_dispatch, and is *called* by release.yml via

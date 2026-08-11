@@ -367,9 +367,30 @@ and this is one. Allowed without asking: `git commit`, `git push`, `bd close`,
 **Merging a pull request always requires explicit approval** — in that session, for that
 PR. Authority to commit and push is not authority to merge.
 
-Run the full local gate before pushing, not only the part you touched: `gofumpt -l .`,
-`golangci-lint run`, `go test -race ./...`, plus `npx prettier --check .`, `npx eslint .`,
-`npm run typecheck` and `npm test` in `frontend/`.
+**Run the gate CI runs, not a subset of it.** `make ci-full` is every CI job, each in the
+environment its job runs in — and the four names below are the whole of `ci.yml`:
+
+```bash
+make ci-full            # all four, cheapest first
+make ci                 # host-side only: the macOS `backend` job + host frontend gates
+./scripts/ci-linux.sh   # `backend-linux`, ubuntu-24.04, both keyring variants
+./scripts/ci-frontend.sh # `frontend`, node 24 — frontend/ AND the repo root
+./e2e/run-in-container.sh # `e2e`, the same image and the same command CI runs
+```
+
+`make ci` alone is **not** the gate, whatever it used to say about itself. It covered one
+of four jobs, and a release attempt and its follow-up PR both came back red from a job it
+had just reported green (2026-08-10). The three containerized runners are byte-for-byte
+their CI counterparts, down to the runner's 4 vCPU — the capacity cap is not a detail, it
+is the single thing that made the e2e container disagree with CI (nocx-cbtc), and every
+one of these scripts now defaults to it.
+
+**`backend` is the one job with no container, and it is the one place local and CI still
+disagree.** macos-latest is the target OS, so it cannot be containerized, and a developer
+Mac is not that runner: `internal/pty` hangs to its 600 s panic here while green there,
+and three tests in `internal/app` and `internal/git/local` fail here and pass there
+(nocx-58gq, nocx-65v6). Until those are closed, read a local `backend` red against that
+list before believing it — and never the other way round: CI is still the source of truth.
 
 **Take the merge slot before integrating into `main`**, and release it whether you succeed
 or not — a worker that forgets strands everyone behind it:

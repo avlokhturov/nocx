@@ -1,4 +1,5 @@
-.PHONY: all init build dev dev-web lint format test clean hooks ci lint-ci test-ci build-ci frontend-ci
+.PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
+        ci-linux ci-frontend ci-e2e lint-ci test-ci build-ci root-ci frontend-ci
 
 GO ?= go
 GOFUMPT ?= gofumpt
@@ -81,7 +82,47 @@ hooks:
 	git config core.hooksPath .githooks
 	@echo "git hooks installed from .githooks/"
 
-ci: lint-ci test-ci build-ci frontend-ci
+# `ci` is the HOST-SIDE half of CI: the `backend` job (macos-latest) plus the
+# host's copy of the `frontend` job. It is the fast gate, and it is deliberately
+# NOT the whole matrix — read `ci-full` below before you treat a green `ci` as a
+# green run.
+#
+# ci.yml's header used to claim this target "mirrors the same set of checks so
+# green is identical locally and in CI". It did not, and every gap had already
+# produced a red run from a gate that had just reported green:
+#
+#   backend-linux (both keyring variants)  scripts/ci-linux.sh   (nocx-cn86)
+#   e2e                                    e2e/run-in-container.sh
+#   frontend on the runner's node 24       scripts/ci-frontend.sh
+#   the repo-root gates and spec coverage  scripts/ci-frontend.sh (nocx-z9s9.8)
+#   go test -tags release ./internal/storage/...   added below
+#
+# `ci-full` runs all of them, each in the environment its job runs in.
+ci: lint-ci test-ci build-ci root-ci frontend-ci
+	@echo ""
+	@echo "=== host-side gates green ==="
+	@echo "NOT covered by this target: backend-linux, e2e, and the frontend job"
+	@echo "on the runner's node — those are the other three of 'make ci-full'."
+
+# Every CI job, each through the runner it actually runs on. The three
+# containerized jobs are byte-for-byte their CI counterparts; `ci` is the
+# macOS-only part, which is the one job that cannot be containerized because
+# macos-latest is the target OS (see ci.yml's runner decision).
+#
+# Order is cheapest-first: the host gates fail in seconds, ci-linux in minutes,
+# e2e last because it is the longest.
+ci-full: ci ci-linux ci-frontend ci-e2e
+	@echo ""
+	@echo "=== every CI job green locally ==="
+
+ci-linux:
+	./scripts/ci-linux.sh
+
+ci-frontend:
+	./scripts/ci-frontend.sh
+
+ci-e2e:
+	./e2e/run-in-container.sh
 
 lint-ci:
 	@echo "=== gofumpt check ==="
@@ -94,10 +135,35 @@ lint-ci:
 test-ci:
 	@echo "=== go test -race ==="
 	$(GO) test -race -count=1 ./...
+	@echo ""
+	@echo "=== go test -race -tags release (the shipped profile directory) ==="
+	@# The shipped profile directory lives behind `-tags release`
+	@# (internal/storage/appdir.go), so the ordinary run never compiles it. The
+	@# `backend` job runs this; this target did not, which is exactly the kind
+	@# of gap that makes a green local gate mean nothing.
+	$(GO) test -race -count=1 -tags release ./internal/storage/...
 
 build-ci:
 	@echo "=== go build ./... ==="
 	$(GO) build ./...
+
+# The repo-root gates: a different eslint config and a different tree from
+# frontend/'s, covering e2e/, the hooks and the config files. They ran ONLY in
+# the pre-commit hook, where they had been dying on EACCES against the e2e
+# container's root-owned output — and a crashing gate reports nothing, so 19
+# lint errors and 15 unformatted files accumulated behind it before CI grew
+# steps for them (nocx-z9s9.8). Nothing local ran them until now.
+root-ci:
+	@echo "=== repo root (e2e, hooks, config) ==="
+	@if [ ! -d node_modules ]; then echo "FAIL: node_modules not found — run 'npm ci' first"; exit 1; fi
+	@echo "--- tsc --noEmit (the e2e suite) ---"
+	npm run typecheck
+	@echo "--- eslint ---"
+	npm run lint
+	@echo "--- prettier check ---"
+	npm run format:check
+	@echo "--- every spec file is collected ---"
+	node e2e/check-coverage.mjs
 
 frontend-ci:
 	@echo "=== frontend ==="

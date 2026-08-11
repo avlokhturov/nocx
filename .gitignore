@@ -48,6 +48,12 @@ frontend/dist/*
 frontend/node_modules/
 nocx
 node_modules/
+# The other two cmd/ binaries, for the same reason as `nocx` above: a bare
+# `go build ./cmd/e2e-sshd` drops its output in the working directory, and a
+# 6 MB Mach-O in the repo root is one `git add -A` away from being committed.
+# The e2e specs build these into a temp dir; these are what a hand-run leaves.
+/e2e-sshd
+/devharness
 Thumbs.db
 vendor/
 

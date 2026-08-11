@@ -20,6 +20,25 @@
 #
 # Usage: e2e/run-in-container.sh [playwright args...]
 
+# ARCHITECTURE: the host's, deliberately — and this is the opposite call from
+# .githooks/images/ci-linux/Dockerfile, which pins --platform=linux/amd64 to BE
+# the runner. Stating it because a reader comparing the two files has to be able
+# to tell a decision from an omission.
+#
+# So this image is linux/arm64 on an Apple Silicon developer machine and
+# linux/amd64 on ubuntu-latest. The trade is measured rather than assumed: at
+# the same tree, the local container reported 13 failures and CI 12, and the
+# deterministic core — five specs, both engines — was IDENTICAL (nocx-cbtc).
+# What made the two runs disagree was never the architecture; it was core count,
+# which is why run-in-container.sh now defaults to the runner's 4.
+#
+# Pinning amd64 here would run two browser engines under QEMU on every developer
+# machine this product is built on. The ci-linux image can afford that — it runs
+# Go tests, and being the runner is its entire purpose. A Playwright suite cannot:
+# an 11-minute gate that becomes an hours-long one is a gate nobody runs, and a
+# gate nobody runs is the divergence this whole directory exists to remove.
+#
+# Revisit if a failure ever turns out to be arch-specific. Nothing has been.
 FROM mcr.microsoft.com/playwright:v1.61.1-noble
 
 # Go, pinned to go.mod. The suite compiles cmd/devharness and cmd/e2e-sshd.
