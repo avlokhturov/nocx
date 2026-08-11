@@ -60,32 +60,40 @@ tty_flag=()
 #
 # Passed in rather than guessed inside: only out here is there a host user to
 # ask about.
-# A CPU cap, because the image is not the whole of "the same conditions".
+# UNCAPPED by default, on the owner's decision of 2026-08-11: a test must
+# never depend on timing, so this stops throttling the host to imitate a
+# slower one.
 #
-# The container made the two runs identical in software and left them different
-# in capacity: this developer box has many cores, and ubuntu-latest gives four.
-# Measured 2026-08-07 at the same commit — the suite takes 6.3 minutes here and
-# 10.6 on the runner — and every failure that survived the move to the container
-# was a timing one that only appeared on the slower side: a bell racing a tab
-# open, a command snapshot arriving past its budget, a drag losing focus.
+# It defaulted to 4 — ubuntu-latest's vCPU count — from 2026-08-07, on the
+# reasoning that the container had made the two runs identical in software and
+# left them different in capacity (the suite took 6.3 minutes here and 10.6 on
+# the runner), and that every failure surviving the move to the container was
+# a timing one visible only on the slower side: a bell racing a tab open, a
+# command snapshot arriving past its budget, a drag losing focus.
 #
-# So this exists to reproduce the runner rather than to out-run it, and that is
-# why it is the DEFAULT rather than the thing you remember to reach for. It was
-# opt-in, on the argument that an uncapped run is faster while iterating on one
-# spec — which is true, and is why the escape hatch below still exists. But the
-# default is what a developer actually runs before pushing, and a default that
-# differs from CI is the divergence this whole file was built to remove: the
-# capacity gap is now the ONLY thing left between this command and the runner,
-# so leaving it off by default meant nobody was reproducing CI unless they knew
-# to. `scripts/ci-linux.sh` already defaults its own cap to 4 for the same
-# reason; two sibling scripts answering one question two ways is the defect.
+# Each of those is now read as a defect in the spec rather than a reason to
+# slow the machine down. Throttling made them reproducible, which kept them
+# alive: a spec that waits on an observable state change instead of a duration
+# passes at any speed, and one that does not is broken on a fast machine too —
+# it just has not been caught yet.
 #
-# NOCX_E2E_CPUS=0 opts out for a fast single-spec loop. Override the number
-# when GitHub changes the runner tier — the same knob `scripts/ci-linux.sh`
-# documents.
-cpus="${NOCX_E2E_CPUS:-4}"
+# The cap also could not deliver what it promised. The image is linux/amd64
+# and a developer's Mac is arm64, so the whole thing runs EMULATED: capping it
+# to four cores does not produce the runner, it produces a third machine with
+# timings unlike either. nocx-2h08 is the standing example.
+#
+# NOCX_E2E_CPUS=<n> caps it again for bisecting a suspected concurrency
+# defect. That is a debugging tool, not the gate — the same knob, with the
+# same meaning, as `scripts/ci-linux.sh`.
+cpus="${NOCX_E2E_CPUS:-0}"
 cpu_flag=()
-[ "$cpus" != "0" ] && cpu_flag=(--cpus "$cpus")
+# An `if`, not `[ … ] && …`: under `set -e` a false test as the last command
+# of a && list exits the script, so with 0 as the default the one-liner this
+# replaced would have made the uncapped path terminate silently before docker
+# ever ran.
+if [ "$cpus" != "0" ]; then
+  cpu_flag=(--cpus "$cpus")
+fi
 
 # A git worktree keeps no .git DIRECTORY — it keeps a .git FILE pointing at
 # `<main-repo>/.git/worktrees/<name>`, which is outside the bind mount. The

@@ -115,8 +115,95 @@ ci-full: ci ci-linux ci-frontend ci-e2e
 	@echo ""
 	@echo "=== every CI job green locally ==="
 
+# --- the five jobs ------------------------------------------------------
+#
+# ci-backend  the portable Go suite            Linux container
+# ci-linux    the Linux-only packages          Linux container
+# ci-mac      the macOS-only packages          NATIVE, run by hand
+# ci-frontend node 24                          container
+# ci-e2e      playwright                       container
+#
+# A package is OS-SPECIFIC when its non-test source carries a build
+# constraint — mechanical, checkable, and `make ci-os-split` re-derives the
+# list and fails if this one has drifted. internal/pty is the one entry not
+# derived that way: its source is portable (creack/pty) and its BEHAVIOUR is
+# the platform's, which is why it hangs on a macOS workstation while green on
+# the runner (nocx-58gq).
+#
+# ci-backend and ci-linux partition ./... exactly — nothing is dropped by the
+# split and nothing is run twice. The point of splitting them is that a red
+# run says whether portable behaviour broke or platform behaviour did, which
+# one job answering for both could never say.
+#
+# The keyring matrix rides with ci-linux and NOT with the OS split, because it
+# is a fixture dimension rather than a platform one: internal/vault/system is
+# the Secret Service binding and lives in the OS set, but portable packages
+# read through it too, so both variants run over the whole partition.
+OS_PKG_DIRS := cmd/e2e-sshd internal/contentkey internal/lifecyclechannel \
+               internal/nativeports internal/pty internal/storage \
+               internal/update internal/vault/system
+OS_PKG_RE := (cmd/e2e-sshd|internal/contentkey|internal/lifecyclechannel|internal/nativeports|internal/pty|internal/storage|internal/update|internal/vault/system)
+OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
+
+ci-backend:
+	@echo "=== ci-backend: the portable Go suite, in the Linux container ==="
+	./scripts/ci-linux.sh --no-keyring -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
+
 ci-linux:
-	./scripts/ci-linux.sh
+	@echo "=== ci-linux: the OS-specific packages, both keyring variants ==="
+	./scripts/ci-linux.sh -- $(OS_PKGS)
+
+# ci-os-split re-derives the OS package list from the build constraints and
+# fails when OS_PKG_DIRS has drifted from it. Without this the list is a
+# hand-kept copy of a fact the compiler already knows, and the first package
+# to grow a _darwin.go would quietly stop being covered by ci-mac.
+ci-os-split:
+	@echo "=== every build-constrained package is in OS_PKG_DIRS ==="
+	@derived=$$(grep -rl '//go:build' --include='*.go' . \
+	  | grep -v node_modules | grep -v '_test\.go$$' \
+	  | xargs -n1 dirname | sort -u); \
+	missing=""; \
+	for d in $$derived; do \
+	  case " $(OS_PKG_DIRS) " in *" $${d#./} "*) ;; *) missing="$$missing $${d#./}";; esac; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	  echo "FAIL: build-constrained but not in OS_PKG_DIRS:$$missing"; exit 1; \
+	fi; \
+	echo "ok"
+
+# ci-mac is the ONLY gate with no container, because macos-latest is the
+# target OS and Docker on a Mac runs Linux. It is therefore also the only one
+# that runs against a real machine with a real login keychain, so it is NOT in
+# `make ci` — you run it by hand, when a Darwin-specific failure needs
+# reproducing.
+#
+# Hermetic by construction, and it refuses to start otherwise. The three
+# variables below move the profile directory, the home directory and the
+# temporary root off the developer's own; without them this suite spawns real
+# shells that read the developer's rc files and writes where the developer
+# lives. That is not hypothetical — an e2e run once reset this developer's
+# settings and theme on every pass (nocx-ti8w), and a shell test never reached
+# prompt_ready here while passing on an empty runner because ~/.bashrc loads a
+# second prompt integration (nocx-58gq).
+#
+# The keychain is the one thing a directory cannot move: go-keyring talks to
+# the Keychain service, and app.New probes the system vault provider on every
+# backend start. That probe is a real keychain write and it is stated here
+# rather than pretended away.
+ci-mac:
+	@echo "=== ci-mac: the OS-specific packages, natively, in a disposable root ==="
+	@root=$$(mktemp -d "$${TMPDIR:-/tmp}/nocx-ci-mac.XXXXXX") && \
+	  echo "disposable root: $$root" && \
+	  trap 'rm -rf "$$root"' EXIT && \
+	  NOCX_TEST_APP_DIR="$$root/profile" HOME="$$root/home" TMPDIR="$$root/tmp" \
+	  sh -c 'mkdir -p "$$NOCX_TEST_APP_DIR" "$$HOME" "$$TMPDIR" && \
+	         $(GO) test -race -count=1 $(OS_PKGS) && \
+	         echo "" && \
+	         echo "=== the shipped profile directory (-tags release) ===" && \
+	         $(GO) test -race -count=1 -tags release ./internal/storage/...'
+	@echo ""
+	@echo "=== ci-mac green — NOTE: the login keychain is shared with your Mac"
+	@echo "    and is the one thing a disposable root cannot isolate. ==="
 
 ci-frontend:
 	./scripts/ci-frontend.sh

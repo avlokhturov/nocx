@@ -27,12 +27,29 @@ IMAGE="nocx-ci-linux:ubuntu-24.04"
 IMAGE_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")/../.githooks/images/ci-linux" && pwd)"
 REPO="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 
-# GitHub's standard ubuntu-latest runner for a public repository is 4 vCPU.
-# The count is not incidental: TestOneLaneSeveralDomainsNoCurrentDomain failed
-# on the runner and nowhere else because two adapter goroutines raced, and a
-# developer machine with cores to spare let the intended one win every time
-# (nocx-x8ol). Override when GitHub changes the tier.
-CPUS="${NOCX_CI_CPUS:-4}"
+# UNCAPPED by default, on the owner's decision of 2026-08-11: a test must
+# never depend on timing, so the local runner stops pretending to be a slow
+# machine and runs on every core the host has.
+#
+# It used to default to 4, GitHub's vCPU count for a public repository, after
+# TestOneLaneSeveralDomainsNoCurrentDomain failed on the runner and nowhere
+# else — two adapter goroutines raced and a developer machine with cores to
+# spare let the intended one win every time (nocx-x8ol). The cap did make that
+# failure reproducible, and that is exactly the objection to it: it preserved
+# a timing-dependent test by reproducing the conditions it depended on,
+# instead of the test being fixed to wait on an observable state change.
+#
+# The cap could not have delivered what it promised anyway. This image is
+# --platform=linux/amd64 and a developer's Mac is arm64, so the container runs
+# EMULATED: byte-for-byte the runner in software, nothing like it in timing,
+# whatever the core count is set to. A capped emulated run is not the runner
+# either — it is a third machine. nocx-2h08 is the live example: one starved
+# resource in internal/transport reporting a 30-second timeout under a
+# different test name in every environment.
+#
+# Set NOCX_CI_CPUS to a number to cap it again while bisecting a suspected
+# concurrency defect. That is a debugging tool, not the gate.
+CPUS="${NOCX_CI_CPUS:-0}"
 
 RUN_KEYRING=1
 RUN_NO_KEYRING=1
@@ -67,11 +84,23 @@ GOBUILD_VOL="nocx-ci-gobuild-${HOST_UID}-${HOST_GID}"
 #
 # -count=1, unlike the hook: the runner has no warm test cache, so a package the
 # hook answered from cache is a package this has not run.
+# CPU_FLAG is empty for the uncapped default, so docker is given no --cpus at
+# all rather than a zero it would reject. Unquoted on purpose: an empty
+# variable must expand to no word, which is what sh's word splitting does.
+if [ "$CPUS" = 0 ]; then
+    CPU_FLAG=""
+    CPU_LABEL="every core"
+else
+    CPU_FLAG="--cpus=$CPUS"
+    CPU_LABEL="$CPUS cpus (capped by NOCX_CI_CPUS — a debugging aid, not the gate)"
+fi
+
 run_variant() {
     _label="$1"
     _cmd="$2"
-    printf '\n=== backend-linux (%s) — %s cpus, -count=1, %s ===\n' "$_label" "$CPUS" "$PKGS"
-    docker run --rm --cpus="$CPUS" \
+    printf '\n=== backend-linux (%s) — %s, -count=1, %s ===\n' "$_label" "$CPU_LABEL" "$PKGS"
+    # shellcheck disable=SC2086 # CPU_FLAG must word-split away when empty.
+    docker run --rm $CPU_FLAG \
         -v "$REPO:/src:ro" \
         -v "$GOMOD_VOL:/cache/gomod" \
         -v "$GOBUILD_VOL:/cache/gobuild" \
