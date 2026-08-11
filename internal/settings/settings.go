@@ -1030,6 +1030,21 @@ func (r *Registry) Publish(n PendingNotification) {
 	r.finishCommit(n.ch)
 }
 
+// ValidateSetting checks whether a key-value pair would be accepted by the
+// registry without persisting anything. It returns an error for unknown,
+// secret-class, wrong-typed, object, or array values.
+func (r *Registry) ValidateSetting(key string, value any) error {
+	d := descriptorByKey(key)
+	if d == nil {
+		return fmt.Errorf("unknown setting key %q", key)
+	}
+	if d.Control() == ControlSecret || d.DataClass() == SecretAuthenticator {
+		return fmt.Errorf("secret-class setting %q cannot be validated as non-secret", key)
+	}
+	_, err := coerceValue(d, value)
+	return err
+}
+
 func validateValue(d Descriptor, value any) error {
 	switch d.Control() {
 	case ControlToggle:

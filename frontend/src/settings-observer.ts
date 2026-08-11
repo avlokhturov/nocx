@@ -22,39 +22,48 @@ export class SettingsObserver {
   private unsub: (() => void) | null = null
   private unsubConnect: (() => void) | null = null
   private active = false
+  private handlers = new Set<InvalidationHandler>()
 
   constructor(private dispatcher: Dispatcher) {}
 
-  /** Start listening for settings.changed notifications.  Call setRevision()
-   *  after the initial snapshot fetch so the observer knows the baseline. */
-  start(handler: InvalidationHandler): void {
-    if (this.active) return
-    this.active = true
+  /** Start listening for settings.changed notifications. Call setRevision()
+   *  after the initial snapshot fetch so the observer knows the baseline.
+   *  Every caller receives its own cleanup; the wire subscription is shared. */
+  start(handler: InvalidationHandler): () => void {
+    this.handlers.add(handler)
+    if (!this.active) {
+      this.active = true
 
-    this.unsub = this.dispatcher.subscribe('settings.changed', (params: unknown) => {
-      if (!this.active) return
-      const p = params as SettingsChangeParams
-      if (!p || typeof p.revision !== 'number') return
+      this.unsub = this.dispatcher.subscribe('settings.changed', (params: unknown) => {
+        if (!this.active) return
+        const p = params as SettingsChangeParams
+        if (!p || typeof p.revision !== 'number') return
 
-      if (this.expectedRevision < 0) {
+        if (this.expectedRevision < 0) {
+          this.expectedRevision = p.revision + 1
+          this.invalidate()
+          return
+        }
+
+        if (p.revision < this.expectedRevision) return
+
         this.expectedRevision = p.revision + 1
-        handler()
-        return
-      }
+        this.invalidate()
+      })
 
-      if (p.revision < this.expectedRevision) return
+      // On reconnect the revision counter may reset (it is in-memory, §A.1).
+      // Reset our tracker and trigger a full snapshot fetch.
+      this.unsubConnect = this.dispatcher.onConnect(() => {
+        if (!this.active) return
+        this.expectedRevision = -1
+        this.invalidate()
+      })
+    }
 
-      this.expectedRevision = p.revision + 1
-      handler()
-    })
-
-    // On reconnect the revision counter may reset (it is in-memory, §A.1).
-    // Reset our tracker and trigger a full snapshot fetch.
-    this.unsubConnect = this.dispatcher.onConnect(() => {
-      if (!this.active) return
-      this.expectedRevision = -1
-      handler()
-    })
+    return () => {
+      this.handlers.delete(handler)
+      if (this.handlers.size === 0) this.stop()
+    }
   }
 
   /** Set the expected next revision from a snapshot. Call after every
@@ -63,8 +72,13 @@ export class SettingsObserver {
     this.expectedRevision = rev + 1
   }
 
+  private invalidate(): void {
+    for (const handler of [...this.handlers]) handler()
+  }
+
   stop(): void {
     this.active = false
+    this.handlers.clear()
     this.unsub?.()
     this.unsub = null
     this.unsubConnect?.()

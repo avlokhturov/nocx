@@ -2,8 +2,8 @@
 title: 'Port structured Backup & Restore onto current main'
 type: 'feature'
 created: '2026-08-09'
-status: 'in-progress'
-baseline_commit: 'a790937143df3bc83d42065e032c51a5ea43b4b9'
+status: 'done'
+baseline_commit: 'bc603c6f261f3c51f9f382388f8778333ce1d068'
 context:
   - '{project-root}/docs/architecture.md'
   - '{project-root}/docs/capabilities-migration-map.md'
@@ -55,13 +55,17 @@ context:
 
 **Execution:**
 
-- [ ] Add backup document/service/journal/save-dialog code and tests, adapted to current profile/settings models -- preserve all non-secret fields and recovery invariants.
-- [ ] Add profile/settings snapshot seams and atomic implementations -- make backup reads and writes coherent without exposing secrets.
-- [ ] Add typed capability operation and current `methodSpec` registrations -- keep handlers responder-only and bounded off-loop.
-- [ ] Replace legacy export RPC/package/callers and wire the service in `internal/app/app.go` -- leave one owner for backup behavior.
-- [ ] Add four exact backup JSON Schemas and generated frontend types plus contract checks -- make the wire a tested party.
-- [ ] Port the Backup & Restore UI and file-input behavior -- make create/save/preview/confirm/restore reachable from Settings.
-- [ ] Add backend over-the-wire and frontend/e2e happy-path and failure-path tests -- prove the user can create, save, preview, and restore.
+- [x] Add backup document/service/journal/save-dialog code and tests, adapted to current profile/settings models -- preserve all non-secret fields and recovery invariants.
+- [x] Add profile/settings snapshot seams and atomic implementations -- make backup reads and writes coherent without exposing secrets.
+- [x] Add typed capability operation and current `methodSpec` registrations -- keep handlers responder-only and bounded off-loop.
+- [x] Replace legacy export RPC/package/callers and wire the service in `internal/app/app.go` -- leave one owner for backup behavior.
+- [x] Add four exact backup JSON Schemas and generated frontend types plus contract checks -- make the wire a tested party.
+- [x] Port the Backup & Restore UI and file-input behavior -- make create/save/preview/confirm/restore reachable from Settings.
+- [x] Add backend over-the-wire and frontend/e2e happy-path and failure-path tests -- prove the user can create, save, preview, and restore.
+- [x] Harden native save and JSON parsing -- pass filenames as data, detect duplicate keys token-by-token, and make nested values return validation errors rather than panic.
+- [x] Validate the complete restored aggregate through existing settings/profile authorities -- reject unknown settings, malformed forwards, and orphaned group references before mutation; normalize session-end behavior.
+- [x] Restore transport and UI contracts -- keep the Tabby document budget, represent save cancellation exactly on the wire, publish inline rollback notifications, and compose Backup & Restore from PageSection so WebKit scroll ownership remains intact.
+- [x] Replace no-op acceptance coverage with non-empty restore and restart assertions; add regression tests for every review reproducer.
 
 **Acceptance Criteria:**
 
@@ -82,3 +86,58 @@ context:
 - `npm run contracts:check` -- expected: PASS.
 - `npm run typecheck` and `npm test` in `frontend/` -- expected: PASS.
 - Targeted `e2e` backup spec in the disposable harness -- expected: create/save/read/preview/restore succeeds.
+
+## Suggested Review Order
+
+**Restore invariants**
+
+- Restore coordinates preview freshness, journal spans, rollback, and deferred notification publication.
+  [`service.go:189`](../../internal/backup/service.go#L189)
+
+- One parser validates duplicates, settings, forwards, groups, and document shape before mutation.
+  [`service.go:577`](../../internal/backup/service.go#L577)
+
+- Atomic profile replacement enforces group membership and the existing forward authority.
+  [`store.go:399`](../../internal/profile/store.go#L399)
+
+- Registry validation makes preview and restore accept exactly the same non-secret values.
+  [`settings.go:1036`](../../internal/settings/settings.go#L1036)
+
+- Merge normalizes duplicated session-end fields while preserving current credential metadata.
+  [`service.go:1215`](../../internal/backup/service.go#L1215)
+
+- Recovery publishes rolled-back settings only after the profile snapshot is restored.
+  [`service.go:250`](../../internal/backup/service.go#L250)
+
+**Native save and wire boundaries**
+
+- macOS passes filenames as argv data, removing AppleScript interpolation entirely.
+  [`save.go:126`](../../internal/backup/save.go#L126)
+
+- Document admission retains the 8 MiB budget for backup and Tabby imports.
+  [`ws.go:1327`](../../internal/transport/ws.go#L1327)
+
+- Cancellation is explicitly nullable while successful save results remain exact objects.
+  [`backup.saveToFile.schema.json:1`](../../contracts/backup.saveToFile.schema.json#L1)
+
+- Real-socket coverage validates both cancellation and successful save against the schema.
+  [`ws_backup_contract_test.go:112`](../../internal/transport/ws_backup_contract_test.go#L112)
+
+**Renderer lifecycle and layout**
+
+- Backup cards compose PageSection, preserving the Settings page's sole scroll owner.
+  [`backup-restore-section.tsx:199`](../../frontend/src/backup-restore-section.tsx#L199)
+
+- One observer fans invalidations to independent application and Settings consumers.
+  [`settings-observer.ts:32`](../../frontend/src/settings-observer.ts#L32)
+
+- Composition-root injection gives the Settings surface a scoped observer cleanup.
+  [`main.tsx:245`](../../frontend/src/main.tsx#L245)
+
+**Acceptance proof**
+
+- Real WebSocket acceptance mutates, restores, restarts, and re-reads profiles and settings.
+  [`backup_acceptance_test.go:11`](../../internal/app/backup_acceptance_test.go#L11)
+
+- Browser acceptance saves the download, mutates state, restores, and observes the setting.
+  [`backup-restore.spec.ts:9`](../../e2e/backup-restore.spec.ts#L9)

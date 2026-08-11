@@ -447,6 +447,79 @@ func TestEnvelope_DuplicateMethod_CannotBypassBudgetTier(t *testing.T) {
 	}
 }
 
+// ── T13: document-tier methods admit frames above the default budget ────────
+
+// TestDocumentBudget_AdmitsFrameAboveDefaultBudget proves that a method on the
+// document budget tier (profiles.tabbyPreview, 8 MiB) accepts a frame that
+// would be refused on the default budget (64 KiB). The frame is ~128 KiB —
+// comfortably above the default budget, far below the document ceiling.
+func TestDocumentBudget_AdmitsFrameAboveDefaultBudget(t *testing.T) {
+	ws, conn := newBareTransport(t)
+	defer func() { _ = conn.Close() }()
+	defer func() { _ = ws.Stop(context.Background()) }()
+
+	// A frame above the default budget but inside the document budget.
+	// The payload is a plausible import frame: >64 KiB of JSON.
+	payload := strings.Repeat("x", 128<<10) // 128 KiB
+	frame := `{"jsonrpc":"2.0","id":1,"method":"profiles.tabbyPreview","params":{"contents":"` +
+		payload + `"}}`
+	writeRaw(t, conn, frame)
+
+	// The budget gate must admit it — read the response and check it's not
+	// a budget rejection (-32602).
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, resp, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var env struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if env.Error != nil && env.Error.Code == -32602 && strings.Contains(env.Error.Message, "size budget") {
+		t.Fatalf("document-tier method refused by budget gate: %+v", env.Error)
+	}
+	// The method itself will fail (parse error on the garbage payload), but
+	// the budget gate must have admitted it — the error code must not be
+	// -32602 "size budget".
+}
+
+// TestDocumentBudget_ImportTabbyAdmitsLargeFrame proves profiles.importTabby
+// also uses the document budget.
+func TestDocumentBudget_ImportTabbyAdmitsLargeFrame(t *testing.T) {
+	ws, conn := newBareTransport(t)
+	defer func() { _ = conn.Close() }()
+	defer func() { _ = ws.Stop(context.Background()) }()
+
+	payload := strings.Repeat("x", 128<<10) // 128 KiB
+	frame := `{"jsonrpc":"2.0","id":1,"method":"profiles.importTabby","params":{"planToken":"` +
+		payload + `"}}`
+	writeRaw(t, conn, frame)
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	_, resp, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var env struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if env.Error != nil && env.Error.Code == -32602 && strings.Contains(env.Error.Message, "size budget") {
+		t.Fatalf("document-tier method refused by budget gate: %+v", env.Error)
+	}
+}
+
 func TestEnvelope_HugeStringBeforeMethod_BoundedAllocation(t *testing.T) {
 	// heapGrowth runs decodeEnvelope and returns the HeapAlloc delta (bytes),
 	// with the frame built and resident BEFORE the measurement so the delta

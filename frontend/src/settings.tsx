@@ -160,12 +160,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
   function startObserver(): void {
     if (!props.observer) return
-    props.observer.start(() => {
+    cleanupObserver = props.observer.start(() => {
       void refresh(reconnectRevisionPolicy)
     })
     props.observer.setRevision(revision())
-    // eslint-disable-next-line solid/reactivity
-    cleanupObserver = () => props.observer!.stop()
   }
 
   // ── Data loading ───────────────────────────────────────────────────

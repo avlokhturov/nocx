@@ -608,7 +608,7 @@ export class ProfileClient {
     return this.call('backup.restore', { contents, strategy, previewToken })
   }
 
-  async saveBackupToFile(fileName: string, contents: string): Promise<SaveFileResult | null> {
+  async saveBackupToFile(fileName: string, contents: string): Promise<SaveFileResult> {
     return this.call('backup.saveToFile', { fileName, contents })
   }
 }

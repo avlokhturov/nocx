@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -157,7 +158,7 @@ func (s *Service) Create() (*CreateResult, error) {
 // Preview parses a backup file, computes the diff against current state,
 // and returns a preview with a binding token.
 func (s *Service) Preview(contents string, strategy RestoreStrategy) (*RestorePreview, error) {
-	doc, omissions, err := parseAndValidate(contents)
+	doc, omissions, err := parseAndValidate(contents, s.settings)
 	if err != nil {
 		return nil, err
 	}
@@ -186,7 +187,7 @@ func (s *Service) Preview(contents string, strategy RestoreStrategy) (*RestorePr
 // Restore applies a backup file under the given strategy, gated by a
 // preview token that must match current state.
 func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToken string) (*RestoreResult, error) {
-	doc, omissions, err := parseAndValidate(contents)
+	doc, omissions, err := parseAndValidate(contents, s.settings)
 	if err != nil {
 		return nil, err
 	}
@@ -259,10 +260,12 @@ func (s *Service) Recover() error {
 		if err := s.connections.ReplaceConnectionSnapshot(*js.connections); err != nil {
 			return fmt.Errorf("%w: rollback connections: %w", ErrRecoveryRequired, err)
 		}
-		if _, err := s.settings.ReplaceNonSecretOverrides(*js.settings); err != nil {
+		pn, err := s.settings.ReplaceNonSecretOverrides(*js.settings)
+		if err != nil {
 			return fmt.Errorf("%w: rollback settings: %w", ErrRecoveryRequired, err)
 		}
 		cleanupJournal(s.doc)
+		s.settings.Publish(pn)
 		return nil
 	case "committed":
 		cleanupJournal(s.doc)
@@ -571,9 +574,15 @@ func groupToBackup(g profile.ProfileGroup) (BackupGroup, int) {
 
 // ── Internal: parse & validate ───────────────────────────────────────────
 
-func parseAndValidate(contents string) (Document, RestoreOmissions, error) {
+func parseAndValidate(contents string, settings SettingsSnapshotStore) (Document, RestoreOmissions, error) {
 	if len(contents) > MaxDocumentBytes {
 		return Document{}, RestoreOmissions{}, fmt.Errorf("%w: document exceeds %d bytes", ErrInvalidDocument, MaxDocumentBytes)
+	}
+
+	// Detect duplicate keys before the main decode so the token-level walk
+	// sees the raw JSON before encoding/json's "last value wins" consumes it.
+	if err := detectDuplicateKeys([]byte(contents)); err != nil {
+		return Document{}, RestoreOmissions{}, err
 	}
 
 	var doc Document
@@ -581,21 +590,6 @@ func parseAndValidate(contents string) (Document, RestoreOmissions, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&doc); err != nil {
 		return Document{}, RestoreOmissions{}, fmt.Errorf("%w: %v", ErrInvalidDocument, err)
-	}
-
-	// Detect duplicate keys: re-parse into RawMessage to capture raw bytes,
-	// compact both sides, and compare lengths. If original had duplicates, the
-	// compacted raw (which preserves them) will be longer than the doc's
-	// compact marshal (last value wins).
-	var raw json.RawMessage
-	if json.Unmarshal([]byte(contents), &raw) == nil {
-		var buf bytes.Buffer
-		if json.Compact(&buf, raw) == nil {
-			check, _ := json.Marshal(doc)
-			if len(check) < buf.Len() {
-				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: duplicate keys detected", ErrInvalidDocument)
-			}
-		}
 	}
 
 	if dec.More() {
@@ -698,7 +692,50 @@ func parseAndValidate(contents string) (Document, RestoreOmissions, error) {
 		}
 	}
 
-	// TODO(ADR-0018): validate setting keys against the registry to keep Preview and Restore consistent.
+	// Validate every profile's stored forward list through the single authority.
+	for _, p := range doc.Connections.Profiles {
+		if len(p.Options.Forwards) > 0 {
+			if err := profile.ValidForwards(p.Options.Forwards); err != nil {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: profile %q: %v", ErrInvalidDocument, p.ID, err)
+			}
+		}
+	}
+
+	// Validate forward lists in group defaults through the same authority.
+	for _, g := range doc.Connections.Groups {
+		if g.Defaults != nil && g.Defaults.SSH != nil && len(g.Defaults.SSH.Options.Forwards) > 0 {
+			if err := profile.ValidForwards(g.Defaults.SSH.Options.Forwards); err != nil {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group %q defaults: %v", ErrInvalidDocument, g.ID, err)
+			}
+		}
+	}
+
+	// Validate the group tree (parent references, cycles, depth) before
+	// mutation. Convert backup groups to profile groups for validation.
+	docGroups := make([]profile.ProfileGroup, 0, len(doc.Connections.Groups))
+	for _, bg := range doc.Connections.Groups {
+		docGroups = append(docGroups, backupToGroup(bg))
+	}
+	if err := profile.ValidateGroupTree(docGroups); err != nil {
+		return Document{}, RestoreOmissions{}, fmt.Errorf("%w: group tree: %v", ErrInvalidDocument, err)
+	}
+
+	// Reject any profile whose group ID is non-empty and not present in the
+	// backup's group set. Orphaned profiles would silently lose their group
+	// anchor on restore, leaving them outside the intended hierarchy.
+	for _, p := range doc.Connections.Profiles {
+		if p.Group != "" && !seenGroupIDs[p.Group] {
+			return Document{}, RestoreOmissions{}, fmt.Errorf("%w: profile %q references unknown group %q", ErrInvalidDocument, p.ID, p.Group)
+		}
+	}
+	// Validate setting keys against the registry to keep Preview and Restore consistent (ADR-0018).
+	if settings != nil {
+		for key, val := range doc.Settings.Overrides {
+			if err := settings.ValidateSetting(key, val); err != nil {
+				return Document{}, RestoreOmissions{}, fmt.Errorf("%w: setting %q: %v", ErrInvalidDocument, key, err)
+			}
+		}
+	}
 
 	omissions := RestoreOmissions{}
 	for _, g := range doc.Connections.Groups {
@@ -708,6 +745,126 @@ func parseAndValidate(contents string) (Document, RestoreOmissions, error) {
 		omissions.GroupDefaultKeysOmitted += len(g.OmittedDefaultKeys)
 	}
 	return doc, omissions, nil
+}
+
+// detectDuplicateKeys walks the JSON tokens of raw and returns an error if
+// any object contains duplicate keys (decoded-equivalent after Unicode escape
+// resolution). This is stricter than the encoding/json behavior of "last
+// value wins" and catches tampered files.
+func detectDuplicateKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := checkObjectDuplicates(dec); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	if _, err := dec.Token(); err == io.EOF {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidDocument, err)
+	}
+	return fmt.Errorf("%w: trailing content after JSON", ErrInvalidDocument)
+}
+
+func checkObjectDuplicates(dec *json.Decoder) error {
+	t, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := t.(json.Delim)
+	if !ok {
+		return nil
+	}
+
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return fmt.Errorf("expected string key, got %T", keyTok)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := checkObjectDuplicates(dec); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim('}') {
+			return fmt.Errorf("expected object end, got %v", end)
+		}
+	case '[':
+		for dec.More() {
+			if err := checkObjectDuplicates(dec); err != nil {
+				return err
+			}
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if end != json.Delim(']') {
+			return fmt.Errorf("expected array end, got %v", end)
+		}
+	}
+	return nil
+}
+
+// valuesEqual reports whether a and b are semantically equal.
+// It handles types that == cannot compare (slices, maps) without panicking.
+func valuesEqual(a, b any) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	switch av := a.(type) {
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case float64:
+		bv, ok := b.(float64)
+		return ok && av == bv
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for k, v := range av {
+			if !valuesEqual(v, bv[k]) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		bv, ok := b.([]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !valuesEqual(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		// Fall back to JSON canonical comparison for unknown types.
+		aj, _ := json.Marshal(a)
+		bj, _ := json.Marshal(b)
+		return string(aj) == string(bj)
+	}
 }
 
 // ── Internal: preview token ──────────────────────────────────────────────
@@ -802,7 +959,7 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 
 	if strategy == RestoreReplace {
 		for key := range doc.Settings.Overrides {
-			if cv, ok := overrides[key]; ok && cv == doc.Settings.Overrides[key] {
+			if cv, ok := overrides[key]; ok && valuesEqual(cv, doc.Settings.Overrides[key]) {
 				continue
 			}
 			p.Settings.Changed++
@@ -814,7 +971,7 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 		}
 	} else {
 		for key, val := range doc.Settings.Overrides {
-			if cv, ok := overrides[key]; ok && cv == val {
+			if cv, ok := overrides[key]; ok && valuesEqual(cv, val) {
 				continue
 			}
 			p.Settings.Changed++
@@ -864,7 +1021,7 @@ func computeRestore(doc Document, snap profile.ConnectionSnapshot, overrides map
 			targetOverrides[k] = v
 		}
 		for key := range doc.Settings.Overrides {
-			if cv, ok := overrides[key]; ok && cv == doc.Settings.Overrides[key] {
+			if cv, ok := overrides[key]; ok && valuesEqual(cv, doc.Settings.Overrides[key]) {
 				continue
 			}
 			result.SettingsChanged++
@@ -921,7 +1078,7 @@ func computeRestore(doc Document, snap profile.ConnectionSnapshot, overrides map
 			targetOverrides[k] = v
 		}
 		for k, v := range doc.Settings.Overrides {
-			if cv, ok := targetOverrides[k]; !ok || cv != v {
+			if cv, ok := targetOverrides[k]; !ok || !valuesEqual(cv, v) {
 				result.SettingsChanged++
 			}
 			targetOverrides[k] = v
@@ -1084,6 +1241,7 @@ func mergeProfile(bp BackupProfile, cp profile.SSHProfile) profile.SSHProfile {
 	mp.Options.Forwards = optForwards(bp.Options.Forwards)
 	mp.Options.AgentForward = optBool(bp.Options.AgentForward)
 	mp.Options.CanBeJumpServer = optBool(bp.Options.CanBeJumpServer)
+	mp.Options.BehaviorOnSessionEnd = optBeh(bp.BehaviorOnSessionEnd)
 
 	effPort := bp.Options.Port
 	if effPort == 0 {

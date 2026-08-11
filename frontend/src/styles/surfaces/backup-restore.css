@@ -5,17 +5,6 @@
   gap: var(--space-6);
 }
 
-.backup-restore__section {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.backup-restore__section h3 {
-  font-size: var(--font-size-lg);
-  font-weight: 600;
-}
-
 .backup-restore__warning {
   padding: var(--space-3);
   border: 1px solid var(--color-warning);

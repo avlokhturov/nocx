@@ -49,6 +49,11 @@ type SettingsSnapshotStore interface {
 	NonSecretOverrides() map[string]any
 	ReplaceNonSecretOverrides(map[string]any) (settings.PendingNotification, error)
 	Publish(settings.PendingNotification)
+
+	// ValidateSetting checks a key-value pair against the registry without
+	// persisting anything. It returns an error for unknown, secret-class,
+	// wrong-typed, object, or array values.
+	ValidateSetting(key string, value any) error
 }
 
 // ── Document envelope ────────────────────────────────────────────────────

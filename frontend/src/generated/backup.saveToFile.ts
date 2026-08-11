@@ -9,6 +9,6 @@
  * then the Go transport has to satisfy it.
  */
 
-export interface BackupSaveFileResult {
+export type BackupSaveFileResult = null | {
   path: string
 }

@@ -123,15 +123,19 @@ func zenitySave(fileName string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func osascriptSave(fileName string) (string, error) {
-	// Escape double-quote to prevent AppleScript injection.
-	safe := strings.ReplaceAll(fileName, `"`, `\"`)
-	script := fmt.Sprintf(
-		`POSIX path of (choose file name with prompt "Save backup" default name "%s")`,
-		safe,
-	)
+func osascriptCommand(fileName string) *exec.Cmd {
+	// Pass fileName as an argv argument to the run handler rather than
+	// interpolating it into the AppleScript string. This avoids injection
+	// through filename content (backslash-quote, shell metacharacters, etc.).
+	script := `on run argv
+	POSIX path of (choose file name with prompt "Save backup" default name (item 1 of argv))
+end run`
 	//nolint:gosec
-	cmd := exec.Command("osascript", "-e", script)
+	return exec.Command("osascript", "-e", script, "--", fileName)
+}
+
+func osascriptSave(fileName string) (string, error) {
+	cmd := osascriptCommand(fileName)
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {

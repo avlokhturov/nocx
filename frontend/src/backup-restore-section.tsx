@@ -11,7 +11,7 @@ import type {
   RestoreResult,
 } from './profiles'
 import { readBackupText, MAX_BACKUP_BYTES, downloadText } from './backup-file'
-import { Button, FileInput, Radio, MarkerList } from './ui'
+import { Button, FileInput, Radio, MarkerList, PageSection } from './ui'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
 
@@ -196,12 +196,10 @@ export function BackupRestoreSection(props: Props) {
 
   return (
     <div class="backup-restore">
-      <section class="backup-restore__section">
-        <h3>Create backup</h3>
-        <p>
-          Download a versioned backup file containing your non-secret settings, SSH connections, and
-          connection groups. Credential records and secrets are never included.
-        </p>
+      <PageSection
+        title="Create backup"
+        description="Download a versioned backup file containing your non-secret settings, SSH connections, and connection groups. Credential records and secrets are never included."
+      >
         <MarkerList
           items={[
             {
@@ -226,14 +224,12 @@ export function BackupRestoreSection(props: Props) {
         >
           {state.creating ? 'Creating…' : 'Create backup'}
         </Button>
-      </section>
+      </PageSection>
 
-      <section class="backup-restore__section">
-        <h3>Restore backup</h3>
-        <p>
-          Select a <code>nocx-backup</code> JSON file to preview and restore. Maximum file size:{' '}
-          {MAX_BACKUP_BYTES / 1024 / 1024} MiB.
-        </p>
+      <PageSection
+        title="Restore backup"
+        description={`Select a nocx-backup JSON file to preview and restore. Maximum file size: ${MAX_BACKUP_BYTES / 1024 / 1024} MiB.`}
+      >
         <FileInput
           accept=".json"
           disabled={busy()}
@@ -373,7 +369,7 @@ export function BackupRestoreSection(props: Props) {
             </div>
           )}
         </Show>
-      </section>
+      </PageSection>
     </div>
   )
 }

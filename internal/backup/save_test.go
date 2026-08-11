@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -63,5 +64,23 @@ func TestWriteBackupFileRejectsSymlinkTarget(t *testing.T) {
 	}
 	if got, want := string(contents), "keep"; got != want {
 		t.Errorf("outside contents = %q, want %q", got, want)
+	}
+}
+
+func TestOsaScriptSave_PassesFileNameAsArgv(t *testing.T) {
+	// Prove the filename is passed as a separate argv argument, not
+	// interpolated into the AppleScript string. A filename containing
+	// backslash-quote and shell metacharacters must survive.
+	fileName := `test\"$(rm -rf /)"backup.json`
+	cmd := osascriptCommand(fileName)
+
+	if got, want := cmd.Args[len(cmd.Args)-2], "--"; got != want {
+		t.Fatalf("argument separator = %q, want %q", got, want)
+	}
+	if got := cmd.Args[len(cmd.Args)-1]; got != fileName {
+		t.Fatalf("filename argument = %q, want %q", got, fileName)
+	}
+	if script := cmd.Args[len(cmd.Args)-3]; strings.Contains(script, fileName) {
+		t.Fatal("filename was interpolated into the AppleScript")
 	}
 }

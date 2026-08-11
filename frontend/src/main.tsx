@@ -242,6 +242,8 @@ async function main() {
   tm.onCreateSecret = (name) => openSettingsTab().startNewSecret(name)
   tm.onActivity = reportActivity
 
+  const observer = new SettingsObserver(dispatcher)
+
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
   const registry = new SurfaceRegistry()
@@ -251,7 +253,7 @@ async function main() {
     factory: () => {
       const content = new SettingsContent(
         profileClient,
-        undefined,
+        observer,
         vaultController,
         vaultClient,
         dialogClient,
@@ -463,7 +465,6 @@ async function main() {
 
   // Live application through SettingsObserver: when any setting
   // changes, refetch the snapshot and act on relevant keys.
-  const observer = new SettingsObserver(dispatcher)
   observer.setRevision(0)
   observer.start(() => {
     void (async () => {

@@ -2,6 +2,7 @@ package backup_test
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -55,8 +56,9 @@ func (f *fakeConnStore) ReplaceConnectionSnapshot(s profile.ConnectionSnapshot) 
 }
 
 type fakeSettingsStore struct {
-	overrides  map[string]any
-	publishLog []bool
+	overrides   map[string]any
+	publishLog  []bool
+	validateErr error
 }
 
 func (f *fakeSettingsStore) NonSecretOverrides() map[string]any {
@@ -77,6 +79,10 @@ func (f *fakeSettingsStore) ReplaceNonSecretOverrides(v map[string]any) (setting
 
 func (f *fakeSettingsStore) Publish(settings.PendingNotification) {
 	f.publishLog = append(f.publishLog, true)
+}
+
+func (f *fakeSettingsStore) ValidateSetting(key string, value any) error {
+	return f.validateErr
 }
 
 func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fakeDocStore) {
@@ -547,9 +553,13 @@ func TestRecover_Prepared_RollsBack(t *testing.T) {
 		t.Error("setting should be rolled back")
 	}
 
+	// Recovery must publish the rolled-back notification so live observers see the change.
+	if len(sett.publishLog) < 1 {
+		t.Error("recovery should publish the rolled-back notification")
+	}
+
 	// Journal should be cleaned.
-	js, _ := readTestJournal(doc)
-	if js.state != "idle" {
+	if js, _ := readTestJournal(doc); js.state != "idle" {
 		t.Errorf("journal state = %q, want idle", js.state)
 	}
 }
@@ -681,5 +691,232 @@ func TestRestore_GroupDefaultsRoundTrip(t *testing.T) {
 	}
 	if g.Defaults.User == nil || *g.Defaults.User != "alice" {
 		t.Errorf("restored group defaults user = %+v, want alice", g.Defaults)
+	}
+}
+
+// ── Duplicate key detection ─────────────────────────────────────────────
+
+func TestParse_RejectsDuplicateTopLevelKey(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for duplicate top-level key")
+	}
+}
+
+func TestParse_RejectsDuplicateNestedKey(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","host":"h2"}}],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for duplicate nested key")
+	}
+}
+
+func TestParse_AcceptsUnicodeEscapedKeys(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	// "\u0061" = "a", "\u0062" = "b" — unique decoded keys in overrides map.
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"\u0061":"val1","\u0062":"val2"}},"connections":{"profiles":[],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err != nil {
+		t.Fatalf("expected no error for valid unicode escapes, got: %v", err)
+	}
+}
+
+func TestParse_RejectsDecodedEquivalentDuplicate(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	// "\u006Bey" decodes to "key" — same as the literal "key" in overrides.
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"\u006Bey":"val1","key":"val2"}},"connections":{"profiles":[],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for decoded-equivalent duplicate keys")
+	}
+}
+
+func TestParse_AcceptsDecimalNumberWithoutDuplicateKeys(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"test.number":1.0}},"connections":{"profiles":[],"groups":[]}}`
+	if _, err := svc.Preview(contents, backup.RestoreMerge); err != nil {
+		t.Fatalf("valid decimal number rejected: %v", err)
+	}
+}
+
+func TestParse_RejectsSettingValidationError(t *testing.T) {
+	svc, _, sett, _ := newFakeService()
+	sett.validateErr = errors.New("expected string")
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"ui.theme":{"mode":"dark"}}},"connections":{"profiles":[],"groups":[]}}`
+	if _, err := svc.Preview(contents, backup.RestoreMerge); !errors.Is(err, backup.ErrInvalidDocument) {
+		t.Fatalf("Preview error = %v, want ErrInvalidDocument", err)
+	}
+}
+
+// ── valuesEqual safety ──────────────────────────────────────────────────
+
+func TestValuesEqual_NestedMaps(t *testing.T) {
+	svc, _, sett, _ := newFakeService()
+	sett.overrides["test.key"] = map[string]any{"nested": "value"}
+
+	r := mustCreate(t, svc)
+	var doc backup.Document
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
+	doc.Settings.Overrides["test.key"] = map[string]any{"nested": "value"}
+	b, _ := json.Marshal(doc)
+	contents := string(b) + "\n"
+
+	preview := mustPreview(t, svc, contents, backup.RestoreMerge)
+	// Same nested map value — should not count as changed.
+	if preview.Settings.Changed != 0 {
+		t.Errorf("settings changed = %d, want 0 (same nested map)", preview.Settings.Changed)
+	}
+}
+
+func TestValuesEqual_NestedArrays(t *testing.T) {
+	svc, _, sett, _ := newFakeService()
+	sett.overrides["test.key"] = []any{"a", "b"}
+
+	r := mustCreate(t, svc)
+	var doc backup.Document
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
+	doc.Settings.Overrides["test.key"] = []any{"a", "b"}
+	b, _ := json.Marshal(doc)
+	contents := string(b) + "\n"
+
+	preview := mustPreview(t, svc, contents, backup.RestoreMerge)
+	if preview.Settings.Changed != 0 {
+		t.Errorf("settings changed = %d, want 0 (same nested array)", preview.Settings.Changed)
+	}
+}
+
+func TestPreview_SettingsValuesEqualDoesNotPanic(t *testing.T) {
+	svc, _, sett, _ := newFakeService()
+	// Store complex types that would panic with == comparison.
+	sett.overrides["test.key"] = map[string]any{"deep": map[string]any{"v": float64(1)}}
+
+	r := mustCreate(t, svc)
+	var doc backup.Document
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
+	doc.Settings.Overrides["test.key"] = map[string]any{"deep": map[string]any{"v": float64(1)}}
+	b, _ := json.Marshal(doc)
+	contents := string(b) + "\n"
+
+	// Must not panic.
+	_ = mustPreview(t, svc, contents, backup.RestoreMerge)
+}
+
+func TestRestore_SettingsValuesEqualDoesNotPanic(t *testing.T) {
+	svc, _, sett, _ := newFakeService()
+	sett.overrides["test.key"] = []any{map[string]any{"id": float64(1)}, map[string]any{"id": float64(2)}}
+
+	r := mustCreate(t, svc)
+	var doc backup.Document
+	_ = json.Unmarshal([]byte(r.Contents), &doc)
+	doc.Settings.Overrides["test.key"] = []any{map[string]any{"id": float64(1)}, map[string]any{"id": float64(2)}}
+	b, _ := json.Marshal(doc)
+	contents := string(b) + "\n"
+
+	preview := mustPreview(t, svc, contents, backup.RestoreReplace)
+	// Must not panic.
+	mustRestore(t, svc, contents, backup.RestoreReplace, preview.PreviewToken)
+}
+
+func TestParse_RejectsMalformedForwardDirection(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","forwards":[{"direction":"bogus","destination":"localhost:8080"}]}}],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for malformed forward direction")
+	}
+	if !strings.Contains(err.Error(), "forward") && !strings.Contains(err.Error(), "direction") {
+		t.Errorf("error should mention forward/direction, got: %v", err)
+	}
+}
+
+func TestParse_RejectsInvalidForwardDestination(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","forwards":[{"direction":"local","destination":"missing-port"}]}}],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for invalid forward destination")
+	}
+}
+
+func TestParse_RejectsInvalidForwardPort(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","forwards":[{"direction":"local","bindPort":99999,"destination":"localhost:8080"}]}}],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for invalid forward port")
+	}
+}
+
+func TestParse_RejectsOrphanedGroupReference(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h"},"group":"nonexistent"}],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for orphaned group reference")
+	}
+	if !strings.Contains(err.Error(), "unknown group") {
+		t.Errorf("error should mention unknown group, got: %v", err)
+	}
+}
+
+func TestParse_RejectsCyclicGroupTree(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[{"id":"g1","name":"G1","parentGroupId":"g2"},{"id":"g2","name":"G2","parentGroupId":"g1"}]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for cyclic group tree")
+	}
+	if !strings.Contains(err.Error(), "group tree") && !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error should mention group tree or cycle, got: %v", err)
+	}
+}
+
+func TestParse_RejectsGroupForwardDefaultsInvalid(t *testing.T) {
+	svc, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[{"id":"g1","name":"G1","defaults":{"ssh":{"options":{"forwards":[{"direction":"bogus","destination":"host:80"}]}}}}]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil {
+		t.Fatal("expected error for invalid group forward defaults")
+	}
+}
+
+func TestRestoreMergeNormalizesBehaviorOnSessionEnd(t *testing.T) {
+	svc, conn, _, _ := newFakeService()
+	conn.snap.Profiles = []profile.SSHProfile{{
+		Base: profile.Base{
+			ID:                   "p1",
+			Type:                 "ssh",
+			Name:                 "current",
+			BehaviorOnSessionEnd: profile.BehaviorKeep,
+		},
+		Options: profile.StoredSSHProfileOptions{
+			Host:                 "host",
+			BehaviorOnSessionEnd: profile.Ptr(profile.BehaviorKeep),
+		},
+	}}
+
+	created := mustCreate(t, svc)
+	var doc backup.Document
+	if err := json.Unmarshal([]byte(created.Contents), &doc); err != nil {
+		t.Fatalf("decode backup: %v", err)
+	}
+	doc.Connections.Profiles[0].BehaviorOnSessionEnd = profile.BehaviorClose
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encode backup: %v", err)
+	}
+	contents := string(raw)
+	preview := mustPreview(t, svc, contents, backup.RestoreMerge)
+	mustRestore(t, svc, contents, backup.RestoreMerge, preview.PreviewToken)
+
+	got := conn.snap.Profiles[0]
+	if got.BehaviorOnSessionEnd != profile.BehaviorClose {
+		t.Errorf("base behavior = %q, want %q", got.BehaviorOnSessionEnd, profile.BehaviorClose)
+	}
+	if got.Options.BehaviorOnSessionEnd == nil || *got.Options.BehaviorOnSessionEnd != profile.BehaviorClose {
+		t.Errorf("options behavior = %v, want %q", got.Options.BehaviorOnSessionEnd, profile.BehaviorClose)
 	}
 }

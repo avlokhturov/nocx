@@ -1,18 +1,30 @@
 import { test, expect } from './harness'
 
 /**
- * The backup surface must be usable through the real renderer and control plane,
- * not only through unit fixtures. The empty disposable profile is intentional:
- * it proves the complete create/save/read/preview/restore protocol without
- * coupling this acceptance check to another settings editor.
+ * The backup surface must move non-empty user state through the real renderer
+ * and control plane. Changing a persisted setting before and after creation
+ * makes a successful no-op restore fail this acceptance check.
  */
 test.describe('Backup & Restore', () => {
-  test('creates, reads, previews and restores a backup', async ({ page }) => {
+  test('creates, reads, previews and restores a backup after mutating state', async ({
+    page,
+  }, testInfo) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
 
+    // Open settings.
     await page.keyboard.press('Meta+,')
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+
+    // Change a reachable persisted setting so restore has an observable effect.
+    const placementNav = '.ui-settings-section-nav-item[data-section="Interface"] button'
+    const placementSelect = '.ui-settings-row[data-key="tab.placement"] select'
+    await page.locator(placementNav).click()
+    await expect(page.locator(placementSelect)).toBeVisible({ timeout: 5000 })
+    await page.selectOption(placementSelect, 'vertical')
+    await expect(page.locator(placementSelect)).toHaveValue('vertical')
+
+    // Navigate to Backup & Restore and create a backup.
     await page
       .locator('.ui-settings-section-nav-item[data-section="Backup & Restore"] button')
       .click()
@@ -21,10 +33,21 @@ test.describe('Backup & Restore', () => {
     const downloadPromise = page.waitForEvent('download')
     await page.getByRole('button', { name: 'Create backup', exact: true }).click()
     const download = await downloadPromise
-    const backupPath = await download.path()
-    expect(backupPath).not.toBeNull()
+    const backupPath = testInfo.outputPath('backup.json')
+    await download.saveAs(backupPath)
 
-    await page.locator('.ui-file-input__native').setInputFiles(backupPath!)
+    // Mutate the setting after creation so restore must move it back.
+    await page.locator(placementNav).click()
+    await expect(page.locator(placementSelect)).toBeVisible({ timeout: 5000 })
+    await page.selectOption(placementSelect, 'horizontal')
+    await expect(page.locator(placementSelect)).toHaveValue('horizontal')
+
+    // Go back to Backup & Restore, load the backup file and preview.
+    await page
+      .locator('.ui-settings-section-nav-item[data-section="Backup & Restore"] button')
+      .click()
+
+    await page.locator('.ui-file-input__native').setInputFiles(backupPath)
     await expect(page.getByRole('heading', { name: /Preview — merge/ })).toBeVisible({
       timeout: 10_000,
     })
@@ -34,5 +57,10 @@ test.describe('Backup & Restore', () => {
     await expect(page.getByRole('button', { name: 'Merge', exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Merge', exact: true }).click()
     await expect(page.getByText('Restore complete (merge).')).toBeVisible({ timeout: 10_000 })
+
+    // The restored setting is visible again through the ordinary Settings seam.
+    await page.locator(placementNav).click()
+    await expect(page.locator(placementSelect)).toBeVisible({ timeout: 5000 })
+    await expect(page.locator(placementSelect)).toHaveValue('vertical')
   })
 })

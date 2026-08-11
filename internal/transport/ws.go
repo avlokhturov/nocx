@@ -1339,7 +1339,7 @@ func paramsBudgetForMethod(method string) int {
 	case "vault.unlockResolved", "connections.passwordResolved":
 		return budgetTiny
 	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
-		"profiles.tabbyPreview":
+		"profiles.importTabby", "profiles.tabbyPreview":
 		return budgetDocument
 	default:
 		return budgetDefault

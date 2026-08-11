@@ -108,3 +108,43 @@ func TestBackup_OverTheWireResultsConformToContracts(t *testing.T) {
 	}
 	validateJSON(t, saveSchema, saved.Result, "backup.saveToFile result")
 }
+
+func TestBackup_SaveToFileCancel_ConformsToContract(t *testing.T) {
+	saveSchema := loadSchema(t, "backup.saveToFile.schema.json")
+
+	dir := t.TempDir()
+	profiles := profile.NewJSONStore(filepath.Join(dir, "profiles.json"))
+	profileService := profile.NewProfileService(profiles)
+	doc := storage.NewDocumentStore(dir)
+	registry := settings.New(doc, &fakeSecretStore{})
+	backupService := backup.NewService(profiles, registry, doc)
+	// Saver returns (nil, nil) to simulate user cancelling the save dialog.
+	ws := NewWSServer(
+		log.NewSlogAdapter(nil),
+		newRegWithStub(log.NewSlogAdapter(nil)),
+		WithProfileRepository(profiles),
+		WithGroupRepository(profiles),
+		WithProfileService(profileService),
+		WithSettingsRegistry(registry),
+		WithBackupService(backupService),
+		WithBackupFileSaver(func(fileName, contents string) (*backup.SaveResult, error) {
+			return nil, nil
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	saved := backupContractCall(t, conn, "backup.saveToFile", map[string]any{
+		"fileName": "cancelled.json",
+		"contents": `{"version":1}`,
+	})
+	if saved.Result == nil {
+		t.Fatal("expected JSON null result for cancel, got nil bytes")
+	}
+	validateJSON(t, saveSchema, saved.Result, "backup.saveToFile cancel result")
+}

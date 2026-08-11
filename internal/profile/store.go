@@ -402,6 +402,26 @@ func (s *JSONStore) ReplaceConnectionSnapshot(snapshot ConnectionSnapshot) error
 	if err := ValidateGroupTree(snapshot.Groups); err != nil {
 		return err
 	}
+	groupIDs := make(map[string]struct{}, len(snapshot.Groups))
+	for _, group := range snapshot.Groups {
+		groupIDs[group.ID] = struct{}{}
+	}
+	for _, p := range snapshot.Profiles {
+		if p.Group == "" {
+			continue
+		}
+		if _, ok := groupIDs[p.Group]; !ok {
+			return fmt.Errorf("profile %q references unknown group %q", p.ID, p.Group)
+		}
+	}
+	// Defensive: validate every stored forward list through the single authority.
+	for _, p := range snapshot.Profiles {
+		if p.Options.Forwards != nil && len(*p.Options.Forwards) > 0 {
+			if err := ValidForwards(*p.Options.Forwards); err != nil {
+				return fmt.Errorf("profile %q: %w", p.ID, err)
+			}
+		}
+	}
 	d, err := s.load()
 	if err != nil {
 		return err

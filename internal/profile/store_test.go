@@ -242,3 +242,50 @@ func TestApplyGroups_EmptySlice(t *testing.T) {
 		t.Fatalf("empty slice: %v", err)
 	}
 }
+
+func TestReplaceConnectionSnapshotRejectsOrphanedProfileGroup(t *testing.T) {
+	s := newTestStore(t)
+	err := s.ReplaceConnectionSnapshot(ConnectionSnapshot{
+		Profiles: []SSHProfile{{
+			Base:    Base{ID: "p1", Type: "ssh", Name: "one", Group: "missing"},
+			Options: StoredSSHProfileOptions{Host: "host"},
+		}},
+		Groups: []ProfileGroup{},
+	})
+	if err == nil {
+		t.Fatal("orphaned profile group accepted")
+	}
+
+	profiles, loadErr := s.LoadProfiles()
+	if loadErr != nil {
+		t.Fatalf("LoadProfiles: %v", loadErr)
+	}
+	if len(profiles) != 0 {
+		t.Fatalf("profiles changed after rejected snapshot: %+v", profiles)
+	}
+}
+
+func TestReplaceConnectionSnapshotRejectsMalformedForwards(t *testing.T) {
+	s := newTestStore(t)
+	forwards := []ForwardSpec{{Direction: "bogus"}}
+	err := s.ReplaceConnectionSnapshot(ConnectionSnapshot{
+		Profiles: []SSHProfile{{
+			Base: Base{ID: "p1", Type: "ssh", Name: "one"},
+			Options: StoredSSHProfileOptions{
+				Host:     "host",
+				Forwards: &forwards,
+			},
+		}},
+	})
+	if err == nil {
+		t.Fatal("malformed forward accepted")
+	}
+
+	profiles, loadErr := s.LoadProfiles()
+	if loadErr != nil {
+		t.Fatalf("LoadProfiles: %v", loadErr)
+	}
+	if len(profiles) != 0 {
+		t.Fatalf("profiles changed after rejected snapshot: %+v", profiles)
+	}
+}
