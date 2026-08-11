@@ -386,7 +386,7 @@ func TestEnvStateSettlesResolvedWithoutReopen(t *testing.T) {
 		"printf started > " + started + "\n" +
 		"while [ ! -f " + release + " ]; do sleep 0.01; done\n" +
 		"export PATH=/usr/bin\n" +
-		"export -p\n"
+		dumpEnvScript
 	if err := writeFileExec(shell, body); err != nil {
 		t.Fatal(err)
 	}
@@ -444,8 +444,8 @@ func TestCommitRunsWithResolvedEnvironment(t *testing.T) {
 	fakeDir := writeFakeGit(t)
 	repo := t.TempDir()
 	shell := filepath.Join(t.TempDir(), "ok-shell")
-	// The resolver runs `shell -i -c "export -p"`; the script must PRINT
-	// the exports it sets, or the resolver sees an empty environment.
+	// The resolver runs `shell -i -c "printf <marker>; exec env -0"`; the
+	// script must reach that dump, or the resolver sees no environment.
 	body := "#!/bin/sh\n" +
 		"export PATH=" + fakeDir + ":$PATH\n" +
 		"export FAKE_GIT_LOG=" + filepath.Join(fakeDir, "argv.log") + "\n" +
@@ -453,7 +453,7 @@ func TestCommitRunsWithResolvedEnvironment(t *testing.T) {
 		"export FAKE_GITDIR=" + filepath.Join(repo, ".git") + "\n" +
 		"export FAKE_STATUS=staged\n" +
 		"export FAKE_COMMIT=ok\n" +
-		"export -p\n"
+		dumpEnvScript
 	if err := writeFileExec(shell, body); err != nil {
 		t.Fatal(err)
 	}

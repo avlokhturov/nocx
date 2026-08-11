@@ -177,21 +177,41 @@ func (c *envCache) waitSettled() {
 	}
 }
 
+// envDumpMarker separates whatever the rc files printed on their way past —
+// a greeting, a version notice, a fastfetch — from the environment dump that
+// follows it. Everything before the first occurrence is discarded; the bytes
+// after it are the dump and nothing else, because `exec` leaves no shell
+// behind to write again.
+const envDumpMarker = "\n__nocx_env_dump__\n"
+
 // resolveShellEnv runs the user's shell interactively — so it reads the rc
-// files the way the pty's shell does — asking it to print its exported
-// variables in the re-parseable form POSIX specifies, bounded by a deadline
-// and an output cap. Both bounds are enforced by the same machinery git
-// itself runs under: the deadline is the run spec's wall-clock ceiling and
-// the cap is the stdout sink's, so a hung rc file or a chatty one cannot
-// hold the resolver open.
+// files the way the pty's shell does — and then EXECS `env -0`, so what
+// arrives is the exported environment a child of that shell would actually
+// receive, NUL-delimited. Bounded by a deadline and an output cap, both
+// enforced by the same machinery git itself runs under: the deadline is the
+// run spec's wall-clock ceiling and the cap is the stdout sink's, so a hung
+// rc file or a chatty one cannot hold the resolver open.
 //
-// The invocation is deliberately unchanged by nocx-6pz0. The `-i` is what
-// makes the shell read its rc files the way the pty's shell does; a non-pty
-// reimplementation of rc loading (sourcing ~/.bashrc by hand) would be a
-// second answer that diverges from the pty's shell startup — the launcher
-// needed a real pty to get that right — and an interactive shell without a
-// tty hanging in an rc file is a bounded, remembered failure, no longer a
-// cost every open pays.
+// The `-i` is what makes the shell read its rc files the way the pty's shell
+// does (nocx-6pz0); a non-pty reimplementation of rc loading (sourcing
+// ~/.bashrc by hand) would be a second answer that diverges from the pty's
+// shell startup, and an interactive shell without a tty hanging in an rc file
+// is a bounded, remembered failure, no longer a cost every open pays.
+//
+// `env -0` rather than `export -p`, which is what this ran until nocx-58gq.
+// POSIX says `export -p` writes the exported variables in a re-enterable
+// form; zsh does not write the ones tied to an array — PATH, FPATH and SHLVL
+// — so on macOS, whose default shell IS zsh, the resolver read an
+// environment with no PATH on EVERY machine and D6 degraded for every user of
+// the shipping platform. There is no portable `export -p` incantation that
+// includes them (`typeset -x` is not in dash), and the paired-success test
+// was reporting it the whole time from the one shell CI does not run
+// (AGENTS.md rule 2). `env` is the same question asked of the kernel instead
+// of the shell: it needs no un-quoting, it cannot disagree with itself
+// between shells, and it is literally the environment a child gets — which is
+// what D6 hands to git. Absolute path because a broken PATH is one of the
+// states this must still resolve through; a missing /usr/bin/env fails the
+// exec and degrades with the shell's exit status, which is honest.
 func resolveShellEnv(ctx context.Context, shell string, timeout time.Duration, maxOut int64) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -205,7 +225,7 @@ func resolveShellEnv(ctx context.Context, shell string, timeout time.Duration, m
 	// step.
 	sink := &byteSink{max: maxOut}
 	res := run(ctx, spec{
-		argv:      []string{shell, "-i", "-c", "export -p"},
+		argv:      []string{shell, "-i", "-c", "printf '" + envDumpMarker + "'; exec /usr/bin/env -0"},
 		env:       withUTF8Locale(append(scrubLauncherSession(os.Environ()), "TERM=xterm-256color", "COLORTERM=truecolor")),
 		sink:      sink,
 		deadline:  time.Now().Add(timeout),
@@ -221,7 +241,7 @@ func resolveShellEnv(ctx context.Context, shell string, timeout time.Duration, m
 		return nil, &degradedError{reason: "the shell exited " + strconv.Itoa(res.exitCode) + " while resolving the environment"}
 	}
 
-	env, err := parseExportP(string(sink.buf))
+	env, err := parseEnvDump(string(sink.buf))
 	if err != nil {
 		return nil, &degradedError{reason: err.Error()}
 	}
@@ -246,41 +266,35 @@ func hasPATH(env []string) bool {
 	return false
 }
 
-// parseExportP parses the output of export -p: one record per line, each
-// `declare -x NAME=VALUE` (bash) or `export NAME=VALUE` (dash, zsh), values
-// single-quoted, double-quoted, or ANSI-C quoted ($'…') by the emitting
-// shell. PWD is dropped: it is per-process state, and the stale copy the
-// shell prints would lie to hooks about where they are.
-func parseExportP(out string) ([]string, error) {
+// parseEnvDump parses the NUL-delimited output of `env -0` that follows
+// envDumpMarker. Everything before the marker is whatever the rc files
+// printed and is discarded; each record after it is one NAME=VALUE exactly as
+// the kernel holds it, so there is no quoting to undo and a value containing
+// a newline, a space or a quote survives verbatim.
+//
+// A record whose name is not a valid environment-variable name is dropped
+// rather than failing the resolution: it is the shape a stray write from a
+// background job in an rc file takes, and one of those must not cost the user
+// the whole environment.
+//
+// PWD is dropped: it is per-process state, and the stale copy the shell
+// exported would lie to hooks about where they are.
+func parseEnvDump(out string) ([]string, error) {
+	i := strings.Index(out, envDumpMarker)
+	if i < 0 {
+		return nil, &degradedError{reason: "the shell printed no environment dump"}
+	}
 	var env []string
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSuffix(line, "\r")
-		if line == "" {
-			continue
-		}
-		rest, ok := cutPrefix(line, "declare -x ")
-		if !ok {
-			rest, ok = cutPrefix(line, "export ")
-			if !ok {
-				continue // a non-export line; not ours
-			}
-		}
-		eq := strings.IndexByte(rest, '=')
+	for _, record := range strings.Split(out[i+len(envDumpMarker):], "\x00") {
+		eq := strings.IndexByte(record, '=')
 		if eq <= 0 {
+			continue // the trailing empty record, or a name-less fragment
+		}
+		name := record[:eq]
+		if !validName(name) || name == "PWD" {
 			continue
 		}
-		name := rest[:eq]
-		if !validName(name) {
-			continue
-		}
-		value, ok := unquoteShell(rest[eq+1:])
-		if !ok {
-			value = rest[eq+1:] // lenient: an unquoted value is taken verbatim
-		}
-		if name == "PWD" {
-			continue
-		}
-		env = append(env, name+"="+value)
+		env = append(env, record)
 	}
 	return env, nil
 }
@@ -299,142 +313,6 @@ func validName(s string) bool {
 		}
 	}
 	return true
-}
-
-func cutPrefix(s, prefix string) (string, bool) {
-	if strings.HasPrefix(s, prefix) {
-		return s[len(prefix):], true
-	}
-	return s, false
-}
-
-// unquoteShell undoes the quoting export -p uses. Returns ok=false when the
-// value was not quoted, in which case the caller takes it verbatim.
-func unquoteShell(s string) (string, bool) {
-	if len(s) < 2 {
-		return "", false
-	}
-	switch {
-	case s[0] == '\'' && s[len(s)-1] == '\'':
-		// single-quoted: everything literal except '\''.
-		var b strings.Builder
-		inner := s[1 : len(s)-1]
-		for i := 0; i < len(inner); i++ {
-			if inner[i] == '\'' && i+3 < len(inner) && inner[i+1] == '\\' && inner[i+2] == '\'' && inner[i+3] == '\'' {
-				b.WriteByte('\'')
-				i += 3
-			} else {
-				b.WriteByte(inner[i])
-			}
-		}
-		return b.String(), true
-	case s[0] == '"' && s[len(s)-1] == '"':
-		// double-quoted: \" \\ \$ \` unescape.
-		var b strings.Builder
-		inner := s[1 : len(s)-1]
-		for i := 0; i < len(inner); i++ {
-			if inner[i] == '\\' && i+1 < len(inner) {
-				switch inner[i+1] {
-				case '"', '\\', '$', '`':
-					b.WriteByte(inner[i+1])
-					i++
-					continue
-				}
-			}
-			b.WriteByte(inner[i])
-		}
-		return b.String(), true
-	case s[0] == '$' && len(s) >= 3 && s[1] == '\'' && s[len(s)-1] == '\'':
-		// ANSI-C quoted: bash's form for values with control characters.
-		return unescapeAnsiC(s[2 : len(s)-1]), true
-	}
-	return "", false
-}
-
-func unescapeAnsiC(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] != '\\' || i+1 >= len(s) {
-			b.WriteByte(s[i])
-			continue
-		}
-		i++
-		switch s[i] {
-		case 'n':
-			b.WriteByte('\n')
-		case 't':
-			b.WriteByte('\t')
-		case 'r':
-			b.WriteByte('\r')
-		case 'a':
-			b.WriteByte('\a')
-		case 'b':
-			b.WriteByte('\b')
-		case 'f':
-			b.WriteByte('\f')
-		case 'v':
-			b.WriteByte('\v')
-		case '\\':
-			b.WriteByte('\\')
-		case '\'':
-			b.WriteByte('\'')
-		case '"':
-			b.WriteByte('"')
-		case 'x':
-			if i+2 < len(s) {
-				if v, err := parseHex(s[i+1 : i+3]); err == nil {
-					b.WriteByte(byte(v))
-					i += 2
-					continue
-				}
-			}
-			b.WriteString(`\x`)
-		case '0', '1', '2', '3', '4', '5', '6', '7':
-			if i+2 < len(s) {
-				if v, err := parseOctal(s[i : i+3]); err == nil {
-					b.WriteByte(byte(v))
-					i += 2
-					continue
-				}
-			}
-			b.WriteByte(s[i])
-		default:
-			b.WriteByte(s[i])
-		}
-	}
-	return b.String()
-}
-
-func parseHex(s string) (int, error) {
-	v := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		var d int
-		switch {
-		case c >= '0' && c <= '9':
-			d = int(c - '0')
-		case c >= 'a' && c <= 'f':
-			d = int(c-'a') + 10
-		case c >= 'A' && c <= 'F':
-			d = int(c-'A') + 10
-		default:
-			return 0, &degradedError{reason: "bad hex escape"}
-		}
-		v = v*16 + d
-	}
-	return v, nil
-}
-
-func parseOctal(s string) (int, error) {
-	v := 0
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < '0' || c > '7' {
-			return 0, &degradedError{reason: "bad octal escape"}
-		}
-		v = v*8 + int(c-'0')
-	}
-	return v, nil
 }
 
 // detectShell mirrors the pty's shell detection (pty_local.go:114): the

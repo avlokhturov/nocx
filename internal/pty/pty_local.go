@@ -210,17 +210,6 @@ func (lp *LocalPty) Write(p []byte) (int, error) {
 	return lp.file.Write(p)
 }
 
-// Pid returns the spawned shell's process id, for callers that must
-// observe the child directly (e.g. asserting over the child's ACTUAL
-// environment that a bootstrap secret never reached it — nocx-u7uh.21).
-// Zero before the process starts or after it exits.
-func (lp *LocalPty) Pid() int {
-	if lp.cmd.Process == nil {
-		return 0
-	}
-	return lp.cmd.Process.Pid
-}
-
 func (lp *LocalPty) Close() error {
 	lp.mu.Lock()
 	defer lp.mu.Unlock()

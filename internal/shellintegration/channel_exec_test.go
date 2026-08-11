@@ -684,10 +684,20 @@ func testBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T, shell string)
 	if _, err := s.ptmx.Write([]byte("echo SHELL_VAR_HAS_CAP=${__nocx_cap:+yes}\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// A background child that stays alive long enough for the test to read
-	// its /proc/<pid>/environ: a foreground child would exit before the
-	// read, proving nothing about the environment it had.
-	if _, err := s.ptmx.Write([]byte("bash -c 'echo CHILD_PID=$$; sleep 30' &\n")); err != nil {
+	// A CHILD of the shell reports its own environment — the one that would
+	// have inherited the capability had it ridden the environment at all.
+	// It reports before it sleeps, and it sleeps so the test can still see
+	// it in the process table while it reaps it.
+	//
+	// The child answers for itself because nothing else can ask. This used
+	// to read the kernel's copy for both pids — /proc/<pid>/environ on
+	// linux, sysctl kern.procargs2 on darwin — and the darwin half returns
+	// argv and no environment for any pid but the caller's own, which macOS
+	// has enforced since 10.15. So this check scanned an empty map on the
+	// platform the product ships first, found no capability in it, and
+	// passed (nocx-58gq). A security assertion that cannot fail is the one
+	// shape worse than one that is missing.
+	if _, err := s.ptmx.Write([]byte("bash -c 'echo CHILD_PID=$$; echo CHILD_ENV_HAS_CAP=$(env | grep -c " + testCap + "); sleep 30' &\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	deadline := time.Now().Add(8 * time.Second)
@@ -697,40 +707,47 @@ func testBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T, shell string)
 		o := s.output()
 		if strings.Contains(o, "SHELL_ENV_HAS_CAP=0") &&
 			strings.Contains(o, "SHELL_VAR_HAS_CAP=yes") &&
+			childEnvAnswer.MatchString(o) &&
 			strings.Contains(o, "CHILD_PID="+strconv.Itoa(parsePidOrZero(o))) {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	out := s.output()
+	childPID := parseLastPID(t, out, "CHILD_PID=")
+	defer func() {
+		// Reap the background child.
+		_, _ = s.ptmx.Write([]byte("kill " + strconv.Itoa(childPID) + " 2>/dev/null\n"))
+	}()
 	if !strings.Contains(out, "SHELL_ENV_HAS_CAP=0") {
 		t.Errorf("capability found in the shell's `env`:\n%s", out)
 	}
 	if !strings.Contains(out, "SHELL_VAR_HAS_CAP=yes") {
 		t.Errorf("capability not held in the non-exported shell variable:\n%s", out)
 	}
-
-	// The kernel's own view of the environment of the shell and of the LIVE
-	// child must not contain the capability. Read per-OS
-	// (childenviron_*_test.go): /proc on linux, sysctl on darwin.
-	childPID := parseLastPID(t, out, "CHILD_PID=")
-	shellPID := s.cmd.Process.Pid
-	defer func() {
-		// Reap the background child.
-		_, _ = s.ptmx.Write([]byte("kill " + strconv.Itoa(childPID) + " 2>/dev/null\n"))
-	}()
-	for name, pid := range map[string]int{"shell": shellPID, "child": childPID} {
-		environ, err := readChildEnviron(pid)
-		if err != nil {
-			t.Fatalf("read environ of pid %d (%s): %v", pid, name, err)
-		}
-		for key, val := range environ {
-			if strings.Contains(val, testCap) {
-				t.Errorf("capability present in the environment of pid %d (%s), under %s", pid, name, key)
-			}
-		}
+	// Present-and-zero, both halves asserted: a missing line would otherwise
+	// read as an absent capability, which is the vacuous pass again.
+	//
+	// Matched by REGEXP and not by substring, because this is a pty and the
+	// pty echoes what was typed: the literal text "CHILD_ENV_HAS_CAP=" is in
+	// the buffer from the moment the command line is written, as part of
+	// `echo CHILD_ENV_HAS_CAP=$(env | grep -c …)`. A substring check
+	// therefore matched the QUESTION and read as the answer having arrived,
+	// so the wait above returned immediately and the assertion below fired
+	// against a child that had not spoken yet. The answer is the only form
+	// with a digit after the `=`; the echo always has `$`.
+	m := childEnvAnswer.FindStringSubmatch(out)
+	if m == nil {
+		t.Errorf("the child never reported its environment, so nothing was proven about it:\n%s", out)
+	} else if m[1] != "0" {
+		t.Errorf("capability present in the environment of the shell's child (count %s):\n%s", m[1], out)
 	}
 }
+
+// childEnvAnswer matches the child's ANSWER and never the pty's echo of the
+// question that produced it: the answer has a digit after the `=`, the echoed
+// command has `$(`.
+var childEnvAnswer = regexp.MustCompile(`CHILD_ENV_HAS_CAP=(\d+)`)
 
 // parsePidOrZero returns the last CHILD_PID=<digits> in out, or 0 when the
 // background child has not printed yet.

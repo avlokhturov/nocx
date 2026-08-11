@@ -168,7 +168,29 @@ test.describe('tab completion', () => {
     // the caret. Its content is ranking-dependent; the accept is not.
     const ghost = page.locator(`${INPUT} .nocx-editor-ghost`).first()
     await expect(ghost).toBeVisible({ timeout: 5000 })
-    const tail = (await ghost.innerText()).trim()
+
+    // Read it only once it has SETTLED. Candidates arrive in batches — the
+    // command snapshot is local and lands first, the history query is a
+    // round trip and lands after — and every batch re-ranks, so the ghost
+    // legitimately changes for as long as one is outstanding. Reading it
+    // once and pressing Right afterwards compares a value from before the
+    // last batch with a line accepted after it: the suite failed here with
+    // ghost "ntenv" and a line of `printf …` recalled from another spec's
+    // history, and only in a full run, because only there is the history
+    // long enough to outrank a command name (nocx-58gq). Two equal reads a
+    // poll apart mean no batch is still landing.
+    let tail = ''
+    await expect
+      .poll(
+        async () => {
+          const now = (await ghost.innerText()).trim()
+          const settled = now !== '' && now === tail
+          tail = now
+          return settled
+        },
+        { timeout: 10_000, intervals: [250, 250, 250, 250] },
+      )
+      .toBe(true)
     expect(tail.length).toBeGreaterThan(0)
 
     await page.keyboard.press('ArrowRight')

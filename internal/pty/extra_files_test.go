@@ -32,13 +32,30 @@ func TestLocalPty_ExtraFilesReachTheShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("socketpair: %v", err)
 	}
+	// Non-blocking on OUR end only, and before os.NewFile: a file handed a
+	// blocking socket is not registered with the runtime poller, and
+	// SetReadDeadline on it is a no-op that returns ErrNoDeadline — which
+	// this test used to discard, so its 3-second bound existed only on
+	// paper. When the shell never wrote, Read blocked in the kernel until
+	// the package's own 10-minute timeout panicked the whole run
+	// (nocx-58gq). The child end stays blocking: it is fd 3 in the shell.
+	if nberr := unix.SetNonblock(fds[0], true); nberr != nil {
+		t.Fatalf("SetNonblock: %v", nberr)
+	}
 	parent := os.NewFile(uintptr(fds[0]), "test-parent")
 	child := os.NewFile(uintptr(fds[1]), "test-child")
 	defer func() { _ = parent.Close() }()
 
+	// A named shell, not the developer's. What is under test is the
+	// descriptor mechanism, and resolveShell would otherwise run whatever
+	// $SHELL says with whatever rc files that user has — on the runner a
+	// default bash, on this developer's machine a zsh that never reached
+	// the write. /bin/sh reading commands from the pty needs no rc file to
+	// prove an inherited fd works.
 	lp, err := NewLocal(log.NewSlogAdapter(nil), Config{
-		Cols: 80,
-		Rows: 24,
+		Cols:    80,
+		Rows:    24,
+		Command: "/bin/sh",
 	}, WithExtraFiles(child))
 	if err != nil {
 		t.Fatalf("NewLocal: %v", err)
@@ -51,16 +68,19 @@ func TestLocalPty_ExtraFilesReachTheShell(t *testing.T) {
 	}
 
 	buf := make([]byte, 4096)
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = parent.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	deadline := time.Now().Add(10 * time.Second)
+	if err := parent.SetReadDeadline(deadline); err != nil {
+		t.Fatalf("SetReadDeadline: %v — the wait would be unbounded", err)
+	}
+	var got strings.Builder
+	for {
 		n, readErr := parent.Read(buf)
-		if n > 0 && strings.Contains(string(buf[:n]), "EXTRA_FILE_PROOF") {
+		got.Write(buf[:n])
+		if strings.Contains(got.String(), "EXTRA_FILE_PROOF") {
 			return
 		}
 		if readErr != nil {
-			continue // deadline: keep polling
+			t.Fatalf("shell output never arrived on the extra fd: %v (read %q)", readErr, got.String())
 		}
 	}
-	t.Fatal("shell output never arrived on the extra fd")
 }

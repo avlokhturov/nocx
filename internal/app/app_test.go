@@ -337,14 +337,14 @@ func TestLifecycleLaneRegistrationBindsSession(t *testing.T) {
 }
 
 // TestLocalEnhancedChildEnv_SecretNeverReachesIt is the nocx-u7uh.21
-// acceptance assertion in its strongest form, over the CHILD'S ACTUAL
+// acceptance assertion in its strongest form, over the SHELL'S ACTUAL
 // environment rather than over what the factory intended to pass: a local
 // enhanced session's shell carries the lifecycle addressing (the non-secret
 // NOCX_LIFECYCLE_* names) but never the capability or the recovery fence —
-// those ride the rcfile text, and a value in /proc/<pid>/environ would leak
-// the authenticator to every child (ADR-0024 decision 2).
+// those ride the rcfile text, and a value in the environment would leak the
+// authenticator to every child (ADR-0024 decision 2).
 func TestLocalEnhancedChildEnv_SecretNeverReachesIt(t *testing.T) {
-	storagetest.Isolate(t)
+	storagetest.IsolateWithHome(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New(): %v", err)
@@ -360,24 +360,23 @@ func TestLocalEnhancedChildEnv_SecretNeverReachesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPTY(enhanced): %v", err)
 	}
-	defer func() { _ = pt.Close() }()
-	lpty, ok := pt.(*lifecyclePTY)
-	if !ok {
+	// Closed AND waited for: the shell writes ~/.bash_history from its exit
+	// trap, and the disposable home outlives the test only if nothing is
+	// still writing to it.
+	defer func() {
+		_ = pt.Close()
+		select {
+		case <-pt.Done():
+		case <-time.After(10 * time.Second):
+			t.Error("the shell did not exit after Close")
+		}
+	}()
+	if _, ok := pt.(*lifecyclePTY); !ok {
 		t.Fatalf("enhanced pty is %T, want *lifecyclePTY", pt)
 	}
-	lp, ok := lpty.Pty.(*pty.LocalPty)
-	if !ok {
-		t.Fatalf("enhanced pty is %T, want *pty.LocalPty", lpty.Pty)
-	}
-	pid := lp.Pid()
-	if pid == 0 {
-		t.Fatal("shell pid unavailable")
-	}
-	// Per-OS: /proc on linux, sysctl on darwin (childenviron_*_test.go).
-	env, err := readChildEnviron(pid)
-	if err != nil {
-		t.Fatalf("read child environ: %v", err)
-	}
+	// The shell reports its own environment (shellenviron_test.go); on macOS
+	// the kernel will not report another process's to anybody.
+	env := readShellEnviron(t, pt)
 	if env["NOCX_SHELL_INTEGRATION"] != "1" {
 		t.Fatal("the child's actual environment must carry the activation gate (proving this is the right process)")
 	}
@@ -453,7 +452,7 @@ func jsonrpcCall(t *testing.T, conn *websocket.Conn, method string, params any) 
 // pass: the local shell never learned its lane, domain, epoch or capability,
 // so no local session ever established.
 func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
-	storagetest.Isolate(t)
+	storagetest.IsolateWithHome(t)
 	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
 	if err != nil {
 		t.Fatalf("New(): %v", err)
@@ -479,12 +478,20 @@ func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
 		t.Fatalf("open: %+v", open.Error)
 	}
 
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// ONE deadline for the whole wait, set once. A gorilla connection is
+	// permanently failed by ANY read error, timeout included, and reading it
+	// again panics ("repeated read on failed websocket connection"). The
+	// inner 2-second deadline this used to re-arm each pass therefore turned
+	// the first slow message into a panic that took the whole package down —
+	// invisible on a runner where the fact always arrived inside two seconds,
+	// reproducible on a loaded workstation (nocx-58gq).
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v — the wait would be unbounded", err)
+	}
+	for {
 		_, raw, rerr := conn.ReadMessage()
 		if rerr != nil {
-			continue // deadline: keep waiting for the fact
+			t.Fatalf("a local enhanced session never reached prompt_ready through production wiring: %v", rerr)
 		}
 		var notif struct {
 			Method string          `json:"method"`
@@ -504,5 +511,4 @@ func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
 			return // the local shell established through production wiring
 		}
 	}
-	t.Fatal("a local enhanced session never reached prompt_ready through production wiring")
 }

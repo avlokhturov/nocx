@@ -41,6 +41,34 @@ const DEADCODE_CMD = process.env.DEADCODE || 'deadcode'
 
 const UNREACHABLE_RE = /^(.+?):\d+:\d+: unreachable func: (.+)$/
 
+// Packages that exist only to support tests — `storagetest`, `vaulttest` —
+// are not candidates at all, rather than 23 baselined warnings that mean
+// nothing.
+//
+// The gate runs deadcode WITHOUT -test on purpose, and that must not change:
+// with -test, a production function whose only callers are its own tests
+// looks reachable, and that is the exact defect this repo has shipped twice
+// (nocx-rtg0's ContentDB.Add, nocx-ak2d's InstalledFactStore.Record — written,
+// covered, wired, and called by nobody). Keeping -test off is what closes it.
+//
+// The cost of keeping it off is that test HELPERS are unreachable from main()
+// too — not a finding but a definition. Those land in one of two places: a
+// `_test.go` file, which deadcode never compiles without -test and so never
+// reports, or a test-support PACKAGE, which it compiles like any other and
+// reports like any other. The second case fell through the classification,
+// so a quarter of the baseline was noise and adding one test helper failed
+// the commit.
+//
+// Matched on the package directory, not on a file name: a directory named
+// `…test` is the Go convention for this and is checkable, whereas a file
+// called testseam.go inside a production package is a guess. Those stay
+// baselined, deliberately.
+//
+// This does NOT weaken the check that matters. InstalledFactStore.Record
+// lives in internal/ssh, an ordinary production package, and is still
+// reported.
+const TEST_SUPPORT_PKG_RE = /(^|\/)[a-z0-9]*test\/[^/]+\.go:\d+:\d+: unreachable func:/
+
 /**
  * The platforms the baseline is defined over — the two this product ships to.
  *
@@ -123,6 +151,7 @@ function parseDeadcodeOutput(stdout) {
     // and a `/node_modules/` test silently stops filtering. That cost a
     // worker a red gate and a paragraph of report on 2026-08-06.
     if (line.includes('/node_modules/') || line.startsWith('node_modules/')) continue
+    if (TEST_SUPPORT_PKG_RE.test(line)) continue
     const m = UNREACHABLE_RE.exec(line)
     if (!m) {
       throw new Error(`unparseable deadcode output line: ${line}`)

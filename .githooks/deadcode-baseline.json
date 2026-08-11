@@ -243,10 +243,6 @@
       "func": "WithTimeout"
     },
     {
-      "file": "internal/storage/storagetest/storagetest.go",
-      "func": "Isolate"
-    },
-    {
       "file": "internal/transport/transport.go",
       "func": "NewStub"
     },
@@ -353,50 +349,6 @@
     {
       "file": "internal/vault/testseam.go",
       "func": "MintReferenceForTest"
-    },
-    {
-      "file": "internal/vault/vaulttest/contract.go",
-      "func": "RunProviderContract"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Delete"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Get"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.ID"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Put"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.SetDelay"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.SetFailure"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.snapshot"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Status"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "NewFake"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "NewFakeWithID"
     }
   ]
 }
