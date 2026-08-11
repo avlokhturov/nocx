@@ -516,13 +516,27 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await primary.waitConn(2, 30_000)
     await page.keyboard.type(primaryPassword)
     await page.keyboard.press('Enter')
-    // The second ssh entered: a third entered block (ssh1, the step-3
-    // remote exit, ssh2 — the cut-short remote exits freeze with the same
-    // no-code entered paint), showing the same banner and prompt.
+    // The second ssh entered: the LAST entered block carries the banner and
+    // the prompt, whichever ordinal it happens to be.
+    //
+    // This counted entered blocks and expected exactly three — ssh1, the
+    // step-3 remote `exit`, ssh2 — on the reading that a cut-short remote
+    // exit freezes with the same no-code entered paint. It does not, and
+    // more importantly it is not required to: nocx-mlyu established that
+    // whether `exit` becomes an attempt at all is A RACE THE PRODUCT CANNOT
+    // WIN, because the command usually destroys the shell that would have
+    // sent the start frame. The renderer therefore has two legitimate
+    // answers — bound and frozen, or unbound and abandoned as `unknown` —
+    // and both are pinned in frontend/src/lifecycle/projections.test.ts.
+    // Counting the class asserted which side of that race came up.
+    //
+    // `.last()` is what makes this deterministic rather than merely looser:
+    // the exit block precedes ssh2 chronologically either way, so the most
+    // recent entered block is ssh2 whether the count is two or three.
     const enteredBlocks = pane(page).locator('.cmd-block.cmd-block-entered')
-    await expect(enteredBlocks).toHaveCount(3, { timeout: 30_000 })
-    await expect(enteredBlocks.nth(2)).toContainText(primaryBanner)
-    await expect(enteredBlocks.nth(2)).toContainText('password:')
+    const secondSsh = enteredBlocks.last()
+    await expect(secondSsh).toContainText(primaryBanner, { timeout: 30_000 })
+    await expect(secondSsh).toContainText('password:')
     await submitInEditor(page, 'echo journey-2-ok')
     await expect(pane(page).locator('.cmd-block', { hasText: 'journey-2-ok' })).toBeVisible({
       timeout: 30_000,
