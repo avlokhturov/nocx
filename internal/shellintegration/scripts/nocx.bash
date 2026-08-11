@@ -415,6 +415,10 @@ __nocx_nested_env=
 __nocx_nested_host=
 __nocx_nested_user=
 __nocx_nested_port=0
+# The ssh options the detector collected, in the order they were typed
+# (nocx-c6z0). An array, because each token is one argv entry on the user's
+# side and must stay one on the far side of the wire.
+__nocx_nested_opts=()
 __nocx_grant_bootstrap=
 __nocx_nested_rc=
 # Bounds the grant wait: the grant is composed synchronously by the backend
@@ -600,23 +604,43 @@ __nocx_nested_detect() {
     if [[ "$__line" =~ ^ssh([[:space:]]+.*)?$ ]] && [[ "$__line" != *[\;\|\&\<\>\`]* ]]; then
         local -a __toks
         read -r -a __toks <<< "$__line"
-        local __i __tok __dest="" __skip=0 __want_port=0
+        local __i __tok __dest="" __skip=0 __want_port=0 __want_opt=0
+        # The options are COLLECTED, not merely tolerated. The backend
+        # rebuilds the command line from what this sends, so an option that
+        # is recognised here and not carried is an option the user typed and
+        # the shell then ran without: `ssh -i ~/.ssh/prod -J bastion host`
+        # went out as a bare `ssh host`, with the block still showing the
+        # line they typed (nocx-c6z0).
+        #
+        # -p is not collected because it is modelled as the port, and -t/-tt
+        # are not because the composer adds its own -t and ssh reads a second
+        # one as -tt — a different request from the one the user made.
+        __nocx_nested_opts=()
         for ((__i = 1; __i < ${#__toks[@]}; __i++)); do
             __tok="${__toks[$__i]}"
             if (( __skip )); then
                 (( __want_port )) && __nocx_nested_port="$__tok"
+                (( __want_opt )) && __nocx_nested_opts[${#__nocx_nested_opts[@]}]="$__tok"
                 __want_port=0
+                __want_opt=0
                 __skip=0
                 continue
             fi
             case "$__tok" in
-                -t|-tt|-4|-6|-v|-C|-x|-X) : ;;
+                -t|-tt) : ;;
+                -4|-6|-v|-C|-x|-X) __nocx_nested_opts[${#__nocx_nested_opts[@]}]="$__tok" ;;
                 -p) __skip=1; __want_port=1 ;;
-                -l|-o|-i|-F|-J|-e|-b|-c|-m) __skip=1 ;;
+                -l|-o|-i|-F|-J|-e|-b|-c|-m)
+                    __nocx_nested_opts[${#__nocx_nested_opts[@]}]="$__tok"
+                    __skip=1; __want_opt=1 ;;
                 -*) return 1 ;; # an option we do not model: refuse
                 *) [[ -n "$__dest" ]] && return 1; __dest="$__tok" ;;
             esac
         done
+        # An option whose argument never arrived (`ssh -i` and nothing after
+        # it) is a line ssh itself would refuse. Refusing it here keeps the
+        # collected list and the typed line the same thing.
+        (( __skip )) && return 1
         [[ -z "$__dest" ]] && return 1
         if [[ "$__dest" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+(:[0-9]+)?$ ]]; then
             local __h="${__dest##*@}"
@@ -645,6 +669,23 @@ __nocx_nested_launch() {
         __extra+=',"host":"'"$__nocx_nested_host"'"'
         [[ -n "$__nocx_nested_user" ]] && __extra+=',"user":"'"$__nocx_nested_user"'"'
         (( __nocx_nested_port != 0 )) && __extra+=',"port":'"$__nocx_nested_port"
+        # The options the user typed, so the composer can rebuild the line
+        # they actually asked for (nocx-c6z0). Escaped one token at a time:
+        # an ssh option argument is an arbitrary path or config string, and
+        # the composer shell-quotes each one on the far side.
+        #
+        # The ${#arr[@]} guard is not decoration: under `set -u`, bash 3.2 —
+        # still /bin/bash on macOS — treats an EMPTY array expansion as an
+        # unbound variable, so the loop below must not be reached at all when
+        # nothing was collected.
+        if (( ${#__nocx_nested_opts[@]} > 0 )); then
+            local __opt __opts_json=''
+            for __opt in "${__nocx_nested_opts[@]}"; do
+                __nocx_lc_json_escape "$__opt"
+                __opts_json+=',"'"$__nocx_lc_json_escaped"'"'
+            done
+            __extra+=',"opts":['"${__opts_json#,}"']'
+        fi
     fi
     __nocx_lc_send domain_request ",$__extra" || return 1
     if ! __nocx_lc_read_grant "$__rid"; then

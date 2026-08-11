@@ -422,11 +422,21 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     // before the password prompt). The password is typed only after that —
     // a timed wait would race the prompt.
     await primary.waitConn(1, 30_000)
-    // The argv-borne bootstrap launcher was consumed: the staged run dir is
-    // empty again. (The compact ~/.nocx/launch line replaces this path from
-    // the second connection on.)
+    // Nothing was staged on disk: the run directory is empty, or was never
+    // created at all. Both mean the same thing and the second is what
+    // actually happens — ADR-0022 made the ssh command line the carrier, so
+    // no launcher is written anywhere (the comment above says as much about
+    // `.nocx/run/` being the removed path's staging directory).
+    //
+    // Written as a bare readdirSync, it threw ENOENT instead of asserting,
+    // and a spec cannot report on a directory by crashing on its absence.
+    // Its own sibling at step 7 already guards existence this way; this is
+    // the same check spelled the same way (nocx-c6z0 found it, having got
+    // past the failure that used to hide it).
     const runDir = path.join(localHome(), '.nocx', 'run')
-    expect(readdirSync(runDir), 'staged bootstrap launcher consumed').toEqual([])
+    if (existsSync(runDir)) {
+      expect(readdirSync(runDir), 'staged bootstrap launcher consumed').toEqual([])
+    }
 
     // The password goes to the pty, not the editor: the command owns input.
     await page.keyboard.type(primaryPassword)

@@ -37,6 +37,28 @@ test.describe('enhanced input raw routing', () => {
 
     await promptReady(page)
 
+    // THE PREMISE, and it is not free — this test is "Ctrl-C AT A PROMPT".
+    //
+    // promptReady is a DOM statement: the editor is visible and focused. It
+    // says nothing about the shell, which at that moment may still be sourcing
+    // its rc. For ordinary keystrokes that does not matter — they queue in the
+    // tty input buffer and readline reads them when it gets there, which is
+    // why the neighbouring tests submit immediately and pass. \x03 is not a
+    // keystroke: the line discipline turns it into SIGINT the instant it
+    // arrives, and it lands on whatever the shell is doing right then. On a
+    // fast machine that is always readline; at the runner's 4 vCPU it is
+    // sometimes the rc, and the session never recovers (nocx-xplc).
+    //
+    // So the prompt is established rather than assumed: a completed block for
+    // a real command proves the shell reached readline, ran something and came
+    // back. `true` is a builtin, so it cannot fail for want of a PATH entry.
+    await page.keyboard.type("true && printf 'READY-%s\\n' up")
+    await page.keyboard.press('Enter')
+    await expect(page.locator('.cmd-block', { hasText: 'READY-up' }).first()).toBeVisible({
+      timeout: 15_000,
+    })
+    await promptReady(page)
+
     // Type partial input then Ctrl-C to cancel.
     await page.keyboard.type('echo partial')
     await page.keyboard.press('Control+c')

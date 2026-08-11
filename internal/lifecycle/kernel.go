@@ -43,6 +43,18 @@ type Kernel struct {
 // rather than a string compared by accident.
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// Bounds on a domain request's carried ssh options (nocx-c6z0). They are not
+// a shape — an ssh option argument is an arbitrary path, host list or config
+// string, and constraining its CHARACTERS would refuse lines OpenSSH accepts.
+// Quoting is what makes them safe (the composer shell-quotes each one); these
+// two only keep a malformed frame from composing a line no shell will take.
+// `ssh -o A -o B -o C -i k -J h -F c` is nine tokens, so 64 is generous, and
+// the longest real argument is a path.
+const (
+	maxDomainRequestOpts   = 64
+	maxDomainRequestOptLen = 4096
+)
+
 // New builds a Kernel with the given options. A nil Now uses time.Now; a nil
 // Rand uses crypto/rand.Reader.
 func New(opts Options) *Kernel {
@@ -702,6 +714,23 @@ func (k *Kernel) applyDomainRequest(d *Domain, ls *laneState, env Envelope) ([]O
 	if req.Port < 0 || req.Port > 65535 {
 		return nil, ErrBadRequest
 	}
+	// The options are spliced into a command line the PARENT SHELL then
+	// evaluates, so they are bounded here even though the frame is
+	// capability-authenticated and the shell is the only thing that can have
+	// sent it. The composer shell-quotes each one, which is what makes them
+	// safe; these bounds are what keep a malformed frame from composing a
+	// line no shell will accept. Every real ssh invocation is far inside
+	// them, and an option this refuses refuses the whole request — the
+	// parent then runs its command conventionally, which is the honest
+	// fallback and never a silently altered command (nocx-c6z0).
+	if len(req.Opts) > maxDomainRequestOpts {
+		return nil, ErrBadRequest
+	}
+	for _, o := range req.Opts {
+		if o == "" || len(o) > maxDomainRequestOptLen {
+			return nil, ErrBadRequest
+		}
+	}
 	// The kernel validates and mints nothing here: the grant's child is
 	// minted by the publisher seam (kernel.RequestDomain — the kernel
 	// stays the sole minter), which also picks the child's transport and
@@ -722,6 +751,7 @@ func (k *Kernel) grantOutbound(d *Domain, req *DomainRequest) Outbound {
 				Host:      req.Host,
 				User:      req.User,
 				Port:      req.Port,
+				Opts:      req.Opts,
 			}},
 		},
 	}

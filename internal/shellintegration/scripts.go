@@ -164,7 +164,18 @@ var (
 // matches the skip, and the flag goes up on the line after it, so everything
 // below is covered by the flag instead; `local` cannot come first because it
 // would reset $?.
-const version = "34"
+// 35: the ssh options the user typed reach the line that actually runs
+// (nocx-c6z0). The detector NAMES -i, -o, -F, -J, -l, -e, -b, -c and -m —
+// it accepts a line carrying them and skips each one's argument — and then
+// sent only host, user and port, which is all composeSSHChildLine had to
+// rebuild the line from. So `ssh -i ~/.ssh/prod -J bastion host` went out as
+// a bare `ssh host`: the wrong key, no jump host, the default host-key
+// policy. Silent in both directions, because the block a user sees shows the
+// line they TYPED. The detector now collects the tokens it already
+// recognises and sends them as `opts`; -p is excluded because it is modelled
+// as the port, and -t because the composer adds its own and ssh reads a
+// second one as -tt.
+const version = "35"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

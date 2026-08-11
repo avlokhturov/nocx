@@ -212,6 +212,22 @@ type (
 		Host      string    `json:"host,omitempty"`
 		User      string    `json:"user,omitempty"`
 		Port      int       `json:"port,omitempty"`
+		// Opts are the ssh options the user typed, in the order they typed
+		// them, with their arguments — everything between `ssh` and the
+		// destination that the composer does not model itself.
+		//
+		// They are here because the composer rebuilds the line from scratch
+		// and had nothing else to rebuild it from. The shell's detector
+		// NAMES -i, -o, -F, -J, -l, -e, -b, -c and -m, accepts a line
+		// carrying them, and used to keep only host/user/port — so
+		// `ssh -i ~/.ssh/prod -J bastion host` ran with the wrong key and no
+		// jump host, and the block still showed the line the user typed
+		// (nocx-c6z0). An option the shell cannot model still refuses the
+		// whole interception; dropping one silently is the defect.
+		//
+		// -p is absent by construction (it is Port above) and so is -t (the
+		// composer adds its own, and ssh reads a second one as -tt).
+		Opts []string `json:"opts,omitempty"`
 	}
 
 	// DomainGrant is the kernel's answer to a domain_request: the child's
@@ -233,6 +249,9 @@ type (
 		Host string `json:"host,omitempty"`
 		User string `json:"user,omitempty"`
 		Port int    `json:"port,omitempty"`
+		// Opts rides with them for the same reason: the builder composes
+		// the launch line and needs everything the line is made of.
+		Opts []string `json:"opts,omitempty"`
 		// Domain/Epoch/Bootstrap are the answer, filled by the publisher's
 		// grant seam (which mints via kernel.RequestDomain — the kernel
 		// stays the sole minter) before delivery.
