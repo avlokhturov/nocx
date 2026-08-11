@@ -1,5 +1,6 @@
 .PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
-        ci-linux ci-frontend ci-e2e lint-ci test-ci build-ci root-ci frontend-ci
+        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e \
+        lint-ci test-ci build-ci root-ci frontend-ci
 
 GO ?= go
 GOFUMPT ?= gofumpt
@@ -104,16 +105,40 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 	@echo "NOT covered by this target: backend-linux, e2e, and the frontend job"
 	@echo "on the runner's node — those are the other three of 'make ci-full'."
 
-# Every CI job, each through the runner it actually runs on. The three
-# containerized jobs are byte-for-byte their CI counterparts; `ci` is the
-# macOS-only part, which is the one job that cannot be containerized because
-# macos-latest is the target OS (see ci.yml's runner decision).
+# Every CI job, each through the runner it actually runs on. The containerized
+# targets are byte-for-byte their CI counterparts; `ci` is the macOS-only part,
+# which is the one job that cannot be containerized because macos-latest is the
+# target OS (see ci.yml's runner decision).
 #
-# Order is cheapest-first: the host gates fail in seconds, ci-linux in minutes,
-# e2e last because it is the longest.
-ci-full: ci ci-linux ci-frontend ci-e2e
+#   ci                        ci.yml `backend`      (macOS, native)
+#   ci-backend + ci-linux     ci.yml `backend-linux`
+#   ci-frontend               ci.yml `frontend`
+#   ci-e2e                    ci.yml `e2e`
+#
+# CI-BACKEND IS IN THIS LIST, and its absence is what made this target lie.
+# 9527464 narrowed `ci-linux` from "the backend-linux job" to "the eight
+# OS-specific packages" and moved the portable suite into the new `ci-backend`
+# — but left this line alone. The name survived the change of meaning, so the
+# composite went on reading as correct while running none of the portable Go
+# suite on Linux at all. Every target it invoked was green, which is exactly
+# how a gate that does not run a job reports that the job passed — the defect
+# ci-full exists to prevent (nocx-cn86, nocx-1e7x, nocx-aruz).
+#
+# ci-os-split runs FIRST and costs seconds: it re-derives the OS package list
+# from the build constraints, so the partition below cannot drift silently
+# into dropping a package from both halves.
+#
+# ci-mac is deliberately NOT here — it has no CI counterpart (macos-latest
+# runs the whole suite as `backend`), and it is the one gate that touches the
+# real login keychain. Run it by hand when a Darwin failure needs reproducing.
+#
+# Order is cheapest-first: the drift check in seconds, the host gates next,
+# the Linux containers in minutes, e2e last because it is the longest.
+ci-full: ci-os-split ci ci-backend ci-linux ci-frontend ci-e2e
 	@echo ""
 	@echo "=== every CI job green locally ==="
+	@echo "NOT run by this target: ci-mac — no CI job corresponds to it, and it"
+	@echo "shares your login keychain. Run it by hand for a Darwin failure."
 
 # --- the five jobs ------------------------------------------------------
 #
@@ -145,31 +170,70 @@ OS_PKG_DIRS := cmd/e2e-sshd internal/contentkey internal/lifecyclechannel \
 OS_PKG_RE := (cmd/e2e-sshd|internal/contentkey|internal/lifecyclechannel|internal/nativeports|internal/pty|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
+# BOTH keyring variants here too, and the comment above already said so —
+# "both variants run over the whole partition" — while the recipe passed
+# --no-keyring and ran the portable half once. CI's backend-linux runs
+# `go test ./...` in each variant, so a portable package that reads through
+# the Secret Service binding is exercised there with a keyring present and was
+# not exercised that way here. The two halves are a PLATFORM split; the
+# keyring is a fixture dimension that crosses both (nocx-aruz).
 ci-backend:
-	@echo "=== ci-backend: the portable Go suite, in the Linux container ==="
-	./scripts/ci-linux.sh --no-keyring -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
+	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
+	./scripts/ci-linux.sh -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
 
 ci-linux:
-	@echo "=== ci-linux: the OS-specific packages, both keyring variants ==="
+	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
 	./scripts/ci-linux.sh -- $(OS_PKGS)
 
 # ci-os-split re-derives the OS package list from the build constraints and
 # fails when OS_PKG_DIRS has drifted from it. Without this the list is a
 # hand-kept copy of a fact the compiler already knows, and the first package
 # to grow a _darwin.go would quietly stop being covered by ci-mac.
+#
+# A GOOS, not merely a build line. The first version asked only whether a
+# package had a `//go:build` at all, which cannot tell `//go:build linux` from
+# `//go:build release` — and the repo already contained both. It went unseen
+# because the check ran in no composite: wiring it into ci-full flagged
+# internal/log (release/!release, added by bea5b6f) on the first run, while
+# internal/storage — the SAME constraint shape — sat inside OS_PKG_DIRS
+# unflagged. Two packages, one rule, opposite verdicts (nocx-aruz).
+GOOS_RE := (aix|android|darwin|dragonfly|freebsd|hurd|illumos|ios|js|linux|netbsd|openbsd|plan9|solaris|wasip1|windows|unix)
+
+# In the OS set although no build line names a GOOS. The derivation cannot
+# supply a reason, so each one is stated here:
+#
+#   internal/pty      portable source (creack/pty) whose BEHAVIOUR is the
+#                     platform's — it hangs on a macOS workstation while green
+#                     on the runner (nocx-58gq).
+#   internal/storage  the shipped profile directory is behind `-tags release`
+#                     (appdir.go). Not a GOOS, but it is the one package whose
+#                     tested code differs between what a developer builds and
+#                     what ships, and ci-mac is what runs the release-tag pass.
+OS_EXEMPT := internal/pty internal/storage
+
 ci-os-split:
-	@echo "=== every build-constrained package is in OS_PKG_DIRS ==="
-	@derived=$$(grep -rl '//go:build' --include='*.go' . \
-	  | grep -v node_modules | grep -v '_test\.go$$' \
-	  | xargs -n1 dirname | sort -u); \
+	@echo "=== the OS split is derived from the build constraints, not remembered ==="
+	@derived=$$(grep -rlE '^//go:build.*$(GOOS_RE)' --include='*.go' \
+	  --exclude-dir=node_modules . \
+	  | grep -v '_test\.go$$' | xargs -n1 dirname | sed 's|^\./||' | sort -u \
+	  | tr '\n' ' '); \
 	missing=""; \
 	for d in $$derived; do \
-	  case " $(OS_PKG_DIRS) " in *" $${d#./} "*) ;; *) missing="$$missing $${d#./}";; esac; \
+	  case " $(OS_PKG_DIRS) " in *" $$d "*) ;; *) missing="$$missing $$d";; esac; \
 	done; \
+	extra=""; \
+	for d in $(OS_PKG_DIRS); do \
+	  case " $$derived " in *" $$d "*) ;; *) \
+	    case " $(OS_EXEMPT) " in *" $$d "*) ;; *) extra="$$extra $$d";; esac ;; \
+	  esac; \
+	done; \
+	rc=0; \
 	if [ -n "$$missing" ]; then \
-	  echo "FAIL: build-constrained but not in OS_PKG_DIRS:$$missing"; exit 1; \
-	fi; \
-	echo "ok"
+	  echo "FAIL: names a GOOS but is not in OS_PKG_DIRS:$$missing"; rc=1; fi; \
+	if [ -n "$$extra" ]; then \
+	  echo "FAIL: in OS_PKG_DIRS, names no GOOS, and is not in OS_EXEMPT:$$extra"; rc=1; fi; \
+	if [ $$rc = 0 ]; then echo "ok"; fi; \
+	exit $$rc
 
 # ci-mac is the ONLY gate with no container, because macos-latest is the
 # target OS and Docker on a Mac runs Linux. It is therefore also the only one
@@ -206,9 +270,11 @@ ci-mac:
 	@echo "    and is the one thing a disposable root cannot isolate. ==="
 
 ci-frontend:
+	@echo "=== ci-frontend: ci.yml's frontend job, on the runner's node 24 ==="
 	./scripts/ci-frontend.sh
 
 ci-e2e:
+	@echo "=== ci-e2e: ci.yml's e2e job, the same image and command ==="
 	./e2e/run-in-container.sh
 
 lint-ci:
