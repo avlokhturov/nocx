@@ -386,13 +386,16 @@ command.
 
 **They are not their counterparts in timing, and no setting will make them so.** Each of
 these scripts capped itself to the runner's 4 vCPU until 2026-08-11, on the argument that
-capacity was the last gap left. Two things were wrong with it. The image is
-`--platform=linux/amd64` and a developer's Mac is arm64, so the container runs emulated:
-throttling it to four cores does not produce the runner, it produces a third machine
-unlike either — `nocx-2h08` is one starved resource in `internal/transport` reporting a
-30-second timeout under a different test name in every environment, including a run that
-was green on the runner and red here at the same commit. And the cap worked by keeping
-timing-dependent specs reproducible, which is what kept them alive.
+capacity was the last gap left. Two things were wrong with it. The first is the machine
+underneath, and it differs per image — read the file, not this paragraph:
+`.githooks/images/ci-linux` pins `--platform=linux/amd64` **to be** the runner, so on a
+Mac it runs emulated; `e2e/Dockerfile` pins no platform **deliberately**, so it builds for
+the host and runs native arm64 here and native amd64 on CI. Either way throttling to four
+cores does not produce the runner, it produces a third machine unlike either — `nocx-2h08`
+is one starved resource in `internal/transport` reporting a 30-second timeout under a
+different test name in every environment, including a run that was green on the runner and
+red here at the same commit. And the cap worked by keeping timing-dependent specs
+reproducible, which is what kept them alive.
 
 So the caps are off by default, and the rule that replaces them is the stronger one:
 **a test may not depend on timing.** Wait on an observable state change — a frame, a

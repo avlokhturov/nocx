@@ -77,10 +77,21 @@ tty_flag=()
 # passes at any speed, and one that does not is broken on a fast machine too —
 # it just has not been caught yet.
 #
-# The cap also could not deliver what it promised. The image is linux/amd64
-# and a developer's Mac is arm64, so the whole thing runs EMULATED: capping it
-# to four cores does not produce the runner, it produces a third machine with
-# timings unlike either. nocx-2h08 is the standing example.
+# The cap also could not deliver what it promised, and the reason is the one
+# thing about this container that is NOT the runner. e2e/Dockerfile pins no
+# --platform, deliberately (its ARCHITECTURE note has the argument): the image
+# is built for the host, so a developer runs linux/arm64 natively and CI runs
+# linux/amd64 natively. Same recipe, same packages, same command — different
+# machine code, at native speed on both sides. Capping cores does not turn one
+# into the other; it produces a third machine with timings unlike either.
+#
+# Do not read scripts/ci-linux.sh's paragraph onto this file. THAT image does
+# pin --platform=linux/amd64 and therefore does run emulated on a Mac, which is
+# the opposite call for the opposite reason: being the runner is its whole
+# purpose, and it runs Go tests rather than two browser engines. This comment
+# claimed the same about this image until 2026-08-12 and it was simply untrue —
+# `docker image inspect nocx-e2e:local --format '{{.Architecture}}'` says which.
+# nocx-2h08 is the standing example of the timing gap that remains.
 #
 # NOCX_E2E_CPUS=<n> caps it again for bisecting a suspected concurrency
 # defect. That is a debugging tool, not the gate — the same knob, with the

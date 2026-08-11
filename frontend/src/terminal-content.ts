@@ -722,13 +722,24 @@ export class TerminalContent extends BaseTabContent {
           },
           submit: (doc: string, plan?: SubmitPlan) => {
             // The atomic handoff transfers input ownership to the grid at
-            // the moment the bytes go out — not when the running fact lands
-            // (an RPC round trip later). The editor already hid itself in
-            // commit; a grid still marked read-only drops keys typed into
-            // the gap, so a program waiting on stdin (read, ssh, less)
-            // starves with no editor and no input surface (nocx-u7uh.23).
+            // the moment the editor gives it up — not when the running fact
+            // lands (an RPC round trip later). The editor already hid itself
+            // in commit; a grid that is not yet the keyboard's owner drops
+            // keys typed into the gap, so a program waiting on stdin (read,
+            // ssh, less) starves with no editor and no input surface
+            // (nocx-u7uh.23, nocx-yb5y).
             // _syncLifecycleOwnership reconciles this on every fact.
-            this.renderer?.setReadOnly(false)
+            //
+            // Both lines, always in this order and never one without the
+            // other: the keyboard changes hands HERE, and from here until
+            // the command's own bytes have gone out the grid's bytes queue
+            // behind them (holdRawUntilSubmitted). Handing the keyboard over
+            // without the queue is what turned a dropped keystroke into a
+            // reordered one — measured, the letters of the next input
+            // arriving at the pty ahead of the command that was going to
+            // read them.
+            this.takeKeyboardToGrid()
+            this.holdRawUntilSubmitted()
             const recordLine = plan?.recordLine ?? doc
             // Where the command RUNS, captured before anything below can
             // change it. Entering an environment blanks `_cwd` (we know the
@@ -741,11 +752,32 @@ export class TerminalContent extends BaseTabContent {
             // ledger record (CommandLedger.open refuses empty commands) and
             // no block. The shell still gets its newline — a conventional
             // terminal stays conventional.
+            const write = (): void => {
+              // Detach the queue BEFORE the command goes out, flush it after.
+              //
+              // Both halves matter and the order is the whole point. The
+              // command is delivered through renderer.paste, and a paste is
+              // itself an onData — so a queue still armed here would swallow
+              // the command and put it BEHIND the keys that were waiting for
+              // it, which is the same reordering with the operands swapped
+              // (measured: a bare `\r` reaching the pty ahead of its own
+              // command line).
+              const held = this.takeHeldRaw()
+              try {
+                submitCommand(doc, {
+                  focusGrid: () => this.takeKeyboardToGrid(),
+                  sendDoc: (d) => void this.shellTarget!.submit(d),
+                })
+              } finally {
+                // In a `finally`, and fail-open: a write that threw sent
+                // nothing, and holding the keys anyway would swallow them
+                // for the rest of the session. Late at a prompt is a line
+                // the user can see and erase; silently gone is not.
+                for (const data of held) this.session?.send(data)
+              }
+            }
             if (recordLine === '') {
-              submitCommand(doc, {
-                focusGrid: () => renderer.focus(),
-                sendDoc: (d) => void this.shellTarget!.submit(d),
-              })
+              write()
               return
             }
             // SEVERED (ADR-0024): the ssh attempt binding (expected passport
@@ -784,12 +816,6 @@ export class TerminalContent extends BaseTabContent {
             if (this.scrollback && this.renderer) {
               const startLine = this.renderer.cursorLine()
               this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1)
-            }
-            const write = (): void => {
-              submitCommand(doc, {
-                focusGrid: () => renderer.focus(),
-                sendDoc: (d) => void this.shellTarget!.submit(d),
-              })
             }
             const st = this.lifecycle.state
             if (st.kind !== 'prompt_ready') {
@@ -1554,7 +1580,15 @@ export class TerminalContent extends BaseTabContent {
       // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
       // is enabled (setReadOnly(false)). The editor captures keys while it is
       // visible and the terminal is read-only, so these only arrive in RAW mode.
+      //
+      // Held, never dropped, while a submitted command is still on its way to
+      // the pty: the keyboard changed hands at the commit and the command
+      // goes out an RPC later, so these bytes belong AFTER it (_heldRaw).
       renderer.onData((data: string) => {
+        if (this._heldRaw !== null) {
+          this._heldRaw.push(data)
+          return
+        }
         this.session?.send(data)
       })
       session.onExit((sid: string) => {
@@ -2071,10 +2105,73 @@ export class TerminalContent extends BaseTabContent {
     return 'value'
   }
 
+  /** The grid becomes the keyboard's owner: writable AND focused, in one
+   *  step. Both halves or neither — that is the whole rule, and it is here
+   *  rather than at each call site because it was split once and the split
+   *  is what nocx-yb5y was.
+   *
+   *  The editor gives the keyboard up SYNCHRONOUSLY at commit (clearDoc →
+   *  hide), and a display:none host drops the browser's focus to <body>. So
+   *  every path that hides the editor has to hand the keyboard on in the
+   *  same step. `setReadOnly(false)` alone did that for writability and left
+   *  focus to ride along with the deferred paste — which at a live prompt
+   *  waits on the lifecycle.submitAttempt round trip. For that whole round
+   *  trip nobody owned the keyboard: keys reached <body> and were gone, with
+   *  no editor to show them and no grid to send them. The user typing into a
+   *  program already reading stdin lost the letters and kept the Enter, so an
+   *  ssh password prompt was answered with an empty line, silently.
+   *
+   *  Idempotent, deliberately: the deferred `focusGrid` runs this again after
+   *  the round trip, and it must be the SAME operation rather than a second
+   *  rule about who owns input (AD-8). */
+  private takeKeyboardToGrid(): void {
+    this.renderer?.setReadOnly(false)
+    this.renderer?.focus()
+  }
+
+  /** Raw bytes the grid produced after the keyboard changed hands but before
+   *  the submitted command reached the pty — null when nothing is in flight,
+   *  which is the ordinary state.
+   *
+   *  ADR-0024 §5 puts the lifecycle.submitAttempt round trip BETWEEN the
+   *  editor's commit and the pty write, and that is deliberate: the attempt
+   *  must open before the bytes that can cause the shell's own start. The
+   *  keyboard, meanwhile, changes hands synchronously at commit — it has to,
+   *  or the keys typed into the gap reach nobody. So there is a real window
+   *  in which the grid owns the keyboard and the command it follows has not
+   *  been sent, and bytes crossing it would arrive at the pty AHEAD of the
+   *  command. Measured: `hello\r` reaching the shell before `read x; …\r`,
+   *  which runs `hello` as a command and leaves `read` waiting for a line
+   *  nobody typed. */
+  private _heldRaw: string[] | null = null
+
+  /** Start holding: from here until releaseHeldRaw, the grid's bytes queue.
+   *  A second submit inside the window keeps the existing queue — the order
+   *  is the invariant, and re-arming would publish the earlier one twice. */
+  private holdRawUntilSubmitted(): void {
+    this._heldRaw ??= []
+  }
+
+  /** Stop holding and hand back what was held, for the caller to send after
+   *  the command. Detaching and flushing are two steps on purpose — the
+   *  command's own bytes travel between them (see `write`).
+   *
+   *  Nothing bounds this window with a timer, and nothing should: the write
+   *  is attempted on BOTH settlements of the attempt RPC (`.then(write,
+   *  write)`), and the dispatcher rejects every pending call when the socket
+   *  closes. The only way to stay held is a live socket whose backend never
+   *  answers — where the queued bytes had nowhere to go either, and which
+   *  the session's own input-stalled warning is what reports. */
+  private takeHeldRaw(): string[] {
+    const held = this._heldRaw ?? []
+    this._heldRaw = null
+    return held
+  }
+
   private enterNativeMode(): void {
     this.nativeMode = true
     this.editor?.hide()
-    this.renderer?.focus()
+    this.takeKeyboardToGrid()
     this.session?.send(NATIVE_RESTORE)
     this._updateCapability()
   }
