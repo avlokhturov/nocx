@@ -6,7 +6,7 @@ package control
 // source.
 //
 // It lives in an internal test file because NonblockingAdmission's marker
-// method is unexported by design (ADR-0024 item 3 of Enforcement): only this
+// method is unexported by design (ADR-0026 item 3 of Enforcement): only this
 // package may declare a submission-path admission, so a waiting admission
 // cannot be wired into a Submission's TrySubmit from anywhere else — the
 // miswiring is a compile error, not a convention. The package's internal

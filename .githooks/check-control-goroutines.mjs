@@ -3,7 +3,7 @@
  * Control-plane goroutine ratchet — no `go` statements in control-handler
  * code, baselined.
  *
- * The control plane's scheduling contract (ADR-0024) says every piece of
+ * The control plane's scheduling contract (ADR-0026) says every piece of
  * control work runs on the read loop, on the bounded lane, or on the
  * ordered per-session lanes — and that a handler which spawns its own
  * goroutine escapes context, admission, conflict ownership and shutdown
@@ -86,7 +86,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(
       `FAIL: ${offenders.length} un-baselined \`go\` statement(s) in control-handler code — ` +
         'a handler goroutine escapes context, admission, conflict ownership and shutdown ' +
-        'accounting (ADR-0024). Regenerate the baseline only for genuine infrastructure spawns: ' +
+        'accounting (ADR-0026). Regenerate the baseline only for genuine infrastructure spawns: ' +
         'node .githooks/update-control-goroutines-baseline.mjs',
     )
     for (const o of offenders) {

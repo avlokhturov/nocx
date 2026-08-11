@@ -12,11 +12,9 @@ import "strings"
 // next connection bootstraps again (§3.2). An `ssh` that fails with 127 is a
 // bug in this design, never a user-visible outcome.
 //
-// The arguments are the environment id minted for this attempt and the
-// session id (AD-7); they are exported as NOCX_ENVIRONMENT_ID and
-// NOCX_SESSION_ID and validated by the shell scripts themselves — an
-// absent or malformed id means no passport and no tagged marker
-// (fail-open). The second argument is the nocx-mlm7 P7 amendment of the
+// The argument is the session id (AD-7), exported as NOCX_SESSION_ID and
+// validated by the shell scripts themselves — an absent id means no
+// marker-only mode (fail-open). The nocx-mlm7 P7 amendment of the
 // 2026-08-05 delivery-modes design: the compact path carries the session
 // id exactly like the argv launchers do, so the ownership handshake is
 // not degraded on installed hosts.
@@ -29,7 +27,7 @@ import "strings"
 const launchCarrierTemplate = `#!/bin/sh
 # nocx launch carrier — the compact activation entry point (design §3.3).
 # Reads manifest.json only; refuses an incomplete or protocol-incompatible
-# generation and in that case execs a native login shell with no passport.
+# generation and in that case execs a native login shell.
 __nocx_root="${HOME}/.nocx"
 __nocx_manifest="$__nocx_root/manifest.json"
 __nocx_protocol_version="1"
@@ -68,8 +66,7 @@ for __nocx_f in nocx.bash nocx.zsh nocx.posix; do
     [ -n "$__nocx_actual" ] || __nocx_native
     [ "$__nocx_expected" = "sha256:$__nocx_actual" ] || __nocx_native
 done
-export NOCX_ENVIRONMENT_ID="${1-}"
-export NOCX_SESSION_ID="${2-}"
+export NOCX_SESSION_ID="${1-}"
 export NOCX_GENERATION="$__nocx_generation"
 export NOCX_SHELL_INTEGRATION=1
 export NOCX_PROMPT_MODE=marker-only
@@ -87,22 +84,34 @@ esac
 // deliberate: the minimal tier's ENV file is parsed by dash / busybox ash /
 // ksh, none of which know bash's `source`; `.` is understood by all of them
 // and by bash and zsh.
+//
+// stderr is suppressed on purpose: when the publish prelude failed,
+// NOCX_GENERATION is unset, the path names no file, and the session must
+// land in a CLEAN visible native prompt (ADR-0024 decision 4) — not a
+// conventional terminal with a shell error line on it.
 func launchSourceLine(name string) string {
-	return `. "${HOME}/.nocx/integration/${NOCX_GENERATION}/` + name + `"`
+	return `. "${HOME}/.nocx/integration/${NOCX_GENERATION}/` + name + `" 2>/dev/null`
 }
 
 // launchCarrier renders the compact carrier: the template with the three tier
 // payloads substituted. The payloads are the same pinned transports the argv
 // launchers use, but the rcfile bodies source the INSTALLED generation files
 // instead of embedding the scripts — a stable carrier over a changing bundle.
+// The rendered text is comment-stripped like the generation scripts: the
+// carrier ships inside the bootstrap payload on every launch (and to every
+// install), and the far side never reads the prose (nocx-z9s9.17). The
+// template keeps its comments — the carrier is a FILE, authored multi-line
+// for the humans who read the source — and only the shipped bytes shrink.
+// The shebang survives the strip, so `exec "$HOME/.nocx/launch"` keeps
+// working.
 func launchCarrier() string {
 	s := strings.ReplaceAll(launchCarrierTemplate, "@BASH_ARG@",
-		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"))))
+		bashArgFor(bashRcfile("", launchSourceLine("nocx.bash"), "", "")))
 	s = strings.ReplaceAll(s, "@ZSH_ARG@",
-		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"))))
+		zshArgFor(zshRcfile("", launchSourceLine("nocx.zsh"), "", "")))
 	s = strings.ReplaceAll(s, "@POSIX_ARG@",
 		posixArgFor(posixEnvFile("", launchSourceLine("nocx.posix"))))
-	return s
+	return stripShellComments(s)
 }
 
 // launchBundle assembles the bundle descriptor both carriers publish (AD-8):

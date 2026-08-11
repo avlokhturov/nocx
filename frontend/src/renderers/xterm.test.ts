@@ -1,29 +1,35 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
-import { parseOsc7, parseOsc133, XtermRenderer } from './xterm'
+import {
+  parseOsc7,
+  parseOsc133,
+  parseRecoveryFence,
+  parseRenderFence,
+  XtermRenderer,
+} from './xterm'
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
 
-describe('XtermRenderer setReadOnly', () => {
-  const stubBrowser = () => {
-    window.matchMedia = (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    })
-    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
+const stubBrowser = () => {
+  window.matchMedia = (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })
+  ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
   }
+}
 
+describe('XtermRenderer setReadOnly', () => {
   it('toggles disableStdin on the underlying terminal', async () => {
     stubBrowser()
     const r = new XtermRenderer()
@@ -42,6 +48,35 @@ describe('XtermRenderer setReadOnly', () => {
 
     r.setReadOnly(false)
     expect(term!.options.disableStdin).toBe(false)
+  })
+
+  it('paste delivers the document even while the grid is read-only (nocx-u7uh.23)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const term = (r as unknown as Record<string, unknown>).term as
+      { options: { disableStdin: boolean } } | undefined
+    expect(term).toBeDefined()
+
+    const received: string[] = []
+    r.onData((text) => received.push(text))
+
+    // The editor owns input, so the grid is read-only — exactly the state a
+    // submit is in. The submitted document must still reach the program: a
+    // paste dropped here is the editor vanishing after every command.
+    r.setReadOnly(true)
+    r.paste('echo hi')
+    expect(received).toEqual(['echo hi'])
+    // The read-only guard is restored: user input stays blocked afterwards.
+    expect(term!.options.disableStdin).toBe(true)
+
+    r.setReadOnly(false)
+    r.paste('echo again')
+    expect(received).toEqual(['echo hi', 'echo again'])
   })
 
   it('uses the same word separator policy as the frozen block (parity by construction)', async () => {
@@ -226,8 +261,10 @@ describe('parseOsc133 nocx_env tags', () => {
   })
 })
 
-describe('onEnvironmentPassport fan-out', () => {
-  const stubBrowser = () => {
+describe('onCommandMarker fan-out', () => {
+  it('exposes a tagged marker through the real parser into the enriched event', async () => {
+    // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
+    // code uses during init. Stub them so the terminal can initialise.
     window.matchMedia = (query: string) => ({
       matches: false,
       media: query,
@@ -243,90 +280,13 @@ describe('onEnvironmentPassport fan-out', () => {
       unobserve() {}
       disconnect() {}
     }
-  }
 
-  async function mountRenderer(): Promise<XtermRenderer> {
-    stubBrowser()
     const r = new XtermRenderer()
     const container = document.createElement('div')
     Object.defineProperty(container, 'clientWidth', { value: 800 })
     Object.defineProperty(container, 'clientHeight', { value: 600 })
     await r.mount(container)
-    return r
-  }
 
-  it('accepts a passport matching the expected id through the real parser', async () => {
-    const r = await mountRenderer()
-    r.setExpectedEnvironmentId('env-ab12')
-
-    let resolveDone: () => void
-    const done = new Promise<void>((res) => {
-      resolveDone = res
-    })
-    let received: unknown
-    r.onEnvironmentPassport((d) => {
-      received = d
-      resolveDone()
-    })
-
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await done
-
-    expect(received).toMatchObject({ status: 'accepted' })
-    r.dispose()
-  })
-
-  it('reports an unexpected id and never accepts it', async () => {
-    const r = await mountRenderer()
-    r.setExpectedEnvironmentId('env-minted-for-this-attempt')
-
-    let resolveDone: () => void
-    const done = new Promise<void>((res) => {
-      resolveDone = res
-    })
-    let received: unknown
-    r.onEnvironmentPassport((d) => {
-      received = d
-      resolveDone()
-    })
-
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await done
-
-    expect(received).toMatchObject({ status: 'unexpected' })
-    r.dispose()
-  })
-
-  it('a duplicate passport for an accepted id is reported, never re-accepted', async () => {
-    const r = await mountRenderer()
-    r.setExpectedEnvironmentId('env-ab12')
-
-    const seen: string[] = []
-    let resolveFirst: () => void
-    const first = new Promise<void>((res) => {
-      resolveFirst = res
-    })
-    let resolveSecond: () => void
-    const second = new Promise<void>((res) => {
-      resolveSecond = res
-    })
-    r.onEnvironmentPassport((d) => {
-      seen.push(d.status)
-      if (seen.length === 1) resolveFirst()
-      else resolveSecond()
-    })
-
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await first
-    r.write('\x1b]636;P;1;env-ab12;-;11;enhanced;-\x07')
-    await second
-
-    expect(seen).toEqual(['accepted', 'duplicate'])
-    r.dispose()
-  })
-
-  it('exposes a tagged marker through the real parser into the enriched event', async () => {
-    const r = await mountRenderer()
     let resolveDone: () => void
     const done = new Promise<void>((res) => {
       resolveDone = res
@@ -342,9 +302,6 @@ describe('onEnvironmentPassport fan-out', () => {
     expect(ev?.nocxEnv).toBe('env-ab12')
     r.dispose()
   })
-})
-
-describe('onCommandMarker fan-out', () => {
   it('fans out one enriched event per marker to every subscriber', async () => {
     // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
     // code uses during init. Stub them so the terminal can initialise.
@@ -391,79 +348,6 @@ describe('onCommandMarker fan-out', () => {
     expect(ev.buffer).toBe('normal')
     expect(typeof ev.line).toBe('number')
     expect(typeof ev.col).toBe('number')
-    r.dispose()
-  })
-})
-
-describe('OSC 1337 in-band READY (nocx-ynsx)', () => {
-  const stubBrowser = () => {
-    window.matchMedia = (query: string) => ({
-      matches: false,
-      media: query,
-      onchange: null,
-      addListener: () => {},
-      removeListener: () => {},
-      addEventListener: () => {},
-      removeEventListener: () => {},
-      dispatchEvent: () => false,
-    })
-    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    }
-  }
-
-  it('fires the subscriber only on the exact NOCX_IB_READY payload, through the real parser', async () => {
-    stubBrowser()
-    const r = new XtermRenderer()
-    const container = document.createElement('div')
-    Object.defineProperty(container, 'clientWidth', { value: 800 })
-    Object.defineProperty(container, 'clientHeight', { value: 600 })
-    await r.mount(container)
-
-    // A subscriber whose invocation resolves a promise — the write() path
-    // is async, so each step awaits the marker actually landing. Same
-    // stored-resolver shape the OSC 133 fan-out test above uses.
-    const fired = (): { promise: Promise<void>; sub: () => void } => {
-      let resolve!: () => void
-      const promise = new Promise<void>((res) => {
-        resolve = res
-      })
-      return { promise, sub: vi.fn(() => resolve()) }
-    }
-
-    const cb = vi.fn()
-    const first = fired()
-    r.onInBandReady(cb)
-    r.onInBandReady(first.sub)
-
-    // The wrapper's exact handshake: READY proves raw -echo is on.
-    r.write('\x1b]1337;NOCX_IB_READY\x07')
-    await first.promise
-    expect(cb).toHaveBeenCalledTimes(1)
-
-    // Any other 1337 content is discarded — a forged or stray payload must
-    // never be read as the go-ahead to stream.
-    r.write('\x1b]1337;NOCX_IB_READY2\x07')
-    r.write('\x1b]1337;\x07')
-    const second = fired()
-    r.onInBandReady(second.sub)
-    r.write('\x1b]1337;NOCX_IB_READY\x07')
-    await second.promise
-    expect(cb).toHaveBeenCalledTimes(2) // the two wrong payloads fired nobody
-
-    // Unsubscribe removes exactly that listener: a later READY reaches the
-    // remaining subscribers, not the removed one.
-    const gone = vi.fn()
-    const unsub = r.onInBandReady(gone)
-    unsub()
-    const third = fired()
-    r.onInBandReady(third.sub)
-    r.write('\x1b]1337;NOCX_IB_READY\x07')
-    await third.promise
-    expect(gone).not.toHaveBeenCalled()
-
     r.dispose()
   })
 })
@@ -605,5 +489,331 @@ describe('OSC 636 command-existence snapshot', () => {
     const r = new XtermRenderer()
     expect(r.snapshotStore).toBeInstanceOf(CommandSnapshotStore)
     expect(r.snapshotStore.status).toBe('unavailable')
+  })
+})
+
+describe('parseRenderFence (OSC 1337 NOCX_FENCE — ADR-0024 §7 carve-out)', () => {
+  const FENCE = 'ab'.repeat(32) // 64 hex chars, what the shell generates
+
+  it('parses a well-formed fence payload', () => {
+    expect(parseRenderFence(`NOCX_FENCE;${FENCE}`)).toEqual({ hex: FENCE })
+  })
+
+  it('rejects payloads without the NOCX_FENCE; prefix (foreign OSC 1337)', () => {
+    expect(parseRenderFence(`File=name;size=42`)).toBeNull() // iTerm2 file transfer
+    expect(parseRenderFence(`NOCX_IB_READY`)).toBeNull()
+    expect(parseRenderFence('')).toBeNull()
+  })
+
+  it('rejects a non-hex, short, long or empty nonce — only exactly 64 lowercase hex', () => {
+    expect(parseRenderFence(`NOCX_FENCE;deadbeef`)).toBeNull() // 8 chars, not 64
+    expect(parseRenderFence(`NOCX_FENCE;${'g'.repeat(64)}`)).toBeNull()
+    expect(parseRenderFence(`NOCX_FENCE;${'A'.repeat(64)}`)).toBeNull() // uppercase
+    expect(parseRenderFence(`NOCX_FENCE;${FENCE}x`)).toBeNull() // 65 chars
+    expect(parseRenderFence(`NOCX_FENCE;`)).toBeNull()
+  })
+})
+
+describe('parseRecoveryFence (OSC 1337 NOCX_RECOVERY — ADR-0024 decision 8)', () => {
+  const NONCE = 'ab'.repeat(32)
+
+  it('parses a well-formed recovery fence payload', () => {
+    expect(parseRecoveryFence(`NOCX_RECOVERY;${NONCE}`)).toEqual({ hex: NONCE })
+  })
+
+  it('rejects foreign OSC 1337 payloads and non-conforming nonces', () => {
+    expect(parseRecoveryFence(`File=name;size=42`)).toBeNull()
+    expect(parseRecoveryFence(`NOCX_FENCE;${NONCE}`)).toBeNull() // the completion fence is not a recovery
+    expect(parseRecoveryFence(`NOCX_RECOVERY;deadbeef`)).toBeNull()
+    expect(parseRecoveryFence(`NOCX_RECOVERY;${'g'.repeat(64)}`)).toBeNull()
+    expect(parseRecoveryFence(`NOCX_RECOVERY;${'A'.repeat(64)}`)).toBeNull()
+    expect(parseRecoveryFence('')).toBeNull()
+  })
+})
+
+describe('XtermRenderer fence delivery through the real parser', () => {
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  async function mountRenderer(): Promise<XtermRenderer> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return r
+  }
+
+  const FENCE = 'cd'.repeat(32)
+
+  it('reports the fence and the line it landed on', async () => {
+    const r = await mountRenderer()
+    let seen: { hex: string; line: number } | null = null
+    r.onRenderFence((ev) => {
+      seen = { hex: ev.hex, line: ev.line }
+    })
+
+    // The 133 marker after the 1337 bytes is a stream-order sync point:
+    // writes are async, and the fence callback has no other completion
+    // signal. When the marker lands, the fence before it has been parsed.
+    let markerDone: () => void
+    const marker = new Promise<void>((resolve) => {
+      markerDone = resolve
+    })
+    r.onCommandMarker(() => markerDone())
+
+    r.write(`\x1b]1337;NOCX_FENCE;${FENCE}\x07`)
+    r.write('\x1b]133;A\x07')
+    await marker
+
+    expect(seen).toEqual({ hex: FENCE, line: 0 })
+    r.dispose()
+  })
+
+  it('a malformed or foreign OSC 1337 never fires the callback', async () => {
+    const r = await mountRenderer()
+    const cb = vi.fn()
+    r.onRenderFence(cb)
+
+    let markerDone: () => void
+    const marker = new Promise<void>((resolve) => {
+      markerDone = resolve
+    })
+    r.onCommandMarker(() => markerDone())
+
+    r.write(`\x1b]1337;NOCX_FENCE;deadbeef\x07`) // not 64 hex
+    r.write('\x1b]1337;File=name;size=42\x07') // iTerm2's 1337, not ours
+    r.write('\x1b]133;A\x07')
+    await marker
+
+    expect(cb).not.toHaveBeenCalled()
+    r.dispose()
+  })
+
+  it('delivers a recovery fence through the OSC path — the same handler as the render fence (nocx-u7uh.24)', async () => {
+    const r = await mountRenderer()
+    const NONCE = 'ef'.repeat(32)
+    const seen: string[] = []
+    r.onRecoveryFence((hex) => seen.push(hex))
+
+    let markerDone: () => void
+    const marker = new Promise<void>((resolve) => {
+      markerDone = resolve
+    })
+    r.onCommandMarker(() => markerDone())
+
+    r.write(`\x1b]1337;NOCX_RECOVERY;${NONCE}\x07`)
+    r.write('\x1b]133;A\x07')
+    await marker
+
+    // The shell's one-shot recovery nonce reached the subscribers — the
+    // production path that previously parsed NOCX_RECOVERY nowhere.
+    expect(seen).toEqual([NONCE])
+
+    // The completion fence is a different payload kind on the same ident:
+    // it must NOT fan out to recovery subscribers.
+    seen.length = 0
+    r.onRenderFence(() => {})
+    let fenceMarkerDone: () => void
+    const fenceMarker = new Promise<void>((resolve) => {
+      fenceMarkerDone = resolve
+    })
+    r.onCommandMarker(() => fenceMarkerDone())
+    r.write(`\x1b]1337;NOCX_FENCE;${'ab'.repeat(32)}\x07`)
+    r.write('\x1b]133;A\x07')
+    await fenceMarker
+    expect(seen).toEqual([])
+    r.dispose()
+  })
+})
+
+// ── Shift+Enter as its own chord (nocx-nt70) ──────────────────────────────
+// A program that owns the keyboard receives Enter as a bare CR and cannot
+// tell Shift+Enter apart — xterm drops the modifier. The renderer re-encodes
+// the plain chord as ESC CR (the decision and the named alternative live at
+// SHIFT_ENTER_SEQUENCE in xterm.ts). These tests pin the exact bytes that
+// leave the renderer for each chord, driven through xterm's real keydown
+// path — the same DOM events a user's keystrokes produce.
+describe('Shift+Enter as its own chord (nocx-nt70)', () => {
+  async function mountKeyRenderer(): Promise<{ r: XtermRenderer; received: string[] }> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    const received: string[] = []
+    r.onData((text) => received.push(text))
+    return { r, received }
+  }
+
+  /** Dispatch a real keydown at xterm's hidden textarea — the production
+   *  path (xterm binds its key handling to the textarea with capture). */
+  function pressKey(r: XtermRenderer, init: KeyboardEventInit & { keyCode: number }): void {
+    const term = (r as unknown as Record<string, unknown>).term as { element: HTMLElement }
+    const textarea = term.element.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    const event = new KeyboardEvent('keydown', { ...init, bubbles: true })
+    // jsdom does not compute keyCode from `key`; xterm's encoder reads it.
+    Object.defineProperty(event, 'keyCode', { value: init.keyCode })
+    textarea!.dispatchEvent(event)
+  }
+
+  it('sends ESC CR for Shift+Enter and CR for Enter — the exact bytes a program sees', async () => {
+    const { r, received } = await mountKeyRenderer()
+    pressKey(r, { key: 'Enter', keyCode: 13 })
+    pressKey(r, { key: 'Enter', keyCode: 13, shiftKey: true })
+    expect(received).toEqual(['\r', '\x1b\r'])
+    r.dispose()
+  })
+
+  it('leaves every neighbouring chord byte-identical to xterm\u2019s own encoding', async () => {
+    const { r, received } = await mountKeyRenderer()
+    // Ctrl+Enter, Alt+Enter, Ctrl+Shift+Enter, Shift+Tab, then a bare Enter.
+    // Only the plain Shift+Enter chord is re-encoded; everything else must
+    // stay exactly what xterm produced before the hook existed (the
+    // "nothing negotiated, nothing changed" property, pinned per chord).
+    // Alt+Enter = ESC CR is the collision the decision names: a program
+    // still cannot tell it from Shift+Enter under the legacy encoding.
+    pressKey(r, { key: 'Enter', keyCode: 13, ctrlKey: true })
+    pressKey(r, { key: 'Enter', keyCode: 13, altKey: true })
+    pressKey(r, { key: 'Enter', keyCode: 13, shiftKey: true, ctrlKey: true })
+    pressKey(r, { key: 'Tab', keyCode: 9, shiftKey: true })
+    pressKey(r, { key: 'Enter', keyCode: 13 })
+    expect(received).toEqual(['\r', '\x1b\r', '\r', '\x1b[Z', '\r'])
+    r.dispose()
+  })
+
+  it('never re-encodes a Ctrl-modified Enter into the Shift+Enter bytes', async () => {
+    const { r, received } = await mountKeyRenderer()
+    // Ctrl+Shift+Enter is not the plain chord: the hook must not fire for it.
+    // If the hook condition ever widened past Enter+Shift alone, this key
+    // would come back as ESC CR — the bytes this test pins it against.
+    pressKey(r, { key: 'Enter', keyCode: 13, shiftKey: true, ctrlKey: true })
+    expect(received).toEqual(['\r'])
+    r.dispose()
+  })
+})
+
+describe('XtermRenderer cell metric (nocx-yy9g)', () => {
+  async function mountRenderer() {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return { r, container }
+  }
+
+  it('reports the render service cell width — the same source FitAddon fits to', async () => {
+    const { r } = await mountRenderer()
+    // Access the private term via a cast — the test owns both sides,
+    // exactly like the setReadOnly test above.
+    const term = (r as unknown as Record<string, unknown>).term as
+      { _core: Record<string, unknown> } | undefined
+    term!._core._renderService = {
+      dimensions: { css: { cell: { width: 8.5, height: 15.6 } } },
+    }
+    expect(r.cellWidth).toBe(8.5)
+    r.dispose()
+  })
+
+  it('reports 0 when the render service cannot measure yet', async () => {
+    const { r } = await mountRenderer()
+    // jsdom has no layout, so xterm's own char-size measurement is 0 and
+    // the fallback char-measure element measures nothing either.
+    expect(r.cellWidth).toBe(0)
+    r.dispose()
+  })
+
+  it('fires onCellDimsChange once at the end of mount (fonts loaded, atlas attached)', async () => {
+    const r = new XtermRenderer()
+    const cb = vi.fn()
+    r.onCellDimsChange(cb)
+    stubBrowser()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    expect(cb).toHaveBeenCalledTimes(1)
+    r.dispose()
+  })
+
+  it('re-fires onCellDimsChange when the device pixel ratio changes', async () => {
+    const changeListeners: Array<() => void> = []
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: (type: string, l: EventListenerOrEventListenerObject) => {
+        if (type === 'change') changeListeners.push(l as () => void)
+      },
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // Registered after mount so the mount-end fire is not counted.
+    const cb = vi.fn()
+    r.onCellDimsChange(cb)
+    for (const l of changeListeners) l()
+    expect(cb).toHaveBeenCalledTimes(1)
+    r.dispose()
+  })
+})
+
+describe('XtermRenderer contrast floor', () => {
+  // nocx-3lrm. xterm.js renders the palette literally, and mc's default skin
+  // paints its panels with an ANSI colour as the BACKGROUND
+  // (`_default_ = lightgray;blue`). Under tokyo-night that pair is 1.19:1 —
+  // the owner's mc over ssh was unreadable, while the same mc in Warp was
+  // fine, because Warp raises the foreground against the actual cell
+  // background. xterm.js has the same mechanism as an option whose default is
+  // documented as "1: do nothing", and we never set it.
+  //
+  // The assertion is on the live Terminal, not on a constant: a constant
+  // proves someone typed a number, not that the renderer ships it.
+  it('applies a minimum contrast ratio to the terminal it creates', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const term = (r as unknown as Record<string, unknown>).term as
+      { options: { minimumContrastRatio?: number } } | undefined
+    expect(term).toBeDefined()
+    // 4.5 is the WCAG AA floor — the threshold the theme audit measured
+    // against. Anything at or below 1 is xterm's "do nothing".
+    expect(term!.options.minimumContrastRatio).toBe(4.5)
   })
 })

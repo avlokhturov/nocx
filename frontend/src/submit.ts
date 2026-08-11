@@ -13,13 +13,11 @@ import type { VaultResolveLine, ResolveRef } from './vault-client'
 import { findReferences } from './secret-reference'
 
 export interface SubmitDeps {
-  dispatchSubmit(): void
   focusGrid(): void
   sendDoc(doc: string): void
 }
 
 export function submitCommand(doc: string, deps: SubmitDeps): void {
-  deps.dispatchSubmit()
   deps.focusGrid()
   deps.sendDoc(doc)
 }

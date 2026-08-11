@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
   deriveActions,
-  deriveShellState,
+  shellStateFromLifecycle,
   type ActionFacts,
   type DesiredMode,
   type ObservedDelivery,
   type RelayConsent,
 } from './capability'
+import { LifecycleKernel } from './lifecycle/state'
 
 const facts = (over: Partial<ActionFacts> = {}): ActionFacts => ({
   shellState: 'unsupported',
@@ -24,13 +25,11 @@ describe('three axes (nocx-atyf.1)', () => {
     // and "alt-screen program owns the pane". In the new model these are
     // separate axes: the shell IS integrated AND the presentation IS
     // terminal — the user chose it.
-    const state = deriveShellState({
-      integrated: true,
-      integrating: false,
-      integrationFailed: false,
-      trusted: true,
-    })
-    expect(state).toBe('integrated')
+    // The kernel says the domain is live at a ready prompt — the shell IS
+    // integrated (ADR-0024 §6; the old `trusted` boolean is deleted).
+    const k = new LifecycleKernel()
+    k.applyFact({ lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
 
     // With authorisation and eligibility resolved, the user should be
     // offered a way back to the editor.
@@ -93,84 +92,78 @@ describe('three axes (nocx-atyf.1)', () => {
   })
 })
 
-describe('deriveShellState', () => {
-  it('a plain shell with no markers is unsupported', () => {
-    expect(
-      deriveShellState({
-        integrated: false,
-        integrating: false,
-        integrationFailed: false,
-        trusted: false,
-      }),
-    ).toBe('unsupported')
+describe('shellStateFromLifecycle — the kernel is the integration authority (ADR-0024 §6)', () => {
+  const promptReady = { lane: 'l', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 } as const
+
+  it('Native with nothing below it is unsupported: no domain ever arrived, a conventional terminal', () => {
+    const k = new LifecycleKernel()
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('unsupported')
   })
 
-  it('a shell with markers and trust is integrated', () => {
-    expect(
-      deriveShellState({
-        integrated: true,
-        integrating: false,
-        integrationFailed: false,
-        trusted: true,
-      }),
-    ).toBe('integrated')
+  it('a live authenticated domain is integrated — at the prompt and while running', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady })
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
+    k.applyFact({
+      lane: 'l',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'a1', state: 'open' },
+    })
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
   })
 
-  it('a shell whose markers stopped is lost', () => {
-    expect(
-      deriveShellState({
-        integrated: true,
-        integrating: false,
-        integrationFailed: false,
-        trusted: false,
-      }),
-    ).toBe('lost')
+  it('lost and desynchronized are lost — neither is live, ownership is revoked', () => {
+    const lost = new LifecycleKernel()
+    lost.applyFact({ ...promptReady })
+    lost.applyFact({ lane: 'l', lifecycle: 'lost' })
+    expect(shellStateFromLifecycle(lost.state, lost.domainStack)).toBe('lost')
+
+    const desync = new LifecycleKernel()
+    desync.applyFact({ ...promptReady })
+    desync.applyFact({ lane: 'l', lifecycle: 'desynchronized', domain: 'd1', epoch: 1 })
+    expect(shellStateFromLifecycle(desync.state, desync.domainStack)).toBe('lost')
   })
 
-  it('an in-flight integration is integrating', () => {
-    expect(
-      deriveShellState({
-        integrated: false,
-        integrating: true,
-        integrationFailed: false,
-        trusted: false,
-      }),
-    ).toBe('integrating')
+  // nocx-mlyu: 'native' says three different things, and the pane answered
+  // all three as 'a conventional terminal'. A lane hands ownership over
+  // twice per nested session — once when the parent suspends for the ssh
+  // handshake, once when the child's domain closes — and each time the
+  // structured presentation was torn down and the whole buffer shown.
+  it('Native with a domain suspended below it is a handover, not a conventional terminal', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady }) // the parent integrates
+    k.applyFact({ lane: 'l', lifecycle: 'native' }) // it suspends for the ssh handshake
+    expect(k.domainStack).toHaveLength(1)
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('handover')
   })
 
-  it('a failed integration is failed', () => {
-    expect(
-      deriveShellState({
-        integrated: false,
-        integrating: false,
-        integrationFailed: true,
-        trusted: false,
-      }),
-    ).toBe('failed')
+  it('the handover ends when the child claims the lane, and again when the parent takes it back', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady })
+    k.applyFact({ lane: 'l', lifecycle: 'native' })
+    k.applyFact({ lane: 'l', lifecycle: 'prompt_ready', domain: 'd2', epoch: 2 })
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
+
+    k.applyFact({ lane: 'l', lifecycle: 'native' }) // the child's domain closed
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('handover')
+
+    k.applyFact({ ...promptReady }) // the parent reclaims the lane
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('integrated')
+  })
+
+  it('a lane that fell to Lost is lost, never a handover — its stack is dead, not suspended', () => {
+    const k = new LifecycleKernel()
+    k.applyFact({ ...promptReady })
+    k.applyFact({ lane: 'l', lifecycle: 'lost' })
+    expect(shellStateFromLifecycle(k.state, k.domainStack)).toBe('lost')
   })
 })
 
 describe('deriveActions per state', () => {
   const authorizedFacts = (over: Partial<ActionFacts> = {}): ActionFacts =>
     facts({ authorized: true, eligible: true, ...over })
-
-  it('unsupported shell: offer integration', () => {
-    const actions = deriveActions(authorizedFacts({ shellState: 'unsupported' }))
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('integrate')
-  })
-
-  it('eligible shell: offer integration', () => {
-    const actions = deriveActions(authorizedFacts({ shellState: 'eligible' }))
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('integrate')
-  })
-
-  it('failed integration: offer retry', () => {
-    const actions = deriveActions(authorizedFacts({ shellState: 'failed' }))
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('retry-integration')
-  })
 
   it('integrated + terminal: offer enable-editor', () => {
     const actions = deriveActions(
@@ -211,17 +204,32 @@ describe('three delivery axes, never collapsed (nocx-mlm7 §3.5)', () => {
   })
 
   it('deriveActions reads the axes, never a collapsed value', () => {
-    // The observed-delivery axis is part of the facts; deriving actions
-    // must not need to reconstruct it from a single policy string.
-    const actions = deriveActions(
+    // The presentation axis is part of the facts; deriving actions must
+    // not need to reconstruct it from a single policy string. The same
+    // shellState yields different actions for different presentations —
+    // the property the old integrate offer demonstrated, now carried by
+    // the surviving editor-presentation actions.
+    const enable = deriveActions(
       facts({
-        shellState: 'unsupported',
-        observedDelivery: 'none',
+        shellState: 'integrated',
+        presentation: 'terminal',
+        observedDelivery: 'installed-script',
         authorized: true,
         eligible: true,
       }),
     )
-    expect(actions).toHaveLength(1)
-    expect(actions[0].kind).toBe('integrate')
+    expect(enable).toHaveLength(1)
+    expect(enable[0].kind).toBe('enable-editor')
+
+    const healthy = deriveActions(
+      facts({
+        shellState: 'integrated',
+        presentation: 'editor',
+        observedDelivery: 'installed-script',
+        authorized: true,
+        eligible: true,
+      }),
+    )
+    expect(healthy).toHaveLength(0)
   })
 })

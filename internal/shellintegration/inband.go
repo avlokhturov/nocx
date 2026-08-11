@@ -78,10 +78,30 @@ const (
 // InBandPlan is the in-band bootstrap: the wrapper line typed at the prompt,
 // the payload staged through the raw-mode window, and the stream terminator
 // the frontend appends (or sends alone to cancel).
+//
+// Capability is the per-epoch bearer the backend writes into the pty as the
+// FIRST line of the raw-mode stream, immediately after the wrapper's READY —
+// before the payload. It is backend-only: it is never serialized into the
+// shell.integrate result the renderer receives (ADR-0024 decision 7: no
+// capability reaches the renderer), never substituted into the payload, and
+// never written to the staged file. The wrapper captures it into a
+// non-exported shell variable; the staged file stays capability-free.
 type InBandPlan struct {
 	Wrapper    string
 	Payload    string
 	Terminator string
+	Capability string
+}
+
+// ChannelConfig is the per-session authenticated-channel configuration
+// substituted into the in-band dispatcher text. Every field is a NAME, never
+// a secret (the capability is delivered separately, above); the shell reads
+// them as NOCX_LIFECYCLE_* and addresses its envelopes with them.
+type ChannelConfig struct {
+	Lane   string
+	Domain string
+	Epoch  uint64
+	Port   int // loopback TCP port the shell connects to
 }
 
 // sessionIDRe matches the 32-lowercase-hex session ids the registry mints
@@ -91,7 +111,9 @@ var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // inBandDispatcher is the payload's header, sourced by the shell at the
 // prompt. It must parse under bash, zsh and POSIX sh. @SID@ is replaced by
-// the shell-quoted session id.
+// the shell-quoted session id; @LANE@, @DOM@, @EPOCH@ and @PORT@ by the
+// authenticated-channel configuration (names only — the capability is
+// delivered as the first streamed line and never enters this file).
 const inBandDispatcher = `# nocx in-band integration — dispatcher (POSIX sh).
 # Sourced by the shell that was at the trusted prompt. Extracts this
 # shell's hook script from the staged file and sources it with the
@@ -112,7 +134,7 @@ else
 fi
 __nocx_ib_tmp="$(mktemp "${TMPDIR:-/tmp}/nocx-ib.XXXXXX" 2>/dev/null)" || return 2>/dev/null || exit 0
 sed -n "/^${__nocx_ib_section}_START$/,/^${__nocx_ib_section}_END$/p" "$NOCX_IB_SRC" | sed '1d;$d' > "$__nocx_ib_tmp"
-NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=@SID@ . "$__nocx_ib_tmp"
+NOCX_LIFECYCLE_LANE=@LANE@ NOCX_LIFECYCLE_DOMAIN=@DOM@ NOCX_LIFECYCLE_EPOCH=@EPOCH@ NOCX_LIFECYCLE_PORT=@PORT@ NOCX_SHELL_INTEGRATION=1 NOCX_PROMPT_MODE=marker-only NOCX_SESSION_ID=@SID@ . "$__nocx_ib_tmp"
 rm -f "$__nocx_ib_tmp"
 unset __nocx_ib_section __nocx_ib_tmp
 return 0 2>/dev/null || exit 0
@@ -121,17 +143,52 @@ return 0 2>/dev/null || exit 0
 // inBandWrapperTemplate is the single line typed at the prompt. Built by
 // concatenation so the READY OSC, the terminator and the completion marker
 // are single-sourced constants.
-const inBandWrapperTemplate = `saved=$(stty -g); NOCX_IB_SRC=$(mktemp "${TMPDIR:-/tmp}/nocx-ib.XXXXXX" 2>/dev/null) && stty raw -echo && printf '` + inBandReadyOSC + `' && while IFS= read -r __nocx_ib_line; do [ "$__nocx_ib_line" = "` + inBandTerminator + `" ] && break; printf '%s\n' "$__nocx_ib_line"; done > "$NOCX_IB_SRC"; unset __nocx_ib_line; stty "$saved"; if grep -qx '` + inBandCompleteMarker + `' "$NOCX_IB_SRC" 2>/dev/null; then . "$NOCX_IB_SRC"; fi; rm -f "$NOCX_IB_SRC" 2>/dev/null`
+//
+// The FIRST streamed line is the per-epoch capability, written by the
+// backend after READY; the wrapper captures it into __nocx_cap (a plain,
+// non-exported shell variable) before anything is staged, so the staged
+// file stays capability-free. The hooks clear the export attribute at
+// source time (a user shell under `set -a` would otherwise auto-export the
+// assignment); the wrapper itself cannot use `export -n` — zsh would read
+// it as a nameref and dash rejects it.
+//
+// Backward-compatible by shape: a first line that is NOT 64 lowercase hex
+// (a legacy payload streamed without a capability line) is treated as the
+// first payload line instead, and the integration proceeds capability-free
+// — a conventional terminal, which is the fail-open state for a shell with
+// no authenticated channel.
+const inBandWrapperTemplate = `saved=$(stty -g); NOCX_IB_SRC=$(mktemp "${TMPDIR:-/tmp}/nocx-ib.XXXXXX" 2>/dev/null) && stty raw -echo && printf '` + inBandReadyOSC + `' && IFS= read -r __nocx_cap && if [ "${#__nocx_cap}" = 64 ] && case "$__nocx_cap" in *[^0-9a-f]*) false;; esac; then : > "$NOCX_IB_SRC"; else printf '%s\n' "$__nocx_cap" > "$NOCX_IB_SRC"; __nocx_cap=; fi && while IFS= read -r __nocx_ib_line; do [ "$__nocx_ib_line" = "` + inBandTerminator + `" ] && break; printf '%s\n' "$__nocx_ib_line"; done >> "$NOCX_IB_SRC"; unset __nocx_ib_line; stty "$saved"; if grep -qx '` + inBandCompleteMarker + `' "$NOCX_IB_SRC" 2>/dev/null; then . "$NOCX_IB_SRC"; fi; rm -f "$NOCX_IB_SRC" 2>/dev/null`
 
 // InBandBootstrap builds the in-band integration plan for the given session.
 // The session id anchors NOCX_SESSION_ID in the payload — the same id the
 // launcher would have embedded at session start, so the nested-session gate
 // (nocx-4ff.13) treats the freshly integrated shell as the owning session.
-func (s *Impl) InBandBootstrap(sessionID string) (InBandPlan, error) {
+//
+// ch, when non-nil, carries the authenticated-channel configuration minted
+// for this integration (lane, domain, epoch and the loopback port the
+// kernel's transport listens on) and is substituted into the dispatcher.
+// nil leaves the dispatcher capability-free and config-free: the hooks find
+// no channel and the shell stays conventional — the safe state when the
+// transport wiring has not minted a domain. The capability itself is never
+// an argument here: the backend writes it into the pty as the first line of
+// the raw-mode stream and it never crosses the renderer or a named file.
+func (s *Impl) InBandBootstrap(sessionID string, ch *ChannelConfig) (InBandPlan, error) {
 	if !sessionIDRe.MatchString(sessionID) {
 		return InBandPlan{}, fmt.Errorf("shellintegration: invalid session id %q", sessionID)
 	}
-	payload := strings.ReplaceAll(inBandDispatcher, "@SID@", shellQuote(sessionID))
+	lane, dom, epoch, port := "", "", "0", ""
+	if ch != nil {
+		lane = ShellQuote(ch.Lane)
+		dom = ShellQuote(ch.Domain)
+		epoch = fmt.Sprintf("%d", ch.Epoch)
+		port = fmt.Sprintf("%d", ch.Port)
+	}
+	payload := inBandDispatcher
+	payload = strings.ReplaceAll(payload, "@SID@", ShellQuote(sessionID))
+	payload = strings.ReplaceAll(payload, "@LANE@", lane)
+	payload = strings.ReplaceAll(payload, "@DOM@", dom)
+	payload = strings.ReplaceAll(payload, "@EPOCH@", epoch)
+	payload = strings.ReplaceAll(payload, "@PORT@", port)
 	payload += inBandBashStart + "\n" + ensureTrailingNewline(bashScript) + inBandBashEnd + "\n"
 	payload += inBandZshStart + "\n" + ensureTrailingNewline(zshScript) + inBandZshEnd + "\n"
 	payload += inBandPosixStart + "\n" + ensureTrailingNewline(posixScript) + inBandPosixEnd + "\n"

@@ -57,6 +57,19 @@ if (typeof HTMLDialogElement !== 'undefined' && !HTMLDialogElement.prototype.sho
   }
 }
 
+// jsdom implements no scrolling at all, so Element.scrollIntoView and
+// Element.scrollTo are simply absent. The scrollback controller calls both,
+// and setIdle schedules its scrollIntoView a frame late on purpose — so the
+// callback lands after the test that caused it has finished, and the
+// TypeError surfaces as an unhandled rejection attributed to whichever file
+// happens to be running. There is no layout in jsdom, so doing nothing is
+// the honest stub; a test that cares about scrolling asserts on the mode and
+// the classes, never on a scroll position that cannot exist here.
+if (typeof Element !== 'undefined') {
+  if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+  if (!Element.prototype.scrollTo) Element.prototype.scrollTo = () => {}
+}
+
 // jsdom (≤ 25) does not implement Range.getClientRects; CodeMirror 6 calls it
 // to measure text geometry (coordsAtPos, measureTextSize). There is no layout
 // in jsdom, so an empty rect list is the honest answer — it stops CM6 from

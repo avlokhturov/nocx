@@ -39,6 +39,11 @@ type sessionMachine interface {
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
+	// replayLifecycleFacts re-emits the current lifecycle projection of the
+	// session's lanes on reattach (ADR-0024 decision 8 / AD-9). One narrow
+	// method rather than the publisher itself: the handler may resynchronise
+	// a session it already owns, and nothing more.
+	replayLifecycleFacts(sid session.ID)
 }
 
 // openMachine is the transport-owned machinery handleOpen needs after the
@@ -66,7 +71,12 @@ type openHandlers struct {
 	resolver *resolverHolder // profile resolver, readable post-construction
 	sshCfg   ssh.ConfigResolver
 	launcher ssh.RemoteLauncher
-	log      log.Logger
+	// lifecycle is the authenticated-channel seam (ADR-0024): the dial
+	// hands it to the far side so the shell can hand its lifecycle back
+	// over a channel that is not the terminal. An explicit seam, not the
+	// whole server.
+	lifecycle ssh.RemoteLifecycle
+	log       log.Logger
 }
 
 // handleOpen creates a new session and output ring.
@@ -84,12 +94,23 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 	}
 
 	cfg := session.Config{
-		Kind:     session.KindLocal,
-		Cols:     params.Cols,
-		Rows:     params.Rows,
-		XPixel:   params.XPixel,
-		YPixel:   params.YPixel,
-		Enhanced: params.Enhanced,
+		Kind:   session.KindLocal,
+		Cols:   params.Cols,
+		Rows:   params.Rows,
+		XPixel: params.XPixel,
+		YPixel: params.YPixel,
+		// Every session asks to be integrated, and the ones that cannot be
+		// fall back to an ordinary terminal (nocx-tr2n). This is not a
+		// policy the renderer may express: it arrived as an `enhanced` open
+		// parameter, both ssh openers omitted it, and the result was a
+		// second — silent, always-negative — answer to the question
+		// `desiredMode` (raw|script|relay) already answers per connection
+		// (AD-8). Nothing below fails closed on the request: a launcher
+		// that declines, a channel the far sshd refuses, a raw destination
+		// all end at a visible native prompt, so asking always is the safe
+		// direction and forgetting to ask is the one that shipped a tab
+		// with no blocks and no diagnostic.
+		Enhanced: true,
 	}
 	// ProfileID is deliberately NOT set here. It is recorded below, only once
 	// the resolver has accepted it, because a local PTY has no profile and
@@ -133,6 +154,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 				remote.XPixel = params.XPixel
 				remote.YPixel = params.YPixel
 				remote.RemoteLauncher = h.launcher
+				remote.RemoteLifecycle = h.lifecycle
 
 				h.log.Info("SSH open via profile", "profileId", params.ProfileID, "host", host, "user", remote.User)
 
@@ -181,12 +203,13 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 					keyFile = resolved.IdentityFile
 				}
 				remote = &ssh.ConnectConfig{
-					User:           user,
-					Port:           port,
-					KeyFile:        keyFile,
-					Cols:           params.Cols,
-					Rows:           params.Rows,
-					RemoteLauncher: h.launcher,
+					User:            user,
+					Port:            port,
+					KeyFile:         keyFile,
+					Cols:            params.Cols,
+					Rows:            params.Rows,
+					RemoteLauncher:  h.launcher,
+					RemoteLifecycle: h.lifecycle,
 				}
 
 				h.log.Info("SSH open via direct host", "host", params.Host, "resolvedHost", remoteHost, "user", user)
@@ -581,6 +604,15 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		// made).
 		h.machine.flushFilesChanged(sid, wconn)
 
+		// Lifecycle (ADR-0024 decision 8): a reattached frontend must resume
+		// the existing domain, so its current projection is re-emitted to
+		// THIS connection — after the attach response and after
+		// setSubscriber, like the files flush above. The publisher's
+		// ReplayLane bypasses the change-dedupe on purpose: the renderer
+		// needs the current state even when no transition happened since it
+		// last saw this session.
+		h.machine.replayLifecycleFacts(sid)
+
 		sidBytes, _ := session.IDToBytes(sid)
 		go h.machine.ringToConn(ctx, wconn, sidBytes, rx.ring, from)
 		return nil
@@ -660,7 +692,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
 		reg(openSub, "open", func(w *wsConn, state *connState) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, state, req) }
 		}),
 		reg(ordered, "resize", func(w *wsConn, state *connState) handlerFunc {

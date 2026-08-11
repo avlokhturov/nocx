@@ -1,6 +1,6 @@
 package transport_test
 
-// The package-boundary proof (ADR-0024, Enforcement item 1).
+// The package-boundary proof (ADR-0026, Enforcement item 1).
 //
 // Two claims, proven structurally rather than by inspection:
 //
@@ -149,7 +149,7 @@ func walkRefs(t *testing.T, n ast.Node, report func(token.Pos, string)) {
 // the non-blocking TryResult/TryError/TryNotify trio and nothing else. The
 // raw socket lives in package outbound; anything a handler can do with a
 // Responder is a bounded enqueue, so a stuck renderer can delay the read
-// loop by no more than one channel send (ADR-0024 item 13). A new method on
+// loop by no more than one channel send (ADR-0026 item 13). A new method on
 // this interface is a new write path and must be deliberate.
 func TestResponderIsTheOnlyWriteSeam(t *testing.T) {
 	tp := reflect.TypeOf((*transport.Responder)(nil)).Elem()

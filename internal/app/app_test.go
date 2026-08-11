@@ -6,8 +6,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 )
@@ -243,4 +249,266 @@ func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
 	if got := a.LogFilePath(); got != "" {
 		t.Errorf("LogFilePath() = %q, want \"\" when the file could not be opened", got)
 	}
+}
+
+// TestLifecycleChannelWiring proves the composition root constructs the
+// lifecycle kernel and wires one descriptor transport per enhanced session:
+// an enhanced pty gets a channel that closes with it; a conventional pty
+// gets none (ADR-0024 decision 4: no channel, conventional session).
+func TestLifecycleChannelWiring(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	f, ok := a.Pty.(*localPTYFactory)
+	if !ok {
+		t.Fatalf("Pty factory is %T, want *localPTYFactory", a.Pty)
+	}
+	if f.kernel == nil {
+		t.Fatal("lifecycle kernel was not constructed at the composition root")
+	}
+	if f.registerLane == nil {
+		t.Fatal("lifecycle lane registration was not wired at the composition root")
+	}
+
+	enhanced, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24, Enhanced: true, SessionID: "sid-wiring"})
+	if err != nil {
+		t.Fatalf("NewPTY(enhanced): %v", err)
+	}
+	wrapped, ok := enhanced.(*lifecyclePTY)
+	if !ok {
+		t.Fatalf("enhanced pty is %T, want *lifecyclePTY", enhanced)
+	}
+	if wrapped.ch == nil {
+		t.Fatal("enhanced session got no lifecycle channel")
+	}
+	_ = wrapped.Close()
+
+	plain, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("NewPTY(conventional): %v", err)
+	}
+	if _, ok := plain.(*lifecyclePTY); ok {
+		t.Fatal("conventional session must not carry a lifecycle channel")
+	}
+	_ = plain.Close()
+}
+
+// TestLifecycleLaneRegistrationBindsSession proves the production wiring of
+// the lane→session registry: an enhanced pty spawn with a session id reports
+// the minted lane bound to that id, and a conventional spawn reports
+// nothing. Without this binding every published lifecycle fact is dropped at
+// the transport and enhanced mode never engages — the fact path's dead half.
+func TestLifecycleLaneRegistrationBindsSession(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	f, ok := a.Pty.(*localPTYFactory)
+	if !ok {
+		t.Fatalf("Pty factory is %T, want *localPTYFactory", a.Pty)
+	}
+	var registered []string
+	f.registerLane = func(lane lifecycle.LaneID, sid string) {
+		registered = append(registered, string(lane)+"->"+sid)
+	}
+
+	enhanced, err := f.NewPTY(context.Background(), pty.Config{
+		Cols: 80, Rows: 24, Enhanced: true, SessionID: "sid-test-1",
+	})
+	if err != nil {
+		t.Fatalf("NewPTY(enhanced): %v", err)
+	}
+	if len(registered) != 1 || !strings.HasSuffix(registered[0], "->sid-test-1") {
+		t.Fatalf("registered = %v, want exactly one lane bound to sid-test-1", registered)
+	}
+	_ = enhanced.Close()
+
+	plain, err := f.NewPTY(context.Background(), pty.Config{Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("NewPTY(conventional): %v", err)
+	}
+	if len(registered) != 1 {
+		t.Fatalf("a conventional spawn must not register a lane, got %v", registered)
+	}
+	_ = plain.Close()
+}
+
+// TestLocalEnhancedChildEnv_SecretNeverReachesIt is the nocx-u7uh.21
+// acceptance assertion in its strongest form, over the CHILD'S ACTUAL
+// environment rather than over what the factory intended to pass: a local
+// enhanced session's shell carries the lifecycle addressing (the non-secret
+// NOCX_LIFECYCLE_* names) but never the capability or the recovery fence —
+// those ride the rcfile text, and a value in /proc/<pid>/environ would leak
+// the authenticator to every child (ADR-0024 decision 2).
+func TestLocalEnhancedChildEnv_SecretNeverReachesIt(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	f, ok := a.Pty.(*localPTYFactory)
+	if !ok {
+		t.Fatalf("Pty factory is %T, want *localPTYFactory", a.Pty)
+	}
+
+	pt, err := f.NewPTY(context.Background(), pty.Config{
+		Cols: 80, Rows: 24, Enhanced: true, SessionID: "sid-env-proof",
+	})
+	if err != nil {
+		t.Fatalf("NewPTY(enhanced): %v", err)
+	}
+	defer func() { _ = pt.Close() }()
+	lpty, ok := pt.(*lifecyclePTY)
+	if !ok {
+		t.Fatalf("enhanced pty is %T, want *lifecyclePTY", pt)
+	}
+	lp, ok := lpty.Pty.(*pty.LocalPty)
+	if !ok {
+		t.Fatalf("enhanced pty is %T, want *pty.LocalPty", lpty.Pty)
+	}
+	pid := lp.Pid()
+	if pid == 0 {
+		t.Fatal("shell pid unavailable")
+	}
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "environ"))
+	if err != nil {
+		t.Fatalf("read child environ: %v", err)
+	}
+	env := map[string]string{}
+	for _, kv := range bytes.Split(raw, []byte{0}) {
+		parts := bytes.SplitN(kv, []byte("="), 2)
+		if len(parts) == 2 {
+			env[string(parts[0])] = string(parts[1])
+		}
+	}
+	if env["NOCX_SHELL_INTEGRATION"] != "1" {
+		t.Fatal("the child's actual environment must carry the activation gate (proving this is the right process)")
+	}
+	// The point of the assertion: neither the capability nor the recovery
+	// fence — both 64 lowercase hex — may exist anywhere in the delivered
+	// environment. They ride the rcfile text only.
+	for key, val := range env {
+		if len(val) == 64 && isLowerHex(val) {
+			t.Fatalf("child environment leaked a 64-hex authenticator (%s)", key)
+		}
+	}
+}
+
+func isLowerHex(s string) bool {
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// jsonrpcCall sends one JSON-RPC request over conn and returns the envelope,
+// skipping any notifications (exit, ack, lifecycle.changed) that may arrive
+// first — the same reach pattern the launcher tests use.
+func jsonrpcCall(t *testing.T, conn *websocket.Conn, method string, params any) struct {
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+} {
+	t.Helper()
+	req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write %s: %v", method, err)
+	}
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		_, raw, rerr := conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("read %s response: %v", method, rerr)
+		}
+		var check struct {
+			ID *json.RawMessage `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &check)
+		if check.ID == nil {
+			continue // a notification (exit, ack, lifecycle.changed)
+		}
+		var resp struct {
+			Error *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("decode %s response: %v", method, err)
+		}
+		return resp
+	}
+}
+
+// TestLocalEnhancedSessionEstablishesThroughProductionWiring is the
+// nocx-u7uh.21 acceptance proof (AGENTS.md rule 2: a feature that was never
+// reachable must be proven through production wiring, not by mounting
+// pieces): boot the REAL composition root, open a local enhanced session
+// over the REAL WebSocket, and watch the published lifecycle fact reach
+// prompt_ready — which exists only after the shell proved the per-epoch
+// capability over the inherited descriptor. Before .21 this test could not
+// pass: the local shell never learned its lane, domain, epoch or capability,
+// so no local session ever established.
+func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
+	storagetest.Isolate(t)
+	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	if serr := a.Start(context.Background()); serr != nil {
+		t.Fatalf("Start: %v", serr)
+	}
+	defer a.Shutdown(context.Background())
+
+	wsURL := "ws://127.0.0.1:" + strconv.Itoa(a.WSPort()) + "/session"
+	conn, _, err := (&websocket.Dialer{
+		Subprotocols: []string{"nocx.token." + a.WSToken()},
+	}).Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	open := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "enhanced": true,
+	})
+	if open.Error != nil {
+		t.Fatalf("open: %+v", open.Error)
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, raw, rerr := conn.ReadMessage()
+		if rerr != nil {
+			continue // deadline: keep waiting for the fact
+		}
+		var notif struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(raw, &notif); err != nil || notif.Method != "lifecycle.changed" {
+			continue
+		}
+		var fact struct {
+			Lifecycle string `json:"lifecycle"`
+			Domain    string `json:"domain"`
+		}
+		if err := json.Unmarshal(notif.Params, &fact); err != nil {
+			continue
+		}
+		if fact.Lifecycle == "prompt_ready" && fact.Domain != "" {
+			return // the local shell established through production wiring
+		}
+	}
+	t.Fatal("a local enhanced session never reached prompt_ready through production wiring")
 }

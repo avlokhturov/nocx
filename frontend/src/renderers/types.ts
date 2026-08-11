@@ -1,5 +1,4 @@
 import type { ITheme } from '@xterm/xterm'
-import type { PassportDisposition } from '../environment-passport'
 
 // Renderer-agnostic terminal contract. The backend (PTY over WS) is renderer-
 // agnostic, so any VT frontend just needs to satisfy this small surface:
@@ -50,6 +49,26 @@ export interface CommandMarkerEvent extends CommandMarker {
 // each enriched marker as an event — the backend never sniffs the byte stream.
 export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
 
+// RenderFenceEvent — the ADR-0024 §7 carve-out rendezvous: the shell writes
+// ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER a command's output, and
+// carries the same 64 hex chars in the authenticated `complete` event. The
+// renderer parses the OSC and reports WHERE the fence landed (render-only —
+// a fence carries no authority; see ADR-0024 decision 1). The block model
+// matches the fence hex against the authenticated completion to freeze the
+// block at the true output end instead of truncating the in-flight tail.
+export interface RenderFenceEvent {
+  /** 64 lowercase hex chars — the nonce the shell generated at completion. */
+  hex: string
+  /** Absolute buffer line the fence sequence was parsed on. The command's
+   *  last output byte is on this line or the one above it. */
+  line: number
+  /** Active buffer at parse time. A fence in the alternate buffer has no
+   *  scrollback line to serialize — the consumer ignores it. */
+  buffer: 'normal' | 'alternate'
+}
+
+export type RenderFenceCallback = (event: RenderFenceEvent) => void
+
 export interface TerminalRenderer {
   mount(container: HTMLElement): Promise<void>
   /**
@@ -93,32 +112,19 @@ export interface TerminalRenderer {
   // tooltip.
   onCwd(cb: CwdCallback): void
 
-  // onEnvironmentPassport registers a callback that fires for every OSC 636
-  // P readiness-passport disposition (accepted / duplicate / unexpected /
-  // ignored). Parse-and-report only: the caller decides what an accepted
-  // passport means (spec §5.2, §5.3).
-  onEnvironmentPassport(cb: (disposition: PassportDisposition) => void): void
-
-  // setExpectedEnvironmentId registers the environment id minted for the
-  // attempt in flight — before the line reaches the pty. Only a passport
-  // carrying exactly this id can be accepted; any other id is ignored.
-  setExpectedEnvironmentId(id: string | null): void
-
   // onCommandMarker registers a callback that fires when the shell emits
   // OSC 133 command boundary markers (A/B/C/D). The VT frontend parses the
   // OSC sequence and extracts the marker kind, optional exit code and the
   // nocx_env tag when the marker is tagged.
   onCommandMarker(cb: CommandMarkerCallback): void
 
-  // onInBandReady registers a callback that fires when the shell emits the
-  // private OSC 1337 in-band READY handshake (\x1b]1337;NOCX_IB_READY\x07).
-  // The wrapper line emits it only after raw -echo mode is provably on, so
-  // this event is the go-ahead to stream the in-band payload (nocx-ynsx,
-  // spec §4.4). The renderer whitelists the exact payload; anything else is
-  // discarded. Returns an unsubscribe: the caller registers immediately
-  // before sending the wrapper and removes the listener on success, cancel,
-  // timeout and error, so a stale READY can never trigger a stream.
-  onInBandReady(cb: () => void): () => void
+  // onRenderFence registers a callback that fires when the shell emits the
+  // private render fence (OSC 1337 NOCX_FENCE — ADR-0024 §7 carve-out).
+  // Parse-and-report only: the renderer says where the fence landed; the
+  // consumer matches it against the authenticated completion. Optional so a
+  // renderer that does not parse fences degrades to the documented
+  // no-fence deferral instead of failing to mount.
+  onRenderFence?(cb: RenderFenceCallback): void
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the
   // tab bar always lights the activity indicator on bell.
@@ -200,6 +206,24 @@ export interface TerminalRenderer {
    *  Falls back to fontSize * lineHeight only if measurement is unavailable. */
   readonly cellHeight: number
 
+  /** CSS-pixel width of one grid cell — xterm's real cell advance, snapped
+   *  to whole device pixels (the same source FitAddon fits to). 0 while the
+   *  renderer cannot measure (not yet mounted, no layout). The frozen block
+   *  layout publishes this so N columns of frozen output occupy exactly
+   *  N × cellWidth (nocx-yy9g).
+   */
+  readonly cellWidth: number
+
+  /**
+   * Subscribe to "the cell dimensions MAY have changed" — fired at mount
+   *  (after the fonts load), on grid resize and on device-pixel-ratio
+   *  change, the three places xterm re-measures its char size. The
+   *  scrollback re-publishes the cell metric to the frozen block layout on
+   *  this. Optional so a renderer that never re-measures degrades to the
+   *  single publish the scrollback does at construction.
+   */
+  onCellDimsChange?(cb: () => void): void
+
   /** Absolute buffer line index at the top of the visible viewport.
    *  = buffer.active.baseY + buffer.active.viewportY in xterm terms. */
   readonly viewportTopLine: number
@@ -223,9 +247,13 @@ export interface TerminalRenderer {
   cursorLine(): number
 
   /**
-   * Clear the visible xterm viewport. Used after freezing a block to
-   * prevent output duplication between DOM blocks and the xterm grid.
-   * Does NOT clear scrollback — only the visible viewport rows.
+   * Clear the visible xterm viewport. Used after freezing a block, so the
+   * rows the block's DOM element now owns do not stay in the grid and get
+   * re-displayed by the live region (nocx-m87n). The underlying
+   * `Terminal.clear()` clears the whole buffer — "making the prompt line
+   * the new first line" — which is exactly what the DOM block model
+   * wants: the DOM owns the scrollback now, and the grid only ever holds
+   * the running command's rows.
    */
   clearViewport(): void
 }

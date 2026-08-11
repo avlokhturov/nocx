@@ -3,6 +3,7 @@ package shellintegration
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,82 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// in readline runs no traps, so a job that misses it waits for a prompt
 		// the user may never produce (nocx-z9s9.16).
 		"13": "00383f333efb2633efb5b039302b36d834ffba9364dfb3b3406f4779d2cd3041",
+		// v14: the authenticated lifecycle channel (ADR-0024) — the shell
+		// speaks hello/accept/start/complete/prompt_ready over a transport
+		// that is not the tty, authenticated by the per-epoch capability
+		// (nocx-u7uh.3).
+		"14": "1db018fdd91b47676ba3e71d75b9ac3f02346dcb57d6c314f0ad3ce8d5936490",
+		// v15: the hooks answer a refresh_request with an authenticated
+		// snapshot at the next prompt boundary and restore a visible prompt
+		// while the domain is desynchronized (ADR-0024 decision 7/9,
+		// nocx-u7uh.9). The snapshot names no attempt — the shell never
+		// learns attempt ids — so open attempts reconcile as unknown.
+		"15": "462c239042f18b149f94d8349bce08d5354595869eba785965dbb7037346ce7a",
+		// v16: the snapshot names the shell's own attempts — the shell mints
+		// an id per command at start, the kernel learns it at attach and
+		// resolves it as a per-attempt alias, and a completion lost inside a
+		// corrupted region reconciles to its real status instead of to
+		// unknown; zsh answers refresh_request the way bash does; POSIX sh
+		// documents the omission as decided (nocx-u7uh.19).
+		"16": "d706a17d13634c274fcb0618dfd22c4eacd4427744d9848e23a5aa38a81a22a1",
+		// v17: the shell-minted attempt id carries the domain (s-<dom>-<n>)
+		// instead of the PID (s-$$-<n>): PID spaces are not shared across
+		// domains, so a docker exec / ssh shell sharing a low PID with
+		// another domain's shell minted a colliding id and the kernel
+		// rejected the second domain's first command (nocx-u7uh.19).
+		"17": "5edf9b249dd194fc3c43cd21cbb2a2608378afebd0f2f318928a7448f8671779",
+		// v18: the shipped scripts are comment-stripped at embed time
+		// (nocx-z9s9.17) — same code, no prose — so every install rewrites
+		// to the smaller bytes and the version test hashes exactly what
+		// ships.
+		"18": "7e6cac4c22db022dd78434c5d6ac911dc12b8651b6db527de8df57ab82bfe06f",
+		// v19: the recovery seam (ADR-0024 decision 8) — a failed lifecycle
+		// send at a prompt boundary clears the active latch, restores a
+		// visible native prompt, and emits the one-shot recovery fence
+		// (nocx-u7uh.15).
+		"19": "008bf5b8f7a80a8be10c30eedc1c1e3eb4e269f30427c0fd3651254d51dcd84c",
+		// v20: __nocx_snapshot_wait_ms is declared once per shell rather than
+		// once per source. The rcfile re-sources the script on purpose, and a
+		// readonly can be neither unset nor re-declared, so every local
+		// enhanced session printed "readonly variable" as its first line
+		// (nocx-u7uh.22).
+		"20": "4171ef459ec928439c0268ec98e6204d89ee0f05c53d4effc67048509faa7ba0",
+		// v21: the handshake wait is a real poll and the connect no longer
+		// hijacks stderr (nocx-u7uh.10). `read -N 0` with a nonzero -t
+		// returns immediately on an open fd, so a kernel that accepted the
+		// connection but never answered left the shell blocked in dd with no
+		// prompt; the bounded wait now polls with `read -t 0 -N 0` around
+		// each sleep, and the connect's 2>/dev/null is scoped to a group —
+		// unscoped, `exec` made it permanent and every restored native
+		// prompt (decisions 8/9) was invisible, because readline writes the
+		// prompt to stderr.
+		"21": "94b686e116c401b4d393319972333bf49e406b2c2021344e550f878b9ad256ca",
+		"22": "21de58ea754f1d0099c63934b2916704aa92eab74da2d29975dd2df8e2ec2dd6",
+		"23": "0ea2de4602addb7f5240a62b3490981ee34332e90a257b0bc7490d2f039d6d31",
+		// v24: the zsh tier gets the nested-domain machinery (nocx-u7uh.28)
+		// — accept-line-widget interception and zsh's own descriptor
+		// staging, porting the bash tier's nocx-u7uh.11 flow.
+		"24": "d31066a947f5a56af583bb12ed936f910bb2fc4987682e85ce742ec31cde24ce",
+		// v25: the zsh nested launch binds the child's stdin to the tty
+		// (zle gives widget commands /dev/null, which EOF'd the child) and
+		// runs the precmd chain at the widget's end (zle does not fire it
+		// for consumed lines) — nocx-u7uh.28.
+		"25": "9d9703fb279d9732d6db22ff1d89a2a4372a5c75714b739c032b4ebd288dc005",
+		// v26: the hello declares max_frame 262144. The kernel→shell
+		// direction carries the ssh child's bootstrap — a full remote
+		// launcher with the bundle embedded — and at 64 KiB that frame was
+		// never written, so the parent sat out its grant timeout and ran the
+		// user's ssh conventionally (nocx-beib).
+		"26": "ddc204fcee1a2e640b9f58dcbdb75dcd8bd3cf8a56621fc9a6ce0de45e86bc37",
+		// v27: the reader is bounded by the same declaration the hello
+		// advertises. v26 raised only the advertised number and left the
+		// length check at 65536, so the grant frame was rejected before it
+		// was parsed (nocx-beib).
+		"27": "4e88fad6351032bb90b94c3e2c72774cb0c35d5473ee5dd793ee1e1a649d7482",
+		// v28: the grant frame is parsed with a shortest-match expansion —
+		// the longest-match form is quadratic and cost ten seconds on a
+		// grant-sized frame (nocx-beib).
+		"28": "acdddb0681bfb3ea80974d9ae348c2f0d4150275ef426150e4ae7cf525fea559",
 	}
 
 	h := sha256.New()
@@ -90,5 +167,30 @@ func scriptFor(t *testing.T, path string) string {
 	default:
 		t.Fatalf("no embedded script for %q", path)
 		return ""
+	}
+}
+
+// TestFrameParseAvoidsLongestMatch pins the one expansion that made the ssh
+// child feel broken (nocx-beib).
+//
+// `${frame##*pat}` scans for the LAST occurrence, which bash does by walking
+// every position: measured 1.65 s on a 78 KiB frame, against 1 ms for the
+// shortest-match form. The grant carrying a remote launcher is exactly that
+// size, so the shell burned ten seconds between reading the frame and using
+// it — the user saw a tab that sat still after typing `ssh host`, with
+// everything else already fixed and no hint that the delay was ours.
+//
+// The check is deliberately narrow: only the frame variable, only the
+// longest-match form. Elsewhere ## is on short strings and is the right
+// tool.
+func TestFrameParseAvoidsLongestMatch(t *testing.T) {
+	for name, body := range scripts {
+		for _, line := range strings.Split(body, "\n") {
+			if !strings.Contains(line, "__nocx_lc_frame##") {
+				continue
+			}
+			t.Errorf("%s parses the frame with a longest-match expansion, which is "+
+				"quadratic on a grant-sized frame: %s", name, strings.TrimSpace(line))
+		}
 	}
 }

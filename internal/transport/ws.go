@@ -26,6 +26,8 @@ import (
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
@@ -66,6 +68,21 @@ func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
 	rx.mu.Lock()
 	defer rx.mu.Unlock()
 	return rx.subscriber, rx.subState
+}
+
+// clearSubscriber drops the subscriber slot iff it still holds wconn —
+// connection teardown. A newer subscriber (a reattach that replaced this
+// connection) is preserved. The slot is what the lifecycle establishment
+// acknowledgement validates against (decision 9): a detached connection's
+// late ack must never release an accept, and with the slot cleared on
+// teardown it cannot.
+func (rx *sessionRx) clearSubscriber(wconn *wsConn) {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	if rx.subscriber == wconn {
+		rx.subscriber = nil
+		rx.subState = nil
+	}
 }
 
 type WSServer struct {
@@ -138,17 +155,17 @@ type WSServer struct {
 	// plain shell and report reason none.
 	remoteLauncher ssh.RemoteLauncher
 
-	// launcherStager puts a remote launcher where a LOCAL shell can read it,
-	// for the hand-typed-ssh rewrite (nocx-pu4.6). Wired through
-	// WithLauncherStager; when nil, shell.launcherCommand refuses and the
-	// renderer sends the line the user typed.
-	launcherStager LauncherStager
-
+	// remoteLifecycle establishes the authenticated lifecycle channel for
+	// remote sessions (ADR-0024 decision 2 "Over SSH"), stamped onto every
+	// ConnectConfig alongside the launcher. Wired through
+	// WithRemoteLifecycle; when nil, remote sessions open without a
+	// channel and stay conventional.
+	remoteLifecycle ssh.RemoteLifecycle
 	// installedFacts is the backend-owned, persisted memory of which
 	// resolved destinations carry a committed, protocol-compatible
 	// integration (§5.4). Wired through WithInstalledFactStore; when nil,
-	// every host bootstraps and observations are logged but never
-	// recorded.
+	// the footprint surface answers an empty list (the P7 observation RPC
+	// that used to write it was severed — ADR-0024 §1).
 	installedFacts *ssh.InstalledFactStore
 
 	// remoteUninstaller removes the integration bundle on a remote host,
@@ -156,14 +173,6 @@ type WSServer struct {
 	// when nil, shell.footprint.uninstall answers an error and removes
 	// nothing — the status surface never offers the button without it.
 	remoteUninstaller RemoteUninstaller
-
-	// launcherAttempts is the idempotency registry binding a minted
-	// environment id to its resolved identity and expected delivery
-	// (§5.3). Guarded by launcherAttemptsMu; a passport can arrive
-	// immediately after the result, so registration and observation
-	// consumption are atomic with the registry.
-	launcherAttemptsMu sync.Mutex
-	launcherAttempts   map[string]*launchAttempt
 
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
@@ -344,6 +353,22 @@ type WSServer struct {
 	// opaque token, stored server-side so secrets never reach the renderer.
 	planMu    sync.Mutex
 	planStore map[string]*planEntry
+
+	// lifecyclePub is the lifecycle publication boundary (ADR-0024 decision
+	// 7, bead nocx-u7uh.5). When nil, no lifecycle adapters can be created
+	// and no lifecycle.changed facts are routed — sessions stay
+	// conventional. Wired by WithLifecyclePublisher at the composition
+	// root; the shell-spawn path reads it to create adapters, and this
+	// server is bound as the publisher's emitter after construction.
+	lifecyclePub   *lifecyclepub.Publisher
+	lifecycleMu    sync.Mutex
+	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// recoveryMu guards recoveries: the per-session restoration episodes
+	// (ADR-0024 decision 8). The episode opens when a lost fact with a
+	// recovery fence routes to a live session, and is cancelled when the
+	// session closes — a late ack is rejected (session death wins).
+	recoveryMu sync.Mutex
+	recoveries map[session.ID]*recoveryState
 }
 
 // ── Tabby import plan store (server-side, never reaches renderer) ─────────
@@ -524,6 +549,16 @@ func WithSSHConfigResolver(resolver ssh.ConfigResolver, configPath string) WSSer
 // transport default.
 func WithRemoteLauncher(l ssh.RemoteLauncher) WSServerOption {
 	return func(s *WSServer) { s.remoteLauncher = l }
+}
+
+// WithRemoteLifecycle attaches the lifecycle-channel establisher that
+// remote sessions consult (ADR-0024 decision 2 "Over SSH"), stamped onto
+// every ConnectConfig alongside the launcher. The composition root
+// implements it with the lifecycle kernel and the ssh client. When not
+// wired, remote sessions open without a channel and stay conventional —
+// the same opt-in-per-connection shape as the launcher.
+func WithRemoteLifecycle(l ssh.RemoteLifecycle) WSServerOption {
+	return func(s *WSServer) { s.remoteLifecycle = l }
 }
 
 // WithCompleters attaches the completion sources for shell.complete
@@ -792,6 +827,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
 	specs = append(specs, s.contentSpecs(lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
+	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
@@ -1185,12 +1221,15 @@ func isJSONObject(data []byte) bool {
 }
 
 // openParams is the payload of the "open" RPC method.
+//
+// There is deliberately no `enhanced` field (nocx-tr2n): whether a session
+// tries to become integrated is the backend's decision, not the renderer's.
+// See handleOpen.
 type openParams struct {
-	Cols     uint16 `json:"cols"`
-	Rows     uint16 `json:"rows"`
-	XPixel   uint16 `json:"xpixel"`
-	YPixel   uint16 `json:"ypixel"`
-	Enhanced bool   `json:"enhanced"`
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
 
 	// SSH fields — when Kind="ssh", the session opens an SSH channel.
 	// ProfileID identifies the SSH profile to connect to; the backend
@@ -1519,12 +1558,14 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	<-readErr
 
-	// Connection dropped. Wake any ring waiters blocked on this
-	// connection's sessions. The cancel above also fires (via defer)
-	// which is the primary exit signal for ringToConn.
+	// Connection dropped. Clear this connection from every subscriber slot
+	// it still holds (a newer subscriber is preserved), then wake any ring
+	// waiters blocked on this connection's sessions. The cancel above also
+	// fires (via defer) which is the primary exit signal for ringToConn.
 	state.mu.Lock()
 	for sid := range state.sessions {
 		if rx := s.getRx(sid); rx != nil {
+			rx.clearSubscriber(wconn)
 			rx.ring.wake()
 		}
 	}
@@ -1995,8 +2036,14 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 		rx.ring.close()
 	}
 	s.removeRx(sid)
+	// Session death wins (decision 8): cancel any pending restoration
+	// episode as teardown begins, so a late ack is rejected and no
+	// recovery is promised over a dead connection. The registry close is
+	// the caller's under main's signature (nocx-292k).
+	s.cancelRecovery(sid)
 	s.filesSessionClosed(sid)
 	s.gitSessionClosed(sid, wconn)
+	s.unregisterLifecycleLanes(sid)
 	s.discoverySessionClosed(sess)
 }
 

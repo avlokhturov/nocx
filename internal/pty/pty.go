@@ -3,6 +3,7 @@ package pty
 import (
 	"context"
 	"io"
+	"os"
 
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -20,13 +21,22 @@ type Config struct {
 	// Cwd is where the shell starts. Empty means inherit the process's
 	// directory — which for a GUI launched from Finder is "/", so callers
 	// that care should pass something.
-	Cwd    string
-	Cols   uint16
-	Rows   uint16
-	XPixel uint16
-	YPixel uint16
+	Cwd string
+	// SessionID is the backend-assigned session id (AD-7) the shell will
+	// run under. The pty factory uses it to bind a lifecycle lane to its
+	// session (RegisterLifecycleLane), so published lifecycle facts route
+	// to the right subscriber; empty on paths that predate the session id.
+	SessionID string
+	Cols      uint16
+	Rows      uint16
+	XPixel    uint16
+	YPixel    uint16
 	// Enhanced requests the marker-only prompt env (ADR-0006) for this session.
 	Enhanced bool
+	// ExtraFiles are inherited by the shell as fds 3, 4, … via
+	// exec.Cmd.ExtraFiles. The lifecycle channel descriptor is the first
+	// one, so it is fd 3 in the shell.
+	ExtraFiles []*os.File
 }
 
 // Option configures a Config before PTY creation.
@@ -36,6 +46,15 @@ type Option func(*Config)
 func WithExtraEnv(env []string) Option {
 	return func(cfg *Config) {
 		cfg.Env = append(cfg.Env, env...)
+	}
+}
+
+// WithExtraFiles appends open files the child shell inherits as fds 3, 4, …
+// via exec.Cmd.ExtraFiles — the lifecycle channel descriptor is the first
+// one, so it is fd 3 in the shell.
+func WithExtraFiles(files ...*os.File) Option {
+	return func(cfg *Config) {
+		cfg.ExtraFiles = append(cfg.ExtraFiles, files...)
 	}
 }
 

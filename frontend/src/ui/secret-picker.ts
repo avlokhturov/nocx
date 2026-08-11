@@ -72,6 +72,21 @@ export interface SecretEntry {
  *  list, grouped; a submenu is a mouse in a keyboard-first tool). */
 const GROUP_LABEL = 'Secrets'
 
+// The words the vault's states are OFFERED in. Exported because a second
+// surface reaches for the vault (the tab-strip picker), and two surfaces
+// that describe one vault in their own words drift into disagreeing about
+// it. The offers themselves are each surface's to render — these are the
+// sentences.
+export const VAULT_OFFER_UNSEAL = 'Unlock the vault to use its secrets'
+export const VAULT_OFFER_SETUP = 'Set up the vault to store secrets'
+
+/** The create offer, carrying what was typed — almost always the name the
+ *  person was reaching for, and asking them to type it again is how a
+ *  feature goes unused. */
+export function addSecretLabel(typed: string): string {
+  return typed === '' ? 'Add a secret…' : `Add "${typed}" to the vault…`
+}
+
 /** The synthetic last row of the list state: "Add a secret…". Not a vault
  *  entry, so it is addressed by a reserved id rather than by index alone. */
 const CREATE_ROW_ID = '\u0000create'
@@ -378,7 +393,7 @@ export class SecretPicker {
         displayText:
           this.purpose === 'resolve'
             ? 'The key is missing here — unlock the vault to substitute it'
-            : 'Unlock the vault to use its secrets',
+            : VAULT_OFFER_UNSEAL,
         matchRanges: [],
         group: GROUP_LABEL,
         actions: [this.badge('sealed')],
@@ -400,7 +415,7 @@ export class SecretPicker {
         displayText:
           this.purpose === 'resolve'
             ? 'The key is missing here — type it in, or set up the vault to keep it'
-            : 'Set up the vault to store secrets',
+            : VAULT_OFFER_SETUP,
         matchRanges: [],
         group: GROUP_LABEL,
         actions: [this.badge('not set up')],
@@ -420,7 +435,7 @@ export class SecretPicker {
     // always the name they were reaching for.
     const createRow: FloatingPanelRow = {
       id: CREATE_ROW_ID,
-      displayText: s.filter === '' ? 'Add a secret…' : `Add "${s.filter}" to the vault…`,
+      displayText: addSecretLabel(s.filter),
       matchRanges: [],
       group: GROUP_LABEL,
     }

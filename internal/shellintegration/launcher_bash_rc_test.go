@@ -37,7 +37,7 @@ import (
 // that happened not to short-read from a file that cannot.
 func TestBashLauncher_RcfileTravelsAsAFileNotAPipe(t *testing.T) {
 	arg, ok := remoteLauncher{}.bashArg(LaunchOptions{
-		SessionID: "sess-1", Enhanced: true, EnvironmentID: "env-1",
+		SessionID: "sess-1", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("bash launcher refused")
@@ -62,7 +62,7 @@ func TestBashLauncher_RcfileTravelsAsAFileNotAPipe(t *testing.T) {
 // shell without integration — never a dead session.
 func TestBashLauncher_RefusesNothingWhenTempIsUnusable(t *testing.T) {
 	arg, ok := remoteLauncher{}.bashArg(LaunchOptions{
-		SessionID: "sess-1", Enhanced: true, EnvironmentID: "env-1",
+		SessionID: "sess-1", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("bash launcher refused")
@@ -100,14 +100,18 @@ func TestBashLauncher_WholeRcfileExecutes(t *testing.T) {
 	target := maxFullLauncherLen - 16*1024
 
 	var b strings.Builder
+	// The filler is CODE, not comments: the shipped rcfile is
+	// comment-stripped (nocx-z9s9.17), so a '#' filler would collapse to
+	// nothing and the payload would stop exceeding pipe capacity. A no-op
+	// ':' command per line pads the body just as well.
 	for i := 0; b.Len() < target; i++ {
-		fmt.Fprintf(&b, "# filler line %d: padding the rcfile past a pipe capacity\n", i)
+		fmt.Fprintf(&b, ": filler line %d: padding the rcfile past a pipe capacity\n", i)
 	}
 	b.WriteString("printf 'RCFILE_TAIL_RAN\\n'\n")
 
 	arg := bashArgFor(bashRcfile(launcherEnvBlock(LaunchOptions{
-		SessionID: "sess-tail", Enhanced: true, EnvironmentID: "tail-env",
-	}), b.String()))
+		SessionID: "sess-tail", Enhanced: true,
+	}), b.String(), "", ""))
 
 	// The two bounds, asserted rather than assumed: a payload that drifted
 	// under the pipe capacity would stop testing anything, and one that drifted
@@ -119,7 +123,7 @@ func TestBashLauncher_WholeRcfileExecutes(t *testing.T) {
 		t.Fatalf("payload is %d bytes, past maxFullLauncherLen %d — Linux would refuse the argv word before bash ever ran", len(arg), maxFullLauncherLen)
 	}
 
-	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+shellQuote(arg),
+	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+ShellQuote(arg),
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
 
 	if !strings.Contains(out, "RCFILE_TAIL_RAN") {
@@ -146,12 +150,12 @@ func TestBashLauncher_TransientRcfileIsGoneBeforeUserCode(t *testing.T) {
 	home := writeBashFixtureHome(t, `if ls -d "${TMPDIR:-/tmp}"/nocx-bash.* >/dev/null 2>&1; then printf 'RC_PRESENT\n'; else printf 'RC_GONE\n'; fi`)
 
 	arg, ok := remoteLauncher{}.bashArg(LaunchOptions{
-		SessionID: "sess-gone", Enhanced: true, EnvironmentID: "gone-env",
+		SessionID: "sess-gone", Enhanced: true,
 	})
 	if !ok {
 		t.Fatal("bash launcher refused")
 	}
-	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+shellQuote(arg),
+	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+ShellQuote(arg),
 		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
 
 	if strings.Contains(out, "RC_PRESENT") {
@@ -174,4 +178,59 @@ func firstN(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// TestBashLauncher_UserRcAlreadySourcedAnInstall: the local enhanced session
+// is the case where the user's ~/.bashrc has ALWAYS already sourced an
+// installed copy of nocx.bash, because the app installs that gate line itself
+// (App.Start -> EnsureInstalled). The rcfile then deliberately unsets
+// __nocx_loaded so THIS session's authenticated copy installs over the
+// installer-era one — which means the script body runs twice in one shell,
+// by design.
+//
+// A `readonly` declaration cannot survive that: it cannot be unset and it
+// cannot be re-declared, so the second source aborts the line with
+// "bash: __nocx_snapshot_wait_ms: readonly variable" printed into the user's
+// terminal as the first thing they see (nocx-u7uh.22). The remote tier never
+// showed it because a far host's rc rarely carries the gate; the local tier
+// added by nocx-u7uh.21 hits it every single time.
+func TestBashLauncher_UserRcAlreadySourcedAnInstall(t *testing.T) {
+	requireBinBash(t)
+	tmp := t.TempDir()
+
+	// A fixture HOME shaped like a real one: an installed generation plus the
+	// gate line the installer writes.
+	home := writeBashFixtureHome(t, "")
+	installed := filepath.Join(home, ".nocx")
+	if err := os.MkdirAll(installed, 0o700); err != nil {
+		t.Fatalf("mkdir .nocx: %v", err)
+	}
+	script := filepath.Join(installed, "shell-integration.bash")
+	if err := os.WriteFile(script, []byte(bashScript), 0o600); err != nil {
+		t.Fatalf("write installed script: %v", err)
+	}
+	rcPath := filepath.Join(home, ".bashrc")
+	gate := "\n[[ -n \"$NOCX_SHELL_INTEGRATION\" ]] && source \"" + script + "\"\n"
+	//nolint:gosec // rcPath is this test's own t.TempDir() fixture home.
+	f, err := os.OpenFile(rcPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open fixture rc: %v", err)
+	}
+	if _, err := f.WriteString(gate); err != nil {
+		t.Fatalf("append gate to fixture rc: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close fixture rc: %v", err)
+	}
+
+	arg := bashArgFor(bashRcfile(launcherEnvBlock(LaunchOptions{
+		SessionID: "sess-dbl", Enhanced: true,
+	}), bashScript, "cap-double-source", "recovery-double-source"))
+
+	out := runLauncherOnPTY(t, "/bin/sh", `exec /usr/bin/env -u BASH_ENV bash -c `+ShellQuote(arg),
+		[]string{"HOME=" + home, "TMPDIR=" + tmp, "TERM=xterm"}, "exit")
+
+	if strings.Contains(out, "readonly variable") {
+		t.Errorf("re-sourcing over an installer-era install printed a readonly error into the user's terminal; output:\n%s", firstN(out, 1200))
+	}
 }

@@ -28,7 +28,7 @@ func TestOutputRing_CancellableWaitForData(t *testing.T) {
 	select {
 	case <-done:
 		// passed
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("waitForData did not return after ctx cancellation")
 	}
 }
@@ -50,7 +50,7 @@ func TestOutputRing_WaitForDataAlreadyCancelled(t *testing.T) {
 	select {
 	case <-done:
 		// passed
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("waitForData did not return immediately with cancelled ctx")
 	}
 }
@@ -93,7 +93,7 @@ func TestOutputRing_WakeBroadcasts(t *testing.T) {
 	select {
 	case <-done:
 		// passed
-	case <-time.After(2 * time.Second):
+	case <-time.After(wantWithin):
 		t.Fatal("waitForData did not return after wake + cancel")
 	}
 }

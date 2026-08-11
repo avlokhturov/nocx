@@ -106,7 +106,7 @@ func TestControlFrameLogging(t *testing.T) {
 		}
 		// Read the error response back. handleControlFrame logs before writing the
 		// response, so this read orders our assertion after the log write.
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 		if _, _, err := conn.ReadMessage(); err != nil {
 			t.Fatalf("read response: %v", err)
 		}
@@ -122,7 +122,7 @@ func TestControlFrameLogging(t *testing.T) {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
 			t.Fatalf("write: %v", err)
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 		if _, _, err := conn.ReadMessage(); err != nil {
 			t.Fatalf("read response: %v", err)
 		}

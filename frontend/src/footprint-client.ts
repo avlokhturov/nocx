@@ -3,9 +3,10 @@
 // footprint of nocx's silent install, and the uninstall action.
 //
 // shell.footprint.status is READ-ONLY and never connects: the answer is the
-// backend's installed fact (last OBSERVED via an accepted passport), so the
-// surface can show a host nocx can no longer reach, and lastObservedAt is
-// "when nocx last saw it", never a claim about the host right now.
+// backend's installed fact (last observed on the host — the renderer never
+// sees the observation mechanism), so the surface can show a host nocx can
+// no longer reach, and lastObservedAt is "when nocx last saw it", never a
+// claim about the host right now.
 //
 // shell.footprint.uninstall is offered only for destinations with a
 // removableProfileId (a saved connection resolves to them) — an action that

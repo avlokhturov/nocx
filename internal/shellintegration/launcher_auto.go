@@ -7,7 +7,7 @@ import "strings"
 // command with quoted arguments, the same shape every tier already sends,
 // so csh and fish can parse it too. The script itself must therefore
 // contain no single quotes: the three tier payloads arrive as positional
-// arguments (already correctly quoted by the outer command's shellQuote),
+// arguments (already correctly quoted by the outer command's ShellQuote),
 // and $0 is the login shell's own argv[0], expanded by the login shell
 // before /bin/sh starts.
 //

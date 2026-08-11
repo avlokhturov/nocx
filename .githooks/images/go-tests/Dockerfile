@@ -21,8 +21,14 @@
 # the shell tests' contract is "dash and zsh are present", and pinning both
 # here keeps that contract in one visible place instead of inheriting dash by
 # accident of the base image's Essential set.
+#
+# openssh-server: the live-sshd suite (nocx-u7uh.17) proves the remote
+# lifecycle channel against a REAL OpenSSH server spawned by the test. The
+# stock image carries bash/dash/ssh/ssh-keygen but not sshd; the same
+# fail-not-skip rule that put zsh here requires the fixture to be provable
+# inside the container the hook runs.
 FROM golang:1.26-bookworm
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends dash zsh \
+ && apt-get install -y --no-install-recommends dash zsh openssh-server \
  && rm -rf /var/lib/apt/lists/*

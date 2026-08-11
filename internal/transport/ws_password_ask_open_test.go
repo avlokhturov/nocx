@@ -101,7 +101,7 @@ func TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop(t *testing.T) {
 	}
 
 	// The renderer receives the connections.passwordRequest notification.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read password request notification: %v", err)
@@ -121,7 +121,7 @@ func TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop(t *testing.T) {
 
 	// While the open is STILL pending, the same connection must serve
 	// another RPC — the read loop is alive, not parked inside the dial.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	vaultResp := jsonrpcCall(t, conn, "vault.status", nil)
 	if string(vaultResp) == "" {
 		t.Fatal("read loop did not answer vault.status while the open was pending")
@@ -129,7 +129,7 @@ func TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop(t *testing.T) {
 
 	// Now answer the ask over the same socket. Before the fix this message
 	// sat unread and the open never completed.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	resp := vaultCall(t, conn, "connections.passwordResolved", map[string]any{
 		"requestId": notif.Params.RequestID,
 		"outcome":   "submitted",
@@ -141,7 +141,7 @@ func TestWSServer_OpenPasswordAsk_DoesNotBlockTheReadLoop(t *testing.T) {
 	}
 
 	// The open completes with the answer the ask returned.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
 	_, openData, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatalf("read open response: %v", err)
