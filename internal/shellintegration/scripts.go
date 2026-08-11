@@ -109,6 +109,16 @@ var (
 // — so macOS's bash 3.2 rejected the script at the `coproc` token and every
 // shell on the platform this product ships to first came up with no
 // integration at all.
+// 32: two decoding defects the nested launch died on (nocx-aupk). The zsh
+// decoder built \NNN escapes without zero-padding, so a \uXXXX whose octal
+// is short swallowed the next character when it was a digit — Go escapes >
+// as \u003e, `>0` read as \760, and the byte became 0xF0. And the bash
+// probe handed its descriptor to the helper by NUMBER, which a close-on-exec
+// channel does not survive: select() on a descriptor that is not open is
+// indistinguishable from "no data", so the probe reported empty forever on a
+// channel with a frame waiting. It arrives on the helper's stdin now, by the
+// same redirection dd uses.
+//
 // 31: the grant's JSON is decoded by the same helper (nocx-aupk). bash 3.2's
 // ${var//pattern/replacement} is quadratic and this decodes a whole rcfile —
 // measured 4655ms for 22 KiB against 8ms on bash 5, a factor of 580 — so a
@@ -121,7 +131,7 @@ var (
 // a defect a parse check cannot see, because `-N` is an option and not
 // syntax. bash 3.2 gets perl's select(); the descriptor and port are now
 // pinned to digits, since the first of those is interpolated into a program.
-const version = "31"
+const version = "32"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

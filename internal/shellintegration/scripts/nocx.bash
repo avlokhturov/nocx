@@ -171,14 +171,25 @@ __nocx_lc_probe_readable() {
             LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null
             ;;
         helper)
-            # vec() builds the select() read-set with our descriptor's bit
-            # set; a 0 timeout makes it a pure poll. The child inherits the
-            # descriptor without a redirection, which matters because a
-            # `$fd<&$fd` form does not exist in 3.2 (variable descriptors are
-            # 4.1+) and would have forced an eval.
+            # The channel arrives on the helper's STDIN, via the same `<&$fd`
+            # redirection dd uses two functions down — NOT by letting the
+            # helper inherit the descriptor by number.
+            #
+            # That distinction is the whole correctness of this arm. A
+            # redirection DUPS, and a dup clears close-on-exec for the copy;
+            # plain inheritance does not, so a close-on-exec channel simply
+            # is not there in the helper. select() on a descriptor that is not
+            # open returns -1, which is indistinguishable from "no data" — the
+            # probe reports empty forever on a channel that has a frame
+            # waiting. Measured: the nested child's accept sat readable on fd
+            # 3 (dd took its 0000009b header immediately) while this arm
+            # answered "empty" four times a second (nocx-aupk).
+            #
+            # It also takes the descriptor number out of the helper's program
+            # text, so the poll cannot be shaped by the environment at all.
             "$__nocx_lc_probe_helper" -e \
-                'vec($r,'"$__nocx_lc_fd"',1)=1; exit(select($r,undef,undef,0)>0 ? 0 : 1)' \
-                2>/dev/null
+                'vec($r,0,1)=1; exit(select($r,undef,undef,0)>0 ? 0 : 1)' \
+                <&"$__nocx_lc_fd" 2>/dev/null
             ;;
         *)
             return 1
