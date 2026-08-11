@@ -139,7 +139,46 @@ test.describe('history: a command survives a restart and recall answers from the
     // and the record is fire-and-forget by design.
     const block = page.locator('.cmd-block', { hasText: marker }).first()
     await expect(block).toBeVisible({ timeout: 15_000 })
-    await page.waitForTimeout(800)
+
+    // THE RECORD REACHED THE STORE — established, not waited out.
+    //
+    // This was `waitForTimeout(800)`, on the honest reasoning that
+    // history.record is fire-and-forget by design and the round trip needs a
+    // moment. 800 ms is a claim about how fast the machine is, written on a
+    // machine where it held: this spec passes alone in 6.9s and fails inside
+    // the full suite on both engines, at the runner's four vCPU, with the
+    // panel reporting "0 results" after the restart. By then the record can
+    // never arrive — the backend it was going to has been replaced — so the
+    // failure lands three phases away from its cause and reads as a lost
+    // feature (nocx-cbtc's method note, and the fourth instance of this shape
+    // on this branch).
+    //
+    // The wait is now on the product's own answer to the same question. The
+    // recall panel says where its rows came from, and "this session only" is
+    // what it says when nothing but the in-memory ledger replied. Its absence
+    // beside the marker IS the store having answered — which is exactly what
+    // phase 3 asserts, so the premise is established with the very statement
+    // the test is about, and a store that never records still fails.
+    const panel1 = page.locator('.ui-floating-panel[data-variant="recall"]')
+    await expect
+      .poll(
+        async () => {
+          await page.keyboard.press('ArrowUp')
+          const answered = await panel1
+            .filter({ hasText: marker })
+            .filter({ hasNotText: 'this session only' })
+            .waitFor({ state: 'visible', timeout: 2_000 })
+            .then(() => true)
+            .catch(() => false)
+          // Esc closes exactly the panel and leaves the line as it was; the
+          // next Up reopens it against fresh results.
+          await page.keyboard.press('Escape')
+          return answered
+        },
+        { timeout: 30_000, intervals: [250] },
+      )
+      .toBe(true)
+    await expect(input).toBeFocused({ timeout: 10_000 })
 
     // ── Phase 2: restart the backend (fresh launch, fresh token) ────────
     const ep2 = await backend.restart()
