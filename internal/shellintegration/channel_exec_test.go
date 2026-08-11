@@ -1249,7 +1249,21 @@ func TestInBand_AuthenticatedChannelFromStreamedCapability(t *testing.T) {
 	if !strings.Contains(s.output(), "SHELL_CAP_NONEXPORTED_CHECK") {
 		// The capability must be usable but non-exported: verify via the
 		// variable and its absence from env.
-		if _, err := ptmx.Write([]byte("echo IB_CAP_SET=${__nocx_cap:+yes} IB_CAP_ENV=$(env | grep -c " + testCap + ")\n")); err != nil {
+		//
+		// The marker is ASSEMBLED BY printf so it does not occur verbatim in
+		// the command text. A pty echoes what is written to it, so `echo
+		// IB_CAP_SET=...` put the string `IB_CAP_SET=` into the output buffer
+		// the instant the line was typed — and the wait below, which breaks on
+		// exactly that substring, was therefore satisfied by the ECHO rather
+		// than by the shell's answer. The assertion then read a buffer whose
+		// result had not arrived and reported a capability the shell was in
+		// fact holding. It passed whenever the result happened to land in the
+		// same read and failed under load, which is why a full Linux run was
+		// red where the package alone was green (nocx-8b47).
+		//
+		// With the field names as printf arguments, `IB_CAP_SET=` exists only
+		// in the output, so waiting for it means waiting for the answer.
+		if _, err := ptmx.Write([]byte("printf 'IB_CAP_%s=%s IB_CAP_%s=%s\\n' SET \"${__nocx_cap:+yes}\" ENV \"$(env | grep -c " + testCap + ")\"\n")); err != nil {
 			t.Fatalf("write: %v", err)
 		}
 	}

@@ -887,12 +887,31 @@ __nocx_prompt_command() {
     # nested child whose command the DEBUG trap skipped leaves $? = 0 (the
     # skip is not the child's exit); the child's real status was captured
     # right after the launch and overrides here.
-    local __nocx_exit=$?
+    #
+    # THESE TWO LINES ARE ORDERED, and the order is the fix for nocx-678o.
+    # extdebug makes the DEBUG trap fire inside functions, so it fires for
+    # every line of this one — and the wrapper suppresses that with two
+    # guards: the command text starting `__nocx_`, and __nocx_in_prompt_command.
+    # The capture used to be `local __nocx_exit=$?`, which satisfies NEITHER:
+    # its text begins with `local`, and the flag was set four lines further
+    # down. That leaves exactly one unguarded command at the top of the prompt
+    # cycle, and one moment where the C-marker latch is still armed — after an
+    # INTERRUPT, where the user ran nothing and __nocx_precmd armed the latch
+    # at the previous prompt. So Ctrl-C at a prompt announced nocx's own line
+    # to the kernel as the user's command: an OSC 133 C, a `start` naming
+    # `local __nocx_exit=$?`, and a `complete` carrying SIGINT's 130.
+    # Reproduced identically on bash 3.2 and 5.x.
+    #
+    # A global for the capture, so its own text matches the `__nocx_*` skip;
+    # the flag goes up immediately after, so everything below is covered by
+    # the flag instead. `local` cannot come first: it would reset $?.
+    __nocx_prompt_exit=$?
+    __nocx_in_prompt_command=1
+    local __nocx_exit=$__nocx_prompt_exit
     if [[ -n "${__nocx_nested_rc:-}" ]]; then
         __nocx_exit=$__nocx_nested_rc
         __nocx_nested_rc=
     fi
-    __nocx_in_prompt_command=1
     # --- Authenticated channel: activate, refresh, complete, fence, prompt_ready ---
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
         # The child closed (the parent was blocked inside the launch); the

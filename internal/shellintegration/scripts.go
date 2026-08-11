@@ -149,7 +149,22 @@ var (
 // good — no hello, so no snapshot ever accepted — which is fail-closed, the
 // wrong direction for this file. Both directions are pinned by tests, so
 // neither can be satisfied by dropping the other.
-const version = "33"
+//
+// 34: an interrupt no longer announces nocx's own line as the user's command
+// (nocx-678o). extdebug fires the DEBUG trap inside functions, and the
+// wrapper suppresses that two ways — a command text starting `__nocx_`, and
+// __nocx_in_prompt_command. `__nocx_prompt_command`'s status capture,
+// `local __nocx_exit=$?`, satisfied NEITHER: it begins with `local`, and the
+// flag went up four lines below it. One unguarded command per prompt cycle,
+// invisible after a real command (the C latch is disarmed by then) and NOT
+// after an interrupt, where nothing ran and __nocx_precmd armed the latch at
+// the previous prompt. So Ctrl-C emitted an OSC 133 C and sent the kernel a
+// start naming `local __nocx_exit=$?` with a complete carrying SIGINT's
+// status. The capture is now a `__nocx_`-prefixed global, so its own text
+// matches the skip, and the flag goes up on the line after it, so everything
+// below is covered by the flag instead; `local` cannot come first because it
+// would reset $?.
+const version = "34"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"
