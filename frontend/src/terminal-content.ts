@@ -1131,7 +1131,23 @@ export class TerminalContent extends BaseTabContent {
                 // generation, superseded establishment, replaced
                 // subscriber). The accept stays unflushed and the session
                 // stays conventional — safe, and nothing to retry here.
-                log.warn('nocx: establishment acknowledgement refused', { error: e })
+                //
+                // The MESSAGE, not just the error object: five distinct
+                // backend rules all refuse with -32603, and logging the
+                // error alone rendered as `{"code":-32603,"name":"RpcError"}`
+                // — identical for every one of them. A reader could see that
+                // the handshake had been refused and never which rule did it,
+                // which is how the cause of six failing specs stayed
+                // "unknown" across three triage rounds (nocx-cbtc). The
+                // backend names the rule in its own log; this is the half a
+                // trace carries.
+                log.warn('nocx: establishment acknowledgement refused', {
+                  reason: e instanceof Error ? e.message : String(e),
+                  generation: fact.generation,
+                  lane: fact.lane,
+                  domain: fact.domain ?? '',
+                  epoch: fact.epoch ?? 0,
+                })
               })
           }
         },

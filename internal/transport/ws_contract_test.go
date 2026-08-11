@@ -2070,6 +2070,19 @@ func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) 
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
+	// The server must have REGISTERED this connection before anything is
+	// broadcast to it. connectWS returns when the client's handshake is done,
+	// which is not the same instant: broadcastAsk reads s.conns, and on an
+	// empty set it does not write — it returns ErrPasswordNoClientConnected
+	// and the goroutine below swallows that into a channel nobody reads
+	// before the socket read. So a lost race produced no notification at all
+	// and this test sat out its full 30s deadline reporting a timeout, which
+	// names the clock instead of the cause (nocx-8b47).
+	//
+	// waitForConns is the existing answer — password_requester_test.go calls
+	// it before every one of its asks. These contract tests never did.
+	waitForConns(t, ws, 1)
+
 	// Request a connection password; this sends the real notification over
 	// the socket.
 	done := make(chan error, 1)

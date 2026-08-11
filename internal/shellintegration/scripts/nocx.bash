@@ -1182,7 +1182,50 @@ __nocx_gen_nonce() {
         builtin printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM"
     fi
 }
-__nocx_snapshot_nonce="$(__nocx_gen_nonce)"
+# ONCE PER SHELL, NOT ONCE PER SOURCE — the same rule, and the same reason,
+# as __nocx_snapshot_wait_ms one screen above.
+#
+# The launcher rcfile deliberately unsets __nocx_loaded and sources this
+# script a second time, so the session's authenticated copy installs over the
+# installer-era one the user's ~/.bashrc already sourced. That is EVERY local
+# enhanced session, not an edge case. Minting a fresh nonce on the second
+# pass emitted a SECOND hello, and the renderer's forgery defence is
+# "exactly one hello per session" (command-snapshot.ts): it keeps the first
+# nonce and discards the second. The snapshot is then emitted from a prompt
+# carrying the second nonce, fails the match, and is discarded — so the store
+# stays `unavailable` for the life of the session and command completion
+# never learns a single command name. Observed directly: two H frames with
+# different nonces, then one 6699-byte S frame that no longer matched.
+#
+# The renderer is right and is not the place to fix it — accepting a re-hello
+# is exactly the re-anchoring the rule exists to prevent. The script simply
+# must not claim to be a new session when it is the same shell.
+#
+# `__nocx_loaded` cannot serve as the latch: the rcfile unsets it on purpose,
+# which is what makes the second pass happen at all.
+#
+# The latch is the PID, not merely the nonce's presence, and that distinction
+# is load-bearing. "Is the variable set" cannot tell a RE-SOURCE from an
+# INHERITED value, and the two need opposite answers: a re-source must stay
+# quiet, a child shell must announce itself. A nonce that leaked into the
+# environment — a user rc under `set -a` auto-exports every assignment, which
+# is the hazard the `export -n` below exists for — would otherwise silence a
+# legitimately new session for good: no hello, so no snapshot is ever
+# accepted, and completion is dead with nothing said. Measured, on a child
+# shell started with the nonce exported: zero hello frames, zero snapshots.
+#
+# That would also be a fail-CLOSED degrade, which is the wrong direction
+# everywhere else in this file. $$ is the shell's own pid and differs in any
+# child, so a child mints its own nonce however it inherited the variable,
+# and a re-source of the same shell does not.
+if [[ "${__nocx_snapshot_owner:-}" != "$$" ]] || [[ -z "${__nocx_snapshot_nonce:-}" ]]; then
+    __nocx_snapshot_nonce="$(__nocx_gen_nonce)"
+    __nocx_snapshot_owner=$$
+    __nocx_snapshot_announce=1
+else
+    __nocx_snapshot_announce=0
+fi
+export -n __nocx_snapshot_owner
 # A user rc running under `set -a` would auto-export every assignment,
 # publishing the nonce in /proc/<pid>/environ; drop the export attribute
 # explicitly (the nonce is assigned exactly once, so this sticks).
@@ -1194,9 +1237,17 @@ export -n __nocx_snapshot_nonce
 # start (no create-then-chmod window) with O_EXCL (no symlink pre-emption).
 # The atomic mv to the .snap name below is what tells a later prompt the
 # payload is complete; the .snap name inherits the staging file's 600 mode.
-__nocx_snap_staging="$(mktemp "${TMPDIR:-/tmp}/nocx-snap.XXXXXX" 2>/dev/null)"
-__nocx_snap_file="${__nocx_snap_staging:+${__nocx_snap_staging}.snap}"
-__nocx_snapshot_done=0
+#
+# Staged once per shell for the same reason as the nonce, and this half
+# matters independently: a second mktemp would repoint __nocx_snap_file at a
+# name the FIRST pass's background job is never going to write, so even a
+# correctly-nonced snapshot would never be found at a prompt — and the first
+# staging file would leak, because the EXIT trap only knows the latest name.
+if (( __nocx_snapshot_announce )); then
+    __nocx_snap_staging="$(mktemp "${TMPDIR:-/tmp}/nocx-snap.XXXXXX" 2>/dev/null)"
+    __nocx_snap_file="${__nocx_snap_staging:+${__nocx_snap_staging}.snap}"
+    __nocx_snapshot_done=0
+fi
 
 # How long the FIRST prompt waits for the source-time snapshot job before
 # degrading to the later-prompt schedule. 250 ms: fast when compgen is local,
@@ -1379,19 +1430,26 @@ __nocx_snapshot_emit() {
 # above was made cheap: bash idle in readline runs no traps, so a job that
 # misses this window waits for a prompt a fresh tab may never produce
 # (nocx-z9s9.16).
-( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
-    >| "$__nocx_snap_staging" 2>/dev/null \
-    && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
-__nocx_snap_job=$!
-# Record the job's identity for the EXIT trap (PID + start time), then
-# disown: without disown, bash prints "[N]+ Done ( compgen ... )" — the
-# job's implementation, verbatim — into the user's output when it finishes.
-# Only OUR job is disowned, so no other job loses its notification.
-__nocx_snap_lstart="$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')"
-disown "$__nocx_snap_job" 2>/dev/null
+#
+# Both the job and the hello are gated on the once-per-shell latch: a second
+# source must not start a second enumeration, and must not announce a session
+# that has already been announced. See the latch's own comment for what the
+# second hello cost.
+if (( __nocx_snapshot_announce )); then
+    ( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
+        >| "$__nocx_snap_staging" 2>/dev/null \
+        && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
+    __nocx_snap_job=$!
+    # Record the job's identity for the EXIT trap (PID + start time), then
+    # disown: without disown, bash prints "[N]+ Done ( compgen ... )" — the
+    # job's implementation, verbatim — into the user's output when it finishes.
+    # Only OUR job is disowned, so no other job loses its notification.
+    __nocx_snap_lstart="$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')"
+    disown "$__nocx_snap_job" 2>/dev/null
 
-# Announce the session nonce before the first prompt.
-builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"
+    # Announce the session nonce before the first prompt.
+    builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"
+fi
 
 # Restore a visible native prompt. Real caller: the prompt-boundary arm's
 # recovered branch (ADR-0024 decision 8) — after the lifecycle channel dies

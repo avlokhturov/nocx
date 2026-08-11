@@ -33,6 +33,84 @@ const cdInto = async (page: Page, dir: string) => {
   await promptReady(page)
 }
 
+/**
+ * Wait until this tab actually HAS the command-existence snapshot.
+ *
+ * A spec that asserts something about command completion has the snapshot as
+ * its premise, and the premise is not free. `nocx.bash` starts `compgen -c |
+ * sort -u` in the background at source time and can only EMIT it from a
+ * prompt — a shell idle in readline runs no traps, which `nocx.bash` and
+ * suggest/controller.ts both state in as many words (nocx-z9s9.16). The first
+ * prompt grants it 250 ms of grace and then gives up for good: the
+ * `__nocx_snapshot_waiting` latch is set once, so every later delivery
+ * depends on there being a LATER PROMPT.
+ *
+ * So on a machine where compgen outruns 250 ms the snapshot is simply absent
+ * until the user runs something, and the product says exactly that in the
+ * panel — "they arrive after your next command". Pressing Tab cannot advance
+ * it. A spec that polls Tab waiting for the snapshot is therefore waiting for
+ * an event its own polling has excluded, and will burn its entire budget.
+ *
+ * That is not hypothetical: it is why `no candidates` failed on both engines
+ * in CI while passing locally. 250 ms is a claim about machine speed, and
+ * `ubuntu-latest` is 4 vCPU where a developer's Mac is not — the same shape as
+ * the tab-title races in multi-tab-input.spec.ts.
+ *
+ * This produces prompts, which is the one thing that does deliver it, and
+ * checks the feature rather than a clock: `printf` is a bash builtin, so it is
+ * in `compgen -c` on every machine, and offering it is proof the snapshot
+ * landed. `true` is the no-op whose prompt carries it — a builtin, so it
+ * cannot fail for want of a PATH entry.
+ */
+const PROBE = 'prin'
+
+const commandSnapshotReady = async (page: Page) => {
+  // A row for `printf` whose SOURCE BADGE says `command` — not merely a row
+  // containing the text. Every spec in a run shares one home and one history
+  // (nocx-8rda), and this file runs `printf` commands, so `prin` matches a
+  // HISTORY row long before any snapshot exists. Matching on text alone made
+  // the probe report "snapshot ready" against a history hit, and the caller
+  // then failed on the real assertion with "still loading" — the probe
+  // answering a different question from the one it was asked.
+  const offered = page
+    .locator(`${DROPDOWN} .ui-floating-panel__row`)
+    .filter({ hasText: 'printf' })
+    .filter({ has: page.locator('.ui-floating-panel__source', { hasText: 'command' }) })
+    .first()
+  await expect
+    .poll(
+      async () => {
+        await page.keyboard.type(PROBE)
+        await page.keyboard.press('Tab')
+        // A BOUNDED WAIT, not isVisible(). isVisible() answers about this
+        // instant, and the instant after Tab is before the panel has
+        // rendered — so it reports "no snapshot" on a tab that has one, every
+        // time, and the poll can never succeed.
+        const ready = await offered
+          .waitFor({ state: 'visible', timeout: 2_000 })
+          .then(() => true)
+          .catch(() => false)
+        // Esc closes exactly the panel and keeps the draft; the draft is then
+        // removed by as many Backspaces as were typed. Deliberately counted
+        // rather than a clear-line binding: what this editor binds to Ctrl-U
+        // is a question about the keymap, and getting it wrong leaves `prin`
+        // in front of whatever the caller types next — a failure that would
+        // read as a product defect.
+        await page.keyboard.press('Escape')
+        for (let i = 0; i < PROBE.length; i++) await page.keyboard.press('Backspace')
+        if (ready) return 'ready'
+        // The delivery point, and the only one. Run a no-op so the next
+        // prompt carries the payload, exactly as the panel tells the user to.
+        await page.keyboard.type('true')
+        await page.keyboard.press('Enter')
+        await promptReady(page)
+        return 'pending'
+      },
+      { timeout: 45_000, intervals: [250] },
+    )
+    .toBe('ready')
+}
+
 test.describe('tab completion', () => {
   test('a real command completes: Tab opens the dropdown, arrows pick, Enter inserts', async ({
     page,
@@ -40,6 +118,11 @@ test.describe('tab completion', () => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
     await promptReady(page)
+
+    // The snapshot is this test's premise, not its subject — established
+    // rather than assumed, because it is absent on a slow first prompt and
+    // only a later prompt delivers it (see commandSnapshotReady).
+    await commandSnapshotReady(page)
 
     // `pri` is a prefix of `printf` — a bash BUILTIN, so the OSC 636
     // snapshot (compgen -c) always contains it on this shell. History may
@@ -74,6 +157,10 @@ test.describe('tab completion', () => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
     await promptReady(page)
+
+    // Same premise as the test above: ghost text is the top CANDIDATE, and
+    // without the snapshot there are no command candidates to be top of.
+    await commandSnapshotReady(page)
 
     await page.keyboard.type('pri')
 
@@ -155,41 +242,22 @@ test.describe('tab completion', () => {
     // waiting for a "No matches" the product had no reason to say. Whichever
     // project ran second lost, which is what made it look like a race
     // (nocx-z9s9.6, and the nocx-8rda shape underneath it).
+    // The premise, established rather than waited for. What this test is
+    // about is the row a user sees when nothing matches — which only means
+    // anything once the shell HAS command names to fail to match against.
+    // Getting them needs a prompt, not a Tab; see commandSnapshotReady.
+    await commandSnapshotReady(page)
+
     const nope = `zzznocxe2enope${Date.now().toString(36)}`
     await page.keyboard.type(nope)
 
-    // The command snapshot may still be loading on a slow machine — the
-    // honest row names that ("command names are still loading"); retry Tab
-    // until the snapshot has arrived and the row says the generic no-match.
     const dropdown = page.locator(DROPDOWN).first()
-    await expect
-      .poll(
-        async () => {
-          await page.keyboard.press('Tab')
-          await page.waitForTimeout(400)
-          if (!(await dropdown.isVisible())) return 'not-visible'
-          const text = await dropdown.innerText()
-          if (text.includes('Command names are still loading')) {
-            // Esc closes exactly the panel; the draft survives.
-            await page.keyboard.press('Escape')
-            return 'still-loading'
-          }
-          return text
-        },
-        // 45s, not the 20s default. What this waits for is not a render but a
-        // background pipeline in the shell — `compgen -c | sort -u`, whose
-        // arrival nocx-0ije already measured as slower than the script's own
-        // 250ms first-prompt wait on a cold machine. Run alone this spec takes
-        // under two seconds; run after two hundred others, with that many PTYs
-        // behind it, the snapshot lands past twenty and the row still honestly
-        // says "still loading" (nocx-z9s9.13).
-        //
-        // The cost is paid only when something is genuinely wrong: a snapshot
-        // that never arrives still fails, later. What it buys is a spec that
-        // does not report a missing feature because the machine was busy.
-        { timeout: 45_000, intervals: [1_000] },
-      )
-      .toContain('No matches')
+    await page.keyboard.press('Tab')
+    await expect(dropdown).toBeVisible({ timeout: 5_000 })
+    // Now that the snapshot is known to be present, "still loading" is a
+    // defect rather than a slow machine, and this asserts the real property
+    // directly instead of tolerating it in a retry loop.
+    await expect(dropdown).toContainText('No matches', { timeout: 5_000 })
 
     // One non-selectable row: never the selected variance, no hint footer.
     const rows = dropdown.locator('.ui-floating-panel__row')

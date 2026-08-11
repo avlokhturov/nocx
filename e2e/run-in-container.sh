@@ -8,7 +8,14 @@
 #   e2e/run-in-container.sh                       # whole suite, both browsers
 #   e2e/run-in-container.sh e2e/sidebar.spec.ts   # one spec
 #   PW_PROJECTS=chromium e2e/run-in-container.sh  # one browser
-#   NOCX_E2E_CPUS=4 e2e/run-in-container.sh       # at the CI runner's capacity
+#   NOCX_E2E_CPUS=0 e2e/run-in-container.sh       # uncapped, while iterating
+#   NOCX_LOG_LEVEL=debug e2e/run-in-container.sh  # the backend says more
+#
+# The backend's log is inside the disposable home, at
+# .e2e/home/.local/share/nocx-dev/nocx.log. Read it BEFORE the Playwright
+# output when a spec fails on a timeout: it named a fixture defect in one line
+# after the trace had spent thirteen minutes describing a hidden editor
+# (nocx-cbtc).
 #
 # Everything after the script name is passed to `playwright test`.
 set -euo pipefail
@@ -62,12 +69,23 @@ tty_flag=()
 # was a timing one that only appeared on the slower side: a bell racing a tab
 # open, a command snapshot arriving past its budget, a drag losing focus.
 #
-# So this exists to reproduce the runner rather than to out-run it. Unset by
-# default: an unconstrained run is faster and is what you want while iterating
-# on one spec. Reach for it when CI is red and the container is green, which is
-# now the only shape of disagreement left.
+# So this exists to reproduce the runner rather than to out-run it, and that is
+# why it is the DEFAULT rather than the thing you remember to reach for. It was
+# opt-in, on the argument that an uncapped run is faster while iterating on one
+# spec — which is true, and is why the escape hatch below still exists. But the
+# default is what a developer actually runs before pushing, and a default that
+# differs from CI is the divergence this whole file was built to remove: the
+# capacity gap is now the ONLY thing left between this command and the runner,
+# so leaving it off by default meant nobody was reproducing CI unless they knew
+# to. `scripts/ci-linux.sh` already defaults its own cap to 4 for the same
+# reason; two sibling scripts answering one question two ways is the defect.
+#
+# NOCX_E2E_CPUS=0 opts out for a fast single-spec loop. Override the number
+# when GitHub changes the runner tier — the same knob `scripts/ci-linux.sh`
+# documents.
+cpus="${NOCX_E2E_CPUS:-4}"
 cpu_flag=()
-[ -n "${NOCX_E2E_CPUS:-}" ] && cpu_flag=(--cpus "$NOCX_E2E_CPUS")
+[ "$cpus" != "0" ] && cpu_flag=(--cpus "$cpus")
 
 # A git worktree keeps no .git DIRECTORY — it keeps a .git FILE pointing at
 # `<main-repo>/.git/worktrees/<name>`, which is outside the bind mount. The
@@ -98,6 +116,7 @@ exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   -v nocx-e2e-gocache:/root/.cache/go-build \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \
   -e PW_WORKERS="${PW_WORKERS:-}" \
+  -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \
   -e NOCX_E2E_HOST_UID="$(id -u)" \
   -e NOCX_E2E_HOST_GID="$(id -g)" \
   -w /work \

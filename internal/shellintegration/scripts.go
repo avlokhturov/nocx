@@ -131,7 +131,25 @@ var (
 // a defect a parse check cannot see, because `-N` is an option and not
 // syntax. bash 3.2 gets perl's select(); the descriptor and port are now
 // pinned to digits, since the first of those is interpolated into a program.
-const version = "32"
+// 33: the session nonce, the staging file and the hello are minted ONCE PER
+// SHELL rather than once per source (nocx-cbtc). The launcher rcfile unsets
+// __nocx_loaded and sources this script a second time on purpose — that is
+// every local enhanced session — and the second pass announced a second
+// hello with a fresh nonce. command-snapshot.ts keeps the FIRST hello by
+// design (accepting a re-hello is the re-anchoring its forgery defence
+// exists to prevent), so the snapshot, emitted from a prompt with the second
+// nonce, failed the match and was discarded. The store stayed `unavailable`
+// for the life of every such session and command completion never learned a
+// single command name — the bash twin of nocx-qduc, and what
+// completion.spec.ts:139 had been reporting all along.
+// The latch is the shell's own pid, not the nonce's presence: "is the
+// variable set" cannot tell a re-source from an INHERITED value, and those
+// need opposite answers. A nonce that reached the environment (a user rc
+// under `set -a`) would otherwise silence a legitimately new child shell for
+// good — no hello, so no snapshot ever accepted — which is fail-closed, the
+// wrong direction for this file. Both directions are pinned by tests, so
+// neither can be satisfied by dropping the other.
+const version = "33"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"
