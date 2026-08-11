@@ -227,7 +227,9 @@ func serveConn(conn net.Conn, config *gossh.ServerConfig) {
 		return
 	}
 	defer func() { _ = sshConn.Close() }()
-	go gossh.DiscardRequests(reqs)
+	fwd := &forwards{conn: sshConn, listeners: map[string]net.Listener{}}
+	defer fwd.closeAll()
+	go fwd.serveGlobalRequests(reqs)
 
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
@@ -239,6 +241,158 @@ func serveConn(conn net.Conn, config *gossh.ServerConfig) {
 			return
 		}
 		go handleSession(ch, reqs)
+	}
+}
+
+// forwards implements remote port forwarding — the `tcpip-forward` global
+// request and the `forwarded-tcpip` channels that answer it.
+//
+// This fixture used to hand every global request to gossh.DiscardRequests,
+// which replies "denied" to anything wanting an answer. The product's remote
+// lifecycle channel is built on remote forwarding (ADR-0024), so every SSH
+// session this fixture served came up conventional — "lifecycle channel
+// refused; session stays conventional" — and the specs that watch a remote
+// shell produce blocks could never have passed. They were failing on main for
+// this, not for anything in the product (nocx-cbtc).
+//
+// A fixture may be small; it may not be dishonest about the protocol. Denying
+// a request the real server grants makes every test above it prove the wrong
+// thing.
+type forwards struct {
+	conn      gossh.Conn
+	mu        sync.Mutex
+	listeners map[string]net.Listener
+}
+
+// serveGlobalRequests answers tcpip-forward and cancel-tcpip-forward, and
+// refuses the rest the way DiscardRequests did.
+func (f *forwards) serveGlobalRequests(reqs <-chan *gossh.Request) {
+	for req := range reqs {
+		switch req.Type {
+		case "tcpip-forward":
+			addr, port, err := f.listen(req.Payload)
+			if err != nil {
+				if req.WantReply {
+					_ = req.Reply(false, nil)
+				}
+				continue
+			}
+			if req.WantReply {
+				// RFC 4254 §7.1: when the client asked for port 0 the reply
+				// carries the port actually bound, and the client addresses
+				// the forward by it.
+				_ = req.Reply(true, gossh.Marshal(struct{ Port uint32 }{port}))
+			}
+			_ = addr
+		case "cancel-tcpip-forward":
+			var p struct {
+				Addr string
+				Port uint32
+			}
+			if err := gossh.Unmarshal(req.Payload, &p); err == nil {
+				f.cancel(fmt.Sprintf("%s:%d", p.Addr, p.Port))
+			}
+			if req.WantReply {
+				_ = req.Reply(true, nil)
+			}
+		default:
+			if req.WantReply {
+				_ = req.Reply(false, nil)
+			}
+		}
+	}
+}
+
+// listen binds the requested address and serves it until cancelled.
+func (f *forwards) listen(payload []byte) (string, uint32, error) {
+	var p struct {
+		Addr string
+		Port uint32
+	}
+	if err := gossh.Unmarshal(payload, &p); err != nil {
+		return "", 0, fmt.Errorf("tcpip-forward payload: %w", err)
+	}
+	// The bind address is honoured as asked, and 127.0.0.1 is what the
+	// product requests (ADR-0024 pins the literal, never "localhost").
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", p.Addr, p.Port))
+	if err != nil {
+		return "", 0, fmt.Errorf("tcpip-forward listen: %w", err)
+	}
+	bound, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		_ = ln.Close()
+		return "", 0, fmt.Errorf("tcpip-forward: not a tcp listener")
+	}
+	key := fmt.Sprintf("%s:%d", p.Addr, p.Port)
+	f.mu.Lock()
+	f.listeners[key] = ln
+	f.mu.Unlock()
+
+	go f.accept(ln, p.Addr, uint32(bound.Port)) // #nosec G115 -- a bound TCP port is 0..65535
+	return p.Addr, uint32(bound.Port), nil      // #nosec G115 -- same
+}
+
+// accept opens one forwarded-tcpip channel per inbound connection and splices
+// it to the client, which is the whole point of the forward.
+func (f *forwards) accept(ln net.Listener, bindAddr string, bindPort uint32) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go f.splice(c, bindAddr, bindPort)
+	}
+}
+
+func (f *forwards) splice(c net.Conn, bindAddr string, bindPort uint32) {
+	defer func() { _ = c.Close() }()
+	origin, _ := c.RemoteAddr().(*net.TCPAddr)
+	var originAddr string
+	var originPort uint32
+	if origin != nil {
+		originAddr = origin.IP.String()
+		originPort = uint32(origin.Port) // #nosec G115 -- a TCP port is 0..65535
+	}
+	payload := gossh.Marshal(struct {
+		Addr       string
+		Port       uint32
+		OriginAddr string
+		OriginPort uint32
+	}{bindAddr, bindPort, originAddr, originPort})
+
+	ch, reqs, err := f.conn.OpenChannel("forwarded-tcpip", payload)
+	if err != nil {
+		return
+	}
+	defer func() { _ = ch.Close() }()
+	go gossh.DiscardRequests(reqs)
+
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(ch, c); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(c, ch); done <- struct{}{} }()
+	<-done
+}
+
+func (f *forwards) cancel(key string) {
+	f.mu.Lock()
+	ln, ok := f.listeners[key]
+	delete(f.listeners, key)
+	f.mu.Unlock()
+	if ok {
+		_ = ln.Close()
+	}
+}
+
+func (f *forwards) closeAll() {
+	f.mu.Lock()
+	lns := make([]net.Listener, 0, len(f.listeners))
+	for k, ln := range f.listeners {
+		lns = append(lns, ln)
+		delete(f.listeners, k)
+	}
+	f.mu.Unlock()
+	for _, ln := range lns {
+		_ = ln.Close()
 	}
 }
 
