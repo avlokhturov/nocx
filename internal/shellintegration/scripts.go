@@ -175,7 +175,34 @@ var (
 // recognises and sends them as `opts`; -p is excluded because it is modelled
 // as the port, and -t because the composer adds its own and ssh reads a
 // second one as -tt.
-const version = "36"
+// 37: zsh emits the command-existence snapshot (nocx-qduc). nocx.zsh had the
+// OSC 133 markers, OSC 7 and the whole authenticated channel, and no hello
+// and no snapshot at all — so on a zsh session the frontend's snapshot store
+// stayed `unavailable` for the life of the tab and the completion dropdown
+// answered "Command names are still loading" forever. macOS's default login
+// shell is zsh, which is where that matters. The protocol is the bash tier's
+// unchanged — one hello before the first prompt, one snapshot under that
+// nonce, the same escaping and the same caps — because the frontend has one
+// parser and AD-8 wants one owner for the format; what differs is mechanism,
+// and each difference is named where it is made: zsh keeps one parameter per
+// command table (so the enumeration is their union), sorts and dedupes in the
+// shell rather than through `sort -u`, sleeps with zsh/zselect rather than
+// forking `sleep`, disowns with `&!`, and chains its cleanup onto the zshexit
+// hook array instead of saving the user's EXIT trap.
+// 38: the accept-line chain invokes a WIDGET rather than a function name
+// (nocx-wwz0). `zle -lL accept-line` reports the function that implements the
+// widget, and the interception called that name straight back through `zle`,
+// which only works when a framework happens to have registered a widget of the
+// same name. fast-syntax-highlighting, zsh-syntax-highlighting and
+// zsh-autosuggestions do not — so on a machine with any of them, pressing
+// Enter printed "No such widget `_zsh_highlight_widget_orig-…-accept-line'" and
+// the command never ran. Latent until nocx-wwz0 gave the local tier a zsh to
+// run at all, and then reproduced on the first real machine it met. The
+// previous implementation is now registered under a name nocx owns, guarded
+// against a completion widget, against our own function (the launcher's
+// deliberate second source would chain to itself), and against an
+// implementation that is not a callable function.
+const version = "38"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

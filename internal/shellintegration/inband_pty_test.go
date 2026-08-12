@@ -461,12 +461,17 @@ func TestInBandBootstrap_RealZshIntegratesAndRestores(t *testing.T) {
 	p := plan(t, "0123456789abcdef0123456789abcdef")
 	s.typeAndWait(p.Wrapper+"\r", "\x1b]1337;NOCX_IB_READY\x07", 15*time.Second)
 	s.assertEchoOff(s.termios())
-	s.typeAndWait(p.Payload+p.Terminator+"\n", "\x1b]133;A", 15*time.Second)
-	// zsh has no source-time emission to anchor the restore boundary on: its
-	// A marker fires from precmd AFTER zle has already taken the terminal
-	// (measured: Lflag 0x8a31, zle's editing mode, ECHO off by design). The
-	// restore itself is the shared wrapper text proven by the bash 636 hello
-	// anchor; here the bit-exact before==after below is the assertion.
+	s.typeAndWait(p.Payload+p.Terminator+"\n", "\x1b]636;H;", 15*time.Second)
+	// The zsh tier now has the same source-time emission the bash tier has
+	// (nocx-qduc), so it gets the same anchor: the 636 hello is written
+	// INSIDE the wrapper, after the exact `stty "$saved"` restore and before
+	// any user code or zle re-prep runs, so ECHO is back on there. Until the
+	// snapshot landed, this test could only wait for the A marker — which
+	// fires from precmd AFTER zle has taken the terminal (measured: Lflag
+	// 0x8a31, zle's editing mode, ECHO off by design) — and so could assert
+	// nothing about the restore beyond the bit-exact before==after below.
+	s.assertEchoOn(s.termios())
+	s.waitFor("\x1b]133;A", 15*time.Second)
 	s.settleUntilReadline(before, 5*time.Second)
 	after := s.termios()
 	if before != after {

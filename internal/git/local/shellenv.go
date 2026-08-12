@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/loginshell"
 )
 
 // The resolved environment (spec D6): git's subprocesses — notably the
@@ -315,26 +316,20 @@ func validName(s string) bool {
 	return true
 }
 
-// detectShell mirrors the pty's shell detection (pty_local.go:114): the
-// user's SHELL when set, otherwise a fallback chain ending at /bin/sh. On a
-// GUI-launched app SHELL may be absent, which is exactly the launch shape the
-// resolver exists for.
+// detectShell asks the one owner of "which shell is this user's login shell"
+// (internal/loginshell) rather than deriving it here.
+//
+// It used to be a copy of the pty's own derivation, "kept in step by a
+// comment", and the two agreed everywhere anyone looked. Where they had to
+// agree and could not was the launch shape this resolver exists for: a
+// Dock-launched app inherits launchd's environment, so $SHELL — which both
+// copies asked first — is absent or stale exactly then, and both fell through
+// to bash on a platform whose users run zsh. D6's guarantee is that a commit
+// runs with the environment the user's shell would give it; reading the rc
+// files of a shell the user does not use is not that environment, it is a
+// third one (nocx-wwz0).
 func detectShell() string {
-	if shell := os.Getenv("SHELL"); shell != "" {
-		return shell
-	}
-	for _, candidate := range []string{
-		"/run/current-system/sw/bin/bash", // NixOS
-		"/bin/bash",
-		"/usr/bin/bash",
-		"/usr/local/bin/bash",
-		"/bin/sh",
-	} {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-	}
-	return "/bin/sh"
+	return loginshell.New().Resolve().Path
 }
 
 // launcherSessionVars mirrors internal/pty/pty_local.go's list, kept in step

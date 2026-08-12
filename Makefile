@@ -174,9 +174,9 @@ ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 # the Secret Service binding and lives in the OS set, but portable packages
 # read through it too, so both variants run over the whole partition.
 OS_PKG_DIRS := cmd/e2e-sshd internal/contentkey internal/lifecyclechannel \
-               internal/nativeports internal/pty internal/storage \
-               internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/contentkey|internal/lifecyclechannel|internal/nativeports|internal/pty|internal/storage|internal/update|internal/vault/system)
+               internal/loginshell internal/nativeports internal/pty \
+               internal/storage internal/update internal/vault/system
+OS_PKG_RE := (cmd/e2e-sshd|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/pty|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —
