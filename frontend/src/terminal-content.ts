@@ -36,10 +36,10 @@ import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
 import {
-  IntegrationSeenStore,
+  IntegrationSilenceStore,
   integrationMessage,
   isDegraded,
-  safeSeenStorage,
+  safeSilenceStorage,
   subscribeIntegrationChanged,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
@@ -367,11 +367,19 @@ export class TerminalContent extends BaseTabContent {
   private _noticeDispose: (() => void) | null = null
   /** The pane the card mounts over. */
   private _paneTarget: HTMLElement | null = null
-  /** Which (shell, reason) cards this machine has already shown. Renderer
-   *  presentation state — "has this person read this card" — so it lives in
-   *  localStorage rather than behind an RPC, and it survives a restart,
-   *  which the clipboard banner's run-scoped suppression does not. */
-  private readonly _seenStore = new IntegrationSeenStore(safeSeenStorage())
+  /** Which shells this machine has been told to stop raising cards for.
+   *  Renderer presentation state — "has this person answered for this
+   *  shell" — so it lives in localStorage rather than behind an RPC, and it
+   *  survives a restart, which the clipboard banner's run-scoped suppression
+   *  does not. Nothing else is remembered: a card the user merely closed is
+   *  raised again by the next session (nocx-wfxz). */
+  private readonly _silencedShells = new IntegrationSilenceStore(safeSilenceStorage())
+  /** The reasons THIS tab has already raised a card for and the user has
+   *  closed. In memory and per tab, which is the scope the persistent record
+   *  deliberately does not cover: the next session asks again, but a status
+   *  republished on this session — a reconnect re-announcing what it already
+   *  said — must not push a card the user just closed back up. */
+  private readonly _closedReasons = new Set<string>()
   /** The observed shell state (one of three independent axes). */
   private _shellState: ShellState = 'unsupported'
   /** The current input presentation. */
@@ -1988,10 +1996,11 @@ export class TerminalContent extends BaseTabContent {
    *  Two surfaces, and they are deliberately different in kind. The tab's
    *  mark is a STATE: it is on for exactly as long as the session stays
    *  degraded, so a user who looks at the strip an hour later still sees it.
-   *  The card is an EVENT, shown at most once per (shell, reason) pair —
-   *  once per session would put the same card in every tab of one
-   *  misconfigured machine, which is how people learn to dismiss cards
-   *  without reading them.
+   *  The card is an EVENT, raised once per session per reason and answered by
+   *  the user or not at all — the only thing that outlives the session is the
+   *  user pressing "Don't show again for this shell" (nocx-wfxz). Closing a
+   *  card remembers nothing beyond this tab, because a card closed before the
+   *  reader worked out what it meant has not been read.
    *
    *  A session that never asked for integration never receives a status at
    *  all, so neither surface has anything to draw: absence is how
@@ -2019,23 +2028,31 @@ export class TerminalContent extends BaseTabContent {
     this.scheduleLiveResize()
   }
 
-  /** Raise the degraded-session card, unless this (shell, reason) pair has
-   *  already been seen on this machine. */
+  /** Raise the degraded-session card, unless the user has already answered
+   *  for this shell — or closed this very card in this tab.
+   *
+   *  Nothing is written here. The card being drawn used to record the (shell,
+   *  reason) pair on this machine, which meant a glance spent it and the next
+   *  session with the same shell and the same reason said nothing at all
+   *  (nocx-wfxz). The only persistent record is the one the user asks for. */
   private _maybeShowIntegrationNotice(fact: SessionIntegrationChanged): void {
     const target = this._paneTarget
     const reason = fact.reason ?? 'unknown'
     if (!target || this._noticeDispose) return
-    const seen = this._seenStore
-    if (!seen.shouldShow(fact.shell, reason)) return
-    seen.markShown(fact.shell, reason)
+    if (this._closedReasons.has(reason)) return
+    if (this._silencedShells.isSilenced(fact.shell)) return
     this._noticeDispose = mountIntegrationNotice(target, {
       fact,
       copy: (text) => this.clipboard.writeText(text),
       onSuppressShell: () => {
-        seen.suppressShell(fact.shell)
+        this._silencedShells.silenceShell(fact.shell)
+        this._closedReasons.add(reason)
         this._dropIntegrationNotice()
       },
-      onDismiss: () => this._dropIntegrationNotice(),
+      onDismiss: () => {
+        this._closedReasons.add(reason)
+        this._dropIntegrationNotice()
+      },
     })
     // The card takes its height off the top of the pane (nocx-rzvq), so the
     // scroller is smaller than the grid fitted to it. Same re-measure the

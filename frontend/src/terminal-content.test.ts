@@ -2950,28 +2950,98 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     }
   })
 
-  it('raises the card once for a (shell, reason) pair and never again', async () => {
+  // nocx-wfxz, the owner reversing the once-per-(shell, reason) rule taken in
+  // nocx-5uu5: the card used to be recorded as read the moment it was DRAWN,
+  // so a user who closed it before working out what it meant never saw it
+  // again. Nothing on the card said that looking at it spent it. The only
+  // thing that writes anything now is the user saying so.
+  it('raises the card again in the next session, having been told nothing', async () => {
     const clientA = makeClient()
-    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
     try {
       publish(clientA)
       expect(cardIn(first.tab)).not.toBeNull()
       expect(first.tab.pane.querySelector('.ui-status-card__title')!.textContent).toBe(
         'Not integrated',
       )
+      press(first.tab, '×')
     } finally {
       first.teardown()
     }
 
-    // A second tab, same shell, same reason: the badge is the standing
-    // signal and the card has already been read.
+    // A second session, same shell, same reason. The user closed the first
+    // card without answering it, so this one is still worth raising.
     const clientB = makeClient()
     const second = await mountTerminal(makeClipboard(), {}, clientB)
     try {
       publish(clientB)
-      expect(cardIn(second.tab)).toBeNull()
+      expect(cardIn(second.tab)).not.toBeNull()
     } finally {
       second.teardown()
+    }
+  })
+
+  // The other end of the same interval: a card the user never touched at all
+  // is not spent either. This is the tab that gets closed with the card still
+  // on it.
+  it('raises the card again after a session that ended with it still showing', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    try {
+      publish(clientA)
+      expect(cardIn(first.tab)).not.toBeNull()
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB)
+      expect(cardIn(second.tab)).not.toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  // Within ONE session it is a different question, and the answer is the
+  // opposite: the user closed this card, in this tab, a moment ago. A status
+  // republished on the same session — a reconnect re-announcing what it
+  // already said — must not push it back up.
+  it('does not push a closed card back up when the same status is republished', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, '×')
+      expect(cardIn(tab)).toBeNull()
+      publish(client)
+      expect(cardIn(tab)).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  // …and a session that degrades a NEW way after the user closed the first
+  // card is telling them something they have not been told.
+  it('raises a card for a new reason in the same session', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, '×')
+      publish(client, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(tab)).not.toBeNull()
+    } finally {
+      teardown()
     }
   })
 

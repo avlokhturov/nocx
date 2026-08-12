@@ -5,10 +5,11 @@
  *
  * Owner decisions this implements, taken 2026-08-12 rather than invented
  * here: the fact lives as a persistent mark on the TAB for as long as the
- * session stays degraded (tab.tsx already owns that mark), plus this card
- * shown once per (shell, reason) pair — not once per session, because one
- * shell failing one way is one thing to learn however many tabs it happens
- * in. The message names no third-party program; the observed process name is
+ * session stays degraded (tab.tsx already owns that mark), plus this card,
+ * raised once per session per reason and spent only when the user answers it
+ * — closing it remembers nothing, because a card closed before the reader
+ * worked out what it meant has not been read (nocx-wfxz). The message names
+ * no third-party program; the observed process name is
  * shown behind the card, labelled as a guess. "Apply the fix for me" is
  * nocx-cqkg and is deliberately not here.
  *
@@ -68,8 +69,9 @@ export interface IntegrationNoticeProps {
   copy: (text: string) => Promise<void>
   /** The user asked not to be shown this shell's cards again. */
   onSuppressShell: () => void
-  /** Dismiss this card. "Not now" — the card is already once-per-pair, so
-   *  there is nothing further to remember. */
+  /** Take this card away. It is "not now", and it is the whole of what it
+   *  says: nothing is recorded, so the next session that hits this raises the
+   *  card again. The action that answers for good is onSuppressShell. */
   onDismiss: () => void
 }
 
