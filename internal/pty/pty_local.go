@@ -181,6 +181,22 @@ func (lp *LocalPty) Shell() string {
 	return lp.cmd.Path
 }
 
+// Pid is the process id of the shell this pty started, or 0 when the spawn
+// never produced one. It is read by the composition root so the process
+// observer can be told which process to watch (nocx-cgzc) — this is the only
+// place that knows it, exactly as Shell() is the only place that knows which
+// binary was exec'd.
+//
+// The pid stays the same across an exec: a shell replaced by a wrapper is the
+// same process wearing a new image, which is why watching the pid answers the
+// question at all.
+func (lp *LocalPty) Pid() int {
+	if lp.cmd.Process == nil {
+		return 0
+	}
+	return lp.cmd.Process.Pid
+}
+
 func (lp *LocalPty) Read(p []byte) (int, error) {
 	return lp.file.Read(p)
 }
