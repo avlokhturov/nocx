@@ -416,7 +416,11 @@ to the worker paying for it.
 
 **When the merged gate goes red, send it back to the worker, do not fix it in the
 coordinator.** A worker is resumable and still holds why it wrote what it wrote; the
-coordinator would be re-deriving that from a diff. The exception is a defect that exists
+coordinator would be re-deriving that from a diff. **Which means the worktrees stay until
+that gate is green** — removing one un-resumes its worker, and the rule above then has
+nobody to send anything to. Measured within the hour of writing it: the tidy-up before
+`make ci-full` cost exactly that, and the reply had to be re-briefed into a fresh worker
+from scratch. The exception is a defect that exists
 only in the merge — the two above were exactly that, and belonged to whoever resolved it.
 
 **They are not their counterparts in timing, and no setting will make them so.** Each of
