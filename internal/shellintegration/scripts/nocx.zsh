@@ -246,7 +246,11 @@ __nocx_lc_init() {
     __nocx_lc_lane_esc=$__nocx_lc_json_escaped
     __nocx_lc_json_escape "$__nocx_lc_dom"
     __nocx_lc_dom_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"zsh","max_frame":'"$__nocx_lc_max_frame"
+    # The bundle this shell was brought up from — see the same block in
+    # nocx.bash for why only the far side can name it and why it is escaped.
+    __nocx_lc_json_escape "${NOCX_GENERATION-}"
+    __nocx_lc_gen_esc=$__nocx_lc_json_escaped
+    __nocx_lc_send hello ',"shell":"zsh","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'
     if ! __nocx_lc_read_frame; then
         return 1
     fi
@@ -360,7 +364,18 @@ __nocx_lc_json_unescape() {
             return 1
         fi
         hexc="${match[1]}"
+        # THREE octal digits, always — the padding is load-bearing, not
+        # cosmetic. \NNN consumes up to three digits, so an unpadded escape
+        # eats the character after it whenever that character is a digit:
+        # `>` is > on the wire (Go escapes <, > and & by default), which
+        # gives \76, and `>0` then reads as \760 — 496, truncated to the byte
+        # 0xF0. Measured exactly that: a payload's `select(...)>0` reached the
+        # child as `select(...)\xF0 ? 0 : 1` and perl refused to parse it
+        # (nocx-aupk). `2>&1` corrupts the same way — & gives \46, and
+        # `&1` reads as \461. bash's twin has always used %03o; this is the
+        # zsh side catching up.
         octc=$(( [##8] 16#$hexc ))
+        octc="${(l:3::0:)octc}"
         s="${s//${bs}"u"$hexc/${bs}${octc}}"
     done
     # The zsh twin of bash's printf %b pass: (g:o:) processes backslash

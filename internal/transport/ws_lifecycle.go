@@ -93,23 +93,41 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		s.log.Debug("lifecycle.changed for unregistered lane", "lane", f.Lane)
 		return
 	}
-	// A lost fact with a recovery fence opens a restoration episode — but
-	// only while the session is alive AND someone is there to receive the
-	// promise. The session coordinator's call (decision 8 / AC4): the
-	// kernel cannot tell "channel died, pty lives" from "connection dead",
-	// and must not try. A dead session gets the lost fact with NO recovery
-	// promise (no restoration claim), and its episode — if one existed —
-	// is cancelled; session death wins. An episode without a subscriber is
-	// not opened: the next attach replays the fact, and the episode opens
-	// then, when the ack can actually come back.
-	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
-		if _, err := s.registry.Get(sid); err != nil {
-			s.cancelRecovery(sid)
-			stripped := f
-			stripped.Recovery = nil
-			f = stripped
-		}
+	// Session death wins, and it wins BEFORE the wire (protocol §12.1).
+	// When the pty/SSH channel's Done() has closed, the session's whole
+	// remaining contract is `exit`: "emit exit, cancel any pending
+	// restoration, reject late acknowledgements, report a disconnected
+	// terminal, and make no restoration claim. If the two race, session
+	// death wins." So a fact for a dead session is SUPPRESSED here — the
+	// episode it might have opened is cancelled and nothing is sent.
+	//
+	// This used to strip the recovery promise and deliver the fact anyway,
+	// which made the observable outcome depend on which goroutine won:
+	// monitorExit removing the receiver, or the lifecycle channel's reader
+	// noticing EOF and publishing. Both orderings are legal and neither is
+	// arranged, so the renderer saw a stripped `lost` before its `exit` or
+	// saw nothing, at random. The renderer does the same thing either way —
+	// `exit` closes the tab and disposes the projections — so the delivery
+	// bought nothing and cost determinism (nocx-2h08).
+	//
+	// The kernel transition is NOT suppressed and must not be: TransportLost
+	// has already marked the domains lost and open attempts unknown. What is
+	// dropped is a notification to a session that is going away, never the
+	// backend's own authority state.
+	if _, err := s.registry.Get(sid); err != nil {
+		s.cancelRecovery(sid)
+		return
 	}
+	// The installed fact (nocx-ak2d): what the far shell said it was brought
+	// up from, recorded once per domain. Before the routing decisions below,
+	// because the fact is about the HOST and does not depend on anybody being
+	// attached to watch it — a session whose renderer has gone away has still
+	// integrated the host it connected to.
+	s.recordInstalledFact(f)
+
+	// An episode without a subscriber is not opened: the next attach replays
+	// the fact, and the episode opens then, when the ack can actually come
+	// back.
 	rx := s.getRx(sid)
 	if rx == nil {
 		return

@@ -68,9 +68,33 @@ func shellEnv(a *Adapter, seq uint64, evt lifecycle.Event) lifecycle.Envelope {
 	}
 }
 
+// waitFor blocks until cond holds, and gives up only when the whole test run
+// is nearly out of time.
+//
+// The condition is the observable state change, which is right; the DEADLINE
+// was a flat 2 s, which was not. `go test ./... -race` builds every package's
+// tests and runs them concurrently, so this package's 2 s competed with
+// internal/importer (42 s) and internal/app (32 s) on the same cores, in an
+// emulated amd64 container. TestChildDescriptorReachesSpawnedProcess — which
+// spawns `sh -c 'cat file >&3'` and waits for the frame to arrive through the
+// inherited descriptor — lost that race and reported "timed out" for work that
+// had not been scheduled yet. Measured 2026-08-12 at one commit: red in the
+// no-keyring variant at 2.04 s, green in the with-keyring variant at 1.33 s
+// (nocx-8b47).
+//
+// The bound now comes from `go test -timeout`, less a margin, so a machine
+// being slow cannot manufacture a failure while a genuinely stuck wait still
+// names what it was waiting for — before the suite's own timeout turns it into
+// a goroutine dump. A run with no deadline (-timeout 0) gets a long one rather
+// than none, so a wedged wait cannot hang a developer's terminal forever.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline, ok := t.Deadline()
+	if ok {
+		deadline = deadline.Add(-5 * time.Second)
+	} else {
+		deadline = time.Now().Add(2 * time.Minute)
+	}
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

@@ -427,10 +427,29 @@ func TestTunnelConnDoneRevokesDomainUnknownsAttempt(t *testing.T) {
 		return ok && d.State == lifecycle.DomainEstablished
 	})
 
-	att, err := k.SubmitAttempt(cfg.Domain, "sleep 100", "/home/dev", "local")
-	if err != nil {
-		t.Fatalf("SubmitAttempt: %v", err)
-	}
+	// DomainEstablished is NOT the precondition SubmitAttempt needs, and the
+	// wait above only reaches that. The kernel sets acceptPending in the same
+	// step that takes the lane to PromptReady and clears it only when the
+	// accept is DELIVERED to the shell, and requireActive refuses a domain
+	// whose accept was minted but never delivered (decision 3/9,
+	// ErrDomainPending). The delivery is asynchronous here — a real socket to
+	// the fake shell — so on a loaded machine the submit landed inside that
+	// window and the test failed instantly with "domain not past accept",
+	// while an idle machine never saw it (nocx-8b47).
+	//
+	// acceptPending is unexported and this package cannot read it, so the wait
+	// is on the operation itself, which is the honest observable: submit until
+	// the kernel stops refusing. A refusal creates no attempt, so retrying
+	// cannot leave a spare one behind.
+	var att lifecycle.ExecutionAttempt
+	waitFor(t, "domain past accept", func() bool {
+		a, err := k.SubmitAttempt(cfg.Domain, "sleep 100", "/home/dev", "local")
+		if err != nil {
+			return false
+		}
+		att = a
+		return true
+	})
 	if got, _ := k.Attempt(att.ID); got.State != lifecycle.AttemptOpen {
 		t.Fatalf("attempt must be open before loss, got %v", got.State)
 	}
@@ -631,6 +650,18 @@ func TestOneLaneSeveralDomainsNoCurrentDomain(t *testing.T) {
 	})
 
 	root.suspend()
+	// Wait for the suspension to be APPLIED, not merely written. The
+	// kernel refuses a child whose parent is still live (ErrParentActive,
+	// kernel.go), and the suspend travels on the root's connection while
+	// the child's hello arrives on its own — two adapter goroutines, no
+	// ordering between them. On a many-core machine the suspend won every
+	// time; on a CI runner with few cores the child's hello got there
+	// first and was rejected, so the test read EOF instead of an accept
+	// (nocx-x8ol). Synchronise on the observable state, not on luck.
+	waitFor(t, "root suspended", func() bool {
+		d, ok := k.Domain(cfg.Domain)
+		return ok && d.State == lifecycle.DomainSuspended
+	})
 	child, err := k.RequestDomain(cfg.Lane, &cfg.Domain, a.id)
 	if err != nil {
 		t.Fatalf("RequestDomain child on the same transport: %v", err)

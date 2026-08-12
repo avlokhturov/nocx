@@ -633,6 +633,139 @@ __nocx_prompt_command
 	}
 }
 
+// TestBashSnapshotSurvivesTheSecondSource drives the arrangement the launcher
+// actually produces, which the test above does not: the user's ~/.bashrc
+// sources the installer-era copy, and then the launcher rcfile unsets
+// __nocx_loaded and sources the session's authenticated copy OVER it. That
+// second pass is not an edge case — nocx.bash's own comment on
+// __nocx_snapshot_wait_ms calls it "EVERY local enhanced session, because the
+// app writes that gate line itself".
+//
+// The second pass used to mint a fresh nonce and announce a second hello.
+// command-snapshot.ts keeps the FIRST hello on purpose — accepting a re-hello
+// is exactly the re-anchoring its forgery defence exists to prevent — so the
+// snapshot, emitted later from a prompt under the SECOND nonce, failed the
+// match and was discarded. The store stayed `unavailable` for the life of the
+// session and command completion never learned a single command name. Both
+// frames were well-formed; they simply disagreed, which is why every check
+// that looked at one frame at a time stayed green (nocx-cbtc).
+//
+// So the assertion is on the PAIR: one hello, one snapshot, same nonce.
+func TestBashSnapshotSurvivesTheSecondSource(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// The REWIND, then the re-source — mirroring bashRcfileTemplate, not a
+	// simplification of it. The rcfile restores the user's original DEBUG and
+	// EXIT traps and their PROMPT_COMMAND before unsetting __nocx_loaded,
+	// precisely so the fresh install chains to the user's originals instead of
+	// to our own wrappers. Leaving that out is not a smaller version of the
+	// same thing: __nocx_prompt_command then chains to itself, bash recurses
+	// through the prompt until the stack is gone, and the shell segfaults — so
+	// a test without the rewind measures a shell nobody runs.
+	//
+	// Kept in step with the launcher by the assertion below, which fails if
+	// the rcfile stops doing this at all.
+	if !strings.Contains(bashRcfileTemplate, "unset __nocx_loaded") {
+		t.Fatal("bashRcfileTemplate no longer re-sources the script; this test reproduces an arrangement that no longer exists")
+	}
+	// compgen is stubbed fast for the same reason as the test above: what is
+	// under test is the nonce's identity across a re-source, never the
+	// machine's speed.
+	prog := `
+enable -n compgen
+compgen() { builtin printf '%s\n' cd echo pwd true; }
+export NOCX_SHELL_INTEGRATION=1
+source "$1"
+if [[ -n "${__nocx_old_debug:-}" ]]; then trap "${__nocx_old_debug}" DEBUG; else trap - DEBUG; fi
+if [[ -n "${__nocx_old_exit:-}" ]]; then trap "${__nocx_old_exit}" EXIT; else trap - EXIT; fi
+if [[ "${PROMPT_COMMAND-}" == "__nocx_prompt_command" ]]; then PROMPT_COMMAND="${__nocx_old_pc-}"; fi
+unset __nocx_loaded __nocx_prompt_wrapped __nocx_owned_session \
+      __nocx_arm_marker_only __nocx_preexec_done __nocx_in_prompt_command \
+      __nocx_first_prompt
+source "$1"
+__nocx_prompt_command
+__nocx_prompt_command
+`
+	out := runShellProgEnv(t, bash, prog, script, "NOCX_SNAPSHOT_WAIT_MS=15000")
+
+	if got := strings.Count(out, "]636;H;"); got != 1 {
+		t.Errorf("a re-source announced a second session: want exactly 1 OSC 636 hello, got %d in %q", got, out)
+	}
+	if got := strings.Count(out, "]636;S;"); got != 1 {
+		t.Errorf("want exactly 1 OSC 636 snapshot, got %d in %q", got, out)
+	}
+
+	// The nonce the snapshot carries is the one the hello established. This is
+	// the assertion the defect actually failed, and the counts above can all
+	// pass while it does not.
+	hello := helloNonce(t, out)
+	after := strings.SplitN(out, "]636;S;", 2)
+	if len(after) < 2 {
+		t.Fatalf("no OSC 636 snapshot emitted: %q", out)
+	}
+	snapNonce := strings.SplitN(after[1], ";", 2)[0]
+	if snapNonce != hello {
+		t.Errorf("snapshot nonce = %q, hello established %q — the renderer discards a mismatch, so command completion never works in this session", snapNonce, hello)
+	}
+
+	// And the payload is real: pwd is a builtin, so it is in every compgen -c.
+	if !strings.Contains(after[1], "pwd") {
+		t.Errorf("snapshot carries no command names: %q", out)
+	}
+}
+
+// TestBashSnapshotAnnouncesInAChildThatInheritedTheNonce is the other half of
+// the once-per-shell latch, and it guards the failure mode the FIRST attempt
+// at that latch introduced.
+//
+// Latching on "is __nocx_snapshot_nonce set" cannot tell a re-source from an
+// INHERITED value, and the two need opposite answers. A nonce that reached
+// the environment — a user rc under `set -a` auto-exports every assignment,
+// which is the hazard the script's own `export -n` exists for — then silenced
+// a legitimately new shell for good: no hello, so no snapshot is ever
+// accepted, and completion is dead for that session with nothing said.
+// Measured at the time: zero hello frames and zero snapshots in the child.
+//
+// That is also fail-CLOSED, the wrong direction for this file. The latch is
+// the shell's own pid, which no child can inherit, so this test and
+// TestBashSnapshotSurvivesTheSecondSource pin the two directions together —
+// neither can be satisfied by dropping the other.
+func TestBashSnapshotAnnouncesInAChildThatInheritedTheNonce(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// The parent exports a nonce; this shell is the child that inherits it.
+	prog := `
+enable -n compgen
+compgen() { builtin printf '%s\n' cd echo pwd true; }
+export NOCX_SHELL_INTEGRATION=1
+export __nocx_snapshot_nonce=deadbeefdeadbeefdeadbeefdeadbeef
+source "$1"
+__nocx_prompt_command
+__nocx_prompt_command
+`
+	out := runShellProgEnv(t, bash, prog, script, "NOCX_SNAPSHOT_WAIT_MS=15000")
+
+	if got := strings.Count(out, "]636;H;"); got != 1 {
+		t.Errorf("a shell that inherited a nonce must still announce itself: want 1 OSC 636 hello, got %d in %q", got, out)
+	}
+	// And the nonce it announces is its OWN, not the inherited one — an
+	// inherited nonce is another session's, and reusing it would let one
+	// session's snapshot be accepted for another.
+	hello := helloNonce(t, out)
+	if hello == "deadbeefdeadbeefdeadbeefdeadbeef" {
+		t.Error("the child announced the INHERITED nonce; it must mint its own")
+	}
+	if got := strings.Count(out, "]636;S;"); got != 1 {
+		t.Errorf("want 1 OSC 636 snapshot, got %d in %q", got, out)
+	}
+	after := strings.SplitN(out, "]636;S;", 2)
+	if len(after) < 2 || strings.SplitN(after[1], ";", 2)[0] != hello {
+		t.Errorf("snapshot nonce does not match the hello's in %q", out)
+	}
+}
+
 // TestBashSnapshotFirstPromptBoundedWait drives the hook with a compgen that
 // sleeps longer than the 250 ms first-prompt bound. The FIRST prompt must not
 // wait for it: the snapshot is deferred to a later prompt, and the prompt is

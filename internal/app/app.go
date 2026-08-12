@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/shady2k/nocx/internal/completion"
@@ -87,6 +88,11 @@ type App struct {
 // which an in-progress compaction stops (design §5.4 names hysteresis as
 // part of the ceiling). A mechanism parameter, not a user knob.
 const contentCompactionFloor = 0.8
+
+// logLevelEnvVar turns the backend's log level up without a rebuild. Read
+// from the environment rather than from settings because the sessions worth
+// debugging are the ones failing during startup, before any store is open.
+const logLevelEnvVar = "NOCX_LOG_LEVEL"
 
 // budgetFromSettings builds the store's two-number budget from the History
 // settings (nocx-rtg0.11): the user's retention size and disk ceiling, in
@@ -232,7 +238,34 @@ func New(opts ...Option) (*App, error) {
 		logFilePath = *o.logFilePath // test override; empty disables file logging
 	}
 	var logFile *os.File
-	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// The level is a knob, not a constant. It was slog.LevelInfo in both
+	// handlers below, so every Debug line in this codebase was unreachable
+	// without editing a source file and rebuilding — which is why debugging a
+	// live session meant adding console.log to the renderer and a temporary
+	// Warn to the backend, and why the cause of a whole class of e2e failures
+	// stayed "unknown" across three triage rounds (nocx-cbtc, nocx-xplc).
+	//
+	// An env var rather than a setting: the thing you need to turn up is the
+	// startup of a session that is already going wrong, and a setting is read
+	// from a store this runs before. Unrecognised values fall back to info
+	// rather than failing — a mistyped level must never stop the app starting,
+	// and the fallback says so in the log.
+	logLevel := slog.LevelInfo
+	levelName := strings.ToLower(strings.TrimSpace(os.Getenv(logLevelEnvVar)))
+	badLevel := ""
+	switch levelName {
+	case "":
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "info":
+	case "warn", "warning":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		badLevel = levelName
+	}
+	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 	if logFilePath != "" {
 		if mkErr := os.MkdirAll(filepath.Dir(logFilePath), 0o700); mkErr != nil {
 			slogger.Warn("backend log file unavailable; logging to stderr only",
@@ -250,7 +283,7 @@ func New(opts ...Option) (*App, error) {
 			// nobody would look in), and still be visible on the console.
 			logFile = f
 			slogger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f),
-				&slog.HandlerOptions{Level: slog.LevelInfo}))
+				&slog.HandlerOptions{Level: logLevel}))
 		}
 	}
 	logger := log.NewSlogAdapter(slogger)
@@ -258,6 +291,15 @@ func New(opts ...Option) (*App, error) {
 	// file is by reading its own first line.
 	if logFilePath != "" {
 		logger.Info("backend log file", "path", logFilePath)
+	}
+	// Said after the logger exists, so it lands in the file too — and said at
+	// all, because a level that silently did not apply is worse than no knob.
+	if badLevel != "" {
+		logger.Warn("unrecognised log level; using info",
+			"var", logLevelEnvVar, "value", badLevel, "known", "debug, info, warn, error")
+	}
+	if logLevel == slog.LevelDebug {
+		logger.Info("log level", "level", "debug", "var", logLevelEnvVar)
 	}
 
 	shint := shellintegration.New(logger)

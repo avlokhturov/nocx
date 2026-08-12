@@ -2070,6 +2070,19 @@ func TestConnectionsPasswordRequest_OverTheWireConformsToContract(t *testing.T) 
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
+	// The server must have REGISTERED this connection before anything is
+	// broadcast to it. connectWS returns when the client's handshake is done,
+	// which is not the same instant: broadcastAsk reads s.conns, and on an
+	// empty set it does not write — it returns ErrPasswordNoClientConnected
+	// and the goroutine below swallows that into a channel nobody reads
+	// before the socket read. So a lost race produced no notification at all
+	// and this test sat out its full 30s deadline reporting a timeout, which
+	// names the clock instead of the cause (nocx-8b47).
+	//
+	// waitForConns is the existing answer — password_requester_test.go calls
+	// it before every one of its asks. These contract tests never did.
+	waitForConns(t, ws, 1)
+
 	// Request a connection password; this sends the real notification over
 	// the socket.
 	done := make(chan error, 1)
@@ -3362,7 +3375,16 @@ func TestGitChanged_OverTheWireConformsToContract(t *testing.T) {
 	sid := e.openSession(t, 1)
 	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
 
-	closeResp := jsonrpcCallWithID(t, e.conn, "close", map[string]string{"sessionId": sid}, 3)
+	// One loop for both frames, because git.changed may precede the close
+	// response on the wire and jsonrpcCallWithID DISCARDS notifications
+	// while it hunts for an id. This test used to do exactly that and then
+	// wait for the frame it had just thrown away — a 30-second deadline on
+	// a delivery that had already happened, and once gorilla stores that
+	// first read error it returns it from every later read, so the wait
+	// could never recover. closeSessionCollectNotification exists in this
+	// package for precisely this hazard (ws_git_test.go) and documents it;
+	// the contract test simply was not using it.
+	closeResp, raw := closeSessionCollectNotification(t, e.conn, sid, "git.changed", 3, wantWithin)
 	var closeEnv struct {
 		Error *jsonrpcErrorObj `json:"error"`
 	}
@@ -3373,7 +3395,6 @@ func TestGitChanged_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("close: %+v", closeEnv.Error)
 	}
 
-	raw := readNotification(t, e.conn, "git.changed", wantWithin)
 	validateJSON(t, schema, raw, "git.changed params (real socket)")
 	var params gitChangedParams
 	if err := json.Unmarshal(raw, &params); err != nil {

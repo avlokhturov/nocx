@@ -33,8 +33,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/log"
@@ -110,7 +108,11 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 		opt(&o)
 	}
 
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	// Per-OS: Linux sets close-on-exec atomically, everything else closes the
+	// same window with ForkLock (socketpair_linux.go / socketpair_other.go).
+	// The constant this used to name inline exists only on Linux, which is
+	// how the product came to not build on macOS at all (nocx-1w69).
+	fds, err := socketpairCloexec()
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle socketpair: %w", err)
 	}

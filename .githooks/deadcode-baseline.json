@@ -2,13 +2,16 @@
   "//": [
     "DO NOT EDIT MANUALLY. Regenerate with `node .githooks/update-deadcode-baseline.mjs`.",
     "",
-    "Every entry is a Go function `deadcode ./...` reports unreachable from main()",
-    "on this machine. It may only shrink. A function deadcode reports that is not",
-    "listed here is a new violation and fails the pre-commit hook.",
+    "Every entry is a Go function `deadcode ./...` reports unreachable from main().",
+    "It may only shrink. A function deadcode reports that is not listed here is a",
+    "new violation and fails the pre-commit hook.",
     "",
-    "Machine-specific in one respect: build-tag-gated files (e.g.",
-    "secretservice_linux.go) only appear on the OS they build for, so an entry",
-    "that vanishes on another platform is a free shrink, not a violation."
+    "NOT machine-specific: the list is the UNION over darwin/arm64 and linux/amd64,",
+    "analysed with CGO_ENABLED=0, so every machine computes the same set. Both",
+    "halves of a build-tag-gated pair (secretservice_linux.go and its _other",
+    "sibling) are therefore listed, and an entry never appears or vanishes because",
+    "of who ran the gate — which is what made this unpassable on macOS while CI,",
+    "which runs no deadcode at all, stayed silent (nocx-0odm)."
   ],
   "violations": [
     {
@@ -240,10 +243,6 @@
       "func": "WithTimeout"
     },
     {
-      "file": "internal/storage/storagetest/storagetest.go",
-      "func": "Isolate"
-    },
-    {
       "file": "internal/transport/transport.go",
       "func": "NewStub"
     },
@@ -336,6 +335,10 @@
       "func": "secretServiceAvailableVia"
     },
     {
+      "file": "internal/vault/system/secretservice_other.go",
+      "func": "SecretServiceAvailable"
+    },
+    {
       "file": "internal/vault/system/system.go",
       "func": "WithReasonProbe"
     },
@@ -346,50 +349,6 @@
     {
       "file": "internal/vault/testseam.go",
       "func": "MintReferenceForTest"
-    },
-    {
-      "file": "internal/vault/vaulttest/contract.go",
-      "func": "RunProviderContract"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Delete"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Get"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.ID"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Put"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.SetDelay"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.SetFailure"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.snapshot"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "Fake.Status"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "NewFake"
-    },
-    {
-      "file": "internal/vault/vaulttest/fake.go",
-      "func": "NewFakeWithID"
     }
   ]
 }

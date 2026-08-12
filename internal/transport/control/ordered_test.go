@@ -86,30 +86,54 @@ func TestOrderedSubmission_RefusesWhenFull(t *testing.T) {
 	sub := NewOrderedSubmission("session", 2)
 	ctx := context.Background()
 	release := make(chan struct{})
+	running := make(chan struct{})
 	var n int64
-	// Fill the queue: the first task blocks, the second waits in the FIFO.
+
+	// OCCUPY THE WORKER FIRST, then fill the queue. Submitting exactly
+	// `capacity` tasks does not fill it: the worker starts on the first
+	// submit and dequeues immediately, so one of those tasks is in flight
+	// rather than queued and a slot is free. The next submit was then
+	// admitted and the refusal never came — instantly, with no timeout to
+	// hint at why. It held on an idle machine, where the worker had not got
+	// round to dequeuing yet, and failed under load (nocx-8b47).
+	//
+	// Once this task is inside Run and blocked on release, the single worker
+	// is occupied and nothing drains the channel, so the buffer's occupancy
+	// is fully determined by what is submitted after this point.
+	if rej := sub.TrySubmit(ctx, Task{Run: func(context.Context) {
+		atomic.AddInt64(&n, 1)
+		close(running)
+		<-release
+	}}); rej != nil {
+		t.Fatalf("first submit refused: %+v", rej)
+	}
+	<-running
+
+	// Now fill the queue itself — capacity tasks, none of which can be
+	// dequeued while the worker is blocked.
 	for i := range 2 {
 		if rej := sub.TrySubmit(ctx, Task{Run: func(context.Context) {
 			atomic.AddInt64(&n, 1)
-			<-release
 		}}); rej != nil {
-			t.Fatalf("submit %d refused: %+v", i, rej)
+			t.Fatalf("queued submit %d refused while the queue had room: %+v", i, rej)
 		}
 	}
-	// The third submit must be refused, never queued.
+
+	// One more must be refused, never queued.
 	rej := sub.TrySubmit(ctx, Task{Run: func(context.Context) {}})
 	if rej == nil {
-		t.Fatal("third submit must be refused when the queue is full")
+		t.Fatal("a submit past capacity must be refused when the queue is full")
 	}
 	if rej.Scope != "session" {
 		t.Fatalf("rejection scope = %q, want the submission's name", rej.Scope)
 	}
 	close(release)
-	// The admitted tasks complete.
+	// All THREE admitted tasks complete — the one that occupied the worker
+	// and the two that were queued behind it. The refused one never ran.
 	deadline := time.Now().Add(5 * time.Second)
-	for atomic.LoadInt64(&n) < 2 {
+	for atomic.LoadInt64(&n) < 3 {
 		if time.Now().After(deadline) {
-			t.Fatalf("admitted tasks never completed (%d ran)", n)
+			t.Fatalf("admitted tasks never completed (%d of 3 ran)", atomic.LoadInt64(&n))
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

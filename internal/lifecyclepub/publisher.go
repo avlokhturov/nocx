@@ -295,6 +295,11 @@ type GrantRequest struct {
 	Host      string
 	User      string
 	Port      int
+	// Opts are the ssh options the user typed, in order, with their
+	// arguments. The composer rebuilds the command line and these are the
+	// rest of what it is made of; without them `ssh -i key -J bastion host`
+	// was executed as a bare `ssh host` (nocx-c6z0).
+	Opts []string
 }
 
 // GrantBootstrap is the builder's answer: the child's identity and the
@@ -452,6 +457,7 @@ func (p *Publisher) buildAndDeliverGrant(out lifecycle.Outbound) {
 		Host:      grant.Host,
 		User:      grant.User,
 		Port:      grant.Port,
+		Opts:      grant.Opts,
 	}
 	if p.grantBuilder != nil {
 		if b, err := p.grantBuilder(req); err == nil {

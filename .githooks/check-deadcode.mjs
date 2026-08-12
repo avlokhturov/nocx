@@ -41,28 +41,105 @@ const DEADCODE_CMD = process.env.DEADCODE || 'deadcode'
 
 const UNREACHABLE_RE = /^(.+?):\d+:\d+: unreachable func: (.+)$/
 
+// Packages that exist only to support tests — `storagetest`, `vaulttest` —
+// are not candidates at all, rather than 23 baselined warnings that mean
+// nothing.
+//
+// The gate runs deadcode WITHOUT -test on purpose, and that must not change:
+// with -test, a production function whose only callers are its own tests
+// looks reachable, and that is the exact defect this repo has shipped twice
+// (nocx-rtg0's ContentDB.Add, nocx-ak2d's InstalledFactStore.Record — written,
+// covered, wired, and called by nobody). Keeping -test off is what closes it.
+//
+// The cost of keeping it off is that test HELPERS are unreachable from main()
+// too — not a finding but a definition. Those land in one of two places: a
+// `_test.go` file, which deadcode never compiles without -test and so never
+// reports, or a test-support PACKAGE, which it compiles like any other and
+// reports like any other. The second case fell through the classification,
+// so a quarter of the baseline was noise and adding one test helper failed
+// the commit.
+//
+// Matched on the package directory, not on a file name: a directory named
+// `…test` is the Go convention for this and is checkable, whereas a file
+// called testseam.go inside a production package is a guess. Those stay
+// baselined, deliberately.
+//
+// This does NOT weaken the check that matters. InstalledFactStore.Record
+// lives in internal/ssh, an ordinary production package, and is still
+// reported.
+const TEST_SUPPORT_PKG_RE = /(^|\/)[a-z0-9]*test\/[^/]+\.go:\d+:\d+: unreachable func:/
+
 /**
- * Run deadcode from the repo root and return the normalized violation list.
- * Deterministic: one spawn, stdout and stderr both captured, keys sorted, and
- * any output line the parser does not understand fails loudly rather than
- * silently passing (a format change in a newer deadcode must not look like a
- * clean tree). A nonzero exit is a tool failure (module does not compile, the
- * binary is missing) and is never a pass.
+ * The platforms the baseline is defined over — the two this product ships to.
+ *
+ * deadcode analyses ONE GOOS at a time, so a build-tag-gated pair
+ * (secretservice_linux.go / secretservice_other.go) only ever has one half
+ * compiled. A baseline generated on one machine therefore listed that
+ * machine's halves and nobody else's, and the other platform's halves read as
+ * NEW violations — which made the ratchet unpassable on macOS while CI, which
+ * never runs deadcode at all, said nothing (nocx-0odm). Regenerating on the
+ * other machine only mirrored the failure.
+ *
+ * The answer is to stop asking the host. Both platforms are analysed from
+ * wherever this runs, and the baseline is their UNION, so the gate gives the
+ * same answer on every machine and the "free shrink" caveat this file used to
+ * carry is gone rather than documented.
+ *
+ * CGO_ENABLED=0 for the same reason: cgo gates whole files, so leaving it to
+ * the host would reintroduce host-dependence one layer down. It is set for
+ * BOTH platforms so the two runs are comparable, and it is what makes a
+ * cross-GOOS analysis possible without a cross-compiler at all.
  */
-export function collectDeadcodeViolations() {
+const TARGET_PLATFORMS = [
+  { GOOS: 'darwin', GOARCH: 'arm64' },
+  { GOOS: 'linux', GOARCH: 'amd64' },
+]
+
+/**
+ * Run deadcode from the repo root for one platform and return its raw stdout.
+ * A nonzero exit is a tool failure (module does not compile, the binary is
+ * missing) and is never a pass.
+ */
+function runDeadcode(platform) {
   const proc = spawnSync(DEADCODE_CMD, ['./...'], {
     cwd: PROJECT_ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, ...platform, CGO_ENABLED: '0' },
   })
 
   if (proc.status !== 0) {
     const detail = (proc.stderr || proc.stdout || '').trim()
-    throw new Error(`deadcode exited ${proc.status}${detail ? `:\n${detail}` : ''}`)
+    throw new Error(
+      `deadcode exited ${proc.status} for ${platform.GOOS}/${platform.GOARCH}` +
+        `${detail ? `:\n${detail}` : ''}`,
+    )
   }
+  return proc.stdout
+}
 
+/**
+ * Return the normalized violation list: the union across TARGET_PLATFORMS,
+ * deduplicated and sorted. Deterministic, and independent of the host —
+ * stdout and stderr both captured, keys sorted, and any output line the parser
+ * does not understand fails loudly rather than silently passing (a format
+ * change in a newer deadcode must not look like a clean tree).
+ */
+export function collectDeadcodeViolations() {
+  const seen = new Map()
+  for (const platform of TARGET_PLATFORMS) {
+    for (const v of parseDeadcodeOutput(runDeadcode(platform))) {
+      seen.set(violationKey(v), v)
+    }
+  }
+  const violations = [...seen.values()]
+  violations.sort((a, b) => `${a.file}:${a.func}`.localeCompare(`${b.file}:${b.func}`))
+  return violations
+}
+
+function parseDeadcodeOutput(stdout) {
   const violations = []
-  for (const line of proc.stdout.split('\n')) {
+  for (const line of stdout.split('\n')) {
     if (line === '') continue
     // node_modules ships third-party Go (e.g. flatted/golang), which deadcode
     // picks up whenever npm has run. It is not our code and not ours to
@@ -74,6 +151,7 @@ export function collectDeadcodeViolations() {
     // and a `/node_modules/` test silently stops filtering. That cost a
     // worker a red gate and a paragraph of report on 2026-08-06.
     if (line.includes('/node_modules/') || line.startsWith('node_modules/')) continue
+    if (TEST_SUPPORT_PKG_RE.test(line)) continue
     const m = UNREACHABLE_RE.exec(line)
     if (!m) {
       throw new Error(`unparseable deadcode output line: ${line}`)
@@ -81,7 +159,6 @@ export function collectDeadcodeViolations() {
     violations.push({ file: m[1], func: m[2] })
   }
 
-  violations.sort((a, b) => `${a.file}:${a.func}`.localeCompare(`${b.file}:${b.func}`))
   return violations
 }
 

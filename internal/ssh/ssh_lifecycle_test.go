@@ -281,7 +281,7 @@ func TestConnect_LifecycleRemoteCommand_CloserClosed(t *testing.T) {
 		WithEnhanced(),
 	)
 
-	if got := srv.lastExecCommand(); got != "tmux attach -t work" {
+	if got := srv.waitExecCommand(t); got != "tmux attach -t work" {
 		t.Fatalf("remote command must win, got %q", got)
 	}
 	if !lc.wasClosed() {

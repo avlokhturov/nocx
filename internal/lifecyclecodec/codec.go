@@ -277,7 +277,11 @@ type wireEnvelope struct {
 	Evt     string `json:"evt"`
 
 	// Event payload fields (§3).
-	Shell         *string           `json:"shell,omitempty"`
+	Shell *string `json:"shell,omitempty"`
+	// Gen is the hello's bundle generation — what the far shell says it was
+	// brought up from. Optional: a shell launched from no bundle names none,
+	// and every shell built before the field existed sends nothing.
+	Gen           *string           `json:"gen,omitempty"`
 	MaxFrame      *int              `json:"max_frame,omitempty"`
 	Attempt       *string           `json:"attempt,omitempty"`
 	Command       *string           `json:"command,omitempty"`
@@ -295,13 +299,19 @@ type wireEnvelope struct {
 	// shell extracts it by substring (everything between "bootstrap":" and
 	// the closing "}), and a fixed trailing position makes that extraction
 	// robust against the content's own escaped quotes.
-	Env         *string `json:"env,omitempty"`
-	Host        *string `json:"host,omitempty"`
-	User        *string `json:"user,omitempty"`
-	Port        *int    `json:"port,omitempty"`
-	GrantDomain *string `json:"grant_domain,omitempty"`
-	GrantEpoch  *uint64 `json:"grant_epoch,omitempty"`
-	Bootstrap   *string `json:"bootstrap,omitempty"`
+	Env  *string `json:"env,omitempty"`
+	Host *string `json:"host,omitempty"`
+	User *string `json:"user,omitempty"`
+	Port *int    `json:"port,omitempty"`
+	// Opts are the ssh options the user typed, in order, with their
+	// arguments — the rest of what the composer rebuilds the line from
+	// (nocx-c6z0). Before Bootstrap for the reason stated above: Bootstrap
+	// stays last, and a field added after it would break the shell's
+	// substring extraction.
+	Opts        []string `json:"opts,omitempty"`
+	GrantDomain *string  `json:"grant_domain,omitempty"`
+	GrantEpoch  *uint64  `json:"grant_epoch,omitempty"`
+	Bootstrap   *string  `json:"bootstrap,omitempty"`
 }
 
 // wireCompletedRef is the snapshot's last_completed payload.
@@ -329,7 +339,7 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 	copy(env.Capability[:], capBytes)
 	switch env.Event.Kind {
 	case lifecycle.KindHello:
-		env.Event.Hello = &lifecycle.Hello{Shell: str(w.Shell)}
+		env.Event.Hello = &lifecycle.Hello{Shell: str(w.Shell), Generation: str(w.Gen)}
 	case lifecycle.KindAccept:
 		env.Event.Accept = &lifecycle.Accept{}
 	case lifecycle.KindStart:
@@ -375,6 +385,7 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 			Host:      str(w.Host),
 			User:      str(w.User),
 			Port:      derefInt(w.Port),
+			Opts:      w.Opts,
 		}
 	case lifecycle.KindDomainGrant:
 		env.Event.DomainGrant = &lifecycle.DomainGrant{
@@ -383,6 +394,7 @@ func decodeEnvelope(w *wireEnvelope) (lifecycle.Envelope, error) {
 			Host:      str(w.Host),
 			User:      str(w.User),
 			Port:      derefInt(w.Port),
+			Opts:      w.Opts,
 			Domain:    lifecycle.DomainID(str(w.GrantDomain)),
 			Epoch:     derefU64(w.GrantEpoch),
 			Bootstrap: str(w.Bootstrap),
@@ -410,6 +422,9 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	case lifecycle.KindHello:
 		if p := env.Event.Hello; p != nil {
 			we.Shell = new(p.Shell)
+			if p.Generation != "" {
+				we.Gen = new(p.Generation)
+			}
 		}
 	case lifecycle.KindStart:
 		if p := env.Event.Start; p != nil {
@@ -453,6 +468,7 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 			if p.Port != 0 {
 				we.Port = new(p.Port)
 			}
+			we.Opts = p.Opts
 		}
 	case lifecycle.KindDomainGrant:
 		if p := env.Event.DomainGrant; p != nil {
@@ -469,6 +485,7 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 			if p.Port != 0 {
 				we.Port = new(p.Port)
 			}
+			we.Opts = p.Opts
 			we.GrantDomain = new(string(p.Domain))
 			we.GrantEpoch = new(p.Epoch)
 			if p.Bootstrap != "" {

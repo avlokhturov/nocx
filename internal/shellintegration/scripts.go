@@ -103,7 +103,79 @@ var (
 // seconds between reading the child's grant and using it, and the tab sat
 // still after the user typed `ssh host`. The first occurrence is also the
 // correct one: the field name precedes its own value.
-const version = "28"
+// 29: the bash-4-only staging constructs (`coproc NAME { }`, `exec {var}>&-`)
+// are `eval`ed rather than written inline (nocx-cn86). A version guard cannot
+// protect SYNTAX — bash parses a function body whole before running any of it
+// — so macOS's bash 3.2 rejected the script at the `coproc` token and every
+// shell on the platform this product ships to first came up with no
+// integration at all.
+// 32: two decoding defects the nested launch died on (nocx-aupk). The zsh
+// decoder built \NNN escapes without zero-padding, so a \uXXXX whose octal
+// is short swallowed the next character when it was a digit — Go escapes >
+// as \u003e, `>0` read as \760, and the byte became 0xF0. And the bash
+// probe handed its descriptor to the helper by NUMBER, which a close-on-exec
+// channel does not survive: select() on a descriptor that is not open is
+// indistinguishable from "no data", so the probe reported empty forever on a
+// channel with a frame waiting. It arrives on the helper's stdin now, by the
+// same redirection dd uses.
+//
+// 31: the grant's JSON is decoded by the same helper (nocx-aupk). bash 3.2's
+// ${var//pattern/replacement} is quadratic and this decodes a whole rcfile —
+// measured 4655ms for 22 KiB against 8ms on bash 5, a factor of 580 — so a
+// nested launch spent seconds decoding while the user watched a frozen
+// terminal. Same cliff as nocx-beib, different string operation.
+//
+// 30: the readable-probe has one owner and a per-version answer
+// (nocx-sw4p). `read -N` is bash 4.1+, so on macOS's 3.2 the probe could
+// never succeed, the accept was never read and the channel never activated —
+// a defect a parse check cannot see, because `-N` is an option and not
+// syntax. bash 3.2 gets perl's select(); the descriptor and port are now
+// pinned to digits, since the first of those is interpolated into a program.
+// 33: the session nonce, the staging file and the hello are minted ONCE PER
+// SHELL rather than once per source (nocx-cbtc). The launcher rcfile unsets
+// __nocx_loaded and sources this script a second time on purpose — that is
+// every local enhanced session — and the second pass announced a second
+// hello with a fresh nonce. command-snapshot.ts keeps the FIRST hello by
+// design (accepting a re-hello is the re-anchoring its forgery defence
+// exists to prevent), so the snapshot, emitted from a prompt with the second
+// nonce, failed the match and was discarded. The store stayed `unavailable`
+// for the life of every such session and command completion never learned a
+// single command name — the bash twin of nocx-qduc, and what
+// completion.spec.ts:139 had been reporting all along.
+// The latch is the shell's own pid, not the nonce's presence: "is the
+// variable set" cannot tell a re-source from an INHERITED value, and those
+// need opposite answers. A nonce that reached the environment (a user rc
+// under `set -a`) would otherwise silence a legitimately new child shell for
+// good — no hello, so no snapshot ever accepted — which is fail-closed, the
+// wrong direction for this file. Both directions are pinned by tests, so
+// neither can be satisfied by dropping the other.
+//
+// 34: an interrupt no longer announces nocx's own line as the user's command
+// (nocx-678o). extdebug fires the DEBUG trap inside functions, and the
+// wrapper suppresses that two ways — a command text starting `__nocx_`, and
+// __nocx_in_prompt_command. `__nocx_prompt_command`'s status capture,
+// `local __nocx_exit=$?`, satisfied NEITHER: it begins with `local`, and the
+// flag went up four lines below it. One unguarded command per prompt cycle,
+// invisible after a real command (the C latch is disarmed by then) and NOT
+// after an interrupt, where nothing ran and __nocx_precmd armed the latch at
+// the previous prompt. So Ctrl-C emitted an OSC 133 C and sent the kernel a
+// start naming `local __nocx_exit=$?` with a complete carrying SIGINT's
+// status. The capture is now a `__nocx_`-prefixed global, so its own text
+// matches the skip, and the flag goes up on the line after it, so everything
+// below is covered by the flag instead; `local` cannot come first because it
+// would reset $?.
+// 35: the ssh options the user typed reach the line that actually runs
+// (nocx-c6z0). The detector NAMES -i, -o, -F, -J, -l, -e, -b, -c and -m —
+// it accepts a line carrying them and skips each one's argument — and then
+// sent only host, user and port, which is all composeSSHChildLine had to
+// rebuild the line from. So `ssh -i ~/.ssh/prod -J bastion host` went out as
+// a bare `ssh host`: the wrong key, no jump host, the default host-key
+// policy. Silent in both directions, because the block a user sees shows the
+// line they TYPED. The detector now collects the tokens it already
+// recognises and sends them as `opts`; -p is excluded because it is modelled
+// as the port, and -t because the composer adds its own and ssh reads a
+// second one as -tt.
+const version = "36"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

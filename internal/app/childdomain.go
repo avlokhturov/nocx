@@ -131,9 +131,17 @@ func newChildGrantBuilder(lg log.Logger, pub func() *lifecyclepub.Publisher, tra
 				lg.Warn("child domain refused; the command runs conventionally",
 					"env", req.Env, "host", req.Host, "lane", req.Lane, "error", err)
 			default:
+				// The options are named, not just counted: they are the
+				// difference between the command the user asked for and the
+				// one that runs, and when they went missing the only visible
+				// symptom was an ssh sitting at a host-key prompt the user
+				// had passed an option to suppress (nocx-c6z0). The launcher
+				// command is deliberately not logged — it carries the
+				// per-epoch capability.
 				lg.Info("child domain granted",
 					"env", req.Env, "host", req.Host, "lane", req.Lane,
-					"domain", boot.Domain, "epoch", boot.Epoch, "bootstrapBytes", len(boot.Bootstrap))
+					"domain", boot.Domain, "epoch", boot.Epoch,
+					"opts", req.Opts, "bootstrapBytes", len(boot.Bootstrap))
 			}
 		}()
 
@@ -304,6 +312,25 @@ func composeSSHChildLine(startCmd string, remotePort, localPort int, req lifecyc
 	var b strings.Builder
 	b.WriteString("ssh -t -R 127.0.0.1:")
 	b.WriteString(fmt.Sprintf("%d:127.0.0.1:%d", remotePort, localPort))
+	// The options the user typed, in their order, ahead of the destination
+	// where ssh expects them (nocx-c6z0).
+	//
+	// This line is rebuilt rather than edited, so anything not carried here
+	// is not merely reordered — it is gone. It used to carry host, user and
+	// port and nothing else, while the shell's detector deliberately ACCEPTS
+	// a line bearing -i, -o, -F, -J, -l, -e, -b and -m. So a user's
+	// `ssh -i ~/.ssh/prod -J bastion host` connected with the wrong key and
+	// no jump host at all, and the block went on showing the line they typed,
+	// so nothing anywhere said otherwise.
+	//
+	// Quoted one token at a time, never joined and quoted once: each token is
+	// a separate argv entry on the user's side and must stay one here.
+	// -p and -t are absent by construction (the port is modelled above; a
+	// second -t is -tt, which is not what this composes).
+	for _, o := range req.Opts {
+		b.WriteString(" ")
+		b.WriteString(shellintegration.ShellQuote(o))
+	}
 	if req.Port != 0 {
 		b.WriteString(fmt.Sprintf(" -p %d", req.Port))
 	}

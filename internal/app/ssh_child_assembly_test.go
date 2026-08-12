@@ -88,7 +88,24 @@ func (fx *liveSshd) fixturePort() int {
 // developer's real ~/.ssh.
 func startInProcessAgent(t *testing.T, fx *liveSshd) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "agent.sock")
+	// NOT t.TempDir(): a unix socket path is bounded by sun_path, which is
+	// 104 bytes on darwin, and t.TempDir() spells the test's full name into
+	// the directory. On macOS the base is already
+	// /var/folders/<11>/<26>/T/ (~49 bytes), so these three
+	// TestLiveSshd_SSHChildAssembly_* names put the socket past the limit and
+	// bind failed with "invalid argument" — on the platform this product
+	// ships to first, while Linux's 108 bytes and short /tmp hid it
+	// (nocx-cn86). A short fixed prefix keeps the path inside the bound
+	// whatever the test is called.
+	dir, err := os.MkdirTemp("", "nocx-agt")
+	if err != nil {
+		t.Fatalf("agent socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "a.sock")
+	if len(sock) > 100 {
+		t.Fatalf("agent socket path is %d bytes, past darwin's sun_path bound: %s", len(sock), sock)
+	}
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("agent socket: %v", err)

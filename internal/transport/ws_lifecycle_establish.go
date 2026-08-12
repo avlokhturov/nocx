@@ -72,9 +72,24 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 		return
 	}
 	sid := session.ID(params.SessionID)
+	// Every arm below refuses with -32603, and the renderer logs the code
+	// without the message, so all five reasons arrived at a reader as one
+	// indistinguishable "establishment acknowledgement refused". A refusal
+	// leaves the session conventional — no editor authority — which is the
+	// visible symptom of six e2e specs whose cause stayed "unknown" across
+	// three triage rounds (nocx-cbtc). The refusal is the fail-open
+	// direction and stays a warning rather than an error, but which rule
+	// refused it is the whole diagnostic value, so it is named here.
+	refuse := func(rule, msg string) {
+		s.log.Warn("establishment acknowledgement refused",
+			"rule", rule, "reason", msg, "session", string(sid),
+			"lane", params.Lane, "domain", params.Domain,
+			"epoch", params.Epoch, "generation", params.Generation)
+		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: msg})
+	}
 	// (b) alive: the session must be open, and owned by this connection.
 	if _, err := s.registry.Get(sid); err != nil || !state.has(sid) {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
+		refuse("b-session-open", "session is not open")
 		return
 	}
 	// (c) the lane must belong to this session.
@@ -82,7 +97,7 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 	registered, ok := s.lifecycleLanes[lifecycle.LaneID(params.Lane)]
 	s.lifecycleMu.Unlock()
 	if !ok || registered != sid {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "lane is not registered to this session"})
+		refuse("c-lane-registered", "lane is not registered to this session")
 		return
 	}
 	// (d) the acknowledging connection must still be the session's current
@@ -91,12 +106,12 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 	// connection's in-flight ack and a replaced connection's late ack.
 	rx := s.getRx(sid)
 	if rx == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "session is not open"})
+		refuse("d-no-receiver", "session is not open")
 		return
 	}
 	sub, _ := rx.getSubscriber()
 	if sub != wconn {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: "not the current subscriber"})
+		refuse("d-not-subscriber", "not the current subscriber")
 		return
 	}
 	// (e) the publisher validates the pending establishment and flushes the
@@ -105,8 +120,23 @@ func (s *WSServer) handleLifecycleEstablishAck(wconn *wsConn, state *connState, 
 	if err := s.lifecyclePub.AcknowledgeEstablishment(
 		lifecycle.LaneID(params.Lane), lifecycle.DomainID(params.Domain), params.Epoch, params.Generation,
 	); err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		refuse("e-publisher", err.Error())
 		return
 	}
+	// The SUCCESS is logged too, and that is the point of logging here at all.
+	// A refusal alone cannot be read: "no establishment is pending
+	// acknowledgement" is what a stale ack says AND what a second ack of an
+	// already-flushed generation says, and those mean opposite things — one is
+	// a session that never went live, the other is normal. With only refusals
+	// in the log the two are indistinguishable, which is exactly where the
+	// nocx-xplc investigation stalled. Paired with the refusal above, a
+	// generation that was accepted once and re-acked twice now reads as such.
+	//
+	// Debug, not Info: one line per established domain per session is noise on
+	// a healthy machine and the whole story on a sick one. NOCX_LOG_LEVEL=debug
+	// turns it on.
+	s.log.Debug("establishment acknowledged",
+		"session", string(sid), "lane", params.Lane, "domain", params.Domain,
+		"epoch", params.Epoch, "generation", params.Generation)
 	_ = wconn.TryResult(req.ID, mustMarshal(map[string]bool{"ok": true}))
 }

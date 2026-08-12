@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
@@ -84,11 +85,40 @@ func (f *recordInstaller) UninstallRemote(_ context.Context, _ *gossh.Client, _ 
 }
 
 // testSSHServer accessors for start-command observations.
+//
+// lastExecCommand is the NON-BLOCKING read, and it exists for exactly one
+// question: "was no exec requested?" Every other caller wants waitExecCommand
+// below.
 func (s *testSSHServer) lastExecCommand() string {
 	select {
 	case cmd := <-s.execCommands:
 		return cmd
 	default:
+		return ""
+	}
+}
+
+// waitExecCommand blocks — bounded — until the server has recorded a start
+// command, and is what a test asserting WHICH command was sent must use.
+//
+// The client returning from Connect does not mean the server has processed
+// the exec request: the request travels, and the server's handler goroutine
+// pushes onto execCommands when it gets there. Reading the channel
+// non-blockingly at that moment is a race between two goroutines with no
+// ordering between them, and the losing read returns "" — which then reads
+// as "the wrong command was sent" rather than as "nobody has looked yet".
+//
+// It passed on this developer's Mac and on the runner and failed roughly one
+// run in five in the CI-equivalent container. Per the 2026-08-11 decision in
+// AGENTS.md a test waits on an observable state change rather than assuming
+// one has already happened.
+func (s *testSSHServer) waitExecCommand(t *testing.T) string {
+	t.Helper()
+	select {
+	case cmd := <-s.execCommands:
+		return cmd
+	case <-time.After(10 * time.Second):
+		t.Fatal("the server recorded no start command")
 		return ""
 	}
 }
@@ -167,7 +197,7 @@ func TestConnect_LauncherAccepted_StartUsesItsCommand(t *testing.T) {
 
 	assertUsable(t, srv, ch)
 
-	if got := srv.lastExecCommand(); got != wantCmd {
+	if got := srv.waitExecCommand(t); got != wantCmd {
 		t.Errorf("session.Start received %q, want the launcher's command %q", got, wantCmd)
 	}
 	if srv.shellRequestCount() != 0 {
@@ -284,7 +314,7 @@ func TestConnect_DesiredModeEmpty_IntegratesLikeScript(t *testing.T) {
 	if n := launcher.callCount(); n != 1 {
 		t.Fatalf("launcher consulted %d times with an empty mode, want 1 (script default)", n)
 	}
-	if got := srv.lastExecCommand(); got != "exec bash -i" {
+	if got := srv.waitExecCommand(t); got != "exec bash -i" {
 		t.Errorf("session.Start received %q, want the launcher command", got)
 	}
 }
@@ -371,7 +401,7 @@ func TestConnect_RemoteCommand_LauncherNeverCalled(t *testing.T) {
 		t.Fatalf("installer consulted with a RemoteCommand configured (home=%d publish=%d), want 0 — the configured command wins outright",
 			installer.homeCalls, installer.publishCalls)
 	}
-	if got := srv.lastExecCommand(); got != "tmux attach -t work" {
+	if got := srv.waitExecCommand(t); got != "tmux attach -t work" {
 		t.Errorf("session.Start received %q, want the configured RemoteCommand", got)
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonRemoteCommand {
@@ -476,7 +506,7 @@ func TestConnect_DesiredModeScript_PublishesThenLaunches(t *testing.T) {
 		t.Errorf("publish under script: home=%d publish=%d, want 1 each",
 			installer.homeCalls, installer.publishCalls)
 	}
-	if got := srv.lastExecCommand(); got != wantCmd {
+	if got := srv.waitExecCommand(t); got != wantCmd {
 		t.Errorf("session.Start received %q, want the launcher command %q", got, wantCmd)
 	}
 	if got := ch.ShellIntegrationReason(); got != ReasonNone {
@@ -505,7 +535,7 @@ func TestConnect_DesiredModeScript_NoLauncher_UsesInstallerCommand(t *testing.T)
 	if installer.publishCalls != 1 || installer.cmdCalls != 1 {
 		t.Errorf("carrier calls: publish=%d cmd=%d, want 1 each", installer.publishCalls, installer.cmdCalls)
 	}
-	if got := srv.lastExecCommand(); got != wantCmd {
+	if got := srv.waitExecCommand(t); got != wantCmd {
 		t.Errorf("session.Start received %q, want the carrier's guard %q", got, wantCmd)
 	}
 }

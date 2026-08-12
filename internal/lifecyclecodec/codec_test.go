@@ -466,3 +466,75 @@ func TestMaxFrameBytes_ShellsDeclareTheSameBound(t *testing.T) {
 		}
 	}
 }
+
+// TestDomainRequestOptsSurviveTheWire guards nocx-c6z0's second half.
+//
+// This codec does not marshal the envelope structs; it maps them field by
+// field onto a wire struct. So a field added to lifecycle.DomainRequest and
+// not added HERE is silently dropped — which is exactly what happened: the
+// shell collected the user's ssh options and sent them, the composer read
+// req.Opts and found nothing, and the only visible symptom was an ssh
+// sitting at a host-key prompt the user had passed -o to suppress. Every
+// other test passed, because every other test builds the struct it asserts.
+//
+// The arguments here are the awkward ones on purpose — spaces, an equals
+// sign, a percent, a quote — because they are what an ssh -o argument
+// actually contains, and because the composer shell-quotes each token on
+// the strength of it arriving as its own token.
+func TestDomainRequestOptsSurviveTheWire(t *testing.T) {
+	opts := []string{
+		"-i", "/home/u/.ssh/id key",
+		"-o", "ProxyCommand=nc -X 5 %h %p",
+		"-o", "SetEnv=GREETING=it's",
+		"-J", "bastion.example.com",
+	}
+	for _, tc := range []struct {
+		name string
+		want lifecycle.Envelope
+		get  func(lifecycle.Envelope) []string
+	}{
+		{
+			name: "request",
+			want: env(lifecycle.KindDomainRequest, lifecycle.Event{
+				Kind: lifecycle.KindDomainRequest,
+				DomainRequest: &lifecycle.DomainRequest{
+					RequestID: "r-dom-2-1", Env: "ssh", Host: "h", Opts: opts,
+				},
+			}, 3),
+			get: func(e lifecycle.Envelope) []string { return e.Event.DomainRequest.Opts },
+		},
+		{
+			// The grant echoes them back, and the echo is what the bootstrap
+			// builder reads — the kernel keeps no request state of its own.
+			name: "grant echo",
+			want: env(lifecycle.KindDomainGrant, lifecycle.Event{
+				Kind: lifecycle.KindDomainGrant,
+				DomainGrant: &lifecycle.DomainGrant{
+					RequestID: "r-dom-2-1", Env: "ssh", Host: "h", Opts: opts,
+					Domain: "dom-child", Epoch: 4, Bootstrap: "ssh -t h true",
+				},
+			}, 3),
+			get: func(e lifecycle.Envelope) []string { return e.Event.DomainGrant.Opts },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if _, err := Encode(&buf, tc.want); err != nil {
+				t.Fatal(err)
+			}
+			got, err := NewDecoder(&buf, Config{}, nil).ReadFrame()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("round trip mismatch:\n got %+v\nwant %+v", got, tc.want)
+			}
+			// Named separately from DeepEqual so a drop reports as a drop
+			// rather than as a struct diff nobody reads.
+			if !reflect.DeepEqual(tc.get(got), opts) {
+				t.Errorf("the options the user typed did not survive the wire:\n got %q\nwant %q",
+					tc.get(got), opts)
+			}
+		})
+	}
+}

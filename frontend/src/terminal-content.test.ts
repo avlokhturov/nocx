@@ -362,7 +362,8 @@ describe('Escape with the editor visible but unfocused (focus-loss rescue)', () 
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(session.send.mock.calls.length).toBe(1)
+      // The command and its '\r' — the paste is an onData too (nocx-yb5y).
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
 
       // A non-empty draft opens recall on Up-at-top; the overlay previews
       // the newest row into the editor.
@@ -520,7 +521,11 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       ed.show()
       ed.insertText('make deploy')
       key(view, { key: 'Enter' }) // the one legitimate send
-      expect(session.send.mock.calls.length).toBe(1)
+      // Two frames, in this order: the command through the renderer's paste
+      // (which is an onData like any keystroke) and then the '\r' the shell
+      // target appends. The renderer mock used to swallow the paste, so this
+      // read as one frame and the command was invisible here (nocx-yb5y).
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
       const sentBefore = session.send.mock.calls.length
       // The send payload is a string; String() gives the linter a typed value
       // without assuming the exact wire bytes (the '\r' the shell target
@@ -535,11 +540,13 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row
 
       key(view, { key: 'Enter' }) // accept — executes the previewed command
-      // One more send, and it is the SAME wire shape as the typed submit:
-      // the command went through the renderer paste handoff, '\r' through the
-      // session. No second route exists to assert against.
-      expect(session.send.mock.calls.length).toBe(sentBefore + 1)
-      expect(session.send).toHaveBeenLastCalledWith(sentShape)
+      // The same two frames again, in the same order and the same shapes as
+      // the typed submit: the recalled command takes the ordinary submit
+      // path, not a second route.
+      expect(session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])).toEqual([
+        'make deploy',
+        sentShape,
+      ])
       // `paste` is a method declaration on TerminalRenderer, so referencing it
       // detached trips unbound-method; the mock property type does not.
       const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
@@ -1922,6 +1929,101 @@ describe('the projections consume the kernel through the composition root (ADR-0
       teardown()
     }
   })
+
+  it('the grid takes the keyboard in the same step the editor gives it up (nocx-yb5y)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const focusMock = (renderer as unknown as { focus: ReturnType<typeof vi.fn> }).focus
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      focusMock.mockClear()
+
+      // WRITABLE IS NOT ENOUGH — the grid must also be FOCUSED, and in the
+      // same synchronous step. The editor gives the keyboard up at commit
+      // (clearDoc → hide, and a display:none host drops the browser's focus
+      // to <body>), while at a live prompt the paste is deferred behind the
+      // lifecycle.submitAttempt round trip — and renderer.focus() used to
+      // ride along with it. For that whole round trip nobody owned the
+      // keyboard: keys went to <body> and were gone, with no editor to show
+      // them and no grid to send them.
+      //
+      // A user typing into a program that is already reading stdin loses the
+      // letters and keeps the Enter — so an ssh password prompt is answered
+      // with an empty line, silently (nocx-yb5y).
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(ed.isVisible).toBe(false)
+      // Synchronously: no await between the dispatch and this assertion, so
+      // the RPC cannot have resolved and this can only be the handoff.
+      expect(focusMock).toHaveBeenCalled()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('keys typed while the command is still in flight reach the pty BEHIND it (nocx-yb5y)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // At a LIVE prompt the pty write waits on lifecycle.submitAttempt
+      // (ADR-0024 §5), while the keyboard changed hands at the commit. So
+      // this is a real window a user types into: `read` is what they are
+      // answering, and the answer must not arrive before the question.
+      renderer._fireData('h')
+      renderer._fireData('i')
+      renderer._fireData('\r')
+      // Held: not one byte of it has been sent yet.
+      expect(session.send).not.toHaveBeenCalled()
+
+      // The attempt settles, the command goes out, and what was typed
+      // behind it follows — in the order it was typed.
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalled())
+      // The command FIRST, whole, then its '\r', then the answer somebody
+      // typed while it was in flight. The command travels through the
+      // renderer's paste (it owns bracketed-paste wrapping) and a paste is
+      // an onData, so it is subject to the same hold — which is why the
+      // hold is lifted before the write rather than after it.
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual([
+        'read x',
+        '\r',
+        'h',
+        'i',
+        '\r',
+      ])
+      // `paste` is a method declaration on TerminalRenderer, so referencing it
+      // detached trips unbound-method; the mock property type does not.
+      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
+      expect(pasteMock.paste).toHaveBeenCalledWith('read x')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
 })
 
 describe('two attempts and the live region stay separate while running (nocx-m87n, nocx-zn4d, nocx-mu8s)', () => {
@@ -2496,7 +2598,9 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         origin: 'app',
         startedAt: '2026-08-08T12:00:00Z',
       })
-      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+      )
     } finally {
       restoreScroll()
       teardown()
@@ -2566,7 +2670,12 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         origin: 'app',
         startedAt: '2026-08-08T12:00:00Z',
       })
-      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual([
+          'make --token=SECRETVALUE',
+          '\r',
+        ]),
+      )
       const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
       expect(pasteMock.paste).toHaveBeenCalledWith('make --token=SECRETVALUE')
     } finally {
@@ -2599,7 +2708,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // The write goes out on the synchronous path and no attempt-open call
       // was ever made — nothing is fabricated for a conventional terminal.
       expect(submitAttempt).not.toHaveBeenCalled()
-      expect(session.send).toHaveBeenCalledTimes(1)
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
     } finally {
       restoreScroll()
       teardown()
@@ -2659,8 +2768,10 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       key(view, { key: 'Enter' })
 
       // Fail-open: the domain lost its prompt between the last fact and the
-      // Enter, the attempt was refused — and the command still runs.
-      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      // Enter, the attempt was refused — and the command still runs, whole.
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+      )
     } finally {
       restoreScroll()
       teardown()
