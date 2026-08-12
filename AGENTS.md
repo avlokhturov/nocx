@@ -384,6 +384,36 @@ had just reported green (2026-08-10). The three containerized runners are byte-f
 their CI counterparts in **software** — the same image, packages, Go toolchain and
 command.
 
+**The gate belongs to whoever integrates, and to nobody else.** A worker on a branch runs
+the unit tests for the files it changed, and stops there. It does not run `make ci-full`,
+the containerized jobs or the e2e suite — not as diligence, not "just to be sure". The
+coordinator runs all four, **once, on the merged tree, before `git push` to `main`**,
+every time, including when every branch that went into it was green alone.
+
+That is not a weakening: the failure that bought this rule was a push to `main`, and there
+it binds exactly as hard as before. What comes off is a cost it never bought — and the
+cost is not small. 2026-08-12, three branches, each `ci-full` green on its own tree:
+`nocx-qduc`, `nocx-wwz0` and `nocx-dvql`+`nocx-5uu5`, about an hour of wall clock apiece.
+The merge of them was red twice, and neither defect could have been seen from any branch
+because neither existed on one: a struct literal in a test that predated a new required
+dependency (a nil dereference), and a test asserting a mechanism the merge had deleted,
+which had been green while asserting a value no local path read. The three per-branch full
+runs found nothing the merge run did not.
+
+Three costs, all measured the same afternoon, all invisible to the worker paying them. The
+containerized jobs serialize on one Docker daemon and one CPU, so parallel workers each
+running four jobs finish later than the same work run in sequence. They mount
+`node_modules` as named volumes with no worktree in the name, so concurrent runs break
+each other's dependency tree (`nocx-x6z3`) — measured as a pre-commit hook failing on a
+package another run was mid-install. And every host-side Go run writes to the developer's
+login keychain (`nocx-o4hg`), which on macOS is a modal dialog per backend start: a full
+gate per branch is also a dialog storm per branch.
+
+**When the merged gate goes red, send it back to the worker, do not fix it in the
+coordinator.** A worker is resumable and still holds why it wrote what it wrote; the
+coordinator would be re-deriving that from a diff. The exception is a defect that exists
+only in the merge — the two above were exactly that, and belonged to whoever resolved it.
+
 **They are not their counterparts in timing, and no setting will make them so.** Each of
 these scripts capped itself to the runner's 4 vCPU until 2026-08-11, on the argument that
 capacity was the last gap left. Two things were wrong with it. The first is the machine
