@@ -1,5 +1,6 @@
 .PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e \
+        print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
 GO ?= go
@@ -110,10 +111,11 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 # which is the one job that cannot be containerized because macos-latest is the
 # target OS (see ci.yml's runner decision).
 #
-#   ci                        ci.yml `backend`      (macOS, native)
-#   ci-backend + ci-linux     ci.yml `backend-linux`
-#   ci-frontend               ci.yml `frontend`
-#   ci-e2e                    ci.yml `e2e`
+#   ci + ci-mac               ci.yml `ci-mac`     (macOS, native)
+#   ci-backend                ci.yml `ci-backend`
+#   ci-linux                  ci.yml `ci-linux`
+#   ci-frontend               ci.yml `ci-frontend`
+#   ci-e2e                    ci.yml `ci-e2e`
 #
 # CI-BACKEND IS IN THIS LIST, and its absence is what made this target lie.
 # 9527464 narrowed `ci-linux` from "the backend-linux job" to "the eight
@@ -128,17 +130,24 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 # from the build constraints, so the partition below cannot drift silently
 # into dropping a package from both halves.
 #
-# ci-mac is deliberately NOT here — it has no CI counterpart (macos-latest
-# runs the whole suite as `backend`), and it is the one gate that touches the
-# real login keychain. Run it by hand when a Darwin failure needs reproducing.
+# ci-mac IS in this list now. It used to be excluded on the grounds that no CI
+# job corresponded to it — macos-latest ran the whole suite as `backend` — and
+# that is no longer true: ci.yml's ci-mac job is this target's package set, so
+# leaving it out would reopen exactly the hole nocx-aruz was about. The
+# keychain caveat stands and is stated by the target itself; it applied to
+# `make ci` all along, which has always run the Darwin suite.
+#
+# `ci` stays here for ci.yml's ci-mac job MINUS its test step: gofumpt,
+# golangci-lint and the build, which must run on Darwin to see the
+# darwin-tagged files at all, plus the host's copy of the frontend gates. Its
+# own `go test ./...` is a superset of what the job runs and is left as it is —
+# a local gate running more than CI costs minutes, never a hole.
 #
 # Order is cheapest-first: the drift check in seconds, the host gates next,
 # the Linux containers in minutes, e2e last because it is the longest.
-ci-full: ci-os-split ci ci-backend ci-linux ci-frontend ci-e2e
+ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 	@echo ""
 	@echo "=== every CI job green locally ==="
-	@echo "NOT run by this target: ci-mac — no CI job corresponds to it, and it"
-	@echo "shares your login keychain. Run it by hand for a Darwin failure."
 
 # --- the five jobs ------------------------------------------------------
 #
@@ -209,7 +218,27 @@ GOOS_RE := (aix|android|darwin|dragonfly|freebsd|hurd|illumos|ios|js|linux|netbs
 #                     (appdir.go). Not a GOOS, but it is the one package whose
 #                     tested code differs between what a developer builds and
 #                     what ships, and ci-mac is what runs the release-tag pass.
+# internal/shellintegration is NOT here, and the reason is worth stating
+# because it is the package you would expect to be. Its behaviour is the
+# platform's shell — macOS ships GNU bash 3.2.57, where a bash-4 construct is a
+# syntax error at PARSE time (nocx-cn86) — but that dimension is a BASH
+# VERSION, not an operating system, and scripts/install-bash32.sh puts a real
+# 3.2 on the Linux runner. requireBash32 resolves it there and /bin/bash on a
+# Mac, so TestBashScript_ParsesUnderBash32 and the channel-exec bash32 leg
+# measure the same shell on either side. Keeping the package on macos-latest
+# would buy the OS around the shell, not the shell.
 OS_EXEMPT := internal/pty internal/storage
+
+# The workflow asks for the split rather than carrying a copy of it. ci.yml's
+# ci-backend and ci-linux jobs need the same two package sets these targets
+# use, and a list written twice is two lists: the day one grows a package the
+# other does not, a package silently runs nowhere or twice and both files
+# still read as correct. One owner, asked over `make -s` (AD-8).
+print-os-pkgs:
+	@echo '$(OS_PKGS)'
+
+print-portable-pkgs:
+	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)'
 
 ci-os-split:
 	@echo "=== the OS split is derived from the build constraints, not remembered ==="
@@ -254,12 +283,55 @@ ci-os-split:
 # the Keychain service, and app.New probes the system vault provider on every
 # backend start. That probe is a real keychain write and it is stated here
 # rather than pretended away.
+# The teardown is the dangerous half of this target, so it is written to be
+# incapable of the accident rather than merely unlikely to have it.
+#
+# It used to be `trap 'rm -rf "$$root"' EXIT`, with $$root expanded when the
+# trap FIRES. Everything then rests on that one variable still holding what
+# mktemp returned: an `rm -rf` under a HOME this recipe itself redirects is one
+# unset variable away from `rm -rf ""` — and one mistaken assignment away from
+# something much worse. Nothing checked it, and the target's whole job is to
+# delete a directory tree.
+#
+# So the path is checked against the temporary root it must live under, at
+# creation AND again inside the trap, and rm runs only if the pattern holds.
+# An unset, empty, relative or reassigned $$root fails the case and the trap
+# says so instead of deleting. `rm -rf --` on top, so a path that somehow began
+# with a dash could not be read as options.
+#
+# The chmod is not tidiness: Go makes every file in the module cache
+# read-only, and the disposable HOME grew one (GOPATH defaults to $$HOME/go),
+# so the old teardown died with a screenful of "Permission denied" and left
+# the tree behind on every run. GOMODCACHE and GOCACHE now point at the host's
+# real caches — they are build artefacts, not the user's documents, and they
+# are not what a disposable root exists to protect — so nothing read-only
+# lands inside it at all. The chmod stays as the belt to that braces.
 ci-mac:
 	@echo "=== ci-mac: the OS-specific packages, natively, in a disposable root ==="
-	@root=$$(mktemp -d "$${TMPDIR:-/tmp}/nocx-ci-mac.XXXXXX") && \
-	  echo "disposable root: $$root" && \
-	  trap 'rm -rf "$$root"' EXIT && \
+	@set -eu; \
+	  tmpbase="$${TMPDIR:-/tmp}"; tmpbase="$${tmpbase%/}"; \
+	  case "$$tmpbase" in \
+	    /*) ;; \
+	    *) echo "ci-mac: TMPDIR '$$tmpbase' is not absolute — refusing to run" >&2; exit 1 ;; \
+	  esac; \
+	  root="$$(mktemp -d "$$tmpbase/nocx-ci-mac.XXXXXX")"; \
+	  case "$$root" in \
+	    "$$tmpbase"/nocx-ci-mac.??????*) ;; \
+	    *) echo "ci-mac: mktemp produced '$$root', which is not under '$$tmpbase' — refusing to run" >&2; exit 1 ;; \
+	  esac; \
+	  echo "disposable root: $$root"; \
+	  gomodcache="$$($(GO) env GOMODCACHE)"; gocache="$$($(GO) env GOCACHE)"; \
+	  cleanup() { \
+	    case "$${root:-}" in \
+	      "$$tmpbase"/nocx-ci-mac.??????*) \
+	        chmod -R u+w "$$root" 2>/dev/null || true; \
+	        rm -rf -- "$$root" ;; \
+	      *) echo "ci-mac: refusing to remove '$${root:-<unset>}' — not under '$$tmpbase'" >&2 ;; \
+	    esac; \
+	  }; \
+	  trap cleanup EXIT INT TERM; \
 	  NOCX_TEST_APP_DIR="$$root/profile" HOME="$$root/home" TMPDIR="$$root/tmp" \
+	  GOMODCACHE="$$gomodcache" GOCACHE="$$gocache" \
 	  sh -c 'mkdir -p "$$NOCX_TEST_APP_DIR" "$$HOME" "$$TMPDIR" && \
 	         $(GO) test -race -count=1 $(OS_PKGS) && \
 	         echo "" && \

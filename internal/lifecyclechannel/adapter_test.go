@@ -448,10 +448,29 @@ func TestChildDescriptorReachesSpawnedProcess(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("spawned hello writer: %v (%s)", err, out)
 	}
-	_ = child.Close() // the parent's copy must not keep the socket open
 
 	waitFor(t, "domain established by the spawned process", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
+	// CLOSED AFTER THE ASSERTION, and that ordering is the test.
+	//
+	// It used to close here — before the wait, "so the parent's copy does not
+	// keep the socket open" — and that lost the frame it had just sent. The
+	// hello establishes the domain, the test kernel's acking emitter answers
+	// synchronously, and the accept goes back out through Adapter.Send into
+	// this same socketpair. Nobody reads it: the spawned `cat` wrote and
+	// exited. So the shell end held unread data, and closing a unix stream
+	// socket in that state resets the connection — the adapter's reader got
+	// ECONNRESET, logged "lifecycle transport read error", called lose() and
+	// RETURNED. A reader that has returned can never establish anything, so
+	// the wait was doomed from that instant rather than merely slow.
+	//
+	// Bimodal, which is what made it read as a flake: win the race and the
+	// hello is decoded first and the test passes; lose it and no deadline is
+	// long enough. Measured after the deadline was widened from a flat 2 s to
+	// the test's own budget — the failure moved from 2.04 s to 594.81 s and
+	// stayed a failure, which is what proved the clock was never the defect
+	// (nocx-8b47).
+	_ = child.Close()
 }

@@ -9,13 +9,46 @@
 #   - the repo is public, so macos-latest runner minutes are free.
 # (Note: wails/v2 also requires GTK3/WebKit2GTK on Linux; the decision stands
 # on the target-OS argument alone, without measuring ubuntu.)
-# Every job here has a local runner that IS the job, and `make ci-full` runs
-# them all:
+# Every job here has a local target of the SAME NAME that is the job, and
+# `make ci-full` runs them all:
 #
-#   backend        make ci                   (this host, macOS — see below)
-#   backend-linux  scripts/ci-linux.sh       ubuntu-24.04, both keyring variants
-#   frontend       scripts/ci-frontend.sh    node 24, frontend/ AND the repo root
-#   e2e            e2e/run-in-container.sh   the same image and the same command
+#   ci-mac       make ci-mac        this host, macOS — see below
+#   ci-backend   make ci-backend    the portable packages, ubuntu-24.04 container
+#   ci-linux     make ci-linux      the OS-specific packages, both keyring variants
+#   ci-frontend  make ci-frontend   node 24, frontend/ AND the repo root
+#   ci-e2e       make ci-e2e        the same image and the same command
+#
+# The names match on purpose, and they did not until nocx-qvtu. 9527464 added
+# the five local targets and deliberately left this file's four jobs alone —
+# "splitting the workflow in release week risks the release itself for no gain
+# … the workflow can follow once the branch is green" — and that deferral lived
+# only in a commit body, so nothing surfaced it and the owner had to ask why
+# the names still disagreed. A job whose local runner has a different name is a
+# gate nobody can be sure they ran.
+#
+# THE SPLIT, and what it deliberately gives up. ci-backend carries the
+# portable packages and ci-linux the OS-specific ones; together they are ./...
+# exactly, with the two sets taken FROM THE MAKEFILE rather than from a list
+# copied into this file. ci-mac runs the OS set natively on Darwin — the small
+# job, on purpose: a portable package proves nothing extra by being compiled
+# twice, and macos-latest is the scarcest runner here.
+#
+# What that gives up is the portable suite on Darwin, which used to run in the
+# old `backend` job. Accepted: a portable package compiled twice proves the
+# second compilation, not the platform.
+#
+# internal/shellintegration is the package you would expect to be exempted and
+# is NOT, so the reasoning is recorded rather than left to be re-argued. Its
+# behaviour is the platform's shell — macOS ships GNU bash 3.2.57, where a
+# bash-4 construct is a syntax error at PARSE time, and that is how every macOS
+# bash came up with no integration while all of Linux stayed green (nocx-cn86).
+# But the dimension there is a BASH VERSION, not an operating system:
+# scripts/install-bash32.sh puts a real 3.2 on the Linux runner, requireBash32
+# resolves it there and /bin/bash on a Mac, and TestBashScript_ParsesUnderBash32
+# and the channel-exec bash32 leg therefore measure the same shell on either
+# side. Keeping the package on macos-latest would buy the OS around the shell,
+# not the shell. OS_EXEMPT in the Makefile carries only internal/pty and
+# internal/storage, each with its own reason.
 #
 # `make ci` alone is the host-side half only. The Makefile used to be described
 # here as mirroring "this same set of checks so green is identical locally and
@@ -24,7 +57,7 @@
 # green (2026-08-10, nocx-cn86). The claim is now a list, and each line of it is
 # a command somebody can run.
 #
-# `backend` is the one job with no container, and deliberately: macos-latest is
+# `ci-mac` is the one job with no container, and deliberately: macos-latest is
 # the target OS. That makes it the one place where local and CI can still
 # disagree — and they do (nocx-58gq, nocx-65v6). See the Makefile's `ci` target.
 #
@@ -57,7 +90,7 @@ permissions:
   contents: read
 
 jobs:
-  backend:
+  ci-mac:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: macos-latest
     steps:
@@ -89,16 +122,27 @@ jobs:
       - name: Build
         run: go build ./...
 
-      # The shellintegration launcher tests fail, not skip, when the shell
-      # they must prove is absent (nocx-gd84). macOS ships zsh but not dash;
-      # TestBashLauncher_RunsUnderDash and TestPosixLauncher_EmitsMarkersFromPS1
-      # both need dash, so a job that ran the suite as-is would fail them.
-      # ubuntu-latest ships both shells; this step is macOS-only.
-      - name: Install dash (shell integration tests)
-        run: brew install dash
+      # THE OS-SPECIFIC PACKAGES ONLY, and the list comes from the Makefile
+      # (`make ci-mac` runs the same set locally, in a disposable root).
+      #
+      # This job used to run the whole suite here. Small is the point: a
+      # portable package proves nothing extra by being compiled twice, and
+      # macos-latest is the scarcest runner in this matrix. What belongs here
+      # is what only Darwin can answer — PTY semantics, the profile directory,
+      # the keystore binding, the socketpair — and nothing else. The header
+      # explains why internal/shellintegration is not on that list even though
+      # it is the package about macOS's bash.
+      - name: Resolve the OS-specific package set
+        id: pkgs
+        run: echo "list=$(make -s print-os-pkgs)" >> "$GITHUB_OUTPUT"
 
-      - name: Test
-        run: go test -race -count=1 ./...
+      - name: The OS split has not drifted
+        run: make ci-os-split
+
+      - name: Test (the OS-specific packages)
+        env:
+          PKGS: ${{ steps.pkgs.outputs.list }}
+        run: go test -race -count=1 $PKGS
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -107,14 +151,15 @@ jobs:
       - name: Test (release build tag)
         run: go test -race -count=1 -tags release ./internal/storage/...
 
-  # backend-linux — Go tests on Linux, with and without a Secret Service.
+  # ci-backend — the PORTABLE half of the Go suite on Linux, with and without a
+  # Secret Service. Its OS-specific half is ci-linux, immediately below.
   #
   # Runner decision: ubuntu-latest is the standard CI Linux image. The macOS
-  # backend job tests the target OS; this job tests Linux behaviour, which
+  # ci-mac job tests the target OS; this job tests Linux behaviour, which
   # matters because go-keyring's back end is platform-specific and the
   # release pipeline ships a linux/amd64 AppImage.
   #
-  # Matrix decision: two variants (with-keyring: true / false) in one job
+  # Matrix decision: two variants (a Secret Service, or none) in one job
   # rather than two separate jobs. Rationale: common steps (checkout,
   # setup-go, build) appear once; GitHub auto-labels each variant; one job
   # ID for required checks.
@@ -124,13 +169,17 @@ jobs:
   # Service" and "without one" broke, and the default would cancel the survivor
   # the moment the first one failed — leaving exactly one of the two readings
   # the job was built to take.
-  backend-linux:
+  ci-backend:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        with-keyring: [true, false]
+        # The VALUE is what GitHub prints beside the job name, so it has to say
+        # what the variant IS: `ci-backend (true)` named the axis nowhere and
+        # sent every reader to this file to find out which one was which.
+        # Strings, not booleans.
+        keyring: [with-secret-service, no-secret-service]
     steps:
       - uses: actions/checkout@v7
 
@@ -139,7 +188,9 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      # The same provisioning the macOS job needs, for the same reason: the
+      # The shells internal/shellintegration drives. That package is portable Go,
+      # so it rides here rather than with the OS split — and the bash VERSION it
+      # must survive is provisioned below rather than borrowed from a Mac. The
       # launcher tests fail rather than skip when the shell they exist to prove
       # is missing (nocx-gd84), and a skip there would hide the riskiest paths
       # in the package. macOS was given dash because it ships zsh; ubuntu is the
@@ -175,14 +226,29 @@ jobs:
         run: sudo scripts/install-bash32.sh
 
       - name: Install Secret Service & dbus-x11
-        if: matrix.with-keyring
+        if: matrix.keyring == 'with-secret-service'
         run: sudo apt-get install -y -qq gnome-keyring dbus-x11
 
       - name: Build
         run: go build ./...
 
+      # THE PACKAGE SET COMES FROM THE MAKEFILE, never from a list written
+      # here. `make ci-backend` and `make ci-linux` run these same two sets
+      # locally, and a list written twice is two lists: the day one grows a
+      # package the other does not, that package runs nowhere or twice while
+      # both files still read as correct. `make ci-os-split` is the check that
+      # the split itself has not drifted from the build constraints (AD-8).
+      - name: Resolve the portable package set
+        id: pkgs
+        run: echo "list=$(make -s print-portable-pkgs | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: The OS split has not drifted
+        run: make ci-os-split
+
       - name: Test (with Secret Service)
-        if: matrix.with-keyring
+        if: matrix.keyring == 'with-secret-service'
+        env:
+          PKGS: ${{ steps.pkgs.outputs.list }}
         run: |
           dbus-run-session -- bash <<'TESTEOF'
           set -euo pipefail
@@ -191,14 +257,88 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -count=1 ./...
+          go test -race -count=1 $PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
-        if: '!matrix.with-keyring'
-        run: go test -race -count=1 ./...
+        if: matrix.keyring == 'no-secret-service'
+        env:
+          PKGS: ${{ steps.pkgs.outputs.list }}
+        run: go test -race -count=1 $PKGS
 
-  frontend:
+  # ci-linux — the OS-SPECIFIC half of the Go suite on Linux.
+  #
+  # Together with ci-backend this covers ./... exactly: nothing dropped,
+  # nothing run twice, and `make ci-os-split` (run by both jobs) is what keeps
+  # that true as packages grow build constraints. The point of two jobs rather
+  # than one is attribution — a red run says whether portable behaviour broke
+  # or platform behaviour did, which the single backend-linux job it replaces
+  # could never say (nocx-qvtu).
+  #
+  # None of the shell provisioning ci-backend carries appears here, and that is
+  # not an oversight: zsh, dash and bash 3.2 exist for internal/shellintegration,
+  # whose source is portable and which therefore rides with ci-backend. What
+  # this half does need is the Secret Service, for internal/vault/system and
+  # internal/contentkey — so the keyring matrix stays, on both jobs. The matrix
+  # is a FIXTURE dimension that crosses the platform split rather than being
+  # part of it: portable packages read through the keystore binding too.
+  ci-linux:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The VALUE is what GitHub prints beside the job name, so it has to say
+        # what the variant IS: `ci-backend (true)` named the axis nowhere and
+        # sent every reader to this file to find out which one was which.
+        # Strings, not booleans.
+        keyring: [with-secret-service, no-secret-service]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Install Secret Service & dbus-x11
+        if: matrix.keyring == 'with-secret-service'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gnome-keyring dbus-x11
+
+      - name: Resolve the OS-specific package set
+        id: pkgs
+        run: echo "list=$(make -s print-os-pkgs)" >> "$GITHUB_OUTPUT"
+
+      - name: The OS split has not drifted
+        run: make ci-os-split
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (with Secret Service)
+        if: matrix.keyring == 'with-secret-service'
+        env:
+          PKGS: ${{ steps.pkgs.outputs.list }}
+        run: |
+          dbus-run-session -- bash <<'TESTEOF'
+          set -euo pipefail
+          echo "=== Starting gnome-keyring-daemon ==="
+          eval "$(echo -n "nocx-ci" | gnome-keyring-daemon --daemonize --login)"
+          echo "=== Unlocking login keyring ==="
+          echo -n "nocx-ci" | gnome-keyring-daemon --unlock
+          echo "=== Running tests ==="
+          go test -race -count=1 $PKGS
+          TESTEOF
+
+      - name: Test (no Secret Service)
+        if: matrix.keyring == 'no-secret-service'
+        env:
+          PKGS: ${{ steps.pkgs.outputs.list }}
+        run: go test -race -count=1 $PKGS
+
+  ci-frontend:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     defaults:
@@ -293,7 +433,7 @@ jobs:
   # No shards, and workers stays at 1 until each worker can be given its own
   # backend and home — the DocumentStore consumers rewrite whole documents, so
   # concurrency without that is a race (nocx-8rda).
-  e2e:
+  ci-e2e:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     timeout-minutes: 40

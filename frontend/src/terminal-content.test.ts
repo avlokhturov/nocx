@@ -1619,6 +1619,98 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('a receipt whose ack beats the render fence still lands, on the block it belongs to (nocx-ggha)', async () => {
+    const FENCE = 'c'.repeat(64)
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 1,
+          maskedKinds: ['openai'],
+          entryId: 'e-ggha',
+          redactions: [],
+          maskedCommand: 'echo sk-***',
+          captures: [
+            {
+              id: 'cap-1',
+              entryId: 'e-ggha',
+              suggestedName: 'openai-key',
+              redaction: { kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' },
+            },
+          ],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('echo sk-proj-abcdef')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-g', state: 'open', origin: 'app', command: 'echo sk-proj-abcdef' },
+      })
+      // Completed WITH a fence that has not been sighted: the logical freeze
+      // lands now and the VISUAL one defers, so the element still reads
+      // cmd-block-running while the block is finished. This is the window
+      // the ack arrives in on a cold render.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-g',
+          state: 'completed',
+          exitCode: 0,
+          fence: FENCE,
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      const rec = withScrollback.scrollback.blockManager.blocks[0]
+      expect(rec.status).toBe('success')
+      expect(rec.el.classList.contains('cmd-block-running')).toBe(true)
+
+      // The ack lands here. It used to be refused for the class alone and
+      // dropped for good — no retry, nothing shown, nothing logged.
+      await vi.waitFor(() =>
+        expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(true),
+      )
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The fence lands and the visual freeze replaces the element. The
+      // receipt must be on the NEW element — the one the user is looking at.
+      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      expect(rec.el.classList.contains('cmd-block-running')).toBe(false)
+      await vi.waitFor(() => expect(rec.el.querySelector('.ui-block-receipt')).not.toBeNull())
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('a submitted command freezes its block and persists history from the authenticated completion', async () => {
     const client = makeClient()
     const callMock = client.call
