@@ -65,6 +65,34 @@ describe('parseOsc636', () => {
     })
   })
 
+  // Every other case here feeds the parser a payload this file built with
+  // its own mirror of the escaping — which proves the parser is consistent
+  // with the mirror, never that it is consistent with a shell. This one is
+  // the literal a REAL shell produced: the exact bytes
+  // `internal/shellintegration/scripts/nocx.{bash,zsh}` emit for these eight
+  // names, pinned on the shell side by TestBashSnapshotEncodesHostileNames
+  // and TestZshSnapshotEncodesHostileNames (same eight names, same expected
+  // string). Both ends are held against one literal, so a change to either
+  // encoder breaks a test on its own side rather than passing quietly on
+  // both.
+  it('decodes the literal payload the shell hooks actually emit', () => {
+    const wire = 'plain;with space;semi\\x3bcolon;back\\\\slash;ctl\\x01x;del\\x7fx;c1\\x82x;utfé;'
+    expect(parseOsc636(`S;${NONCE};${wire}`)).toEqual({
+      kind: 'snapshot',
+      nonce: NONCE,
+      names: [
+        'plain',
+        'with space',
+        'semi;colon',
+        'back\\slash',
+        'ctl\x01x',
+        'del\x7fx',
+        'c1\x82x',
+        'utfé',
+      ],
+    })
+  })
+
   it('skips empty segments (the hook joins names with trailing separators)', () => {
     expect(parseOsc636(snapshotPayload(['pwd', 'ls']).concat(';'))).toEqual({
       kind: 'snapshot',

@@ -794,6 +794,15 @@ __nocx_precmd() {
         "$(__nocx_encode_url "${HOST%%.*}")" \
         "$(__nocx_encode_url "$PWD")"
     __nocx_first_prompt=1
+    # Command-existence snapshot (OSC 636): the enumeration started in the
+    # background at source time, and this is where its payload reaches the
+    # terminal. It has to be a prompt — the shell is the sole writer to the
+    # tty here, so the payload can never interleave with command output — and
+    # it is deliberately the LAST thing this hook does, after the A marker
+    # and before zsh renders the prompt itself, so a freshly opened tab is
+    # marked before the first prompt is usable. See the snapshot section at
+    # the bottom of this file for the protocol and the bounds.
+    __nocx_snapshot_pump
 }
 
 __nocx_preexec() {
@@ -901,6 +910,297 @@ __nocx_native_mode() {
     PROMPT='%~ %# '
     PS1='%~ %# '
 }
+
+#   OSC 636 ; S ; <nonce> ; <names> ST          snapshot; <names> is
+#                                               `;`-joined and hex-escaped
+#                                               (\\ for backslash, \xHH for
+#                                               control/C1 bytes and ';')
+#   OSC 636 ; H ; <nonce> ST                    session hello — the FIRST 636
+#                                               message, before any command
+#
+# The zsh tier of the command-existence snapshot (nocx-qduc). The protocol is
+# the bash tier's, unchanged and deliberately so: the frontend cannot know a
+# shell's aliases, functions, builtins and PATH, so it asks the shell, and one
+# wire format with two dialects is already one more than AD-8 wants. What
+# differs below is mechanism, and each difference says why.
+#
+# The nonce is a per-session secret generated here: any process can print an
+# OSC — a command's own output can forge a snapshot — so the frontend discards
+# any payload that does not carry the established nonce. It is emitted at
+# source time, before the first prompt, when no user command has run; the
+# frontend accepts exactly one hello, so a forged re-hello cannot re-anchor it.
+#
+# The enumeration is a background job started at SOURCE time, not at the first
+# prompt: a fresh tab must mark commands before the user runs anything, and a
+# PATH on NFS makes the scan cost seconds — it must never sit in front of the
+# prompt. The payload is emitted from a prompt, the only moment the shell is
+# the sole writer to the tty. One snapshot per session; staleness is
+# deliberately a later problem.
+#
+# It is staged in a mktemp file whose name carries no secret — the nonce must
+# never appear in a path, in any argv, or exported — and mode 600 from
+# creation. The final name only exists after the atomic mv, so a prompt can
+# never read a partial payload, and the exit hook removes both files even when
+# the shell exits before the snapshot was emitted.
+__nocx_gen_nonce() {
+    local n i
+    n="$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    if [[ -z "$n" ]]; then
+        # RANDOM is 15 bits, so four hex digits per draw; eight draws keep the
+        # fallback at the kernel-RNG path's 32-hex width rather than half of
+        # it. Lower-cased because zsh's [##16] arithmetic flag renders hex in
+        # UPPER case, and every other producer and consumer of this nonce
+        # writes it lower.
+        for ((i = 0; i < 8; i++)); do
+            n+="${(L)${(l:4::0:)$(( [##16] RANDOM ))}}"
+        done
+    fi
+    builtin printf '%s' "$n"
+}
+
+# ONCE PER SHELL, NOT ONCE PER SOURCE — the launcher's .zshrc unsets
+# __nocx_loaded and sources this script a second time so the session's
+# authenticated copy installs over the installer-era one the user's ~/.zshrc
+# already sourced. That is EVERY enhanced zsh session, not an edge case, and
+# a second pass that minted a fresh nonce would announce a second hello:
+# command-snapshot.ts keeps the FIRST one on purpose (accepting a re-hello is
+# exactly the re-anchoring its forgery defence exists to prevent), so the
+# snapshot would then carry a nonce the store discards and completion would
+# be dead for the session with both frames well-formed. That is the bash
+# tier's nocx-cbtc, and it costs the same here.
+#
+# The latch is the PID, not merely the nonce's presence. "Is the variable set"
+# cannot tell a RE-SOURCE from an INHERITED value, and the two need opposite
+# answers: a re-source must stay quiet, a child shell must announce itself. A
+# nonce that leaked into the environment — a user rc under `set -a`
+# auto-exports every assignment, which is the hazard the `typeset +x` below
+# exists for — would otherwise silence a legitimately new session for good,
+# with no hello and so no snapshot ever accepted. That is a fail-CLOSED
+# degrade, the wrong direction everywhere in this file. $$ is the shell's own
+# pid and differs in any child.
+if [[ "${__nocx_snapshot_owner:-}" != "$$" ]] || [[ -z "${__nocx_snapshot_nonce:-}" ]]; then
+    __nocx_snapshot_nonce="$(__nocx_gen_nonce)"
+    __nocx_snapshot_owner=$$
+    __nocx_snapshot_announce=1
+else
+    __nocx_snapshot_announce=0
+fi
+# zsh has no `export -n`: `typeset +x` drops the export attribute (and
+# `typeset -n` is a nameref — never use it here). The nonce is the whole
+# forgery defence of OSC 636, so it must not reach /proc/<pid>/environ or any
+# child process.
+typeset +x __nocx_snapshot_owner 2>/dev/null
+typeset +x __nocx_snapshot_nonce 2>/dev/null
+
+# Staged once per shell for the same reason as the nonce, and this half
+# matters independently: a second mktemp would repoint __nocx_snap_file at a
+# name the FIRST pass's background job is never going to write, so even a
+# correctly-nonced snapshot would never be found at a prompt — and the first
+# staging file would leak, because the exit hook only knows the latest name.
+if (( __nocx_snapshot_announce )); then
+    __nocx_snap_staging="$(mktemp "${TMPDIR:-/tmp}/nocx-snap.XXXXXX" 2>/dev/null)"
+    __nocx_snap_file="${__nocx_snap_staging:+${__nocx_snap_staging}.snap}"
+    __nocx_snapshot_done=0
+fi
+
+# How long the FIRST prompt waits for the source-time job before degrading to
+# the later-prompt schedule. 250 ms: fast when the PATH is local, bounded when
+# it is not; the prompt never waits longer, and only once per session.
+# NOCX_SNAPSHOT_WAIT_MS overrides it, and exists for the tests — 250 ms is a
+# budget for a HUMAN's prompt, so a test that asserts the mechanism would
+# otherwise be asserting that a loaded runner finished inside a UX deadline.
+#
+# Declared once per shell, not once per source: a readonly can be neither
+# unset nor re-declared, and the deliberate second source would print
+# "readonly variable" into the user's terminal as the first thing they see
+# (the bash tier's nocx-u7uh.22).
+if [[ -z "${__nocx_snapshot_wait_ms:-}" ]]; then
+    if [[ "${NOCX_SNAPSHOT_WAIT_MS:-}" =~ ^[0-9]+$ ]]; then
+        readonly __nocx_snapshot_wait_ms="$NOCX_SNAPSHOT_WAIT_MS"
+    else
+        readonly __nocx_snapshot_wait_ms=250
+    fi
+fi
+
+# Hex-escape the names into the `;`-joined payload on stdout, capped at 8192
+# names and 65536 encoded characters. Names arrive as ARGUMENTS (the bash twin
+# reads stdin because its producer is a pipeline; zsh's is an array, and a
+# pipeline here would be two processes on the path a fresh tab waits for).
+# Returns non-zero when the list is empty: an empty snapshot must never reach
+# the frontend — "every command is unknown" is the same lie as "every command
+# exists", pointing the other way.
+#
+# Bytes that would break or fake the OSC sequence are escaped as \xHH;
+# backslash is \\ (VS Code's scheme). Printable ASCII and raw UTF-8 pass
+# through — the terminal decodes the byte stream, and escaping every byte
+# would double the payload for no safety.
+#
+# Deliberately NOT under LC_ALL=C, unlike the bash twin: zsh's character-class
+# pattern matching misbehaves in the C locale (the same finding
+# __nocx_lc_json_escape records). In a UTF-8 locale ${#s} counts characters
+# where bash counts bytes, so the 65536 cap is a slightly different bound in
+# the two tiers — it is a bound either way, and the frontend enforces its own.
+#
+# The fast path is a strict subset of the loop: printable ASCII passes through
+# unchanged either way, and the two bytes with meaning in the payload are
+# excluded from it explicitly. It is not an optimisation for its own sake —
+# the bash tier measured the per-character loop at ~85 ms of a ~104 ms
+# pipeline, in front of a grace period there is no second shot at.
+__nocx_snapshot_build() {
+    local __out='' __name __esc __c __hex
+    local -i __n=0 __i __code
+    for __name in "$@"; do
+        if [[ "$__name" == *[![:print:]]* || "$__name" == *'\'* || "$__name" == *';'* ]]; then
+            __esc=''
+            for ((__i = 1; __i <= ${#__name}; __i++)); do
+                __c=${__name[__i]}
+                if [[ "$__c" == '\' ]]; then
+                    __esc+='\\'
+                elif [[ "$__c" == ';' ]]; then
+                    __esc+='\x3b'
+                else
+                    __code=$(( #__c ))
+                    if (( __code < 32 || (__code >= 127 && __code <= 159) )); then
+                        __hex="${(L)${(l:2::0:)$(( [##16] __code ))}}"
+                        __esc+="\\x$__hex"
+                    else
+                        __esc+="$__c"
+                    fi
+                fi
+            done
+            __name=$__esc
+        fi
+        (( ${#__out} + ${#__name} + 1 > 65536 )) && break
+        __out+="$__name;"
+        __n+=1
+        (( __n >= 8192 )) && break
+    done
+    [[ -n "$__out" ]] || return 1
+    builtin printf '%s' "$__out"
+}
+
+# The background job's body: enumerate, encode, stage, publish atomically.
+__nocx_snapshot_write() {
+    local -a __names
+    # The tables that answer "what can this shell run". bash asks `compgen -c`
+    # for all of them at once; zsh keeps one parameter per table, so the list
+    # is their union — and the union is the point, not a detail: a tier that
+    # enumerated three of the five would still ship a well-formed snapshot
+    # under a matching nonce while the editor marked the user's own alias as a
+    # command that does not exist. Reading the whole `commands` parameter is
+    # what forces zsh to hash every PATH directory, which is the equivalent of
+    # compgen's PATH scan and the reason this runs in the background.
+    __names=( ${(k)commands} ${(k)builtins} ${(k)reswords} ${(k)functions} ${(k)aliases} )
+    # (o) sorts, (u) dedupes — in the shell, where the bash twin pipes through
+    # `sort -u`. Two fewer processes on the path a fresh tab is waiting for.
+    __nocx_snapshot_build "${(@ou)__names}" >| "$__nocx_snap_staging" 2>/dev/null \
+        && mv -f "$__nocx_snap_staging" "$__nocx_snap_file"
+}
+
+# Emit the finished snapshot once and remove the staging files. Only ever
+# called from __nocx_precmd — the shell is the sole writer to the tty there.
+# `$(<file)` reads the payload without a fork.
+__nocx_snapshot_emit() {
+    __nocx_snapshot_done=1
+    builtin printf '\e]636;S;%s;%s\a' "$__nocx_snapshot_nonce" "$(<"$__nocx_snap_file")"
+    rm -f "$__nocx_snap_staging" "$__nocx_snap_file"
+}
+
+# The first prompt's bounded grace period. The bound is on ELAPSED TIME, never
+# on a count of sleeps: the bash tier bounded this by counting ten passes of
+# `sleep 0.025` and held a first prompt for 1.319 s on CI, because `sleep` is
+# not a builtin and on a loaded machine the fork dominates. zsh can do both
+# halves without a fork — zsh/datetime reads the clock, zsh/zselect sleeps —
+# so the poll costs the prompt nothing beyond the wait itself.
+__nocx_snapshot_wait() {
+    local __deadline
+    if zmodload zsh/datetime 2>/dev/null && zmodload zsh/zselect 2>/dev/null; then
+        __deadline=$(( EPOCHREALTIME + __nocx_snapshot_wait_ms / 1000.0 ))
+        while (( EPOCHREALTIME < __deadline )); do
+            if [[ -f "$__nocx_snap_file" ]]; then
+                __nocx_snapshot_emit
+                return 0
+            fi
+            # Hundredths of a second, and no file descriptors: zselect with a
+            # timeout alone is a sleep that does not fork.
+            zselect -t 2 2>/dev/null
+        done
+    else
+        # Neither module: spend the whole budget in ONE sleep rather than
+        # forking one per pass. Less responsive, bounded by construction —
+        # which is the property that matters.
+        sleep $(( __nocx_snapshot_wait_ms / 1000.0 )) 2>/dev/null
+    fi
+    [[ -f "$__nocx_snap_file" ]] && __nocx_snapshot_emit
+    return 0
+}
+
+# Called at every prompt boundary. The FIRST prompt gives the source-time job
+# a bounded grace period so a freshly opened tab is marked immediately — the
+# owner's test is typing a nonexistent command before running anything, and a
+# snapshot that arrives only after an unrelated command reads as a broken
+# feature. On timeout the payload is left for a later prompt rather than
+# delaying this one; the wait applies once per session.
+__nocx_snapshot_pump() {
+    [[ -n "${__nocx_snap_staging:-}" ]] || return 0
+    [[ "${__nocx_snapshot_done:-0}" != "1" ]] || return 0
+    if [[ -f "$__nocx_snap_file" ]]; then
+        __nocx_snapshot_emit
+        return 0
+    fi
+    [[ "${__nocx_snapshot_waiting:-0}" != "1" ]] || return 0
+    __nocx_snapshot_waiting=1
+    __nocx_snapshot_wait
+}
+
+# Nothing may survive the shell: a session that exits before the snapshot was
+# emitted must leave no file behind. zsh's exit HOOK ARRAY is the chaining
+# mechanism — bash saves the user's EXIT trap and re-runs it, while
+# add-zsh-hook appends, so there is nothing here to clobber.
+#
+# Kill the enumeration first, then remove the files, and the ARGUMENT ORDER of
+# that `rm` is what closes the rename window: a job killed mid-flight could
+# otherwise mv the staging file into the final name after the final name was
+# removed, and a `wait` cannot help — the job was disowned, so zsh no longer
+# has it to wait for (measured: `wait` returns 127). Removing the SOURCE first
+# means a pending mv fails with ENOENT and can recreate nothing.
+#
+# The job is disowned, so `jobs -p` cannot vouch for it either; the kill is
+# guarded by a process-identity check instead — the pid plus the start time
+# captured at spawn. A reaped child's pid may have been reused, and a reused
+# pid has a different start time, so it is never killed.
+__nocx_snapshot_cleanup() {
+    if [[ -n "${__nocx_snap_job:-}" ]] && [[ -n "${__nocx_snap_lstart:-}" ]] \
+        && [[ "$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')" == "$__nocx_snap_lstart" ]]; then
+        kill -- -"$__nocx_snap_job" 2>/dev/null || kill "$__nocx_snap_job" 2>/dev/null
+    fi
+    if [[ -n "${__nocx_snap_staging:-}" ]]; then
+        rm -f "$__nocx_snap_staging" "$__nocx_snap_file"
+    fi
+}
+add-zsh-hook zshexit __nocx_snapshot_cleanup
+
+# Both the job and the hello are gated on the once-per-shell latch: a second
+# source must not start a second enumeration, and must not announce a session
+# that has already been announced.
+#
+# The hello is NOT gated on the staging file. A machine whose $TMPDIR cannot
+# be written to gets no snapshot, and that is all it gets: the session is
+# still announced, the prompt still works, and the frontend reports command
+# names as unavailable rather than reporting them wrongly.
+if (( __nocx_snapshot_announce )); then
+    if [[ -n "$__nocx_snap_staging" ]]; then
+        # `&!` is zsh's background-and-disown in one token. Without the
+        # disown zsh announces the finished job at the next prompt — "[1]  +
+        # done ..." followed by the job's own implementation — in the middle
+        # of the user's output. bash spells this `& ; disown`.
+        __nocx_snapshot_write &!
+        __nocx_snap_job=$!
+        __nocx_snap_lstart="$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')"
+    fi
+    # Announce the session nonce before the first prompt.
+    builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"
+fi
 
 # Nested interception registration (see the mechanism note at the nested
 # block). The widget replaces the accept-line widget itself — not a

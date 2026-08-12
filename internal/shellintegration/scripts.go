@@ -175,7 +175,21 @@ var (
 // recognises and sends them as `opts`; -p is excluded because it is modelled
 // as the port, and -t because the composer adds its own and ssh reads a
 // second one as -tt.
-const version = "36"
+// 37: zsh emits the command-existence snapshot (nocx-qduc). nocx.zsh had the
+// OSC 133 markers, OSC 7 and the whole authenticated channel, and no hello
+// and no snapshot at all — so on a zsh session the frontend's snapshot store
+// stayed `unavailable` for the life of the tab and the completion dropdown
+// answered "Command names are still loading" forever. macOS's default login
+// shell is zsh, which is where that matters. The protocol is the bash tier's
+// unchanged — one hello before the first prompt, one snapshot under that
+// nonce, the same escaping and the same caps — because the frontend has one
+// parser and AD-8 wants one owner for the format; what differs is mechanism,
+// and each difference is named where it is made: zsh keeps one parameter per
+// command table (so the enumeration is their union), sorts and dedupes in the
+// shell rather than through `sort -u`, sleeps with zsh/zselect rather than
+// forking `sleep`, disowns with `&!`, and chains its cleanup onto the zshexit
+// hook array instead of saving the user's EXIT trap.
+const version = "37"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

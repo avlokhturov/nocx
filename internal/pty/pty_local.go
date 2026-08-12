@@ -115,9 +115,12 @@ const (
 	shellFromFallback shellSource = "fallback"
 )
 
-// Prefer bash for shell integration (OSC 133 markers, and the OSC 636 command
-// snapshot only it emits). Fall back through common paths; on stripped-down
-// containers none may exist, so keep /bin/sh as the last resort.
+// Preferred when $SHELL says nothing: bash is the tier the local enhanced
+// bootstrap is written for (app.go starts `bash --rcfile`), not the only tier
+// with shell integration — nocx.zsh emits the same OSC 133 markers and, since
+// nocx-qduc, the same OSC 636 command snapshot. Fall back through common
+// paths; on stripped-down containers none may exist, so keep /bin/sh as the
+// last resort.
 var shellCandidates = []string{
 	"/run/current-system/sw/bin/bash", // NixOS
 	"/bin/bash",
@@ -159,11 +162,12 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 			return err == nil
 		})
 		// Logged, not merely decided. Which shell a session runs is the single
-		// biggest thing that varies between two machines running the same code:
-		// nocx.bash emits the OSC 636 command snapshot and nocx.zsh does not, so
-		// the shell decides whether tab completion ever learns a command name.
-		// This line is what lets a run's account answer that without inference
-		// (nocx-z9s9.9).
+		// biggest thing that varies between two machines running the same code,
+		// and each tier answers a different amount of the protocol — bash and
+		// zsh emit the OSC 636 command snapshot (nocx-qduc gave zsh its half),
+		// the POSIX tier emits none of it, so the shell still decides whether
+		// tab completion ever learns a command name. This line is what lets a
+		// run's account answer that without inference (nocx-z9s9.9).
 		logger.Info("local pty shell resolved", "shell", shell, "source", string(shellFrom))
 		cmd = exec.Command(shell, "-i") //nolint:gosec // shell is from detected path
 	}

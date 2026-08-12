@@ -139,6 +139,10 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		"34": "7ce61eeb1dbcd505b92ed443654fa4fd83fc19bfd313120cbf239d78d6b476fe",
 		"35": "37b4b1df12693cb33cd4cce844a8de1a5f9dfa488661292f8f861bad87c2b7cc",
 		"36": "dd5d790c78599442f7e9e13da49bb82182532e329c55504055f29d3b67ab2c64",
+		// v37: the zsh tier emits the command-existence snapshot (nocx-qduc).
+		// Without it a zsh session's completion never learned a single command
+		// name, on the platform whose default login shell is zsh.
+		"37": "bf26d29e03b5bc82f94b8828ae6f6a892bcb5d142f70f30314ecd78bb9c110e9",
 	}
 
 	h := sha256.New()
