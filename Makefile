@@ -283,12 +283,55 @@ ci-os-split:
 # the Keychain service, and app.New probes the system vault provider on every
 # backend start. That probe is a real keychain write and it is stated here
 # rather than pretended away.
+# The teardown is the dangerous half of this target, so it is written to be
+# incapable of the accident rather than merely unlikely to have it.
+#
+# It used to be `trap 'rm -rf "$$root"' EXIT`, with $$root expanded when the
+# trap FIRES. Everything then rests on that one variable still holding what
+# mktemp returned: an `rm -rf` under a HOME this recipe itself redirects is one
+# unset variable away from `rm -rf ""` — and one mistaken assignment away from
+# something much worse. Nothing checked it, and the target's whole job is to
+# delete a directory tree.
+#
+# So the path is checked against the temporary root it must live under, at
+# creation AND again inside the trap, and rm runs only if the pattern holds.
+# An unset, empty, relative or reassigned $$root fails the case and the trap
+# says so instead of deleting. `rm -rf --` on top, so a path that somehow began
+# with a dash could not be read as options.
+#
+# The chmod is not tidiness: Go makes every file in the module cache
+# read-only, and the disposable HOME grew one (GOPATH defaults to $$HOME/go),
+# so the old teardown died with a screenful of "Permission denied" and left
+# the tree behind on every run. GOMODCACHE and GOCACHE now point at the host's
+# real caches — they are build artefacts, not the user's documents, and they
+# are not what a disposable root exists to protect — so nothing read-only
+# lands inside it at all. The chmod stays as the belt to that braces.
 ci-mac:
 	@echo "=== ci-mac: the OS-specific packages, natively, in a disposable root ==="
-	@root=$$(mktemp -d "$${TMPDIR:-/tmp}/nocx-ci-mac.XXXXXX") && \
-	  echo "disposable root: $$root" && \
-	  trap 'rm -rf "$$root"' EXIT && \
+	@set -eu; \
+	  tmpbase="$${TMPDIR:-/tmp}"; tmpbase="$${tmpbase%/}"; \
+	  case "$$tmpbase" in \
+	    /*) ;; \
+	    *) echo "ci-mac: TMPDIR '$$tmpbase' is not absolute — refusing to run" >&2; exit 1 ;; \
+	  esac; \
+	  root="$$(mktemp -d "$$tmpbase/nocx-ci-mac.XXXXXX")"; \
+	  case "$$root" in \
+	    "$$tmpbase"/nocx-ci-mac.??????*) ;; \
+	    *) echo "ci-mac: mktemp produced '$$root', which is not under '$$tmpbase' — refusing to run" >&2; exit 1 ;; \
+	  esac; \
+	  echo "disposable root: $$root"; \
+	  gomodcache="$$($(GO) env GOMODCACHE)"; gocache="$$($(GO) env GOCACHE)"; \
+	  cleanup() { \
+	    case "$${root:-}" in \
+	      "$$tmpbase"/nocx-ci-mac.??????*) \
+	        chmod -R u+w "$$root" 2>/dev/null || true; \
+	        rm -rf -- "$$root" ;; \
+	      *) echo "ci-mac: refusing to remove '$${root:-<unset>}' — not under '$$tmpbase'" >&2 ;; \
+	    esac; \
+	  }; \
+	  trap cleanup EXIT INT TERM; \
 	  NOCX_TEST_APP_DIR="$$root/profile" HOME="$$root/home" TMPDIR="$$root/tmp" \
+	  GOMODCACHE="$$gomodcache" GOCACHE="$$gocache" \
 	  sh -c 'mkdir -p "$$NOCX_TEST_APP_DIR" "$$HOME" "$$TMPDIR" && \
 	         $(GO) test -race -count=1 $(OS_PKGS) && \
 	         echo "" && \
