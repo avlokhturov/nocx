@@ -32,12 +32,11 @@ import (
 
 func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 	storagetest.Isolate(t)
-	noKeystore := func(context.Context) bool { return false }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	a, err := New(WithKeystoreProbe(noKeystore))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -87,7 +86,7 @@ func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 	// over the same directories — the process equivalent of quitting and
 	// relaunching the app.
 	a.Shutdown(ctx)
-	a2, err := New(WithKeystoreProbe(noKeystore))
+	a2, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New after restart: %v", err)
 	}
@@ -187,7 +186,6 @@ func callAppWS(t *testing.T, conn *websocket.Conn, method string, params map[str
 // what kind, and the raw key appears nowhere in the marshalled result.
 func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 	storagetest.Isolate(t)
-	noKeystore := func(context.Context) bool { return false }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -195,7 +193,7 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 	rawKey := "sk-proj-abcdef1234567890"
 	command := `curl -H "Authorization: Bearer ` + rawKey + `" https://api.example.com`
 
-	a, err := New(WithKeystoreProbe(noKeystore))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -234,7 +232,7 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 	// Restart: the row must read masked from the encrypted store, with the
 	// facts intact — the durable text is the masked one, by construction.
 	a.Shutdown(ctx)
-	a2, err := New(WithKeystoreProbe(noKeystore))
+	a2, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New after restart: %v", err)
 	}

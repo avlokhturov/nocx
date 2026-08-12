@@ -22,12 +22,11 @@ import (
 
 func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	storagetest.Isolate(t)
-	noKeystore := func(context.Context) bool { return false }
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	a, err := New(WithKeystoreProbe(noKeystore))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

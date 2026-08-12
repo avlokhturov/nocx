@@ -31,6 +31,13 @@ import (
 //
 // It does NOT move HOME — see [IsolateWithHome] for the tests that need that
 // and for why it is not what everybody gets.
+//
+// And neither of them moves a per-user OS SERVICE. Both of these are
+// directories; the OS keystore is reached through the Keychain service or the
+// session bus, so no environment variable this package sets can keep a test
+// off the developer's real login keychain (nocx-o4hg). That one is declared
+// instead of isolated: app.New refuses to build for a test that has not said
+// whether it may reach it.
 func Isolate(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

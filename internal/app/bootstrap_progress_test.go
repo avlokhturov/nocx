@@ -122,7 +122,7 @@ func waitForIntegrationStatus(t *testing.T, conn *websocket.Conn, sid string) (s
 // client, with the account's login shell injected.
 func bootstrapStack(t *testing.T, shellPath string) *websocket.Conn {
 	t.Helper()
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
