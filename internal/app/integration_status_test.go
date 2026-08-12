@@ -64,6 +64,7 @@ func TestLocalEnhancedSessionReportsWhatItStarted(t *testing.T) {
 		shint:             shellintegration.New(logger),
 		kernel:            newIntegrationKernel(),
 		reportIntegration: rec.report,
+		shells:            fixedShell{path: "/bin/bash"},
 	}
 	p, err := ptf.NewPTY(context.Background(), pty.Config{
 		SessionID: "0123456789abcdef0123456789abcdef",
@@ -87,9 +88,12 @@ func TestLocalEnhancedSessionReportsWhatItStarted(t *testing.T) {
 	}
 	// The shell is the one fact a user cannot infer and cannot act without:
 	// which shell a session runs is the single biggest thing that varies
-	// between two machines running the same code.
-	if !filepath.IsAbs(got.shell) || filepath.Base(got.shell) != "bash" {
-		t.Errorf("shell = %q, want the absolute path of the bash the factory exec'd", got.shell)
+	// between two machines running the same code. Asserted against the
+	// INJECTED answer, not against a name: since nocx-wwz0 the factory starts
+	// whatever the resolver returns, so a test that hard-coded "bash" would
+	// pass or fail on what the developer's own account record happens to say.
+	if !filepath.IsAbs(got.shell) || got.shell != "/bin/bash" {
+		t.Errorf("shell = %q, want the absolute path the resolver named", got.shell)
 	}
 }
 

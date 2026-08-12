@@ -14,6 +14,7 @@ import (
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
+	"github.com/shady2k/nocx/internal/transport"
 )
 
 // The tier a local session gets follows the user's LOGIN SHELL, through the
@@ -88,9 +89,9 @@ func TestLocalSession_TierFollowsTheLoginShell(t *testing.T) {
 // TestLocalSession_UnsupportedLoginShellRunsItAndSaysWhy is criterion 3. A
 // login shell with no local tier — fish, csh, tcsh, anything — must be STARTED,
 // not replaced by a bash the user never chose, and the missing integration must
-// reach the product rather than a log line: the reason rides the open ack by
-// the same optional-method seam a remote refusal uses, and the renderer already
-// turns a non-empty reason into a toast and a degraded tab.
+// reach the product rather than a log line: the factory reports it on the
+// integration axis, which the renderer turns into a persistent mark and a
+// reason the user can act on (nocx-dvql, nocx-5uu5).
 //
 // The shell here is a fixture rather than a real fish, because what is under
 // test is nocx's decision, not fish's behaviour, and a machine without fish
@@ -100,6 +101,8 @@ func TestLocalSession_UnsupportedLoginShellRunsItAndSaysWhy(t *testing.T) {
 	shell := fakeUnsupportedShell(t)
 	f := localFactory(t)
 	f.shells = fixedShell{path: shell}
+	rec := &integrationRecorder{}
+	f.reportIntegration = rec.report
 
 	pt, err := f.NewPTY(context.Background(), pty.Config{
 		Cols: 80, Rows: 24, Enhanced: true, SessionID: "sid-unsupported",
@@ -112,12 +115,20 @@ func TestLocalSession_UnsupportedLoginShellRunsItAndSaysWhy(t *testing.T) {
 	if _, ok := pt.(*lifecyclePTY); ok {
 		t.Error("a shell with no local tier must not be handed a lifecycle channel it cannot use")
 	}
-	rc, ok := pt.(interface{ ShellIntegrationReason() ssh.RefusalReason })
-	if !ok {
-		t.Fatalf("the session reports no refusal reason at all (%T) — the degrade would be log-only", pt)
+	// Reported through the factory, not carried on the pty. The optional-method
+	// seam this test originally asserted was the remote path's; nocx-dvql made
+	// the notification the single owner and registerRemoteIntegration returns
+	// early for local sessions, so a reason on the pty would be a write nothing
+	// reads — the fish user's tab would degrade exactly as silently as before.
+	seen := rec.all()
+	if len(seen) != 1 {
+		t.Fatalf("reports = %+v, want exactly one — the degrade would otherwise be log-only", seen)
 	}
-	if got := rc.ShellIntegrationReason(); got != ssh.ReasonUnsupportedShell {
-		t.Errorf("reason = %q, want %q", got, ssh.ReasonUnsupportedShell)
+	if got := seen[0]; got.status != transport.IntegrationConventional || got.reason != ssh.ReasonUnsupportedShell {
+		t.Errorf("report = %+v, want status=conventional with reason %q", got, ssh.ReasonUnsupportedShell)
+	}
+	if got := seen[0].shell; got != shell {
+		t.Errorf("reported shell = %q, want the fixture the resolver named (%q)", got, shell)
 	}
 
 	// And it is the USER'S shell that came up, as a login shell, told nothing
