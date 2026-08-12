@@ -189,7 +189,20 @@ var (
 // shell rather than through `sort -u`, sleeps with zsh/zselect rather than
 // forking `sleep`, disowns with `&!`, and chains its cleanup onto the zshexit
 // hook array instead of saving the user's EXIT trap.
-const version = "37"
+// 38: the accept-line chain invokes a WIDGET rather than a function name
+// (nocx-wwz0). `zle -lL accept-line` reports the function that implements the
+// widget, and the interception called that name straight back through `zle`,
+// which only works when a framework happens to have registered a widget of the
+// same name. fast-syntax-highlighting, zsh-syntax-highlighting and
+// zsh-autosuggestions do not — so on a machine with any of them, pressing
+// Enter printed "No such widget `_zsh_highlight_widget_orig-…-accept-line'" and
+// the command never ran. Latent until nocx-wwz0 gave the local tier a zsh to
+// run at all, and then reproduced on the first real machine it met. The
+// previous implementation is now registered under a name nocx owns, guarded
+// against a completion widget, against our own function (the launcher's
+// deliberate second source would chain to itself), and against an
+// implementation that is not a callable function.
+const version = "38"
 
 // promptModeEnvVar is the env var that selects the prompt mode.
 const promptModeEnvVar = "NOCX_PROMPT_MODE"

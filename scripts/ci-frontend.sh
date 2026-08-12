@@ -107,9 +107,27 @@ if [ "$RUN_ROOT" = 1 ]; then
 fi
 '
 
+# A git worktree keeps no .git DIRECTORY — it keeps a .git FILE pointing at
+# `<main-repo>/.git/worktrees/<name>`, which is outside the bind mount. The
+# container then answers "fatal: not a git repository" at the first git command
+# the job runs, and the whole frontend job dies before a single check does.
+#
+# So mount the common git dir at its own absolute path, which is where the .git
+# file's `gitdir:` line says to look. Nothing is written to it: read-only says
+# so. Empty for an ordinary checkout, whose .git is a directory already inside
+# the mount. Same arrangement, and the same reasoning, as
+# e2e/run-in-container.sh — this script was the one runner that never learned
+# it, so `make ci-full` could not complete from a worktree at all (nocx-7wkc).
+git_flag=()
+if [ -f "$REPO/.git" ]; then
+    git_common="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    [ -n "$git_common" ] && git_flag=(-v "$git_common:$git_common:ro")
+fi
+
 printf '=== frontend job on %s — %s cpus ===\n' "$IMAGE" "$CPUS"
 exec docker run --rm -i \
     ${cpu_flag[@]+"${cpu_flag[@]}"} \
+    ${git_flag[@]+"${git_flag[@]}"} \
     -v "$REPO:/work" \
     -v nocx-ci-fe-root:/work/node_modules \
     -v nocx-ci-fe-frontend:/work/frontend/node_modules \

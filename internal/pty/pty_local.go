@@ -10,6 +10,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/loginshell"
 )
 
 type LocalPty struct {
@@ -103,46 +104,6 @@ func resolveCwd(cwd string) string {
 	return ""
 }
 
-// shellSource names where the shell a local session runs came from. It exists
-// so the log line can distinguish "the environment asked for this one" from
-// "we went looking and this is what the machine had" — two answers that need
-// different fixes when a run drove a shell nobody expected.
-type shellSource string
-
-const (
-	shellFromEnv      shellSource = "SHELL"
-	shellFromDetected shellSource = "detected"
-	shellFromFallback shellSource = "fallback"
-)
-
-// Preferred when $SHELL says nothing: bash is the tier the local enhanced
-// bootstrap is written for (app.go starts `bash --rcfile`), not the only tier
-// with shell integration — nocx.zsh emits the same OSC 133 markers and, since
-// nocx-qduc, the same OSC 636 command snapshot. Fall back through common
-// paths; on stripped-down containers none may exist, so keep /bin/sh as the
-// last resort.
-var shellCandidates = []string{
-	"/run/current-system/sw/bin/bash", // NixOS
-	"/bin/bash",
-	"/usr/bin/bash",
-	"/usr/local/bin/bash",
-}
-
-// resolveShell decides which shell a local session runs, and says where the
-// answer came from. Both lookups are injected so the decision can be tested
-// without a machine that happens to have the right binaries.
-func resolveShell(lookupEnv func(string) string, exists func(string) bool) (string, shellSource) {
-	if shell := lookupEnv("SHELL"); shell != "" {
-		return shell, shellFromEnv
-	}
-	for _, candidate := range shellCandidates {
-		if exists(candidate) {
-			return candidate, shellFromDetected
-		}
-	}
-	return "/bin/sh", shellFromFallback
-}
-
 func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) {
 	for _, opt := range opts {
 		opt(&cfg)
@@ -150,17 +111,17 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 
 	// The launcher may name an explicit command (e.g. a lifecycle bootstrap
 	// that must start bash with `--rcfile` so the per-epoch capability
-	// rides script text, never the environment — nocx-u7uh.21). When
-	// cfg.Command is empty the resolved interactive shell is used, exactly
-	// as before.
+	// rides script text, never the environment — nocx-u7uh.21). Every
+	// production local session arrives that way since nocx-wwz0: the
+	// composition root resolves the login shell, chooses the tier and names
+	// both. An empty Command is the library default for a caller that has no
+	// composition root behind it, and it asks the SAME owner rather than
+	// deriving a second answer of its own (internal/loginshell).
 	var cmd *exec.Cmd
 	if cfg.Command != "" {
 		cmd = exec.Command(cfg.Command, cfg.Args...) //nolint:gosec // the launcher names its own shell
 	} else {
-		shell, shellFrom := resolveShell(os.Getenv, func(p string) bool {
-			_, err := os.Stat(p)
-			return err == nil
-		})
+		shell := loginshell.New().Resolve()
 		// Logged, not merely decided. Which shell a session runs is the single
 		// biggest thing that varies between two machines running the same code,
 		// and each tier answers a different amount of the protocol — bash and
@@ -168,8 +129,8 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		// the POSIX tier emits none of it, so the shell still decides whether
 		// tab completion ever learns a command name. This line is what lets a
 		// run's account answer that without inference (nocx-z9s9.9).
-		logger.Info("local pty shell resolved", "shell", shell, "source", string(shellFrom))
-		cmd = exec.Command(shell, "-i") //nolint:gosec // shell is from detected path
+		logger.Info("local pty shell resolved", "shell", shell.Path, "source", string(shell.Source))
+		cmd = exec.Command(shell.Path, "-i") //nolint:gosec // shell is from the account record or a detected path
 	}
 	cmd.Dir = resolveCwd(cfg.Cwd)
 	env := withUTF8Locale(append(
@@ -223,8 +184,24 @@ func (lp *LocalPty) Close() error {
 	}
 	lp.closed = true
 
+	// SIGHUP, not SIGTERM: this is a terminal closing, and SIGHUP is the
+	// signal a terminal sends when it goes away. An INTERACTIVE shell ignores
+	// SIGTERM — both bash and zsh do — so the signal that was sent here was
+	// never the thing that ended the session; closing the master below was,
+	// via the EOF the shell reads at its prompt. bash exits on that EOF, which
+	// is why nobody noticed while bash was the only local shell nocx started.
+	// zsh does not: measured on macOS 15, a `zsh -l -i` on a pty whose master
+	// is closed sits at its prompt indefinitely (Ss+, still alive after 67
+	// seconds), because the kernel does not deliver a hangup to the foreground
+	// group here the way Linux's vhangup does. So every closed tab on the
+	// platform this product ships to would have leaked a shell (nocx-wwz0).
+	//
+	// SIGHUP ends both immediately, and it is what they are written to handle:
+	// a shell that receives it saves its history, runs its exit hooks and
+	// hangs up its own jobs. The master is closed afterwards, so a shell that
+	// wants to write on the way out still has somewhere to write.
 	if lp.cmd.Process != nil {
-		_ = lp.cmd.Process.Signal(syscall.SIGTERM)
+		_ = lp.cmd.Process.Signal(syscall.SIGHUP)
 	}
 	return lp.file.Close()
 }

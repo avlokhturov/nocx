@@ -143,6 +143,11 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// Without it a zsh session's completion never learned a single command
 		// name, on the platform whose default login shell is zsh.
 		"37": "bf26d29e03b5bc82f94b8828ae6f6a892bcb5d142f70f30314ecd78bb9c110e9",
+		// v38: the accept-line chain calls a widget rather than a function name
+		// (nocx-wwz0). With any of the common highlighting/autosuggestion
+		// plugins installed, pressing Enter printed "No such widget" and the
+		// command did not run.
+		"38": "f6f2b6cf7509ee97806376d141edaae0c94dd5df69ef2734586ae521ecb0c37d",
 	}
 
 	h := sha256.New()

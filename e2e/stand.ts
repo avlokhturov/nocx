@@ -85,22 +85,23 @@ export function readStand(): StandManifest {
 }
 
 /**
- * Take the host's login shell out of what the backend inherits.
+ * Take the launching shell's `$SHELL` out of what the backend inherits.
  *
- * `internal/pty` reads `$SHELL` first and only goes looking when it is unset,
- * so leaving it in means the suite drives whatever shell the developer happens
- * to log in with — bash in the e2e container, zsh on a stock Mac. That is not a
- * cosmetic difference: `nocx.bash` emits the OSC 636 command snapshot and
- * `nocx.zsh` emits only the readiness passport, so the shell decides whether
- * tab completion ever learns a command name. completion.spec.ts was green in
- * the container and red on the macOS runner for exactly that reason, and it
- * took a day and a trace download to find out (nocx-qduc, nocx-z9s9.9).
+ * It no longer decides anything, and that is the point of still removing it.
+ * Since nocx-wwz0 the backend asks the OS ACCOUNT DATABASE which shell this
+ * user logs in with (`internal/loginshell`) and treats `$SHELL` as the
+ * fallback for when that cannot be read — because a Dock-launched app inherits
+ * launchd's environment, where `$SHELL` is absent or stale. So a stale claim
+ * from whatever started the suite must not be the thing the fallback picks up
+ * if the account lookup ever fails on a runner; stripping it keeps the fallback
+ * honest instead of silently host-dependent.
  *
- * Stripped rather than pinned to a path: there is no one path. `/bin/bash` is
- * absent on NixOS, where bash lives under /run/current-system. What has to be
- * the same on every host is the POLICY, and the backend already owns it —
- * prefer bash, fall through a candidate list, /bin/sh as the last resort — and
- * now logs which one it took.
+ * What this does NOT do any more is pin the shell. The suite drives the host's
+ * real login shell — bash for the container's root, zsh on a stock Mac — which
+ * is the whole reason nocx-wwz0 exists: what the product does on macOS is what
+ * has to be tested on macOS. Both tiers emit the OSC 636 command snapshot as of
+ * script v37 (nocx-qduc), so completion.spec.ts is a fair question to ask of
+ * either.
  *
  * This is deliberately NOT in home-isolation's restricted list. That list is
  * the home boundary, and overriding one of its keys raises. `$SHELL` cannot

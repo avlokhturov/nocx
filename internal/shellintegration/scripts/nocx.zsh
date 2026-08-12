@@ -1210,13 +1210,50 @@ fi
 # nothing under `zle -lL`, a custom widget prints its registration line.
 # The registration is interactive-only: sourcing this file from a
 # non-interactive context (the exec tests) must not touch zle.
-__nocx_old_accept_line=
+#
+# `zle -lL accept-line` prints `zle -N accept-line <FUNCTION>`, and a function
+# is not a widget: `zle "$function"` fails unless something happened to
+# register a widget of the same name. This used to take that last field and
+# call it directly, so on any machine with fast-syntax-highlighting,
+# zsh-syntax-highlighting or zsh-autosuggestions — which is most zsh machines —
+# pressing Enter printed "No such widget `_zsh_highlight_widget_orig-…'" and the
+# command did not run (nocx-wwz0; latent until a local zsh session existed to
+# reach it). The previous implementation is registered under a name nocx owns
+# instead, which is the only way to invoke it as a widget.
+#
+# Three guards, each for a case the plain form gets wrong: the `zle -N` prefix
+# match refuses a completion widget (`zle -C`), whose last field is a completer
+# and not an implementation; the identity check refuses OUR OWN function, which
+# the launcher's deliberate second source would otherwise chain to itself; and
+# the function-existence check falls back to the builtin rather than registering
+# a widget whose implementation cannot be called.
+#
+# The saved value SURVIVES a re-source — the launcher rcfile sources this file a
+# second time on purpose, and by then the widget it would find registered is our
+# own — but it is re-validated first. A generation installed in ~/.nocx before
+# this fix leaves a FUNCTION name in the variable, and this session's copy would
+# otherwise inherit and call it; validating against the live widget table means
+# a stale value degrades to the builtin accept-line (Enter works, the
+# framework's wrapper is skipped for this one session) instead of to an error
+# where the command does not run at all.
+__nocx_old_accept_line="${__nocx_old_accept_line:-}"
 if [[ -o interactive ]]; then
     zmodload zsh/zle 2>/dev/null
-    __nocx_acc_def="$(zle -lL accept-line 2>/dev/null)"
-    if [[ -n "$__nocx_acc_def" ]]; then
-        __nocx_old_accept_line="${__nocx_acc_def##* }"
+    zmodload zsh/zleparameter 2>/dev/null
+    if [[ -n "$__nocx_old_accept_line" ]] && (( ${+widgets} )) \
+        && (( ! ${+widgets[$__nocx_old_accept_line]} )); then
+        __nocx_old_accept_line=
     fi
-    unset __nocx_acc_def
+    __nocx_acc_def="$(zle -lL accept-line 2>/dev/null)"
+    __nocx_acc_impl=
+    case "$__nocx_acc_def" in
+        "zle -N accept-line "*) __nocx_acc_impl="${__nocx_acc_def##* }" ;;
+    esac
+    if [[ -n "$__nocx_acc_impl" ]] && [[ "$__nocx_acc_impl" != __nocx_accept_line ]] \
+        && (( ${+functions[$__nocx_acc_impl]} )); then
+        zle -N __nocx_prev_accept_line "$__nocx_acc_impl"
+        __nocx_old_accept_line=__nocx_prev_accept_line
+    fi
+    unset __nocx_acc_def __nocx_acc_impl
     zle -N accept-line __nocx_accept_line
 fi

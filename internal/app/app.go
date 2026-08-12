@@ -29,6 +29,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/lifecycleremote"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -311,7 +312,10 @@ func New(opts ...Option) (*App, error) {
 	// registry.
 	childTransports := newTransportRegistry()
 	childSessions := newSessionRegistry()
-	ptf := &localPTYFactory{log: logger, shint: shint, transports: childTransports}
+	// One login-shell resolver, built here and injected: "which shell is this
+	// user's login shell" is one question with one owner (nocx-wwz0), and the
+	// composition root is where the platform half gets wired in.
+	ptf := &localPTYFactory{log: logger, shint: shint, transports: childTransports, shells: loginshell.New()}
 	sess := session.New(logger, ptf)
 
 	// SSH config resolver: shared by both the SSH client and the profile
@@ -875,6 +879,11 @@ type localPTYFactory struct {
 	log    log.Logger
 	shint  shellintegration.ShellIntegration
 	kernel lifecyclechannel.Kernel
+	// shells answers which shell this user logs in with. Injected because the
+	// platform half is a subprocess against the OS account database, and
+	// because the answer decides the tier: it is the single call site of the
+	// value (nocx-wwz0).
+	shells loginshell.Resolver
 	// transports records each local adapter's transport kind so the child
 	// grant builder knows the child rides the inherited descriptor
 	// (nocx-u7uh.11).
@@ -904,10 +913,54 @@ func (p *lifecyclePTY) Close() error {
 	return err
 }
 
+// unsupportedShellPTY is a local session on a login shell that has no local
+// integration tier: the user's OWN shell, started conventionally, carrying the
+// reason it is conventional.
+//
+// The reason travels by the same optional-method seam a remote channel uses
+// (session.realSession.ShellIntegrationReason), so it rides the open ack the
+// renderer already reads and already turns into a toast and a degraded mark.
+// That is the point of reusing ssh.RefusalReason's vocabulary rather than
+// minting a local one: a fish user and a far host with an unusable shell are
+// the same fact about the same session, and the product has one way of saying
+// it. A soft degrade that lived only in a log is what AGENTS.md forbids.
+type unsupportedShellPTY struct {
+	pty.Pty
+	reason ssh.RefusalReason
+}
+
+func (p *unsupportedShellPTY) ShellIntegrationReason() ssh.RefusalReason { return p.reason }
+
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	env := f.shint.ActivationEnv(cfg.Enhanced)
 	if !cfg.Enhanced || f.kernel == nil {
 		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+	}
+	// Which shell the user logs in with, and which local tier starts it. One
+	// resolution, one log line, one decision — everything below reads them
+	// (nocx-wwz0). Before this the answer was the constant "bash", so on macOS,
+	// whose default login shell has been zsh since Catalina, every local tab
+	// opened a shell the user had not chosen and none of their own environment.
+	shell := f.shells.Resolve()
+	kind := shellintegration.LocalShellKind(shell.Path)
+	f.log.Info("local session shell resolved",
+		"shell", shell.Path, "source", string(shell.Source), "tier", string(kind))
+
+	if kind == shellintegration.ShellUnknown {
+		// fish, csh, tcsh, dash, anything: started as itself, integrated not
+		// at all, and SAID so. Substituting bash here is the defect this bead
+		// is; degrading silently is the one AGENTS.md names. The activation
+		// env is the conventional one — a shell that will not be integrated
+		// must not be told it is being integrated.
+		cfg.Command = shell.Path
+		cfg.Args = []string{"-l"}
+		p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
+		if err != nil {
+			return nil, err
+		}
+		f.log.Warn("no local shell-integration tier for this login shell; the session is conventional",
+			"shell", shell.Path, "reason", string(ssh.ReasonUnsupportedShell))
+		return &unsupportedShellPTY{Pty: p, reason: ssh.ReasonUnsupportedShell}, nil
 	}
 	// Enhanced: the shell reports its lifecycle over a descriptor that is not
 	// the tty (ADR-0024 decision 2). The child end goes in as fd 3; the parent
@@ -924,13 +977,17 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	if f.transports != nil {
 		f.transports.register(ch.TransportID(), transportKind{local: true})
 	}
-	// The local bootstrap (nocx-u7uh.21): bash starts with a transient
-	// --rcfile carrying THIS session's capability and recovery fence in its
-	// text — never in the environment (ADR-0024 decision 2) — and the
-	// non-secret addressing as NOCX_LIFECYCLE_* env, exactly the way the
-	// remote tier learns them (shellintegration.LaunchOptions is the single
+	// The local bootstrap (nocx-u7uh.21, extended to zsh by nocx-wwz0): the
+	// user's own login shell starts with a transient artefact carrying THIS
+	// session's capability and recovery fence in its TEXT — never in the
+	// environment (ADR-0024 decision 2) — and the non-secret addressing as
+	// NOCX_LIFECYCLE_* env, exactly the way the remote tier learns them.
+	// shellintegration.LaunchOptions is the single description of "how a shell
+	// learns its addressing and its capability", and LocalEnhancedLaunch owns
+	// the per-tier difference between them: a transient rcfile for bash, a
+	// transient ZDOTDIR for zsh, because zsh has no --rcfile.
 	launch := ch.Launch()
-	rc, rerr := shellintegration.LocalBashRcfile(shellintegration.LaunchOptions{
+	local, rerr := shellintegration.LocalEnhancedLaunch(shell.Path, kind, shellintegration.LaunchOptions{
 		SessionID:   cfg.SessionID,
 		Enhanced:    true,
 		Capability:  launch.Capability,
@@ -940,31 +997,38 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		Epoch:       launch.Epoch,
 		LifecycleFD: 3, // the child end of the socketpair, via ExtraFiles
 	})
-	rcPath := ""
-	if rerr == nil {
-		rcPath, rerr = shellintegration.WriteLocalRcfile(rc)
-	}
 	if rerr != nil {
 		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
-			"error", rerr)
+			"shell", shell.Path, "tier", string(kind), "error", rerr)
 		_ = ch.Close()
 		_ = child.Close()
-		// No channel, no rcfile: a plain enhanced pty, whose shell keeps a
-		// visible native prompt (the script's init bails without config).
-		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+		// No channel and no bootstrap: the user's own shell, plain, with a
+		// visible native prompt (the script's init bails without config). The
+		// degrade is reported as ReasonUnknown rather than left in the log —
+		// the backend genuinely cannot classify a temp-file failure into the
+		// launcher vocabulary, and "no refusal" would be read by the renderer
+		// as "integration succeeded", which is the one thing it is not.
+		cfg.Command = shell.Path
+		cfg.Args = []string{"-i"}
+		p, perr := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
+		if perr != nil {
+			return nil, perr
+		}
+		return &unsupportedShellPTY{Pty: p, reason: ssh.ReasonUnknown}, nil
 	}
-	// Bash is the integration-first shell for the local tier (the same
-	// preference the pty resolver applies when $SHELL is unset); a
-	// non-bash $SHELL on an enhanced local session is a reported follow-up.
-	cfg.Command = "bash"
-	cfg.Args = []string{"--rcfile", rcPath, "-i"}
-	p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env), pty.WithExtraFiles(child))
+	cfg.Command = local.Command
+	cfg.Args = local.Args
+	p, err := pty.NewLocal(f.log, cfg,
+		pty.WithExtraEnv(env), pty.WithExtraEnv(local.Env), pty.WithExtraFiles(child))
 	// The child end is the shell's once the fork has happened; this process
 	// keeps no reference either way.
 	_ = child.Close()
 	if err != nil {
 		_ = ch.Close()
-		_ = os.Remove(rcPath)
+		// The shell erases the artefact itself once it has read it; on a spawn
+		// failure there is no shell, so the capability would sit in TMPDIR
+		// until the machine cleaned it.
+		local.Cleanup()
 		return nil, err
 	}
 	// Bind the lane to the session that will receive its facts. Without
