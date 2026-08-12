@@ -1,8 +1,11 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
+  INTEGRATION_EXPLANATION,
   IntegrationSeenStore,
   integrationMessage,
   isDegraded,
+  observationSentence,
+  shellFamily,
   subscribeIntegrationChanged,
   type IntegrationReason,
 } from './status'
@@ -60,7 +63,14 @@ describe('what the product says about a degraded session', () => {
     ]
     for (const reason of REASONS) {
       const m = integrationMessage(fact({ reason }))!
-      const text = [m.title, m.description, m.happening, m.lastGoodStep, m.snippet ?? '']
+      const text = [
+        m.title,
+        m.description,
+        m.happening,
+        m.lastGoodStep,
+        m.fix?.lead ?? '',
+        m.fix?.snippet ?? '',
+      ]
         .join(' ')
         .toLowerCase()
       for (const name of forbidden) {
@@ -96,6 +106,141 @@ describe('what the product says about a degraded session', () => {
     const m = integrationMessage(fact({ reason: 'brand-new' as IntegrationReason }))
     expect(m).not.toBeNull()
     expect(m!.title).toBe('Not integrated')
+  })
+})
+
+// ── the fix nocx offers (nocx-0mqs) ───────────────────────────────────────
+//
+// The defect these were written against: a zsh session was shown
+// `bash -lic …` and told to bisect ~/.bashrc. Three things wrong at once —
+// a shell the session is not running, a file it never reads, and a guessing
+// game where nocx's own launcher gives it a measured answer.
+
+describe('the fix a degraded session is offered', () => {
+  const fixFor = (shell: string) => integrationMessage(fact({ shell }))!.fix
+
+  // THE bug, stated from the user's side: nothing put in front of a zsh
+  // user may be a bash command or a bash file.
+  it('never hands a zsh session a bash command or a bash startup file', () => {
+    const fix = fixFor('/bin/zsh')!
+    const text = `${fix.lead}\n${fix.snippet}`
+    expect(text).not.toMatch(/\bbash\b/)
+    expect(text).not.toContain('.bashrc')
+    expect(text).toContain('/bin/zsh')
+    expect(text).toContain('~/.zshrc')
+  })
+
+  it('names the bash startup file for a bash session, and no zsh one', () => {
+    const fix = fixFor('/opt/homebrew/bin/bash')!
+    const text = `${fix.lead}\n${fix.snippet}`
+    expect(text).toContain('/opt/homebrew/bin/bash')
+    expect(text).toContain('~/.bashrc')
+    expect(text).not.toContain('.zshrc')
+    expect(text).not.toMatch(/\bzsh\b/)
+  })
+
+  // The startup file named is the one nocx's OWN launcher sources —
+  // internal/shellintegration/launcher_bash.go sources ~/.bashrc and
+  // launcher_zsh.go sources ~/.zshrc. Advice about a file nocx never reads
+  // is advice that cannot work.
+  it('probes the shell nocx actually started, not a shell it assumed', () => {
+    expect(fixFor('/bin/zsh')!.snippet).toContain("/bin/zsh -ic 'echo nocx-reached-a-prompt'")
+    expect(fixFor('/bin/bash')!.snippet).toContain("/bin/bash -ic 'echo nocx-reached-a-prompt'")
+  })
+
+  // The measured answer replaces the textbook one. nocx exports
+  // NOCX_SHELL_INTEGRATION=1 before the user's rc runs (verified in
+  // internal/shellintegration), so a block that takes the shell over can be
+  // told to stand aside. Telling the user to halve their rc file is what we
+  // say when we know nothing, and here we know something.
+  it('offers the gate nocx sets rather than telling the user to bisect', () => {
+    const fix = fixFor('/bin/zsh')!
+    expect(fix.snippet).toContain('NOCX_SHELL_INTEGRATION')
+    expect(fix.snippet).toContain('if [ -z "$NOCX_SHELL_INTEGRATION" ]; then')
+    const text = `${fix.lead} ${fix.snippet}`.toLowerCase()
+    expect(text).not.toContain('bisect')
+    expect(text).not.toContain('half')
+    expect(text).not.toContain('piece at a time')
+  })
+
+  // A shell nocx has no launcher for still gets the gate — the variable is
+  // exported for every session — but not a command line invented for it.
+  it('gives an unfamiliar shell the gate and no invented invocation', () => {
+    const fix = fixFor('/usr/local/bin/fish')!
+    expect(fix.snippet).toContain('NOCX_SHELL_INTEGRATION')
+    expect(fix.snippet).not.toContain('-ic')
+    expect(fix.snippet).not.toContain('.zshrc')
+    expect(fix.snippet).not.toContain('.bashrc')
+  })
+
+  // A path with a space would otherwise produce a command line that runs the
+  // wrong thing when pasted.
+  it('quotes a shell path the shell would otherwise split', () => {
+    const fix = fixFor('/Users/me/my shells/zsh')!
+    expect(fix.snippet).toContain("'/Users/me/my shells/zsh' -ic")
+  })
+
+  // A reason with no honest remedy offers none: an empty "How to fix" that
+  // says "try again" teaches the user the button never helps.
+  it('is absent for a reason nocx cannot advise on', () => {
+    expect(
+      integrationMessage(fact({ status: 'lost', reason: 'channel-lost' }))!.fix,
+    ).toBeUndefined()
+    expect(integrationMessage(fact({ reason: 'remote-command' }))!.fix).toBeUndefined()
+    expect(integrationMessage(fact({ reason: 'unsupported-shell' }))!.fix).toBeUndefined()
+  })
+})
+
+describe('which shell nocx started', () => {
+  it('reads the family off the path the backend sent', () => {
+    expect(shellFamily('/bin/zsh')).toBe('zsh')
+    expect(shellFamily('/opt/homebrew/bin/bash')).toBe('bash')
+    expect(shellFamily('/usr/local/bin/fish')).toBe('other')
+    expect(shellFamily('')).toBe('other')
+  })
+
+  // A login shell is conventionally argv[0]-prefixed with a dash. The wire
+  // carries a path, but a backend that ever sends "-zsh" must not be read as
+  // an unknown shell and lose the user their fix.
+  it('sees through the login-shell dash', () => {
+    expect(shellFamily('-zsh')).toBe('zsh')
+    expect(shellFamily('-bash')).toBe('bash')
+  })
+
+  // "bashful" is not bash. A prefix match would put ~/.bashrc in front of a
+  // user who has never had one.
+  it('does not match a shell whose name merely starts the same way', () => {
+    expect(shellFamily('/bin/bashful')).toBe('other')
+    expect(shellFamily('/bin/zshx')).toBe('other')
+  })
+})
+
+describe('the observation, as one sentence with one owner', () => {
+  // Both surfaces that show it — the Details chain and the fix panel — read
+  // this one function, so they cannot disagree about how strongly nocx
+  // claims it (AD-8).
+  it('labels itself a guess and quotes only the process name', () => {
+    const s = observationSentence(fact({ detail: { observedProcess: 'some-tui' } }))!
+    expect(s.toLowerCase()).toContain('guess')
+    expect(s).toContain('some-tui')
+  })
+
+  it('is nothing at all when the backend observed nothing', () => {
+    expect(observationSentence(fact())).toBeNull()
+  })
+})
+
+describe('the explanation the product carries', () => {
+  // nocx-qs68: the explanation ships in the build. A link needs the network,
+  // a system browser and a URL that survives a rename; the shipped app needs
+  // none of them.
+  it('is prose the app can show with no network at all', () => {
+    expect(INTEGRATION_EXPLANATION.length).toBeGreaterThan(0)
+    for (const para of INTEGRATION_EXPLANATION) expect(para.length).toBeGreaterThan(0)
+  })
+
+  it('links nowhere — there is no URL left to rot', () => {
+    for (const para of INTEGRATION_EXPLANATION) expect(para).not.toContain('http')
   })
 })
 

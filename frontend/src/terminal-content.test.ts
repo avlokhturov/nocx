@@ -2966,6 +2966,29 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     }
   })
 
+  // nocx-rzvq, measured by the owner on the installed build: the card floated
+  // over the terminal and covered the first prompt line. It now takes space
+  // from the top of the pane — the pane is a flex column and the card is its
+  // first child, so the scrollback is laid out in what is left rather than
+  // underneath it.
+  it('takes space above the terminal instead of covering it', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      publish(client)
+      const card = cardIn(tab)
+      const scrollback = tab.pane.querySelector('.scrollback-layout')
+      expect(card).not.toBeNull()
+      expect(scrollback).not.toBeNull()
+      expect(tab.pane.firstElementChild).toBe(card)
+      expect(card!.compareDocumentPosition(scrollback!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   it('raises the card again when the same shell fails a different way', async () => {
     const clientA = makeClient()
     const first = await mountTerminal(makeClipboard(), {}, clientA)

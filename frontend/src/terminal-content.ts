@@ -43,7 +43,6 @@ import {
   subscribeIntegrationChanged,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
-import { createUrlOpener } from './open-url'
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
 import { renderRecordedCommand } from './scrollback/blocks'
@@ -373,10 +372,6 @@ export class TerminalContent extends BaseTabContent {
    *  localStorage rather than behind an RPC, and it survives a restart,
    *  which the clipboard banner's run-scoped suppression does not. */
   private readonly _seenStore = new IntegrationSeenStore(safeSeenStorage())
-  /** The one seam every surface opens a link through (AD-8). */
-  private readonly _urlOpener = createUrlOpener({
-    openUrl: (url: string) => this.client.dispatcher.call('shell.openUrl', { url }),
-  })
   /** The observed shell state (one of three independent axes). */
   private _shellState: ShellState = 'unsupported'
   /** The current input presentation. */
@@ -2008,12 +2003,20 @@ export class TerminalContent extends BaseTabContent {
     this._updateCapability()
     if (!isDegraded(fact)) {
       // Recovered, or never failed. The card belongs to the state that
-      // raised it and goes with it.
-      this._noticeDispose?.()
-      this._noticeDispose = null
+      // raised it and goes with it — and the terminal gets the space back,
+      // so the live region is re-measured on the way out too.
+      this._dropIntegrationNotice()
       return
     }
     this._maybeShowIntegrationNotice(fact)
+  }
+
+  /** Take the card down and give the pane back to the terminal. */
+  private _dropIntegrationNotice(): void {
+    if (!this._noticeDispose) return
+    this._noticeDispose()
+    this._noticeDispose = null
+    this.scheduleLiveResize()
   }
 
   /** Raise the degraded-session card, unless this (shell, reason) pair has
@@ -2025,20 +2028,20 @@ export class TerminalContent extends BaseTabContent {
     const seen = this._seenStore
     if (!seen.shouldShow(fact.shell, reason)) return
     seen.markShown(fact.shell, reason)
-    const dismiss = () => {
-      this._noticeDispose?.()
-      this._noticeDispose = null
-    }
     this._noticeDispose = mountIntegrationNotice(target, {
       fact,
       copy: (text) => this.clipboard.writeText(text),
-      openUrl: (url) => this._urlOpener.open(url),
       onSuppressShell: () => {
         seen.suppressShell(fact.shell)
-        dismiss()
+        this._dropIntegrationNotice()
       },
-      onDismiss: dismiss,
+      onDismiss: () => this._dropIntegrationNotice(),
     })
+    // The card takes its height off the top of the pane (nocx-rzvq), so the
+    // scroller is smaller than the grid fitted to it. Same re-measure the
+    // editor appearing and disappearing already goes through — the pane's
+    // own box is unchanged, so the viewport observer never fires for this.
+    this.scheduleLiveResize()
   }
 
   /** Acknowledge the restoration (ADR-0024 decision 8) once the shell's
