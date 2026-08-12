@@ -367,9 +367,79 @@ and this is one. Allowed without asking: `git commit`, `git push`, `bd close`,
 **Merging a pull request always requires explicit approval** — in that session, for that
 PR. Authority to commit and push is not authority to merge.
 
-Run the full local gate before pushing, not only the part you touched: `gofumpt -l .`,
-`golangci-lint run`, `go test -race ./...`, plus `npx prettier --check .`, `npx eslint .`,
-`npm run typecheck` and `npm test` in `frontend/`.
+**Run the gate CI runs, not a subset of it.** `make ci-full` is every CI job, each in the
+environment its job runs in — and the four names below are the whole of `ci.yml`:
+
+```bash
+make ci-full            # all four, cheapest first
+make ci                 # host-side only: the macOS `backend` job + host frontend gates
+./scripts/ci-linux.sh   # `backend-linux`, ubuntu-24.04, both keyring variants
+./scripts/ci-frontend.sh # `frontend`, node 24 — frontend/ AND the repo root
+./e2e/run-in-container.sh # `e2e`, the same image and the same command CI runs
+```
+
+`make ci` alone is **not** the gate, whatever it used to say about itself. It covered one
+of four jobs, and a release attempt and its follow-up PR both came back red from a job it
+had just reported green (2026-08-10). The three containerized runners are byte-for-byte
+their CI counterparts in **software** — the same image, packages, Go toolchain and
+command.
+
+**The gate belongs to whoever integrates, and to nobody else.** A worker on a branch runs
+the unit tests for the files it changed, and stops there. It does not run `make ci-full`,
+the containerized jobs or the e2e suite — not as diligence, not "just to be sure". The
+coordinator runs all four, **once, on the merged tree, before `git push` to `main`**,
+every time, including when every branch that went into it was green alone.
+
+That is not a weakening: the failure that bought this rule was a push to `main`, and there
+it binds exactly as hard as before. What comes off is a cost it never bought — and the
+cost is not small. 2026-08-12, three branches, each `ci-full` green on its own tree:
+`nocx-qduc`, `nocx-wwz0` and `nocx-dvql`+`nocx-5uu5`, about an hour of wall clock apiece.
+The merge of them was red twice, and neither defect could have been seen from any branch
+because neither existed on one: a struct literal in a test that predated a new required
+dependency (a nil dereference), and a test asserting a mechanism the merge had deleted,
+which had been green while asserting a value no local path read. The three per-branch full
+runs found nothing the merge run did not.
+
+Three costs, all measured the same afternoon, all invisible to the worker paying them. The
+containerized jobs serialize on one Docker daemon and one CPU, so parallel workers each
+running four jobs finish later than the same work run in sequence. They mount
+`node_modules` as named volumes with no worktree in the name, so concurrent runs break
+each other's dependency tree (`nocx-x6z3`) — measured as a pre-commit hook failing on a
+package another run was mid-install. And every host-side Go run writes to the developer's
+login keychain (`nocx-o4hg`), which on macOS is a modal dialog per backend start: a full
+gate per branch is also a dialog storm per branch.
+
+**When the merged gate goes red, send it back to the worker, do not fix it in the
+coordinator.** A worker is resumable and still holds why it wrote what it wrote; the
+coordinator would be re-deriving that from a diff. The exception is a defect that exists
+only in the merge — the two above were exactly that, and belonged to whoever resolved it.
+
+**They are not their counterparts in timing, and no setting will make them so.** Each of
+these scripts capped itself to the runner's 4 vCPU until 2026-08-11, on the argument that
+capacity was the last gap left. Two things were wrong with it. The first is the machine
+underneath, and it differs per image — read the file, not this paragraph:
+`.githooks/images/ci-linux` pins `--platform=linux/amd64` **to be** the runner, so on a
+Mac it runs emulated; `e2e/Dockerfile` pins no platform **deliberately**, so it builds for
+the host and runs native arm64 here and native amd64 on CI. Either way throttling to four
+cores does not produce the runner, it produces a third machine unlike either — `nocx-2h08`
+is one starved resource in `internal/transport` reporting a 30-second timeout under a
+different test name in every environment, including a run that was green on the runner and
+red here at the same commit. And the cap worked by keeping timing-dependent specs
+reproducible, which is what kept them alive.
+
+So the caps are off by default, and the rule that replaces them is the stronger one:
+**a test may not depend on timing.** Wait on an observable state change — a frame, a
+record, a DOM state — never on a duration. A spec that needs a slow machine to pass is
+broken on a fast one too; it has only not been caught yet. `NOCX_CI_CPUS` and
+`NOCX_E2E_CPUS` still cap on demand, for bisecting a suspected concurrency defect. That
+is a debugging tool, not the gate.
+
+**`backend` is the one job with no container, and it is the one place local and CI still
+disagree.** macos-latest is the target OS, so it cannot be containerized, and a developer
+Mac is not that runner: `internal/pty` hangs to its 600 s panic here while green there,
+and three tests in `internal/app` and `internal/git/local` fail here and pass there
+(nocx-58gq, nocx-65v6). Until those are closed, read a local `backend` red against that
+list before believing it — and never the other way round: CI is still the source of truth.
 
 **Take the merge slot before integrating into `main`**, and release it whether you succeed
 or not — a worker that forgets strands everyone behind it:

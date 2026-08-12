@@ -349,6 +349,15 @@ func reachJSONRPCCall(t *testing.T, conn *websocket.Conn, method string, params 
 	}
 }
 
+// reachOpenSSH opens the profile's session and returns the id plus the
+// refusal reason the product actually receives.
+//
+// The reason no longer rides the ack (nocx-dvql): it arrives on the
+// session.integrationChanged notification, which is what lets it be revised
+// later — a handshake that expires or a channel lost mid-session are both
+// after the ack, and a one-shot field could never report either. An empty
+// return still means "no refusal": a session that asked for integration and
+// has not failed reports `starting`, which carries no reason at all.
 func reachOpenSSH(t *testing.T, conn *websocket.Conn, enhanced bool) (sid string, reason string) {
 	t.Helper()
 	resp := reachJSONRPCCall(t, conn, "open", map[string]any{
@@ -357,8 +366,7 @@ func reachOpenSSH(t *testing.T, conn *websocket.Conn, enhanced bool) (sid string
 	})
 	var envelope struct {
 		Result struct {
-			SessionID              string `json:"sessionId"`
-			ShellIntegrationReason string `json:"shellIntegrationReason"`
+			SessionID string `json:"sessionId"`
 		} `json:"result"`
 		Error *struct {
 			Code    int    `json:"code"`
@@ -371,7 +379,43 @@ func reachOpenSSH(t *testing.T, conn *websocket.Conn, enhanced bool) (sid string
 	if envelope.Error != nil {
 		t.Fatalf("open failed: %d %s", envelope.Error.Code, envelope.Error.Message)
 	}
-	return envelope.Result.SessionID, envelope.Result.ShellIntegrationReason
+	return envelope.Result.SessionID, reachIntegrationReason(t, conn, envelope.Result.SessionID)
+}
+
+// reachIntegrationReason waits for the session's first integration status and
+// returns its reason. Read AFTER the ack, deliberately: AD-7 puts the ack
+// before any of the session's own traffic, so a status frame that overtook it
+// would address a session the renderer does not yet have.
+func reachIntegrationReason(t *testing.T, conn *websocket.Conn, sid string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(deadline)
+		mt, msg, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read integration status: %v", err)
+		}
+		if mt != websocket.TextMessage {
+			continue
+		}
+		var frame struct {
+			Method string `json:"method"`
+			Params struct {
+				SessionID string `json:"sessionId"`
+				Status    string `json:"status"`
+				Reason    string `json:"reason"`
+			} `json:"params"`
+		}
+		if err := json.Unmarshal(msg, &frame); err != nil {
+			continue
+		}
+		if frame.Method != "session.integrationChanged" || frame.Params.SessionID != sid {
+			continue
+		}
+		return frame.Params.Reason
+	}
+	t.Fatalf("no session.integrationChanged for %s: the refusal reason never reached the product", sid)
+	return ""
 }
 
 // reachWriteAndReadEcho round-trips one write through the real data plane:

@@ -65,6 +65,7 @@
 @import './styles/components/context-menu.css';
 @import './styles/components/file-viewer.css';
 @import './styles/surfaces/banner.css';
+@import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/settings.css';
 @import './styles/surfaces/backup-restore.css';

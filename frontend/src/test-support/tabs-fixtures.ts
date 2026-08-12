@@ -68,6 +68,8 @@ export interface RendererMock extends TerminalRenderer {
   _fireRecoveryFence(hex: string): void
   /** Fire a render-fence sighting (ADR-0024 §7 carve-out, u7uh.8). */
   _fireRenderFence(ev: RenderFenceEvent): void
+  /** Fire a keystroke reaching the grid in raw mode (nocx-yb5y). */
+  _fireData(data: string): void
 }
 
 /**
@@ -117,7 +119,15 @@ export function createRendererMock(): RendererMock {
     onClipboardWrite: vi.fn((cb: (text: string) => void) => {
       cbs.onClipboardWrite = cb
     }),
-    paste: vi.fn(),
+    // A paste IS input: xterm's term.paste() writes the payload (bracketed
+    // when the program asked for it) through the same onData every keystroke
+    // takes — which is how a submitted command reaches the pty at all. A mock
+    // that only recorded the call made the command invisible to anything
+    // watching onData, and hid a defect that put the command BEHIND the keys
+    // typed after it until the e2e suite found it (nocx-yb5y).
+    paste: vi.fn((text: string) => {
+      cbs.onData?.(text)
+    }),
     setReadOnly: vi.fn(),
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
@@ -174,6 +184,13 @@ export function createRendererMock(): RendererMock {
     _fireRenderFence(ev: RenderFenceEvent) {
       for (const sub of fenceSubs) sub(ev)
     },
+    /** A keystroke reaching the grid in raw mode — what xterm's onData
+     *  fires once stdin is enabled. The real renderer drops these while
+     *  disableStdin is set; the mock does not model that, so a test that
+     *  cares asserts on setReadOnly instead. */
+    _fireData(data: string) {
+      cbs.onData?.(data)
+    },
   }
   return mock as unknown as RendererMock
 }
@@ -194,8 +211,6 @@ export interface SessionFake {
   cwd: string
   /** The resolved destination mode from the open ack (nocx-mlm7). */
   desiredMode: DesiredMode
-  /** Why integration did not happen at open; empty = succeeded/never. */
-  shellIntegrationReason: '' | 'unsupported-shell' | 'no-secure-temp' | 'remote-command' | 'unknown'
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -220,7 +235,6 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     sessionId: `mock-sid-${++sessionCounter}`,
     cwd: FIXTURE_CWD,
     desiredMode: 'script',
-    shellIntegrationReason: '',
     send: vi.fn(),
     sendResize: vi.fn(),
     close: vi.fn(),
@@ -276,6 +290,24 @@ export interface ClientFake {
    *  the handler to deliver published facts (lifecycle.changed). */
   dispatcher: DispatcherFake
 }
+/** The handler a surface registered for one server-initiated method, so a
+ *  test can deliver a published fact through the REAL subscription seam
+ *  rather than reaching into the surface. Fails loudly when nothing
+ *  subscribed: a silent no-op would let a test pass over a subscription
+ *  that was never made, which is the defect class the lifecycle branch
+ *  already shipped once (a dropped subscription, found by diffing). */
+function notificationHandler(client: ClientFake, method: string): (params: unknown) => void {
+  const call = client.dispatcher.subscribe.mock.calls.find((c: unknown[]) => c[0] === method) as
+    [string, (params: unknown) => void] | undefined
+  if (!call) throw new Error(`nothing subscribed to ${method}`)
+  return call[1]
+}
+
+/** The session.integrationChanged handler (nocx-dvql). */
+export function integrationHandler(client: ClientFake): (params: unknown) => void {
+  return notificationHandler(client, 'session.integrationChanged')
+}
+
 /**
  * Create a fake WSClient whose openSession() returns a new makeSession()
  * on every call and records it in _sessions for test inspection.

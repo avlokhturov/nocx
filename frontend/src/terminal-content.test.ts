@@ -15,7 +15,7 @@
 // takes. The editor is reached through the same private-field escape hatch
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -34,6 +34,7 @@ import {
   makeClipboard,
   makeBanner,
   makeSession,
+  integrationHandler,
   type ClipboardFake,
   type ClientFake,
   type LiveContentHeightSpy,
@@ -362,7 +363,8 @@ describe('Escape with the editor visible but unfocused (focus-loss rescue)', () 
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
-      expect(session.send.mock.calls.length).toBe(1)
+      // The command and its '\r' — the paste is an onData too (nocx-yb5y).
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
 
       // A non-empty draft opens recall on Up-at-top; the overlay previews
       // the newest row into the editor.
@@ -520,7 +522,11 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       ed.show()
       ed.insertText('make deploy')
       key(view, { key: 'Enter' }) // the one legitimate send
-      expect(session.send.mock.calls.length).toBe(1)
+      // Two frames, in this order: the command through the renderer's paste
+      // (which is an onData like any keystroke) and then the '\r' the shell
+      // target appends. The renderer mock used to swallow the paste, so this
+      // read as one frame and the command was invisible here (nocx-yb5y).
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
       const sentBefore = session.send.mock.calls.length
       // The send payload is a string; String() gives the linter a typed value
       // without assuming the exact wire bytes (the '\r' the shell target
@@ -535,11 +541,13 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row
 
       key(view, { key: 'Enter' }) // accept — executes the previewed command
-      // One more send, and it is the SAME wire shape as the typed submit:
-      // the command went through the renderer paste handoff, '\r' through the
-      // session. No second route exists to assert against.
-      expect(session.send.mock.calls.length).toBe(sentBefore + 1)
-      expect(session.send).toHaveBeenLastCalledWith(sentShape)
+      // The same two frames again, in the same order and the same shapes as
+      // the typed submit: the recalled command takes the ordinary submit
+      // path, not a second route.
+      expect(session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])).toEqual([
+        'make deploy',
+        sentShape,
+      ])
       // `paste` is a method declaration on TerminalRenderer, so referencing it
       // detached trips unbound-method; the mock property type does not.
       const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
@@ -960,16 +968,19 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
 })
 
 describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
-  /** A client whose SSH open session carries the given destination mode. */
-  const clientWithPolicy = (
-    desiredMode: DesiredMode,
-    reason: SessionFake['shellIntegrationReason'] = '',
-  ): ClientFake =>
-    makeClient({
-      openSSHSession: vi.fn(() =>
-        Promise.resolve(makeSession({ desiredMode, shellIntegrationReason: reason })),
-      ),
+  /** A client whose SSH open session carries the given destination mode.
+   *  The refusal reason no longer rides the ack (nocx-dvql) — it arrives on
+   *  session.integrationChanged, which the integration tests drive. */
+  const clientWithPolicy = (desiredMode: DesiredMode): ClientFake => {
+    const client = makeClient({
+      openSSHSession: vi.fn(() => {
+        const s = makeSession({ desiredMode })
+        client._sessions.push(s)
+        return Promise.resolve(s)
+      }),
     })
+    return client
+  }
 
   const SSH = { profileId: 'ssh:test:1', host: 'test-host' }
 
@@ -1003,15 +1014,20 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
     }
   })
 
-  it('a launcher decline on a script profile shows the recovery action', async () => {
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { ssh: SSH },
-      clientWithPolicy('script', 'unsupported-shell'),
-    )
+  it('a launcher decline on a script profile leaves the mode script — the decline is a separate axis', async () => {
+    const client = clientWithPolicy('script')
+    const { content, teardown } = await mountTerminal(makeClipboard(), { ssh: SSH }, client)
     try {
       content.setVisible(true)
-      // The degrade warning fires; mode is script.
+      // The decline arrives on session.integrationChanged now (nocx-dvql),
+      // and it does NOT rewrite the resolved destination mode: the mode is
+      // what the connection asked for, the status is what happened.
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: 'auto',
+      })
       expect(content.policy).toBe('script')
     } finally {
       teardown()
@@ -1612,6 +1628,98 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('a receipt whose ack beats the render fence still lands, on the block it belongs to (nocx-ggha)', async () => {
+    const FENCE = 'c'.repeat(64)
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 1,
+          maskedKinds: ['openai'],
+          entryId: 'e-ggha',
+          redactions: [],
+          maskedCommand: 'echo sk-***',
+          captures: [
+            {
+              id: 'cap-1',
+              entryId: 'e-ggha',
+              suggestedName: 'openai-key',
+              redaction: { kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' },
+            },
+          ],
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('echo sk-proj-abcdef')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-g', state: 'open', origin: 'app', command: 'echo sk-proj-abcdef' },
+      })
+      // Completed WITH a fence that has not been sighted: the logical freeze
+      // lands now and the VISUAL one defers, so the element still reads
+      // cmd-block-running while the block is finished. This is the window
+      // the ack arrives in on a cold render.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-g',
+          state: 'completed',
+          exitCode: 0,
+          fence: FENCE,
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      const rec = withScrollback.scrollback.blockManager.blocks[0]
+      expect(rec.status).toBe('success')
+      expect(rec.el.classList.contains('cmd-block-running')).toBe(true)
+
+      // The ack lands here. It used to be refused for the class alone and
+      // dropped for good — no retry, nothing shown, nothing logged.
+      await vi.waitFor(() =>
+        expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(true),
+      )
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The fence lands and the visual freeze replaces the element. The
+      // receipt must be on the NEW element — the one the user is looking at.
+      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+      expect(rec.el.classList.contains('cmd-block-running')).toBe(false)
+      await vi.waitFor(() => expect(rec.el.querySelector('.ui-block-receipt')).not.toBeNull())
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('a submitted command freezes its block and persists history from the authenticated completion', async () => {
     const client = makeClient()
     const callMock = client.call
@@ -1917,6 +2025,101 @@ describe('the projections consume the kernel through the composition root (ADR-0
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(true)
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('the grid takes the keyboard in the same step the editor gives it up (nocx-yb5y)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const focusMock = (renderer as unknown as { focus: ReturnType<typeof vi.fn> }).focus
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      focusMock.mockClear()
+
+      // WRITABLE IS NOT ENOUGH — the grid must also be FOCUSED, and in the
+      // same synchronous step. The editor gives the keyboard up at commit
+      // (clearDoc → hide, and a display:none host drops the browser's focus
+      // to <body>), while at a live prompt the paste is deferred behind the
+      // lifecycle.submitAttempt round trip — and renderer.focus() used to
+      // ride along with it. For that whole round trip nobody owned the
+      // keyboard: keys went to <body> and were gone, with no editor to show
+      // them and no grid to send them.
+      //
+      // A user typing into a program that is already reading stdin loses the
+      // letters and keeps the Enter — so an ssh password prompt is answered
+      // with an empty line, silently (nocx-yb5y).
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(ed.isVisible).toBe(false)
+      // Synchronously: no await between the dispatch and this assertion, so
+      // the RPC cannot have resolved and this can only be the handoff.
+      expect(focusMock).toHaveBeenCalled()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      teardown()
+    }
+  })
+
+  it('keys typed while the command is still in flight reach the pty BEHIND it (nocx-yb5y)', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    try {
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+      session.send.mockClear()
+
+      ed.insertText('read x')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      // At a LIVE prompt the pty write waits on lifecycle.submitAttempt
+      // (ADR-0024 §5), while the keyboard changed hands at the commit. So
+      // this is a real window a user types into: `read` is what they are
+      // answering, and the answer must not arrive before the question.
+      renderer._fireData('h')
+      renderer._fireData('i')
+      renderer._fireData('\r')
+      // Held: not one byte of it has been sent yet.
+      expect(session.send).not.toHaveBeenCalled()
+
+      // The attempt settles, the command goes out, and what was typed
+      // behind it follows — in the order it was typed.
+      await vi.waitFor(() => expect(session.send).toHaveBeenCalled())
+      // The command FIRST, whole, then its '\r', then the answer somebody
+      // typed while it was in flight. The command travels through the
+      // renderer's paste (it owns bracketed-paste wrapping) and a paste is
+      // an onData, so it is subject to the same hold — which is why the
+      // hold is lifted before the write rather than after it.
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual([
+        'read x',
+        '\r',
+        'h',
+        'i',
+        '\r',
+      ])
+      // `paste` is a method declaration on TerminalRenderer, so referencing it
+      // detached trips unbound-method; the mock property type does not.
+      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
+      expect(pasteMock.paste).toHaveBeenCalledWith('read x')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       teardown()
@@ -2496,7 +2699,9 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         origin: 'app',
         startedAt: '2026-08-08T12:00:00Z',
       })
-      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+      )
     } finally {
       restoreScroll()
       teardown()
@@ -2566,7 +2771,12 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
         origin: 'app',
         startedAt: '2026-08-08T12:00:00Z',
       })
-      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual([
+          'make --token=SECRETVALUE',
+          '\r',
+        ]),
+      )
       const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
       expect(pasteMock.paste).toHaveBeenCalledWith('make --token=SECRETVALUE')
     } finally {
@@ -2599,7 +2809,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // The write goes out on the synchronous path and no attempt-open call
       // was ever made — nothing is fabricated for a conventional terminal.
       expect(submitAttempt).not.toHaveBeenCalled()
-      expect(session.send).toHaveBeenCalledTimes(1)
+      expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r'])
     } finally {
       restoreScroll()
       teardown()
@@ -2659,10 +2869,166 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       key(view, { key: 'Enter' })
 
       // Fail-open: the domain lost its prompt between the last fact and the
-      // Enter, the attempt was refused — and the command still runs.
-      await vi.waitFor(() => expect(session.send).toHaveBeenCalledTimes(1))
+      // Enter, the attempt was refused — and the command still runs, whole.
+      await vi.waitFor(() =>
+        expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
+      )
     } finally {
       restoreScroll()
+      teardown()
+    }
+  })
+})
+
+describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () => {
+  const TIMED_OUT = {
+    status: 'conventional',
+    reason: 'handshake-timeout',
+    shell: '/bin/bash',
+  } as const
+
+  /** The status the backend publishes, delivered through the real
+   *  subscription seam rather than reached for on the content object. */
+  const publish = (client: ClientFake, over: Record<string, unknown> = {}): void =>
+    integrationHandler(client)({
+      sessionId: client._sessions[0].sessionId,
+      ...TIMED_OUT,
+      ...over,
+    })
+
+  const cardIn = (tab: { pane: HTMLElement }) => tab.pane.querySelector('.nocx-integration-notice')
+
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  // The test the bead names, from the user's side: a session whose shell
+  // never completed the handshake is marked, and says why. Before this the
+  // product was silent for the whole life of the session.
+  it('marks the tab, with the reason in the mark', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) } },
+      client,
+    )
+    try {
+      publish(client)
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Not integrated'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // `starting` is the honest interval, not a failure: marking it would put a
+  // warning on every tab for its first seconds and teach the user that the
+  // mark means nothing.
+  it('does not mark a session that is still starting', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) } },
+      client,
+    )
+    try {
+      publish(client, { status: 'starting', reason: undefined })
+      expect(warnings.some(([w]) => w)).toBe(false)
+      expect(cardIn(tab)).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('raises the card once for a (shell, reason) pair and never again', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    try {
+      publish(clientA)
+      expect(cardIn(first.tab)).not.toBeNull()
+      expect(first.tab.pane.querySelector('.ui-status-card__title')!.textContent).toBe(
+        'Not integrated',
+      )
+    } finally {
+      first.teardown()
+    }
+
+    // A second tab, same shell, same reason: the badge is the standing
+    // signal and the card has already been read.
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB)
+      expect(cardIn(second.tab)).toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  // nocx-rzvq, measured by the owner on the installed build: the card floated
+  // over the terminal and covered the first prompt line. It now takes space
+  // from the top of the pane — the pane is a flex column and the card is its
+  // first child, so the scrollback is laid out in what is left rather than
+  // underneath it.
+  it('takes space above the terminal instead of covering it', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      publish(client)
+      const card = cardIn(tab)
+      const scrollback = tab.pane.querySelector('.scrollback-layout')
+      expect(card).not.toBeNull()
+      expect(scrollback).not.toBeNull()
+      expect(tab.pane.firstElementChild).toBe(card)
+      expect(card!.compareDocumentPosition(scrollback!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('raises the card again when the same shell fails a different way', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    try {
+      publish(clientA)
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(second.tab)).not.toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  // A session that never asked for integration receives no status at all,
+  // so there is nothing to draw and nothing to nag about.
+  it('shows nothing at all for a session that never reports a status', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(cardIn(tab)).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('drops the card when the session recovers', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      publish(client)
+      expect(cardIn(tab)).not.toBeNull()
+      publish(client, { status: 'integrated', reason: undefined })
+      expect(cardIn(tab)).toBeNull()
+    } finally {
       teardown()
     }
   })

@@ -1,0 +1,286 @@
+// @vitest-environment jsdom
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { mountIntegrationNotice } from './notice'
+import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
+
+// A test asserts what a user can do (AGENTS.md rule 1): the card exists, the
+// actions on it are reachable from the state the user starts in, activating
+// one reaches the handler, and the result appears afterwards. Everything here
+// goes through mountIntegrationNotice, which is the seam the tab uses — the
+// card's position in the pane is part of what the user gets, and a test that
+// rendered the component into a bare div could not see it.
+
+const TIMED_OUT: SessionIntegrationChanged = {
+  sessionId: 's1',
+  status: 'conventional',
+  reason: 'handshake-timeout',
+  shell: '/opt/homebrew/bin/bash',
+}
+
+const ZSH_TIMED_OUT: SessionIntegrationChanged = { ...TIMED_OUT, shell: '/bin/zsh' }
+
+let dispose: (() => void) | null = null
+let pane: HTMLElement | null = null
+
+afterEach(() => {
+  dispose?.()
+  dispose = null
+  pane?.remove()
+  pane = null
+  // A dialog left open in the top layer outlives the component's root.
+  document.querySelectorAll('dialog').forEach((d) => d.remove())
+})
+
+/** A stand-in for the tab's pane: the terminal is already in it, exactly as
+ *  it is when a status arrives seconds into a session. */
+function mount(over: Partial<Parameters<typeof mountIntegrationNotice>[1]> = {}) {
+  pane = document.createElement('div')
+  const terminal = document.createElement('div')
+  terminal.className = 'scrollback-layout'
+  pane.appendChild(terminal)
+  document.body.appendChild(pane)
+  const props = {
+    fact: TIMED_OUT,
+    copy: vi.fn(() => Promise.resolve()),
+    onSuppressShell: vi.fn(),
+    onDismiss: vi.fn(),
+    ...over,
+  }
+  dispose = mountIntegrationNotice(pane, props)
+  return { props, pane, terminal }
+}
+
+/** What the user can see and reach right now. Every dialog's markup is in
+ *  the document whether it is open or not (`showModal` is what makes one
+ *  visible), so a test that queried the whole document would pass on a panel
+ *  nobody opened — and would then be unable to report the two-clicks defect
+ *  it was written for. The innermost open dialog is the surface with the
+ *  user's attention; with none open that is the card in the pane. */
+const surface = (): ParentNode => {
+  const open = [...document.querySelectorAll('dialog[open]')]
+  return open[open.length - 1] ?? pane!.querySelector('.ui-status-card') ?? pane!
+}
+
+const button = (label: string): HTMLButtonElement => {
+  const found = [...surface().querySelectorAll('button')].find(
+    (b) => (b.textContent ?? '').trim() === label,
+  )
+  if (!found) throw new Error(`no button labelled ${label} on the visible surface`)
+  return found
+}
+
+const buttonLabels = (): string[] =>
+  [...surface().querySelectorAll('button')].map((b) => (b.textContent ?? '').trim())
+
+const visibleText = (): string => surface().textContent ?? ''
+
+const codeBlockText = (): string => surface().querySelector('.ui-code-block')?.textContent ?? ''
+
+describe('the degraded-session card', () => {
+  it('says what happened, in the agreed words, with no program named', () => {
+    const { pane } = mount()
+    const card = pane.querySelector('.ui-status-card')
+    expect(card).not.toBeNull()
+    expect(card!.getAttribute('data-tone')).toBe('warning')
+    expect(pane.querySelector('.ui-status-card__title')!.textContent).toBe('Not integrated')
+    expect(pane.querySelector('.ui-status-card__desc')!.textContent).toBe(
+      'Your shell did not answer nocx in time, so this tab is a plain terminal.',
+    )
+  })
+
+  // It is a kit component placed by the surface, never a hand-rolled div
+  // with its own colours — the defect two epics spent themselves unwinding.
+  it('is the kit StatusCard, not a private one', () => {
+    const { pane } = mount()
+    expect(pane.querySelector('.ui-status-card')).not.toBeNull()
+    expect(pane.querySelector('.nocx-integration-notice')).not.toBeNull()
+  })
+
+  it('dismisses when the user closes it', () => {
+    const { props } = mount()
+    button('×').click()
+    expect(props.onDismiss).toHaveBeenCalledOnce()
+  })
+})
+
+// ── where the card sits (nocx-rzvq) ───────────────────────────────────────
+//
+// Measured on the installed build: the card floated over the terminal and
+// covered the first prompt line. A card that hides the thing it describes is
+// worse than the toast it replaced. jsdom computes no layout, so this pins
+// what jsdom CAN see — the DOM order that puts the card above the terminal,
+// and the stylesheet contract that keeps it from lifting out of the flow.
+
+describe('where the card sits', () => {
+  it('goes above the terminal, not over it', () => {
+    const { pane, terminal } = mount()
+    const notice = pane.querySelector('.nocx-integration-notice')!
+    expect(pane.firstElementChild).toBe(notice)
+    // DOCUMENT_POSITION_FOLLOWING: the terminal comes after the card, so the
+    // card takes its space from the top of the pane instead of covering it.
+    expect(notice.compareDocumentPosition(terminal) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
+  it('gives the pane back to the terminal when it is dismissed', () => {
+    const { pane, terminal } = mount()
+    dispose!()
+    dispose = null
+    expect(pane.querySelector('.nocx-integration-notice')).toBeNull()
+    expect(pane.firstElementChild).toBe(terminal)
+  })
+
+  // The stylesheet half of the same guarantee: an absolutely positioned or
+  // z-indexed card is out of the flow, and out of the flow is exactly what
+  // covered the prompt line.
+  it('declares no rule that could lift it out of the flow', () => {
+    const css = readFileSync(
+      resolve(import.meta.dirname ?? '.', '../styles/surfaces/integration-notice.css'),
+      'utf8',
+    ).replace(/\/\*[\s\S]*?\*\//g, '')
+    const open = css.indexOf('.nocx-integration-notice')
+    expect(open).toBeGreaterThanOrEqual(0)
+    const block = css.slice(css.indexOf('{', open) + 1, css.indexOf('}', open))
+    expect(block).not.toMatch(/position\s*:/)
+    expect(block).not.toMatch(/z-index\s*:/)
+    // It never gives up its own height to the terminal: a card squeezed to
+    // nothing is the overlay defect wearing a different hat.
+    expect(block).toMatch(/flex\s*:\s*0\s+0\s+auto/)
+  })
+})
+
+// ── the fix (nocx-0mqs) ───────────────────────────────────────────────────
+
+describe('the fix', () => {
+  // The owner's measurement: reaching the fix took two clicks through the
+  // Details dialog. It is now the card's own action.
+  it('is one click from the card', () => {
+    mount()
+    // Nothing is on screen before the click: the panels exist in the DOM
+    // whether they are open or not, so "visible" is what this asserts.
+    expect(codeBlockText()).toBe('')
+    button('How to fix').click()
+    expect(codeBlockText()).toContain('NOCX_SHELL_INTEGRATION')
+  })
+
+  // The reader who went to Details first must not have to back out to reach
+  // it — the same fix, from the other route.
+  it('is reachable from the Details dialog too', () => {
+    mount()
+    button('Details').click()
+    button('How to fix').click()
+    expect(codeBlockText()).toContain('NOCX_SHELL_INTEGRATION')
+  })
+
+  // THE defect, from the user's side: a zsh session was shown a bash command
+  // line and told about ~/.bashrc, neither of which exists in that session.
+  it('is written for the shell the session is actually running', () => {
+    mount({ fact: ZSH_TIMED_OUT })
+    button('How to fix').click()
+    const shown = visibleText()
+    expect(shown).toContain('/bin/zsh')
+    expect(shown).toContain('~/.zshrc')
+    expect(shown).not.toMatch(/\bbash\b/)
+  })
+
+  it('copies the same lines the user was shown', () => {
+    const { props } = mount({ fact: ZSH_TIMED_OUT })
+    button('How to fix').click()
+    const shown = codeBlockText()
+    button('Copy').click()
+    expect(props.copy).toHaveBeenCalledOnce()
+    expect((props.copy as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(shown)
+  })
+
+  // What nocx observed belongs where the user is acting on it, labelled a
+  // guess in the sentence — the same sentence the Details chain shows, from
+  // the same function, so the two cannot claim it with different force.
+  it('says what nocx saw, labelled as a guess', () => {
+    mount({ fact: { ...ZSH_TIMED_OUT, detail: { observedProcess: 'some-tui' } } })
+    button('How to fix').click()
+    const shown = visibleText()
+    expect(shown).toContain('some-tui')
+    expect(shown.toLowerCase()).toContain('guess')
+  })
+
+  it('does not offer itself for a reason nocx cannot advise on', () => {
+    mount({ fact: { ...TIMED_OUT, reason: 'remote-command' } })
+    expect(buttonLabels()).not.toContain('How to fix')
+  })
+
+  // "Apply the fix for me" is nocx-cqkg and is deliberately NOT here: a
+  // button that edits the user's startup files needs a backup and a diff
+  // they approve first, which is a bead of its own.
+  it('offers no apply-it-for-me action', () => {
+    mount()
+    button('Details').click()
+    const labels = buttonLabels().map((l) => l.toLowerCase())
+    expect(labels.some((l) => l.includes('apply') || l.includes('fix it for me'))).toBe(false)
+  })
+})
+
+describe('the Details dialog', () => {
+  const openDetails = () => button('Details').click()
+
+  it('shows the chain of facts, starting with the shell nocx actually started', () => {
+    mount()
+    openDetails()
+    const items = [...document.querySelectorAll('.ui-marker-list__text')].map((n) =>
+      (n.textContent ?? '').trim(),
+    )
+    expect(items[0]).toBe('nocx started /opt/homebrew/bin/bash')
+    expect(items.some((t) => t.includes('plain terminal'))).toBe(true)
+    expect(items.some((t) => t.includes('never answered'))).toBe(true)
+  })
+
+  it('labels the observed process as a guess, in the sentence itself', () => {
+    mount({ fact: { ...TIMED_OUT, detail: { observedProcess: 'some-tui' } } })
+    openDetails()
+    const guess = [...document.querySelectorAll('.ui-marker-list__text')]
+      .map((n) => (n.textContent ?? '').trim())
+      .find((t) => t.includes('some-tui'))
+    expect(guess).toBeDefined()
+    expect(guess!.toLowerCase()).toContain('guess')
+  })
+
+  it('omits the guess entirely when the backend observed nothing', () => {
+    mount()
+    openDetails()
+    const texts = [...document.querySelectorAll('.ui-marker-list__text')].map((n) =>
+      (n.textContent ?? '').trim(),
+    )
+    expect(texts.some((t) => t.toLowerCase().includes('guess'))).toBe(false)
+  })
+
+  it('silences this shell when the user asks it to', () => {
+    const { props } = mount()
+    openDetails()
+    button("Don't show again for this shell").click()
+    expect(props.onSuppressShell).toHaveBeenCalledOnce()
+  })
+})
+
+// ── the explanation (nocx-qs68) ───────────────────────────────────────────
+
+describe('Learn more', () => {
+  // It used to open a GitHub blob URL, which 404s on a rename, a
+  // default-branch change or an aeroplane. The explanation now ships in the
+  // build, so it resolves wherever the app runs.
+  it('explains integration inside the app', () => {
+    mount()
+    button('Details').click()
+    button('Learn more').click()
+    expect(visibleText()).toContain('An integrated tab knows where each command starts and ends')
+  })
+
+  it('opens no browser and needs no network', () => {
+    const { props } = mount()
+    expect(Object.keys(props)).not.toContain('openUrl')
+    button('Details').click()
+    button('Learn more').click()
+    expect(document.querySelector('a[href]')).toBeNull()
+  })
+})

@@ -65,6 +65,11 @@ __nocx_lc_desynced=0
 __nocx_lc_frame=''
 __nocx_lc_lane_esc=''
 __nocx_lc_dom_esc=''
+# How this shell answers "is the channel readable right now, consuming
+# nothing" — resolved ONCE by __nocx_lc_resolve_probe, never per call. See it
+# for why the answer is per-bash-version and why it is cached.
+__nocx_lc_probe_mode=''
+__nocx_lc_probe_helper=''
 
 # JSON-escape one string into __nocx_lc_json_escaped. Backslash, quote and
 # the C0/DEL bytes JSON forbids are escaped; raw UTF-8 passes through (the
@@ -109,15 +114,94 @@ __nocx_lc_send() {
     builtin printf "\\$(printf '%03o' "$__b0")\\$(printf '%03o' "$__b1")\\$(printf '%03o' "$__b2")\\$(printf '%03o' "$__b3")%s" "$__json" >&"$__nocx_lc_fd" 2>/dev/null
 }
 
+# Decide, once per shell, how to ask "is the channel readable right now?"
+# without consuming a byte. Consuming is not allowed: the frame's 4-byte
+# length prefix is mostly NULs, `read` cannot hold a NUL, and dd must see the
+# prefix whole — a probe that took one byte would corrupt the frame it was
+# probing for.
+#
+#   builtin  bash 4.1+: `read -t 0 -N 0` is exactly this operation.
+#   helper   bash 3.2 (macOS's /bin/bash) has NO such operation at all —
+#            `-N` is 4.1+ and `-t 0` in 3.2 is a zero-second timeout, not a
+#            poll. perl's select() is, and perl is part of the macOS base
+#            system. Measured at 2ms per call, against ~2ms for the fence's
+#            own od+tr, and the child inherits the descriptor with no
+#            redirection (both measured on a real 3.2).
+#   none     neither: the channel cannot be read, so it is never activated
+#            and the session is a conventional terminal with its native
+#            prompt — the honest floor, reached on no machine this product
+#            ships to, and present so the refusal is stated rather than
+#            silent.
+#
+# Cached rather than re-tested per call because the shell's version is a
+# constant for the life of the process, and the refresh poll runs at EVERY
+# prompt — the user's critical path.
+#
+# This replaced the same `read -r -t 0 -N 0` inlined at three call sites,
+# which is how bash 3.2 came to hang its handshake in three places at once
+# (nocx-sw4p): the hello was sent, the accept could never be read, the domain
+# never activated, and every macOS bash session was a conventional terminal.
+__nocx_lc_resolve_probe() {
+    if (( ${BASH_VERSINFO[0]:-0} > 4 || (${BASH_VERSINFO[0]:-0} == 4 && ${BASH_VERSINFO[1]:-0} >= 1) )); then
+        __nocx_lc_probe_mode=builtin
+        return 0
+    fi
+    local __cand
+    for __cand in /usr/bin/perl perl; do
+        if command -v "$__cand" >/dev/null 2>&1; then
+            __nocx_lc_probe_helper="$__cand"
+            __nocx_lc_probe_mode=helper
+            return 0
+        fi
+    done
+    __nocx_lc_probe_mode=none
+    return 1
+}
+
+# Succeeds iff a byte is available on the channel right now. Consumes
+# nothing, blocks never — both arms are non-blocking by construction.
+#
+# The helper arm interpolates the descriptor NUMBER into a perl program, so
+# __nocx_lc_fd must be digits; __nocx_lc_init's config gate is what
+# guarantees that, and it is a hard requirement of this function rather than
+# a nicety.
+__nocx_lc_probe_readable() {
+    case "$__nocx_lc_probe_mode" in
+        builtin)
+            LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null
+            ;;
+        helper)
+            # The channel arrives on the helper's STDIN, via the same `<&$fd`
+            # redirection dd uses two functions down — NOT by letting the
+            # helper inherit the descriptor by number.
+            #
+            # That distinction is the whole correctness of this arm. A
+            # redirection DUPS, and a dup clears close-on-exec for the copy;
+            # plain inheritance does not, so a close-on-exec channel simply
+            # is not there in the helper. select() on a descriptor that is not
+            # open returns -1, which is indistinguishable from "no data" — the
+            # probe reports empty forever on a channel that has a frame
+            # waiting. Measured: the nested child's accept sat readable on fd
+            # 3 (dd took its 0000009b header immediately) while this arm
+            # answered "empty" four times a second (nocx-aupk).
+            #
+            # It also takes the descriptor number out of the helper's program
+            # text, so the poll cannot be shaped by the environment at all.
+            "$__nocx_lc_probe_helper" -e \
+                'vec($r,0,1)=1; exit(select($r,undef,undef,0)>0 ? 0 : 1)' \
+                <&"$__nocx_lc_fd" 2>/dev/null
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Wait for the transport to become readable, bounded by the handshake
 # timeout, consuming nothing. bash's `read` cannot hold NUL bytes, so the
-# binary length prefix must be read by dd|od instead. The bound is a poll:
-# `read -N 0` with a NONZERO `-t` returns immediately on an open fd
-# (verified empirically — it only detects EOF, so it cannot bound a silent
-# peer), while `read -t 0 -N 0` is a true non-blocking probe that succeeds
-# iff data is available right now. The sleep loop is the bound, and a
-# closed channel fails on the first probe instead of waiting it out
-# (fail-open, decision 3).
+# binary length prefix must be read by dd|od instead. The sleep loop is the
+# bound, and a closed channel fails on the first probe instead of waiting it
+# out (fail-open, decision 3).
 __nocx_lc_wait_readable() {
     # $1 = timeout in seconds (defaults to the handshake timeout). The
     # refresh poll passes a short bound: the prompt is the user's critical
@@ -129,7 +213,7 @@ __nocx_lc_wait_readable() {
     # a sleep, and a premature give-up.
     local __t="${1:-$__nocx_lc_timeout_s}" __round=0
     while :; do
-        if LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+        if __nocx_lc_probe_readable; then
             return 0 # data is available; the caller reads it
         fi
         (( __round >= __t )) && return 1 # the bound expired: fail open
@@ -190,7 +274,7 @@ __nocx_lc_ans_refresh() {
     if [[ "${__nocx_nested_active:-0}" == "1" ]]; then
         return 1
     fi
-    if ! LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+    if ! __nocx_lc_probe_readable; then
         return 1
     fi
     # A frame is buffered (the kernel writes each envelope in one write);
@@ -251,13 +335,24 @@ __nocx_lc_fence() {
 __nocx_lc_init() {
     local __cfg_ok=0
     __nocx_lc_active=0
+    # The descriptor and the port are DIGITS or they are nothing. Both come
+    # from the environment, and both are interpolated into something that
+    # executes: the descriptor into the probe helper's program text, the port
+    # into a /dev/tcp path. Every other field here was already pinned to a
+    # shape; these two were checked only for being non-empty.
     if [[ -n "$__nocx_cap" ]] && [[ "$__nocx_cap" =~ ^[0-9a-f]{64}$ ]] \
         && [[ -n "$__nocx_lc_lane" ]] && [[ -n "$__nocx_lc_dom" ]] \
         && [[ "$__nocx_lc_epoch" =~ ^[0-9]+$ ]] \
+        && [[ -z "$__nocx_lc_fd" || "$__nocx_lc_fd" =~ ^[0-9]+$ ]] \
+        && [[ -z "$__nocx_lc_port" || "$__nocx_lc_port" =~ ^[0-9]+$ ]] \
         && [[ -n "$__nocx_lc_fd" || -n "$__nocx_lc_port" ]]; then
         __cfg_ok=1
     fi
     if [[ "$__cfg_ok" != "1" ]]; then
+        return 1
+    fi
+    # Before the first read of any kind — __nocx_lc_read_frame below is one.
+    if ! __nocx_lc_resolve_probe; then
         return 1
     fi
     if [[ -n "$__nocx_lc_port" ]]; then
@@ -282,7 +377,16 @@ __nocx_lc_init() {
     __nocx_lc_lane_esc=$__nocx_lc_json_escaped
     __nocx_lc_json_escape "$__nocx_lc_dom"
     __nocx_lc_dom_esc=$__nocx_lc_json_escaped
-    __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"
+    # The bundle this shell was brought up from, so the backend can record
+    # which hosts carry an installation without guessing. Only the far side
+    # knows it: the publish prelude installs "v<version>" when it publishes
+    # and ADOPTS whatever the manifest names when a newer bundle is already
+    # there. Escaped rather than trusted — the launcher's own value is a
+    # validated safe name, but NOCX_GENERATION is an ordinary environment
+    # variable and anyone can set it before starting a shell.
+    __nocx_lc_json_escape "${NOCX_GENERATION-}"
+    __nocx_lc_gen_esc=$__nocx_lc_json_escaped
+    __nocx_lc_send hello ',"shell":"bash","max_frame":'"$__nocx_lc_max_frame"',"gen":"'"$__nocx_lc_gen_esc"'"'
     if ! __nocx_lc_read_frame; then
         return 1
     fi
@@ -320,6 +424,10 @@ __nocx_nested_env=
 __nocx_nested_host=
 __nocx_nested_user=
 __nocx_nested_port=0
+# The ssh options the detector collected, in the order they were typed
+# (nocx-c6z0). An array, because each token is one argv entry on the user's
+# side and must stay one on the far side of the wire.
+__nocx_nested_opts=()
 __nocx_grant_bootstrap=
 __nocx_nested_rc=
 # Bounds the grant wait: the grant is composed synchronously by the backend
@@ -337,6 +445,57 @@ fi
 # decoding failure corrupts the rcfile, which makes the child conventional —
 # the safe direction — so the decoder is best-effort by construction.
 __nocx_lc_json_unescape() {
+    # bash 3.2's ${var//pattern/replacement} is quadratic, and this decodes a
+    # whole rcfile: measured 4655ms for 22 KiB against 8ms on bash 5, a factor
+    # of 580, and the grant is larger than that. That is not a slow prompt, it
+    # is a nested launch that misses its window — the user types `sudo -i` and
+    # watches a frozen terminal while the shell decodes (nocx-aupk). Same
+    # shape as nocx-beib, where a `${frame##*...}` scan cost 1.65s per
+    # expansion; different string operation, same cliff.
+    #
+    # The helper resolved for the readable-probe decodes it in one pass
+    # instead. The condition is the same condition — this bash is a 3.2 — so
+    # it is read off the same latch rather than tested twice.
+    if [[ "$__nocx_lc_probe_mode" == "helper" ]]; then
+        __nocx_lc_json_unescape_helper "$1" && return 0
+        # Falling through on helper failure is deliberate: a corrupted decode
+        # makes the child conventional, which is the safe direction, but a
+        # SLOW correct decode is better than a wrong one.
+    fi
+    __nocx_lc_json_unescape_native "$1"
+}
+
+# One left-to-right pass, which is also what makes it correct: a lone `\\`
+# followed by `u0041` is a literal backslash then the text "u0041", and any
+# decoder that resolves \uXXXX in a separate earlier pass gets that wrong.
+# The trailing sentinel survives command substitution's newline stripping —
+# the bootstrap legitimately ends in a newline, and losing it truncates the
+# rcfile's last line.
+__nocx_lc_json_unescape_helper() {
+    local __out
+    # The program is q{}/qq{} throughout so it can live inside a shell
+    # single-quoted string without a quote of its own: one stray ' would end
+    # the shell quoting and the rest would be parsed as shell.
+    __out="$(
+        builtin printf '%s' "$1" | "$__nocx_lc_probe_helper" -e '
+            local $/; my $s = <STDIN>;
+            my %m = (q{"},q{"}, q{\\},q{\\}, q{/},q{/}, q{b},qq{\b}, q{f},qq{\f},
+                     q{n},qq{\n}, q{r},qq{\r}, q{t},qq{\t});
+            $s =~ s{\\(?:u([0-9a-fA-F]{4})|(.))}
+                   {defined $1 ? chr(hex $1) : (exists $m{$2} ? $m{$2} : $2)}gse;
+            utf8::encode($s) if utf8::is_utf8($s);
+            print $s, qq{\1};
+        ' 2>/dev/null
+    )" || return 1
+    case "$__out" in
+        *$'\1') : ;;
+        *) return 1 ;; # no sentinel: the helper died mid-write
+    esac
+    __nocx_lc_json_unescaped="${__out%$'\1'}"
+    return 0
+}
+
+__nocx_lc_json_unescape_native() {
     local s="$1" LC_ALL=C hex oct
     # Protect literal backslashes (\\ in JSON) before the single-char
     # escapes: a literal backslash must not be consumed by the \" or \n
@@ -375,7 +534,7 @@ __nocx_lc_read_grant() {
     __nocx_grant_bootstrap=
     __nocx_grant_env=
     while (( __t < __nocx_lc_grant_timeout_s )); do
-        if ! LC_ALL=C IFS= read -r -t 0 -N 0 <&"$__nocx_lc_fd" 2>/dev/null; then
+        if ! __nocx_lc_probe_readable; then
             sleep 1
             __t=$(( __t + 1 ))
             continue
@@ -454,23 +613,43 @@ __nocx_nested_detect() {
     if [[ "$__line" =~ ^ssh([[:space:]]+.*)?$ ]] && [[ "$__line" != *[\;\|\&\<\>\`]* ]]; then
         local -a __toks
         read -r -a __toks <<< "$__line"
-        local __i __tok __dest="" __skip=0 __want_port=0
+        local __i __tok __dest="" __skip=0 __want_port=0 __want_opt=0
+        # The options are COLLECTED, not merely tolerated. The backend
+        # rebuilds the command line from what this sends, so an option that
+        # is recognised here and not carried is an option the user typed and
+        # the shell then ran without: `ssh -i ~/.ssh/prod -J bastion host`
+        # went out as a bare `ssh host`, with the block still showing the
+        # line they typed (nocx-c6z0).
+        #
+        # -p is not collected because it is modelled as the port, and -t/-tt
+        # are not because the composer adds its own -t and ssh reads a second
+        # one as -tt — a different request from the one the user made.
+        __nocx_nested_opts=()
         for ((__i = 1; __i < ${#__toks[@]}; __i++)); do
             __tok="${__toks[$__i]}"
             if (( __skip )); then
                 (( __want_port )) && __nocx_nested_port="$__tok"
+                (( __want_opt )) && __nocx_nested_opts[${#__nocx_nested_opts[@]}]="$__tok"
                 __want_port=0
+                __want_opt=0
                 __skip=0
                 continue
             fi
             case "$__tok" in
-                -t|-tt|-4|-6|-v|-C|-x|-X) : ;;
+                -t|-tt) : ;;
+                -4|-6|-v|-C|-x|-X) __nocx_nested_opts[${#__nocx_nested_opts[@]}]="$__tok" ;;
                 -p) __skip=1; __want_port=1 ;;
-                -l|-o|-i|-F|-J|-e|-b|-c|-m) __skip=1 ;;
+                -l|-o|-i|-F|-J|-e|-b|-c|-m)
+                    __nocx_nested_opts[${#__nocx_nested_opts[@]}]="$__tok"
+                    __skip=1; __want_opt=1 ;;
                 -*) return 1 ;; # an option we do not model: refuse
                 *) [[ -n "$__dest" ]] && return 1; __dest="$__tok" ;;
             esac
         done
+        # An option whose argument never arrived (`ssh -i` and nothing after
+        # it) is a line ssh itself would refuse. Refusing it here keeps the
+        # collected list and the typed line the same thing.
+        (( __skip )) && return 1
         [[ -z "$__dest" ]] && return 1
         if [[ "$__dest" =~ ^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+(:[0-9]+)?$ ]]; then
             local __h="${__dest##*@}"
@@ -499,6 +678,23 @@ __nocx_nested_launch() {
         __extra+=',"host":"'"$__nocx_nested_host"'"'
         [[ -n "$__nocx_nested_user" ]] && __extra+=',"user":"'"$__nocx_nested_user"'"'
         (( __nocx_nested_port != 0 )) && __extra+=',"port":'"$__nocx_nested_port"
+        # The options the user typed, so the composer can rebuild the line
+        # they actually asked for (nocx-c6z0). Escaped one token at a time:
+        # an ssh option argument is an arbitrary path or config string, and
+        # the composer shell-quotes each one on the far side.
+        #
+        # The ${#arr[@]} guard is not decoration: under `set -u`, bash 3.2 —
+        # still /bin/bash on macOS — treats an EMPTY array expansion as an
+        # unbound variable, so the loop below must not be reached at all when
+        # nothing was collected.
+        if (( ${#__nocx_nested_opts[@]} > 0 )); then
+            local __opt __opts_json=''
+            for __opt in "${__nocx_nested_opts[@]}"; do
+                __nocx_lc_json_escape "$__opt"
+                __opts_json+=',"'"$__nocx_lc_json_escaped"'"'
+            done
+            __extra+=',"opts":['"${__opts_json#,}"']'
+        fi
     fi
     __nocx_lc_send domain_request ",$__extra" || return 1
     if ! __nocx_lc_read_grant "$__rid"; then
@@ -543,10 +739,17 @@ __nocx_nested_launch() {
         # read end via /dev/fd/N — an OPEN never sets CLOEXEC, where a dup
         # (N<&src) preserves the source's. A busy user fd is never clobbered
         # (the /dev/fd check first).
+        # The `coproc NAME { ...; }` form is bash 4.0+ SYNTAX, and a version
+        # test cannot guard syntax: bash parses a function body whole before
+        # it runs a line of it, so 3.2 rejected the file at this token and
+        # every shell on macOS started with no integration at all. It is
+        # `eval`ed for that reason and no other — the string is parsed only
+        # when this branch is actually taken, which 3.2 never does. Same rule
+        # for `exec {var}>&-` below (bash 4.1+).
         __nocx_stage_ok=0
         __nocx_boot_fd=0
         if (( ${BASH_VERSINFO[0]:-0} > 4 || (${BASH_VERSINFO[0]:-0} == 4 && ${BASH_VERSINFO[1]:-0} >= 1) )); then
-            coproc __nocx_boot { builtin printf '%s' "$__nocx_grant_bootstrap" 2>/dev/null; }
+            eval "coproc __nocx_boot { builtin printf '%s' \"\$__nocx_grant_bootstrap\" 2>/dev/null; }"
             for __nocx_cand in 4 5 6 7 8 9; do
                 if [[ ! -e /dev/fd/$__nocx_cand ]]; then
                     case $__nocx_cand in
@@ -562,7 +765,7 @@ __nocx_nested_launch() {
                         # the child — then wait for the writer: the pipe is
                         # complete before the child ever reads it.
                         __nocx_boot_w="${__nocx_boot[1]}"
-                        exec {__nocx_boot_w}>&-
+                        eval 'exec {__nocx_boot_w}>&-'
                         wait "$__nocx_boot_PID" 2>/dev/null
                         __nocx_stage_ok=1
                     fi
@@ -734,12 +937,31 @@ __nocx_prompt_command() {
     # nested child whose command the DEBUG trap skipped leaves $? = 0 (the
     # skip is not the child's exit); the child's real status was captured
     # right after the launch and overrides here.
-    local __nocx_exit=$?
+    #
+    # THESE TWO LINES ARE ORDERED, and the order is the fix for nocx-678o.
+    # extdebug makes the DEBUG trap fire inside functions, so it fires for
+    # every line of this one — and the wrapper suppresses that with two
+    # guards: the command text starting `__nocx_`, and __nocx_in_prompt_command.
+    # The capture used to be `local __nocx_exit=$?`, which satisfies NEITHER:
+    # its text begins with `local`, and the flag was set four lines further
+    # down. That leaves exactly one unguarded command at the top of the prompt
+    # cycle, and one moment where the C-marker latch is still armed — after an
+    # INTERRUPT, where the user ran nothing and __nocx_precmd armed the latch
+    # at the previous prompt. So Ctrl-C at a prompt announced nocx's own line
+    # to the kernel as the user's command: an OSC 133 C, a `start` naming
+    # `local __nocx_exit=$?`, and a `complete` carrying SIGINT's 130.
+    # Reproduced identically on bash 3.2 and 5.x.
+    #
+    # A global for the capture, so its own text matches the `__nocx_*` skip;
+    # the flag goes up immediately after, so everything below is covered by
+    # the flag instead. `local` cannot come first: it would reset $?.
+    __nocx_prompt_exit=$?
+    __nocx_in_prompt_command=1
+    local __nocx_exit=$__nocx_prompt_exit
     if [[ -n "${__nocx_nested_rc:-}" ]]; then
         __nocx_exit=$__nocx_nested_rc
         __nocx_nested_rc=
     fi
-    __nocx_in_prompt_command=1
     # --- Authenticated channel: activate, refresh, complete, fence, prompt_ready ---
     if [[ "${__nocx_lc_active:-0}" == "1" ]]; then
         # The child closed (the parent was blocked inside the launch); the
@@ -1029,7 +1251,50 @@ __nocx_gen_nonce() {
         builtin printf '%04x%04x%04x%04x' "$RANDOM" "$RANDOM" "$RANDOM" "$RANDOM"
     fi
 }
-__nocx_snapshot_nonce="$(__nocx_gen_nonce)"
+# ONCE PER SHELL, NOT ONCE PER SOURCE — the same rule, and the same reason,
+# as __nocx_snapshot_wait_ms one screen above.
+#
+# The launcher rcfile deliberately unsets __nocx_loaded and sources this
+# script a second time, so the session's authenticated copy installs over the
+# installer-era one the user's ~/.bashrc already sourced. That is EVERY local
+# enhanced session, not an edge case. Minting a fresh nonce on the second
+# pass emitted a SECOND hello, and the renderer's forgery defence is
+# "exactly one hello per session" (command-snapshot.ts): it keeps the first
+# nonce and discards the second. The snapshot is then emitted from a prompt
+# carrying the second nonce, fails the match, and is discarded — so the store
+# stays `unavailable` for the life of the session and command completion
+# never learns a single command name. Observed directly: two H frames with
+# different nonces, then one 6699-byte S frame that no longer matched.
+#
+# The renderer is right and is not the place to fix it — accepting a re-hello
+# is exactly the re-anchoring the rule exists to prevent. The script simply
+# must not claim to be a new session when it is the same shell.
+#
+# `__nocx_loaded` cannot serve as the latch: the rcfile unsets it on purpose,
+# which is what makes the second pass happen at all.
+#
+# The latch is the PID, not merely the nonce's presence, and that distinction
+# is load-bearing. "Is the variable set" cannot tell a RE-SOURCE from an
+# INHERITED value, and the two need opposite answers: a re-source must stay
+# quiet, a child shell must announce itself. A nonce that leaked into the
+# environment — a user rc under `set -a` auto-exports every assignment, which
+# is the hazard the `export -n` below exists for — would otherwise silence a
+# legitimately new session for good: no hello, so no snapshot is ever
+# accepted, and completion is dead with nothing said. Measured, on a child
+# shell started with the nonce exported: zero hello frames, zero snapshots.
+#
+# That would also be a fail-CLOSED degrade, which is the wrong direction
+# everywhere else in this file. $$ is the shell's own pid and differs in any
+# child, so a child mints its own nonce however it inherited the variable,
+# and a re-source of the same shell does not.
+if [[ "${__nocx_snapshot_owner:-}" != "$$" ]] || [[ -z "${__nocx_snapshot_nonce:-}" ]]; then
+    __nocx_snapshot_nonce="$(__nocx_gen_nonce)"
+    __nocx_snapshot_owner=$$
+    __nocx_snapshot_announce=1
+else
+    __nocx_snapshot_announce=0
+fi
+export -n __nocx_snapshot_owner
 # A user rc running under `set -a` would auto-export every assignment,
 # publishing the nonce in /proc/<pid>/environ; drop the export attribute
 # explicitly (the nonce is assigned exactly once, so this sticks).
@@ -1041,9 +1306,17 @@ export -n __nocx_snapshot_nonce
 # start (no create-then-chmod window) with O_EXCL (no symlink pre-emption).
 # The atomic mv to the .snap name below is what tells a later prompt the
 # payload is complete; the .snap name inherits the staging file's 600 mode.
-__nocx_snap_staging="$(mktemp "${TMPDIR:-/tmp}/nocx-snap.XXXXXX" 2>/dev/null)"
-__nocx_snap_file="${__nocx_snap_staging:+${__nocx_snap_staging}.snap}"
-__nocx_snapshot_done=0
+#
+# Staged once per shell for the same reason as the nonce, and this half
+# matters independently: a second mktemp would repoint __nocx_snap_file at a
+# name the FIRST pass's background job is never going to write, so even a
+# correctly-nonced snapshot would never be found at a prompt — and the first
+# staging file would leak, because the EXIT trap only knows the latest name.
+if (( __nocx_snapshot_announce )); then
+    __nocx_snap_staging="$(mktemp "${TMPDIR:-/tmp}/nocx-snap.XXXXXX" 2>/dev/null)"
+    __nocx_snap_file="${__nocx_snap_staging:+${__nocx_snap_staging}.snap}"
+    __nocx_snapshot_done=0
+fi
 
 # How long the FIRST prompt waits for the source-time snapshot job before
 # degrading to the later-prompt schedule. 250 ms: fast when compgen is local,
@@ -1226,19 +1499,26 @@ __nocx_snapshot_emit() {
 # above was made cheap: bash idle in readline runs no traps, so a job that
 # misses this window waits for a prompt a fresh tab may never produce
 # (nocx-z9s9.16).
-( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
-    >| "$__nocx_snap_staging" 2>/dev/null \
-    && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
-__nocx_snap_job=$!
-# Record the job's identity for the EXIT trap (PID + start time), then
-# disown: without disown, bash prints "[N]+ Done ( compgen ... )" — the
-# job's implementation, verbatim — into the user's output when it finishes.
-# Only OUR job is disowned, so no other job loses its notification.
-__nocx_snap_lstart="$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')"
-disown "$__nocx_snap_job" 2>/dev/null
+#
+# Both the job and the hello are gated on the once-per-shell latch: a second
+# source must not start a second enumeration, and must not announce a session
+# that has already been announced. See the latch's own comment for what the
+# second hello cost.
+if (( __nocx_snapshot_announce )); then
+    ( compgen -c 2>/dev/null | LC_ALL=C sort -u | __nocx_snapshot_build \
+        >| "$__nocx_snap_staging" 2>/dev/null \
+        && mv -f "$__nocx_snap_staging" "$__nocx_snap_file" ) &
+    __nocx_snap_job=$!
+    # Record the job's identity for the EXIT trap (PID + start time), then
+    # disown: without disown, bash prints "[N]+ Done ( compgen ... )" — the
+    # job's implementation, verbatim — into the user's output when it finishes.
+    # Only OUR job is disowned, so no other job loses its notification.
+    __nocx_snap_lstart="$(ps -o lstart= -p "$__nocx_snap_job" 2>/dev/null | tr -s ' ')"
+    disown "$__nocx_snap_job" 2>/dev/null
 
-# Announce the session nonce before the first prompt.
-builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"
+    # Announce the session nonce before the first prompt.
+    builtin printf '\e]636;H;%s\a' "$__nocx_snapshot_nonce"
+fi
 
 # Restore a visible native prompt. Real caller: the prompt-boundary arm's
 # recovered branch (ADR-0024 decision 8) — after the lifecycle channel dies

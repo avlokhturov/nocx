@@ -167,6 +167,11 @@ type WSServer struct {
 	// the footprint surface answers an empty list (the P7 observation RPC
 	// that used to write it was severed — ADR-0024 §1).
 	installedFacts *ssh.InstalledFactStore
+	// installedFactSeen bounds the write to once per domain: a lane
+	// publishes a fact at every prompt, and the installation it reports does
+	// not change while the shell that reported it is alive.
+	installedFactMu   sync.Mutex
+	installedFactSeen map[string]struct{}
 
 	// remoteUninstaller removes the integration bundle on a remote host,
 	// owning the dial-and-call (P10). Wired through WithRemoteUninstaller;
@@ -363,6 +368,22 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// integrations is the per-session integration axis published as
+	// session.integrationChanged (nocx-dvql, ws_integration.go). Separate
+	// from lifecycleLanes because it answers a different question: that map
+	// says which session a DOMAIN belongs to, this one says what the
+	// SESSION's launch started and how far it got.
+	integrationMu sync.Mutex
+	integrations  map[session.ID]*integrationStatus
+	// bootstrapStages is how far each session's shell got through nocx's
+	// rcfile (nocx-yww2). Its own map rather than a field of
+	// integrationStatus, because the two arrive in an order nothing
+	// controls: the shell can write its first fact microseconds after the
+	// fork, while the launch registers the axis only once the pty is back.
+	// A stage folded into the status would be dropped for arriving early,
+	// and the failure it explains is exactly the one where the shell was
+	// fast and then vanished.
+	bootstrapStages map[session.ID]string
 	// recoveryMu guards recoveries: the per-session restoration episodes
 	// (ADR-0024 decision 8). The episode opens when a lost fact with a
 	// recovery fence routes to a live session, and is cancelled when the
@@ -1845,6 +1866,23 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 		// The frame is dropped — and the tab is TOLD, because input
 		// that silently disappears is indistinguishable from a terminal
 		// that ignores you.
+		// The data plane's arrival log. Debug, so it costs nothing until
+		// somebody asks — and somebody does: "were the keystrokes sent at
+		// all, or did the renderer swallow them?" is the first question of
+		// every input-routing defect, and without this it can only be
+		// guessed at from the far side of the socket.
+		//
+		// This is the one plane carrying exactly what the user typed, so it
+		// carries their passwords: every password for a host nocx holds no
+		// credentials for is typed into a running ssh and arrives here as an
+		// ordinary frame. log.Sensitive is what decides whether the bytes
+		// reach a file — shown in a development build, redacted to a length
+		// in a shipped one — and that decision is the logger's, not this
+		// call site's, precisely so no call site can get it wrong.
+		s.log.Debug("data frame",
+			"session_id", string(sid),
+			"bytes", len(frame.Payload),
+			"payload", log.Sensitive(frame.Payload))
 		if !sess.EnqueueWrite(frame.Payload) {
 			s.log.Warn("session write queue full or closed, dropping frame",
 				"session_id", string(sid))
@@ -1965,6 +2003,26 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	s.removeRx(sess.ID())
 	_ = s.registry.Close(sess.ID())
 
+	// The two responsibilities this path used to drop. closeSession has had
+	// both since it was written; monitorExit is the OTHER teardown owner and
+	// carried neither, so everything below held only for a session the user
+	// closed by hand and not for one whose shell simply exited — which is
+	// the ordinary way a session ends.
+	//
+	// cancelRecovery: protocol §12.1 says that when the pty/SSH channel's
+	// Done() closes the session is dead, and the backend must "cancel any
+	// pending restoration, reject late acknowledgements ... and make no
+	// restoration claim". Without this an episode opened moments earlier
+	// outlived the session, so a late lifecycle.recoverAck could still be
+	// accepted for a lane whose shell was gone.
+	//
+	// unregisterLifecycleLanes: without it the lane→session map kept an
+	// entry per dead session for the life of the process, and PublishLifecycle
+	// went on resolving that lane to a session nobody can reach.
+	s.cancelRecovery(sess.ID())
+	s.unregisterLifecycleLanes(sess.ID())
+	s.unregisterIntegration(sess.ID())
+
 	// Port discovery (nocx-wzc4.2): if this was the last session on its
 	// profile, forget the target and release its lease.
 	s.discoverySessionClosed(sess)
@@ -2044,6 +2102,7 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	s.filesSessionClosed(sid)
 	s.gitSessionClosed(sid, wconn)
 	s.unregisterLifecycleLanes(sid)
+	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)
 }
 

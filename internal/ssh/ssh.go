@@ -81,6 +81,30 @@ const (
 	ReasonUnsupportedShell RefusalReason = "unsupported-shell"
 	ReasonNoSecureTemp     RefusalReason = "no-secure-temp"
 	ReasonRemoteCommand    RefusalReason = "remote-command"
+	// ReasonHandshakeTimeout means the shell never completed the
+	// authenticated handshake inside lifecycle.HelloTimeout (ADR-0024
+	// decision 3): the transport was established and the shell either never
+	// connected or never sent an acceptable hello. It is the dominant local
+	// failure and could not be reported at all before nocx-dvql, because the
+	// only channel for a reason was the session-open ack and this answer
+	// arrives ten seconds after it.
+	ReasonHandshakeTimeout RefusalReason = "handshake-timeout"
+	// ReasonStartupDidNotReturn means the shell started, nocx's rcfile began
+	// executing, and the user's own startup file never gave control back —
+	// so the install line after it was never reached (nocx-yww2). It is a
+	// STAGE, deliberately not a cause: `exec` into a foreign terminal
+	// wrapper is the case that was measured, but a plain `exit`, a
+	// `tmux attach` that never returns, a keychain dialog and a shell that
+	// crashed produce exactly the same fact, and naming any one of them
+	// would be a guess dressed as a diagnosis. Before this, every one of
+	// them was ReasonHandshakeTimeout, which says only that ten seconds
+	// passed.
+	ReasonStartupDidNotReturn RefusalReason = "startup-did-not-return"
+	// ReasonChannelLost means the session WAS integrated and is not any
+	// more: the authenticated channel ended mid-session (ADR-0024 decision
+	// 8). Distinct from every reason above, all of which describe a session
+	// that never integrated at all.
+	ReasonChannelLost RefusalReason = "channel-lost"
 	// ReasonUnknown means integration did not happen and the backend cannot
 	// say why — the remoteLauncherAdapter's fail-open for a refusal reason
 	// the ssh vocabulary does not yet know (nocx-axpz). It is a distinct

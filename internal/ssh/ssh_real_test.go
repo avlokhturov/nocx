@@ -66,6 +66,39 @@ type testSSHServer struct {
 	// registers from the accept loop while a test may kill concurrently).
 	liveMu    sync.Mutex
 	liveConns map[*gossh.ServerConn]struct{}
+
+	// logMu guards every call this server's GOROUTINES make into t, and
+	// `over` says the test that owns that t has finished. See logf.
+	logMu sync.Mutex
+	over  bool
+}
+
+// logf is the only way a server goroutine may reach *testing.T, and the lock
+// is what makes it legal.
+//
+// The server's goroutines outlive their test by design: serving is sequential
+// so acceptLoop stays parked in Accept, and a probe whose host key was
+// rejected leaves gossh.NewServerConn mid-handshake on a connection the
+// client has already dropped. close() only closed the LISTENER, so that
+// handshake went on to fail and log its error into a t whose test had
+// returned — which the race detector reports (correctly) as a write/read race
+// against tRunner's completion, and which fails the whole package under
+// -race while no test reports a failed assertion (nocx-9y7z).
+//
+// The guarantee is an interval, not an instant: close() takes this lock and
+// sets `over` before it returns, so a logf already inside the lock finishes
+// first and no later one can start. Every test closes its server with a defer
+// (and t.Cleanup covers a test that forgets), and a deferred call runs before
+// tRunner marks the test done. Nothing is silenced while the test is live —
+// which is the point, since these four messages are how a handshake failure
+// explains itself.
+func (s *testSSHServer) logf(format string, args ...any) {
+	s.logMu.Lock()
+	defer s.logMu.Unlock()
+	if s.over {
+		return
+	}
+	s.t.Logf(format, args...)
 }
 
 // setExecHandler installs the scripted exec responder. Call before the
@@ -171,6 +204,10 @@ func startTestSSHServer(t *testing.T) *testSSHServer {
 		liveConns:     make(map[*gossh.ServerConn]struct{}),
 	}
 
+	// The server outlives the test's body but not its t: close() ends the
+	// interval in which its goroutines may log (see logf). Registered here as
+	// well as deferred by each test, so a test that forgets is still safe.
+	t.Cleanup(srv.close)
 	go srv.acceptLoop(config)
 	return srv
 }
@@ -210,6 +247,10 @@ func startTestSSHServerWithUserKey(t *testing.T, userKey gossh.Signer) *testSSHS
 		liveConns:     make(map[*gossh.ServerConn]struct{}),
 	}
 
+	// The server outlives the test's body but not its t: close() ends the
+	// interval in which its goroutines may log (see logf). Registered here as
+	// well as deferred by each test, so a test that forgets is still safe.
+	t.Cleanup(srv.close)
 	go srv.acceptLoop(config)
 	return srv
 }
@@ -233,7 +274,7 @@ func (s *testSSHServer) acceptLoop(config *gossh.ServerConfig) {
 func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	sshConn, chans, reqs, err := gossh.NewServerConn(conn, config)
 	if err != nil {
-		s.t.Logf("test server handshake: %v", err)
+		s.logf("test server handshake: %v", err)
 		_ = conn.Close()
 		return
 	}
@@ -262,14 +303,14 @@ func (s *testSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 			sessions++
 			ch, reqs, err := newChan.Accept()
 			if err != nil {
-				s.t.Logf("test server accept channel: %v", err)
+				s.logf("test server accept channel: %v", err)
 				return
 			}
 			go s.handleSession(ch, reqs)
 		case "direct-tcpip":
 			ch, reqs, err := newChan.Accept()
 			if err != nil {
-				s.t.Logf("test server accept direct-tcpip: %v", err)
+				s.logf("test server accept direct-tcpip: %v", err)
 				continue
 			}
 			go s.handleDirectTCPIP(ch, reqs, newChan.ExtraData())
@@ -387,7 +428,7 @@ func (s *testSSHServer) handleDirectTCPIP(ch gossh.Channel, reqs <-chan *gossh.R
 	targetAddr := net.JoinHostPort(host, strconv.Itoa(int(port)))
 	targetConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {
-		s.t.Logf("direct-tcpip: dial target %s: %v", targetAddr, err)
+		s.logf("direct-tcpip: dial target %s: %v", targetAddr, err)
 		return
 	}
 	defer func() { _ = targetConn.Close() }()
@@ -446,6 +487,11 @@ func (s *testSSHServer) getPTYSize() (cols, rows, xp, yp uint16) {
 	return s.ptyCols, s.ptyRows, s.ptyX, s.ptyY
 }
 
+// close stops the server and ends the interval in which its goroutines may
+// speak to *testing.T (see logf). Idempotent: every test closes with a defer
+// and both constructors also register it with t.Cleanup, so it runs twice on
+// the ordinary path — closing a closed listener is an error nobody reads, and
+// setting `over` twice is setting it once.
 func (s *testSSHServer) close() {
 	_ = s.listener.Close()
 	s.mu.Lock()
@@ -453,6 +499,14 @@ func (s *testSSHServer) close() {
 		_ = s.shellCh.Close()
 	}
 	s.mu.Unlock()
+	// LAST, and taking the lock is the whole mechanism: a logf already in
+	// flight holds it, so this waits for that call to finish before it
+	// declares the test over. The goroutines themselves are not joined —
+	// they may still be parked in Accept or mid-handshake — they simply stop
+	// being able to reach t.
+	s.logMu.Lock()
+	s.over = true
+	s.logMu.Unlock()
 }
 
 // ---------------------------------------------------------------------------

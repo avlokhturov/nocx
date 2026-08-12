@@ -34,7 +34,6 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     await page.locator(TAB_ADD).click()
     await expect(page.locator(TAB)).toHaveCount(2)
     await promptReady(page)
-    const tab2Title = await page.locator(TITLE).nth(1).textContent()
 
     // Back to tab 1 — by clicking its TAB, which is not the same as clicking
     // into its content. Nothing else touches the pane from here on.
@@ -61,8 +60,17 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     await page.keyboard.press('Enter')
 
     await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
-    // The other tab must not have received it.
-    await expect(page.locator(TITLE).nth(1)).toHaveText(tab2Title!, { timeout: 2000 })
+    // The other tab must not have received it — stated as "never shows the
+    // marker" rather than "still equals a title captured earlier". A fresh
+    // tab's title starts as `~` and becomes its real cwd when the shell's
+    // OSC 7 lands, which is after promptReady; the captured form asserted
+    // that self-change did not happen and failed on `.e2e/home` whenever the
+    // machine was slow enough for OSC 7 to arrive after the snapshot. Same
+    // defect, same fix, as multi-tab-input.spec.ts — see the long note there.
+    //
+    // Safe rather than vacuous because tab 1's title has already become the
+    // marker above: the keystroke has demonstrably been routed by now.
+    await expect(page.locator(TITLE).nth(1)).not.toHaveText(marker)
   })
 
   /**

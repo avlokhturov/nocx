@@ -3,14 +3,20 @@ import { Dispatcher } from './dispatcher'
 import type { Open } from './generated/open'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
- *  assigns the session id (AD-7), and the resolved destination mode +
- *  refusal reason ride the same ack so the tab's capability control starts
- *  from the backend's own resolution (nocx-mlm7). */
+ *  assigns the session id (AD-7), and the resolved destination mode rides the
+ *  same ack so the tab's capability control starts from the backend's own
+ *  resolution (nocx-mlm7).
+ *
+ *  shellIntegrationReason is deliberately absent (nocx-dvql). It answered
+ *  "is this session integrated" once, at open, and the two failures that
+ *  matter most arrive later — a handshake that expires ten seconds in, and a
+ *  channel lost mid-session. The session.integrationChanged notification
+ *  answers it as a state instead; two answers would be the defect AD-8
+ *  names. */
 type OpenResult = {
   sessionId?: string
   cwd?: string
   desiredMode?: Open['desiredMode']
-  shellIntegrationReason?: Open['shellIntegrationReason']
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -184,9 +190,6 @@ export class SessionHandle {
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
     readonly desiredMode: Open['desiredMode'] = 'script',
-    /** Why shell integration did not happen at open; empty means it
-     *  succeeded or was never attempted (nocx-r52q, nocx-xs1d). */
-    readonly shellIntegrationReason: Open['shellIntegrationReason'] = '',
   ) {}
 
   send(data: string): void {
@@ -447,13 +450,7 @@ export class WSClient {
       resetCallback: null,
       inputStalledCallback: null,
     })
-    return new SessionHandle(
-      this,
-      sid,
-      result?.cwd ?? '',
-      result?.desiredMode ?? 'script',
-      result?.shellIntegrationReason ?? '',
-    )
+    return new SessionHandle(this, sid, result?.cwd ?? '', result?.desiredMode ?? 'script')
   }
 
   // --- reattach -----------------------------------------------------------

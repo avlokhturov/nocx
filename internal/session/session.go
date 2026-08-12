@@ -548,8 +548,28 @@ func (s *realSession) startWriteLoop() {
 				return
 			case job := <-s.writeCh:
 				n, err := s.ch.Write(job.p)
-				if job.res != nil {
+				// res == nil is the TRANSPORT's path — every byte the user
+				// types arrives here, and nobody is waiting for the result.
+				// So an error here had exactly one reader and it was
+				// discarded: a keystroke that never reached the pty looked
+				// identical to one that did, from every log this product
+				// keeps. That is the shape of "input is trapped", and it must
+				// not be silent (nocx-xplc).
+				//
+				// Warn on the error, because a failed write on the input path
+				// is the user typing into nothing. Debug on the short write —
+				// same question, lower volume.
+				switch {
+				case job.res != nil:
+					// A caller is waiting; the result is theirs to read, and
+					// theirs to report.
 					job.res <- writeResult{n: n, err: err}
+				case err != nil:
+					s.log.Warn("session input write failed; keystrokes did not reach the terminal",
+						"error", err, "bytes", len(job.p), "written", n)
+				case n != len(job.p):
+					s.log.Debug("session input short write",
+						"bytes", len(job.p), "written", n)
 				}
 			}
 		}

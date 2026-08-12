@@ -68,9 +68,33 @@ func shellEnv(a *Adapter, seq uint64, evt lifecycle.Event) lifecycle.Envelope {
 	}
 }
 
+// waitFor blocks until cond holds, and gives up only when the whole test run
+// is nearly out of time.
+//
+// The condition is the observable state change, which is right; the DEADLINE
+// was a flat 2 s, which was not. `go test ./... -race` builds every package's
+// tests and runs them concurrently, so this package's 2 s competed with
+// internal/importer (42 s) and internal/app (32 s) on the same cores, in an
+// emulated amd64 container. TestChildDescriptorReachesSpawnedProcess — which
+// spawns `sh -c 'cat file >&3'` and waits for the frame to arrive through the
+// inherited descriptor — lost that race and reported "timed out" for work that
+// had not been scheduled yet. Measured 2026-08-12 at one commit: red in the
+// no-keyring variant at 2.04 s, green in the with-keyring variant at 1.33 s
+// (nocx-8b47).
+//
+// The bound now comes from `go test -timeout`, less a margin, so a machine
+// being slow cannot manufacture a failure while a genuinely stuck wait still
+// names what it was waiting for — before the suite's own timeout turns it into
+// a goroutine dump. A run with no deadline (-timeout 0) gets a long one rather
+// than none, so a wedged wait cannot hang a developer's terminal forever.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline, ok := t.Deadline()
+	if ok {
+		deadline = deadline.Add(-5 * time.Second)
+	} else {
+		deadline = time.Now().Add(2 * time.Minute)
+	}
 	for time.Now().Before(deadline) {
 		if cond() {
 			return
@@ -424,10 +448,161 @@ func TestChildDescriptorReachesSpawnedProcess(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("spawned hello writer: %v (%s)", err, out)
 	}
-	_ = child.Close() // the parent's copy must not keep the socket open
 
 	waitFor(t, "domain established by the spawned process", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
+	// CLOSED AFTER THE ASSERTION, and that ordering is the test.
+	//
+	// It used to close here — before the wait, "so the parent's copy does not
+	// keep the socket open" — and that lost the frame it had just sent. The
+	// hello establishes the domain, the test kernel's acking emitter answers
+	// synchronously, and the accept goes back out through Adapter.Send into
+	// this same socketpair. Nobody reads it: the spawned `cat` wrote and
+	// exited. So the shell end held unread data, and closing a unix stream
+	// socket in that state resets the connection — the adapter's reader got
+	// ECONNRESET, logged "lifecycle transport read error", called lose() and
+	// RETURNED. A reader that has returned can never establish anything, so
+	// the wait was doomed from that instant rather than merely slow.
+	//
+	// Bimodal, which is what made it read as a flake: win the race and the
+	// hello is decoded first and the test passes; lose it and no deadline is
+	// long enough. Measured after the deadline was widened from a flat 2 s to
+	// the test's own budget — the failure moved from 2.04 s to 594.81 s and
+	// stayed a failure, which is what proved the clock was never the defect
+	// (nocx-8b47).
+	_ = child.Close()
+}
+
+// ── which path lost the channel (nocx-dvql) ───────────────────────────────
+
+// lose is reached from four callers and used to record none of them, so a
+// degraded session produced no diagnostic line anywhere — twenty-two seconds
+// of one on the owner's machine produced zero. Each caller must be
+// distinguishable, because "the shell never answered" and "the shell went
+// away" need different fixes and the product renders different reasons for
+// them.
+
+// recordCauses collects the causes reported for an adapter's lane.
+type causeRecorder struct {
+	mu     chan struct{} // a 1-buffered channel as a mutex, so waitFor can read
+	causes []LossCause
+}
+
+func newCauseRecorder() *causeRecorder {
+	r := &causeRecorder{mu: make(chan struct{}, 1)}
+	r.mu <- struct{}{}
+	return r
+}
+
+func (r *causeRecorder) report(_ lifecycle.LaneID, c LossCause) {
+	<-r.mu
+	r.causes = append(r.causes, c)
+	r.mu <- struct{}{}
+}
+
+func (r *causeRecorder) all() []LossCause {
+	<-r.mu
+	out := append([]LossCause(nil), r.causes...)
+	r.mu <- struct{}{}
+	return out
+}
+
+func TestHelloTimeoutReportsItsCause(t *testing.T) {
+	k := newTestKernel()
+	rec := newCauseRecorder()
+	a, child, err := New(log.NewSlogAdapter(nil), k,
+		WithHelloTimeout(50*time.Millisecond), WithLossReporter(rec.report))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+	defer func() { _ = child.Close() }()
+
+	waitFor(t, "hello timeout reported as its own cause", func() bool {
+		c := rec.all()
+		return len(c) == 1 && c[0] == LossHelloTimeout
+	})
+	// Close afterwards must not append a second cause: the first cause is
+	// the one that ended the channel, and a later disposal cannot rewrite
+	// it into something the user would be told to fix.
+	_ = a.Close()
+	if c := rec.all(); len(c) != 1 || c[0] != LossHelloTimeout {
+		t.Errorf("causes after a post-loss Close = %v, want exactly [hello-timeout]", c)
+	}
+}
+
+func TestShellClosingItsEndReportsEndOfStream(t *testing.T) {
+	k := newTestKernel()
+	rec := newCauseRecorder()
+	a, child, err := New(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+	mustEstablish(t, a, child)
+
+	// The shell goes away without saying goodbye: the domain is live, so
+	// this is a loss and not a clean end.
+	_ = child.Close()
+	waitFor(t, "end of stream reported as its own cause", func() bool {
+		c := rec.all()
+		return len(c) == 1 && c[0] == LossEndOfStream
+	})
+}
+
+func TestSessionDisposalReportsClosed(t *testing.T) {
+	k := newTestKernel()
+	rec := newCauseRecorder()
+	a, child, err := New(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = child.Close() }()
+	mustEstablish(t, a, child)
+
+	// The session is closing. Distinguishable from every failure above, so
+	// the product does not paint a tab as broken on its way out.
+	_ = a.Close()
+	waitFor(t, "disposal reported as its own cause", func() bool {
+		c := rec.all()
+		return len(c) == 1 && c[0] == LossClosed
+	})
+}
+
+// The reporter runs BEFORE the kernel is told, so a consumer that watches
+// both never sees the published consequence before the cause that explains
+// it. Asserted rather than assumed: the ordering is the whole reason the two
+// seams can be combined at all.
+func TestCauseIsReportedBeforeTheKernelIsTold(t *testing.T) {
+	k := newTestKernel()
+	order := make(chan string, 4)
+	a, child, err := New(log.NewSlogAdapter(nil), &orderingKernel{Kernel: k, order: order},
+		WithHelloTimeout(50*time.Millisecond),
+		WithLossReporter(func(lifecycle.LaneID, LossCause) { order <- "cause" }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+	defer func() { _ = child.Close() }()
+
+	if first := <-order; first != "cause" {
+		t.Errorf("first observation = %q, want the cause before the kernel's TransportLost", first)
+	}
+	if second := <-order; second != "transport-lost" {
+		t.Errorf("second observation = %q, want transport-lost", second)
+	}
+}
+
+// orderingKernel records when TransportLost was called, delegating
+// everything else.
+type orderingKernel struct {
+	Kernel
+	order chan string
+}
+
+func (k *orderingKernel) TransportLost(t lifecycle.TransportID) error {
+	k.order <- "transport-lost"
+	return k.Kernel.TransportLost(t)
 }

@@ -50,6 +50,11 @@ export interface TabProps {
   /** The environment degraded or became uncertain (nocx-4t37.2): renders
    *  the small warning mark in the status line. */
   warning?: boolean
+  /** What the mark means, for its accessible name and its tooltip. The
+   *  session's integration status supplies it (nocx-5uu5) — a mark that
+   *  cannot say what it is about is a mark people learn to ignore. Falls
+   *  back to the generic wording when nothing more specific is known. */
+  warningLabel?: string
   /** Called when the tab is clicked. */
   onActivate: () => void
   /** Called with the tab id when the tab is closed (middle-click or close button). */
@@ -116,8 +121,8 @@ export function Tab(props: TabProps) {
           <Show when={props.warning === true}>
             <span
               class="nocx-tab-warning"
-              aria-label="Environment degraded"
-              title="Shell integration degraded or uncertain"
+              aria-label={props.warningLabel ?? 'Environment degraded'}
+              title={props.warningLabel ?? 'Shell integration degraded or uncertain'}
             />
           </Show>
           <span class="nocx-tab-title">{props.title}</span>

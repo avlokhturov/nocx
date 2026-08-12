@@ -24,9 +24,6 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
     // Wait for tab 2's prompt to be ready.
     await promptReady(page)
 
-    // Record tab 2's initial title.
-    const tab2InitialTitle = await page.locator(TITLE).nth(1).textContent()
-
     // Switch back to tab 1 by clicking its tab button.
     await page.locator(TAB).first().click()
 
@@ -49,8 +46,29 @@ test.describe('multi-tab input (nocx-4ff.28)', () => {
     // Tab 1's title must reflect the keystroke.
     await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
 
-    // Tab 2's title must NOT have changed.
-    await expect(page.locator(TITLE).nth(1)).toHaveText(tab2InitialTitle!, { timeout: 2000 })
+    // Tab 2 must NOT have received the keystroke.
+    //
+    // Stated as "tab 2 never shows the marker", not as "tab 2's title equals
+    // the string we captured earlier". The captured form asserted something
+    // the product never promised: a fresh tab's title starts as `~` and
+    // becomes its real cwd when the shell's OSC 7 arrives, which is AFTER
+    // promptReady — the editor is focused before the shell has reported where
+    // it is. So the snapshot caught `~` mid-transition and the assertion
+    // failed on `.e2e/home`, a change the tab made by itself with no keystroke
+    // involved.
+    //
+    // That window is a function of machine speed, which is exactly why this
+    // was a CI-only failure: with cores to spare the OSC 7 lands before the
+    // capture and the strings match. Capped at the runner's 4 vCPU it lands
+    // after, and the same tree fails. The defect was in the assertion, not in
+    // the product and not in the runner.
+    //
+    // Ordering is what makes this safe rather than vacuous: tab 1's title has
+    // already become the marker above, so the keystroke is known to have been
+    // routed and rendered by the time this runs. A `not` assertion here is
+    // therefore a real check, not one that passes because nothing has
+    // happened yet.
+    await expect(page.locator(TITLE).nth(1)).not.toHaveText(marker)
 
     // And tab 1's title is definitely different from initial.
     //

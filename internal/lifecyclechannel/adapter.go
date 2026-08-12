@@ -33,8 +33,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/log"
@@ -61,11 +59,50 @@ type Kernel interface {
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
 }
 
+// LossCause names which of the adapter's three loss paths fired. lose is
+// idempotent and is reached from the hello timer, the pump's end of stream,
+// the pump's read error and the session's own Close, and until nocx-dvql it
+// recorded none of them: a fully degraded session produced no diagnostic
+// line anywhere, and the only line that did appear — endOfStream's "ended
+// cleanly" — says the opposite of what happened, because it treats a domain
+// lose() already marked Lost as a clean end on the strength of a report
+// lose() never made.
+type LossCause string
+
+const (
+	// LossHelloTimeout is the handshake bound expiring (protocol §5): the
+	// transport was established and no acceptable hello arrived inside the
+	// window. The session stays conventional, and this is the reason the
+	// product shows for it.
+	LossHelloTimeout LossCause = "hello-timeout"
+	// LossEndOfStream is the shell closing its end of the descriptor.
+	LossEndOfStream LossCause = "end-of-stream"
+	// LossReadError is the descriptor breaking under the pump.
+	LossReadError LossCause = "read-error"
+	// LossClosed is the session's own disposal path — Close, from the pty
+	// teardown. Not a failure: the session is going away and the product
+	// has nothing to say about it.
+	LossClosed LossCause = "closed"
+)
+
+// LossReporter is told which path ended one adapter's transport, keyed by the
+// adapter's own lane. It exists because the kernel cannot answer this: a
+// handshake that times out never establishes a domain, so the lane's
+// projection never changes and no lifecycle fact is published at all — the
+// publisher deliberately announces only lanes whose projection moved. The
+// cause is transport knowledge (ADR-0024 decision 8: the two losses "must not
+// share a code path"), and the composition root routes it to the session
+// integration status the product renders. Reported before the kernel's
+// TransportLost, so a consumer that also watches published facts has the
+// cause in hand by the time one arrives.
+type LossReporter func(lane lifecycle.LaneID, cause LossCause)
+
 // Option configures an Adapter.
 type Option func(*options)
 
 type options struct {
 	helloTimeout time.Duration
+	lossReporter LossReporter
 }
 
 // WithHelloTimeout bounds the handshake: unless an authenticated hello is
@@ -75,6 +112,12 @@ type options struct {
 // protocol constant.
 func WithHelloTimeout(d time.Duration) Option {
 	return func(o *options) { o.helloTimeout = d }
+}
+
+// WithLossReporter registers the sink for this adapter's loss cause. Nil (the
+// default) reports nowhere and the loss is still logged.
+func WithLossReporter(r LossReporter) Option {
+	return func(o *options) { o.lossReporter = r }
 }
 
 // Adapter is one local descriptor transport. It implements lifecycle.Port
@@ -93,6 +136,7 @@ type Adapter struct {
 	dec        *lifecyclecodec.Decoder
 
 	helloTimeout time.Duration
+	report       LossReporter
 
 	mu     sync.Mutex
 	closed bool
@@ -110,7 +154,11 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 		opt(&o)
 	}
 
-	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	// Per-OS: Linux sets close-on-exec atomically, everything else closes the
+	// same window with ForkLock (socketpair_linux.go / socketpair_other.go).
+	// The constant this used to name inline exists only on Linux, which is
+	// how the product came to not build on macOS at all (nocx-1w69).
+	fds, err := socketpairCloexec()
 	if err != nil {
 		return nil, nil, fmt.Errorf("lifecycle socketpair: %w", err)
 	}
@@ -124,6 +172,7 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 		lane:         lifecycle.LaneID("lane-" + randHex(8)),
 		conn:         parent,
 		helloTimeout: o.helloTimeout,
+		report:       o.lossReporter,
 	}
 	a.dec = lifecyclecodec.NewDecoder(parent, lifecyclecodec.Config{}, a.reportGap)
 
@@ -150,7 +199,7 @@ func New(log log.Logger, k Kernel, opts ...Option) (*Adapter, *os.File, error) {
 	// The timer may fire before New returns (a short hello timeout), so the
 	// field is stored under the same mutex stopHelloTimer reads: the
 	// callback's read is then ordered against this write and never races.
-	t := time.AfterFunc(a.helloTimeout, a.lose)
+	t := time.AfterFunc(a.helloTimeout, func() { a.lose(LossHelloTimeout) })
 	a.mu.Lock()
 	a.timer = t
 	a.mu.Unlock()
@@ -233,15 +282,32 @@ func (a *Adapter) Send(env lifecycle.Envelope) error {
 // Close tears the transport down: the domain ends (TransportLost), the hello
 // timer stops, and the pump stops. It is the session-end disposal path.
 func (a *Adapter) Close() error {
-	a.lose()
+	a.lose(LossClosed)
 	return nil
 }
 
-// lose is the single loss path, executed once: notify the kernel, mark the
-// adapter closed, and close the descriptor so the pump unblocks. Idempotent
-// under concurrent callers (pump EOF, hello timeout, explicit Close).
-func (a *Adapter) lose() {
+// lose is the single loss path, executed once: say which caller fired,
+// report the cause, notify the kernel, mark the adapter closed, and close
+// the descriptor so the pump unblocks. Idempotent under concurrent callers
+// (pump EOF, pump read error, hello timeout, explicit Close) — the FIRST
+// cause wins, which is the one that actually ended the channel.
+//
+// The log line is not decoration. All three failure paths converge here, and
+// while this function was silent a degraded session left no trace anywhere:
+// twenty-two seconds of one on the owner's machine produced zero diagnostic
+// lines, in the product or the log (nocx-dvql). The cause is what
+// distinguishes "the shell never answered" from "the shell went away", and
+// those need different fixes.
+func (a *Adapter) lose(cause LossCause) {
 	a.loss.Do(func() {
+		a.log.Info("lifecycle channel lost",
+			"cause", string(cause), "transport", a.id, "lane", a.lane, "domain", a.domain)
+		// Before TransportLost: that call publishes the kernel's own facts
+		// synchronously, and a consumer watching both must not see the fact
+		// before the cause that explains it.
+		if a.report != nil {
+			a.report(a.lane, cause)
+		}
 		a.stopHelloTimer()
 		if err := a.kernel.TransportLost(a.id); err != nil {
 			a.log.Warn("lifecycle transport lost notification failed", "error", err)
@@ -313,7 +379,7 @@ func (a *Adapter) pump() {
 		default:
 			// A read error: the transport broke.
 			a.log.Warn("lifecycle transport read error", "error", err)
-			a.lose()
+			a.lose(LossReadError)
 			return
 		}
 	}
@@ -328,7 +394,14 @@ func (a *Adapter) endOfStream() {
 	if ok {
 		switch d.State {
 		case lifecycle.DomainClosed, lifecycle.DomainLost:
-			a.log.Info("lifecycle transport ended cleanly", "domain", a.domain)
+			// Clean only in the sense that the loss is already accounted
+			// for: DomainClosed is the shell saying goodbye, and DomainLost
+			// means lose() already ran and already named its cause. That
+			// second half used to be a lie by omission — lose() said
+			// nothing, so this was the only line and it read as a clean
+			// exit for a channel that had just been lost.
+			a.log.Info("lifecycle transport ended with the domain already accounted for",
+				"domain", a.domain, "state", d.State)
 			a.mu.Lock()
 			a.closed = true
 			a.mu.Unlock()
@@ -336,7 +409,7 @@ func (a *Adapter) endOfStream() {
 		}
 	}
 	a.log.Info("lifecycle transport ended with a live domain; marking lost", "domain", a.domain)
-	a.lose()
+	a.lose(LossEndOfStream)
 }
 
 func randHex(n int) string {

@@ -422,11 +422,21 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     // before the password prompt). The password is typed only after that —
     // a timed wait would race the prompt.
     await primary.waitConn(1, 30_000)
-    // The argv-borne bootstrap launcher was consumed: the staged run dir is
-    // empty again. (The compact ~/.nocx/launch line replaces this path from
-    // the second connection on.)
+    // Nothing was staged on disk: the run directory is empty, or was never
+    // created at all. Both mean the same thing and the second is what
+    // actually happens — ADR-0022 made the ssh command line the carrier, so
+    // no launcher is written anywhere (the comment above says as much about
+    // `.nocx/run/` being the removed path's staging directory).
+    //
+    // Written as a bare readdirSync, it threw ENOENT instead of asserting,
+    // and a spec cannot report on a directory by crashing on its absence.
+    // Its own sibling at step 7 already guards existence this way; this is
+    // the same check spelled the same way (nocx-c6z0 found it, having got
+    // past the failure that used to hide it).
     const runDir = path.join(localHome(), '.nocx', 'run')
-    expect(readdirSync(runDir), 'staged bootstrap launcher consumed').toEqual([])
+    if (existsSync(runDir)) {
+      expect(readdirSync(runDir), 'staged bootstrap launcher consumed').toEqual([])
+    }
 
     // The password goes to the pty, not the editor: the command owns input.
     await page.keyboard.type(primaryPassword)
@@ -466,11 +476,22 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
 
     // ── 3. exit: the remote session ends, local blocks again, editor back ──
     await submitInEditor(page, 'exit')
-    // The exit block (remote context) closes with "Connection … closed." and
-    // freezes with NO code — the local D owns the ssh command's status.
-    const exitBlock = pane(page).locator('.cmd-block', {
-      hasText: 'Connection to 127.0.0.1 closed',
-    })
+    // The exit block (remote context) freezes with NO code — the local D owns
+    // the ssh command's status.
+    //
+    // Located by the COMMAND the user typed, not by the ssh client's
+    // "Connection … closed." farewell. That text is printed by the LOCAL ssh
+    // client after the far shell has already died, while the block freezes on
+    // the far domain ending — two events on opposite sides of the connection
+    // with nothing ordering them. Whether the farewell lands inside the block
+    // or after it is therefore undetermined, and asserting it asserted which
+    // way the race went: the journey passed when run alone and failed in the
+    // full suite, on both engines, for as long as that locator stood
+    // (nocx-8tf6).
+    //
+    // `.last()` because `exit` is the only command typed so far whose text
+    // could match, and the most recent match is the block just submitted.
+    const exitBlock = pane(page).locator('.cmd-block').filter({ hasText: 'exit' }).last()
     await expect(exitBlock).toBeVisible({ timeout: 30_000 })
     await expect(exitBlock.locator('.cmd-header-exit')).toHaveCount(0)
     await expect(editor).toBeVisible({ timeout: 20_000 })
@@ -506,13 +527,27 @@ test('a hand-typed ssh: frozen local block, remote blocks, compact second connec
     await primary.waitConn(2, 30_000)
     await page.keyboard.type(primaryPassword)
     await page.keyboard.press('Enter')
-    // The second ssh entered: a third entered block (ssh1, the step-3
-    // remote exit, ssh2 — the cut-short remote exits freeze with the same
-    // no-code entered paint), showing the same banner and prompt.
+    // The second ssh entered: the LAST entered block carries the banner and
+    // the prompt, whichever ordinal it happens to be.
+    //
+    // This counted entered blocks and expected exactly three — ssh1, the
+    // step-3 remote `exit`, ssh2 — on the reading that a cut-short remote
+    // exit freezes with the same no-code entered paint. It does not, and
+    // more importantly it is not required to: nocx-mlyu established that
+    // whether `exit` becomes an attempt at all is A RACE THE PRODUCT CANNOT
+    // WIN, because the command usually destroys the shell that would have
+    // sent the start frame. The renderer therefore has two legitimate
+    // answers — bound and frozen, or unbound and abandoned as `unknown` —
+    // and both are pinned in frontend/src/lifecycle/projections.test.ts.
+    // Counting the class asserted which side of that race came up.
+    //
+    // `.last()` is what makes this deterministic rather than merely looser:
+    // the exit block precedes ssh2 chronologically either way, so the most
+    // recent entered block is ssh2 whether the count is two or three.
     const enteredBlocks = pane(page).locator('.cmd-block.cmd-block-entered')
-    await expect(enteredBlocks).toHaveCount(3, { timeout: 30_000 })
-    await expect(enteredBlocks.nth(2)).toContainText(primaryBanner)
-    await expect(enteredBlocks.nth(2)).toContainText('password:')
+    const secondSsh = enteredBlocks.last()
+    await expect(secondSsh).toContainText(primaryBanner, { timeout: 30_000 })
+    await expect(secondSsh).toContainText('password:')
     await submitInEditor(page, 'echo journey-2-ok')
     await expect(pane(page).locator('.cmd-block', { hasText: 'journey-2-ok' })).toBeVisible({
       timeout: 30_000,

@@ -102,3 +102,98 @@ func TestComposeSSHChildLine_StartCommandSurvivesQuoting(t *testing.T) {
 		t.Errorf("sshd would receive %q, want the launcher command verbatim %q", string(out), startCmd)
 	}
 }
+
+// TestComposeSSHChildLine_CarriesTheOptionsTheUserTyped guards nocx-c6z0, and
+// it asserts the EXECUTED argv rather than the composed string on purpose.
+//
+// The line is rebuilt from the grant request rather than edited, so anything
+// the request does not carry is not reordered — it is gone. It carried host,
+// user and port and nothing else, while the shell's detector deliberately
+// ACCEPTS a line bearing -i, -o, -F, -J, -l, -e, -b and -m. So
+// `ssh -i ~/.ssh/prod -J bastion host` was executed as a bare `ssh host`: the
+// wrong key, no jump host, the default host-key policy. Nothing said so,
+// because the block the user sees shows the line they TYPED — which is why
+// nocxify-journey's assertions on that block all passed while the connection
+// it was watching never reached userauth.
+//
+// A stand-in ssh reports its own argv, so what is checked is what the client
+// would actually receive: one argv entry per typed token, in order, with the
+// spaces and quotes inside an argument intact.
+func TestComposeSSHChildLine_CarriesTheOptionsTheUserTyped(t *testing.T) {
+	opts := []string{
+		"-i", "/home/u/.ssh/id key", // a path with a space
+		"-o", "StrictHostKeyChecking=no", // the option this test exists for
+		"-o", "ProxyCommand=nc -X 5 %h %p", // spaces AND a percent
+		"-J", "bastion.example.com", // a jump host, silently dropped before
+		"-l", "alice", // a login name given as an option
+	}
+	line := composeSSHChildLine("true", 40123, 37777, lifecyclepub.GrantRequest{
+		Env: "ssh", Host: "box.example.com", Port: 2222, Opts: opts,
+	})
+
+	// A stand-in ssh that prints its argv one entry per line, so an argument
+	// that was split or joined by quoting is visible as such.
+	binDir := t.TempDir()
+	fakeSSH := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n"
+	// #nosec G306 — a stand-in for ssh must be executable to be found through
+	// PATH; temp dir, no secret.
+	if err := os.WriteFile(binDir+"/ssh", []byte(fakeSSH), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G204 — the composed line under test plus a PATH pointing at this
+	// test's temp dir; evaluating it under a real bash IS the assertion.
+	cmd := exec.Command("bash", "-c", "PATH="+binDir+":$PATH\n"+line+"\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("evaluating the composed line: %v\n%s\nline:\n%s", err, out, line)
+	}
+	argv := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+
+	// Every typed token is one argv entry, and they appear in the order they
+	// were typed. Checked as a contiguous run: ssh reads `-o X` as a pair, so
+	// an option separated from its argument is a different request.
+	if !containsRun(argv, opts) {
+		t.Errorf("the client would not receive the options the user typed.\nwant the run %q\ngot argv %q\nline: %s",
+			opts, argv, line)
+	}
+	// The port is still modelled, and still appears exactly once — the
+	// detector does not collect -p, so carrying it here too would send two.
+	if n := countArg(argv, "-p"); n != 1 {
+		t.Errorf("-p appears %d times in %q, want exactly 1", n, argv)
+	}
+	// And a second -t never appears: ssh reads `-t -t` as -tt, which forces a
+	// pty the authentication phase must not be given.
+	if n := countArg(argv, "-t"); n != 1 {
+		t.Errorf("-t appears %d times in %q, want exactly 1", n, argv)
+	}
+}
+
+// containsRun reports whether want appears in argv as a contiguous run.
+func containsRun(argv, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	for i := 0; i+len(want) <= len(argv); i++ {
+		match := true
+		for j := range want {
+			if argv[i+j] != want[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func countArg(argv []string, arg string) int {
+	n := 0
+	for _, a := range argv {
+		if a == arg {
+			n++
+		}
+	}
+	return n
+}

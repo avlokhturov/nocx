@@ -8,7 +8,14 @@
 #   e2e/run-in-container.sh                       # whole suite, both browsers
 #   e2e/run-in-container.sh e2e/sidebar.spec.ts   # one spec
 #   PW_PROJECTS=chromium e2e/run-in-container.sh  # one browser
-#   NOCX_E2E_CPUS=4 e2e/run-in-container.sh       # at the CI runner's capacity
+#   NOCX_E2E_CPUS=0 e2e/run-in-container.sh       # uncapped, while iterating
+#   NOCX_LOG_LEVEL=debug e2e/run-in-container.sh  # the backend says more
+#
+# The backend's log is inside the disposable home, at
+# .e2e/home/.local/share/nocx-dev/nocx.log. Read it BEFORE the Playwright
+# output when a spec fails on a timeout: it named a fixture defect in one line
+# after the trace had spent thirteen minutes describing a hidden editor
+# (nocx-cbtc).
 #
 # Everything after the script name is passed to `playwright test`.
 set -euo pipefail
@@ -53,21 +60,51 @@ tty_flag=()
 #
 # Passed in rather than guessed inside: only out here is there a host user to
 # ask about.
-# A CPU cap, because the image is not the whole of "the same conditions".
+# UNCAPPED by default, on the owner's decision of 2026-08-11: a test must
+# never depend on timing, so this stops throttling the host to imitate a
+# slower one.
 #
-# The container made the two runs identical in software and left them different
-# in capacity: this developer box has many cores, and ubuntu-latest gives four.
-# Measured 2026-08-07 at the same commit — the suite takes 6.3 minutes here and
-# 10.6 on the runner — and every failure that survived the move to the container
-# was a timing one that only appeared on the slower side: a bell racing a tab
-# open, a command snapshot arriving past its budget, a drag losing focus.
+# It defaulted to 4 — ubuntu-latest's vCPU count — from 2026-08-07, on the
+# reasoning that the container had made the two runs identical in software and
+# left them different in capacity (the suite took 6.3 minutes here and 10.6 on
+# the runner), and that every failure surviving the move to the container was
+# a timing one visible only on the slower side: a bell racing a tab open, a
+# command snapshot arriving past its budget, a drag losing focus.
 #
-# So this exists to reproduce the runner rather than to out-run it. Unset by
-# default: an unconstrained run is faster and is what you want while iterating
-# on one spec. Reach for it when CI is red and the container is green, which is
-# now the only shape of disagreement left.
+# Each of those is now read as a defect in the spec rather than a reason to
+# slow the machine down. Throttling made them reproducible, which kept them
+# alive: a spec that waits on an observable state change instead of a duration
+# passes at any speed, and one that does not is broken on a fast machine too —
+# it just has not been caught yet.
+#
+# The cap also could not deliver what it promised, and the reason is the one
+# thing about this container that is NOT the runner. e2e/Dockerfile pins no
+# --platform, deliberately (its ARCHITECTURE note has the argument): the image
+# is built for the host, so a developer runs linux/arm64 natively and CI runs
+# linux/amd64 natively. Same recipe, same packages, same command — different
+# machine code, at native speed on both sides. Capping cores does not turn one
+# into the other; it produces a third machine with timings unlike either.
+#
+# Do not read scripts/ci-linux.sh's paragraph onto this file. THAT image does
+# pin --platform=linux/amd64 and therefore does run emulated on a Mac, which is
+# the opposite call for the opposite reason: being the runner is its whole
+# purpose, and it runs Go tests rather than two browser engines. This comment
+# claimed the same about this image until 2026-08-12 and it was simply untrue —
+# `docker image inspect nocx-e2e:local --format '{{.Architecture}}'` says which.
+# nocx-2h08 is the standing example of the timing gap that remains.
+#
+# NOCX_E2E_CPUS=<n> caps it again for bisecting a suspected concurrency
+# defect. That is a debugging tool, not the gate — the same knob, with the
+# same meaning, as `scripts/ci-linux.sh`.
+cpus="${NOCX_E2E_CPUS:-0}"
 cpu_flag=()
-[ -n "${NOCX_E2E_CPUS:-}" ] && cpu_flag=(--cpus "$NOCX_E2E_CPUS")
+# An `if`, not `[ … ] && …`: under `set -e` a false test as the last command
+# of a && list exits the script, so with 0 as the default the one-liner this
+# replaced would have made the uncapped path terminate silently before docker
+# ever ran.
+if [ "$cpus" != "0" ]; then
+  cpu_flag=(--cpus "$cpus")
+fi
 
 # A git worktree keeps no .git DIRECTORY — it keeps a .git FILE pointing at
 # `<main-repo>/.git/worktrees/<name>`, which is outside the bind mount. The
@@ -98,6 +135,7 @@ exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   -v nocx-e2e-gocache:/root/.cache/go-build \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \
   -e PW_WORKERS="${PW_WORKERS:-}" \
+  -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \
   -e NOCX_E2E_HOST_UID="$(id -u)" \
   -e NOCX_E2E_HOST_GID="$(id -g)" \
   -w /work \
