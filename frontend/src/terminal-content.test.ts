@@ -2898,6 +2898,15 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
 
   const cardIn = (tab: { pane: HTMLElement }) => tab.pane.querySelector('.nocx-integration-notice')
 
+  /** Press one of the card's own actions, by the label the user reads. */
+  const press = (tab: { pane: HTMLElement }, label: string): void => {
+    const found = [...cardIn(tab)!.querySelectorAll('button')].find(
+      (b) => (b.textContent ?? '').trim() === label,
+    )
+    if (!found) throw new Error(`no card action labelled ${label}`)
+    found.click()
+  }
+
   beforeEach(() => {
     window.localStorage.clear()
   })
@@ -2941,28 +2950,98 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     }
   })
 
-  it('raises the card once for a (shell, reason) pair and never again', async () => {
+  // nocx-wfxz, the owner reversing the once-per-(shell, reason) rule taken in
+  // nocx-5uu5: the card used to be recorded as read the moment it was DRAWN,
+  // so a user who closed it before working out what it meant never saw it
+  // again. Nothing on the card said that looking at it spent it. The only
+  // thing that writes anything now is the user saying so.
+  it('raises the card again in the next session, having been told nothing', async () => {
     const clientA = makeClient()
-    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
     try {
       publish(clientA)
       expect(cardIn(first.tab)).not.toBeNull()
       expect(first.tab.pane.querySelector('.ui-status-card__title')!.textContent).toBe(
         'Not integrated',
       )
+      press(first.tab, '×')
     } finally {
       first.teardown()
     }
 
-    // A second tab, same shell, same reason: the badge is the standing
-    // signal and the card has already been read.
+    // A second session, same shell, same reason. The user closed the first
+    // card without answering it, so this one is still worth raising.
     const clientB = makeClient()
     const second = await mountTerminal(makeClipboard(), {}, clientB)
     try {
       publish(clientB)
-      expect(cardIn(second.tab)).toBeNull()
+      expect(cardIn(second.tab)).not.toBeNull()
     } finally {
       second.teardown()
+    }
+  })
+
+  // The other end of the same interval: a card the user never touched at all
+  // is not spent either. This is the tab that gets closed with the card still
+  // on it.
+  it('raises the card again after a session that ended with it still showing', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    try {
+      publish(clientA)
+      expect(cardIn(first.tab)).not.toBeNull()
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB)
+      expect(cardIn(second.tab)).not.toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  // Within ONE session it is a different question, and the answer is the
+  // opposite: the user closed this card, in this tab, a moment ago. A status
+  // republished on the same session — a reconnect re-announcing what it
+  // already said — must not push it back up.
+  it('does not push a closed card back up when the same status is republished', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, '×')
+      expect(cardIn(tab)).toBeNull()
+      publish(client)
+      expect(cardIn(tab)).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  // …and a session that degrades a NEW way after the user closed the first
+  // card is telling them something they have not been told.
+  it('raises a card for a new reason in the same session', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, '×')
+      publish(client, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(tab)).not.toBeNull()
+    } finally {
+      teardown()
     }
   })
 
@@ -3030,6 +3109,101 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
       expect(cardIn(tab)).toBeNull()
     } finally {
       teardown()
+    }
+  })
+
+  // ── the card's two silences, and the one thing neither silences ─────────
+  //
+  // The owner's composition (nocx-aimo): the cross and "Don't show again for
+  // this shell" are on the card together because they are different
+  // promises. Written as tests so the next reader who wants to collapse them
+  // can see the difference rather than infer it.
+
+  it('takes the card away when the cross is pressed, and leaves the mark on the tab', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) },
+      },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, '×')
+      expect(cardIn(tab)).toBeNull()
+      // The mark is the state of the session, not a notification: dismissing
+      // the card says nothing about whether the session is integrated.
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Not integrated'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaves the mark alone when the user silences the shell as well', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) },
+      },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, "Don't show again for this shell")
+      expect(cardIn(tab)).toBeNull()
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Not integrated'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // The difference between the two, from the user's side: the cross answers
+  // the card in front of them, and this shell failing a DIFFERENT way is
+  // still something they have not been told. "Don't show again for this
+  // shell" answers for the shell, so nothing about it asks again.
+  it('still reports a new way for this shell to fail after the cross', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
+    try {
+      publish(clientA)
+      press(first.tab, '×')
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(second.tab)).not.toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  it('says nothing more about a shell the user has silenced, however it fails', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
+    try {
+      publish(clientA)
+      press(first.tab, "Don't show again for this shell")
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(second.tab)).toBeNull()
+    } finally {
+      second.teardown()
     }
   })
 })

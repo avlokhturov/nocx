@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   INTEGRATION_EXPLANATION,
-  IntegrationSeenStore,
+  IntegrationSilenceStore,
   integrationMessage,
   isDegraded,
   observationSentence,
@@ -220,9 +220,8 @@ describe('which shell nocx started', () => {
 })
 
 describe('the observation, as one sentence with one owner', () => {
-  // Both surfaces that show it — the Details chain and the fix panel — read
-  // this one function, so they cannot disagree about how strongly nocx
-  // claims it (AD-8).
+  // Every surface that shows the observation reads this one function, so
+  // none of them can claim it more strongly than another (AD-8).
   it('labels itself a guess and quotes only the process name', () => {
     const s = observationSentence(fact({ detail: { observedProcess: 'some-tui' } }))!
     expect(s.toLowerCase()).toContain('guess')
@@ -231,6 +230,36 @@ describe('the observation, as one sentence with one owner', () => {
 
   it('is nothing at all when the backend observed nothing', () => {
     expect(observationSentence(fact())).toBeNull()
+  })
+
+  // nocx-aimo, measured by the owner: `zsh (kiro-cli-te` on screen, a word
+  // stopped mid-syllable. It is p_comm's fixed width — the same width that
+  // makes the value safe to show at all — so the sentence marks the elision
+  // and says why, instead of quoting the fragment as a whole name.
+  it('marks a name that fills the process table field as possibly short', () => {
+    const s = observationSentence(fact({ detail: { observedProcess: 'zsh (kiro-cli-te' } }))!
+    expect(s).toContain('"zsh (kiro-cli-te…"')
+    expect(s).toContain('cut short')
+    expect(s).toContain('16')
+  })
+
+  // The hedge is for the names that need it. A name plainly inside the
+  // field is quoted as itself — hedging every observation would teach the
+  // reader that the hedge means nothing.
+  it('leaves a name that fits alone', () => {
+    const s = observationSentence(fact({ detail: { observedProcess: 'some-tui' } }))!
+    expect(s).toContain('"some-tui"')
+    expect(s).not.toContain('…')
+    expect(s).not.toContain('cut short')
+  })
+
+  // The field is bytes and so is its truncation: a name of sixteen
+  // CHARACTERS that is more than sixteen bytes never reached the renderer
+  // whole either.
+  it('counts the field in bytes, the way the kernel does', () => {
+    const wide = 'ααααααααααααααα' // 15 characters, 30 bytes
+    const s = observationSentence(fact({ detail: { observedProcess: wide } }))!
+    expect(s).toContain('cut short')
   })
 })
 
@@ -280,7 +309,7 @@ describe('the subscription seam', () => {
   })
 })
 
-describe('which card the user has already seen', () => {
+describe('the shells the user has silenced', () => {
   const memoryStorage = () => {
     const map = new Map<string, string>()
     return {
@@ -289,68 +318,77 @@ describe('which card the user has already seen', () => {
     }
   }
 
-  it('shows a (shell, reason) pair once and never again', () => {
-    const store = new IntegrationSeenStore(memoryStorage())
-    expect(store.shouldShow('/bin/bash', 'handshake-timeout')).toBe(true)
-    store.markShown('/bin/bash', 'handshake-timeout')
-    expect(store.shouldShow('/bin/bash', 'handshake-timeout')).toBe(false)
-  })
+  const KEY = 'nocx.integration.seen.v1'
 
-  // Keyed by the PAIR, which is the owner's decision: one shell failing one
-  // way is one thing to learn, however many tabs it happens in — but a
-  // different failure of the same shell is genuinely new information.
-  it('still shows a different reason for the same shell', () => {
-    const store = new IntegrationSeenStore(memoryStorage())
-    store.markShown('/bin/bash', 'handshake-timeout')
-    expect(store.shouldShow('/bin/bash', 'channel-lost')).toBe(true)
-  })
-
-  it('still shows the same reason for a different shell', () => {
-    const store = new IntegrationSeenStore(memoryStorage())
-    store.markShown('/bin/bash', 'handshake-timeout')
-    expect(store.shouldShow('/bin/zsh', 'handshake-timeout')).toBe(true)
+  it('has nothing to say about a shell until the user says it', () => {
+    const store = new IntegrationSilenceStore(memoryStorage())
+    expect(store.isSilenced('/bin/bash')).toBe(false)
   })
 
   // Per shell, not global: a user who has accepted that their login shell is
-  // not integrated has said nothing about the next host they connect to.
-  it('suppresses every reason for a shell the user silenced, and only that shell', () => {
-    const store = new IntegrationSeenStore(memoryStorage())
-    store.suppressShell('/bin/bash')
-    expect(store.shouldShow('/bin/bash', 'handshake-timeout')).toBe(false)
-    expect(store.shouldShow('/bin/bash', 'channel-lost')).toBe(false)
-    expect(store.shouldShow('/bin/zsh', 'handshake-timeout')).toBe(true)
+  // not integrated has said nothing about the next host they connect to. And
+  // every reason for that shell, because the user answered about the shell
+  // rather than about one way it failed.
+  it('silences every reason for the shell the user silenced, and only that shell', () => {
+    const store = new IntegrationSilenceStore(memoryStorage())
+    store.silenceShell('/bin/bash')
+    expect(store.isSilenced('/bin/bash')).toBe(true)
+    expect(store.isSilenced('/bin/zsh')).toBe(false)
   })
 
   it('survives a restart — the record is what the next run reads', () => {
     const storage = memoryStorage()
-    new IntegrationSeenStore(storage).markShown('/bin/bash', 'handshake-timeout')
-    expect(new IntegrationSeenStore(storage).shouldShow('/bin/bash', 'handshake-timeout')).toBe(
-      false,
-    )
+    new IntegrationSilenceStore(storage).silenceShell('/bin/bash')
+    expect(new IntegrationSilenceStore(storage).isSilenced('/bin/bash')).toBe(true)
   })
 
-  // The failure paths. Showing a card twice is a nuisance; never showing it
-  // is the defect, so every storage failure degrades towards showing.
+  // nocx-wfxz. The record used to hold a line per card DRAWN as well as per
+  // shell silenced, and those lines are still in the storage of everyone who
+  // ran that build. Drawing a card is not a choice the user made, so those
+  // lines must not silence anything — while the one line that IS a choice
+  // goes on being honoured.
+  it('reads a card that an older build merely drew as nothing at all', () => {
+    const storage = memoryStorage()
+    storage.setItem(KEY, JSON.stringify(['/bin/bash handshake-timeout']))
+    expect(new IntegrationSilenceStore(storage).isSilenced('/bin/bash')).toBe(false)
+  })
+
+  it('still honours a silence the user chose on an older build', () => {
+    const storage = memoryStorage()
+    storage.setItem(KEY, JSON.stringify(['/bin/zsh handshake-timeout', '/bin/zsh *']))
+    expect(new IntegrationSilenceStore(storage).isSilenced('/bin/zsh')).toBe(true)
+  })
+
+  // A shell path can contain a space, and the record's format puts the
+  // reason after one. Silencing `/opt/my shell/bash` must not be read back as
+  // a silence of `/opt/my`.
+  it('reads back a shell whose path has a space in it', () => {
+    const storage = memoryStorage()
+    const store = new IntegrationSilenceStore(storage)
+    store.silenceShell('/opt/my shell/bash')
+    expect(new IntegrationSilenceStore(storage).isSilenced('/opt/my shell/bash')).toBe(true)
+    expect(new IntegrationSilenceStore(storage).isSilenced('/opt/my')).toBe(false)
+  })
+
+  // The failure paths. Showing a card the user silenced is a nuisance; never
+  // showing one is the defect, so every storage failure degrades towards
+  // showing.
   it('shows the card when the record is corrupt', () => {
     const storage = memoryStorage()
-    storage.setItem('nocx.integration.seen.v1', '{not json')
-    expect(new IntegrationSeenStore(storage).shouldShow('/bin/bash', 'handshake-timeout')).toBe(
-      true,
-    )
+    storage.setItem(KEY, '{not json')
+    expect(new IntegrationSilenceStore(storage).isSilenced('/bin/bash')).toBe(false)
   })
 
   it('shows the card when the record is the wrong shape', () => {
     const storage = memoryStorage()
-    storage.setItem('nocx.integration.seen.v1', '{"seen":true}')
-    expect(new IntegrationSeenStore(storage).shouldShow('/bin/bash', 'handshake-timeout')).toBe(
-      true,
-    )
+    storage.setItem(KEY, '{"seen":true}')
+    expect(new IntegrationSilenceStore(storage).isSilenced('/bin/bash')).toBe(false)
   })
 
   it('shows the card when there is no storage at all', () => {
-    const store = new IntegrationSeenStore(null)
-    store.markShown('/bin/bash', 'handshake-timeout')
-    expect(store.shouldShow('/bin/bash', 'handshake-timeout')).toBe(true)
+    const store = new IntegrationSilenceStore(null)
+    store.silenceShell('/bin/bash')
+    expect(store.isSilenced('/bin/bash')).toBe(false)
   })
 
   it('shows the card when writing is denied, rather than throwing at the user', () => {
@@ -360,8 +398,8 @@ describe('which card the user has already seen', () => {
         throw new Error('QuotaExceededError')
       }),
     }
-    const store = new IntegrationSeenStore(denied)
-    expect(() => store.markShown('/bin/bash', 'handshake-timeout')).not.toThrow()
-    expect(store.shouldShow('/bin/bash', 'handshake-timeout')).toBe(true)
+    const store = new IntegrationSilenceStore(denied)
+    expect(() => store.silenceShell('/bin/bash')).not.toThrow()
+    expect(store.isSilenced('/bin/bash')).toBe(false)
   })
 })

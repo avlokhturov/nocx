@@ -14,7 +14,7 @@
 // The words never name a third-party program. nocx cannot see which one took
 // the shell over — AD-6 forbids reading the byte stream and the process table
 // is a race — so naming one would be a guess presented as a finding. The
-// details surface carries the observation instead, labelled as a guess.
+// remedy surface carries the observation instead, labelled as a guess.
 
 import type { Dispatcher } from '../dispatcher'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
@@ -262,20 +262,57 @@ export function integrationMessage(
   return fix ? { ...words, fix: fix(shellFacts(fact.shell)) } : words
 }
 
+/** How much of an executable name the process table keeps, in bytes.
+ *
+ *  It is the kernel's number, not a display choice: `observedProcess` is
+ *  darwin's `p_comm` (`internal/procwatch`, `commLen` — MAXCOMLEN), a
+ *  fixed-width field. That width is the whole reason the observation can be
+ *  shown at all: a field this size structurally cannot carry a path, an
+ *  argument or a command line, so nothing of the user's own text can ride
+ *  into a surface that is not theirs. The renderer states the number again
+ *  because the wire does not carry "this one was cut" — the contract
+ *  describes the fact, and a flag on it is a change to make deliberately
+ *  rather than inside a wording fix (nocx-3f6a). */
+const COMM_FIELD_BYTES = 16
+
+/** The kernel truncates by bytes, so that is what is counted here: a
+ *  fifteen-character name of two-byte characters was already cut when it
+ *  reached the wire. */
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).length
+}
+
 /** What nocx observed running where it expected the shell, as one sentence,
  *  in one place.
  *
- *  Two surfaces show it — the Details chain and the fix panel — and they must
- *  claim it exactly as strongly as each other, so they read the same function
- *  (AD-8). It is labelled a guess IN THE SENTENCE rather than by placement:
- *  it comes from the process table, which can be raced, and never from the
- *  byte stream, which AD-6 forbids the backend to interpret, so a reader who
- *  sees only this line still knows what it is worth. Null when the backend
- *  observed nothing — an absent observation is silence, never a hedge. */
+ *  Every surface that shows the observation reads this function, so none of
+ *  them can claim it more strongly than another (AD-8). It is labelled a
+ *  guess IN THE SENTENCE rather than by placement: it comes from the process
+ *  table, which can be raced, and never from the byte stream, which AD-6
+ *  forbids the backend to interpret, so a reader who sees only this line
+ *  still knows what it is worth. Null when the backend observed nothing — an
+ *  absent observation is silence, never a hedge.
+ *
+ *  A name that fills the field is quoted with an ellipsis and explained
+ *  (nocx-aimo). The owner read `zsh (kiro-cli-te` on the installed build: a
+ *  word stopped mid-syllable, which reads as a defect in nocx and is
+ *  actually the field doing its job. Nothing downstream can tell a name that
+ *  was cut from one that happens to be exactly this long — the wire carries
+ *  the string and no flag — so the sentence says "may be cut short", which
+ *  is the only claim that is true either way. The hedge is spent only where
+ *  it is needed: on every observation it would teach the reader to skip it. */
 export function observationSentence(fact: SessionIntegrationChanged): string | null {
   const observed = fact.detail?.observedProcess
   if (!observed) return null
-  return `Best guess, not a finding: nocx saw "${observed}" running where it expected the shell.`
+  const filled = byteLength(observed) >= COMM_FIELD_BYTES
+  const name = filled ? `${observed}…` : observed
+  const sentence = `Best guess, not a finding: nocx saw "${name}" running where it expected the shell.`
+  if (!filled) return sentence
+  return (
+    `${sentence} The system keeps only the first ${COMM_FIELD_BYTES} characters of a ` +
+    `process name and nocx reads no further — never the command line — so this one may ` +
+    `be cut short.`
+  )
 }
 
 /** What shell integration is, carried by the build rather than linked to
@@ -299,96 +336,108 @@ export const INTEGRATION_EXPLANATION: readonly string[] = [
   'The mark on the tab stays for as long as the session is degraded. "Don\'t show again for this shell" stops the card for this shell on this machine; it leaves the mark alone, because the mark is the honest state of the session.',
 ]
 
-// ── which card has already been seen ──────────────────────────────────────
+// ── which shells the user has silenced ────────────────────────────────────
 
 /** The narrow storage seam, injectable so the store is testable without a
  *  browser and so a locked-down webview cannot throw on construction. */
-export interface IntegrationSeenStorage {
+export interface IntegrationSilenceStorage {
   getItem(key: string): string | null
   setItem(key: string, value: string): void
 }
 
-/** Versioned key. Format v1 is a JSON array of `${shell} ${reason}`
- *  entries, where a reason of `*` means every reason for that shell. */
-const SEEN_KEY = 'nocx.integration.seen.v1'
+/** The record is a JSON array of `${shell} ${reason}` lines, where a reason
+ *  of `*` means every reason for that shell — and `*` is the only reason
+ *  ever written now (see the store below).
+ *
+ *  The key still says `seen` because that is where the record already is
+ *  (nocx-wfxz). Renaming it would throw away the silences users chose on the
+ *  shipped build — the one thing in there that IS a decision — to tidy a
+ *  string nobody sees. The per-card lines that build also wrote are read as
+ *  nothing and drop out on the next write. */
+const SILENCE_KEY = 'nocx.integration.seen.v1'
 const ALL_REASONS = '*'
 
-/** Remembers which (shell, reason) cards the user has already been shown.
+/** Remembers which shells the user has told nocx to stop raising cards for.
+ *
+ *  Exactly one thing writes here, and it is the user pressing "Don't show
+ *  again for this shell" (nocx-wfxz). Drawing a card writes nothing, closing
+ *  one writes nothing, and a session that ends with the card still up writes
+ *  nothing — so a card closed before the user had worked out what it meant
+ *  comes back with the next session that hits the same thing. The rule this
+ *  replaces recorded the (shell, reason) pair the moment the card was DRAWN,
+ *  which spent the card on a glance and never said so on the surface.
+ *
+ *  What is left is the standing decision, and it is per shell rather than per
+ *  (shell, reason): the user answered about the shell, not about one way it
+ *  failed. Deliberately not global either — a user who has accepted that
+ *  their login shell is not integrated has said nothing about the next host
+ *  they connect to.
  *
  *  WHY localStorage, and why here rather than in the backend: this is
- *  renderer presentation state — "has this person read this card" — not
- *  backend authority, and putting it behind an RPC would make the card's
+ *  renderer presentation state — "has this person answered for this shell" —
+ *  not backend authority, and putting it behind an RPC would make the card's
  *  first paint wait on a round trip. It must survive a restart, which rules
- *  out the run-scoped suppression the clipboard banner uses: the shell and
- *  the reason are properties of THIS machine and this configuration, so a
- *  card the user dismissed on Monday must not return every morning. And it
- *  must be per machine, which localStorage is and a synced setting would not
- *  be — the same profile on a second machine has a different shell and
- *  deserves the card again.
- *
- *  Keyed by (shell, reason) rather than by session, which is the owner's
- *  decision: one shell failing one way is one thing to learn, however many
- *  tabs it happens in. Keying by session turns a single misconfiguration
- *  into a card per tab, which is how people learn to dismiss cards without
- *  reading them. */
-export class IntegrationSeenStore {
-  constructor(private storage: IntegrationSeenStorage | null) {}
+ *  out the run-scoped suppression the clipboard banner uses: a decision the
+ *  user made on Monday must not be asked again every morning. And it must be
+ *  per machine, which localStorage is and a synced setting would not be — the
+ *  same profile on a second machine has a different shell and deserves the
+ *  card. */
+export class IntegrationSilenceStore {
+  constructor(private storage: IntegrationSilenceStorage | null) {}
 
-  /** Should the card be shown for this pair? */
-  shouldShow(shell: string, reason: string): boolean {
-    const seen = this.read()
-    return !seen.has(entry(shell, ALL_REASONS)) && !seen.has(entry(shell, reason))
+  /** Has the user silenced this shell? */
+  isSilenced(shell: string): boolean {
+    return this.read().has(shell)
   }
 
-  /** Record that the card was shown for this pair. */
-  markShown(shell: string, reason: string): void {
-    this.add(entry(shell, reason))
-  }
-
-  /** Suppress every card for this shell — the "Don't show again for this
-   *  shell" action. Deliberately per shell rather than global: a user who
-   *  has accepted that their login shell is not integrated has not said
-   *  anything about the next host they connect to. */
-  suppressShell(shell: string): void {
-    this.add(entry(shell, ALL_REASONS))
-  }
-
-  private read(): Set<string> {
-    if (!this.storage) return new Set()
-    try {
-      const raw = this.storage.getItem(SEEN_KEY)
-      if (!raw) return new Set()
-      const parsed: unknown = JSON.parse(raw)
-      if (!Array.isArray(parsed)) return new Set()
-      return new Set(parsed.filter((v): v is string => typeof v === 'string'))
-    } catch {
-      // A corrupt or unreadable record reads as "nothing seen": showing a
-      // card twice is a nuisance, never showing it is the defect.
-      return new Set()
-    }
-  }
-
-  private add(value: string): void {
+  /** Silence every card for this shell — the "Don't show again for this
+   *  shell" action, and the only writer there is. */
+  silenceShell(shell: string): void {
     if (!this.storage) return
-    const seen = this.read()
-    if (seen.has(value)) return
-    seen.add(value)
+    const silenced = this.read()
+    if (silenced.has(shell)) return
+    silenced.add(shell)
     try {
-      this.storage.setItem(SEEN_KEY, JSON.stringify([...seen]))
+      this.storage.setItem(
+        SILENCE_KEY,
+        JSON.stringify([...silenced].map((s) => `${s} ${ALL_REASONS}`)),
+      )
     } catch {
       // Storage full or denied. The card will be offered again, which is
       // the safe direction.
     }
   }
-}
 
-function entry(shell: string, reason: string): string {
-  return `${shell} ${reason}`
+  /** The silenced shells, as shells. A line that does not end in the
+   *  all-reasons marker is not a decision the user made and reads as nothing
+   *  at all — which is what retires the per-card lines the previous build
+   *  wrote. The shell is everything before the marker, so a path with a
+   *  space in it survives the round trip. */
+  private read(): Set<string> {
+    if (!this.storage) return new Set()
+    try {
+      const raw = this.storage.getItem(SILENCE_KEY)
+      if (!raw) return new Set()
+      const parsed: unknown = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return new Set()
+      const suffix = ` ${ALL_REASONS}`
+      return new Set(
+        parsed
+          .filter((v): v is string => typeof v === 'string' && v.endsWith(suffix))
+          .map((v) => v.slice(0, -suffix.length)),
+      )
+    } catch {
+      // A corrupt or unreadable record reads as "nothing silenced": showing
+      // a card the user silenced is a nuisance, never showing one is the
+      // defect.
+      return new Set()
+    }
+  }
 }
 
 /** localStorage when the webview allows it, null when it does not. A
  *  denied storage must not take the tab down on construction. */
-export function safeSeenStorage(): IntegrationSeenStorage | null {
+export function safeSilenceStorage(): IntegrationSilenceStorage | null {
   try {
     return window.localStorage
   } catch {

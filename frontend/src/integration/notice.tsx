@@ -1,29 +1,42 @@
 /**
  * The degraded-session notice (nocx-5uu5, revised by nocx-0mqs / nocx-rzvq /
- * nocx-qs68): the card a user sees the first time a shell fails to integrate
- * a given way, and the dialogs behind it.
+ * nocx-qs68 / nocx-aimo): the card a user sees the first time a shell fails
+ * to integrate a given way, and the dialog behind it.
  *
  * Owner decisions this implements, taken 2026-08-12 rather than invented
  * here: the fact lives as a persistent mark on the TAB for as long as the
- * session stays degraded (tab.tsx already owns that mark), plus this card
- * shown once per (shell, reason) pair — not once per session, because one
- * shell failing one way is one thing to learn however many tabs it happens
- * in. The message names no third-party program. The Details dialog shows the
- * chain of facts, including the observed process name, labelled as a guess.
- * "Apply the fix for me" is nocx-cqkg and is deliberately not here.
+ * session stays degraded (tab.tsx already owns that mark), plus this card,
+ * raised once per session per reason and spent only when the user answers it
+ * — closing it remembers nothing, because a card closed before the reader
+ * worked out what it meant has not been read (nocx-wfxz). The message names
+ * no third-party program; the observed process name is
+ * shown behind the card, labelled as a guess. "Apply the fix for me" is
+ * nocx-cqkg and is deliberately not here.
  *
- * Three things the owner measured on the installed build and this file
+ * Four things the owner measured on the installed build and this file
  * answers:
  *
- *   - The remedy is the card's OWN action, not two clicks away behind
- *     Details. A user looking at "Not integrated" wants the fix, and the
- *     chain of facts is what they read when the fix does not apply.
+ *   - The remedy is the card's OWN action, not two clicks away. A user
+ *     looking at "Not integrated" wants the fix, and the chain of facts is
+ *     what they read when the fix does not apply.
+ *   - There is ONE dialog. Details used to be a second surface holding the
+ *     chain, the explanation and the silence-this-shell action, so what nocx
+ *     knew and what to do about it were different journeys through the same
+ *     card. Everything it held is behind the card's primary action now.
  *   - The card sits ABOVE the terminal in the flow (mountIntegrationNotice
  *     below). It used to overlay, and it covered the first prompt line —
  *     a card that hides what it describes is worse than the toast it
  *     replaced.
  *   - The explanation ships in the build rather than at a URL. See
  *     INTEGRATION_EXPLANATION in ./status for why.
+ *
+ * The card carries three actions and they are three different promises, which
+ * is why none of them is a duplicate of another: the primary opens the one
+ * dialog, "Don't show again for this shell" silences the card for this shell
+ * on this machine for good, and the cross takes THIS card away now. Neither
+ * of the last two touches the tab's mark — the mark is the state of the
+ * session rather than a notification, and it stays until the session is not
+ * degraded any more.
  *
  * Everything visible is a kit component placed by this surface. The identity
  * class positions the card in the pane (placement — `flex`, `margin`) and
@@ -56,14 +69,15 @@ export interface IntegrationNoticeProps {
   copy: (text: string) => Promise<void>
   /** The user asked not to be shown this shell's cards again. */
   onSuppressShell: () => void
-  /** Dismiss this card. "Not now" — the card is already once-per-pair, so
-   *  there is nothing further to remember. */
+  /** Take this card away. It is "not now", and it is the whole of what it
+   *  says: nothing is recorded, so the next session that hits this raises the
+   *  card again. The action that answers for good is onSuppressShell. */
   onDismiss: () => void
 }
 
-/** The chain of facts the Details dialog shows, in the order a person reads
- *  them: what nocx started, what is true now, what worked last, and the
- *  guess. Each item is one sentence. */
+/** The chain of facts the dialog shows under the remedy, in the order a
+ *  person reads them: what nocx started, what is true now, what worked last,
+ *  and the guess. One item per fact. */
 function detailItems(fact: SessionIntegrationChanged, msg: IntegrationMessage): MarkerListItem[] {
   const items: MarkerListItem[] = [
     { tone: 'note', text: `nocx started ${fact.shell}` },
@@ -75,9 +89,19 @@ function detailItems(fact: SessionIntegrationChanged, msg: IntegrationMessage): 
   return items
 }
 
+/** What the card's primary action promises, which is the most this reason
+ *  can honestly promise. A reason nocx has no remedy for still has a chain
+ *  of facts and an explanation worth reading, and it must not be offered
+ *  under a label that says nocx can fix it — an empty "How to fix" teaches
+ *  the user that the button never helps (nocx-0mqs). One derivation, read by
+ *  both the button and the dialog it opens, so the two cannot disagree about
+ *  what is behind the click. */
+function openLabel(msg: IntegrationMessage): string {
+  return msg.fix ? 'How to fix' : 'What happened'
+}
+
 function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
-  const [detailsOpen, setDetailsOpen] = createSignal(false)
-  const [fixOpen, setFixOpen] = createSignal(false)
+  const [open, setOpen] = createSignal(false)
   const [aboutOpen, setAboutOpen] = createSignal(false)
   const msg = () => integrationMessage(props.fact)
 
@@ -98,82 +122,64 @@ function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
             description={m.description}
             action={
               <Toolbar ariaLabel="Shell integration">
-                {/* The one action this card exists for, when there is one.
-                    A reason with no honest remedy leads with Details. */}
-                <Show when={m.fix}>
-                  <Button variant="primary" onClick={() => setFixOpen(true)}>
-                    How to fix
-                  </Button>
-                </Show>
-                <Button onClick={() => setDetailsOpen(true)}>Details</Button>
+                {/* The one action this card exists for: the remedy when
+                    there is one, and what nocx knows when there is not. */}
+                <Button variant="primary" onClick={() => setOpen(true)}>
+                  {openLabel(m)}
+                </Button>
+                {/* Not the same promise as the cross beside it, which is why
+                    both are here: this one answers for the shell, on this
+                    machine, for good. */}
+                <Button
+                  onClick={() => {
+                    setOpen(false)
+                    props.onSuppressShell()
+                  }}
+                >
+                  Don't show again for this shell
+                </Button>
+                {/* And this one answers only the card in front of the user. */}
                 <IconButton ariaLabel="Dismiss" size="sm" onClick={() => props.onDismiss()}>
                   {'×'}
                 </IconButton>
               </Toolbar>
             }
           />
+          {/* One dialog, in the order a person reads it: what to do, then
+              what nocx knows. Details used to hold the second half on a
+              surface of its own, so a reader who wanted both took two
+              journeys through the same card (nocx-aimo). The observation is
+              in the chain and only there — it is one sentence from one
+              function (AD-8), and showing it twice on one surface would make
+              the same fact look like two. */}
           <Dialog
-            open={detailsOpen()}
-            onClose={() => setDetailsOpen(false)}
-            title={m.title}
+            open={open()}
+            onClose={() => setOpen(false)}
+            title={openLabel(m)}
             footer={
               <>
-                <Show when={m.fix}>
-                  <Button
-                    onClick={() => {
-                      setDetailsOpen(false)
-                      setFixOpen(true)
-                    }}
-                  >
-                    How to fix
-                  </Button>
+                <Show when={m.fix} keyed>
+                  {(fix) => <Button onClick={() => copySnippet(fix.snippet)}>Copy</Button>}
                 </Show>
-                <Button
-                  onClick={() => {
-                    props.onSuppressShell()
-                    setDetailsOpen(false)
-                  }}
-                >
-                  Don't show again for this shell
-                </Button>
                 <Button onClick={() => setAboutOpen(true)}>Learn more</Button>
-                <Button variant="primary" onClick={() => setDetailsOpen(false)}>
+                <Button variant="primary" onClick={() => setOpen(false)}>
                   Close
                 </Button>
               </>
             }
           >
-            <MarkerList items={detailItems(props.fact, m)} />
-          </Dialog>
-          <Show when={m.fix} keyed>
-            {(fix) => (
-              <Dialog
-                open={fixOpen()}
-                onClose={() => setFixOpen(false)}
-                title="How to fix"
-                footer={
+            <Stack>
+              <Show when={m.fix} keyed>
+                {(fix) => (
                   <>
-                    <Button onClick={() => copySnippet(fix.snippet)}>Copy</Button>
-                    <Button variant="primary" onClick={() => setFixOpen(false)}>
-                      Close
-                    </Button>
+                    <p>{fix.lead}</p>
+                    <CodeBlock ariaLabel="Commands to run">{fix.snippet}</CodeBlock>
                   </>
-                }
-              >
-                <Stack>
-                  <p>{fix.lead}</p>
-                  {/* The observation belongs where the user is acting on it,
-                      and it is the same sentence the Details chain shows —
-                      one function, so the two cannot claim it with different
-                      force (AD-8). */}
-                  <Show when={observationSentence(props.fact)} keyed>
-                    {(observed) => <p>{observed}</p>}
-                  </Show>
-                  <CodeBlock ariaLabel="Commands to run">{fix.snippet}</CodeBlock>
-                </Stack>
-              </Dialog>
-            )}
-          </Show>
+                )}
+              </Show>
+              <MarkerList items={detailItems(props.fact, m)} />
+            </Stack>
+          </Dialog>
           <Dialog
             open={aboutOpen()}
             onClose={() => setAboutOpen(false)}
