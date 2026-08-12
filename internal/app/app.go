@@ -31,6 +31,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
+	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -75,6 +76,10 @@ type App struct {
 	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
 	// the process.
 	gitFactory *gitlocal.Factory
+
+	// procs owns the process observation (nocx-cgzc); closed at shutdown so
+	// its kernel queue and its goroutine do not outlive the process.
+	procs procwatch.Watcher
 	// logFilePath is where the backend log file lives — the stable,
 	// findable copy of the log the delivery-path decisions are written
 	// to (the P0 that had to be diagnosed from a JSON file's mtime). ""
@@ -312,10 +317,19 @@ func New(opts ...Option) (*App, error) {
 	// registry.
 	childTransports := newTransportRegistry()
 	childSessions := newSessionRegistry()
+	// One process observer for the whole backend, built here and injected:
+	// "is the shell we started still the process running there" is one
+	// question with one owner (nocx-cgzc), the platform half is per-OS, and
+	// a per-session observer would mean a kernel queue and a goroutine per
+	// tab.
+	procs := procwatch.New(logger)
 	// One login-shell resolver, built here and injected: "which shell is this
 	// user's login shell" is one question with one owner (nocx-wwz0), and the
 	// composition root is where the platform half gets wired in.
-	ptf := &localPTYFactory{log: logger, shint: shint, transports: childTransports, shells: loginshell.New()}
+	ptf := &localPTYFactory{
+		log: logger, shint: shint, transports: childTransports,
+		shells: loginshell.New(), procs: procs,
+	}
 	sess := session.New(logger, ptf)
 
 	// SSH config resolver: shared by both the SSH client and the profile
@@ -697,6 +711,13 @@ func New(opts ...Option) (*App, error) {
 	ptf.noteLifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 		tp.NoteIntegrationLoss(lane, string(cause))
 	}
+	// The third seam onto the same axis (nocx-cgzc): the observer says the
+	// shell was replaced before it ever answered, and the transport decides
+	// whether that still applies. The factory does not decide it, because
+	// only the transport knows whether the session has integrated since.
+	ptf.reportShellReplaced = func(sid, observed string) {
+		tp.NoteShellReplaced(session.ID(sid), observed)
+	}
 	resolver := connection.NewResolver(
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
@@ -720,6 +741,7 @@ func New(opts ...Option) (*App, error) {
 		UnlockRequester:  tp,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
+		procs:            procs,
 	}
 
 	logger.Info("application initialized")
@@ -921,6 +943,19 @@ type localPTYFactory struct {
 	// handshake that expires establishes no domain and therefore publishes
 	// no fact at all — the silence this bead exists to end.
 	noteLifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
+	// procs watches the process this factory forked, so a shell replaced
+	// out of the user's own startup files is noticed when it happens rather
+	// than when the handshake bound expires ten seconds later (nocx-cgzc).
+	// Injected because the observation is per-OS; nil (tests, or a server
+	// without the wiring) leaves the bound as the only detector, which is
+	// where the product was before.
+	procs procwatch.Watcher
+	// reportShellReplaced carries one observation to the session's
+	// integration axis. Separate from reportIntegration because it answers
+	// a different question — reportIntegration says what the launch did,
+	// this says what happened to it afterwards — and because only the
+	// transport may decide whether an observation still applies.
+	reportShellReplaced func(sid, observed string)
 }
 
 // lifecyclePTY is an enhanced session's pty plus the lifecycle channel whose
@@ -931,11 +966,21 @@ type localPTYFactory struct {
 type lifecyclePTY struct {
 	pty.Pty
 	ch *lifecyclechannel.Adapter
+	// stopWatch releases this session's process observation. Nil when
+	// nothing is watching — no observer wired, or a platform that cannot
+	// look.
+	stopWatch func()
 }
 
 func (p *lifecyclePTY) Close() error {
 	err := p.Pty.Close()
 	_ = p.ch.Close()
+	// The pid is the OS's to reuse the moment the shell is reaped, so a
+	// watch that outlived its session would be a watch on somebody else's
+	// process.
+	if p.stopWatch != nil {
+		p.stopWatch()
+	}
 	return err
 }
 
@@ -1063,7 +1108,43 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// would have nowhere to land. Registering the axis afterwards is the
 	// safe order — the status is only emitted after the open ack anyway.
 	f.report(cfg.SessionID, p.Shell(), transport.IntegrationStarting, ssh.ReasonNone)
-	return &lifecyclePTY{Pty: p, ch: ch}, nil
+	// Watched only here, on the one path that has a handshake to shorten.
+	// A session already reported conventional has nothing an observation
+	// could bring forward, and watching it could only produce noise.
+	return &lifecyclePTY{Pty: p, ch: ch, stopWatch: f.watchForReplacement(cfg.SessionID, p)}, nil
+}
+
+// watchForReplacement asks the observer to say when the shell this factory
+// just started stops being the process running under its pid — the takeover
+// nocx-cgzc measured, where a wrapper execs out of the user's own startup
+// file milliseconds after the fork and the product finds out ten seconds
+// later.
+//
+// It is a SECOND detector, never a replacement for the first: the handshake
+// bound still bounds the handshake, and a platform that cannot observe an
+// exec (or a kernel that refuses the watch) degrades to exactly the product
+// that shipped before this — which is why the failure is a Debug line and
+// not an error the session carries.
+func (f *localPTYFactory) watchForReplacement(sid string, p *pty.LocalPty) func() {
+	if sid == "" || f.procs == nil || f.reportShellReplaced == nil {
+		return nil
+	}
+	pid := p.Pid()
+	if pid <= 0 {
+		return nil
+	}
+	shell := p.Shell()
+	stop, err := f.procs.Started(pid, shell, func(obs procwatch.Observation) {
+		f.log.Info("the shell this session started was replaced before it answered",
+			"session", sid, "pid", obs.PID, "started", shell, "observed", obs.Name)
+		f.reportShellReplaced(sid, obs.Name)
+	})
+	if err != nil {
+		f.log.Debug("this session's shell is not watched for replacement",
+			"session", sid, "error", err)
+		return nil
+	}
+	return stop
 }
 
 // report enters this session into the integration axis, when the wiring
@@ -1111,6 +1192,11 @@ func (a *App) Shutdown(ctx context.Context) {
 	// outlive the process.
 	if a.gitFactory != nil {
 		a.gitFactory.Stop()
+	}
+	// The process observer last of the background owners: nothing can ask
+	// for a new watch once the transport and the sessions are gone.
+	if a.procs != nil {
+		_ = a.procs.Close()
 	}
 	a.Logger.Info("application stopped")
 	// Close the log file last, after the final line: the stable copy of

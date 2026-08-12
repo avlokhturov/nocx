@@ -197,6 +197,83 @@ func (s *WSServer) NoteIntegrationLoss(lane lifecycle.LaneID, cause string) {
 	s.emitIntegration(sid)
 }
 
+// NoteShellReplaced records that the executable nocx started is no longer the
+// one running under a session's pty, and concludes the axis now rather than
+// when the handshake bound expires.
+//
+// It is a SECOND DETECTOR of a conclusion the product already had, never a
+// second answer: until this existed, the only way the backend learned a shell
+// would not answer was that it had not answered for ten seconds, so the user
+// read a working terminal for ten seconds and then had a card put over it
+// (nocx-cgzc). The observation is not authority — the domain is still
+// established only by the authenticated hello, and this never grants one —
+// and the name it carries is a guess the product labels as one.
+//
+// Unlike every other trigger on this axis it can fire INSIDE the open call,
+// because the launch is what starts the process being watched and a wrapper
+// takes it over milliseconds later. That is safe without a special case:
+// emitIntegration resolves the subscriber at emit time, so before the
+// subscriber is attached the notification is simply dropped, and the open
+// handler's own emitIntegration — which runs after the ack, as AD-7 requires
+// — then sends the status this call had already recorded.
+//
+// The reason is deliberately the one the bound would have produced. The
+// vocabulary is a closed server enum whose extension belongs to the bootstrap
+// progress facts (nocx-yww2, whose `startup-did-not-return` the renderer
+// already names as not-yet-emittable), and inventing a value here would leave
+// the product with two words for one situation. What this adds is the timing
+// and the observation, which is exactly what the bead asked for.
+func (s *WSServer) NoteShellReplaced(sid session.ID, observed string) {
+	status, reason, changed := s.applyShellReplaced(sid, observed)
+	if !changed {
+		return
+	}
+	s.log.Info("session integration degraded",
+		"session", sid, "status", status, "reason", string(reason),
+		"cause", causeShellReplaced, "observed", observed)
+	s.emitIntegration(sid)
+}
+
+// causeShellReplaced names this detector in the log, beside the adapter's own
+// loss causes. It is a diagnostic and never a wire value: a reader has to be
+// able to tell "the bound expired" from "we watched the shell go", because
+// the two need different fixes.
+const causeShellReplaced = "shell-replaced"
+
+// applyShellReplaced moves the axis for an observed takeover under the lock,
+// and reports whether anything changed.
+//
+// The window it may answer in has both ends: it opens when the session is
+// registered as `starting` and closes the moment anything else concludes the
+// axis — an authenticated domain going live, or a transport loss. Outside it
+// the observation is dropped, because an integrated shell may replace its own
+// image legitimately (the adapter's own comment says a re-exec keeps speaking
+// for the same domain), and tearing a working session down for that would be
+// a defect this detector introduced rather than found.
+func (s *WSServer) applyShellReplaced(sid session.ID, observed string) (string, ssh.RefusalReason, bool) {
+	// A guess nobody can name is not worth showing: the contract requires a
+	// name inside detail, and "something replaced your shell and I cannot
+	// say what" is not something a user can act on.
+	if sid == "" || observed == "" {
+		return "", "", false
+	}
+	s.integrationMu.Lock()
+	defer s.integrationMu.Unlock()
+	st, ok := s.integrations[sid]
+	if !ok {
+		return "", "", false
+	}
+	if st.everLive || st.status != IntegrationStarting {
+		return "", "", false
+	}
+	next := *st
+	next.observedProcess = observed
+	next.status = IntegrationConventional
+	next.reason = ssh.ReasonHandshakeTimeout
+	*st = next
+	return next.status, next.reason, true
+}
+
 // applyIntegrationLoss maps a transport loss onto the session's axis under
 // the lock, and reports whether anything changed.
 func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, ssh.RefusalReason, bool) {
@@ -210,6 +287,18 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 	// away and the product has nothing to say about it. Emitting here would
 	// paint every closing tab as broken on its way out.
 	if cause == LossCauseClosed {
+		return "", "", false
+	}
+	// Already answered, and the first answer wins. A session that never
+	// integrated and is already conventional has been explained once — by
+	// the launch itself, or by the process observation above — and the loss
+	// that follows says nothing the user does not already know. Without
+	// this, the descriptor the abandoned shell leaves behind would report
+	// end-of-stream and DOWNGRADE a specific answer to `unknown` seconds
+	// after the product gave it. The adapter states the same rule for its
+	// own three paths ("the FIRST cause wins, which is the one that actually
+	// ended the channel"); this is that rule where two detectors meet.
+	if st.status == IntegrationConventional && !st.everLive {
 		return "", "", false
 	}
 	next := integrationStatus{shell: st.shell, everLive: st.everLive, observedProcess: st.observedProcess}

@@ -17,6 +17,29 @@ import (
 // transitions the product's badge and card depend on, and the paths where
 // the honest answer is to say nothing at all.
 
+// awaitIntegration waits for the session to REACH a status, skipping frames
+// that report a status it already had.
+//
+// Skipping them is not leniency, it is the rule: a test waits on a state
+// change, and a re-send of the current state is not one. The transport
+// re-sends deliberately — the status is a state, replayed on reattach and
+// emitted again by the open handler after its ack (AD-7) — and because
+// openSession returns as soon as it reads that ack, the handler's emit can
+// land at any later moment. It landed after a test had already moved the axis
+// on the emulated Linux container, where the handler is slower than the test,
+// and read as "the wrong status arrived" (nocx-6au4).
+//
+// A status that never arrives still fails, on readNotification's own bound.
+func awaitIntegration(t *testing.T, conn *websocket.Conn, sid, want string) integrationChangedParams {
+	t.Helper()
+	for {
+		got := readIntegration(t, conn, sid)
+		if got.Status == want {
+			return got
+		}
+	}
+}
+
 // readIntegration reads the next session.integrationChanged for a session.
 func readIntegration(t *testing.T, conn *websocket.Conn, sid string) integrationChangedParams {
 	t.Helper()
@@ -61,9 +84,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	}
 	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
 	e.ws.emitIntegration(session.ID(sid))
-	if first := readIntegration(t, e.conn, sid); first.Status != IntegrationStarting {
-		t.Fatalf("first status = %q, want starting", first.Status)
-	}
+	awaitIntegration(t, e.conn, sid, IntegrationStarting)
 	return &integrationEnv{lifecycleTestEnv: e, pub: pub, sid: sid, lane: lane, h: h}
 }
 
@@ -78,7 +99,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 func (e *integrationEnv) establish(t *testing.T) integrationChangedParams {
 	t.Helper()
 	mustLifecycleIngest(t, e.pub, "T", lifecycleEnv(e.lane, e.h, 1, lifecycleHelloEvt()))
-	got := readIntegration(t, e.conn, e.sid)
+	got := awaitIntegration(t, e.conn, e.sid, IntegrationIntegrated)
 	ackEstablishmentFrom(t, e.pub, e.lane, e.h, e.conn)
 	return got
 }
@@ -127,10 +148,7 @@ func TestIntegration_LossAfterEstablishmentIsLost(t *testing.T) {
 func TestIntegration_LossBeforeEstablishmentWithoutTimeoutIsUnknown(t *testing.T) {
 	e := newIntegrationEnv(t)
 	e.ws.NoteIntegrationLoss(e.lane, "end-of-stream")
-	got := readIntegration(t, e.conn, e.sid)
-	if got.Status != IntegrationConventional {
-		t.Errorf("status = %q, want conventional", got.Status)
-	}
+	got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional)
 	if got.Reason != string(ssh.ReasonUnknown) {
 		t.Errorf("reason = %q, want unknown", got.Reason)
 	}
@@ -170,7 +188,7 @@ func TestIntegration_UnregisteredSessionSaysNothing(t *testing.T) {
 func TestIntegration_ReattachReplaysTheCurrentStatus(t *testing.T) {
 	e := newIntegrationEnv(t)
 	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
-	if got := readIntegration(t, e.conn, e.sid); got.Reason != string(ssh.ReasonHandshakeTimeout) {
+	if got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional); got.Reason != string(ssh.ReasonHandshakeTimeout) {
 		t.Fatalf("reason = %q, want handshake-timeout", got.Reason)
 	}
 
@@ -186,8 +204,8 @@ func TestIntegration_ReattachReplaysTheCurrentStatus(t *testing.T) {
 	if envelope.Error != nil {
 		t.Fatalf("attach: %+v", envelope.Error)
 	}
-	got := readIntegration(t, connB, e.sid)
-	if got.Status != IntegrationConventional || got.Reason != string(ssh.ReasonHandshakeTimeout) {
+	got := awaitIntegration(t, connB, e.sid, IntegrationConventional)
+	if got.Reason != string(ssh.ReasonHandshakeTimeout) {
 		t.Errorf("replayed status = %+v, want conventional/handshake-timeout", got)
 	}
 }
@@ -199,5 +217,186 @@ func TestIntegration_LossOnAnUnknownLaneIsDropped(t *testing.T) {
 	e.ws.NoteIntegrationLoss(lifecycle.LaneID("lane-nobody"), LossCauseHelloTimeout)
 	if leaked := tryReadNotification(t, e.conn, "session.integrationChanged", 300*time.Millisecond); leaked != nil {
 		t.Errorf("an unregistered lane produced a status: %s", leaked)
+	}
+}
+
+// ── the process observation (nocx-cgzc, nocx-viil.3) ──────────────────────
+
+// The bead's own sentence: a takeover is reported in well under a second,
+// and not when the handshake bound expires. Nothing here advances a clock —
+// the observation IS the trigger, which is the whole point of having a second
+// detector.
+func TestIntegration_ShellReplacedIsReportedWithoutWaitingForTheBound(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteShellReplaced(session.ID(e.sid), "kiro-cli-term")
+	got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional)
+	if got.Reason != string(ssh.ReasonHandshakeTimeout) {
+		t.Errorf("reason = %q, want handshake-timeout: the same conclusion the bound reaches, reached now", got.Reason)
+	}
+	if got.Detail == nil || got.Detail.ObservedProcess != "kiro-cli-term" {
+		t.Errorf("detail = %+v, want the observed executable's name", got.Detail)
+	}
+}
+
+// answersAfter collects every session.integrationChanged for a session that
+// arrives in a short window and returns the DISTINCT answers in them.
+//
+// The tests below cannot assert that nothing arrives at all, and the reason is
+// the harness rather than the code: openSession returns as soon as the ack is
+// read, while the open handler goes on to emit the session's CURRENT status
+// after that ack (AD-7), on its own goroutine. So a re-send of a status a test
+// has already read can land at any moment, and one did — on the emulated
+// Linux container, where the handler is slower than the test.
+//
+// That re-send is not a defect and must not be asserted away: the status is a
+// STATE, replayed on reattach for exactly this reason, and re-sending a state
+// says nothing new. What a test may assert — and what the user experiences —
+// is that nothing says anything DIFFERENT.
+func answersAfter(t *testing.T, conn *websocket.Conn, sid string) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	var answers []string
+	for {
+		raw := tryReadNotification(t, conn, "session.integrationChanged", 300*time.Millisecond)
+		if raw == nil {
+			return answers
+		}
+		var p integrationChangedParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("decode session.integrationChanged: %v\nraw: %s", err, raw)
+		}
+		if p.SessionID != sid {
+			continue
+		}
+		answer := p.Status + "/" + p.Reason
+		if p.Detail != nil {
+			answer += "/" + p.Detail.ObservedProcess
+		}
+		if !seen[answer] {
+			seen[answer] = true
+			answers = append(answers, answer)
+		}
+	}
+}
+
+// One takeover, one answer. The bound still expires ten seconds later and
+// still reports its own loss; the axis has already said what that loss would
+// say, so the product must not change what it tells the user — a card that
+// restates itself differently is a card people learn to ignore.
+func TestIntegration_TheBoundExpiringAfterAnObservationSaysNothingNew(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteShellReplaced(session.ID(e.sid), "kiro-cli-term")
+	awaitIntegration(t, e.conn, e.sid, IntegrationConventional)
+	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
+	want := IntegrationConventional + "/" + string(ssh.ReasonHandshakeTimeout) + "/kiro-cli-term"
+	for _, answer := range answersAfter(t, e.conn, e.sid) {
+		if answer != want {
+			t.Errorf("the bound changed the answer to %q, want %q", answer, want)
+		}
+	}
+}
+
+// A loss that arrives after an observation must not DOWNGRADE it either. The
+// wrapper closing the inherited descriptor is an end-of-stream, which alone
+// means `unknown`; here the backend can say more than that and has already
+// said it, and the first answer wins.
+func TestIntegration_ALaterLossDoesNotOverwriteTheObservedAnswer(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteShellReplaced(session.ID(e.sid), "kiro-cli-term")
+	if got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional); got.Reason != string(ssh.ReasonHandshakeTimeout) {
+		t.Fatalf("reason = %q, want handshake-timeout", got.Reason)
+	}
+	e.ws.NoteIntegrationLoss(e.lane, "end-of-stream")
+	want := IntegrationConventional + "/" + string(ssh.ReasonHandshakeTimeout) + "/kiro-cli-term"
+	for _, answer := range answersAfter(t, e.conn, e.sid) {
+		if answer != want {
+			t.Errorf("a later loss changed the answer to %q, want %q", answer, want)
+		}
+	}
+}
+
+// An integrated session's shell may legitimately replace its own image, and
+// the product must not tear a working session down for it. The observation
+// answers only the pre-handshake window; a channel that WAS live and then
+// ends is the adapter's loss path, with its own cause and its own reason.
+func TestIntegration_AnObservationAfterEstablishmentChangesNothing(t *testing.T) {
+	e := newIntegrationEnv(t)
+	if got := e.establish(t); got.Status != IntegrationIntegrated {
+		t.Fatalf("status = %q, want integrated", got.Status)
+	}
+	e.ws.NoteShellReplaced(session.ID(e.sid), "kiro-cli-term")
+	for _, answer := range answersAfter(t, e.conn, e.sid) {
+		if answer != IntegrationIntegrated+"/" {
+			t.Errorf("an integrated session was changed to %q by a process observation", answer)
+		}
+	}
+}
+
+// The contract requires a name inside detail, and a guess nobody can name is
+// not worth showing: an observation without one is dropped rather than
+// flipping a tab to conventional on evidence the user cannot act on.
+func TestIntegration_AnUnnamedObservationIsDropped(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteShellReplaced(session.ID(e.sid), "")
+	for _, answer := range answersAfter(t, e.conn, e.sid) {
+		if answer != IntegrationStarting+"/" {
+			t.Errorf("an observation with no name moved the session to %q", answer)
+		}
+	}
+}
+
+// A session nobody registered has no axis to move — the same rule the loss
+// path already obeys, so an observation about a raw tab stays silent. Absence
+// IS assertable here: an unregistered session emits nothing on any path, so
+// there is no re-send to race with.
+func TestIntegration_AnObservationForAnUnregisteredSessionIsDropped(t *testing.T) {
+	e := newLifecycleTestEnv(t)
+	sid := e.openSession(t, 1)
+	e.ws.NoteShellReplaced(session.ID(sid), "kiro-cli-term")
+	if leaked := tryReadNotification(t, e.conn, "session.integrationChanged", 300*time.Millisecond); leaked != nil {
+		t.Errorf("an unregistered session announced a status: %s", leaked)
+	}
+}
+
+// The observation survives a reconnect like every other part of the status
+// (AD-9): it is a state, and no further transition is coming to re-deliver
+// it.
+func TestIntegration_ReattachReplaysTheObservation(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteShellReplaced(session.ID(e.sid), "kiro-cli-term")
+	if got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional); got.Detail == nil {
+		t.Fatal("no detail on the first fact")
+	}
+
+	connB := connectWS(t, e.ws)
+	defer func() { _ = connB.Close() }()
+	resp := jsonrpcCallWithID(t, connB, "attach", map[string]any{"sessionId": e.sid, "offset": 0}, 2)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("attach: %+v", envelope.Error)
+	}
+	got := awaitIntegration(t, connB, e.sid, IntegrationConventional)
+	if got.Detail == nil || got.Detail.ObservedProcess != "kiro-cli-term" {
+		t.Errorf("replayed detail = %+v, want the observation", got.Detail)
+	}
+}
+
+// And the paired half of nocx-viil.3: a session where nothing unusual was
+// observed sends no detail at all. The details chain must not grow a line
+// that says nothing — an empty guess would read as a finding.
+func TestIntegration_NothingObservedSendsNoDetail(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
+	got := awaitIntegration(t, e.conn, e.sid, IntegrationConventional)
+	if got.Reason != string(ssh.ReasonHandshakeTimeout) {
+		t.Fatalf("reason = %q, want handshake-timeout", got.Reason)
+	}
+	if got.Detail != nil {
+		t.Errorf("detail = %+v, want none when the backend observed nothing", got.Detail)
 	}
 }
