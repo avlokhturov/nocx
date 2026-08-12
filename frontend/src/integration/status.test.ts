@@ -220,9 +220,8 @@ describe('which shell nocx started', () => {
 })
 
 describe('the observation, as one sentence with one owner', () => {
-  // Both surfaces that show it — the Details chain and the fix panel — read
-  // this one function, so they cannot disagree about how strongly nocx
-  // claims it (AD-8).
+  // Every surface that shows the observation reads this one function, so
+  // none of them can claim it more strongly than another (AD-8).
   it('labels itself a guess and quotes only the process name', () => {
     const s = observationSentence(fact({ detail: { observedProcess: 'some-tui' } }))!
     expect(s.toLowerCase()).toContain('guess')
@@ -231,6 +230,36 @@ describe('the observation, as one sentence with one owner', () => {
 
   it('is nothing at all when the backend observed nothing', () => {
     expect(observationSentence(fact())).toBeNull()
+  })
+
+  // nocx-aimo, measured by the owner: `zsh (kiro-cli-te` on screen, a word
+  // stopped mid-syllable. It is p_comm's fixed width — the same width that
+  // makes the value safe to show at all — so the sentence marks the elision
+  // and says why, instead of quoting the fragment as a whole name.
+  it('marks a name that fills the process table field as possibly short', () => {
+    const s = observationSentence(fact({ detail: { observedProcess: 'zsh (kiro-cli-te' } }))!
+    expect(s).toContain('"zsh (kiro-cli-te…"')
+    expect(s).toContain('cut short')
+    expect(s).toContain('16')
+  })
+
+  // The hedge is for the names that need it. A name plainly inside the
+  // field is quoted as itself — hedging every observation would teach the
+  // reader that the hedge means nothing.
+  it('leaves a name that fits alone', () => {
+    const s = observationSentence(fact({ detail: { observedProcess: 'some-tui' } }))!
+    expect(s).toContain('"some-tui"')
+    expect(s).not.toContain('…')
+    expect(s).not.toContain('cut short')
+  })
+
+  // The field is bytes and so is its truncation: a name of sixteen
+  // CHARACTERS that is more than sixteen bytes never reached the renderer
+  // whole either.
+  it('counts the field in bytes, the way the kernel does', () => {
+    const wide = 'ααααααααααααααα' // 15 characters, 30 bytes
+    const s = observationSentence(fact({ detail: { observedProcess: wide } }))!
+    expect(s).toContain('cut short')
   })
 })
 

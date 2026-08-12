@@ -14,7 +14,7 @@
 // The words never name a third-party program. nocx cannot see which one took
 // the shell over — AD-6 forbids reading the byte stream and the process table
 // is a race — so naming one would be a guess presented as a finding. The
-// details surface carries the observation instead, labelled as a guess.
+// remedy surface carries the observation instead, labelled as a guess.
 
 import type { Dispatcher } from '../dispatcher'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
@@ -262,20 +262,57 @@ export function integrationMessage(
   return fix ? { ...words, fix: fix(shellFacts(fact.shell)) } : words
 }
 
+/** How much of an executable name the process table keeps, in bytes.
+ *
+ *  It is the kernel's number, not a display choice: `observedProcess` is
+ *  darwin's `p_comm` (`internal/procwatch`, `commLen` — MAXCOMLEN), a
+ *  fixed-width field. That width is the whole reason the observation can be
+ *  shown at all: a field this size structurally cannot carry a path, an
+ *  argument or a command line, so nothing of the user's own text can ride
+ *  into a surface that is not theirs. The renderer states the number again
+ *  because the wire does not carry "this one was cut" — the contract
+ *  describes the fact, and a flag on it is a change to make deliberately
+ *  rather than inside a wording fix (nocx-3f6a). */
+const COMM_FIELD_BYTES = 16
+
+/** The kernel truncates by bytes, so that is what is counted here: a
+ *  fifteen-character name of two-byte characters was already cut when it
+ *  reached the wire. */
+function byteLength(text: string): number {
+  return new TextEncoder().encode(text).length
+}
+
 /** What nocx observed running where it expected the shell, as one sentence,
  *  in one place.
  *
- *  Two surfaces show it — the Details chain and the fix panel — and they must
- *  claim it exactly as strongly as each other, so they read the same function
- *  (AD-8). It is labelled a guess IN THE SENTENCE rather than by placement:
- *  it comes from the process table, which can be raced, and never from the
- *  byte stream, which AD-6 forbids the backend to interpret, so a reader who
- *  sees only this line still knows what it is worth. Null when the backend
- *  observed nothing — an absent observation is silence, never a hedge. */
+ *  Every surface that shows the observation reads this function, so none of
+ *  them can claim it more strongly than another (AD-8). It is labelled a
+ *  guess IN THE SENTENCE rather than by placement: it comes from the process
+ *  table, which can be raced, and never from the byte stream, which AD-6
+ *  forbids the backend to interpret, so a reader who sees only this line
+ *  still knows what it is worth. Null when the backend observed nothing — an
+ *  absent observation is silence, never a hedge.
+ *
+ *  A name that fills the field is quoted with an ellipsis and explained
+ *  (nocx-aimo). The owner read `zsh (kiro-cli-te` on the installed build: a
+ *  word stopped mid-syllable, which reads as a defect in nocx and is
+ *  actually the field doing its job. Nothing downstream can tell a name that
+ *  was cut from one that happens to be exactly this long — the wire carries
+ *  the string and no flag — so the sentence says "may be cut short", which
+ *  is the only claim that is true either way. The hedge is spent only where
+ *  it is needed: on every observation it would teach the reader to skip it. */
 export function observationSentence(fact: SessionIntegrationChanged): string | null {
   const observed = fact.detail?.observedProcess
   if (!observed) return null
-  return `Best guess, not a finding: nocx saw "${observed}" running where it expected the shell.`
+  const filled = byteLength(observed) >= COMM_FIELD_BYTES
+  const name = filled ? `${observed}…` : observed
+  const sentence = `Best guess, not a finding: nocx saw "${name}" running where it expected the shell.`
+  if (!filled) return sentence
+  return (
+    `${sentence} The system keeps only the first ${COMM_FIELD_BYTES} characters of a ` +
+    `process name and nocx reads no further — never the command line — so this one may ` +
+    `be cut short.`
+  )
 }
 
 /** What shell integration is, carried by the build rather than linked to

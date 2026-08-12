@@ -2898,6 +2898,15 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
 
   const cardIn = (tab: { pane: HTMLElement }) => tab.pane.querySelector('.nocx-integration-notice')
 
+  /** Press one of the card's own actions, by the label the user reads. */
+  const press = (tab: { pane: HTMLElement }, label: string): void => {
+    const found = [...cardIn(tab)!.querySelectorAll('button')].find(
+      (b) => (b.textContent ?? '').trim() === label,
+    )
+    if (!found) throw new Error(`no card action labelled ${label}`)
+    found.click()
+  }
+
   beforeEach(() => {
     window.localStorage.clear()
   })
@@ -3030,6 +3039,101 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
       expect(cardIn(tab)).toBeNull()
     } finally {
       teardown()
+    }
+  })
+
+  // ── the card's two silences, and the one thing neither silences ─────────
+  //
+  // The owner's composition (nocx-aimo): the cross and "Don't show again for
+  // this shell" are on the card together because they are different
+  // promises. Written as tests so the next reader who wants to collapse them
+  // can see the difference rather than infer it.
+
+  it('takes the card away when the cross is pressed, and leaves the mark on the tab', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) },
+      },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, '×')
+      expect(cardIn(tab)).toBeNull()
+      // The mark is the state of the session, not a notification: dismissing
+      // the card says nothing about whether the session is integrated.
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Not integrated'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaves the mark alone when the user silences the shell as well', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        attachToDocument: true,
+        hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) },
+      },
+      client,
+    )
+    try {
+      publish(client)
+      press(tab, "Don't show again for this shell")
+      expect(cardIn(tab)).toBeNull()
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Not integrated'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // The difference between the two, from the user's side: the cross answers
+  // the card in front of them, and this shell failing a DIFFERENT way is
+  // still something they have not been told. "Don't show again for this
+  // shell" answers for the shell, so nothing about it asks again.
+  it('still reports a new way for this shell to fail after the cross', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
+    try {
+      publish(clientA)
+      press(first.tab, '×')
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(second.tab)).not.toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  it('says nothing more about a shell the user has silenced, however it fails', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, clientA)
+    try {
+      publish(clientA)
+      press(first.tab, "Don't show again for this shell")
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(second.tab)).toBeNull()
+    } finally {
+      second.teardown()
     }
   })
 })

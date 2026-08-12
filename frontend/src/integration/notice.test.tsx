@@ -78,6 +78,13 @@ const visibleText = (): string => surface().textContent ?? ''
 
 const codeBlockText = (): string => surface().querySelector('.ui-code-block')?.textContent ?? ''
 
+/** The chain of facts, as the user can read it on the surface in front of
+ *  them. Scoped like everything else here: the chain used to live in a
+ *  dialog of its own and a document-wide query could not tell the two
+ *  surfaces apart. */
+const chainTexts = (): string[] =>
+  [...surface().querySelectorAll('.ui-marker-list__text')].map((n) => (n.textContent ?? '').trim())
+
 describe('the degraded-session card', () => {
   it('says what happened, in the agreed words, with no program named', () => {
     const { pane } = mount()
@@ -98,10 +105,35 @@ describe('the degraded-session card', () => {
     expect(pane.querySelector('.nocx-integration-notice')).not.toBeNull()
   })
 
-  it('dismisses when the user closes it', () => {
+  // The owner's composition, measured on the installed build (nocx-aimo):
+  // the remedy, the permanent silence, and the close. Details is gone —
+  // it was a second surface holding what belongs behind the remedy.
+  it('offers three actions and Details is not one of them', () => {
+    mount()
+    expect(buttonLabels()).toEqual(['How to fix', "Don't show again for this shell", '×'])
+  })
+})
+
+// ── the three actions are three different things (nocx-aimo) ──────────────
+//
+// Written down as tests because the next reader will be tempted to collapse
+// them: the cross takes this card away now, "Don't show again for this
+// shell" takes every card for this shell away for good, and neither touches
+// the tab's mark — the mark is the state of the session, not a notification.
+
+describe('what each action on the card does', () => {
+  it('the cross takes this card away and promises nothing further', () => {
     const { props } = mount()
     button('×').click()
     expect(props.onDismiss).toHaveBeenCalledOnce()
+    expect(props.onSuppressShell).not.toHaveBeenCalled()
+  })
+
+  it('silences this shell when the user asks it to, from the card itself', () => {
+    const { props } = mount()
+    button("Don't show again for this shell").click()
+    expect(props.onSuppressShell).toHaveBeenCalledOnce()
+    expect(props.onDismiss).not.toHaveBeenCalled()
   })
 })
 
@@ -166,15 +198,6 @@ describe('the fix', () => {
     expect(codeBlockText()).toContain('NOCX_SHELL_INTEGRATION')
   })
 
-  // The reader who went to Details first must not have to back out to reach
-  // it — the same fix, from the other route.
-  it('is reachable from the Details dialog too', () => {
-    mount()
-    button('Details').click()
-    button('How to fix').click()
-    expect(codeBlockText()).toContain('NOCX_SHELL_INTEGRATION')
-  })
-
   // THE defect, from the user's side: a zsh session was shown a bash command
   // line and told about ~/.bashrc, neither of which exists in that session.
   it('is written for the shell the session is actually running', () => {
@@ -211,26 +234,41 @@ describe('the fix', () => {
     expect(buttonLabels()).not.toContain('How to fix')
   })
 
+  // …and the reader is not left with a card and nothing to open. A reason
+  // with no honest remedy still has a chain of facts and an explanation, and
+  // they are behind the same single dialog under the label that is true for
+  // it.
+  it('leaves the facts reachable for a reason nocx cannot advise on', () => {
+    mount({ fact: { ...TIMED_OUT, reason: 'remote-command' } })
+    button('What happened').click()
+    expect(chainTexts().length).toBeGreaterThan(0)
+  })
+
   // "Apply the fix for me" is nocx-cqkg and is deliberately NOT here: a
   // button that edits the user's startup files needs a backup and a diff
   // they approve first, which is a bead of its own.
   it('offers no apply-it-for-me action', () => {
     mount()
-    button('Details').click()
+    button('How to fix').click()
     const labels = buttonLabels().map((l) => l.toLowerCase())
     expect(labels.some((l) => l.includes('apply') || l.includes('fix it for me'))).toBe(false)
   })
 })
 
-describe('the Details dialog', () => {
-  const openDetails = () => button('Details').click()
+// ── what Details used to hold (nocx-aimo) ─────────────────────────────────
+//
+// The owner's measurement: the fact chain, the explanation and the remedy
+// were split across two dialogs, so reading what nocx knew and reading what
+// to do about it were different journeys. There is one dialog now, and
+// everything is one click from the card.
+
+describe('the facts behind the remedy', () => {
+  const openFix = () => button('How to fix').click()
 
   it('shows the chain of facts, starting with the shell nocx actually started', () => {
     mount()
-    openDetails()
-    const items = [...document.querySelectorAll('.ui-marker-list__text')].map((n) =>
-      (n.textContent ?? '').trim(),
-    )
+    openFix()
+    const items = chainTexts()
     expect(items[0]).toBe('nocx started /opt/homebrew/bin/bash')
     expect(items.some((t) => t.includes('plain terminal'))).toBe(true)
     expect(items.some((t) => t.includes('never answered'))).toBe(true)
@@ -238,28 +276,53 @@ describe('the Details dialog', () => {
 
   it('labels the observed process as a guess, in the sentence itself', () => {
     mount({ fact: { ...TIMED_OUT, detail: { observedProcess: 'some-tui' } } })
-    openDetails()
-    const guess = [...document.querySelectorAll('.ui-marker-list__text')]
-      .map((n) => (n.textContent ?? '').trim())
-      .find((t) => t.includes('some-tui'))
+    openFix()
+    const guess = chainTexts().find((t) => t.includes('some-tui'))
     expect(guess).toBeDefined()
     expect(guess!.toLowerCase()).toContain('guess')
   })
 
   it('omits the guess entirely when the backend observed nothing', () => {
     mount()
-    openDetails()
-    const texts = [...document.querySelectorAll('.ui-marker-list__text')].map((n) =>
-      (n.textContent ?? '').trim(),
-    )
-    expect(texts.some((t) => t.toLowerCase().includes('guess'))).toBe(false)
+    openFix()
+    expect(chainTexts().some((t) => t.toLowerCase().includes('guess'))).toBe(false)
   })
 
-  it('silences this shell when the user asks it to', () => {
-    const { props } = mount()
-    openDetails()
-    button("Don't show again for this shell").click()
-    expect(props.onSuppressShell).toHaveBeenCalledOnce()
+  // One surface, not two: nothing anywhere offers a second way in.
+  it('leaves no Details surface behind it', () => {
+    mount()
+    expect(document.body.textContent).not.toContain('Details')
+    openFix()
+    expect(document.body.textContent).not.toContain('Details')
+  })
+})
+
+// ── the name the process table gave (nocx-aimo) ───────────────────────────
+//
+// Measured by the owner on the installed build: `zsh (kiro-cli-te` — a name
+// cut off mid-word, which reads as a defect in nocx. It is the kernel's
+// fixed-width p_comm, and that width is exactly why the observation carries
+// no path, no arguments and none of the user's own text. So the product says
+// the name may be short, rather than pretending it is whole.
+
+describe('the observed name, when the process table had no room for it', () => {
+  /** Sixteen characters — everything darwin's p_comm can hold. */
+  const FILLED = 'zsh (kiro-cli-te'
+
+  it('does not present a name that fills the field as if it were complete', () => {
+    mount({ fact: { ...TIMED_OUT, detail: { observedProcess: FILLED } } })
+    button('How to fix').click()
+    const guess = chainTexts().find((t) => t.includes(FILLED))!
+    expect(guess).toContain(`${FILLED}…`)
+    expect(guess).toContain('cut short')
+  })
+
+  it('says nothing of the kind about a name that plainly fits', () => {
+    mount({ fact: { ...TIMED_OUT, detail: { observedProcess: 'some-tui' } } })
+    button('How to fix').click()
+    const guess = chainTexts().find((t) => t.includes('some-tui'))!
+    expect(guess).not.toContain('…')
+    expect(guess).not.toContain('cut short')
   })
 })
 
@@ -271,7 +334,7 @@ describe('Learn more', () => {
   // build, so it resolves wherever the app runs.
   it('explains integration inside the app', () => {
     mount()
-    button('Details').click()
+    button('How to fix').click()
     button('Learn more').click()
     expect(visibleText()).toContain('An integrated tab knows where each command starts and ends')
   })
@@ -279,7 +342,7 @@ describe('Learn more', () => {
   it('opens no browser and needs no network', () => {
     const { props } = mount()
     expect(Object.keys(props)).not.toContain('openUrl')
-    button('Details').click()
+    button('How to fix').click()
     button('Learn more').click()
     expect(document.querySelector('a[href]')).toBeNull()
   })
