@@ -405,9 +405,14 @@ containerized jobs serialize on one Docker daemon and one CPU, so parallel worke
 running four jobs finish later than the same work run in sequence. They mount
 `node_modules` as named volumes with no worktree in the name, so concurrent runs break
 each other's dependency tree (`nocx-x6z3`) — measured as a pre-commit hook failing on a
-package another run was mid-install. And every host-side Go run writes to the developer's
-login keychain (`nocx-o4hg`), which on macOS is a modal dialog per backend start: a full
-gate per branch is also a dialog storm per branch.
+package another run was mid-install. And a host-side Go run used to write to the
+developer's login keychain on every backend start, which on macOS is a modal dialog
+apiece: a full gate per branch was also a dialog storm per branch. That one is fixed —
+`New` now refuses a test binary that has not declared whether it may reach the OS keystore
+(`nocx-o4hg`) — and it is left written down because the shape recurs: `$HOME` isolation
+moves directories and cannot move a per-user OS service, so the next one (Secret Service,
+a launchd agent, the system clipboard) will arrive the same way and be just as invisible
+to the worker paying for it.
 
 **When the merged gate goes red, send it back to the worker, do not fix it in the
 coordinator.** A worker is resumable and still holds why it wrote what it wrote; the
