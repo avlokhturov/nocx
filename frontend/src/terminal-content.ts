@@ -2257,16 +2257,31 @@ export class TerminalContent extends BaseTabContent {
   ): void {
     if (!block) return
     const blockEl = block.el
-    // The block must be frozen (the D marker froze it) and still in the
-    // DOM: a running block means the D never arrived for this record, and
-    // a disconnected element means the scrollback was cleared or the tab
-    // disposed. Both drop the receipt silently — the capture died with
-    // them on the backend anyway.
-    if (
-      !blockEl.isConnected ||
-      blockEl.classList.contains('cmd-block-running') ||
-      !blockEl.classList.contains('cmd-block')
-    ) {
+    // A disconnected element means the scrollback was cleared or the tab
+    // disposed; the capture died with them on the backend anyway, so the
+    // receipt goes with it.
+    if (!blockEl.isConnected || !blockEl.classList.contains('cmd-block')) return
+    // Still logically running: the completion has not landed for this
+    // record at all, and nothing here can attach to a block that has not
+    // finished.
+    if (block.status === 'running') return
+    // FINISHED, BUT NOT YET REDRAWN. This used to read the DOM class, which
+    // is a different question and the wrong one: the logical freeze lands on
+    // the authenticated completion while the visual freeze waits up to
+    // FENCE_DEFER_MS for the fence bytes, and until it runs the element
+    // still says cmd-block-running. So a block that had finished perfectly
+    // well was refused, and the receipt was dropped in silence — no retry,
+    // nothing in the UI, nothing in the log. For a user: run a command
+    // carrying a key, have the backend capture it, and watch nothing offer
+    // to save it. It surfaced as one webkit e2e failure in five CI runs,
+    // where a cold first render widened the window enough for the ack to
+    // land inside it (nocx-ggha).
+    //
+    // Parked rather than applied, because the visual freeze REPLACES el and
+    // would discard anything written now. `_freezeVisual` runs this the
+    // instant the boundary lands, and the re-entry passes the check above.
+    if (blockEl.classList.contains('cmd-block-running')) {
+      block.afterVisualFreeze = () => this.attachRecordedAck(_recId, block, ack)
       return
     }
     if (ack.redactions.length > 0) {

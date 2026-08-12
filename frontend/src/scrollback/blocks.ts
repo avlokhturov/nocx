@@ -83,6 +83,21 @@ export interface BlockRecord {
    *  attempt was abandoned (ADR-0024 §5): frozen, never successful, no
    *  reported exit code. */
   status: 'running' | 'success' | 'failure' | 'entered' | 'unknown'
+  /** Run once, after the VISUAL freeze has replaced `el`.
+   *
+   *  The two freezes are separate moments (u7uh.8): the logical one lands on
+   *  the authenticated completion and sets `status` above, while the visual
+   *  one waits up to FENCE_DEFER_MS for the fence bytes and REPLACES `el`
+   *  when it lands. Between them the block is finished but its element still
+   *  reads `cmd-block-running`, and anything written onto that element is
+   *  discarded by the replacement.
+   *
+   *  So a decoration arriving in that window parks here instead of being
+   *  applied to an element about to be discarded, or dropped. The receipt is
+   *  the case that needed it: the history.record ack raced the fence, was
+   *  refused for looking unfinished, and was gone for good — a captured
+   *  secret with nothing offering to save it (nocx-ggha). */
+  afterVisualFreeze?: () => void
   /** The authenticated attempt this block is bound to (ADR-0024 §7
    *  projection): set when the running block binds to the published
    *  attempt, kept when the block freezes. Absent only for a block that
@@ -1033,6 +1048,14 @@ export class BlockManager {
     )
 
     rec.el = newEl
+    // Anything that wanted to decorate this block had to wait for THIS
+    // moment, because the line above threw the running element away. One
+    // shot, cleared before it runs so a callback that re-enters cannot loop.
+    const after = rec.afterVisualFreeze
+    if (after !== undefined) {
+      rec.afterVisualFreeze = undefined
+      after()
+    }
   }
 
   /** Freeze the block bound to the attempt, from the attempt's authenticated
