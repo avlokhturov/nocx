@@ -81,6 +81,19 @@ const (
 	ReasonUnsupportedShell RefusalReason = "unsupported-shell"
 	ReasonNoSecureTemp     RefusalReason = "no-secure-temp"
 	ReasonRemoteCommand    RefusalReason = "remote-command"
+	// ReasonHandshakeTimeout means the shell never completed the
+	// authenticated handshake inside lifecycle.HelloTimeout (ADR-0024
+	// decision 3): the transport was established and the shell either never
+	// connected or never sent an acceptable hello. It is the dominant local
+	// failure and could not be reported at all before nocx-dvql, because the
+	// only channel for a reason was the session-open ack and this answer
+	// arrives ten seconds after it.
+	ReasonHandshakeTimeout RefusalReason = "handshake-timeout"
+	// ReasonChannelLost means the session WAS integrated and is not any
+	// more: the authenticated channel ended mid-session (ADR-0024 decision
+	// 8). Distinct from every reason above, all of which describe a session
+	// that never integrated at all.
+	ReasonChannelLost RefusalReason = "channel-lost"
 	// ReasonUnknown means integration did not happen and the backend cannot
 	// say why — the remoteLauncherAdapter's fail-open for a refusal reason
 	// the ssh vocabulary does not yet know (nocx-axpz). It is a distinct

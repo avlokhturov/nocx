@@ -680,6 +680,19 @@ func New(opts ...Option) (*App, error) {
 	}
 	remoteLifecycle.registerLane = registerLane
 	ptf.registerLane = registerLane
+	// The session integration axis (nocx-dvql). Two seams, one owner: the
+	// pty factory says what it started and how far it got, and the adapter
+	// says which path ended the channel. The transport joins them with the
+	// kernel's own "a domain went live" and publishes
+	// session.integrationChanged. The cause crosses as its string so the
+	// transport does not depend on the adapter package — the adapter's
+	// constants remain the single spelling.
+	ptf.reportIntegration = func(sid, shell, status string, reason ssh.RefusalReason) {
+		tp.RegisterIntegration(session.ID(sid), shell, status, reason)
+	}
+	ptf.noteLifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+		tp.NoteIntegrationLoss(lane, string(cause))
+	}
 	resolver := connection.NewResolver(
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
@@ -886,6 +899,19 @@ type localPTYFactory struct {
 	// direction — the renderer keys enhanced mode on the fact, and an
 	// unregistered lane is a conventional terminal.
 	registerLane func(lane lifecycle.LaneID, sid string)
+	// reportIntegration enters a session into the integration axis the
+	// product renders (nocx-dvql): what this factory started, and how far
+	// it got before it handed the pty back. Only this factory knows which
+	// binary was exec'd, so only it may answer — the transport registers
+	// remote sessions from the ssh path instead. Nil (tests, or a server
+	// without the wiring) leaves the session unregistered, which emits
+	// nothing, which is the safe direction.
+	reportIntegration func(sid, shell, status string, reason ssh.RefusalReason)
+	// noteLifecycleLoss carries the adapter's loss cause to the same axis.
+	// It is a separate seam from the published lifecycle facts because a
+	// handshake that expires establishes no domain and therefore publishes
+	// no fact at all — the silence this bead exists to end.
+	noteLifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
 }
 
 // lifecyclePTY is an enhanced session's pty plus the lifecycle channel whose
@@ -917,7 +943,8 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// falls back to conventional is a product decision, and the composition
 	// root is where product decisions belong.
 	ch, child, err := lifecyclechannel.New(f.log, f.kernel,
-		lifecyclechannel.WithHelloTimeout(lifecycle.HelloTimeout))
+		lifecyclechannel.WithHelloTimeout(lifecycle.HelloTimeout),
+		lifecyclechannel.WithLossReporter(f.noteLifecycleLoss))
 	if err != nil {
 		return nil, err
 	}
@@ -951,7 +978,16 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		_ = child.Close()
 		// No channel, no rcfile: a plain enhanced pty, whose shell keeps a
 		// visible native prompt (the script's init bails without config).
-		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+		p, perr := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+		if perr == nil {
+			// The session asked for integration and will not get it, so it
+			// says so — with `unknown`, because the failure is a local
+			// bootstrap error and none of the refusal vocabulary describes
+			// it. `unknown` is a real visible answer, never a synonym for
+			// success.
+			f.report(cfg.SessionID, p.Shell(), transport.IntegrationConventional, ssh.ReasonUnknown)
+		}
+		return p, perr
 	}
 	// Bash is the integration-first shell for the local tier (the same
 	// preference the pty resolver applies when $SHELL is unset); a
@@ -974,7 +1010,23 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	if cfg.SessionID != "" && f.registerLane != nil {
 		f.registerLane(ch.Lane(), cfg.SessionID)
 	}
+	// The lane is bound first, deliberately: the loss reporter resolves a
+	// lane to its session, so a handshake that expired between the two
+	// would have nowhere to land. Registering the axis afterwards is the
+	// safe order — the status is only emitted after the open ack anyway.
+	f.report(cfg.SessionID, p.Shell(), transport.IntegrationStarting, ssh.ReasonNone)
 	return &lifecyclePTY{Pty: p, ch: ch}, nil
+}
+
+// report enters this session into the integration axis, when the wiring
+// exists. A local session that never asked for integration never reaches
+// here, and so emits nothing at all: absence is how "conventional by design"
+// is expressed, and a session with nothing to say must not nag.
+func (f *localPTYFactory) report(sid, shell, status string, reason ssh.RefusalReason) {
+	if sid == "" || shell == "" || f.reportIntegration == nil {
+		return
+	}
+	f.reportIntegration(sid, shell, status, reason)
 }
 
 func (a *App) Start(ctx context.Context) error {

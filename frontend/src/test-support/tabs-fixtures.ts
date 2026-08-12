@@ -211,8 +211,6 @@ export interface SessionFake {
   cwd: string
   /** The resolved destination mode from the open ack (nocx-mlm7). */
   desiredMode: DesiredMode
-  /** Why integration did not happen at open; empty = succeeded/never. */
-  shellIntegrationReason: '' | 'unsupported-shell' | 'no-secure-temp' | 'remote-command' | 'unknown'
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -237,7 +235,6 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     sessionId: `mock-sid-${++sessionCounter}`,
     cwd: FIXTURE_CWD,
     desiredMode: 'script',
-    shellIntegrationReason: '',
     send: vi.fn(),
     sendResize: vi.fn(),
     close: vi.fn(),
@@ -293,6 +290,24 @@ export interface ClientFake {
    *  the handler to deliver published facts (lifecycle.changed). */
   dispatcher: DispatcherFake
 }
+/** The handler a surface registered for one server-initiated method, so a
+ *  test can deliver a published fact through the REAL subscription seam
+ *  rather than reaching into the surface. Fails loudly when nothing
+ *  subscribed: a silent no-op would let a test pass over a subscription
+ *  that was never made, which is the defect class the lifecycle branch
+ *  already shipped once (a dropped subscription, found by diffing). */
+function notificationHandler(client: ClientFake, method: string): (params: unknown) => void {
+  const call = client.dispatcher.subscribe.mock.calls.find((c: unknown[]) => c[0] === method) as
+    [string, (params: unknown) => void] | undefined
+  if (!call) throw new Error(`nothing subscribed to ${method}`)
+  return call[1]
+}
+
+/** The session.integrationChanged handler (nocx-dvql). */
+export function integrationHandler(client: ClientFake): (params: unknown) => void {
+  return notificationHandler(client, 'session.integrationChanged')
+}
+
 /**
  * Create a fake WSClient whose openSession() returns a new makeSession()
  * on every call and records it in _sessions for test inspection.

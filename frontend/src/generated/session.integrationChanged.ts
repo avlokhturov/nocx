@@ -1,0 +1,47 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/session.integrationChanged.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Params of the session.integrationChanged server-to-client notification: whether this session's shell integration is live, and when it is not, why — in a form the product renders. It replaces the one-shot shellIntegrationReason field of the session-open result, which could only answer at open time and therefore could never report the two failures that matter most: a handshake that times out seconds later, and a channel lost mid-session. Two places answering 'is this session integrated' is the defect AD-8 names, so the field is removed rather than kept beside this fact (nocx-viil, nocx-dvql). This is NOT lifecycle.changed and does not overlap it: that fact is what the authenticated kernel concluded about a domain, while this one carries what only the launcher and the transport know — which shell was actually started, and why integration was refused, declined or lost. Server-initiated and unsolicited, so nothing correlates it and nothing checks its shape at the call site, which is exactly why it is declared here.
+ */
+export interface SessionIntegrationChanged {
+  /**
+   * The session this status is about. Server-authoritative (AD-7); the renderer attaches the status to the tab that owns this id and filters nothing.
+   */
+  sessionId: string
+  /**
+   * The integration axis, as the backend currently knows it. 'starting' is the honest interval before the shell has proved itself: a session begins here and stays until it either integrates or gives up, so the product never claims either outcome early. 'integrated' means an authenticated domain is live. 'conventional' means integration was attempted and did not happen — the session is a working terminal with a native prompt, and reason says why. 'lost' means it was integrated and is not any more. A session that never requested integration emits nothing at all: absence is how 'conventional by design' is expressed, so the surface has nothing to nag about.
+   */
+  status: 'starting' | 'integrated' | 'conventional' | 'lost'
+  /**
+   * Why integration did not happen, from the closed server vocabulary ssh.RefusalReason — the existing owner of this question, extended rather than duplicated. Present exactly when status is 'conventional' or 'lost', and absent otherwise; 'unknown' is a real, visible answer meaning the backend cannot say, never a synonym for success. Never raw error text: a remote publish failure is an SFTP status code and a path, meaningful in a log and meaningless in a pane (nocx-viil).
+   */
+  reason?:
+    | 'unsupported-shell'
+    | 'no-secure-temp'
+    | 'remote-command'
+    | 'handshake-timeout'
+    | 'channel-lost'
+    | 'unknown'
+  /**
+   * What the backend actually started, as an absolute path when it has one. It is required because the product must be able to say 'nocx started /bin/zsh' without the renderer guessing: which shell a session runs is the single biggest thing that varies between two machines running the same code, and a user cannot act on a diagnosis that omits it.
+   */
+  shell: string
+  /**
+   * Best-effort observation for the details surface, never authority. Everything here is a guess the product must label as one: it is derived from the process table, which can be raced, and never from the byte stream, which AD-6 forbids the backend to interpret. Absent when the backend observed nothing worth showing.
+   */
+  detail?: {
+    /**
+     * The executable the backend observed running in place of the shell it started, by name only — no path, no arguments, no command line, which would carry the user's own text into a surface that is not theirs.
+     */
+    observedProcess: string
+  }
+}

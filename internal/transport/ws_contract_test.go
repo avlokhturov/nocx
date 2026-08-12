@@ -19,6 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
@@ -1557,49 +1558,64 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 
 // ── open ─────────────────────────────────────────────────────────────────
 
-// The DTO's own conformance: the four fields the open ack always carries.
-// shellIntegrationReason is present even when empty — a missing field would
-// read as "integration happened" to a renderer that defaults to that, which
-// is exactly the soft degrade AGENTS.md forbids. desiredMode (the resolved
-// destination mode, nocx-mlm7) is present for every session, including
-// local ones — a renderer that defaults a missing field to "script" would
-// show a raw tab as silently integrated. Each of the three mode values
-// must marshal; the schema pins the enum.
+// The DTO's own conformance: the three fields the open ack always carries.
+// shellIntegrationReason is deliberately NOT among them any more (nocx-dvql):
+// it answered "is this session integrated" once, at open, and the two
+// failures that matter most arrive after it. session.integrationChanged owns
+// that question now, and additionalProperties:false is what makes the
+// removal real rather than a comment — a handler that still sent the field
+// would fail here. desiredMode (the resolved destination mode, nocx-mlm7) is
+// present for every session, including local ones — a renderer that
+// defaulted a missing field to "script" would show a raw tab as silently
+// integrated. Each of the three mode values must marshal; the schema pins
+// the enum.
 func TestOpen_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "open.schema.json")
 
-	raw, err := json.Marshal(map[string]string{
+	for name, mode := range map[string]string{
+		"script": "script",
+		"raw":    "raw",
+		"relay":  "relay",
+	} {
+		raw, err := json.Marshal(map[string]string{
+			"sessionId":   "0123456789abcdef0123456789abcdef",
+			"cwd":         "~/work",
+			"desiredMode": mode,
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		validateJSON(t, schema, raw, "open DTO ("+name+" mode)")
+	}
+
+	// The removed field is removed, not merely unset: an ack that still
+	// carried it must fail the contract, or "removed" is a claim nothing
+	// checks.
+	stale, err := json.Marshal(map[string]string{
 		"sessionId":              "0123456789abcdef0123456789abcdef",
 		"cwd":                    "~/work",
-		"shellIntegrationReason": "no-secure-temp",
 		"desiredMode":            "script",
+		"shellIntegrationReason": "no-secure-temp",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	validateJSON(t, schema, raw, "open DTO (launcher refusal)")
+	if err := schema.Validate(mustUnmarshalAny(t, stale)); err == nil {
+		t.Error("open schema still accepts shellIntegrationReason: the field was removed from the ack, and additionalProperties:false is what has to enforce it")
+	}
+}
 
-	rawNone, err := json.Marshal(map[string]string{
-		"sessionId":              "0123456789abcdef0123456789abcdef",
-		"cwd":                    "~/work",
-		"shellIntegrationReason": "",
-		"desiredMode":            "raw",
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+// mustUnmarshalAny decodes JSON into the any-shaped value the schema
+// validator takes. validateJSON does the same thing and fails the test on a
+// violation; this is its inverse, for the case where the violation IS the
+// assertion.
+func mustUnmarshalAny(t *testing.T, raw []byte) any {
+	t.Helper()
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	validateJSON(t, schema, rawNone, "open DTO (integration never attempted — raw)")
-
-	rawUnknown, err := json.Marshal(map[string]string{
-		"sessionId":              "0123456789abcdef0123456789abcdef",
-		"cwd":                    "~/work",
-		"shellIntegrationReason": "unknown",
-		"desiredMode":            "relay",
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	validateJSON(t, schema, rawUnknown, "open DTO (unclassified refusal, relay mode)")
+	return v
 }
 
 // openProfileResolver resolves every profile to a fixed host and a minimal
@@ -1683,14 +1699,35 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, envelope.Result, "open result (real socket)")
 	var got struct {
-		ShellIntegrationReason string `json:"shellIntegrationReason"`
-		DesiredMode            string `json:"desiredMode"`
+		SessionID   string `json:"sessionId"`
+		DesiredMode string `json:"desiredMode"`
 	}
 	if err := json.Unmarshal(envelope.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.ShellIntegrationReason != "no-secure-temp" {
-		t.Errorf("shellIntegrationReason = %q, want %q", got.ShellIntegrationReason, "no-secure-temp")
+
+	// The launcher refusal reaches the product, and it reaches it on the
+	// notification rather than in this ack (nocx-dvql). Read AFTER the ack,
+	// which is the ordering AD-7 requires: a status frame that overtook the
+	// open result would address a session the renderer does not yet have.
+	integration := loadSchema(t, "session.integrationChanged.schema.json")
+	raw := readNotification(t, conn, "session.integrationChanged", wantWithin)
+	validateJSON(t, integration, raw, "session.integrationChanged params (real socket, ssh refusal)")
+	var status integrationChangedParams
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("decode integration status: %v", err)
+	}
+	if status.SessionID != got.SessionID {
+		t.Errorf("integration status addresses %q, want the opened session %q", status.SessionID, got.SessionID)
+	}
+	if status.Status != IntegrationConventional || status.Reason != string(ssh.ReasonNoSecureTemp) {
+		t.Errorf("integration status = %+v, want conventional/no-secure-temp", status)
+	}
+	// The profile pinned no shell, so the far dispatcher chose: "auto" is
+	// what this side honestly knows, and inventing a name would be the
+	// confidence the details surface exists to avoid.
+	if status.Shell != string(ssh.ShellAuto) {
+		t.Errorf("shell = %q, want %q for an unpinned remote", status.Shell, ssh.ShellAuto)
 	}
 	// The resolver stamped no mode (openProfileResolver builds a bare
 	// config), so the ack must report the default: script (N3 — wrap and
@@ -3893,5 +3930,156 @@ func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if att, ok := kernel.Attempt(lifecycle.AttemptID(got.ID)); !ok || att.Command != "make" {
 		t.Errorf("kernel attempt = %+v (ok=%v), want the submitted command", att, ok)
+	}
+}
+
+// ── session.integrationChanged ────────────────────────────────────────────
+
+// The session.integrationChanged notification gets the same three checks as a
+// method (AGENTS.md rule 5): it is server-initiated and unsolicited, so
+// nothing correlates it and nothing checks its shape at the call site.
+//
+// It answers "is this session integrated, and if not why" — the question the
+// open ack's shellIntegrationReason used to answer once and could therefore
+// never revise. The two failures that matter most (a handshake that expires
+// ten seconds after the ack, a channel lost mid-session) are exactly the ones
+// a one-shot field cannot carry (nocx-dvql, nocx-viil).
+
+func TestSessionIntegrationChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.integrationChanged.schema.json")
+	cases := map[string]integrationChangedParams{
+		// The honest interval: a session that asked for integration and has
+		// not yet proved anything. No reason, because nothing has gone
+		// wrong yet — the schema forbids one here.
+		"starting": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Status:    IntegrationStarting,
+			Shell:     "/bin/bash",
+		},
+		"integrated": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Status:    IntegrationIntegrated,
+			Shell:     "/opt/homebrew/bin/bash",
+		},
+		// The measured local failure: the shell never completed the
+		// handshake, ten seconds after an ack that could not have said so.
+		"conventional after a handshake timeout": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Status:    IntegrationConventional,
+			Reason:    string(ssh.ReasonHandshakeTimeout),
+			Shell:     "/bin/bash",
+		},
+		// A launcher decline on the remote path, carried by the same
+		// notification rather than a second one (AD-8).
+		"conventional after a launcher decline": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Status:    IntegrationConventional,
+			Reason:    string(ssh.ReasonUnsupportedShell),
+			Shell:     "zsh",
+		},
+		// The unpinned remote: nocx did not choose a shell, the far
+		// dispatcher did, and "auto" is what this side honestly knows.
+		"conventional on an unpinned remote": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Status:    IntegrationConventional,
+			Reason:    string(ssh.ReasonRemoteCommand),
+			Shell:     string(ssh.ShellAuto),
+		},
+		"lost mid-session": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Status:    IntegrationLost,
+			Reason:    string(ssh.ReasonChannelLost),
+			Shell:     "/bin/bash",
+		},
+		// The best-effort half, which the product must label as a guess.
+		// Name only — no path, no arguments, no command line.
+		"conventional with an observation": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Status:    IntegrationConventional,
+			Reason:    string(ssh.ReasonHandshakeTimeout),
+			Shell:     "/bin/bash",
+			Detail:    &integrationDetail{ObservedProcess: "fish"},
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "session.integrationChanged DTO ("+name+")")
+		})
+	}
+}
+
+// The test the bead names, and it is red without this change: a LOCAL session
+// whose shell never completes the handshake reports handshake-timeout, off
+// the real socket.
+//
+// Everything but the shell itself is production code — a real
+// lifecyclechannel.Adapter over a real socketpair, wired to a real publisher
+// and a real server exactly as internal/app wires them, with the handshake
+// bound shortened because a test may not wait ten seconds. Nothing here waits
+// on a duration: the assertion is on the frame arriving.
+//
+// Note what could NOT have produced this notification: no lifecycle.changed
+// fact is published at all on this path. The domain never establishes, so the
+// lane's projection never moves and the publisher (correctly) announces
+// nothing — which is why the adapter's loss cause is a seam of its own.
+func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.integrationChanged.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+
+	// The composition root's two seams, verbatim: the loss cause crosses as
+	// its string, and the adapter's own constant is the single spelling.
+	ch, child, err := lifecyclechannel.New(logger, pub,
+		lifecyclechannel.WithHelloTimeout(50*time.Millisecond),
+		lifecyclechannel.WithLossReporter(func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
+			e.ws.NoteIntegrationLoss(lane, string(cause))
+		}))
+	if err != nil {
+		t.Fatalf("lifecyclechannel.New: %v", err)
+	}
+	t.Cleanup(func() { _ = child.Close() })
+	e.ws.RegisterLifecycleLane(ch.Lane(), session.ID(sid))
+	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	e.ws.emitIntegration(session.ID(sid))
+
+	// First frame: the honest interval. A product that claimed either
+	// outcome here would be guessing.
+	raw := readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+	validateJSON(t, schema, raw, "session.integrationChanged params (real socket, starting)")
+	var starting integrationChangedParams
+	if err := json.Unmarshal(raw, &starting); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if starting.Status != IntegrationStarting || starting.Reason != "" {
+		t.Errorf("first fact = %+v, want status=starting with no reason", starting)
+	}
+	if starting.SessionID != sid || starting.Shell != "/bin/bash" {
+		t.Errorf("first fact addressing = %q/%q, want %q//bin/bash", starting.SessionID, starting.Shell, sid)
+	}
+
+	// The shell never speaks. The handshake bound expires, the adapter names
+	// the path that lost the channel, and the product finally hears about it.
+	raw = readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+	validateJSON(t, schema, raw, "session.integrationChanged params (real socket, handshake timeout)")
+	var timedOut integrationChangedParams
+	if err := json.Unmarshal(raw, &timedOut); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if timedOut.Status != IntegrationConventional {
+		t.Errorf("status = %q, want %q", timedOut.Status, IntegrationConventional)
+	}
+	if timedOut.Reason != string(ssh.ReasonHandshakeTimeout) {
+		t.Errorf("reason = %q, want %q", timedOut.Reason, ssh.ReasonHandshakeTimeout)
+	}
+	if timedOut.Shell != "/bin/bash" {
+		t.Errorf("shell = %q, want /bin/bash — a diagnosis that omits the shell is not actionable", timedOut.Shell)
 	}
 }

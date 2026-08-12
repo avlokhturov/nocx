@@ -125,6 +125,18 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// integrated the host it connected to.
 	s.recordInstalledFact(f)
 
+	// The session's integration axis (nocx-dvql): a live domain is the
+	// kernel's own word that this session integrated, and it is read from
+	// the published fact rather than re-derived, so there is exactly one
+	// authority for "is a domain live". The loss half is NOT taken from
+	// here — a handshake that expires moves no projection and publishes no
+	// fact — it comes from the adapter's loss cause (NoteIntegrationLoss).
+	// Before the subscriber checks below: this updates backend state, and
+	// the emit inside it does its own subscriber lookup.
+	if integrationLiveFromFact(f) {
+		s.noteIntegrationLive(sid)
+	}
+
 	// An episode without a subscriber is not opened: the next attach replays
 	// the fact, and the episode opens then, when the ack can actually come
 	// back.

@@ -44,6 +44,12 @@ type sessionMachine interface {
 	// method rather than the publisher itself: the handler may resynchronise
 	// a session it already owns, and nothing more.
 	replayLifecycleFacts(sid session.ID)
+	// replayIntegration re-sends the session's integration status on
+	// reattach (nocx-dvql). Separate from the lifecycle replay because it
+	// is a state rather than a transition: a frontend that reconnects after
+	// the handshake expired must learn it is in a conventional terminal,
+	// and no further transition is ever coming to tell it.
+	replayIntegration(sid session.ID)
 }
 
 // openMachine is the transport-owned machinery handleOpen needs after the
@@ -58,6 +64,11 @@ type openMachine interface {
 	replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUp(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUpLocal()
+	// The session integration axis (nocx-dvql): the remote registration
+	// from the connect path's own decision, and the first emission — which
+	// must happen AFTER the open ack (AD-7).
+	registerRemoteIntegration(sess session.Session, cfg session.Config)
+	emitIntegration(sid session.ID)
 }
 
 // openHandlers answers "open". It holds the OpenOperation (config, session
@@ -324,26 +335,41 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 	// cwd rides the open result so the tab has a name before any program sets
 	// a title (nocx-9vr). It is the starting directory only — following `cd`
 	// needs OSC 7 (nocx-5mn.2).
-	// shellIntegrationReason rides it too: a launcher decline (or a
-	// configured RemoteCommand) must be visible in the product, never
-	// log-only (AGENTS.md), and the open ack is the one result every session
-	// produces before any of its traffic. ReasonNone means integration
-	// succeeded or was never attempted (nocx-r52q, nocx-xs1d).
-	// desiredMode carries the RESOLVED destination mode (nocx-mlm7): the
-	// connection-scope default the tab's capability control starts from —
-	// script wraps and installs automatically, raw adds nothing, relay is
-	// consent-gated. It is the mode, never proof integration succeeded: the
-	// reason field and the arrival of markers are what confirm or downgrade
-	// the tab's state.
+	// shellIntegrationReason no longer rides it (nocx-dvql). It could only
+	// answer once, at open, and the two failures that matter most arrive
+	// later: a handshake that expires ten seconds in, and a channel lost
+	// mid-session. session.integrationChanged answers the same question as
+	// a state that keeps being revised, and two places answering it would
+	// be the defect AD-8 names — so the field is removed, not kept beside
+	// the notification.
+	// desiredMode still rides it and carries the RESOLVED destination mode
+	// (nocx-mlm7): the connection-scope default the tab's capability control
+	// starts from — script wraps and installs automatically, raw adds
+	// nothing, relay is consent-gated. It is the mode, never proof
+	// integration succeeded.
 	result := map[string]string{
-		"sessionId":              string(sess.ID()),
-		"cwd":                    sess.Cwd(),
-		"shellIntegrationReason": string(sess.ShellIntegrationReason()),
-		"desiredMode":            desiredModeForAck(cfg.Remote),
+		"sessionId":   string(sess.ID()),
+		"cwd":         sess.Cwd(),
+		"desiredMode": desiredModeForAck(cfg.Remote),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = respond(wconn, resp)
+
+	// The session's integration axis, AFTER the ack. AD-7: the ack must
+	// precede the session's own traffic in both directions, and the launch
+	// (which registered the axis) ran inside the dial above — a
+	// notification sent from there would reach a renderer whose sessionId
+	// is still null and be dropped.
+	//
+	// A remote session's launch-time refusal is registered here rather than
+	// at the dial because ShellIntegrationReason is the ssh channel's own
+	// answer and this is where the session first exists as a session. A
+	// local session was registered by the pty factory, which is the only
+	// thing that knows which binary it exec'd; registering it twice is what
+	// AD-8 forbids, so registerRemoteIntegration returns early for one.
+	h.sess.registerRemoteIntegration(sess, cfg)
+	h.sess.emitIntegration(sess.ID())
 
 	// Stored forwards (nocx-wzc4.5): replay the profile's configured
 	// forwards onto the connection. Deliberately ASYNC and only after the
@@ -612,6 +638,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		// needs the current state even when no transition happened since it
 		// last saw this session.
 		h.machine.replayLifecycleFacts(sid)
+		h.machine.replayIntegration(sid)
 
 		sidBytes, _ := session.IDToBytes(sid)
 		go h.machine.ringToConn(ctx, wconn, sidBytes, rx.ring, from)

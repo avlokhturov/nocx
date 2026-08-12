@@ -1,0 +1,23 @@
+/* Degraded-session notice — the card raised over a tab whose shell did not
+   integrate (nocx-5uu5).
+
+   PLACEMENT ONLY. Everything visible inside is the kit's StatusCard, and a
+   surface may place a kit component but never repaint it
+   (frontend/src/ui/README.md). There is no background, border, colour, font
+   or padding rule here on purpose: wanting one would mean StatusCard is
+   missing a variant, and the fix would be in the kit.
+
+   It overlays rather than taking layout space, exactly like the clipboard
+   banner: a card inserted into the flow shrinks the terminal, and shrinking
+   the terminal reflows the grid down to the PTY — a message ABOUT the
+   session must not rewrite the session. */
+
+.nocx-integration-notice {
+  --wails-draggable: no-drag;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  margin: 8px;
+}

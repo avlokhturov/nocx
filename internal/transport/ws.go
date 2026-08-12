@@ -371,6 +371,13 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// integrations is the per-session integration axis published as
+	// session.integrationChanged (nocx-dvql, ws_integration.go). Separate
+	// from lifecycleLanes because it answers a different question: that map
+	// says which session a DOMAIN belongs to, this one says what the
+	// SESSION's launch started and how far it got.
+	integrationMu sync.Mutex
+	integrations  map[session.ID]*integrationStatus
 	// recoveryMu guards recoveries: the per-session restoration episodes
 	// (ADR-0024 decision 8). The episode opens when a lost fact with a
 	// recovery fence routes to a live session, and is cancelled when the
@@ -2012,6 +2019,7 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// went on resolving that lane to a session nobody can reach.
 	s.cancelRecovery(sess.ID())
 	s.unregisterLifecycleLanes(sess.ID())
+	s.unregisterIntegration(sess.ID())
 
 	// Port discovery (nocx-wzc4.2): if this was the last session on its
 	// profile, forget the target and release its lease.
@@ -2092,6 +2100,7 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	s.filesSessionClosed(sid)
 	s.gitSessionClosed(sid, wconn)
 	s.unregisterLifecycleLanes(sid)
+	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)
 }
 
