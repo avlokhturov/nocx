@@ -82,6 +82,11 @@ const RESTORED: RestoreResult = {
   groupsRemoved: 0,
   groupCredentialBindingsRemoved: 0,
   connectionsRequiringCredential: [{ id: 'p1', name: 'My Server' }],
+  omissions: {
+    credentialBindingsRemoved: 1,
+    groupCredentialBindingsRemoved: 0,
+    groupDefaultKeysOmitted: 0,
+  },
 }
 
 /**
