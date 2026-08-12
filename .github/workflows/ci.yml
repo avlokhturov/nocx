@@ -159,7 +159,7 @@ jobs:
   # matters because go-keyring's back end is platform-specific and the
   # release pipeline ships a linux/amd64 AppImage.
   #
-  # Matrix decision: two variants (with-keyring: true / false) in one job
+  # Matrix decision: two variants (a Secret Service, or none) in one job
   # rather than two separate jobs. Rationale: common steps (checkout,
   # setup-go, build) appear once; GitHub auto-labels each variant; one job
   # ID for required checks.
@@ -175,7 +175,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        with-keyring: [true, false]
+        # The VALUE is what GitHub prints beside the job name, so it has to say
+        # what the variant IS: `ci-backend (true)` named the axis nowhere and
+        # sent every reader to this file to find out which one was which.
+        # Strings, not booleans.
+        keyring: [with-secret-service, no-secret-service]
     steps:
       - uses: actions/checkout@v7
 
@@ -222,7 +226,7 @@ jobs:
         run: sudo scripts/install-bash32.sh
 
       - name: Install Secret Service & dbus-x11
-        if: matrix.with-keyring
+        if: matrix.keyring == 'with-secret-service'
         run: sudo apt-get install -y -qq gnome-keyring dbus-x11
 
       - name: Build
@@ -242,7 +246,7 @@ jobs:
         run: make ci-os-split
 
       - name: Test (with Secret Service)
-        if: matrix.with-keyring
+        if: matrix.keyring == 'with-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
         run: |
@@ -257,7 +261,7 @@ jobs:
           TESTEOF
 
       - name: Test (no Secret Service)
-        if: '!matrix.with-keyring'
+        if: matrix.keyring == 'no-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
         run: go test -race -count=1 $PKGS
@@ -284,7 +288,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        with-keyring: [true, false]
+        # The VALUE is what GitHub prints beside the job name, so it has to say
+        # what the variant IS: `ci-backend (true)` named the axis nowhere and
+        # sent every reader to this file to find out which one was which.
+        # Strings, not booleans.
+        keyring: [with-secret-service, no-secret-service]
     steps:
       - uses: actions/checkout@v7
 
@@ -294,7 +302,7 @@ jobs:
           cache: true
 
       - name: Install Secret Service & dbus-x11
-        if: matrix.with-keyring
+        if: matrix.keyring == 'with-secret-service'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gnome-keyring dbus-x11
@@ -310,7 +318,7 @@ jobs:
         run: go build ./...
 
       - name: Test (with Secret Service)
-        if: matrix.with-keyring
+        if: matrix.keyring == 'with-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
         run: |
@@ -325,7 +333,7 @@ jobs:
           TESTEOF
 
       - name: Test (no Secret Service)
-        if: '!matrix.with-keyring'
+        if: matrix.keyring == 'no-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
         run: go test -race -count=1 $PKGS
