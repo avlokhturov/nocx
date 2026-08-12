@@ -55,6 +55,7 @@ export class Tab implements TabHost {
   private _adoptable = false
   private _onAdopt: (() => void) | null = null
   private _warning = false
+  private _warningLabel = ''
   private _disposed = false
   private _mountAbort = new AbortController()
   // ── B.5 geometry authority ──────────────────────────────────────────
@@ -135,17 +136,28 @@ export class Tab implements TabHost {
   }
 
   /** Mark the tab's environment degraded/uncertain (nocx-4t37.2): the one
-   *  signal tab chrome may carry — a small warning mark, never a permanent
-   *  product badge. The capability statement itself lives in the rail. */
-  setWarningState(warning: boolean): void {
+   *  signal tab chrome may carry. It persists for as long as the session
+   *  stays degraded (nocx-5uu5) — the card is the once-per-(shell, reason)
+   *  event, and this is the state that outlives it. The capability
+   *  statement itself lives in the rail.
+   *
+   *  The label is what the mark is ABOUT. A mark that cannot say what it
+   *  means is a mark people learn to ignore, so the integration status
+   *  supplies its own wording rather than the chrome inventing one. */
+  setWarningState(warning: boolean, label = ''): void {
     if (this._disposed) return
-    if (warning === this._warning) return
+    if (warning === this._warning && label === this._warningLabel) return
     this._warning = warning
+    this._warningLabel = label
     this.onDisplayChange?.()
   }
 
   get warning(): boolean {
     return this._warning
+  }
+
+  get warningLabel(): string {
+    return this._warningLabel
   }
 
   setActive(active: boolean): void {
@@ -454,7 +466,7 @@ export class TabManager {
       undefined,
       {
         onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
-        onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onWarningChange: (warning, label) => tabRef.current?.setWarningState(warning, label),
         onPortsTargetChange: () => this.onActiveTabChange?.(),
         onActiveOriginChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
@@ -502,7 +514,7 @@ export class TabManager {
             tab.setAdoptState(false, () => {})
           }
         },
-        onWarningChange: (warning) => tabRef.current?.setWarningState(warning),
+        onWarningChange: (warning, label) => tabRef.current?.setWarningState(warning, label),
         onActiveOriginChange: () => this.onActiveTabChange?.(),
         onPortsTargetChange: () => this.onActiveTabChange?.(),
         onVaultSealed: this.onVaultSealed,

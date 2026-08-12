@@ -34,6 +34,16 @@ import { unresolvedRedactionField } from './unresolved-redactions'
 import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
+import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
+import {
+  IntegrationSeenStore,
+  integrationMessage,
+  isDegraded,
+  safeSeenStorage,
+  subscribeIntegrationChanged,
+} from './integration/status'
+import { mountIntegrationNotice } from './integration/notice'
+import { createUrlOpener } from './open-url'
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
 import { renderRecordedCommand } from './scrollback/blocks'
@@ -69,7 +79,6 @@ import {
   type InputPresentation,
   type DesiredMode,
 } from './capability'
-import type { Open } from './generated/open'
 
 // How long the grid must hold still before the PTY is told about it.
 const RESIZE_SETTLE_MS = 80
@@ -180,7 +189,7 @@ export interface TerminalContentHooks {
    *  open, or markers stopped on an integrated session (nested ssh, docker
    *  exec). Tab chrome renders at most this small warning mark
    *  (nocx-4t37.2); the capability statement itself lives in the rail. */
-  onWarningChange?: (warning: boolean) => void
+  onWarningChange?: (warning: boolean, label?: string) => void
   /** The pane entered or left an environment, so the ports panel's target
    *  changed without the active tab changing (nocx-695k.3). */
   onPortsTargetChange?: () => void
@@ -346,10 +355,28 @@ export class TerminalContent extends BaseTabContent {
    *  the connection-scope default the capability control starts from. raw
    *  refuses every rewrite and remote write; relay is consent-gated. */
   private _policy: DesiredMode = 'script'
-  /** Why integration did not happen at open; empty means it succeeded or
-   *  was never attempted. A non-empty reason on an auto profile is the
-   *  soft degrade AGENTS.md demands be visible in the product. */
-  private _openReason: Open['shellIntegrationReason'] = ''
+  /** The session's integration status, as the backend keeps revising it
+   *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,
+   *  which could not report the two failures that matter most because both
+   *  arrive after the ack: a handshake that expires ten seconds in, and a
+   *  channel lost mid-session. null means the session never asked for
+   *  integration and there is nothing to say about it. */
+  private _integration: SessionIntegrationChanged | null = null
+  /** The subscription to that status, dropped on dispose. */
+  private _integrationUnsub: (() => void) | null = null
+  /** The disposer for the mounted degraded-session card, when one is up. */
+  private _noticeDispose: (() => void) | null = null
+  /** The pane the card mounts over. */
+  private _paneTarget: HTMLElement | null = null
+  /** Which (shell, reason) cards this machine has already shown. Renderer
+   *  presentation state — "has this person read this card" — so it lives in
+   *  localStorage rather than behind an RPC, and it survives a restart,
+   *  which the clipboard banner's run-scoped suppression does not. */
+  private readonly _seenStore = new IntegrationSeenStore(safeSeenStorage())
+  /** The one seam every surface opens a link through (AD-8). */
+  private readonly _urlOpener = createUrlOpener({
+    openUrl: (url: string) => this.client.dispatcher.call('shell.openUrl', { url }),
+  })
   /** The observed shell state (one of three independent axes). */
   private _shellState: ShellState = 'unsupported'
   /** The current input presentation. */
@@ -363,6 +390,8 @@ export class TerminalContent extends BaseTabContent {
    *  open, or markers stopped on an integrated session the user did not
    *  latch native. Tab chrome renders at most this mark. */
   private _degraded = false
+  /** What the mark currently says, so a change of reason repaints it. */
+  private _degradedLabel = ''
 
   // ── Title composition ────────────────────────────────────────────────
   // Title = programTitle || cwdTitle (no placeholder — nocx-83a)
@@ -579,6 +608,10 @@ export class TerminalContent extends BaseTabContent {
   async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
     if (this._disposed) return
     this.host = host
+    // The pane the degraded-session card overlays. Captured here because
+    // the status can arrive at any point in the session's life, long after
+    // mount returned.
+    this._paneTarget = target
 
     // Wire the signal: if the tab is disposed during mount, abort.
     if (signal.aborted) {
@@ -1520,16 +1553,15 @@ export class TerminalContent extends BaseTabContent {
       // backend's own resolution, never from a second fetch that could
       // disagree with it.
       this._policy = session.desiredMode ?? 'script'
-      this._openReason = session.shellIntegrationReason ?? ''
-      if (this._openReason !== '') {
-        // A launcher decline on an auto profile is the soft degrade
-        // AGENTS.md demands be visible in the product, never log-only.
-        showToast({
-          level: 'warning',
-          message: `Shell integration unavailable: ${this._openReason}`,
-          duration: 6000,
-        })
-      }
+      // The integration axis is a SUBSCRIPTION, not a field of the ack: the
+      // backend revises it as it learns (starting → integrated, or →
+      // conventional with a reason, or → lost). Subscribed before anything
+      // else touches the session so the first status — which the server
+      // sends immediately after the ack — cannot arrive unheard.
+      this._integrationUnsub = subscribeIntegrationChanged(this.client.dispatcher, (fact) => {
+        if (fact.sessionId !== session.sessionId) return
+        this._applyIntegration(fact)
+      })
       // The statement is OBSERVED: until the first marker arrives, an auto
       // session honestly reads "Native input" — the launcher may be
       // mid-start, and the first prompt flips it to command blocks.
@@ -1934,18 +1966,79 @@ export class TerminalContent extends BaseTabContent {
     // The open-ack integration decline is still worth the tab's warning
     // mark: it is the backend's own fact about this session, not a
     // stream-derived claim.
-    const degraded = this._openReason !== ''
+    const degraded = isDegraded(this._integration)
+    const label = integrationMessage(this._integration)?.title ?? ''
     if (
       shellState === this._shellState &&
       presentation === this._presentation &&
-      degraded === this._degraded
+      degraded === this._degraded &&
+      label === this._degradedLabel
     )
       return
     this._shellState = shellState
     this._presentation = presentation
     this._degraded = degraded
-    this.hooks.onWarningChange?.(degraded)
+    this._degradedLabel = label
+    // The mark carries the reason's own wording (nocx-5uu5): one table
+    // decides what a reason is called, and every surface that shows one —
+    // this mark, the card, the details dialog — reads it. The label is part
+    // of the dedupe above, because conventional → lost changes what the
+    // mark means without changing whether it is showing.
+    this.hooks.onWarningChange?.(degraded, label)
     this._renderRecovery()
+  }
+
+  /** Apply one published integration status (nocx-dvql / nocx-5uu5).
+   *
+   *  Two surfaces, and they are deliberately different in kind. The tab's
+   *  mark is a STATE: it is on for exactly as long as the session stays
+   *  degraded, so a user who looks at the strip an hour later still sees it.
+   *  The card is an EVENT, shown at most once per (shell, reason) pair —
+   *  once per session would put the same card in every tab of one
+   *  misconfigured machine, which is how people learn to dismiss cards
+   *  without reading them.
+   *
+   *  A session that never asked for integration never receives a status at
+   *  all, so neither surface has anything to draw: absence is how
+   *  "conventional by design" is expressed, and there is nothing here that
+   *  needs to special-case it. */
+  private _applyIntegration(fact: SessionIntegrationChanged): void {
+    if (this._disposed) return
+    this._integration = fact
+    this._updateCapability()
+    if (!isDegraded(fact)) {
+      // Recovered, or never failed. The card belongs to the state that
+      // raised it and goes with it.
+      this._noticeDispose?.()
+      this._noticeDispose = null
+      return
+    }
+    this._maybeShowIntegrationNotice(fact)
+  }
+
+  /** Raise the degraded-session card, unless this (shell, reason) pair has
+   *  already been seen on this machine. */
+  private _maybeShowIntegrationNotice(fact: SessionIntegrationChanged): void {
+    const target = this._paneTarget
+    const reason = fact.reason ?? 'unknown'
+    if (!target || this._noticeDispose) return
+    const seen = this._seenStore
+    if (!seen.shouldShow(fact.shell, reason)) return
+    seen.markShown(fact.shell, reason)
+    const dismiss = () => {
+      this._noticeDispose?.()
+      this._noticeDispose = null
+    }
+    this._noticeDispose = mountIntegrationNotice(target, {
+      fact,
+      copy: (text) => this.clipboard.writeText(text),
+      openUrl: (url) => this._urlOpener.open(url),
+      onSuppressShell: () => {
+        seen.suppressShell(fact.shell)
+        dismiss()
+      },
+      onDismiss: dismiss,
+    })
   }
 
   /** Acknowledge the restoration (ADR-0024 decision 8) once the shell's
@@ -2212,6 +2305,10 @@ export class TerminalContent extends BaseTabContent {
     this.mountAbortController?.abort()
     this._lifecycleUnsub?.()
     this._lifecycleUnsub = null
+    this._integrationUnsub?.()
+    this._integrationUnsub = null
+    this._noticeDispose?.()
+    this._noticeDispose = null
     this._lifecycleChangeUnsub?.()
     this._lifecycleChangeUnsub = null
     this._projections?.detach()

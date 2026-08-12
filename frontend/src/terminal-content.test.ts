@@ -15,7 +15,7 @@
 // takes. The editor is reached through the same private-field escape hatch
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -34,6 +34,7 @@ import {
   makeClipboard,
   makeBanner,
   makeSession,
+  integrationHandler,
   type ClipboardFake,
   type ClientFake,
   type LiveContentHeightSpy,
@@ -967,16 +968,19 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
 })
 
 describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
-  /** A client whose SSH open session carries the given destination mode. */
-  const clientWithPolicy = (
-    desiredMode: DesiredMode,
-    reason: SessionFake['shellIntegrationReason'] = '',
-  ): ClientFake =>
-    makeClient({
-      openSSHSession: vi.fn(() =>
-        Promise.resolve(makeSession({ desiredMode, shellIntegrationReason: reason })),
-      ),
+  /** A client whose SSH open session carries the given destination mode.
+   *  The refusal reason no longer rides the ack (nocx-dvql) — it arrives on
+   *  session.integrationChanged, which the integration tests drive. */
+  const clientWithPolicy = (desiredMode: DesiredMode): ClientFake => {
+    const client = makeClient({
+      openSSHSession: vi.fn(() => {
+        const s = makeSession({ desiredMode })
+        client._sessions.push(s)
+        return Promise.resolve(s)
+      }),
     })
+    return client
+  }
 
   const SSH = { profileId: 'ssh:test:1', host: 'test-host' }
 
@@ -1010,15 +1014,20 @@ describe('the recovery action chip in editor chrome (nocx-atyf.2)', () => {
     }
   })
 
-  it('a launcher decline on a script profile shows the recovery action', async () => {
-    const { content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { ssh: SSH },
-      clientWithPolicy('script', 'unsupported-shell'),
-    )
+  it('a launcher decline on a script profile leaves the mode script — the decline is a separate axis', async () => {
+    const client = clientWithPolicy('script')
+    const { content, teardown } = await mountTerminal(makeClipboard(), { ssh: SSH }, client)
     try {
       content.setVisible(true)
-      // The degrade warning fires; mode is script.
+      // The decline arrives on session.integrationChanged now (nocx-dvql),
+      // and it does NOT rewrite the resolved destination mode: the mode is
+      // what the connection asked for, the status is what happened.
+      integrationHandler(client)({
+        sessionId: client._sessions[0].sessionId,
+        status: 'conventional',
+        reason: 'unsupported-shell',
+        shell: 'auto',
+      })
       expect(content.policy).toBe('script')
     } finally {
       teardown()
@@ -2866,6 +2875,137 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       )
     } finally {
       restoreScroll()
+      teardown()
+    }
+  })
+})
+
+describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () => {
+  const TIMED_OUT = {
+    status: 'conventional',
+    reason: 'handshake-timeout',
+    shell: '/bin/bash',
+  } as const
+
+  /** The status the backend publishes, delivered through the real
+   *  subscription seam rather than reached for on the content object. */
+  const publish = (client: ClientFake, over: Record<string, unknown> = {}): void =>
+    integrationHandler(client)({
+      sessionId: client._sessions[0].sessionId,
+      ...TIMED_OUT,
+      ...over,
+    })
+
+  const cardIn = (tab: { pane: HTMLElement }) => tab.pane.querySelector('.nocx-integration-notice')
+
+  beforeEach(() => {
+    window.localStorage.clear()
+  })
+
+  // The test the bead names, from the user's side: a session whose shell
+  // never completed the handshake is marked, and says why. Before this the
+  // product was silent for the whole life of the session.
+  it('marks the tab, with the reason in the mark', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) } },
+      client,
+    )
+    try {
+      publish(client)
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Not integrated'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // `starting` is the honest interval, not a failure: marking it would put a
+  // warning on every tab for its first seconds and teach the user that the
+  // mark means nothing.
+  it('does not mark a session that is still starting', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onWarningChange: (w: boolean, l?: string) => warnings.push([w, l]) } },
+      client,
+    )
+    try {
+      publish(client, { status: 'starting', reason: undefined })
+      expect(warnings.some(([w]) => w)).toBe(false)
+      expect(cardIn(tab)).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('raises the card once for a (shell, reason) pair and never again', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    try {
+      publish(clientA)
+      expect(cardIn(first.tab)).not.toBeNull()
+      expect(first.tab.pane.querySelector('.ui-status-card__title')!.textContent).toBe(
+        'Not integrated',
+      )
+    } finally {
+      first.teardown()
+    }
+
+    // A second tab, same shell, same reason: the badge is the standing
+    // signal and the card has already been read.
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB)
+      expect(cardIn(second.tab)).toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  it('raises the card again when the same shell fails a different way', async () => {
+    const clientA = makeClient()
+    const first = await mountTerminal(makeClipboard(), {}, clientA)
+    try {
+      publish(clientA)
+    } finally {
+      first.teardown()
+    }
+
+    const clientB = makeClient()
+    const second = await mountTerminal(makeClipboard(), {}, clientB)
+    try {
+      publish(clientB, { status: 'lost', reason: 'channel-lost' })
+      expect(cardIn(second.tab)).not.toBeNull()
+    } finally {
+      second.teardown()
+    }
+  })
+
+  // A session that never asked for integration receives no status at all,
+  // so there is nothing to draw and nothing to nag about.
+  it('shows nothing at all for a session that never reports a status', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(cardIn(tab)).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('drops the card when the session recovers', async () => {
+    const client = makeClient()
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      publish(client)
+      expect(cardIn(tab)).not.toBeNull()
+      publish(client, { status: 'integrated', reason: undefined })
+      expect(cardIn(tab)).toBeNull()
+    } finally {
       teardown()
     }
   })

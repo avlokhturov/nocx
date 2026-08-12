@@ -474,3 +474,135 @@ func TestChildDescriptorReachesSpawnedProcess(t *testing.T) {
 	// (nocx-8b47).
 	_ = child.Close()
 }
+
+// ── which path lost the channel (nocx-dvql) ───────────────────────────────
+
+// lose is reached from four callers and used to record none of them, so a
+// degraded session produced no diagnostic line anywhere — twenty-two seconds
+// of one on the owner's machine produced zero. Each caller must be
+// distinguishable, because "the shell never answered" and "the shell went
+// away" need different fixes and the product renders different reasons for
+// them.
+
+// recordCauses collects the causes reported for an adapter's lane.
+type causeRecorder struct {
+	mu     chan struct{} // a 1-buffered channel as a mutex, so waitFor can read
+	causes []LossCause
+}
+
+func newCauseRecorder() *causeRecorder {
+	r := &causeRecorder{mu: make(chan struct{}, 1)}
+	r.mu <- struct{}{}
+	return r
+}
+
+func (r *causeRecorder) report(_ lifecycle.LaneID, c LossCause) {
+	<-r.mu
+	r.causes = append(r.causes, c)
+	r.mu <- struct{}{}
+}
+
+func (r *causeRecorder) all() []LossCause {
+	<-r.mu
+	out := append([]LossCause(nil), r.causes...)
+	r.mu <- struct{}{}
+	return out
+}
+
+func TestHelloTimeoutReportsItsCause(t *testing.T) {
+	k := newTestKernel()
+	rec := newCauseRecorder()
+	a, child, err := New(log.NewSlogAdapter(nil), k,
+		WithHelloTimeout(50*time.Millisecond), WithLossReporter(rec.report))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+	defer func() { _ = child.Close() }()
+
+	waitFor(t, "hello timeout reported as its own cause", func() bool {
+		c := rec.all()
+		return len(c) == 1 && c[0] == LossHelloTimeout
+	})
+	// Close afterwards must not append a second cause: the first cause is
+	// the one that ended the channel, and a later disposal cannot rewrite
+	// it into something the user would be told to fix.
+	_ = a.Close()
+	if c := rec.all(); len(c) != 1 || c[0] != LossHelloTimeout {
+		t.Errorf("causes after a post-loss Close = %v, want exactly [hello-timeout]", c)
+	}
+}
+
+func TestShellClosingItsEndReportsEndOfStream(t *testing.T) {
+	k := newTestKernel()
+	rec := newCauseRecorder()
+	a, child, err := New(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+	mustEstablish(t, a, child)
+
+	// The shell goes away without saying goodbye: the domain is live, so
+	// this is a loss and not a clean end.
+	_ = child.Close()
+	waitFor(t, "end of stream reported as its own cause", func() bool {
+		c := rec.all()
+		return len(c) == 1 && c[0] == LossEndOfStream
+	})
+}
+
+func TestSessionDisposalReportsClosed(t *testing.T) {
+	k := newTestKernel()
+	rec := newCauseRecorder()
+	a, child, err := New(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = child.Close() }()
+	mustEstablish(t, a, child)
+
+	// The session is closing. Distinguishable from every failure above, so
+	// the product does not paint a tab as broken on its way out.
+	_ = a.Close()
+	waitFor(t, "disposal reported as its own cause", func() bool {
+		c := rec.all()
+		return len(c) == 1 && c[0] == LossClosed
+	})
+}
+
+// The reporter runs BEFORE the kernel is told, so a consumer that watches
+// both never sees the published consequence before the cause that explains
+// it. Asserted rather than assumed: the ordering is the whole reason the two
+// seams can be combined at all.
+func TestCauseIsReportedBeforeTheKernelIsTold(t *testing.T) {
+	k := newTestKernel()
+	order := make(chan string, 4)
+	a, child, err := New(log.NewSlogAdapter(nil), &orderingKernel{Kernel: k, order: order},
+		WithHelloTimeout(50*time.Millisecond),
+		WithLossReporter(func(lifecycle.LaneID, LossCause) { order <- "cause" }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = a.Close() }()
+	defer func() { _ = child.Close() }()
+
+	if first := <-order; first != "cause" {
+		t.Errorf("first observation = %q, want the cause before the kernel's TransportLost", first)
+	}
+	if second := <-order; second != "transport-lost" {
+		t.Errorf("second observation = %q, want transport-lost", second)
+	}
+}
+
+// orderingKernel records when TransportLost was called, delegating
+// everything else.
+type orderingKernel struct {
+	Kernel
+	order chan string
+}
+
+func (k *orderingKernel) TransportLost(t lifecycle.TransportID) error {
+	k.order <- "transport-lost"
+	return k.Kernel.TransportLost(t)
+}

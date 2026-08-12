@@ -167,6 +167,20 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	return lp, nil
 }
 
+// Shell is the binary this pty actually started, as exec resolved it: an
+// absolute path whenever PATH could supply one, and the bare name otherwise.
+// It is read by the composition root for the session's integration status
+// (nocx-dvql) — "nocx started /bin/bash" is the one fact a user cannot infer
+// and cannot act without, because which shell a session runs is the single
+// biggest thing that varies between two machines running the same code.
+//
+// It reports the launched process, never a preference: an enhanced session
+// starts bash with an rcfile whatever $SHELL says, and saying otherwise
+// would send the user to fix a file the session never read.
+func (lp *LocalPty) Shell() string {
+	return lp.cmd.Path
+}
+
 func (lp *LocalPty) Read(p []byte) (int, error) {
 	return lp.file.Read(p)
 }
