@@ -88,14 +88,8 @@ type ProbeResultRecord struct {
 //	identity-fingerprint: an incoming record with the same identity
 //	replaces the stored entry. Records with empty Endpoint are skipped.
 //
-//	Export/import is exposed as an API on the store, not as dedicated
-//	RPC methods. The rotation wave (wave 8) wires frontend-accessible
-//	RPCs if the UI demands live querying; the existing export.backup
-//	path feeds the store's Export through a narrow interface if a
-//	forensic snapshot is needed. Neither is built here because §6
-//	specifies the *behaviour*, not the transport — and the ownership
-//	rule (operational evidence, not profile configuration) is satisfied
-//	by the documented policy above.
+//	Durable history is exposed through the history RPC surface; any forensic
+//	snapshot uses the store's narrow interface rather than profile configuration.
 //
 // Distinction: "locked" vs "rejected" (brief §41)
 //

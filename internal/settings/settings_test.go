@@ -865,3 +865,26 @@ func TestApplyValues_EmptyMapIsNoop(t *testing.T) {
 		t.Fatalf("ApplyValues(empty): %v", err)
 	}
 }
+
+func TestValidateSettingMatchesBulkRestoreValidation(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	if err := reg.ValidateSetting("test.numberExample", float64(1)); err != nil {
+		t.Fatalf("valid number rejected: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		key   string
+		value any
+	}{
+		"unknown key":  {key: "no.such.setting", value: true},
+		"secret key":   {key: "test.secretExample", value: "secret"},
+		"object value": {key: "test.stringExample", value: map[string]any{"mode": "dark"}},
+		"array value":  {key: "test.stringExample", value: []any{"dark"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := reg.ValidateSetting(tc.key, tc.value); err == nil {
+				t.Fatal("invalid setting accepted")
+			}
+		})
+	}
+}

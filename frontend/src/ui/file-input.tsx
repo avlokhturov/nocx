@@ -20,7 +20,7 @@
  *
  * No `class` prop — identity is always `.ui-file-input` on the wrapper.
  */
-import { createSignal } from 'solid-js'
+import { createSignal, createEffect, on } from 'solid-js'
 import { Button } from './button'
 
 export interface FileInputProps {
@@ -31,11 +31,24 @@ export interface FileInputProps {
   id?: string
   /** Trigger label. Defaults to "Choose file…". */
   buttonLabel?: string
+  /** When this key changes, the selected file is cleared. */
+  resetKey?: number
 }
 
 export function FileInput(props: FileInputProps) {
   const [fileName, setFileName] = createSignal<string | null>(null)
   let input!: HTMLInputElement
+
+  createEffect(
+    on(
+      () => props.resetKey,
+      () => {
+        if (input) input.value = ''
+        setFileName(null)
+      },
+      { defer: true },
+    ),
+  )
 
   const onChange = (e: Event) => {
     const target = e.currentTarget as HTMLInputElement

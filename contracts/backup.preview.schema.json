@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/backup.preview.schema.json",
+  "title": "BackupRestorePreview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "previewToken",
+    "createdAt",
+    "strategy",
+    "settings",
+    "connections",
+    "groups",
+    "connectionsRequiringCredential",
+    "omissions"
+  ],
+  "properties": {
+    "previewToken": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "strategy": { "type": "string", "enum": ["merge", "replace"] },
+    "settings": { "$ref": "#/$defs/settingsCounts" },
+    "connections": { "$ref": "#/$defs/itemCounts" },
+    "groups": { "$ref": "#/$defs/itemCounts" },
+    "connectionsRequiringCredential": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/profileRef" }
+    },
+    "omissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credentialBindingsRemoved",
+        "groupCredentialBindingsRemoved",
+        "groupDefaultKeysOmitted"
+      ],
+      "properties": {
+        "credentialBindingsRemoved": { "type": "integer" },
+        "groupCredentialBindingsRemoved": { "type": "integer" },
+        "groupDefaultKeysOmitted": { "type": "integer" }
+      }
+    }
+  },
+  "$defs": {
+    "settingsCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included", "changed", "reset"],
+      "properties": {
+        "included": { "type": "integer" },
+        "changed": { "type": "integer" },
+        "reset": { "type": "integer" }
+      }
+    },
+    "itemCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included", "added", "updated", "removed"],
+      "properties": {
+        "included": { "type": "integer" },
+        "added": { "type": "integer" },
+        "updated": { "type": "integer" },
+        "removed": { "type": "integer" }
+      }
+    },
+    "profileRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": { "id": { "type": "string" }, "name": { "type": "string" } }
+    }
+  }
+}

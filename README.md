@@ -282,12 +282,13 @@ See `AGENTS.md` for the full workflow.
 
 ## Sources of truth
 
-| File                   | What it contains                                              |
-| ---------------------- | ------------------------------------------------------------- |
-| `AGENTS.md`            | Binding engineering rules for all contributors (human and AI) |
-| `docs/architecture.md` | Architecture spine with AD-1..AD-10 invariants                |
-| `docs/vision.md`       | Product vision, MVP scope, roadmap                            |
-| `docs/decisions/`      | Architecture Decision Records (append-only)                   |
+| File                         | What it contains                                                                                           |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `AGENTS.md`                  | Binding engineering rules for all contributors (human and AI)                                              |
+| `docs/architecture.md`       | Architecture spine with AD-1..AD-10 invariants                                                             |
+| `docs/vision.md`             | Product vision, MVP scope, roadmap                                                                         |
+| `docs/decisions/`            | Architecture Decision Records (append-only)                                                                |
+| `docs/backup-and-restore.md` | What a backup carries, what it deliberately leaves behind, and how a restore recovers from an interruption |
 
 ## Repository layout
 

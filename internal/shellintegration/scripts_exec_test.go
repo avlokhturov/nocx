@@ -821,7 +821,7 @@ TIMEFORMAT='PROMPT_MS=%R'
 func runShellProgEnv(t *testing.T, shell, prog, arg string, extraEnv ...string) string {
 	t.Helper()
 	cmd := exec.Command(shell, "-c", prog, shell, arg)
-	cmd.Env = append(os.Environ(), "HOSTNAME=testhost")
+	cmd.Env = append(os.Environ(), "HOSTNAME=testhost", "LC_ALL=C")
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

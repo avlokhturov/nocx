@@ -197,23 +197,21 @@ cross-connection**: two connections touching the config domain exclude each othe
 exactly as two requests on one connection do.
 
 Where an operation spans several stores, the operation owns the sequencing — never
-the handler. `export.import`/`export.importPortable` run through
-`export.RestoreImport`, which has a documented commit point (the first durable
-write). Before it, cancellation changes nothing on disk. From it on, the domain owns
-completion or rollback, and the **closing event of the interval is the error
-return**: when `RestoreImport` returns an error, every store is at the generation it
-was in before the operation began — never a split.
+the handler. `backup.restore` runs through `BackupOperation`, which has a documented
+prepared/committed journal boundary. Before it, cancellation changes nothing on disk.
+From it on, the domain owns completion or rollback, and the closing event of the
+interval is the error return: when restore returns an error, every store is at a
+recoverable generation.
 
 ### 9. Namespace FIFO was considered and rejected
 
-A per-namespace FIFO is an attractive false guarantee, because the invariants cross
-namespaces. `export.import` touches four stores (profiles, groups, settings,
-content) inside one commit interval; `open` crosses session, profile, vault and
-sshConfig. Serialising per namespace would order work that has no ordering
-relationship, and the work that genuinely needs ordering — conflicts — is already
-ordered by the domain gates. A namespace FIFO would also reintroduce head-of-line
-blocking one level down: a slow `git` operation would stall unrelated `files` work
-that shares no resource. Rejected.
+A per-domain FIFO is an attractive false guarantee, because the invariants cross
+domains. `backup.restore` touches profiles, groups and settings inside one commit
+interval; `open` crosses session, profile, vault and sshConfig. Serialising per
+domain would order work that has no ordering relationship, and the work that genuinely
+needs ordering — conflicts — is already ordered by the domain gates. A namespace FIFO
+would also reintroduce head-of-line blocking one level down: a slow `git` operation
+would stall unrelated `files` work that shares no resource. Rejected.
 
 ### 10. Context owners
 

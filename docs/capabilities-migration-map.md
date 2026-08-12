@@ -55,8 +55,7 @@ order wrong. The submission's execution bound is a separate semaphore
 | `SecretOperation` (+ `SecretOperations.ForSecret`)    | config, vault       | `SecretService`            | profiles repo, groups repo, `SecretVault` seam, `credential.SecretStore`                                                   |
 | `TabbyImportOperation`                                | config, vault       | `TabbyImportService`       | profiles repo, groups repo, `*profile.ProfileService`, `SecretVault`, `credential.SecretStore`                             |
 | `ContentOperation`                                    | content             | `ContentService`           | `content.ContentDB`                                                                                                        |
-| `ExportOperation`                                     | config, content     | `ExportService`            | profiles repo, groups repo, `*settings.Registry`, `storage.Paths`, `content.ContentDB`                                     |
-| `RestoreOperation`                                    | config, content     | `RestoreService`           | `*profile.ProfileService`, `*settings.Registry`, `content.ContentDB`                                                       |
+| `BackupOperation`                                     | config              | `BackupService`            | `*backup.Service`                                                                                                          |
 | `CaptureSaveOperation`                                | vault, content      | `CaptureSaveService`       | `SecretVault`, `content.ContentDB`                                                                                         |
 | `SessionOperation` (+ `SessionOperations.ForSession`) | session             | `SessionService`           | `session.Registry`, `session.ProfileUsageTracker` (nil tolerated)                                                          |
 | `OpenOperation`                                       | config, session     | `OpenService`              | `ProfileResolver` seam, `session.Registry`                                                                                 |
@@ -178,16 +177,14 @@ means the handler keeps its injected seams and touches no domain store.
 | `history.query`  | **ContentOperation** (content) |                                                                                  |
 | `history.record` | **ContentOperation**           | `RecordCommand` + `RewriteRedaction`; the capture registry stays in the handler. |
 
-### export.*
+### backup.* — the configuration domain
 
-| Method                     | Capability                             | Notes                                                                                           |
-| -------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `export.manifest`          | **ExportOperation** (config, content)  | `ManifestFor` is pure; the operation type is shared with the content-reading modes.             |
-| `export.configExport`      | **ExportOperation**                    |                                                                                                 |
-| `export.portableEncrypted` | **ExportOperation**                    |                                                                                                 |
-| `export.backup`            | **ExportOperation**                    |                                                                                                 |
-| `export.import`            | **RestoreOperation** (config, content) | Wraps `export.RestoreImport` (one transaction, one rollback). Handler decodes the payload only. |
-| `export.importPortable`    | **RestoreOperation**                   | Decrypt + `Import`.                                                                             |
+| Method              | Capability                   | Notes                                                                             |
+| ------------------- | ---------------------------- | --------------------------------------------------------------------------------- |
+| `backup.create`     | **BackupOperation** (config) | Builds one bounded `nocx-backup` document from profile and settings snapshots.    |
+| `backup.preview`    | **BackupOperation** (config) | Parses and diffs without mutation; returns a stale-sensitive preview token.       |
+| `backup.restore`    | **BackupOperation** (config) | Applies the confirmed preview through the prepared/committed recovery journal.    |
+| `backup.saveToFile` | native file saver            | Writes the supplied bounded document through the injected save-dialog capability. |
 
 ### The rest
 
@@ -218,14 +215,13 @@ owners of one behaviour (AD-8):
   `rowToSecretRef` (ws_secrets.go) — the row→ref resolution is now inside
   `ConfigService`.
 - `vaultInventoryInputs` (ws_vault.go) — now `capability.inventoryInputs`.
-- `settingsProviderAdapter`, `settingsSinkAdapter` (ws_export.go) — now in
-  `internal/capability/export.go`.
-- `buildRestoreDeps`, `buildConfigExportDeps` (ws_export.go) — the deps
-  are built inside `RestoreService`/`ExportService`.
-
-KEEP (pure, no store): `wireProfile`, `wireGroup`, `sparseToWire`,
-`optionsToWire`, `wireEffectiveSecretFields`, `secretRefToRow`
-(=`vault.RowFor`), `createSecret`'s callers now call the service instead.
+- `settingsProviderAdapter`, `settingsSinkAdapter` (old export transport)
+  — now owned by the structured backup service and settings registry seam.
+- `buildRestoreDeps`, `buildConfigExportDeps` (old export transport) — removed;
+  backup dependencies are built in `internal/backup` at the composition root.
+  KEEP (pure, no store): `wireProfile`, `wireGroup`, `sparseToWire`,
+  `optionsToWire`, `wireEffectiveSecretFields`, `secretRefToRow`
+  (=`vault.RowFor`), `createSecret`'s callers now call the service instead.
 
 ## Known conservative postures (refinable without touching handlers)
 
@@ -255,10 +251,9 @@ KEEP (pure, no store): `wireProfile`, `wireGroup`, `sparseToWire`,
 
 ## Findings
 
-- **`export.manifest`/`export.configExport` don't need content or the
-  vault**, but share the `ExportOperation` [config, content] type with the
-  content-reading modes. Acceptable: export is rare and the type is one
-  surface. Split only if measurements say the content gate is contended.
+- **`backup.create`/`backup.preview`/`backup.restore`** hold the config gate
+  and bounded control lane through `BackupOperation`; save-to-file uses only
+  the injected native file saver.
 - **The session-teardown binding cleanup** (git/files) is shared lifecycle,
   not a handler capability; the registries are their own exclusion.
 - **A nil `RowResolver`** is tolerated (dev-web with no vault): a config
