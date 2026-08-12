@@ -22,13 +22,14 @@ export interface SessionIntegrationChanged {
    */
   status: 'starting' | 'integrated' | 'conventional' | 'lost'
   /**
-   * Why integration did not happen, from the closed server vocabulary ssh.RefusalReason — the existing owner of this question, extended rather than duplicated. Present exactly when status is 'conventional' or 'lost', and absent otherwise; 'unknown' is a real, visible answer meaning the backend cannot say, never a synonym for success. Never raw error text: a remote publish failure is an SFTP status code and a path, meaningful in a log and meaningless in a pane (nocx-viil).
+   * Why integration did not happen, from the closed server vocabulary ssh.RefusalReason — the existing owner of this question, extended rather than duplicated. Present exactly when status is 'conventional' or 'lost', and absent otherwise; 'unknown' is a real, visible answer meaning the backend cannot say, never a synonym for success. 'startup-did-not-return' is a STAGE rather than a cause: nocx's rcfile began executing and the user's own startup file never gave control back, which an exec into another terminal's wrapper, a plain exit, a hung attach and a crashed shell all produce identically — the backend reports where it stopped, never a guess at which of them it was (nocx-yww2). Never raw error text: a remote publish failure is an SFTP status code and a path, meaningful in a log and meaningless in a pane (nocx-viil).
    */
   reason?:
     | 'unsupported-shell'
     | 'no-secure-temp'
     | 'remote-command'
     | 'handshake-timeout'
+    | 'startup-did-not-return'
     | 'channel-lost'
     | 'unknown'
   /**

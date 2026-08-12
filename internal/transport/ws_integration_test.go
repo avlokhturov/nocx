@@ -1,13 +1,17 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -43,11 +47,38 @@ type integrationEnv struct {
 	h    lifecycle.DomainHandle
 }
 
+// integrationPTYFactory registers the session's integration axis from INSIDE
+// the open, exactly where the production local factory registers it — it is
+// the only thing that knows which binary it exec'd, so it is the only thing
+// that may answer.
+//
+// It matters here for a second reason, which is why the env stopped
+// registering the axis itself: the open handler emits the session's status
+// once, after the ack. A test that registers the axis after `open` RETURNS is
+// racing that emit — on an idle machine the handler wins and emits nothing,
+// under load the test wins and the handler emits a second `starting` frame
+// that the next assertion reads instead of the transition it is waiting for.
+// Registering inside the open makes the count exactly one, always.
+type integrationPTYFactory struct {
+	stub *pty.Stub
+	ws   atomic.Pointer[WSServer]
+}
+
+func (f *integrationPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
+	if ws := f.ws.Load(); ws != nil && cfg.SessionID != "" {
+		ws.RegisterIntegration(session.ID(cfg.SessionID), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	}
+	return f.stub, nil
+}
+
 func newIntegrationEnv(t *testing.T) *integrationEnv {
 	t.Helper()
 	kernel := lifecycle.New(lifecycle.Options{})
 	pub := lifecyclepub.New(kernel)
-	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	logger := log.NewSlogAdapter(nil)
+	f := &integrationPTYFactory{stub: pty.NewStub(logger)}
+	e := newLifecycleTestEnvWithReg(t, session.New(logger, f), WithLifecyclePublisher(pub))
+	f.ws.Store(e.ws)
 	pub.SetEmitter(e.ws)
 	sid := e.openSession(t, 1)
 	const lane = lifecycle.LaneID("lane-1")
@@ -59,8 +90,6 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	if err != nil {
 		t.Fatalf("RequestDomain: %v", err)
 	}
-	e.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
-	e.ws.emitIntegration(session.ID(sid))
 	if first := readIntegration(t, e.conn, sid); first.Status != IntegrationStarting {
 		t.Fatalf("first status = %q, want starting", first.Status)
 	}
@@ -189,6 +218,97 @@ func TestIntegration_ReattachReplaysTheCurrentStatus(t *testing.T) {
 	got := readIntegration(t, connB, e.sid)
 	if got.Status != IntegrationConventional || got.Reason != string(ssh.ReasonHandshakeTimeout) {
 		t.Errorf("replayed status = %+v, want conventional/handshake-timeout", got)
+	}
+}
+
+// The product says WHERE it stopped, not that ten seconds passed (nocx-yww2).
+// A session whose rcfile began executing and whose user startup never returned
+// is the dominant local failure — every user with a second shell integration
+// in their rc is in it — and until this it was reported as
+// `handshake-timeout`, which is indistinguishable from a shell that never
+// started and from one that hung.
+//
+// Validated against the contract on the way out, because the reason is a
+// closed enum shared with the renderer: a value the schema does not know would
+// reach a surface that cannot render it.
+func TestIntegration_AStartupThatDidNotReturnIsNamedRatherThanTimedOut(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteBootstrapStage(session.ID(e.sid), BootstrapStageStartupEntered)
+
+	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
+	raw := readNotification(t, e.conn, "session.integrationChanged", wantWithin)
+	validateJSON(t, loadSchema(t, "session.integrationChanged.schema.json"), raw,
+		"session.integrationChanged params (real socket, startup did not return)")
+	var got integrationChangedParams
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Status != IntegrationConventional {
+		t.Errorf("status = %q, want conventional", got.Status)
+	}
+	if got.Reason != string(ssh.ReasonStartupDidNotReturn) {
+		t.Errorf("reason = %q, want startup-did-not-return: the bound expiring is what NOTICED, "+
+			"the stage is what the user can act on", got.Reason)
+	}
+}
+
+// The paired case, and the one that keeps the new answer honest: a session
+// whose user startup DID return and which then failed to authenticate is our
+// own bootstrap breaking, and it still reports the handshake bound. Without
+// this, "startup-did-not-return" would be free to become the answer to every
+// timeout, which is the same lie with a longer name.
+func TestIntegration_AStartupThatReturnedStillReportsTheHandshakeBound(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteBootstrapStage(session.ID(e.sid), BootstrapStageStartupEntered)
+	e.ws.NoteBootstrapStage(session.ID(e.sid), BootstrapStageUserRCReturned)
+
+	e.ws.NoteIntegrationLoss(e.lane, LossCauseHelloTimeout)
+	got := readIntegration(t, e.conn, e.sid)
+	if got.Status != IntegrationConventional || got.Reason != string(ssh.ReasonHandshakeTimeout) {
+		t.Errorf("status/reason = %q/%q, want conventional/handshake-timeout", got.Status, got.Reason)
+	}
+}
+
+// A stage is diagnostic and carries no authority whatsoever (ADR-0024
+// decision 4). The descriptor it arrives on is inherited by every descendant
+// of the shell, so a forged fact must be able to spoil a diagnosis and nothing
+// else: it announces nothing, integrates nothing, and leaves a session in
+// exactly the state it was in.
+func TestIntegration_ABootstrapStageAnnouncesNothingByItself(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteBootstrapStage(session.ID(e.sid), BootstrapStageStartupEntered)
+	e.ws.NoteBootstrapStage(session.ID(e.sid), BootstrapStageUserRCReturned)
+
+	// It cannot claim success: the session is still `starting`, because only
+	// the kernel's own "a domain went live" moves that axis.
+	e.ws.integrationMu.Lock()
+	st := *e.ws.integrations[session.ID(e.sid)]
+	e.ws.integrationMu.Unlock()
+	if st.status != IntegrationStarting || st.reason != ssh.ReasonNone || st.everLive {
+		t.Errorf("status = %+v, want an untouched `starting`: a progress fact may not integrate a session", st)
+	}
+	// And it announces nothing of its own. Last, because a read that times out
+	// leaves this websocket unusable for the assertions after it.
+	if leaked := tryReadNotification(t, e.conn, "session.integrationChanged", 300*time.Millisecond); leaked != nil {
+		t.Errorf("a bootstrap stage published a status of its own: %s", leaked)
+	}
+}
+
+// A session that WAS integrated and then lost its channel is `lost`, whatever
+// its bootstrap stage says. The stage arm sits ahead of the cause arm, so this
+// is the check that it did not also jump ahead of "it was live" — a session
+// whose blocks stopped mid-command must never be told its startup did not
+// return.
+func TestIntegration_AStageNeverOutranksHavingBeenLive(t *testing.T) {
+	e := newIntegrationEnv(t)
+	e.ws.NoteBootstrapStage(session.ID(e.sid), BootstrapStageStartupEntered)
+	if got := e.establish(t); got.Status != IntegrationIntegrated {
+		t.Fatalf("status = %q, want integrated before the loss", got.Status)
+	}
+	e.ws.NoteIntegrationLoss(e.lane, "end-of-stream")
+	got := readIntegration(t, e.conn, e.sid)
+	if got.Status != IntegrationLost || got.Reason != string(ssh.ReasonChannelLost) {
+		t.Errorf("status/reason = %q/%q, want lost/channel-lost", got.Status, got.Reason)
 	}
 }
 

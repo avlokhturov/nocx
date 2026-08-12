@@ -292,6 +292,24 @@ distinction, and put the weaker path on exactly the unusual shells and remote ho
 with the least test coverage — while leaving the user unable to tell which
 guarantee they have.
 
+**A diagnostic channel is not a tier, and this decision does not forbid one.**
+Written down because the sentence above is otherwise read as forbidding the only
+way to tell three failures apart. A channel carrying UNAUTHENTICATED bootstrap
+progress — how far the shell got through nocx's own startup, and nothing else —
+is permitted, on three conditions that are the whole of what makes it safe: it is
+not the terminal, it does not travel through the lifecycle codec (whose rule is
+that every accepted envelope is authenticated, decisions 2 and 7), and no fact on
+it may create, complete, authenticate or revoke anything. Its worst failure — a
+forged or missing fact from a descendant that inherited the descriptor — is a
+wrong sentence in a diagnosis, never a state the shell did not reach. Concretely
+(`nocx-yww2`, `internal/bootstrapprogress`): the rcfile reports that it began and
+that the user's own startup returned, and the pair distinguishes "the user's
+startup took the shell" from "the shell never started" and from "our own bootstrap
+broke" — three situations that are one indistinguishable ten-second silence when
+the handshake bound is the only detector. The second fact is written **before** the
+capability is substituted into the rcfile, so the diagnosis widens the window in
+which the user's own rc could read the capability by exactly nothing.
+
 ### 5. The lifecycle is attempt-based, and a start may come from either side
 
 Editor submit synchronously creates an `ExecutionAttempt` — attempt id, app-owned
@@ -484,7 +502,10 @@ report its own lifecycle honestly; or a compromised backend, renderer or validat
 
 Availability is bounded too, and stating it is part of being honest: a descendant
 that can write to the lifecycle transport may force a safe transition to native
-mode. It can never produce a validated event without the epoch's authenticator.
+mode, and a descendant that can write to the diagnostic channel decision 4 permits
+may spoil a diagnosis. Neither can produce a validated event without the epoch's
+authenticator, and the diagnostic channel has no authenticator to produce one
+with — which is why nothing may be built on it that a wrong answer would break.
 
 That second list is irreducible in kind. We can authenticate **who spoke**; we can
 never prove a compromised speaker told the truth.

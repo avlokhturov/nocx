@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/content"
@@ -697,6 +698,14 @@ func New(opts ...Option) (*App, error) {
 	ptf.noteLifecycleLoss = func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause) {
 		tp.NoteIntegrationLoss(lane, string(cause))
 	}
+	// And how far the shell got through nocx's rcfile (nocx-yww2), which is
+	// what turns the dominant failure from "ten seconds of silence" into a
+	// stage. Routed by session id rather than by lane: the progress
+	// descriptor belongs to the session, carries no domain and confers no
+	// authority, so it never touches the lane registry.
+	ptf.noteBootstrapStage = func(sid, stage string) {
+		tp.NoteBootstrapStage(session.ID(sid), stage)
+	}
 	resolver := connection.NewResolver(
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
@@ -921,6 +930,14 @@ type localPTYFactory struct {
 	// handshake that expires establishes no domain and therefore publishes
 	// no fact at all — the silence this bead exists to end.
 	noteLifecycleLoss func(lane lifecycle.LaneID, cause lifecyclechannel.LossCause)
+	// noteBootstrapStage carries how far the shell got through nocx's rcfile
+	// to the same axis (nocx-yww2). A third seam and not a variant of the
+	// two above, because it is the only one that speaks BEFORE anything has
+	// failed: the handshake bound can say a session did not integrate, and
+	// only these facts can say where it stopped. Diagnostic only — nothing
+	// reached through here may grant authority, and the transport's
+	// NoteBootstrapStage emits nothing on its own.
+	noteBootstrapStage func(sid, stage string)
 }
 
 // lifecyclePTY is an enhanced session's pty plus the lifecycle channel whose
@@ -931,11 +948,19 @@ type localPTYFactory struct {
 type lifecyclePTY struct {
 	pty.Pty
 	ch *lifecyclechannel.Adapter
+	// bp is the bootstrap progress reader, when one was created. It dies
+	// with the session for the same reason the channel does: both are
+	// descriptors this session's shell inherited, and a reader outliving its
+	// shell would report a stage for a session that no longer exists.
+	bp *bootstrapprogress.Reader
 }
 
 func (p *lifecyclePTY) Close() error {
 	err := p.Pty.Close()
 	_ = p.ch.Close()
+	if p.bp != nil {
+		_ = p.bp.Close()
+	}
 	return err
 }
 
@@ -990,6 +1015,15 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	if err != nil {
 		return nil, err
 	}
+	// The bootstrap progress descriptor (nocx-yww2): a SECOND, one-way
+	// descriptor, never the lifecycle channel and never its codec. It carries
+	// two unauthenticated facts about how far the rcfile got, and the reason
+	// it is a separate object rather than two more frames is the rule it must
+	// not break — every envelope on the lifecycle channel is authenticated,
+	// and these cannot be. A failure to create it costs the diagnosis, never
+	// the session: the shell starts anyway and the handshake bound goes back
+	// to being the only detector.
+	bp, bpChild := f.newBootstrapProgress(cfg.SessionID)
 	if f.transports != nil {
 		f.transports.register(ch.TransportID(), transportKind{local: true})
 	}
@@ -1012,12 +1046,14 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		Domain:      string(launch.Domain),
 		Epoch:       launch.Epoch,
 		LifecycleFD: 3, // the child end of the socketpair, via ExtraFiles
+		BootstrapFD: bootstrapFD(bpChild),
 	})
 	if rerr != nil {
 		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
 			"shell", shell.Path, "tier", string(kind), "error", rerr)
 		_ = ch.Close()
 		_ = child.Close()
+		closeProgress(bp, bpChild)
 		// No channel and no bootstrap: the user's OWN login shell, plain, with
 		// a visible native prompt (the script's init bails without config).
 		// The activation env is the conventional one — a shell that will not
@@ -1038,13 +1074,23 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	}
 	cfg.Command = local.Command
 	cfg.Args = local.Args
+	// Descriptor order is the contract: fd 3 is the lifecycle channel, fd 4
+	// the bootstrap progress pipe, and the rcfile reads both numbers from the
+	// environment block LaunchOptions rendered above. Appending the progress
+	// end second is what makes bootstrapFD's answer true.
 	p, err := pty.NewLocal(f.log, cfg,
-		pty.WithExtraEnv(env), pty.WithExtraEnv(local.Env), pty.WithExtraFiles(child))
-	// The child end is the shell's once the fork has happened; this process
+		pty.WithExtraEnv(env), pty.WithExtraEnv(local.Env), pty.WithExtraFiles(extraFiles(child, bpChild)...))
+	// The child ends are the shell's once the fork has happened; this process
 	// keeps no reference either way.
 	_ = child.Close()
+	if bpChild != nil {
+		_ = bpChild.Close()
+	}
 	if err != nil {
 		_ = ch.Close()
+		if bp != nil {
+			_ = bp.Close()
+		}
 		// The shell erases the artefact itself once it has read it; on a spawn
 		// failure there is no shell, so the capability would sit in TMPDIR
 		// until the machine cleaned it.
@@ -1063,7 +1109,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// would have nowhere to land. Registering the axis afterwards is the
 	// safe order — the status is only emitted after the open ack anyway.
 	f.report(cfg.SessionID, p.Shell(), transport.IntegrationStarting, ssh.ReasonNone)
-	return &lifecyclePTY{Pty: p, ch: ch}, nil
+	return &lifecyclePTY{Pty: p, ch: ch, bp: bp}, nil
 }
 
 // report enters this session into the integration axis, when the wiring
@@ -1075,6 +1121,57 @@ func (f *localPTYFactory) report(sid, shell, status string, reason ssh.RefusalRe
 		return
 	}
 	f.reportIntegration(sid, shell, status, reason)
+}
+
+// newBootstrapProgress creates this session's progress reader, or reports
+// nothing at all. Both halves are legitimate outcomes: a session with no
+// session id has nowhere to route a stage, a factory with no sink has nobody
+// to tell, and a pipe that cannot be created costs a diagnosis rather than a
+// terminal. Every caller downstream treats a nil reader as "no progress
+// reporting", which is exactly where the product was before this existed.
+func (f *localPTYFactory) newBootstrapProgress(sid string) (*bootstrapprogress.Reader, *os.File) {
+	if sid == "" || f.noteBootstrapStage == nil {
+		return nil, nil
+	}
+	bp, child, err := bootstrapprogress.New(f.log, func(stage bootstrapprogress.Stage) {
+		f.noteBootstrapStage(sid, string(stage))
+	})
+	if err != nil {
+		f.log.Warn("bootstrap progress channel unavailable; a startup that does not return will report only a timeout",
+			"session", sid, "error", err)
+		return nil, nil
+	}
+	return bp, child
+}
+
+// bootstrapFD is the descriptor number the rcfile writes its progress facts
+// to: 4, because ExtraFiles hands the shell fd 3 first and the lifecycle
+// channel is always that one. Zero when there is no progress pipe, which the
+// rcfile's own guard reads as "report nothing".
+func bootstrapFD(child *os.File) int {
+	if child == nil {
+		return 0
+	}
+	return 4
+}
+
+// extraFiles assembles the descriptors the shell inherits, in the order their
+// numbers depend on.
+func extraFiles(lifecycleChild, progressChild *os.File) []*os.File {
+	if progressChild == nil {
+		return []*os.File{lifecycleChild}
+	}
+	return []*os.File{lifecycleChild, progressChild}
+}
+
+// closeProgress releases both ends on a path that will not start a shell.
+func closeProgress(bp *bootstrapprogress.Reader, child *os.File) {
+	if bp != nil {
+		_ = bp.Close()
+	}
+	if child != nil {
+		_ = child.Close()
+	}
 }
 
 func (a *App) Start(ctx context.Context) error {

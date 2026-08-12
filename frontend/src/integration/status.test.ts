@@ -17,6 +17,7 @@ const REASONS: IntegrationReason[] = [
   'no-secure-temp',
   'remote-command',
   'handshake-timeout',
+  'startup-did-not-return',
   'channel-lost',
   'unknown',
 ]
@@ -69,13 +70,16 @@ describe('what the product says about a degraded session', () => {
     }
   })
 
-  // handshake-timeout is the reason the backend can actually emit today.
-  // The agreed sentence about startup files taking the shell over belongs to
-  // a reason nothing produces yet, and using it here would claim the backend
-  // knows something it does not.
+  // The two reasons are now a pair, and each must keep its own claim.
+  // handshake-timeout is what is left when the startup DID return and the
+  // shell still never answered, so it must not borrow the startup-file
+  // sentence; startup-did-not-return must say it, because that stage is
+  // exactly what the backend observed (nocx-yww2).
   it('does not claim an interception it cannot observe', () => {
     const m = integrationMessage(fact({ reason: 'handshake-timeout' }))!
     expect(m.description.toLowerCase()).not.toContain('startup file')
+    const s = integrationMessage(fact({ reason: 'startup-did-not-return' }))!
+    expect(s.description.toLowerCase()).toContain('startup file')
   })
 
   it('says nothing about a session that is starting or integrated', () => {
