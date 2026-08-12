@@ -33,7 +33,7 @@ const (
 	RestoreReplace RestoreStrategy = "replace"
 )
 
-// ── Domain interfaces (ADR-0018) ─────────────────────────────────────────
+// ── Domain interfaces (ADR-0027) ─────────────────────────────────────────
 
 // ConnectionSnapshotStore reads and replaces the connection portion of the
 // profile store atomically, preserving credential metadata.
@@ -81,7 +81,7 @@ type ConnectionsSection struct {
 // ── Profile DTO ──────────────────────────────────────────────────────────
 
 // BackupProfile is the wire shape of an SSH profile in a backup.
-// credentialId is deliberately absent (ADR-0018).
+// credentialId is deliberately absent (ADR-0027).
 type BackupProfile struct {
 	ID                   string                       `json:"id"`
 	Type                 string                       `json:"type"`

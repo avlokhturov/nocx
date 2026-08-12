@@ -18,7 +18,7 @@ import (
 
 // ── Service ──────────────────────────────────────────────────────────────
 
-// Service implements the Backup & Restore workflow (ADR-0018).
+// Service implements the Backup & Restore workflow (ADR-0027).
 type Service struct {
 	connections ConnectionSnapshotStore
 	settings    SettingsSnapshotStore
@@ -548,7 +548,7 @@ func groupToBackup(g profile.ProfileGroup) (BackupGroup, int) {
 		}
 
 		// Secret references, key material paths and unknown keys are
-		// deliberately not carried by a backup (ADR-0018): secrets are
+		// deliberately not carried by a backup (ADR-0027): secrets are
 		// never serialized, and unknown keys may be provider-specific.
 		// Secret references are counted via CredentialBindingRemoved, not
 		// listed by name — a backup must not name a secret key at all.
@@ -728,7 +728,7 @@ func parseAndValidate(contents string, settings SettingsSnapshotStore) (Document
 			return Document{}, RestoreOmissions{}, fmt.Errorf("%w: profile %q references unknown group %q", ErrInvalidDocument, p.ID, p.Group)
 		}
 	}
-	// Validate setting keys against the registry to keep Preview and Restore consistent (ADR-0018).
+	// Validate setting keys against the registry to keep Preview and Restore consistent (ADR-0027).
 	if settings != nil {
 		for key, val := range doc.Settings.Overrides {
 			if err := settings.ValidateSetting(key, val); err != nil {
@@ -1273,7 +1273,7 @@ func mergeGroup(bg BackupGroup, cg profile.ProfileGroup) profile.ProfileGroup {
 
 	if bg.Defaults != nil && bg.Defaults.SSH != nil {
 		// The backup's defaults replace the safe fields; secret references
-		// are never carried and never kept (ADR-0018).
+		// are never carried and never kept (ADR-0027).
 		if mg.Defaults == nil {
 			mg.Defaults = &profile.ProfileDefaults{}
 		} else {
