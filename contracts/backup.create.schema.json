@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/backup.create.schema.json",
+  "title": "BackupCreateResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fileName", "contents", "summary"],
+  "properties": {
+    "fileName": { "type": "string" },
+    "contents": { "type": "string" },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "settings",
+        "connections",
+        "groups",
+        "credentialBindingsRemoved",
+        "groupCredentialBindingsRemoved",
+        "groupDefaultKeysOmitted"
+      ],
+      "properties": {
+        "settings": { "type": "integer" },
+        "connections": { "type": "integer" },
+        "groups": { "type": "integer" },
+        "credentialBindingsRemoved": { "type": "integer" },
+        "groupCredentialBindingsRemoved": { "type": "integer" },
+        "groupDefaultKeysOmitted": { "type": "integer" }
+      }
+    }
+  }
+}

@@ -2,6 +2,32 @@
 // jsdom does not provide ResizeObserver, so we supply a minimal stub
 // that never fires — enough for unit tests that don't depend on layout.
 
+if (typeof window !== 'undefined' && typeof window.localStorage === 'undefined') {
+  let values = new Map<string, string>()
+  const storage = {
+    get length() {
+      return values.size
+    },
+    clear() {
+      values = new Map()
+    },
+    getItem(key: string) {
+      return values.get(key) ?? null
+    },
+    key(index: number) {
+      return Array.from(values.keys())[index] ?? null
+    },
+    removeItem(key: string) {
+      values.delete(key)
+    },
+    setItem(key: string, value: string) {
+      values.set(key, String(value))
+    },
+  } as Storage
+  Object.defineProperty(window, 'localStorage', { configurable: true, value: storage })
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage })
+}
+
 if (typeof ResizeObserver === 'undefined') {
   ;(globalThis as Record<string, unknown>).ResizeObserver = class ResizeObserver {
     observe() {}

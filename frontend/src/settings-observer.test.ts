@@ -199,6 +199,37 @@ describe('SettingsObserver', () => {
     expect(handler).toHaveBeenCalledTimes(0)
   })
 
+  it('notifies every active handler without one cleanup stopping the others', async () => {
+    const d = new Dispatcher()
+    await connect(d)
+    const obs = new SettingsObserver(d)
+    const first = vi.fn()
+    const second = vi.fn()
+
+    const stopFirst = obs.start(first)
+    obs.start(second)
+    obs.setRevision(5)
+
+    lastSocket().deliver({
+      jsonrpc: '2.0',
+      method: 'settings.changed',
+      params: { revision: 6, keys: ['a'] },
+    })
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(second).toHaveBeenCalledTimes(1)
+
+    stopFirst()
+    lastSocket().deliver({
+      jsonrpc: '2.0',
+      method: 'settings.changed',
+      params: { revision: 7, keys: ['a'] },
+    })
+    expect(first).toHaveBeenCalledTimes(1)
+    expect(second).toHaveBeenCalledTimes(2)
+
+    obs.stop()
+  })
+
   it('does not call handler on reconnect after stop', async () => {
     const d = new Dispatcher()
     await connect(d)

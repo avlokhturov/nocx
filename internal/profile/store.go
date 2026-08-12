@@ -382,3 +382,51 @@ func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
 
 	return s.writeLocked(d)
 }
+
+// LoadConnectionSnapshot returns one locked copy of profiles and groups.
+func (s *JSONStore) LoadConnectionSnapshot() (ConnectionSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := s.load()
+	if err != nil {
+		return ConnectionSnapshot{}, err
+	}
+	return ConnectionSnapshot{Profiles: d.Profiles, Groups: d.Groups}, nil
+}
+
+// ReplaceConnectionSnapshot validates and replaces profiles and groups in one
+// document write, preserving any credential metadata carried by profiles.
+func (s *JSONStore) ReplaceConnectionSnapshot(snapshot ConnectionSnapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ValidateGroupTree(snapshot.Groups); err != nil {
+		return err
+	}
+	groupIDs := make(map[string]struct{}, len(snapshot.Groups))
+	for _, group := range snapshot.Groups {
+		groupIDs[group.ID] = struct{}{}
+	}
+	for _, p := range snapshot.Profiles {
+		if p.Group == "" {
+			continue
+		}
+		if _, ok := groupIDs[p.Group]; !ok {
+			return fmt.Errorf("profile %q references unknown group %q", p.ID, p.Group)
+		}
+	}
+	// Defensive: validate every stored forward list through the single authority.
+	for _, p := range snapshot.Profiles {
+		if p.Options.Forwards != nil && len(*p.Options.Forwards) > 0 {
+			if err := ValidForwards(*p.Options.Forwards); err != nil {
+				return fmt.Errorf("profile %q: %w", p.ID, err)
+			}
+		}
+	}
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	d.Profiles = snapshot.Profiles
+	d.Groups = snapshot.Groups
+	return s.writeLocked(d)
+}

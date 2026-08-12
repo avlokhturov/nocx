@@ -35,10 +35,6 @@
       "func": "NewSSHWithRand"
     },
     {
-      "file": "internal/export/import.go",
-      "func": "ImportConfiguration"
-    },
-    {
       "file": "internal/filesystem/openability.go",
       "func": "CanExpand"
     },
@@ -265,6 +261,10 @@
     {
       "file": "internal/transport/ws_auth.go",
       "func": "WithTokenSource"
+    },
+    {
+      "file": "internal/transport/ws_sessions.go",
+      "func": "WithProfileUsageStore"
     },
     {
       "file": "internal/transport/ws_test_helper.go",

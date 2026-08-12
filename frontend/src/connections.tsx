@@ -55,9 +55,7 @@ import type {
   ProbeOutcome,
   ConnectionTestResult,
   GroupImpactResponse,
-  ConfigExport,
   SSHConfigPathResult,
-  ImportResult,
   TabbyPreviewResponse,
   ForwardSpec,
   ForwardDirection,
@@ -259,11 +257,10 @@ export function firstForwardError(rows: ForwardSpec[]): string | undefined {
 /**
  * Where a batch of connections can come from.
  *
- * `sshConfig` reads the machine's own ~/.ssh/config and takes no file; the
- * other two are files the user picks. That difference is why the dialog's file
- * picker is conditional rather than always shown and sometimes ignored.
+ * `sshConfig` reads the machine's own ~/.ssh/config and takes no file; Tabby
+ * imports a file selected by the user.
  */
-type ImportSource = 'sshConfig' | 'tabby' | 'backup'
+type ImportSource = 'sshConfig' | 'tabby'
 
 // ── Props ────────────────────────────────────────────────────────────────────
 
@@ -483,7 +480,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       // option is named without one rather than with a plausible fiction.
       { value: 'sshConfig', label: cfg?.path ? `SSH config (${cfg.path})` : 'SSH config' },
       { value: 'tabby', label: 'Tabby config (.yml/.yaml)' },
-      { value: 'backup', label: 'nocx configuration export (.json)' },
     ]
   })
 
@@ -499,7 +495,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       }
       case 'tabby':
         return 'Connections, groups and secrets from a Tabby configuration. A preview is shown before anything is written so you can review collisions and skipped secrets.'
-      case 'backup':
     }
   })
 
@@ -526,11 +521,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setImportOpen(false)
     setImportFile(null)
     setImportPassphrase('')
-  }
-
-  function reportImport(result: ImportResult) {
-    const summary = `Imported ${result.profilesImported} connections, ${result.groupsImported} groups`
-    showToast({ level: 'success', message: summary })
   }
 
   async function runImport() {
@@ -577,11 +567,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           setPreviewOpen(true)
           break
         }
-        case 'backup': {
-          const data = JSON.parse(await file!.text()) as ConfigExport
-          reportImport(await props.client.importConfig(data))
-          break
-        }
       }
       closeImportDialog()
       await loadAll()
@@ -607,7 +592,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       const result = await props.client.tabbyExecute(preview.planToken)
       setPreviewOpen(false)
       setPreviewResult(null)
-      reportImport(result)
+      showToast({
+        level: 'success',
+        message: `Imported ${result.profilesImported} connections, ${result.groupsImported} groups`,
+      })
       await loadAll()
     }
 

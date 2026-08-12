@@ -1,6 +1,7 @@
 # ADR-0011 — Persistence: storage capabilities, and secrets as opaque references
 
-- **Status:** Accepted
+- **Status:** Accepted. **§7 superseded by [ADR-0027](0027-structured-backup-and-restore.md)
+  (2026-08-12); §§1–6 stand.**
 - **Date:** 2026-07-25
 - **Related:** AD-8 (interface-first + DI at a single composition root), AD-1 (control
   plane), `docs/architecture.md` §Operational envelope ("plain files in the OS config
@@ -163,6 +164,26 @@ profiles, conversations and history, and JSON-document migrations have different
 transactional properties from SQLite ones anyway.
 
 ### 7. Export and backup are several products, not one button
+
+> **Superseded on 2026-08-12 by
+> [ADR-0027](0027-structured-backup-and-restore.md).** The premise below holds — a
+> keychain in the middle means there is no honest "back up everything" — but the four
+> modes it produces were the wrong answer to it, and one of them could not be built as
+> specified. **Portable encrypted export** needs to read secrets back out of the keychain,
+> which §2 of this ADR forbids; `internal/export` honoured §2 and so shipped a
+> configuration export with a passphrase wrapper, which is worse than not shipping one.
+> **Same-machine backup** was a list of file paths, which is a documentation line.
+> **Import** restored connections whose credentials could not resolve, and they looked
+> whole until the user pressed connect.
+>
+> One structured plaintext file replaces all four. It carries no credential record, no
+> `credentialId` and no secret reference — the property §2 makes structural — and it names
+> at restore time exactly which connections need a credential assigned. Encryption of the
+> file is the filesystem's job.
+>
+> **Sections 1–6 are unaffected.** The three storage capabilities, secrets as opaque
+> references, data classification, explicit cross-store workflows, SQLite as a seam and
+> the shared-schema rule all stand as written.
 
 With a keychain in the middle there is no honest "back up everything" unless the app
 reads secrets back out. So:

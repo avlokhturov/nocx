@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connection"
@@ -485,6 +486,10 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore)
+	if err := backupService.Recover(); err != nil {
+		return nil, fmt.Errorf("backup recovery: %w", err)
+	}
 
 	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
 	// nocx-rtg0.14): the OS keystore's derived slot when one exists, else
@@ -583,18 +588,13 @@ func New(opts ...Option) (*App, error) {
 
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
+		transport.WithBackupService(backupService),
+		transport.WithBackupFileSaver(backup.SaveToFile),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithSettingsRegistry(settingsRegistry),
-		transport.WithProfileUsageStore(usageStore),
-		transport.WithExportPaths(paths),
-		// One ContentDB at the composition root (AD-8): the same store backs
-		// export and history.query. A stub is correct until the SQLCipher
-		// backing lands (ADR-0018 gate); history.query then answers
-		// source=session, which the overlay labels "this session only".
-		transport.WithExportContentDB(contentDB),
 		transport.WithContentDB(contentDB),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),

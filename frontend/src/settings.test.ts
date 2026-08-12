@@ -229,15 +229,14 @@ describe('SettingsContent', () => {
     const labels = Array.from(links).map((l) => l.textContent.replace(/\s*\d+\s*/, '').trim())
 
     // Generated sections keep Go's declaration order and stay first — that is
-    // the invariant the generated screen depends on. Component pages
-    // (nocx-imkb.3 put Connections here, and Export became one too) follow
-    // them, so asserting the whole list rather than a prefix keeps a stray
-    // insertion visible.
+    // (nocx-imkb.3 put Connections here, and Backup & Restore is one too)
+    // follow them, so asserting the whole list rather than a prefix keeps a
+    // stray insertion visible.
     expect(labels).toEqual([
       'Terminal',
       'Application',
       'AI',
-      'Export / Backup / Import',
+      'Backup & Restore',
       'Connections',
       'Secrets',
       'Vault',
