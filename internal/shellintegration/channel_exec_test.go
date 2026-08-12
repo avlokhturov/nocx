@@ -1002,12 +1002,7 @@ func testBashChannelLocalDescriptorTransport(t *testing.T, shell string) {
 
 	// A connected unix socketpair: one end is the shell's inherited
 	// descriptor, the other the kernel's.
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 
 	home := t.TempDir()
 	script := writeScriptFile(t, "nocx.bash", bashScript)
@@ -1062,6 +1057,48 @@ func testBashChannelLocalDescriptorTransport(t *testing.T, shell string) {
 	if k.count("complete") == 0 {
 		t.Errorf("no complete over the inherited descriptor; events=%v", k.events())
 	}
+}
+
+// lifecycleSocketpair mints the connected pair every fixture in this package
+// uses as the lifecycle channel: the first end is the kernel's, the second is
+// the one the spawn hands the shell as fd 3 through exec.Cmd.ExtraFiles. The
+// dup ExtraFiles performs clears close-on-exec for that copy alone, so the
+// shell gets fd 3 and nothing else of ours.
+//
+// Both ends are marked close-on-exec, and that is the fixture's PREMISE rather
+// than hygiene (nocx-dsie). syscall.Socketpair leaves them inheritable, so
+// every shell this package started inherited BOTH ends as well, at whatever
+// numbers the test process happened to have free — which varies with what ran
+// before, in the same process and on the same machine. When the kernel's end
+// landed on fd 4, the number the bootstrap-progress tests announce as
+// NOCX_BOOTSTRAP_FD and deliberately do NOT hand over, the rcfile's
+// "startup-entered" was written into the kernel's end of the very socket it
+// speaks the protocol on, came back out of the shell's own fd 3, and the
+// handshake read "star" as a frame header and refused the session.
+//
+// The product's own socketpair does exactly this dance for exactly this reason
+// (internal/lifecyclechannel/socketpair_other.go, nocx-1w69), as does
+// internal/pty's descriptor fixture: create, then mark, with ForkLock held so
+// no concurrent fork/exec slips through the window between the two.
+func lifecycleSocketpair(t *testing.T) (kernelEnd, shellEnd *os.File) {
+	t.Helper()
+	syscall.ForkLock.RLock()
+	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
+	if err == nil {
+		syscall.CloseOnExec(fds[0])
+		syscall.CloseOnExec(fds[1])
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	kernelEnd = os.NewFile(uintptr(fds[0]), "kernel-end")
+	shellEnd = os.NewFile(uintptr(fds[1]), "shell-end")
+	t.Cleanup(func() {
+		_ = kernelEnd.Close()
+		_ = shellEnd.Close()
+	})
+	return kernelEnd, shellEnd
 }
 
 // serveFile serves one connection wrapped around a socketpair end.

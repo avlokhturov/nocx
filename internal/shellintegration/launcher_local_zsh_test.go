@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -380,12 +379,7 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 		t.Fatalf("the transient ZDOTDIR is not ready before the spawn: %v", serr)
 	}
 
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 
 	// #nosec G204 — launch.Command is the requireShell-resolved zsh; starting
 	// a real interactive shell is the only way to observe what a user gets.
@@ -515,12 +509,7 @@ func TestLocalZshSession_RestoresAUsersOwnZDOTDIR(t *testing.T) {
 		t.Fatalf("LocalEnhancedLaunch: %v", err)
 	}
 
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 
 	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
 	cmd := exec.Command(launch.Command, launch.Args...)
@@ -583,12 +572,7 @@ func TestLocalZshSession_SurvivesAUserRcThatFails(t *testing.T) {
 		}
 	}
 
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 
 	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
 	cmd := exec.Command(launch.Command, launch.Args...)
@@ -666,12 +650,7 @@ func TestLocalZshSession_KeepsAFrameworkAcceptLineWrapper(t *testing.T) {
 		t.Fatalf("LocalEnhancedLaunch: %v", err)
 	}
 
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 
 	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
 	cmd := exec.Command(launch.Command, launch.Args...)
