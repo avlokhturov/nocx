@@ -141,13 +141,14 @@ export interface IntegrationMessage {
  *  the owner rather than invented in review, which is what nocx-viil
  *  requires.
  *
- *  Note what is NOT here: `startup-did-not-return` ("your shell startup files
- *  did not return control to nocx") is the wording for a reason the backend
- *  cannot emit yet, and a message for a reason nothing produces is a dead
- *  string that reads as a supported diagnosis. It arrives with its own bead.
- *  `handshake-timeout` is deliberately vaguer than that sentence, because the
- *  backend knows the shell did not answer and does NOT know that anything
- *  intercepted it. */
+ *  `startup-did-not-return` and `handshake-timeout` are deliberately different
+ *  sentences for two different amounts of knowledge, and the difference is the
+ *  point. The first is emitted when the shell reported entering nocx's rcfile
+ *  and never reported leaving the user's startup — nocx knows where it
+ *  stopped. The second is emitted when nothing was reported at all: the shell
+ *  did not answer, and the backend does NOT know that anything intercepted it.
+ *  Giving the second the first's sentence would state a finding nocx does not
+ *  have, which is how a zsh user was handed advice about bash. */
 interface MessageTemplate extends Omit<IntegrationMessage, 'fix'> {
   /** Resolved against the shell that actually ran, which is the whole point:
    *  a fix written once, for a shell nobody named, is the defect. */
@@ -198,6 +199,20 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
     description: 'Your shell did not answer nocx in time, so this tab is a plain terminal.',
     happening: 'This tab is a plain terminal: command blocks and the command editor are off.',
     lastGoodStep: 'nocx started the shell and opened its channel. The shell never answered on it.',
+    fix: standAsideFix,
+  },
+  // The stage, not the culprit. nocx knows its rcfile started and never got
+  // control back; exec, exit, a hung attach and a crashed shell all produce
+  // this identically, so the sentence names what did not happen and stops
+  // there. It is the reason the owner's own wording was written for, and the
+  // only one that can carry it honestly (nocx-yww2).
+  'startup-did-not-return': {
+    title: 'Not integrated',
+    description:
+      'Your shell startup files did not return control to nocx, so this tab is a plain terminal.',
+    happening: 'This tab is a plain terminal: command blocks and the command editor are off.',
+    lastGoodStep:
+      'nocx started the shell and its startup files began. They never handed control back.',
     fix: standAsideFix,
   },
   'channel-lost': {

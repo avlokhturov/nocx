@@ -80,6 +80,22 @@ type integrationStatus struct {
 	observedProcess string
 }
 
+// Bootstrap progress stages as internal/bootstrapprogress spells them.
+// Declared here as plain strings for the same reason the loss causes are:
+// the transport does not import the reader, the composition root passes the
+// stage through, and a conformance test in the app package pins the two
+// spellings together.
+//
+// A stage is diagnostic and nothing else. It is not authenticated, it cannot
+// be (the descriptor it arrives on is inherited by every descendant of the
+// shell), and it therefore may never decide anything but which sentence the
+// product says about a failure that has already happened. It never opens an
+// attempt, never marks a session integrated and never emits on its own.
+const (
+	BootstrapStageStartupEntered = "startup-entered"
+	BootstrapStageUserRCReturned = "user-rc-returned"
+)
+
 // integrationChangedParams is the params object of the
 // session.integrationChanged notification. Contracted like every other
 // unsolicited notification, because a server-initiated frame has no request
@@ -169,6 +185,29 @@ func (s *WSServer) unregisterIntegration(sid session.ID) {
 	s.integrationMu.Lock()
 	defer s.integrationMu.Unlock()
 	delete(s.integrations, sid)
+	delete(s.bootstrapStages, sid)
+}
+
+// NoteBootstrapStage records how far a session's shell got through nocx's
+// rcfile. It records and nothing else: it emits no notification, changes no
+// status and cannot make a session integrated, because the descriptor it comes
+// from is inherited by every descendant of the shell and authenticates nobody
+// (ADR-0024 decision 4). The one thing it may do is make the next failure
+// legible — see applyIntegrationLoss.
+//
+// Deliberately tolerant of arriving before the session is registered: the
+// shell writes its first fact as it starts, and the launch registers the axis
+// only once the pty is back.
+func (s *WSServer) NoteBootstrapStage(sid session.ID, stage string) {
+	if sid == "" || stage == "" {
+		return
+	}
+	s.integrationMu.Lock()
+	defer s.integrationMu.Unlock()
+	if s.bootstrapStages == nil {
+		s.bootstrapStages = make(map[session.ID]string)
+	}
+	s.bootstrapStages[sid] = stage
 }
 
 // NoteIntegrationLoss records why a session's lifecycle transport ended and
@@ -269,7 +308,16 @@ func (s *WSServer) applyShellReplaced(sid session.ID, observed string) (string, 
 	next := *st
 	next.observedProcess = observed
 	next.status = IntegrationConventional
-	next.reason = ssh.ReasonHandshakeTimeout
+	// The stage, not the bound. nocx exec's the login shell itself, so a
+	// second exec on that pid before the hello can only have come from inside
+	// the shell's own startup — which is the same fact the bootstrap progress
+	// descriptor reports by falling silent after `startup-entered`
+	// (nocx-yww2), arriving here milliseconds after the fork instead of ten
+	// seconds later. Reporting the bound would name the detector rather than
+	// the event, and the two answers would then race: this one lands first
+	// and the first answer wins, so the vaguer word would be the one the user
+	// is left with.
+	next.reason = ssh.ReasonStartupDidNotReturn
 	*st = next
 	return next.status, next.reason, true
 }
@@ -308,6 +356,15 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 		// paths noticed does not change the answer the user needs.
 		next.status = IntegrationLost
 		next.reason = ssh.ReasonChannelLost
+	case s.bootstrapStages[sid] == BootstrapStageStartupEntered:
+		// nocx's rcfile began executing and the user's own startup file
+		// never gave control back, so the install line after it was never
+		// reached. Ahead of the cause arm on purpose: the stage says WHERE
+		// it stopped, the cause says only which of our own timers noticed,
+		// and the stage is the half a user can act on. It stays a stage and
+		// never becomes a culprit — see ssh.ReasonStartupDidNotReturn.
+		next.status = IntegrationConventional
+		next.reason = ssh.ReasonStartupDidNotReturn
 	case cause == LossCauseHelloTimeout:
 		next.status = IntegrationConventional
 		next.reason = ssh.ReasonHandshakeTimeout

@@ -26,8 +26,15 @@ type lifecycleTestEnv struct {
 
 func newLifecycleTestEnv(t *testing.T, opts ...WSServerOption) *lifecycleTestEnv {
 	t.Helper()
+	return newLifecycleTestEnvWithReg(t, newRegWithStub(log.NewSlogAdapter(nil)), opts...)
+}
+
+// newLifecycleTestEnvWithReg is the same env over a caller-supplied registry,
+// for tests whose pty factory has to do something at open time — registering
+// the session's integration axis, the way the production local factory does.
+func newLifecycleTestEnvWithReg(t *testing.T, reg *session.Reg, opts ...WSServerOption) *lifecycleTestEnv {
+	t.Helper()
 	logger := log.NewSlogAdapter(nil)
-	reg := newRegWithStub(logger)
 	ws := NewWSServer(logger, reg, opts...)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {

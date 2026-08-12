@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -149,5 +150,27 @@ func TestLossCauseSpellingsAgree(t *testing.T) {
 		if strings.TrimSpace(string(c)) == "" {
 			t.Errorf("loss cause is empty: an unnamed path is the defect this bead removed")
 		}
+	}
+}
+
+// The bootstrap stages are spelled independently for the same reason the loss
+// causes are: the reader owns the vocabulary, the transport matches on strings
+// so it does not depend on the reader's package, and only the composition root
+// sees both. A rename on either side would leave the transport matching a
+// stage nothing ever sends — and the symptom would be the return of the
+// timeout that says nothing, which is the whole defect (nocx-yww2).
+func TestBootstrapStageSpellingsAgree(t *testing.T) {
+	if string(bootstrapprogress.StageStartupEntered) != transport.BootstrapStageStartupEntered {
+		t.Errorf("startup-entered spelled %q by the reader and %q by the transport",
+			bootstrapprogress.StageStartupEntered, transport.BootstrapStageStartupEntered)
+	}
+	if string(bootstrapprogress.StageUserRCReturned) != transport.BootstrapStageUserRCReturned {
+		t.Errorf("user-rc-returned spelled %q by the reader and %q by the transport",
+			bootstrapprogress.StageUserRCReturned, transport.BootstrapStageUserRCReturned)
+	}
+	// The two stages must stay distinct, or "the startup returned" and "the
+	// startup began" would be one fact and the diagnosis would be a coin toss.
+	if bootstrapprogress.StageStartupEntered == bootstrapprogress.StageUserRCReturned {
+		t.Error("the two bootstrap stages are spelled the same")
 	}
 }

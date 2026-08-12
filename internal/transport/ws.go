@@ -378,6 +378,15 @@ type WSServer struct {
 	// SESSION's launch started and how far it got.
 	integrationMu sync.Mutex
 	integrations  map[session.ID]*integrationStatus
+	// bootstrapStages is how far each session's shell got through nocx's
+	// rcfile (nocx-yww2). Its own map rather than a field of
+	// integrationStatus, because the two arrive in an order nothing
+	// controls: the shell can write its first fact microseconds after the
+	// fork, while the launch registers the axis only once the pty is back.
+	// A stage folded into the status would be dropped for arriving early,
+	// and the failure it explains is exactly the one where the shell was
+	// fast and then vanished.
+	bootstrapStages map[session.ID]string
 	// recoveryMu guards recoveries: the per-session restoration episodes
 	// (ADR-0024 decision 8). The episode opens when a lost fact with a
 	// recovery fence routes to a live session, and is cancelled when the

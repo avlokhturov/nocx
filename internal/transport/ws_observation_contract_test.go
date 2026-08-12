@@ -111,8 +111,8 @@ func TestSessionIntegrationChanged_ObservedProcessOverTheWireConformsToContract(
 	if got.Status != IntegrationConventional {
 		t.Errorf("status = %q, want conventional", got.Status)
 	}
-	if got.Reason != string(ssh.ReasonHandshakeTimeout) {
-		t.Errorf("reason = %q, want handshake-timeout", got.Reason)
+	if got.Reason != string(ssh.ReasonStartupDidNotReturn) {
+		t.Errorf("reason = %q, want startup-did-not-return", got.Reason)
 	}
 	if got.Detail == nil {
 		t.Fatal("no detail: the details chain has no observation line, which is the defect nocx-viil.3 names")
