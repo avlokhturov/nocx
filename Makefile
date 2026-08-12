@@ -1,5 +1,6 @@
 .PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e \
+        print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
 GO ?= go
@@ -110,10 +111,11 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 # which is the one job that cannot be containerized because macos-latest is the
 # target OS (see ci.yml's runner decision).
 #
-#   ci                        ci.yml `backend`      (macOS, native)
-#   ci-backend + ci-linux     ci.yml `backend-linux`
-#   ci-frontend               ci.yml `frontend`
-#   ci-e2e                    ci.yml `e2e`
+#   ci + ci-mac               ci.yml `ci-mac`     (macOS, native)
+#   ci-backend                ci.yml `ci-backend`
+#   ci-linux                  ci.yml `ci-linux`
+#   ci-frontend               ci.yml `ci-frontend`
+#   ci-e2e                    ci.yml `ci-e2e`
 #
 # CI-BACKEND IS IN THIS LIST, and its absence is what made this target lie.
 # 9527464 narrowed `ci-linux` from "the backend-linux job" to "the eight
@@ -128,17 +130,24 @@ ci: lint-ci test-ci build-ci root-ci frontend-ci
 # from the build constraints, so the partition below cannot drift silently
 # into dropping a package from both halves.
 #
-# ci-mac is deliberately NOT here — it has no CI counterpart (macos-latest
-# runs the whole suite as `backend`), and it is the one gate that touches the
-# real login keychain. Run it by hand when a Darwin failure needs reproducing.
+# ci-mac IS in this list now. It used to be excluded on the grounds that no CI
+# job corresponded to it — macos-latest ran the whole suite as `backend` — and
+# that is no longer true: ci.yml's ci-mac job is this target's package set, so
+# leaving it out would reopen exactly the hole nocx-aruz was about. The
+# keychain caveat stands and is stated by the target itself; it applied to
+# `make ci` all along, which has always run the Darwin suite.
+#
+# `ci` stays here for ci.yml's ci-mac job MINUS its test step: gofumpt,
+# golangci-lint and the build, which must run on Darwin to see the
+# darwin-tagged files at all, plus the host's copy of the frontend gates. Its
+# own `go test ./...` is a superset of what the job runs and is left as it is —
+# a local gate running more than CI costs minutes, never a hole.
 #
 # Order is cheapest-first: the drift check in seconds, the host gates next,
 # the Linux containers in minutes, e2e last because it is the longest.
-ci-full: ci-os-split ci ci-backend ci-linux ci-frontend ci-e2e
+ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 	@echo ""
 	@echo "=== every CI job green locally ==="
-	@echo "NOT run by this target: ci-mac — no CI job corresponds to it, and it"
-	@echo "shares your login keychain. Run it by hand for a Darwin failure."
 
 # --- the five jobs ------------------------------------------------------
 #
@@ -209,7 +218,27 @@ GOOS_RE := (aix|android|darwin|dragonfly|freebsd|hurd|illumos|ios|js|linux|netbs
 #                     (appdir.go). Not a GOOS, but it is the one package whose
 #                     tested code differs between what a developer builds and
 #                     what ships, and ci-mac is what runs the release-tag pass.
+# internal/shellintegration is NOT here, and the reason is worth stating
+# because it is the package you would expect to be. Its behaviour is the
+# platform's shell — macOS ships GNU bash 3.2.57, where a bash-4 construct is a
+# syntax error at PARSE time (nocx-cn86) — but that dimension is a BASH
+# VERSION, not an operating system, and scripts/install-bash32.sh puts a real
+# 3.2 on the Linux runner. requireBash32 resolves it there and /bin/bash on a
+# Mac, so TestBashScript_ParsesUnderBash32 and the channel-exec bash32 leg
+# measure the same shell on either side. Keeping the package on macos-latest
+# would buy the OS around the shell, not the shell.
 OS_EXEMPT := internal/pty internal/storage
+
+# The workflow asks for the split rather than carrying a copy of it. ci.yml's
+# ci-backend and ci-linux jobs need the same two package sets these targets
+# use, and a list written twice is two lists: the day one grows a package the
+# other does not, a package silently runs nowhere or twice and both files
+# still read as correct. One owner, asked over `make -s` (AD-8).
+print-os-pkgs:
+	@echo '$(OS_PKGS)'
+
+print-portable-pkgs:
+	@$(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)'
 
 ci-os-split:
 	@echo "=== the OS split is derived from the build constraints, not remembered ==="
