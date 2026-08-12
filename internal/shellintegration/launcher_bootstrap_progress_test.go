@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -116,12 +115,7 @@ func startProgressSession(t *testing.T, shellPath, home string) *progressSession
 		t.Fatalf("LocalEnhancedLaunch: %v", err)
 	}
 
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 
 	plog := &progressLog{}
 	reader, progressChild, err := bootstrapprogress.New(log.NewSlogAdapter(nil), plog.note)
@@ -369,6 +363,15 @@ func TestRenderedRcfiles_WithoutAProgressDescriptorSayNothing(t *testing.T) {
 // is a real failure path — the remote tiers take it on every launch — and a
 // redirection to a closed descriptor is precisely the kind of failure that
 // ends a shell under an inherited errexit and prints on the user's terminal.
+//
+// The premise — fd 4 is not open in the shell — is ASSERTED here rather than
+// assumed, because assuming it is what made this test report the machine's
+// state instead of the product's behaviour (nocx-dsie): the fixture's own
+// socketpair used to leak into the shell, and on a process where the kernel's
+// end landed on fd 4 the "closed" descriptor was open, was the lifecycle
+// socket, and the redirection this test says costs nothing corrupted the
+// handshake. The shell answers the question itself: `>&4` only DUPS, so the
+// probe cannot write a byte into whatever is there if the premise is broken.
 func TestBootstrapProgress_AClosedDescriptorCostsNoTerminal(t *testing.T) {
 	for _, family := range []string{"bash", "zsh"} {
 		t.Run(family, func(t *testing.T) {
@@ -380,8 +383,11 @@ func TestBootstrapProgress_AClosedDescriptorCostsNoTerminal(t *testing.T) {
 				unsetZDOTDIR(t)
 			}
 			// An rc that turns errexit on, which is what makes a failed
-			// redirection fatal rather than merely noisy.
-			if err := os.WriteFile(filepath.Join(home, rcName), []byte("set -e\n"), 0o600); err != nil {
+			// redirection fatal rather than merely noisy, and that reports
+			// what the shell can see on fd 4.
+			rc := "set -e\n" +
+				"if { : >&4; } 2>/dev/null; then printf 'NOCX_FD4_OPEN\\n'; else printf 'NOCX_FD4_CLOSED\\n'; fi\n"
+			if err := os.WriteFile(filepath.Join(home, rcName), []byte(rc), 0o600); err != nil {
 				t.Fatalf("write user rc: %v", err)
 			}
 
@@ -391,12 +397,7 @@ func TestBootstrapProgress_AClosedDescriptorCostsNoTerminal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LocalEnhancedLaunch: %v", err)
 			}
-			fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-			if err != nil {
-				t.Fatalf("socketpair: %v", err)
-			}
-			kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-			shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+			kernelFile, shellFile := lifecycleSocketpair(t)
 
 			// #nosec G204 — shellPath is requireShell-resolved.
 			cmd := exec.Command(launch.Command, launch.Args...)
@@ -419,6 +420,13 @@ func TestBootstrapProgress_AClosedDescriptorCostsNoTerminal(t *testing.T) {
 				_ = cmd.Process.Kill()
 				launch.Cleanup()
 			})
+
+			// The premise first, on the shell's own word: a descriptor that
+			// IS open would make everything below vacuous.
+			if got := waitForEither(t, s, "NOCX_FD4_CLOSED", "NOCX_FD4_OPEN"); got != "NOCX_FD4_CLOSED" {
+				t.Fatalf("fd 4 is open in the shell, so this test never exercised a closed descriptor: "+
+					"the fixture leaked one; output=%q", s.output())
+			}
 
 			// The session integrates anyway — the strongest statement that the
 			// missing descriptor cost nothing — and the shell's own terminal

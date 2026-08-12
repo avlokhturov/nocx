@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -348,12 +347,7 @@ func startNestedBashParent(t *testing.T, k *nestedKernel, binName, fakeBody stri
 	t.Helper()
 	bash := requireShell(t, "bash")
 
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 	k.shellFile = shellFile
 
 	home := t.TempDir()
@@ -563,12 +557,7 @@ func startNestedZshParent(t *testing.T, k *nestedKernel, binName, fakeBody strin
 	t.Helper()
 	zsh := requireShell(t, "zsh")
 
-	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM, 0)
-	if err != nil {
-		t.Fatalf("socketpair: %v", err)
-	}
-	kernelFile := os.NewFile(uintptr(fds[0]), "kernel-end")
-	shellFile := os.NewFile(uintptr(fds[1]), "shell-end")
+	kernelFile, shellFile := lifecycleSocketpair(t)
 	k.shellFile = shellFile
 
 	home := t.TempDir()

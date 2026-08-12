@@ -146,7 +146,7 @@ func TestLocalSession_UnsupportedLoginShellRunsItAndSaysWhy(t *testing.T) {
 // factory — the object the product uses, not one assembled here.
 func localFactory(t *testing.T) *localPTYFactory {
 	t.Helper()
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}

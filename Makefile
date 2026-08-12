@@ -244,7 +244,7 @@ print-portable-pkgs:
 ci-os-split:
 	@echo "=== the OS split is derived from the build constraints, not remembered ==="
 	@derived=$$(grep -rlE '^//go:build.*$(GOOS_RE)' --include='*.go' \
-	  --exclude-dir=node_modules . \
+	  --exclude-dir=node_modules --exclude-dir=worktrees . \
 	  | grep -v '_test\.go$$' | xargs -n1 dirname | sed 's|^\./||' | sort -u \
 	  | tr '\n' ' '); \
 	missing=""; \

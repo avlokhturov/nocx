@@ -13,7 +13,7 @@ func TestBackup_RoundTripThroughRealSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	a, newErr := New(WithKeystoreProbe(func(context.Context) bool { return false }))
+	a, newErr := newTestApp(t)
 	if newErr != nil {
 		t.Fatalf("New: %v", newErr)
 	}
@@ -155,7 +155,7 @@ func TestBackup_RoundTripThroughRealSocket(t *testing.T) {
 	// ── Persistence: reopen and verify state survives restart ──────
 	a.Shutdown(ctx)
 
-	a2, restartErr := New(WithKeystoreProbe(func(context.Context) bool { return false }))
+	a2, restartErr := newTestApp(t)
 	if restartErr != nil {
 		t.Fatalf("New (restart): %v", restartErr)
 	}

@@ -20,7 +20,7 @@ import (
 
 func TestNew(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestNew(t *testing.T) {
 
 func TestNew_AllModulesInjected(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestNew_AllModulesInjected(t *testing.T) {
 
 func TestStartShutdown(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestStartShutdown(t *testing.T) {
 
 func TestWSPortBeforeStart(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
@@ -195,7 +195,7 @@ func (f *appFakeDoc) Delete(name string) error {
 func TestNew_LogFile(t *testing.T) {
 	storagetest.Isolate(t)
 	path := filepath.Join(t.TempDir(), "nocx.log")
-	a, err := New(WithLogFilePath(path))
+	a, err := newTestApp(t, WithLogFilePath(path))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestNew_LogFile(t *testing.T) {
 // LogFilePath reports it — nothing is written anywhere unexpected.
 func TestNew_LogFileDisabled(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(""))
+	a, err := newTestApp(t, WithLogFilePath(""))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write blocker: %v", err)
 	}
-	a, err := New(WithLogFilePath(filepath.Join(blocker, "nocx.log")))
+	a, err := newTestApp(t, WithLogFilePath(filepath.Join(blocker, "nocx.log")))
 	if err != nil {
 		t.Fatalf("New must fail open when the log file cannot be opened: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
 // gets none (ADR-0024 decision 4: no channel, conventional session).
 func TestLifecycleChannelWiring(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
@@ -302,7 +302,7 @@ func TestLifecycleChannelWiring(t *testing.T) {
 // the transport and enhanced mode never engages — the fact path's dead half.
 func TestLifecycleLaneRegistrationBindsSession(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
@@ -345,7 +345,7 @@ func TestLifecycleLaneRegistrationBindsSession(t *testing.T) {
 // authenticator to every child (ADR-0024 decision 2).
 func TestLocalEnhancedChildEnv_SecretNeverReachesIt(t *testing.T) {
 	storagetest.IsolateWithHome(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
@@ -453,7 +453,7 @@ func jsonrpcCall(t *testing.T, conn *websocket.Conn, method string, params any) 
 // so no local session ever established.
 func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
 	storagetest.IsolateWithHome(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}

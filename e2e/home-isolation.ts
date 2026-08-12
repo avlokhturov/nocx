@@ -32,6 +32,23 @@
  *  - An attempt to override any of them RAISES. A boundary a caller can quietly
  *    opt out of is the arrangement that produced nocx-ti8w in the first place,
  *    where correct isolation existed and three specs out of twenty-five used it.
+ *
+ * # What this boundary cannot move, and never will
+ *
+ * Everything above is a DIRECTORY. A per-user OS SERVICE is a fourth class and
+ * `$HOME` does not reach it: the OS keystore is found through the Keychain
+ * service on macOS and the session bus on Linux, not through a path, so
+ * `go-keyring` goes to the developer's real login keychain no matter what
+ * `$HOME` says. `app.New` probed it at every backend start, and a probe is a
+ * real keyring write — on macOS a modal dialog that looks like it belongs to
+ * the OS, once per start, for the whole run (nocx-o4hg). The same is true of
+ * anything else per-user and pathless: launchd agents, D-Bus, the system
+ * notification service.
+ *
+ * So the keystore is declared rather than isolated, on the Go side of the line:
+ * `app.New` refuses to build for a test that has not said whether it may reach
+ * it, and `NOCX_NO_SYSTEM_KEYSTORE=1` is how a backend the suite launches says
+ * it may not. Adding a variable to the list below cannot substitute for that.
  */
 import { mkdirSync, realpathSync } from 'node:fs'
 import os from 'node:os'

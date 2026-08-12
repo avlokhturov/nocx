@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
@@ -222,7 +221,7 @@ func TestAPlatformThatCannotObserveStillOpensTheSession(t *testing.T) {
 // else.
 func TestProcessObservationIsWiredAtTheCompositionRoot(t *testing.T) {
 	storagetest.Isolate(t)
-	a, err := New(WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")))
+	a, err := newTestApp(t)
 	if err != nil {
 		t.Fatalf("New(): %v", err)
 	}
