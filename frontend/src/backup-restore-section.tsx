@@ -53,23 +53,37 @@ export function BackupRestoreSection(props: Props) {
     setState('creating', true)
     try {
       const result: BackupCreateResult = await props.profileClient.createBackup()
-      let saved = false
+
+      // Three outcomes, and only one of them is a download. `backup.saveToFile`
+      // resolves to a path when the user picked one and to `null` when they
+      // cancelled the dialog (contracts/backup.saveToFile.schema.json models
+      // both). It rejects when there is no dialog to open at all — no saver
+      // wired, or no zenity/osascript on the machine. Cancelling is the user
+      // declining the file; falling back to a download there hands them the
+      // very thing they just refused, and puts an unasked-for plaintext copy
+      // of their configuration in Downloads.
+      let dialogAvailable = true
+      let savedPath: string | null = null
       try {
         const saveResult = await props.profileClient.saveBackupToFile(
           result.fileName,
           result.contents,
         )
-        if (saveResult !== null) {
-          showToast({ message: `Backup saved to ${saveResult.path}`, level: 'success' })
-          saved = true
-        }
+        savedPath = saveResult === null ? null : saveResult.path
       } catch {
-        // Native dialog unavailable: use the browser download fallback.
+        dialogAvailable = false
       }
-      if (!saved) {
-        downloadText(result.fileName, result.contents)
+
+      if (dialogAvailable && savedPath === null) {
+        showToast({ message: 'Backup discarded — save was cancelled.', level: 'info' })
+      } else {
+        // What was left behind is the part worth reading, and it is the same
+        // whether the file went through the dialog or the download — the two
+        // used to say different things, so a user who saved never learned that
+        // a credential binding had been dropped.
         const parts = [
-          `Backup created: ${result.summary.settings} settings, ${result.summary.connections} connections, ${result.summary.groups} groups.`,
+          savedPath !== null ? `Backup saved to ${savedPath}.` : 'Backup downloaded.',
+          `${result.summary.settings} settings, ${result.summary.connections} connections, ${result.summary.groups} groups.`,
         ]
         if (result.summary.credentialBindingsRemoved > 0)
           parts.push(`${result.summary.credentialBindingsRemoved} credential binding(s) removed.`)
@@ -77,6 +91,7 @@ export function BackupRestoreSection(props: Props) {
           parts.push(`${result.summary.groupCredentialBindingsRemoved} group binding(s) removed.`)
         if (result.summary.groupDefaultKeysOmitted > 0)
           parts.push(`${result.summary.groupDefaultKeysOmitted} group key(s) omitted.`)
+        if (savedPath === null) downloadText(result.fileName, result.contents)
         showToast({ message: parts.join(' '), level: 'success' })
       }
     } catch (err) {

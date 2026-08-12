@@ -16,12 +16,14 @@ you tell it.
 Press **Create backup**. nocx opens your system's save dialog with a timestamped name —
 `nocx-backup-20260812T143005Z.json`. Choose where it goes.
 
-If the save dialog is unavailable — a Linux box without `zenity`, or nocx running in a
-browser — the file downloads instead, and a message tells you what it contained.
+Cancel the dialog and nothing is written. The backup was built in memory and is discarded.
 
-Either way you get counts: settings overrides, connections and groups included, plus the
-credential bindings and group-default keys that were left behind (see
-[What is left out](#what-is-left-out)).
+If there is no save dialog to open — a Linux box without `zenity`, or nocx running in a
+browser — the file downloads instead.
+
+Whichever way the file lands, the message tells you what went into it: settings overrides,
+connections and groups included, plus the credential bindings and group-default keys that
+were left behind (see [What is left out](#what-is-left-out)).
 
 ## What is in the file
 
