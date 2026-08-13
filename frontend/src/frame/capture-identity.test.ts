@@ -8,7 +8,7 @@
 // belongs to DRIVE), and no surface may present drift as "stale".
 
 import { describe, expect, it } from 'vitest'
-import { CaptureIdentityTracker } from './capture-identity'
+import { CaptureAbortedError, CaptureIdentityTracker } from './capture-identity'
 import { FakeSource } from './test-source'
 
 describe('CaptureIdentityTracker — the generation', () => {
@@ -145,16 +145,18 @@ describe('CaptureIdentityTracker — comparability, not staleness', () => {
 })
 
 describe('CaptureIdentityTracker — the capture fence', () => {
-  it('defers a capture while a multi-chunk write is queued, and waits for the FINAL parse pass, not the first onWriteParsed', async () => {
+  it('defers a capture while ONE write is still mid-parse, and waits for the FINAL parse pass, not the first onWriteParsed', async () => {
     const source = new FakeSource()
     source.seed(['AAAA'])
     const tracker = new CaptureIdentityTracker(source)
     const before = tracker.identity()
 
-    // Two writes queued; NEITHER has parsed yet — the buffer still holds the
-    // pre-write state and a snapshot now would mix "before" and "after".
-    source.write('BBBB')
-    source.write('CCCC')
+    // ONE write, split by xterm's WriteBuffer across parse passes (the
+    // per-write callback fires only on the pass that empties it). So
+    // onWriteParsed CAN fire while the write's own callback is still
+    // pending — the exact interleaving the fence exists for. The old model
+    // equated one write with one pass and issued two writes instead.
+    source.write('BBBBCCCC')
     expect(source.hasUnsettledWrite()).toBe(true)
 
     let settled = false
@@ -162,19 +164,23 @@ describe('CaptureIdentityTracker — the capture fence', () => {
       settled = true
     })
 
-    // Chunk 1 parses: onWriteParsed fires while chunk 2 is STILL queued.
-    // A naive "wait for the next onWriteParsed" would mint now, mid-write.
-    source.parseOnePass()
+    // Pass 1 parses PART of the write: onWriteParsed fires with the write
+    // still pending. A naive "wait for the next onWriteParsed" would mint
+    // now, mid-write.
+    source.parseOnePass(4)
     await Promise.resolve()
     expect(settled).toBe(false)
+    expect(source.hasUnsettledWrite()).toBe(true)
 
-    // Chunk 2 parses: now the parse has settled and the fence opens.
-    source.parseOnePass()
+    // The final pass empties the write: its callback settles and the fence
+    // opens.
+    source.parseOnePass(4)
     await settledPromise
     expect(settled).toBe(true)
 
     const after = tracker.identity()
-    // Both writes were parsed: the generation reflects the settled state.
+    // The one write was parsed across two passes: each pass advanced the
+    // generation (conservative — a false "moved" costs a re-ask).
     expect(after.generation).toBe(before.generation + 2)
   })
 
@@ -187,5 +193,24 @@ describe('CaptureIdentityTracker — the capture fence', () => {
       resolved = true
     })
     expect(resolved).toBe(true)
+  })
+
+  it('disposing the source mid-capture settles (rejects) the pending awaitSettled — the fence has a closing event (AGENTS.md rule 3)', async () => {
+    const source = new FakeSource()
+    source.seed(['x'])
+    const tracker = new CaptureIdentityTracker(source)
+
+    source.write('BBBB')
+    const pending = tracker.awaitSettled()
+    source.dispose()
+    await expect(pending).rejects.toThrow(CaptureAbortedError)
+  })
+
+  it('an awaitSettled issued AFTER disposal rejects immediately — a stuck counter cannot hang a later capture', async () => {
+    const source = new FakeSource()
+    source.write('x') // will never parse — its source is gone
+    source.dispose()
+    const tracker = new CaptureIdentityTracker(source)
+    await expect(tracker.awaitSettled()).rejects.toThrow(CaptureAbortedError)
   })
 })

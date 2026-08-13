@@ -132,6 +132,14 @@ export interface CaptureEventSource {
   onClear(cb: () => void): void
   /** Fired AFTER the renderer executed a full reset. */
   onReset(cb: () => void): void
+  /** Fires when the source is disposed (tab close, renderer replacement) —
+   *  the fence's CLOSING event. A capture parked on hasUnsettledWrite()
+   *  after this can never settle on its own: the per-write callback went
+   *  away with the terminal, so the pending count is stuck. AGENTS.md rule
+   *  3 — an invariant needs both ends; this is the end that lets the
+   *  tracker reject pending awaitSettled() waiters instead of orphaning
+   *  them. */
+  onDispose(cb: () => void): void
   /** True while bytes queued via write() have not finished parsing. The
    *  capture fence: a frame minted mid-queue can hold row 1 from before a
    *  write and row 20 from after it — a state that never existed. */

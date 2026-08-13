@@ -127,7 +127,15 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 	digest := entryDigest(in)
 	var out SubmitResult
 	err := s.run(ctx, func(ctx context.Context) error {
-		tx, err := s.db.BeginTx(ctx, nil)
+		// BEGIN IMMEDIATE (the ncruces driver maps LevelSerializable to it):
+		// the write lock is taken at BEGIN, not at the first write. With a
+		// deferred BEGIN, two processes — each with its own writer goroutine
+		// — can both read the same snapshot, and the loser's upgrade then
+		// fails with SQLITE_BUSY_SNAPSHOT, which busy_timeout does not
+		// repair (nocx-rtg0.18). Taking the lock up front makes the second
+		// writer wait, bounded by busy_timeout, and read a fresh snapshot:
+		// both submits land, in commit order.
+		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}

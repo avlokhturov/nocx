@@ -128,7 +128,7 @@ describe('frozen mint', () => {
 })
 
 describe('the capture fence', () => {
-  it('mints after the parse settles when a multi-chunk write is queued — no frame mixes rows from before and after one write', async () => {
+  it('mints after the parse settles when ONE write spans parse passes — no frame mixes rows from before and after the write', async () => {
     const source = seedSource(['AAAA'])
     // Park the cursor at the start of the buffer so each chunk lands on its
     // own row, like fresh output in a real terminal.
@@ -140,12 +140,16 @@ describe('the capture fence', () => {
     const unfenced = mintLiveFrame(before, { start: 0, end: 1 }, seamFor(source))
     expect(rowText(unfenced)).toEqual(['AAAA'])
 
-    // Queue a multi-chunk write, start the fence, THEN drain the parse
-    // passes — the fence resolves only after the last pass settles.
-    source.write('BBBB\n')
-    source.write('CCCC\n')
+    // ONE write, split by xterm's WriteBuffer across parse passes (the
+    // per-write callback fires only on the pass that empties it — the old
+    // test issued two writes and settled each by hand, testing the model
+    // the fake chose, not xterm's interleaving). Start the fence, then run
+    // the passes one at a time.
+    source.write('BBBB\nCCCC\n')
     const settled = tracker.awaitSettled()
-    source.flush()
+
+    source.parseOnePass(5) // 'BBBB\n' — the write is still pending
+    source.parseOnePass(5) // 'CCCC\n' — the write settles
     await settled
 
     const after = tracker.identity()

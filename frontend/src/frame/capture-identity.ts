@@ -24,14 +24,31 @@
 
 import type { CaptureComparability, CaptureEventSource, CaptureIdentity } from './types'
 
+/** Thrown by awaitSettled() when the capture source is disposed before the
+ *  fence opens: the renderer is gone (tab close, renderer replacement), so
+ *  the frame can never be captured. */
+export class CaptureAbortedError extends Error {
+  constructor() {
+    super('frame capture aborted: the renderer was disposed before the write settled')
+    this.name = 'CaptureAbortedError'
+  }
+}
+
 export class CaptureIdentityTracker {
   private _generation = 0
   private _buffer: { kind: 'normal' } | { kind: 'alternate'; altSession: number } = {
     kind: 'normal',
   }
   private _altSession = 0
-  /** Waiters for the next onWriteParsed fire — the fence's rendezvous. */
-  private _writeParsedWaiters: Array<() => void> = []
+  /** Waiters for the next onWriteParsed fire — the fence's rendezvous. Each
+   *  carries its reject so disposal can settle (reject) a pending capture
+   *  instead of orphaning it forever. */
+  private _writeParsedWaiters: Array<{
+    resolve: () => void
+    reject: (err: CaptureAbortedError) => void
+  }> = []
+  /** True once the source reported disposal: the fence can never open. */
+  private _disposed = false
 
   constructor(private readonly _source: CaptureEventSource) {
     _source.onWriteParsed(() => this._onWriteParsed())
@@ -39,6 +56,11 @@ export class CaptureIdentityTracker {
     _source.onResize(() => this._onExplicitMutation())
     _source.onClear(() => this._onExplicitMutation())
     _source.onReset(() => this._onExplicitMutation())
+    // The fence's closing event: disposal must settle (reject) a capture
+    // parked on a write that will never settle (the per-write callback went
+    // away with the terminal). A waiter with no closing event hangs forever
+    // — AGENTS.md rule 3: an invariant needs both ends.
+    _source.onDispose(() => this._onSourceDisposed())
   }
 
   /** The current capture identity. The buffer record is copied so a saved
@@ -86,24 +108,59 @@ export class CaptureIdentityTracker {
    *  that actually settles the queue. */
   async awaitSettled(): Promise<void> {
     while (this._source.hasUnsettledWrite()) {
+      // A write can outlive its source: disposal mid-parse leaves the
+      // pending count stuck forever. That is a refusal, not a wait —
+      // rejecting is chosen over resolving-as-not-capturable: "settled"
+      // would let a caller mint a frame from a dead renderer, a refusal
+      // that looks like success is the exact silence the fence exists to
+      // prevent. A caller that sees the rejection knows the capture cannot
+      // happen and can decide (re-ask, tell the person).
+      this._throwIfDisposed()
       await this._waitForWriteParsed()
     }
   }
 
+  private _throwIfDisposed(): void {
+    if (this._disposed) throw new CaptureAbortedError()
+  }
+
   private _waitForWriteParsed(): Promise<void> {
-    return new Promise((resolve) => {
-      // Subscribing a waiter is synchronous with the hasUnsettledWrite()
-      // check that led here (both run in the same task), and a fire can only
-      // arrive in a later task — so this waiter can never miss its event.
-      this._writeParsedWaiters.push(resolve)
+    // Promise.withResolvers needs an ES2024 lib and this project targets
+    // ES2021, so the resolvers are captured via the executor form (the
+    // codebase pattern).
+    let resolve!: () => void
+    let reject!: (err: CaptureAbortedError) => void
+    const promise = new Promise<void>((done, fail) => {
+      resolve = done
+      reject = fail
     })
+    // Subscribing a waiter is synchronous with the hasUnsettledWrite()
+    // check that led here (both run in the same task), and a fire can only
+    // arrive in a later task — so this waiter can never miss its event,
+    // and a disposal that lands before this registration is caught here
+    // instead of orphaning the waiter.
+    if (this._disposed) {
+      reject(new CaptureAbortedError())
+      return promise
+    }
+    this._writeParsedWaiters.push({ resolve, reject })
+    return promise
   }
 
   private _onWriteParsed(): void {
     this._generation++
     const waiters = this._writeParsedWaiters
     this._writeParsedWaiters = []
-    for (const w of waiters) w()
+    for (const w of waiters) w.resolve()
+  }
+
+  /** The source was disposed: a capture waiting on the fence can never
+   *  settle — reject it (the reason lives at awaitSettled). */
+  private _onSourceDisposed(): void {
+    this._disposed = true
+    const waiters = this._writeParsedWaiters
+    this._writeParsedWaiters = []
+    for (const w of waiters) w.reject(new CaptureAbortedError())
   }
 
   private _onBufferChange(type: 'normal' | 'alternate'): void {

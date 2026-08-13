@@ -14,7 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -1197,6 +1199,117 @@ func TestLedgerRejectsAllWritesAfterClose(t *testing.T) {
 	for _, w := range writes {
 		if err := w.do(); !errors.Is(err, content.ErrClosed) {
 			t.Errorf("%s after Close = %v, want ErrClosed", w.name, err)
+		}
+	}
+}
+
+// ── two writers, one file: both submits land (nocx-rtg0.18) ───────────────
+
+// Within one store the writer goroutine serializes submits; across two
+// stores (two windows, two processes) each has its own writer, so two
+// deferred transactions can read the same snapshot and the loser's upgrade
+// dies with SQLITE_BUSY_SNAPSHOT, which busy_timeout does not repair. The
+// fix is BEGIN IMMEDIATE (the ncruces driver maps LevelSerializable to it):
+// the second writer waits on the write lock and reads a fresh snapshot.
+// This test asserts the contract the review named — both stores' submits
+// land, with distinct, gap-free ingest_seq — with two real store instances
+// on one file, not by reasoning about locks.
+func TestTwoStoresSubmitConcurrentlyWithoutLoss(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	cfg := content.Config{
+		Path: path, Key: testKey(), Budget: testBudget,
+	}
+	ctx := context.Background()
+
+	// openAt opens a store on the shared file, failing the test on error —
+	// every call site is a Fatalf site, so no error survives to shadow
+	// another.
+	openAt := func() content.ContentDB {
+		t.Helper()
+		db, openErr := content.Open(ctx, cfg)
+		if openErr != nil {
+			t.Fatalf("Open: %v", openErr)
+		}
+		return db
+	}
+
+	// Bootstrap the schema once and close it, so the two stores below open a
+	// current file instead of racing each other through Open's creation path.
+	boot := openAt()
+	if closeErr := boot.Close(); closeErr != nil {
+		t.Fatalf("bootstrap Close: %v", closeErr)
+	}
+
+	a := openAt()
+	defer func() { _ = a.Close() }()
+	b := openAt()
+	defer func() { _ = b.Close() }()
+
+	if envErr := a.Ledger().EnsureEnvironment(ctx, content.Environment{ID: "local", Kind: content.EnvLocal}); envErr != nil {
+		t.Fatalf("EnsureEnvironment: %v", envErr)
+	}
+
+	const perStore = 40
+	errs := make(chan error, 2)
+	seqs := make(chan int64, 2*perStore)
+	submit := func(db content.ContentDB, base int) {
+		led := db.Ledger()
+		for i := range perStore {
+			res, subErr := led.Submit(ctx, content.SubmitEntry{
+				ID:     fmt.Sprintf("00000000-0000-7000-8000-%012d", base+i),
+				Client: "client", EnvironmentID: "local", Cwd: "/repo",
+				Kind: content.EntryShell, Intent: fmt.Sprintf("cmd-%d", base+i),
+			})
+			if subErr != nil {
+				errs <- subErr
+				return
+			}
+			seqs <- res.IngestSeq
+		}
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); submit(a, 0) }()
+	go func() { defer wg.Done(); submit(b, perStore) }()
+	wg.Wait()
+	close(errs)
+	for subErr := range errs {
+		t.Fatalf("concurrent Submit: %v — one of the two writers lost", subErr)
+	}
+	close(seqs)
+	var submitted []int64
+	for s := range seqs {
+		submitted = append(submitted, s)
+	}
+	if len(submitted) != 2*perStore {
+		t.Fatalf("successful submits = %d, want %d", len(submitted), 2*perStore)
+	}
+
+	// Both stores closed before the final read: the read is of the file,
+	// not of one store's in-memory view.
+	if closeErr := a.Close(); closeErr != nil {
+		t.Fatalf("Close A: %v", closeErr)
+	}
+	if closeErr := b.Close(); closeErr != nil {
+		t.Fatalf("Close B: %v", closeErr)
+	}
+	again := openAt()
+	defer func() { _ = again.Close() }()
+	page, listErr := again.Ledger().ListEntries(ctx, 2*perStore)
+	if listErr != nil {
+		t.Fatalf("ListEntries: %v", listErr)
+	}
+	if len(page) != 2*perStore {
+		t.Fatalf("rows on disk = %d, want %d — a concurrent submit was lost", len(page), 2*perStore)
+	}
+	back := make([]int64, 0, len(page))
+	for _, e := range page {
+		back = append(back, e.IngestSeq)
+	}
+	sort.Slice(back, func(i, j int) bool { return back[i] < back[j] })
+	for i, seq := range back {
+		if seq != int64(i+1) {
+			t.Fatalf("ingest_seq on disk = %v, want exactly 1..%d — a gap or a duplicate", back, 2*perStore)
 		}
 	}
 }

@@ -10,7 +10,7 @@ import {
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
-import { CaptureIdentityTracker } from '../frame/capture-identity'
+import { CaptureAbortedError, CaptureIdentityTracker } from '../frame/capture-identity'
 import { getCurrentTheme } from './theme-adapter'
 
 const stubBrowser = () => {
@@ -938,5 +938,127 @@ describe('XtermRenderer frame capture surface (nocx-3j9b)', () => {
     await tracker.awaitSettled()
     expect(r.hasUnsettledWrite()).toBe(false)
     r.dispose()
+  })
+})
+
+describe('XtermRenderer write refusal under flow control (nocx-x8s2.3)', () => {
+  async function mountRenderer(): Promise<XtermRenderer> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return r
+  }
+
+  it('a refused write reaches the caller AND leaves the fence counter exact', async () => {
+    const r = await mountRenderer()
+
+    const term = (r as unknown as Record<string, unknown>).term as {
+      write: (data: string, cb?: () => void) => void
+    }
+    const spy = vi.spyOn(term, 'write').mockImplementation(() => {
+      // xterm's real refusal: WriteBuffer throws before queueing anything
+      // once the pending-data watermark is exceeded.
+      throw new Error('write data discarded, use flow control to avoid losing data')
+    })
+    try {
+      expect(r.hasUnsettledWrite()).toBe(false)
+      // The refusal is surfaced, never swallowed — before the fix the catch
+      // repaired the counter and returned success, so dropped output was
+      // indistinguishable from a program that printed nothing.
+      expect(() => r.write('overflow')).toThrow('write data discarded')
+      // The counter was repaired: the refusal did not wedge the fence.
+      expect(r.hasUnsettledWrite()).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+    r.dispose()
+  })
+
+  it('a normal write still succeeds and still settles — the paired positive', async () => {
+    const r = await mountRenderer()
+    expect(() => r.write('hello')).not.toThrow()
+    expect(r.hasUnsettledWrite()).toBe(true)
+    await vi.waitFor(() => expect(r.hasUnsettledWrite()).toBe(false))
+    r.dispose()
+  })
+})
+
+describe('XtermRenderer pre-mount subscriptions (nocx-x8s2.4)', () => {
+  it('delivers a resize and a buffer switch to subscribers registered BEFORE mount', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const resizes: Array<[number, number]> = []
+    const buffers: Array<'normal' | 'alternate'> = []
+    r.onResize((cols, rows) => resizes.push([cols, rows]))
+    r.onBufferChange((t) => buffers.push(t))
+
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // Resize through the real terminal (xterm fires onResize synchronously).
+    const term = (r as unknown as Record<string, unknown>).term as {
+      resize: (cols: number, rows: number) => void
+    }
+    term.resize(100, 30)
+    expect(resizes).toContainEqual([100, 30])
+
+    // Buffer switch through the real parser: enter the alternate screen.
+    r.write('\x1b[?1049h')
+    await vi.waitFor(() => expect(buffers).toContain('alternate'))
+    r.dispose()
+  })
+
+  it('a tracker built before mount reports notComparable across a buffer switch and a resize', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const tracker = new CaptureIdentityTracker(r) // BEFORE mount — the defect
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // Buffer switch: incomparability, never "moved" (ADR-0029 rule 2). A
+    // pre-mount subscription that was silently dropped would leave the
+    // tracker believing the normal buffer still owns the screen.
+    const normal = tracker.identity()
+    r.write('\x1b[?1049h')
+    await vi.waitFor(() => expect(tracker.identity().buffer.kind).toBe('alternate'))
+    expect(tracker.compareIdentity(normal)).toEqual({ status: 'notComparable' })
+
+    // Leave the alternate screen, then resize: also not comparable.
+    r.write('\x1b[?1049l')
+    await vi.waitFor(() => expect(tracker.identity().buffer.kind).toBe('normal'))
+    const preResize = tracker.identity()
+    const term = (r as unknown as Record<string, unknown>).term as {
+      resize: (cols: number, rows: number) => void
+    }
+    term.resize(90, 25)
+    expect(tracker.compareIdentity(preResize)).toEqual({ status: 'notComparable' })
+    r.dispose()
+  })
+})
+
+describe('XtermRenderer disposal mid-capture (nocx-x8s2.4)', () => {
+  it('a pending awaitSettled settles (rejects) when the renderer is disposed mid-write — this test hung before the fix', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const tracker = new CaptureIdentityTracker(r)
+    r.write('x') // queued; the fence is up — proven in this environment by
+    // the capture-surface test above (hasUnsettledWrite() is true right
+    // after write; parsing is async)
+    const pending = tracker.awaitSettled() // waiter registered synchronously
+    r.dispose() // the subscriptions go away — the waiter must settle, not
+    // hang forever
+    await expect(pending).rejects.toThrow(CaptureAbortedError)
   })
 })

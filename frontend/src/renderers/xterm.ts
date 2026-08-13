@@ -248,6 +248,22 @@ export class XtermRenderer implements TerminalRenderer {
    *  capture fence's pending count. Settled via the per-write callback, so
    *  it is exact even when onWriteParsed fires between chunks. */
   private unsettledWrites = 0
+  /** Subscribers to grid resizes — the frame identity's geometry axis
+   *  (nocx-x8s2.4). Kept pre-mount and attached at mount, exactly like
+   *  onWriteParsed: a tracker built before mount must not lose the resize
+   *  signal (a resize reads `moved`/`same` instead of `notComparable`). */
+  private resizeSubs: Array<(cols: number, rows: number) => void> = []
+  private resizeDisposable?: { dispose(): void }
+  /** Subscribers to active-buffer changes — the frame identity's buffer
+   *  axis. Kept pre-mount and attached at mount: a tracker built before
+   *  mount must not lose the switch (a frame saved on the normal buffer
+   *  then compares as `same` after entering the alternate screen). */
+  private bufferChangeSubs: Array<(type: 'normal' | 'alternate') => void> = []
+  private bufferChangeDisposable?: { dispose(): void }
+  /** Disposal subscribers — the capture fence's closing event (see
+   *  onDispose). */
+  private disposeSubs: Array<() => void> = []
+  private _disposed = false
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -301,11 +317,15 @@ export class XtermRenderer implements TerminalRenderer {
 
     term.open(container)
 
-    // Attach the parse-settle listener now: a subscriber registered before
-    // mount (frame tracker construction) must not lose the generation's
-    // advance signal. The fence state (unsettledWrites) and the renderer-
-    // side clear/reset subscribers were never mount-dependent.
+    // Attach the frame-identity listeners now: a subscriber registered
+    // before mount (the frame tracker constructs with the renderer) must
+    // not lose the parse-settle, buffer-switch or resize signals — each
+    // keeps pre-mount subscribers and attaches here, when the terminal
+    // exists. The fence state (unsettledWrites) and the renderer-side
+    // clear/reset subscribers were never mount-dependent.
     this._ensureWriteParsed()
+    this._ensureResize()
+    this._ensureBufferChange()
 
     // Shift+Enter as its own chord (nocx-nt70) — see SHIFT_ENTER_SEQUENCE.
     // xterm's blessed hook runs before any key processing; returning false
@@ -531,10 +551,19 @@ export class XtermRenderer implements TerminalRenderer {
         // BETWEEN chunks of one large write.
         this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
       })
-    } catch {
-      // write() can throw (flow-control watermark); nothing was queued, so
-      // the pending count must not stay stuck.
+    } catch (err) {
+      // xterm refuses a write once its pending-data watermark is exceeded:
+      // it THROWS before queueing anything, so the caller's bytes never
+      // entered the terminal. The counter is repaired first — a stuck count
+      // would wedge the capture fence forever. Then the refusal is SURFACED
+      // to the caller, not logged (nocx-x8s2.3): the caller believes it
+      // delivered bytes that are gone, and only the caller can decide the
+      // policy (pause, resend, tell the person). A log inside the renderer
+      // would let the caller keep believing delivery — the old silent drop
+      // in a different shape. Pre-flow-control behaviour was to throw; this
+      // restores that while keeping the counter exact.
       this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
+      throw err
     }
   }
 
@@ -552,7 +581,19 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onResize(cb: ResizeCallback): void {
-    this.term?.onResize(({ cols, rows }) => cb(cols, rows))
+    this.resizeSubs.push(cb)
+    this._ensureResize()
+  }
+
+  /** Attach the resize fan-out when the terminal exists. Subscribers
+   *  registered before mount (the frame tracker constructs with the
+   *  renderer) must not be lost — the same shape onWriteParsed uses. */
+  private _ensureResize(): void {
+    const t = this.term
+    if (this.resizeDisposable || !t) return
+    this.resizeDisposable = t.onResize(({ cols, rows }) => {
+      for (const sub of this.resizeSubs) sub(cols, rows)
+    })
   }
 
   onTitle(cb: TitleCallback): void {
@@ -560,7 +601,18 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
-    this.term?.buffer.onBufferChange((buf) => cb(buf.type))
+    this.bufferChangeSubs.push(cb)
+    this._ensureBufferChange()
+  }
+
+  /** Attach the buffer-change fan-out when the terminal exists — pre-mount
+   *  subscribers (the frame tracker) must not be lost (nocx-x8s2.4). */
+  private _ensureBufferChange(): void {
+    const t = this.term
+    if (this.bufferChangeDisposable || !t) return
+    this.bufferChangeDisposable = t.buffer.onBufferChange((buf) => {
+      for (const sub of this.bufferChangeSubs) sub(buf.type)
+    })
   }
 
   onCwd(cb: CwdCallback): void {
@@ -684,7 +736,30 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.focus()
   }
 
+  /** Frame capture (nocx-x8s2.4): the dispose notification — the fence's
+   *  closing event. The CaptureIdentityTracker rejects its pending
+   *  awaitSettled() waiters on this, so a capture never hangs across
+   *  disposal. Fired exactly once, at the top of dispose(), before the
+   *  event subscriptions are torn down. */
+  onDispose(cb: () => void): void {
+    if (this._disposed) {
+      // Already disposed: fire immediately — a late subscriber must not
+      // wait forever on a source that is gone.
+      cb()
+      return
+    }
+    this.disposeSubs.push(cb)
+  }
   dispose(): void {
+    if (this._disposed) return
+    this._disposed = true
+    // Tell the frame tracker BEFORE the subscriptions go away: a capture
+    // parked on the parse fence must settle (reject) now, while its waiter
+    // is still registered — tearing the subscriptions down first would
+    // orphan it.
+    const disposeSubs = this.disposeSubs
+    this.disposeSubs = []
+    for (const sub of disposeSubs) sub()
     if (this.refreshTimer !== null) {
       clearInterval(this.refreshTimer)
       this.refreshTimer = null
@@ -706,6 +781,12 @@ export class XtermRenderer implements TerminalRenderer {
     this.renderDisposable?.dispose()
     this.renderDisposable = undefined
     this.renderSubs = []
+    this.resizeDisposable?.dispose()
+    this.resizeDisposable = undefined
+    this.resizeSubs = []
+    this.bufferChangeDisposable?.dispose()
+    this.bufferChangeDisposable = undefined
+    this.bufferChangeSubs = []
     this.writeParsedDisposable?.dispose()
     this.writeParsedDisposable = undefined
     this.writeParsedSubs = []

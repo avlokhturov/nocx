@@ -2,10 +2,11 @@
 //
 // Models WriteBuffer's real contract (verified against xterm 5.5.0 source):
 // write() QUEUES data (nothing applied, hasUnsettledWrite() true); a parse
-// pass applies ONE queued chunk, settles its pending count, then fires
-// onWriteParsed — so onWriteParsed CAN fire while more chunks are still
-// queued (xterm's own doc note on the event), which is exactly the trap the
-// capture fence exists for.
+// pass applies a SLICE of the front write and fires onWriteParsed — the
+// write's own settle (its per-write callback) fires only on the pass that
+// EMPTIES it, so ONE write can span several passes with onWriteParsed
+// firing while the write is still pending (xterm's own doc note on the
+// event), which is exactly the trap the capture fence exists for.
 
 import { BufferLine, type BufferLine as BufferLineType } from '../scrollback/test-helpers'
 import type { CaptureEventSource } from './types'
@@ -16,6 +17,7 @@ export class FakeSource implements CaptureEventSource {
   private cells = new Map<number, string[]>()
   private styled = new Map<number, BufferLineType>()
   cursor = { line: 0, col: 0 }
+  /** Queued writes, front entry = remaining bytes of the oldest write. */
   private queued: string[] = []
   private pending = 0
   private writeParsedSubs: Array<() => void> = []
@@ -23,6 +25,8 @@ export class FakeSource implements CaptureEventSource {
   private resizeSubs: Array<(c: number, r: number) => void> = []
   private clearSubs: Array<() => void> = []
   private resetSubs: Array<() => void> = []
+  private disposeSubs: Array<() => void> = []
+  private disposed = false
 
   onWriteParsed(cb: () => void): void {
     this.writeParsedSubs.push(cb)
@@ -38,6 +42,15 @@ export class FakeSource implements CaptureEventSource {
   }
   onReset(cb: () => void): void {
     this.resetSubs.push(cb)
+  }
+  onDispose(cb: () => void): void {
+    if (this.disposed) {
+      // Already disposed: fire immediately — a late subscriber must not
+      // wait forever on a source that is gone.
+      cb()
+      return
+    }
+    this.disposeSubs.push(cb)
   }
   hasUnsettledWrite(): boolean {
     return this.pending > 0
@@ -71,19 +84,32 @@ export class FakeSource implements CaptureEventSource {
     this.cells.set(y, line.translateToString().split(''))
   }
 
-  /** Queue a write — mirrors xterm: queued, not yet parsed. */
+  /** Queue a write — mirrors xterm: queued, not yet parsed. The write's
+   *  settle fires only when its LAST byte has been parsed, so one write
+   *  can span several parseOnePass() calls. */
   write(data: string): void {
     this.queued.push(data)
     this.pending++
   }
 
-  /** One parse pass: apply ONE queued chunk, settle it, fire onWriteParsed.
-   *  With several chunks queued, each call fires the event while the rest
-   *  are still pending — the multi-chunk case from xterm's own doc note. */
-  parseOnePass(): void {
-    const chunk = this.queued.shift()
-    if (chunk !== undefined) this.apply(chunk)
-    this.pending = Math.max(0, this.pending - 1)
+  /** One parse pass: parse up to `chars` bytes of the FRONT write (default:
+   *  the whole front write). The pass settles the write only when it empties
+   *  — so a single write can be split across passes, with onWriteParsed
+   *  firing while the write's own callback is still pending: the exact
+   *  interleaving xterm's WriteBuffer produces for a large write. */
+  parseOnePass(chars = Number.POSITIVE_INFINITY): void {
+    const front = this.queued[0]
+    if (front !== undefined) {
+      const take = Math.min(chars, front.length)
+      if (take > 0) {
+        this.apply(front.slice(0, take))
+        this.queued[0] = front.slice(take)
+      }
+      if (this.queued[0].length === 0) {
+        this.queued.shift()
+        this.pending = Math.max(0, this.pending - 1)
+      }
+    }
     for (const sub of this.writeParsedSubs) sub()
   }
 
@@ -131,6 +157,15 @@ export class FakeSource implements CaptureEventSource {
     this.cells.clear()
     this.styled.clear()
     for (const sub of this.resetSubs) sub()
+  }
+  /** Test driver: dispose the source — a capture parked on the fence must
+   *  settle (reject), never hang (nocx-x8s2.4). */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    const subs = this.disposeSubs
+    this.disposeSubs = []
+    for (const sub of subs) sub()
   }
 }
 

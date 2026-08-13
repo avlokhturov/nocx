@@ -79,6 +79,18 @@ export interface TerminalRenderer {
    */
   fitViewport(viewport: { width: number; height: number }): void
 
+  /**
+   * Write PTY output into the terminal. The write is QUEUED, not applied:
+   * parsing is async, so hasUnsettledWrite() stays true until the bytes
+   * have been parsed (the capture fence).
+   *
+   * MAY THROW when the underlying terminal refuses the write under flow
+   * control (xterm's pending-data watermark): nothing was queued, and the
+   * fence counter is repaired before the throw propagates. The refusal is
+   * surfaced rather than swallowed because the caller believes it
+   * delivered bytes that are gone — only the caller can decide the policy
+   * (nocx-x8s2.3).
+   */
   write(data: string): void
 
   // reset performs a full terminal reset: clears the display, scrollback,

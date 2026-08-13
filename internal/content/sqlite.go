@@ -330,10 +330,29 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // entitled to rather than something to infer from an empty panel.
 const schemaVersion = 3
 
+// rebuildDropOrder is the complete set of user tables this build owns,
+// children first so a parent DROP never meets a surviving child under
+// foreign_keys=ON. It is also the membership gate in resetIfSchemaChanged: a
+// file whose user tables are all in this set was written by an earlier
+// schema of THIS store and is discarded deliberately; one containing any
+// other table is refused.
+var rebuildDropOrder = []string{
+	"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
+	"edges", "executions", "environment_observations", "entries",
+	"sessions", "environments", "workspaces", "ledger_sequence",
+	"command_history",
+}
+
 // resetIfSchemaChanged rebuilds the file when it was written by a different
 // schema. Rows are lost by design: they belong to a shape this build cannot
 // read, and inventing a migration to keep them is the backwards compatibility
 // this project deliberately does not carry.
+//
+// The rebuild is all-or-nothing (nocx-rtg0.17): every DROP and the
+// discarded-row count share ONE transaction, so a crash, a cancellation or a
+// failed DROP midway leaves the file wholly old or wholly new, and the
+// warning is logged only after the commit, with the count that commit
+// actually discarded. SQLite DDL is transactional, so this costs nothing.
 func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
 	var onDisk int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&onDisk); err != nil {
@@ -346,39 +365,74 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 	// reset, and must not be announced as data loss. Any user table (the
 	// interim command_history on a pre-v1 file, a v1 table on a future one)
 	// means the file belongs to a different schema and is rebuilt.
-	var tables int
-	if err := conn.QueryRowContext(
-		ctx,
-		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-	).Scan(&tables); err != nil {
+	names, err := conn.QueryContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+	if err != nil {
 		return fmt.Errorf("content: probe schema: %w", err)
 	}
-	if tables == 0 {
+	var tables []string
+	for names.Next() {
+		var name string
+		if scanErr := names.Scan(&name); scanErr != nil {
+			_ = names.Close()
+			return fmt.Errorf("content: probe schema: %w", scanErr)
+		}
+		tables = append(tables, name)
+	}
+	if iterErr := names.Err(); iterErr != nil {
+		return fmt.Errorf("content: probe schema: %w", iterErr)
+	}
+	if closeErr := names.Close(); closeErr != nil {
+		return fmt.Errorf("content: probe schema: %w", closeErr)
+	}
+	if len(tables) == 0 {
 		return nil
 	}
-	// Count first: the number is the only measure of what the user lost, and
-	// after the DROP nobody can state it. The interim table carried the
-	// history rows; a count that fails is not a reason to abandon the rebuild
-	// — report it as unknown and carry on.
-	rows := -1
-	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&rows); err != nil {
-		rows = -1
+	// A table this build does not know about is refused, deliberately: its
+	// content is unaccounted for, so discarding it is not the "history
+	// discarded" the rebuild promises — it is data this build cannot name.
+	// Dropping it would also hand the outcome to the foreign-key check,
+	// which is exactly the half-destroyed file this function exists to
+	// prevent. A file that reaches here with an unknown table was written
+	// by a newer schema (or is not a ContentDB file at all).
+	for _, name := range tables {
+		known := false
+		for _, t := range rebuildDropOrder {
+			if t == name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("content: rebuild refused: table %q is not part of schema %d — the file was written by a newer schema (or is not a ContentDB file); update nocx rather than discard it",
+				name, schemaVersion)
+		}
 	}
-	// Children first: with foreign_keys=ON a DROP of a parent table fails
-	// while a child still references it.
-	for _, t := range []string{
-		"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
-		"edges", "executions", "environment_observations", "entries",
-		"sessions", "environments", "workspaces", "ledger_sequence",
-		"command_history",
-	} {
-		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
+	// Count inside the transaction, before any DROP: the number is the only
+	// measure of what the user lost, and the count that is logged is the
+	// one this commit discards. A count that fails (the interim table is
+	// absent on a v1 file) is not a reason to abandon the rebuild — report
+	// it as unknown and carry on.
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("content: begin rebuild: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rowsDiscarded := -1
+	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&rowsDiscarded); err != nil {
+		rowsDiscarded = -1
+	}
+	for _, t := range rebuildDropOrder {
+		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
 			return fmt.Errorf("content: rebuild for schema %d: %w", schemaVersion, err)
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("content: commit rebuild: %w", err)
+	}
 	if logger != nil {
 		logger.Warn("content: history discarded — the database was written by an older schema",
-			"was", onDisk, "now", schemaVersion, "rowsDiscarded", rows)
+			"was", onDisk, "now", schemaVersion, "rowsDiscarded", rowsDiscarded)
 	}
 	return nil
 }
