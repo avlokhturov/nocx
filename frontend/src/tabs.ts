@@ -24,6 +24,7 @@ import type {
   ContentDescriptor,
   ContentViewport,
   ActiveOrigin,
+  SurfaceType,
 } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
 import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
@@ -755,6 +756,17 @@ export class TabManager {
     const tab = this.activeTab
     const origin = tab?.content.activeOrigin?.()
     return tab && origin ? { tabId: tab.id, ...origin } : null
+  }
+
+  /** The ACTIVE tab's surface type (B.8) — the seam chrome reads to answer
+   *  "what kind of tab is in front" without instanceof tests. The sidebar's
+   *  Settings collapse (nocx-3e3b) reads this through the composition root:
+   *  the descriptor is the single owner of what a tab is, and neither
+   *  activeTerminalContent() (null for viewer tabs too) nor activeOrigin()
+   *  (null transiently while a session opens) can tell Settings apart.
+   *  Null when no tab is active yet. */
+  activeSurfaceType(): SurfaceType | null {
+    return this.activeTab?.descriptor.surfaceType ?? null
   }
 
   reorderTab(draggedId: number, targetId: number): void {
