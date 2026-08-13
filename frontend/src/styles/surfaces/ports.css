@@ -61,12 +61,15 @@
   color: var(--color-text-dim);
 }
 
-/* Secondary text (the forward's destination) yields before the address does:
-   a capped share that shrinks to nothing when the row is tight. */
+/* The destination, on its own line in the quiet register beneath the
+   address: the remote end the bind on the line above reaches. It used to
+   sit BESIDE the address and yield to it through a capped share; the rework
+   moved it onto its own line, where nothing else uses the width — so the
+   cap only ever cut the string the row exists to show. Like the address,
+   the ellipsis is a floor that should never be reached at the rail's
+   default width (nocx-na05). */
 .ports-row__dest {
-  flex: 0 1 auto;
   min-width: 0;
-  max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

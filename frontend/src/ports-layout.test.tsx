@@ -69,8 +69,9 @@ const statusFixture = (port: number): PortsStatusResult => ({
   forwards: [],
 })
 
-function fakeServices(port: number): PortsPanelServices {
-  const status = (): Promise<PortsStatusResult> => Promise.resolve(statusFixture(port))
+function fakeServices(port: number, statusResult?: PortsStatusResult): PortsPanelServices {
+  const st = statusResult ?? statusFixture(port)
+  const status = (): Promise<PortsStatusResult> => Promise.resolve(st)
   return {
     status: vi.fn(status),
     sample: vi.fn(status),
@@ -80,6 +81,47 @@ function fakeServices(port: number): PortsPanelServices {
     stopForward: vi.fn().mockResolvedValue({}),
   }
 }
+
+/** A row in the forwarded state: a listener on the remote host and a running
+ *  forward whose destination is the listener's derived destination, so the
+ *  row owns its port's state. */
+const forwardedStatusFixture = (): PortsStatusResult => ({
+  profileId: 'ssh:p1:1',
+  host: 'host.example',
+  discovery: {
+    state: 'available',
+    listeners: [
+      {
+        family: 'ipv4' as const,
+        address: '192.168.0.93',
+        port: 9993,
+        process: { evidence: 'known', name: 'node', pid: 123 },
+      },
+    ],
+    probe: 'ss',
+    probesTried: ['ss'],
+    classification: '',
+    stderr: '',
+    lastSampleAt: null,
+    paused: false,
+    visible: true,
+    connLost: false,
+  },
+  forwards: [
+    {
+      id: 'fwd-1',
+      direction: 'local',
+      requestedBind: { host: '127.0.0.1', port: 9993 },
+      actualBind: { host: '127.0.0.1', port: 9993 },
+      destination: '192.168.0.93:9993',
+      caveat: '',
+      scope: 'ports:ssh:p1:1',
+      state: 'running',
+      stopReason: null,
+      error: null,
+    },
+  ],
+})
 
 describe('the detected row keeps the address first and primary (nocx-wzc4.9)', () => {
   it('stacks the address above the process, with the action beside them', async () => {
@@ -149,5 +191,66 @@ describe('the detected row keeps the address first and primary (nocx-wzc4.9)', (
     // The process is in the quiet register beneath it.
     expect(proc).toMatch(/text-overflow\s*:\s*ellipsis/)
     expect(proc).toMatch(/--color-text-dim/)
+  })
+})
+
+// ── The destination line (nocx-na05) ────────────────────────────────────
+// The rework moved the forwarded destination onto its OWN line inside the
+// stacked text column, but the CSS kept the 40% cap that made sense when it
+// sat BESIDE the address. A forwarded row's destination is the entire point
+// of the row — the remote end the bind reaches — so the cap cut it to two
+// characters on a line nothing else was using. The address line above it is
+// the local bind and is unaffected by this change.
+describe('the forwarded destination renders in full on its own line (nocx-na05)', () => {
+  it('shows the whole destination under the local bind', async () => {
+    const services = fakeServices(9993, forwardedStatusFixture())
+    const root = document.createElement('div')
+    document.body.append(root)
+    const pause = createPortsPauseControl()
+    render(
+      () => (
+        <PortsPanel
+          profileId={() => 'ssh:p1:1'}
+          services={services}
+          visible={() => true}
+          pause={pause}
+        />
+      ),
+      { container: root },
+    )
+    await waitFor(() => expect(root.querySelector('.ports-row__dest')).not.toBeNull())
+    const main = root.querySelector<HTMLElement>('.ports-row__main') as HTMLElement
+    const text = main.querySelector<HTMLElement>('.ports-row__text') as HTMLElement
+    const stacked = [...text.children]
+    const addr = stacked.find((el) => el.classList.contains('ports-row__addr'))
+    const dest = stacked.find((el) => el.classList.contains('ports-row__dest'))
+
+    // The local bind stays the primary line — the user asks "where do I
+    // reach this" — and the destination sits beneath it in full: what the
+    // cap used to cut to "19…" is the string the row exists to show.
+    expect(addr?.textContent).toBe('127.0.0.1:9993')
+    expect(dest?.textContent).toBe('→ 192.168.0.93:9993')
+    expect(stacked.indexOf(dest as HTMLElement)).toBeGreaterThan(
+      stacked.indexOf(addr as HTMLElement),
+    )
+    root.remove()
+  })
+
+  it('the stylesheet gives the destination the whole line, ellipsis as a floor', () => {
+    const css: string = readFileSync(PORTS_CSS, 'utf8')
+    const dest = stripComments(extractRuleBlock(css, 'ports-row__dest') ?? '')
+    expect(dest).not.toBe('')
+
+    // The 40% cap was written when the destination sat BESIDE the address
+    // and the two competed for the rail. On its own line nothing else uses
+    // the width, so the cap only ever cut the string the row exists to show.
+    expect(dest).not.toMatch(/max-width/)
+    expect(dest).not.toMatch(/flex\s*:/)
+
+    // The floor stays: a genuinely over-long destination still ellipsises,
+    // so the row can never overflow, and the line can shrink for it.
+    expect(dest).toMatch(/text-overflow\s*:\s*ellipsis/)
+    expect(dest).toMatch(/white-space\s*:\s*nowrap/)
+    expect(dest).toMatch(/min-width\s*:\s*0/)
   })
 })

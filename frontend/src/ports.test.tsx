@@ -911,3 +911,156 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
     expect(screen.queryByTestId('ports-open-as-connection')).toBeNull()
   })
 })
+
+// ── The filter (nocx-cdub) ──────────────────────────────────────────────
+// A busy host lists dozens of listeners; finding one port means scanning the
+// rail. The filter is the kit's SearchField — the one search vocabulary, the
+// one connections.tsx and secrets.tsx already drive. What it matches: the
+// rendered address (which carries the port), and the process name when the
+// probe could name it — never the pid, which is restart-unstable and not a
+// thing a user types, and matching it lets a query hit a row nobody meant
+// (decision 1). A query matching nothing SAYS SO — a heading with nothing
+// under it is what the owner reads as broken (decision 4 of the previous
+// beads). And a row that carries a live or self-stopped forward is never
+// filtered out: the filter exists to find rows, never to strand the Stop or
+// Retry action (decision 3).
+const threeListeners: PortsStatusResult['discovery']['listeners'] = [
+  {
+    family: 'ipv4',
+    address: '192.168.0.93',
+    port: 9993,
+    process: { evidence: 'known', name: 'pihole', pid: 111 },
+  },
+  {
+    family: 'ipv4',
+    address: '127.0.0.1',
+    port: 53,
+    process: { evidence: 'known', name: 'node', pid: 222 },
+  },
+  {
+    family: 'ipv4',
+    address: '0.0.0.0',
+    port: 22,
+    process: { evidence: 'known', name: 'sshd', pid: 333 },
+  },
+]
+
+describe('PortsPanel — the filter (nocx-cdub)', () => {
+  it('a port number finds the row a user expects', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: threeListeners })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+    const field = screen.getByLabelText('Filter ports')
+    fireEvent.input(field, { target: { value: '9993' } })
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(1))
+    expect(screen.getByText('192.168.0.93:9993')).toBeTruthy()
+    expect(screen.queryByText('127.0.0.1:53')).toBeNull()
+    expect(screen.queryByText('0.0.0.0:22')).toBeNull()
+  })
+
+  it('a partial address finds the row', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: threeListeners })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+    const field = screen.getByLabelText('Filter ports')
+    fireEvent.input(field, { target: { value: '192.168' } })
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(1))
+    expect(screen.getByText('192.168.0.93:9993')).toBeTruthy()
+  })
+
+  it('a process name finds the row — and a pid does not', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: threeListeners })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+    const field = screen.getByLabelText('Filter ports')
+
+    // The most natural query for "is pihole still listening" is the process
+    // name — matching only the address would fail it.
+    fireEvent.input(field, { target: { value: 'pihole' } })
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(1))
+    expect(screen.getByText('192.168.0.93:9993')).toBeTruthy()
+
+    // The pid is deliberately not matched: '111' is pihole's pid, and a
+    // query that hits it is a hit nobody meant.
+    fireEvent.input(field, { target: { value: '111' } })
+    await waitFor(() => expect(screen.queryAllByTestId('detected-row')).toHaveLength(0))
+    expect(screen.getByText('No ports match that')).toBeTruthy()
+  })
+
+  it('a query matching nothing says so instead of an empty heading', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: threeListeners })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+    const field = screen.getByLabelText('Filter ports')
+    fireEvent.input(field, { target: { value: 'zzz-nothing' } })
+    await waitFor(() => expect(screen.queryAllByTestId('detected-row')).toHaveLength(0))
+    expect(screen.getByText('No ports match that')).toBeTruthy()
+  })
+
+  it('clearing the filter restores the full list', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: threeListeners })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+    const field = screen.getByLabelText('Filter ports')
+    fireEvent.input(field, { target: { value: '9993' } })
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(1))
+    fireEvent.input(field, { target: { value: '' } })
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+  })
+
+  it("a live forward's row is never filtered out — Stop stays reachable", async () => {
+    const fwd = runningRecord({
+      destination: '192.168.0.93:9993',
+      actualBind: { host: '127.0.0.1', port: 9993 },
+      requestedBind: { host: '127.0.0.1', port: 9993 },
+    })
+    const services = fakeServices({
+      status: vi
+        .fn()
+        .mockResolvedValue(statusFixture({ listeners: threeListeners }, { forwards: [fwd] })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+    const field = screen.getByLabelText('Filter ports')
+    fireEvent.input(field, { target: { value: 'zzz-nothing' } })
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(1))
+    // The surviving row is the forwarded one, and its Stop action is on
+    // screen — a user who filters, forwards, then queries again can still
+    // stop what they started (decision 3).
+    expect(screen.getByTestId('ports-stop')).toBeTruthy()
+    expect(screen.queryByText('No ports match that')).toBeNull()
+  })
+
+  it("a self-stopped forward's row is never filtered out — Retry stays reachable", async () => {
+    const fwd = runningRecord({
+      destination: '192.168.0.93:9993',
+      actualBind: { host: '127.0.0.1', port: 9993 },
+      requestedBind: { host: '127.0.0.1', port: 9993 },
+      state: 'stopped',
+      stopReason: 'error',
+      error: 'connection reset',
+    })
+    const services = fakeServices({
+      status: vi
+        .fn()
+        .mockResolvedValue(statusFixture({ listeners: threeListeners }, { forwards: [fwd] })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(3))
+    const field = screen.getByLabelText('Filter ports')
+    fireEvent.input(field, { target: { value: 'zzz-nothing' } })
+    await waitFor(() => expect(screen.getAllByTestId('detected-row')).toHaveLength(1))
+    expect(screen.getByTestId('ports-retry-forward')).toBeTruthy()
+    expect(screen.queryByText('No ports match that')).toBeNull()
+  })
+})

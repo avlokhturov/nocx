@@ -27,6 +27,7 @@ import { EmptyState } from './ui/empty-state'
 import { IconButton } from './ui/icon-button'
 import { ArrowRightIcon, CopyIcon, ExternalLinkIcon, SquareIcon } from './ui/icons'
 import { MarkerList } from './ui/marker-list'
+import { SearchField } from './ui/search-field'
 import { Section } from './ui/section'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
@@ -141,6 +142,7 @@ export function PortsPanel(props: PortsPanelProps) {
   const [status, setStatus] = createSignal<PortsStatusResult | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [forwards, setForwards] = createSignal<Map<string, ForwardRecord>>(new Map())
+  const [query, setQuery] = createSignal('')
 
   /** The panel's view of the shared pause state. */
   const paused = () => props.pause.paused()
@@ -201,6 +203,10 @@ export function PortsPanel(props: PortsPanelProps) {
       setError(null)
       props.pause.reset()
       setForwards(new Map())
+      // The filter is part of the re-scoped state: a query typed for the
+      // previous host must not meet the next host's list half-filtered
+      // (nocx-cdub decision 4).
+      setQuery('')
     }),
   )
 
@@ -328,6 +334,11 @@ export function PortsPanel(props: PortsPanelProps) {
   const st = () => status()?.discovery
   const host = () => status()?.host ?? ''
   const listeners = () => st()?.listeners ?? []
+  /** The discovery states that can hold rows — the only states the filter
+   *  and the rows appear in. A failure state has no list to filter, and
+   *  showing a search box above an explanation reads as noise (nocx-cdub). */
+  const listAvailable = (): boolean =>
+    st()?.state === 'available' || st()?.state === 'available-limited'
   /** Reading, as opposed to having nothing to read. No status yet is always
    *  loading; a connected target whose first sample has not landed is too —
    *  that window is the settle delay plus a round trip, and showing nothing
@@ -411,6 +422,46 @@ export function PortsPanel(props: PortsPanelProps) {
    *  tracked), and the row would never change (W2). */
   const detectedRows = () => listeners().map((l) => ({ listener: l, fwd: forwardFor(l) }))
 
+  type DetectedRow = {
+    listener: PortsStatusResult['discovery']['listeners'][number]
+    fwd: ForwardRecord | undefined
+  }
+
+  /** A row that carries a forward in a state the user must still be able to
+   *  act on — running (Stop) or self-stopped (Retry) — is never hidden by
+   *  the filter: the filter exists to find rows, never to strand an action
+   *  (nocx-cdub decision 3). */
+  const carriesActionableForward = (r: DetectedRow): boolean =>
+    r.fwd !== undefined && (r.fwd.state === 'running' || isSelfStopped(r.fwd))
+
+  /** What a row matches against: the rendered address (which carries the
+   *  port), the port on its own, the process name when the probe could name
+   *  it, and the forward's destination when one owns the row. The pid is
+   *  deliberately not matched — it is restart-unstable and not something a
+   *  user types, and matching it lets a query hit a row nobody meant
+   *  (nocx-cdub decision 1). */
+  const rowHaystack = (r: DetectedRow): string => {
+    const l = r.listener
+    const parts = [`${l.address}:${l.port}`, String(l.port)]
+    if (l.process.evidence === 'known') parts.push(l.process.name)
+    if (r.fwd !== undefined) parts.push(r.fwd.destination)
+    return parts.join(' ')
+  }
+
+  /** The Detected section's rows after the filter. A row carrying a live or
+   *  self-stopped forward keeps its Stop/Retry on screen whatever the query
+   *  says; everything else must match the query. The orphaned forwards are
+   *  deliberately outside the filter: every one of them is by construction
+   *  running or self-stopped, so filtering them could only hide a stoppable
+   *  or retryable forward (nocx-cdub decision 3). */
+  const visibleRows = (): DetectedRow[] => {
+    const q = query().trim().toLowerCase()
+    if (q === '') return detectedRows()
+    return detectedRows().filter(
+      (r) => carriesActionableForward(r) || rowHaystack(r).toLowerCase().includes(q),
+    )
+  }
+
   const processLabel = (p: { evidence: string; name: string; pid: number }): string => {
     switch (p.evidence) {
       case 'known':
@@ -493,6 +544,25 @@ export function PortsPanel(props: PortsPanelProps) {
               />
             </Show>
             <Show when={!st()?.connLost}>
+              {/* The filter sits ABOVE the sections it governs — a query
+                    is about the whole panel, and the kit's SearchField is
+                    the one search vocabulary (the one connections.tsx and
+                    secrets.tsx drive). It appears only in the discovery
+                    states that can hold rows: a failure state has no list
+                    to filter, so a search box above an explanation would be
+                    noise. The orphaned forwards are deliberately outside
+                    the filter — every one of them is running or self-stopped
+                    by construction, so filtering them could only hide a
+                    forward the user must still be able to stop or retry
+                    (nocx-cdub decision 3). */}
+              <Show when={listAvailable()}>
+                <SearchField
+                  value={query()}
+                  onInput={setQuery}
+                  placeholder="Filter ports"
+                  ariaLabel="Filter ports"
+                />
+              </Show>
               <Section title="Detected" divided dense>
                 {/* Whose listeners these are, said out loud and always. The
                     panel had no such statement, so a tab titled
@@ -544,23 +614,15 @@ export function PortsPanel(props: PortsPanelProps) {
                     description="The settle sample runs shortly after the connection comes up."
                   />
                 </Show>
-                <Show when={st()?.state === 'available' || st()?.state === 'available-limited'}>
+                <Show when={listAvailable()}>
                   {/* Stated once, above the rows it applies to. */}
                   <Show when={hiddenOwners()}>
                     <p class="ports-note" data-testid="ports-owners-note">
                       Some owners are hidden — run as root to see them.
                     </p>
                   </Show>
-                  <Show
-                    when={listeners().length > 0}
-                    fallback={
-                      <EmptyState
-                        title="Nothing is listening"
-                        description={`No listeners observed on ${host()}.`}
-                      />
-                    }
-                  >
-                    <For each={detectedRows()}>
+                  <Show when={visibleRows().length > 0}>
+                    <For each={visibleRows()}>
                       {(row) => {
                         const fwd = row.fwd
                         const running = fwd?.state === 'running' ? fwd : undefined
@@ -726,6 +788,26 @@ export function PortsPanel(props: PortsPanelProps) {
                         )
                       }}
                     </For>
+                  </Show>
+                  {/* A query matching nothing says so: a heading with a
+                      hairline and nothing under it is the shape a user
+                      reads as broken, and "Nothing is listening" would be
+                      a lie the user can disprove by clearing the box. */}
+                  <Show when={visibleRows().length === 0}>
+                    <Show
+                      when={query().trim() === ''}
+                      fallback={
+                        <EmptyState
+                          title="No ports match that"
+                          description="Clear the filter to see the full list."
+                        />
+                      }
+                    >
+                      <EmptyState
+                        title="Nothing is listening"
+                        description={`No listeners observed on ${host()}.`}
+                      />
+                    </Show>
                   </Show>
                 </Show>
               </Section>
