@@ -85,29 +85,41 @@ what they already decided, **before** it says what to build.
   (§6). Snippet **text** reaching a PTY travels the data plane as an ordinary paste; it
   is never wrapped in JSON.
 - **AD-6 (single-owner state).** Already owned, and not re-owned here: bracketed-paste
-  wrapping (the terminal engine — `input-target.ts` says so explicitly, and
-  `bd memories` records a session that hand-rolled `ESC[200~` and broke), "is this a
+  wrapping (the terminal engine — `renderers/types.ts:153-155` says the renderer defers to
+  xterm's `term.paste()`, and `bd memories` records a session that hand-rolled `ESC[200~`
+  and broke), "is this a
   secret" (`secret-candidate.ts`), the reference grammar (`secret-reference.ts`, whose
   own comment calls itself _"one scan shared by every consumer … the one writer of the
   grammar, beside its one reader"_), the completion dropdown's key ownership
   (`suggest/controller.ts`).
-- **AD-8 + ADR-0004 §3 (pluggable input targets).** `input-target.ts` already exists and
-  already says: _"a registered InputTarget decides where a submitted document goes. New
-  kinds (shell now, LLM agent later) are added by registering a target, never by editing
-  the editor."_ → snippets **extend that registry** (§9). We do not invent a parallel
-  `SnippetDestination`.
+- **AD-8 (one owner per behaviour).** ~~`input-target.ts` already exists…~~ **Struck
+  2026-08-14 (`nocx-9zij`): that file has no production caller, and citing it here is what
+  let a second destination derivation into this design.** The behaviour "where does text
+  go when the user is typing in this pane" is owned by `TerminalContent.insertSecret`
+  (`terminal-content.ts:2248`), wired from `main.tsx:738`. → snippets become a **second
+  policy over that one derivation** (§9.2), and this document may not cite
+  `input-target.ts` as an existing seam until it has a production caller (§9.2a).
 - **ADR-0013 + `frontend/src/ui/README.md`.** Surfaces place kit components and never
   repaint them; no colour literals. → the palette is a `FloatingPanel` variant (§10.1),
-  the settings page is `PageSection`/`RowList`/`Field`, empty is `EmptyState`.
+  the settings page is `PageSection`/`EditableRowList`/`Field`, empty is `EmptyState`
+  (the kit exports `EditableRowList`, not `RowList` — `ui/row-list.tsx:46`).
 - **ADR-0016/0017 (vault references).** `{{secret:NAME}}` is an existing, owned grammar
   resolved by `vault.resolveLine` at submit. → §7 shares the **namespace registry** and
   leaves `secret-reference.ts` and the secret path untouched.
 
 Nothing here proposes changing an `AD`, and after the stress test nothing here edits a
-file on the vault's path either (§7.3). The one addition to an existing interface is
-`InputTarget.insert` (§9.1), which is the extension ADR-0004 §3 was written to invite. If
-a reviewer reads it as a change to a settled interface rather than an extension of it,
-that becomes an ADR before implementation, not during.
+file on the vault's path either (§7.3). The one change to an existing production type is
+the extraction in §9.2: `TerminalContent` grows one private derivation that
+`insertSecret` then calls instead of inlining. That is a refactor of one method's first
+three lines, and `insertSecret`'s behaviour must be unchanged across it — a
+characterisation test asserting that is part of the work.
+
+> **Method note, kept because it is the lesson and not the fix.** The struck bullet above
+> was written from `input-target.ts`'s own header comment, which describes a registry that
+> is real code and has no caller. A file describing itself is not evidence that the
+> product uses it, and a brief that cites one as an existing seam has skipped the cheapest
+> check there is. Every "already exists" claim in a spec is a `grep` for the constructor
+> away from being true or false.
 
 ## 5. The store
 
@@ -360,61 +372,110 @@ must cost nothing.
 
 ## 9. Where the text lands
 
-### 9.1 The seam already exists
+### 9.1 The seam this section first named does not exist in the product
 
-`input-target.ts` (ADR-0004 §3) is the registry. It carries `submit(doc, ctx)`. Snippets
-need _insert without submit_, so `InputTarget` gains one optional member:
+**Revised 2026-08-14 (`nocx-9zij`), after an adversarial review found this section's
+premise false.** What was written here before:
+
+> `input-target.ts` (ADR-0004 §3) is the registry … Snippets need _insert without submit_,
+> so `InputTarget` gains one optional member.
+
+`input-target.ts` says exactly that about itself, and §4 of this document quoted it as the
+reason no parallel seam was needed. It is true of the file and false of the product:
+
+```
+grep -rn "createRegistry" frontend/src
+→ input-target.ts:60  (the definition)
+→ input-target.test.ts (its own tests)
+```
+
+No production caller. This is the `nocx-rtg0` shape — real code, real tests, an
+unreachable half — and the check that catches it is AGENTS.md "Before you fix anything"
+#5, _is the code reachable, who constructs it_. It was not run against `input-target.ts`
+when this section was written, and "the seam already exists" was written from the file's
+own comment rather than from the call graph.
+
+### 9.1a What actually owns this, and already does most of it
+
+`TerminalContent.insertSecret` (`terminal-content.ts:2248`), wired from
+`main.tsx:738` / `757`:
 
 ```ts
-export interface InputTarget {
-  readonly id: string
-  readonly label: string
-  submit(doc: string, ctx: SubmitContext): Promise<void>
-  editorExtensions?(): Extension[]
-  /** Put `text` where this target takes input, WITHOUT accepting it.
-   *  Absent when the target has no such notion; §9.2 then skips it. */
-  insert?(text: string): Promise<void>
+async insertSecret(name: string): Promise<'reference' | 'value' | 'unavailable'> {
+  if (this.editor?.isVisible === true) {
+    this.editor.insertText(secretReference(name))
+    return 'reference'
+  }
+  if (!this.session || !this.vault) return 'unavailable'
+  const resolved = await this.vault.resolveLine(secretReference(name))
+  if (resolved.refs.some((r) => !r.resolved)) return 'unavailable'
+  this.session.send(resolved.line + '\n')
+  return 'value'
 }
 ```
 
-Optional, not required: a target that cannot express "typed but not sent" must not be
-forced to fake it. The assistant target, when `nocx-x8s2` lands, implements `insert` and
-appears in §9.2 with no edit here — that is the seam's acceptance test.
+That is, already in production: the destination derivation this section proposed to
+invent (**editor visible → the editor's draft; otherwise → the pty**), _and_ the refusal
+on an unresolvable `{{secret:…}}` that §11.1 proposed to write a second time. Its own
+comment states the principle this feature was going to restate: the pane decides what is
+inserted "because only there is the answer known".
 
-### 9.2 Choosing the destination — derived, not asked
+So snippets do not get a second derivation. They get a second **policy** over the one
+derivation.
 
-There is exactly one derivation, in one module:
+### 9.2 One derivation, two policies
 
-| Live state                                                              | destination                                                                         |
-| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| the command editor is showing (at a trusted prompt)                     | the active `InputTarget.insert` — the shell target puts text in the editor document |
-| a program owns the pane (`running`; the editor has yielded its box)     | the pane's PTY, via the terminal engine's paste path                                |
-| the user held ⌘ on accept (⌘Enter in the palette, ⌘click on a menu row) | the clipboard, via `clipboard.ts`                                                   |
+Extract the question `insertSecret` already answers into a single owner on
+`TerminalContent`:
 
-The clipboard is the one destination that cannot be derived from live state — it is a
-statement of intent about somewhere outside nocx — so it is the one that takes an
-explicit modifier. ⌘Enter is free precisely because §9.3 refused to spend it on
+```ts
+/** Who owns input in this pane right now. The one derivation; every caller
+ *  reads it and none re-derives it. */
+type InputOwner = 'editor' | 'pty' | 'none'
+private inputOwner(): InputOwner
+```
+
+`insertSecret` becomes a caller of it, unchanged in behaviour. Snippets become the second
+caller. The two differ in ways that are **policy, not mode**, and are stated here so
+nobody later "unifies" them into a flag:
+
+|                 | secret policy (existing)                                                       | snippet policy (new)                                                    |
+| --------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| into the editor | the **reference** `{{secret:NAME}}`, so the chip renders and submit resolves   | the resolved snippet text                                               |
+| into the pty    | the **resolved value**, via `vault.resolveLine`                                | the resolved snippet text, `{{secret:…}}` resolved the same way (§11.1) |
+| newline         | **appended** — a password prompt echoes nothing and wants the answer submitted | **never** (§9.3)                                                        |
+
+Two policies over one derivation is what AD-8 asks for — the variation is what the caller
+supplies, not a branch inside the owner. One derivation with two `if (owner === …)`
+switches in two callers would be the thing it forbids, so the extraction must hand the
+caller its policy rather than let each caller re-branch.
+
+**The clipboard is not in the derivation at all.** It cannot be derived from live state —
+it is a statement of intent about somewhere outside nocx — so it is an explicit modifier
+(⌘Enter in the palette). ⌘Enter is free precisely because §9.3 refused to spend it on
 "insert and submit".
 
-The second row is the primary case and the reason the palette exists at all: while
-`claude` runs there **is no command editor** — `scrollback/controller.ts` names `claude`
-among the TUIs that repaint a whole screen _without_ the alternate buffer, and the editor
-"takes its box away when it hides". A snippets surface that lived only in the editor's
-dropdown could not serve it, which is why that approach was rejected during design.
+**`none` is a refusal, never a fallthrough.** If the pane has no editor and no session,
+the fire is refused and says so. The reviewed draft of this section let an absent
+`insert` fall through to the pty, which would deliver text to a different owner than the
+surface the user is looking at.
+
+The pty branch is the primary case and the reason the palette exists at all: while
+`claude` runs there **is no command editor** — `scrollback/controller.ts:249-279` names
+`claude` among the TUIs that repaint a whole screen _without_ the alternate buffer, and
+the editor yields its box. A snippets surface that lived only in the editor's dropdown
+could not serve it. (This part of the original section was checked and holds.)
 
 **The paste goes through the terminal engine, never hand-wrapped.** Bracketed-paste
-(mode 2004) is the engine's to decide, `ShellInputTarget` says so in a comment, and a
-recorded memory documents a session that hand-rolled `ESC[200~…ESC[201~` and broke
-submission.
+(mode 2004) is the engine's to decide, and a recorded memory documents a session that
+hand-rolled `ESC[200~…ESC[201~` and broke submission.
 
-**Optionality has exactly one reader** — added by the stress test (branch 5). An optional
-interface member is a fork waiting to happen: AD-8 forbids variation expressed as a flag
-consumers test. The invariant that keeps this one honest is that **the derivation in §9.2
-is the only code that reads whether `insert` is present**, and it reads it to _choose a
-destination_, never to work around a missing one. No other call site writes
-`if (target.insert)`. A destination that cannot insert is therefore never offered and
-never refused at click time — which is the disabled-then-rejected shape `capability.ts`
-exists to prevent.
+### 9.2a What becomes of `input-target.ts`
+
+It is not this feature's to fix, and it must not be left as a seam that documents point
+at. Either it gets a production caller deliberately, or it is deleted — `bd` decides,
+under `nocx-9zij`. Until then **no section of this spec may cite it as an existing seam**,
+which is the sentence that would have prevented this defect.
 
 ### 9.3 Insert, never submit
 
@@ -537,17 +598,37 @@ Recognition is also the honest place to report an unknown namespace: `{{cwd}}` a
 `vault.resolveLine`'s own schema states the principle: _"an unresolved name is reported,
 never silently left as literal text."_
 
+**Revised 2026-08-14 (`nocx-9zij`).** The first draft said the pty path could not resolve
+a reference and therefore had to refuse. That was written from the same wrong premise as
+§9.1: the pty path in `insertSecret` **does** resolve, by calling `vault.resolveLine` and
+refusing only when a name comes back unresolved. Snippets inherit that, rather than
+inventing a stricter rule for themselves.
+
 - **To the editor.** Nothing special: the reference arrives as text, the chip decorates
   it, submit resolves it. This is the path that works, and the reason a snippet is
   allowed to contain one at all.
-- **To a PTY or the clipboard.** Nothing on that path can resolve it, and shipping the
-  literal `{{secret:prod-db}}` into someone's agent session is both useless and a leak of
-  the vault's naming. **The fire is refused**, names the reference, and offers the one
-  destination that can resolve it. Refusal is a rendered state on the palette, not a
-  toast that disappears.
+- **To a PTY.** The same call `insertSecret` already makes: `vault.resolveLine` over the
+  resolved snippet text, then the substituted line to the session. A name that does not
+  resolve refuses the whole fire and says which name — never the literal
+  `{{secret:prod-db}}` into somebody's agent session. A **sealed** vault is an error
+  distinct from "no such secret" (code `-32001`, the schema's own distinction), and the
+  palette raises the unlock prompt rather than reporting a failure the user could have
+  fixed.
+- **To the clipboard.** **Refused**, and this is the one place a stricter rule than
+  `insertSecret`'s is deliberate: the clipboard is read by everything on the machine and
+  outlives the fire, so putting a resolved secret there is a different exposure from
+  handing it to the program the user is looking at. The refusal names the reference and
+  offers the pty instead.
 - **Saving** a snippet containing one is allowed and unremarked. `secret-candidate.ts`
   already owns "this looks like a raw secret" on the editor path; a second detector here
   would be a second owner of one predicate.
+
+**Consequence, stated because it is an authority decision and not an implementation
+detail:** a snippet can put a real secret into a running program's input. That is not new
+authority — `insertSecret` does exactly this today, from the same vault, into the same
+pane, and the whole point of `{{secret:…}}` is that the value reaches the far side. What
+would be new is doing it _silently_, so the palette reports which references it resolved,
+the way `insertSecret`'s caller toasts "Secret sent — the prompt echoes nothing".
 
 ### 11.2 An `env:` key that cannot be answered
 
@@ -658,19 +739,19 @@ codebase rather than by asking.
 
 ### Resolved decisions
 
-| #   | Branch                                            | Resolution                                                                                                                                                                                                                    |
-| --- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Grammar: extend `secret-reference.ts`?            | **Reversed.** Share the namespace registry, not the scan. `env`/`ask` are resolved before insertion, so a shared scan buys nothing at runtime while putting the vault's resolution path in this feature's change budget. §7.2 |
-| 2   | Security: `ask:` values may be secrets            | **Invariant added.** Never persisted, never logged, no last-value memory, not a masked field, and stated as no worse than typing by hand. §7.5                                                                                |
-| 3   | `{{env:last_command}}`                            | **Cut.** A guess, not a case, and the one key that moves prior command text into a model-bound prompt. §7.4                                                                                                                   |
-| 4   | `Enabled` flag                                    | **Cut.** It exists in termic to serve built-ins; with none, "disabled" is "deleted but still in the way". §5.1                                                                                                                |
-| 5   | Optional `insert?()` vs AD-8                      | **Kept, with the invariant that makes it honest:** §9.2's derivation is the only reader of its presence, and it reads it to choose, never to work around. §9.2                                                                |
-| 6   | A malformed span fires silently                   | **Authoring-time preview added.** The settings editor renders what the parser recognised and what each span becomes. §10.4                                                                                                    |
-| 7   | Shell destination vs `alias`/`Ctrl-R`             | **Scope sharpened, no change of shape.** We do not beat aliases and should not claim to; the value is in destinations with no such mechanism. §3.1                                                                            |
-| 8   | Is the e2e check actually runnable?               | **Tightened.** `cat` + tty `ECHO` makes "inserted, not submitted" observable; single-line on the happy path; every step waits on state, never a duration. §12                                                                 |
-| 9   | Store scale                                       | **N/A, with numbers.** 500 × 4 KB ≈ 2 MB, whole-document rewrite per hand-made edit; no incremental path, and none to be added without a measurement. §5.1                                                                    |
-| 10  | _(reflexion)_ Multi-line body into a PTY          | **New section.** "Insert, never submit" is not ours to guarantee when bracketed paste is off — refuse, name the reason, offer the clipboard. Touches the primary case. §9.4                                                   |
-| 11  | _(reflexion)_ "Rides the existing backup surface" | **The spec was wrong.** `internal/backup` has a hand-written document with named sections and does not enumerate storage modules. Promoted from an assumption to a work item plus a round-trip assertion. §5.4                |
+| #   | Branch                                            | Resolution                                                                                                                                                                                                                                                                                           |
+| --- | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Grammar: extend `secret-reference.ts`?            | **Reversed.** Share the namespace registry, not the scan. `env`/`ask` are resolved before insertion, so a shared scan buys nothing at runtime while putting the vault's resolution path in this feature's change budget. §7.2                                                                        |
+| 2   | Security: `ask:` values may be secrets            | **Invariant added.** Never persisted, never logged, no last-value memory, not a masked field, and stated as no worse than typing by hand. §7.5                                                                                                                                                       |
+| 3   | `{{env:last_command}}`                            | **Cut.** A guess, not a case, and the one key that moves prior command text into a model-bound prompt. §7.4                                                                                                                                                                                          |
+| 4   | `Enabled` flag                                    | **Cut.** It exists in termic to serve built-ins; with none, "disabled" is "deleted but still in the way". §5.1                                                                                                                                                                                       |
+| 5   | Optional `insert?()` vs AD-8                      | **Superseded 2026-08-14 by `nocx-9zij`.** The branch resolved correctly given a false premise: there is no `insert?()`, because the interface it would sit on has no production caller. The invariant it produced still holds in its new home — one derivation, policies supplied by callers (§9.2). |
+| 6   | A malformed span fires silently                   | **Authoring-time preview added.** The settings editor renders what the parser recognised and what each span becomes. §10.4                                                                                                                                                                           |
+| 7   | Shell destination vs `alias`/`Ctrl-R`             | **Scope sharpened, no change of shape.** We do not beat aliases and should not claim to; the value is in destinations with no such mechanism. §3.1                                                                                                                                                   |
+| 8   | Is the e2e check actually runnable?               | **Tightened.** `cat` + tty `ECHO` makes "inserted, not submitted" observable; single-line on the happy path; every step waits on state, never a duration. §12                                                                                                                                        |
+| 9   | Store scale                                       | **N/A, with numbers.** 500 × 4 KB ≈ 2 MB, whole-document rewrite per hand-made edit; no incremental path, and none to be added without a measurement. §5.1                                                                                                                                           |
+| 10  | _(reflexion)_ Multi-line body into a PTY          | **New section.** "Insert, never submit" is not ours to guarantee when bracketed paste is off — refuse, name the reason, offer the clipboard. Touches the primary case. §9.4                                                                                                                          |
+| 11  | _(reflexion)_ "Rides the existing backup surface" | **The spec was wrong.** `internal/backup` has a hand-written document with named sections and does not enumerate storage modules. Promoted from an assumption to a work item plus a round-trip assertion. §5.4                                                                                       |
 
 Also added along the way: which pane and where focus lands (§9.5), and delete-confirms
 (§5.5).
