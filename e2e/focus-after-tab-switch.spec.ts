@@ -123,4 +123,59 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
     await page.keyboard.press('Enter')
     await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
   })
+
+  /**
+   * The bead names three ways to arrive at a tab, and only the click was
+   * watched. The other two reach `TabManager.activate()` through their own
+   * callers — `Cmd/Ctrl+1..9` through `activateByIndex`, a close through
+   * whatever the MRU stack pops (tabs.ts:830-857) — so "the click path is
+   * green" is a statement about one caller, not about activation. Each is
+   * asserted the same way as the click: focus in THIS tab's editor, and a
+   * keystroke that demonstrably reaches THIS tab's shell.
+   */
+  test('the keyboard shortcut hands the keyboard over too', async ({ page }) => {
+    await page.goto('/')
+    await promptReady(page)
+    await page.locator(TAB_ADD).click()
+    await expect(page.locator(TAB)).toHaveCount(2)
+    await promptReady(page)
+
+    // Tab 2 is active; go back to tab 1 without touching the mouse at all.
+    await page.keyboard.press('Meta+1')
+    await expect(page.locator(TAB).first()).toHaveAttribute('aria-selected', 'true')
+
+    await expect.poll(() => focusedClass(page), { timeout: 5000 }).toContain('nocx-editor-input')
+    const focusedInActivePane = await page.evaluate(() => {
+      const active = document.querySelector('.pane.active')
+      const el = document.activeElement
+      return active !== null && el !== null && active.contains(el)
+    })
+    expect(focusedInActivePane).toBe(true)
+
+    const marker = `KB-${Date.now().toString(36)}`
+    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
+    await page.keyboard.press('Enter')
+    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
+  })
+
+  test('closing the active tab leaves the survivor taking keystrokes', async ({ page }) => {
+    await page.goto('/')
+    await promptReady(page)
+    await page.locator(TAB_ADD).click()
+    await expect(page.locator(TAB)).toHaveCount(2)
+    await promptReady(page)
+
+    // Close the tab that is active. Nobody chose the survivor — it is handed
+    // the keyboard by the close, which is exactly the case a user cannot
+    // rescue with a click on a tab they never meant to leave.
+    await page.keyboard.press('Meta+w')
+    await expect(page.locator(TAB)).toHaveCount(1)
+
+    await expect.poll(() => focusedClass(page), { timeout: 5000 }).toContain('nocx-editor-input')
+
+    const marker = `CW-${Date.now().toString(36)}`
+    await page.keyboard.type(`printf '\\033]0;${marker}\\007'`)
+    await page.keyboard.press('Enter')
+    await expect(page.locator(TITLE).first()).toHaveText(marker, { timeout: 5000 })
+  })
 })

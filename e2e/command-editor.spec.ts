@@ -139,4 +139,54 @@ test.describe('command editor (nocx-4ff)', () => {
     // neighbouring word, or the whitespace between two.
     expect(sel.text).toBe('world')
   })
+
+  /**
+   * The DONE WHEN of the CM6 epic (nocx-2gf): shell token highlighting is
+   * visible in the running app.
+   *
+   * `editor.test.ts` already asserts what the grammar produces, thoroughly and
+   * in jsdom — which is where the gap was. jsdom loads no stylesheet, so a
+   * token class there proves the tokenizer ran and says nothing about whether
+   * anything is painted: a build that dropped style.css, or renamed the
+   * classes on one side only, keeps every one of those tests green while the
+   * user looks at one flat colour.
+   *
+   * So this asserts the two halves that only a real browser can: the classes
+   * appear on the live line, and the roles are painted APART. Distinctness is
+   * the honest form of "visible" — comparing against a hard-coded hex would
+   * assert the current theme (there are several, and they are user-chosen),
+   * while a role that shares its neighbour's colour is exactly the failure a
+   * person would report.
+   */
+  test('shell tokens are classed and painted apart in the running app', async ({ page }) => {
+    await waitForPrompt(page)
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 8000 })
+    await page.locator(INPUT).fill('ls -la | grep foo')
+
+    const roles = await page.evaluate(() => {
+      const input = document.querySelector('.nocx-editor-input')
+      if (input === null) throw new Error('editor input not in the document')
+      const seen: Record<string, { text: string; color: string }> = {}
+      for (const span of input.querySelectorAll<HTMLElement>('[class*="tok-"]')) {
+        for (const cls of span.className.split(/\s+/)) {
+          if (cls.startsWith('tok-') && !(cls in seen)) {
+            seen[cls] = { text: span.textContent ?? '', color: getComputedStyle(span).color }
+          }
+        }
+      }
+      return seen
+    })
+
+    // The grammar is running against the live line, not only in a unit test.
+    expect(roles['tok-flag']?.text).toBe('-la')
+    expect(roles['tok-operator']?.text).toBe('|')
+
+    // And the roles do not share a colour. `tok-command` is deliberately left
+    // out of the comparison: a command word the session cannot resolve gives
+    // up the command colour by design (.tok-command.tok-unresolved in
+    // style.css), so its paint depends on what the shell reported, which is
+    // not what this test is about.
+    expect(roles['tok-flag']?.color).not.toBe(roles['tok-operator']?.color)
+    expect(roles['tok-path']?.color).not.toBe(roles['tok-operator']?.color)
+  })
 })
