@@ -99,6 +99,13 @@ export interface QuickConnectItem {
   readonly badge?: string
   /** The row's type, shown as a badge on the right in palette mode. */
   readonly kind: QuickConnectItemKind
+  /** When true, this row may appear in the caret's plain server list even
+   *  though it is not a host. Opt-in per item, never per kind: admitting
+   *  every command would put "Forward a port" in front of the caret, and
+   *  forwarding a port is a different job from connecting to a machine.
+   *  Only "New connection" sets it — creating a connection is still about
+   *  connecting, one you have not saved yet (nocx-d4us). */
+  readonly allowInHosts?: boolean
   /** When present, activating this command drills into its steps inside the
    *  same surface instead of running (nocx-4t37). */
   readonly drill?: DrillCommand
@@ -218,6 +225,12 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
         run: () => void this.newTab(),
       },
       {
+        // The one command row the caret admits (nocx-d4us): creating a
+        // connection is still connecting to a machine — one not saved yet —
+        // the same need the ad-hoc "Connect to <host>" serves from the other
+        // end. Admitted by this flag, never by kind, so "Forward a port" and
+        // any future command stay out of the caret.
+        allowInHosts: true,
         id: '__new_connection__',
         kind: 'command',
         label: 'New connection',
@@ -707,27 +720,39 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     const q = query().trim().toLowerCase()
     // Each variant admits exactly one kind set, and 'secret' is in exactly
     // one of them: the palette must not offer a row whose Enter types into
-    // the pane in front.
-    const admits = (kind: QuickConnectItemKind): boolean => {
-      if (props.variant === 'hosts') return kind === 'host'
-      if (props.variant === 'secrets') return kind === 'secret'
-      return kind !== 'secret'
+    // the pane in front. The caret's one exception is per-item, not per-kind:
+    // "New connection" (allowInHosts) is about connecting to a machine — one
+    // not saved yet — so it belongs to the caret's single job, while "Forward
+    // a port" and every other command stay out (nocx-d4us).
+    const admits = (item: QuickConnectItem): boolean => {
+      if (props.variant === 'hosts') return item.kind === 'host' || item.allowInHosts === true
+      if (props.variant === 'secrets') return item.kind === 'secret'
+      return item.kind !== 'secret'
     }
     // Rows that always sit last — the vault's "Add a secret…". Admitted by
     // the same kind rule as everything else, so the offer to create a secret
     // cannot appear in the palette or the server list.
     const trailing: GroupedItem[] = []
     for (const provider of props.providers) {
-      const providerItems = (provider.getTrailingItems?.(query()) ?? []).filter((it) =>
-        admits(it.kind),
-      )
+      const providerItems = (provider.getTrailingItems?.(query()) ?? []).filter((it) => admits(it))
       trailing.push(...providerItems.map((item) => ({ ...item, providerId: provider.id })))
     }
 
     const matched = items().filter(
-      (it) => admits(it.kind) && (q === '' || matchesText(it.label, it.detail, q)),
+      (it) => admits(it) && (q === '' || matchesText(it.label, it.detail, q)),
     )
-    if (matched.length > 0) return [...matched, ...trailing]
+    if (matched.length > 0) {
+      if (props.variant === 'hosts') {
+        // Hosts keep their order — Enter on an empty query still activates
+        // the first saved host — and the admitted command row ("New
+        // connection") follows them instead of jumping ahead of them (the
+        // actions provider is first in the app's provider list).
+        const hostRows = matched.filter((it) => it.kind === 'host')
+        const caretRows = matched.filter((it) => it.kind !== 'host')
+        return [...hostRows, ...caretRows, ...trailing]
+      }
+      return [...matched, ...trailing]
+    }
 
     // Nothing static matched — consult the query-dependent providers (the
     // ad-hoc "Connect to <host>" fallback). Only reached when every real

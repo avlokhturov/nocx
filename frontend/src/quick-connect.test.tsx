@@ -1257,6 +1257,161 @@ describe('palette and drill-in', () => {
   })
 })
 
+/* ── The caret admits a way to create a connection (nocx-d4us) ──────── */
+
+describe('the caret offers "New connection" (nocx-d4us)', () => {
+  let container: HTMLDivElement
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.append(container)
+  })
+
+  afterEach(() => {
+    container.remove()
+  })
+
+  async function waitForItems(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  /** The full picker, as the app wires it (main.tsx): the actions provider
+   *  FIRST (its "New connection" row would otherwise jump ahead of every
+   *  saved host), one saved profile, the drill command, ad-hoc. */
+  function makeCaret(run = vi.fn()) {
+    const newConnection = vi.fn()
+    const newSSHTab = vi.fn()
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    const drillCommand = {
+      id: '__forward_port__',
+      label: 'Forward a port',
+      detail: 'Expose a port on this machine',
+      steps: [
+        {
+          name: 'server',
+          fetch: () =>
+            Promise.resolve([{ id: 'srv-1', label: 'deploy@example.com', detail: 'Prod' }]),
+        },
+        {
+          name: 'port',
+          fetch: () =>
+            Promise.resolve([
+              { id: 'port-8080', label: ':8080', detail: '10.0.0.1:8080', value: '10.0.0.1:8080' },
+            ]),
+        },
+      ],
+      run,
+    }
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), newConnection, drillCommand),
+      new SSHQuickConnectProvider(
+        {
+          listProfiles: vi.fn().mockResolvedValue([
+            {
+              id: 'ssh:custom:prod:uuid',
+              type: 'ssh' as const,
+              name: 'Production DB',
+              options: { host: 'example.com', port: 22, user: 'deploy' },
+            },
+          ]),
+        } as never,
+        newSSHTab,
+      ),
+      new AdHocQuickConnectProvider(vi.fn()),
+    ]
+    ctrl.mount(container, providers)
+    return { ctrl, newConnection, newSSHTab }
+  }
+
+  function labels(): string[] {
+    return Array.from(container.querySelectorAll('.quick-connect__item')).map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+  }
+
+  it('lists a row for creating a connection, after the saved hosts, and activating it reaches startNewConnection()', async () => {
+    const { ctrl, newConnection } = makeCaret()
+    ctrl.show()
+    await waitForItems()
+
+    const shown = labels()
+    expect(shown.some((l) => l.includes('New connection'))).toBe(true)
+    expect(shown.some((l) => l.includes('Define an SSH connection'))).toBe(true)
+
+    // The saved host is still the first row: the create affordance is added
+    // after the hosts, not in front of them.
+    expect(shown[0]).toContain('deploy@example.com')
+
+    const row = [...container.querySelectorAll<HTMLElement>('.quick-connect__item')].find((el) =>
+      (el.textContent ?? '').includes('New connection'),
+    )
+    expect(row).toBeTruthy()
+    row?.click()
+
+    expect(newConnection).toHaveBeenCalledOnce()
+    const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
+    expect(dialog?.open).toBe(false)
+  })
+
+  it('keeps "Forward a port" out of the caret — admitted by flag, not by kind', async () => {
+    const { ctrl } = makeCaret()
+    ctrl.show()
+    await waitForItems()
+
+    const shown = labels()
+    expect(shown.some((l) => l.includes('Forward a port'))).toBe(false)
+    expect(shown.some((l) => l.includes('Local shell'))).toBe(false)
+  })
+
+  it('Enter on an empty query in the caret still activates the first saved host', async () => {
+    const { ctrl, newSSHTab, newConnection } = makeCaret()
+    ctrl.show()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+
+    expect(newSSHTab).toHaveBeenCalledWith('ssh:custom:prod:uuid', 'example.com', 'deploy')
+    expect(newConnection).not.toHaveBeenCalled()
+  })
+
+  it('the palette still shows both command rows — New connection and Forward a port', async () => {
+    const { ctrl } = makeCaret()
+    ctrl.showPalette()
+    await waitForItems()
+
+    const shown = labels()
+    expect(shown.some((l) => l.includes('New connection'))).toBe(true)
+    expect(shown.some((l) => l.includes('Forward a port'))).toBe(true)
+  })
+
+  it('the secrets variant still admits no command row — the flagged one included', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    ctrl.mount(container, [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SecretsQuickConnectProvider({
+        status: () => Promise.resolve({ state: 'unsealed' as const }),
+        inventory: () => Promise.resolve({ entries: [] }),
+        insert: vi.fn(),
+        create: vi.fn(),
+        requestUnseal: vi.fn(),
+        requestSetup: vi.fn(),
+      }),
+    ])
+    ctrl.showSecrets()
+    await waitForItems()
+
+    const rows = [...container.querySelectorAll('[role="option"]')].map((el) =>
+      (el.textContent ?? '').trim(),
+    )
+    expect(rows.some((r) => r.includes('New connection'))).toBe(false)
+    expect(rows.some((r) => r.includes('Forward a port'))).toBe(false)
+  })
+})
+
 describe('the secret picker (nocx-fk32)', () => {
   let container: HTMLDivElement
 
