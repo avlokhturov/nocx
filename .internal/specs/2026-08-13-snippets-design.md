@@ -50,13 +50,30 @@ all reading one list.
 
 | termic does                                                        | we do not                                            | because                                                                                                                                                                                                         |
 | ------------------------------------------------------------------ | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `localStorage` in the renderer                                     | backend store (§5)                                   | it must survive a webview reset and ride the existing backup/restore surface; the renderer is not the owner of user data (AD-6)                                                                                 |
+| `localStorage` in the renderer                                     | backend store (§5)                                   | it must survive a webview reset and be backup-able at all; the renderer is not the owner of user data (AD-6). Backup is **not** free — see §5.4                                                                 |
 | ships 13 built-in agent prompts, persists only the delta from them | seeds two ordinary records (§5.3)                    | the delta machinery (`overrides`/`deletedBuiltins`/`disabled`/`order`) exists **to serve** shipped defaults. Without defaults it is pure cost. And we would be owning the text of other vendors' CLI workflows. |
 | types the body into the PTY and follows it with a delayed `CR`     | inserts, never submits (§9.3)                        | a template with fields cannot be filled after it has been submitted, and in a shell "insert" and "execute" are not the same act                                                                                 |
 | a fire-time destination dialog on every fire                       | destination derived from where input is going (§9.2) | the answer is already knowable; asking is a click for nothing                                                                                                                                                   |
 
 `~/repos/orca` — floating workspace with markdown notes. Read for the **notes** spec,
 not this one.
+
+### 3.1 Where the value actually is, and where it is not
+
+**Added by the stress test (branch 7),** because the honest version of this sharpens the
+scope. For a plain shell command, this feature is competing with `alias`, a shell
+function, and `Ctrl-R` — three mechanisms the user already has, all of which survive
+outside nocx. We are not going to beat them and should not claim to.
+
+The value is in the destinations that have **no** such mechanism: a phrase typed into an
+agent TUI, a multi-line block of prose, text that carries live session context into a
+prompt. That is the case the palette (§10.1) exists for and the case §12's end-to-end
+check watches.
+
+The shell destination exists because the **editor** is a destination and the editor is
+where the user is at a prompt — not because we think we improve on aliases. Anyone reading
+this later and wondering whether to invest in shell-side snippet features: the answer is
+that the shell already has them.
 
 ## 4. The boundaries this crosses, and what they already decided
 
@@ -83,8 +100,8 @@ what they already decided, **before** it says what to build.
   repaint them; no colour literals. → the palette is a `FloatingPanel` variant (§10.1),
   the settings page is `PageSection`/`RowList`/`Field`, empty is `EmptyState`.
 - **ADR-0016/0017 (vault references).** `{{secret:NAME}}` is an existing, owned grammar
-  resolved by `vault.resolveLine` at submit. → §7 extends the **parser**, never the
-  secret path.
+  resolved by `vault.resolveLine` at submit. → §7 shares the **namespace registry** and
+  leaves `secret-reference.ts` and the secret path untouched.
 
 Nothing here proposes changing an `AD`. If §7's grammar extension is judged to be a
 change of decided behaviour rather than an extension of it, that becomes an ADR before
@@ -102,17 +119,29 @@ collection is not one of those.
 // A snippet is a named body. Nothing about destinations lives here:
 // where it goes is decided when it is fired (§9).
 type Snippet struct {
-    ID      string   // opaque, backend-minted
-    Title   string   // what the palette and the menu show
-    Body    string   // the template text, references intact (§7)
-    Enabled bool     // hidden from the menu and the palette without deleting
+    ID    string // opaque, backend-minted
+    Title string // what the palette and the menu show
+    Body  string // the template text, references intact (§7)
 }
 ```
+
+**There is no `Enabled` flag** — cut by the stress test (branch 4). termic needs one
+because it ships built-ins a user may want out of the menu without losing the ability to
+restore them. We ship no built-ins (§5.3), so "disabled" means only "deleted, but still
+taking up a row in Settings". It would also be a second visibility concept beside order,
+and a user cannot tell from the menu why a snippet they wrote is not in it.
 
 Persistence: one document under the app profile directory via the shared
 `storage.Module` protocol (`internal/storage/document.go`), `Current: 1`, empty
 migration chain. Order is the document's slice order — position is data, not a
 per-record integer that two writers can disagree about.
+
+**Every mutation rewrites the whole document, and that is correct at this size** — checked
+by the stress test (branch 9) with numbers rather than a shrug. A generous library is a few
+hundred records of a few kilobytes: 500 × 4 KB ≈ 2 MB, one write, on a user action that
+happens by hand. There is no incremental write path and none should be added later without
+a measurement that says otherwise; an append log for a list a human edits by hand would be
+complexity bought with nothing.
 
 **Why an explicit `ID` and not the title:** the connection manager shipped broken
 because _"`groups.create` refused every call the UI could make, because all nine backend
@@ -141,6 +170,27 @@ with the two records at the moment it first comes into existence; an existing do
 never inspected for whether it "looks empty". Otherwise deleting both seeds would bring
 them back on the next start, and a record the user deleted would be undeletable. Their
 only job is to teach §7's syntax at the moment the library would otherwise be empty.
+
+### 5.4 Backup is a section somebody writes, not a thing that happens
+
+**Corrected by the stress test's reflexion pass**, which caught this spec asserting
+something about a subsystem it had not read. `internal/backup` does **not** enumerate
+`storage.Module` documents. `backup/document.go` is a hand-written `Document` with named
+sections — `Settings.Overrides`, `Connections.Profiles`, `Connections.Groups` — and
+`service.go` fills them explicitly. A new document under the profile directory is
+therefore **not** in a backup, silently, and would be lost by a restore.
+
+Since "it can be backed up" was part of why §3 chose a backend store over `localStorage`,
+this is a **work item in this epic, not a note**: a `Snippets` section on `backup.Document`
+plus its create/preview/restore paths, with the `Included` count the other sections carry.
+The acceptance list in §12 asserts a round trip, because a backup that silently omits a
+section is worse than no backup — the user believes they have one.
+
+### 5.5 Delete asks first
+
+A body is prose the user wrote, sometimes long, and there is no undo and no version
+history. `Delete` from the settings page confirms through the kit's `Dialog` first. Cheap,
+and the alternative is a misclick that destroys work with no way back.
 
 ## 6. The wire
 
@@ -184,68 +234,105 @@ A snippet placeholder written as `{{cwd}}` would put a **second owner on one tok
 shape**. AGENTS.md names that failure directly — two derivations of one predicate agree
 everywhere anyone looks and disagree at the one moment that matters.
 
-### 7.2 The decision
+### 7.2 The decision — share the namespace registry, not the scan
 
-**Extend `secret-reference.ts` into the general span parser it already almost is**, and
-register resolvers by namespace.
+**Revised by the stress test (branch 1).** The first draft extended `REFERENCE_RE` into a
+general `{{ns:arg}}` parser. That was wrong, and the reason it was wrong is worth keeping:
 
-```
-{{ns:arg}}      ns ∈ { secret, env, ask }
-```
+`env` and `ask` spans are resolved **before** the text reaches any destination (§8). No
+document that `secret-reference.ts` scans ever contains one. So a shared scan buys nothing
+at runtime — while `REFERENCE_RE` sits on the vault's resolution path, where `submit.ts`
+reads it to decide whether a line needs `vault.resolveLine` at all. A regression in that
+regex has a specific shape: a span stops matching, `submit.ts` concludes there is nothing
+to resolve, and `{{secret:prod-db}}` is written to the shell as literal text. That is a
+failed command **and** a disclosure of vault naming. Putting the snippets feature on that
+path, for a benefit that does not exist, is a bad trade.
+
+What is genuinely one concept is **who may claim a namespace**. That is what gets shared:
 
 ```ts
-// secret-reference.ts, extended. One scan, still the only writer.
-export const REFERENCE_RE = /\{\{(secret|env|ask):([^}]*)\}\}/g
-
-export interface ReferenceSpan {
-  from: number
-  to: number
-  ns: 'secret' | 'env' | 'ask'
-  arg: string
-}
+// A new, tiny module: the namespace registry. One declaration, so a third
+// namespace cannot be claimed twice by two features that never meet.
+export const REFERENCE_NAMESPACES = {
+  secret: 'vault (secret-reference.ts / vault.resolveLine)',
+  env: 'snippets (resolved at fire time)',
+  ask: 'snippets (resolved at fire time)',
+} as const
 ```
 
-The existing grammar rules are preserved verbatim, because they were bought: the arg is
+- `secret-reference.ts` is **untouched**. `REFERENCE_RE`, `findReferences`,
+  `secretReference` keep their exact current behaviour, and the vault path is not in this
+  feature's change budget.
+- The snippets module owns its own scan over `env` and `ask` only.
+- A test asserts the two scans' namespace sets are disjoint and that their union is
+  `REFERENCE_NAMESPACES` — so a fourth namespace added to one and forgotten in the other
+  fails the build rather than colliding at runtime.
+
+Two scans over **disjoint** namespaces are not two implementations of one concept. They
+are two concepts that share a bracket shape, and the registry is what keeps that true.
+
+The grammar rules the vault bought are inherited verbatim by the snippets scan: the arg is
 **open** (spaces are legal — `internal/secrets` tests `echo {{secret:with space in
-name}}`), only `}` is structural, and a malformed span matches nothing so the chip never
-decorates it.
+name}}`), only `}` is structural, and a malformed span matches nothing.
 
-| ns       | example                                                                                 | resolved by                                    | when                        |
-| -------- | --------------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------- |
-| `secret` | `{{secret:prod-db}}`                                                                    | the vault, `vault.resolveLine` — **unchanged** | at submit, backend-side     |
-| `env`    | `{{env:cwd}}`, `{{env:host}}`, `{{env:user}}`, `{{env:branch}}`, `{{env:last_command}}` | snippets, from live session state              | at fire time, frontend-side |
-| `ask`    | `{{ask:port}}`, `{{ask:port=8080}}`                                                     | the user, via the palette's field form         | at fire time, frontend-side |
+| ns       | example                                                         | resolved by                                    | when                        |
+| -------- | --------------------------------------------------------------- | ---------------------------------------------- | --------------------------- |
+| `secret` | `{{secret:prod-db}}`                                            | the vault, `vault.resolveLine` — **unchanged** | at submit, backend-side     |
+| `env`    | `{{env:cwd}}`, `{{env:host}}`, `{{env:user}}`, `{{env:branch}}` | snippets, from live session state              | at fire time, frontend-side |
+| `ask`    | `{{ask:port}}`, `{{ask:port=8080}}`                             | the user, via the palette's field form         | at fire time, frontend-side |
 
-An **unknown namespace is one error in one place**. That is the whole argument for a
-closed union in the regex rather than `[a-z]+`: `{{scret:x}}` fails to match, so it is
-literal text the user can see, exactly as a malformed secret reference is today.
+An **unknown namespace is one error in one place**. Both scans use a closed alternation
+rather than `[a-z]+`: `{{scret:x}}` matches nothing anywhere, so it stays literal text the
+user can see, exactly as a malformed secret reference does today.
 
-### 7.3 What does not change
+### 7.3 What does not change — the list is the point
 
-- `secret-chip.ts` filters `ns === 'secret'` and decorates exactly what it decorates
-  today. `env`/`ask` spans are plain text in the editor — by the time a snippet reaches
-  the editor they are already resolved (§8), so a live one there is an anomaly, not a
-  state to style.
-- `submit.ts`'s "does this line need resolving" test reads `ns === 'secret'`. Its cost
-  characteristics are unchanged.
-- `secretReference(name)` stays the single writer of the `secret` form.
+- `secret-reference.ts`: not edited. No line of it appears in this feature's diff.
+- `secret-chip.ts`: not edited. It decorates exactly what it decorates today. `env`/`ask`
+  spans are plain text in the editor — by the time a snippet reaches the editor they are
+  already resolved (§8), so a live one there is an anomaly, not a state to style.
+- `submit.ts`: not edited. Its "does this line need resolving" test and its cost
+  characteristics are untouched.
+- `vault.resolveLine` and its schema: untouched.
 
 ### 7.4 The `env` table
 
 A closed table, extended by adding a row — never by a parameter or a mode flag (AD-8).
 Each entry names the **existing** owner it reads from; snippets derive nothing itself:
 
-| `env:` key     | read from                                                            |
-| -------------- | -------------------------------------------------------------------- |
-| `cwd`          | the session's cwd, as the ledger already tracks it                   |
-| `host`         | the session's host label (local ⇒ the local machine's name)          |
-| `user`         | the session's user                                                   |
-| `branch`       | `git.status`'s branch for the session cwd, when a repository is open |
-| `last_command` | the last completed block's command line from the ledger              |
+| `env:` key | read from                                                            |
+| ---------- | -------------------------------------------------------------------- |
+| `cwd`      | the session's cwd, as the ledger already tracks it                   |
+| `host`     | the session's host label (local ⇒ the local machine's name)          |
+| `user`     | the session's user                                                   |
+| `branch`   | `git.status`'s branch for the session cwd, when a repository is open |
 
 **A key that cannot be answered right now does not resolve to an empty string.** It
 resolves to _unavailable_, and §11.2 says what the fire does about it. Silently
 substituting `""` is how `cd {{env:cwd}}` becomes `cd`.
+
+**`last_command` was cut by the stress test (branch 3).** It was in the first draft on the
+strength of "an agent prompt might want it", which is a guess, not a case — and it is the
+one key that moves a previous command's text into a prompt bound for a model. The table is
+defined to grow by addition; that is exactly the argument for not shipping a row nobody
+has asked for. Adding it later is one row and one resolver.
+
+### 7.5 `ask:` is not a secret channel
+
+A user can type anything into an `ask:` field, including a password. Stated so it is not
+discovered later:
+
+- An `ask:` value is **never persisted**. Not into the snippet, not as a "last value"
+  convenience, not into settings. It lives for the duration of one fire.
+- It is never logged. `log/slog` sees the snippet's **title**, never a resolved body.
+- Once resolved into the text, it is ordinary text at the destination and is subject to
+  whatever that destination does — including, on the editor path, being recorded by
+  `history.record` on submit. That is **not** a new leak: it is identical to the user
+  typing the value by hand, which is what they would otherwise do.
+- The field is a plain text field and is not styled as a password field. A masked field
+  would imply a protection that does not exist on the far side of the fire.
+- The value that belongs in the vault has a namespace already: `{{secret:…}}`. `ask:` is
+  for the port number, the branch name, the ticket id.
 
 ## 8. Resolution happens at fire time, once
 
@@ -318,6 +405,15 @@ dropdown could not serve it, which is why that approach was rejected during desi
 recorded memory documents a session that hand-rolled `ESC[200~…ESC[201~` and broke
 submission.
 
+**Optionality has exactly one reader** — added by the stress test (branch 5). An optional
+interface member is a fork waiting to happen: AD-8 forbids variation expressed as a flag
+consumers test. The invariant that keeps this one honest is that **the derivation in §9.2
+is the only code that reads whether `insert` is present**, and it reads it to _choose a
+destination_, never to work around a missing one. No other call site writes
+`if (target.insert)`. A destination that cannot insert is therefore never offered and
+never refused at click time — which is the disabled-then-rejected shape `capability.ts`
+exists to prevent.
+
 ### 9.3 Insert, never submit
 
 No `CR` is appended, on any path. Consequences, stated so they are chosen and not
@@ -326,10 +422,45 @@ the phrase in its input box for the user to extend and send. There is no per-rec
 "auto-send" flag — that is a mode flag inside one behaviour, which AD-8 forbids, and it
 is a setting nobody remembers the value of.
 
+### 9.4 A multi-line body, and the one case where "insert" is not ours to guarantee
+
+**Added by the stress test (branch 11), and it touches the primary case.** "Insert, never
+submit" is a property of what we send. It is not a property of what the receiving program
+does with a newline. Paste a two-line body into a program that has **not** enabled
+bracketed paste (mode 2004) and the first newline is an ordinary Return — in a shell that
+runs line one, and in an agent TUI that submits a half-written prompt. The owner's own
+case is a multi-line phrase into `claude`, so this is not a corner.
+
+The engine already knows the answer: xterm.js exposes the running program's
+`bracketedPasteMode`. So:
+
+- **Single-line body** — unaffected, always fires.
+- **Multi-line body, mode 2004 active** — fires. The paste arrives as one document and no
+  newline is read as Return. This is the ordinary case for a modern shell and for agent
+  TUIs that accept multi-line input.
+- **Multi-line body, mode 2004 not active** — **refused**, naming the reason, with the
+  clipboard offered instead. We do not send it and hope, and we do not silently strip the
+  newlines into one line — that would change the user's text without saying so.
+
+This is the same principle as §11.1: when the destination cannot honour what the text
+means, the fire is refused and says why, rather than sending something whose behaviour we
+cannot state.
+
+### 9.5 Which pane, and where focus lands
+
+The destination is the **active** pane's target — the one the user is looking at, the same
+pane the tab strip marks active. Not the last-focused, not the one a background program is
+running in.
+
+Firing returns focus to that destination: the palette closes and the terminal or the
+editor has the keyboard, because the next thing the user does is type. A surface that
+fires and keeps focus makes the user click to continue their own sentence.
+
 ## 10. Surfaces
 
 Four entry points, **one list** behind all of them: a store in
-`frontend/src/snippets/` fed by `snippets.list` and refreshed on `snippets.changed`.
+`frontend/src/snippets/` fed by `snippets.list` and re-read after every mutation the
+client itself made (there is no change notification — §6).
 
 ### 10.1 The palette — ⌥⌘P
 
@@ -376,16 +507,26 @@ answers when the editor is not there.
 
 ### 10.3 The toolbar menu
 
-A `ContextMenu` from the kit, opened from the top bar: the enabled snippets in order,
-plus "Manage snippets…" as the last row, which opens §10.4. Discoverable without knowing
-the chord. It places a kit component and repaints nothing.
+A `ContextMenu` from the kit, opened from the top bar: every snippet in order, plus
+"Manage snippets…" as the last row, which opens §10.4. Discoverable without knowing the
+chord. It places a kit component and repaints nothing.
 
 ### 10.4 The settings page
 
 A component page in `settings.tsx`'s registry, beside Vault and Backup — `PageSection` +
-`RowList` for create / edit / reorder / enable / delete, `EmptyState` when the library is
-empty. Editing a body uses the same CM6 host the file viewer uses, in editable mode, with
-the markdown language already in the bundle (`file-viewer/language-registry.ts`).
+`RowList` for create / edit / reorder / delete, `EmptyState` when the library is empty.
+Editing a body uses the same CM6 host the file viewer uses, in editable mode, with the
+markdown language already in the bundle (`file-viewer/language-registry.ts`).
+
+**The editor shows what it parsed** — added by the stress test (branch 6). Under the body
+field, a line reports the spans the parser recognised and what each will become:
+`{{env:cwd}} → /home/dev/repos/nocx · {{ask:port}} → you will be asked`. It exists for one
+failure it makes impossible: a mistyped `{{ask:port}` with one brace matches nothing, and
+without this line the author has no signal at all until a malformed literal is fired into
+somebody's agent session. The parser is already there; this is a render of its output.
+
+Recognition is also the honest place to report an unknown namespace: `{{cwd}}` and
+`{{evn:cwd}}` both appear here as unrecognised text rather than as substitutions.
 
 ## 11. Failure paths and invariants
 
@@ -408,7 +549,7 @@ never silently left as literal text."_
 
 ### 11.2 An `env:` key that cannot be answered
 
-`{{env:branch}}` outside a repository, `{{env:last_command}}` in a fresh session.
+`{{env:branch}}` outside a repository; `{{env:host}}` before a session has one.
 Unavailable is **not** the empty string. The fire stops before writing anything anywhere,
 and the palette says which key and why. Half a command is worse than no command — a
 snippet is fired at something that executes.
@@ -444,14 +585,32 @@ of their own code (AGENTS.md testing rule 4).
 
 **The epic's one end-to-end check** (`cmd/devharness` + Playwright, no wails, no display):
 
-1. GIVEN an empty library, a snippet is created through the settings page with a body
-   containing one `{{env:…}}` and one `{{ask:…}}` span
+1. GIVEN an empty library, a **single-line** snippet is created through the settings page
+   with a body containing one `{{env:…}}` and one `{{ask:…}}` span
 2. AND a long-running program owns the pane, so no command editor is showing
 3. WHEN `⌥⌘P` is pressed and the snippet is chosen
 4. THEN a field form appears for the `ask:` span, with its default prefilled
-5. AND on confirming, the program's input carries the body with the `env:` span replaced
-   by the session's real value and the `ask:` span replaced by what was typed
-6. AND **no newline was sent** — the program has not been given the input
+5. AND on confirming, the pane's grid shows the body with the `env:` span replaced by the
+   session's real value and the `ask:` span replaced by what was typed
+6. AND **no newline was sent** — the row count did not grow and the program produced no
+   new output
+
+**How the check stays honest** — tightened by the stress test (branch 8):
+
+- **The program is `cat`.** Already present in every image, long-running, owns the pane,
+  and the tty's own `ECHO` puts the pasted text on the grid **without** a newline — which
+  is exactly what steps 5 and 6 need to distinguish. A program that only echoes after
+  Return could not tell "inserted" from "submitted" apart, which is the whole assertion.
+- **Single-line body, deliberately.** The multi-line path depends on the running program's
+  bracketed-paste mode (§9.4) and belongs in its own two checks — one per branch of that
+  decision — not smuggled into the happy path.
+- **Every step waits on an observable state, never a duration** (AGENTS.md: a test may not
+  depend on timing). Step 2 waits for the pane to report `running`; step 3 for the
+  palette's rows to exist; step 5 for the grid to contain the text. No sleeps, no
+  "settle" windows. termic's fire path needs a 5-second settle before injecting; ours must
+  not inherit that, because a test that needs a slow machine is broken on a fast one too.
+- **Container-suitable.** This spec is keyboard and text, not layout, so it should behave
+  the same in `e2e/run-in-container.sh` as in CI. CI remains the source of truth.
 
 Plus, per rule 2's paired-success requirement — for every "returns an error when…" there
 is an "and on an ordinary machine it succeeds":
@@ -463,13 +622,75 @@ is an "and on an ordinary machine it succeeds":
 And the negative ones that carry the design's teeth:
 
 - firing a body containing `{{secret:x}}` at a PTY writes **nothing** and states why
+- firing a **multi-line** body at a program with bracketed paste **off** writes nothing
+  and states why; with it **on**, the whole body arrives and no newline is read as Return
 - a snippet candidate in the completion dropdown is never accepted by Right or End
+- an `ask:` value is absent from the settings document, from `slog` output, and from the
+  next fire's prefilled field
+- the two namespace scans (§7.2) are disjoint, and their union equals
+  `REFERENCE_NAMESPACES` — the test that makes a forgotten fourth namespace a build
+  failure rather than a runtime collision
+- `secret-reference.ts`, `secret-chip.ts` and `submit.ts` appear in **no** commit of this
+  epic — §7.3's list, enforced by reading the diff at review
+- a library of snippets survives `backup.create` → wipe the profile directory →
+  `backup.restore` with every record and its order intact, and the preview reports a
+  non-zero `Included` count for them (§5.4)
 - `deadcode -filter 'nocx/internal/snippet'` is empty **and** `snippet.Service.Create`
   has a caller outside its own tests — the `nocx-rtg0` failure was a reachable read path
   hiding an unreachable write path in one package
 
 ## 13. Where notes attach later
 
-The notes spec inherits §7 (the span parser and resolver registry) and §9 (the
-destination seam: "insert this note's selection into the pane"). It brings its own store.
-Nothing in this document should be widened to accommodate it in advance.
+The notes spec inherits §7's namespace registry (claiming its own namespace if it needs
+one) and §9's destination seam — "insert this note's selection into the pane" is an
+`insert` call, not new machinery. It brings its own store and its own backup section
+(§5.4). Nothing in this document should be widened to accommodate it in advance.
+
+---
+
+## Stress Test Results: snippets design
+
+Bead `nocx-y24g`. Eleven branches: nine mapped in Phase 2, two added by the reflexion
+pass. The owner delegated the decisions ("реши сам"), so each was resolved against the
+codebase rather than by asking.
+
+### Resolved decisions
+
+| #   | Branch                                            | Resolution                                                                                                                                                                                                                    |
+| --- | ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Grammar: extend `secret-reference.ts`?            | **Reversed.** Share the namespace registry, not the scan. `env`/`ask` are resolved before insertion, so a shared scan buys nothing at runtime while putting the vault's resolution path in this feature's change budget. §7.2 |
+| 2   | Security: `ask:` values may be secrets            | **Invariant added.** Never persisted, never logged, no last-value memory, not a masked field, and stated as no worse than typing by hand. §7.5                                                                                |
+| 3   | `{{env:last_command}}`                            | **Cut.** A guess, not a case, and the one key that moves prior command text into a model-bound prompt. §7.4                                                                                                                   |
+| 4   | `Enabled` flag                                    | **Cut.** It exists in termic to serve built-ins; with none, "disabled" is "deleted but still in the way". §5.1                                                                                                                |
+| 5   | Optional `insert?()` vs AD-8                      | **Kept, with the invariant that makes it honest:** §9.2's derivation is the only reader of its presence, and it reads it to choose, never to work around. §9.2                                                                |
+| 6   | A malformed span fires silently                   | **Authoring-time preview added.** The settings editor renders what the parser recognised and what each span becomes. §10.4                                                                                                    |
+| 7   | Shell destination vs `alias`/`Ctrl-R`             | **Scope sharpened, no change of shape.** We do not beat aliases and should not claim to; the value is in destinations with no such mechanism. §3.1                                                                            |
+| 8   | Is the e2e check actually runnable?               | **Tightened.** `cat` + tty `ECHO` makes "inserted, not submitted" observable; single-line on the happy path; every step waits on state, never a duration. §12                                                                 |
+| 9   | Store scale                                       | **N/A, with numbers.** 500 × 4 KB ≈ 2 MB, whole-document rewrite per hand-made edit; no incremental path, and none to be added without a measurement. §5.1                                                                    |
+| 10  | _(reflexion)_ Multi-line body into a PTY          | **New section.** "Insert, never submit" is not ours to guarantee when bracketed paste is off — refuse, name the reason, offer the clipboard. Touches the primary case. §9.4                                                   |
+| 11  | _(reflexion)_ "Rides the existing backup surface" | **The spec was wrong.** `internal/backup` has a hand-written document with named sections and does not enumerate storage modules. Promoted from an assumption to a work item plus a round-trip assertion. §5.4                |
+
+Also added along the way: which pane and where focus lands (§9.5), and delete-confirms
+(§5.5).
+
+### Changes made
+
+Design changed in five places (1, 3, 4, 10, 11); strengthened without changing shape in
+four (2, 5, 6, 8); scope statement sharpened in one (7); one resolved as not-applicable
+with numbers (9).
+
+### Deferred / parking lot
+
+- `{{env:last_command}}` — one row and one resolver whenever a real case turns up.
+- A change notification for a second window, if a second window ever ships (§6).
+- Markdown notes — their own spec (§13).
+
+### Confidence assessment
+
+- **Overall: high** for the shape; **medium** for §5.4, which is now the least-explored
+  part of the epic — the backup document's create/preview/restore paths were read enough
+  to know a section is required, not enough to size it.
+- **Remaining concern:** §9.4 depends on xterm.js reporting the running program's
+  bracketed-paste mode. That the API exists is known; that it reports what we need at the
+  moment the palette asks is not yet verified against a live TUI. The first implementation
+  task should prove it before the rest of the fire path is built on it.
