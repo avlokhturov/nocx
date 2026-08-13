@@ -82,10 +82,17 @@ would still be TypeScript calling back into Go.
 
 ## Decision
 
-**1. The loop is eino's.** `flow/agent/react` runs the agent; `compose` provides the graph,
-the interrupt and the checkpoint. We do not write a tool-calling loop, an SSE client, or a
-provider adapter set. The instruction from the owner is the right one and now has evidence
-behind it: reuse the framework, and write only what it cannot give.
+**1. The loop is eino's, and the agent is `adk.ChatModelAgent`.** Naming the agent matters and
+an earlier draft of this ADR got it wrong: it said `flow/agent/react` runs the loop and then
+specified `adk` middleware hooks, which are not interchangeable. `flow/agent/react` builds a
+compose graph and takes `compose.ToolsNodeConfig.ToolCallMiddlewares`; it never mentions
+`adk`. `BeforeAgent`, `BeforeModelRewriteState` and `WrapInvokableToolCall` belong to
+`adk.TypedChatModelAgentMiddleware`. We take `adk`, because rewriting the run's tool set is
+precisely what the grant needs. `compose` supplies the interrupt and the checkpoint underneath.
+
+We do not write a tool-calling loop, an SSE client, or a provider adapter set. The
+instruction from the owner is the right one and now has evidence behind it: reuse the
+framework, and write only what it cannot give.
 
 **2. The framework gives the mechanism; it cannot give the policy or the capability.** That
 distinction is the whole of what stays ours, and it is small.
@@ -109,17 +116,22 @@ uses all three, strongest first:
 - **`BeforeAgent`** — it "allow[s] modification of the agent's instruction and tools
   configuration". A tool the run's grant does not permit is **never declared to the model**.
   The strongest form of refusal is the one that is never proposed.
-- **`BeforeModelRewriteState`** — `ToolInfos` is modifiable before each model call, so a
-  scope that narrows mid-run narrows what is on offer at the next iteration.
+- **`BeforeModelRewriteState`** — `ToolInfos` is modifiable before each model call, so what is
+  **on offer** shrinks as the resource state changes. This is not a change of authority: the
+  grant is immutable once execution starts and only a new attempt carries a different one.
+  "Scope" must not be used for both.
 - **`WrapInvokableToolCall(ctx, endpoint, tCtx *ToolContext)`** — "called at request time
   when the tool is about to be executed". This is where the arguments are visible and where
   the three outcomes live:
 
-- **refuse** — do not call `next`; the run terminalizes with a recorded reason. A refusal
-  handed back as an ordinary tool result would let the model improvise around it: retry, a
-  broader tool, or the same effect encoded as a shell command.
-- **escalate** — `StatefulInterrupt` **before** calling `next`, so nothing has touched the
-  domain while a human decides; approval resumes from the checkpoint as a **new attempt with
+- **refuse** — do not call `next`, **and return `ErrPolicyRefused`**. Withholding `next` is
+  not by itself terminal: a middleware must return something, and a `ToolOutput` with no
+  error becomes a tool result the model reads and works around. `ToolsNode` aborts on a
+  non-interrupt error rather than producing a tool message, so the category is what makes the
+  refusal a control decision; the run adapter terminalizes the attempt as `refused`, and no
+  second model request is made.
+- **escalate** — `StatefulInterrupt` **before** calling `next`, so the call that is asking has
+  not run; approval resumes from the checkpoint as a **new attempt with
   a new grant**, never by mutating a running one (ADR-0020 §5).
 - **permit** — call `next`, with the tool holding a narrowed capability (decision 4).
 
@@ -160,14 +172,26 @@ second implementation of iteration that is already written and tested.
 
 ## Consequences
 
-- **A real dependency, measured rather than argued.** `eino/compose` plus
-  `flow/agent/react`, with **no provider adapter yet**, is 78 modules in the graph and 126
-  packages compiled — including sonic, gonja, json-iterator, easyjson and **logrus**. The
-  last one collides with our rule that structured logging goes through one `log/slog`-backed
-  interface, and must be checked before adoption rather than after.
+- **A real dependency, measured rather than argued.** `eino/compose` plus an agent, with **no
+  provider adapter yet**, is 78 modules in the graph and 126 packages compiled — including
+  sonic, gonja, json-iterator, easyjson and **logrus**. `logrus` arrives through
+  `compose → schema → gonja/exec` — the template engine, not the logic — and it collides with
+  our rule that structured logging goes through one `log/slog`-backed interface. It is
+  **contained**: the composition root redirects the standard logrus logger into that
+  interface, and a test asserts nothing reaches stderr around it.
 - **We inherit an upgrade cadence we do not control** on the most security-sensitive path in
-  the product. The middleware and the interrupt are the two APIs we depend on; a change to
-  either is a break, and the tests that prove refusal and narrowing are what will catch it.
+  the product, and the surface is wider than two APIs: the agent driver, all four tool-wrapper
+  shapes, `ToolsNode`'s error classification, sequential-versus-parallel execution, the
+  interrupt bookkeeping and the checkpoint format. A change to any of them is a break, and the
+  tests that prove never-declared, refusal-terminalizes and narrowing are what turn it into a
+  red build.
+- **Checkpoints are process-lifetime state, not records.** They are encrypted, deleted on
+  terminalization, swept at startup — and approval therefore does not survive a restart, which
+  is already what the recovery rule says. Durable approval would make a checkpoint an artifact
+  with its own version, retention and migration, and that is deliberately not v1.
+- **v1 permits ordinary invokable tools only.** `adk` wraps four tool shapes through four
+  methods; a streaming or enhanced tool added later would route around a single installed
+  wrapper. Registration refuses the other shapes until each is wrapped and tested.
 - **No subscription logins.** pi offers Claude Pro/Max, ChatGPT via Codex and Copilot; we
   cannot, and the entry price is an API key or a local model.
 - **No Node runtime, no bundled engine, nothing to install.** The assistant is a capability
@@ -196,8 +220,10 @@ to _do_ something is part of the product, and deferring it would mean two backen
 
 ## Not decided here
 
-Whether `logrus` in the dependency graph is acceptable or must be contained. Which provider
-adapters ship beyond the OpenAI-compatible one. The concrete approval UI. Multi-agent lanes.
+Which provider adapters ship beyond the OpenAI-compatible one — and each is code rather than
+configuration: every adapter has its own streaming behaviour and tool-call quirks, which eino
+documents itself (its default streaming tool-call check fails for models that emit text before
+tool calls, "like Claude"). The concrete approval UI. Multi-agent lanes.
 Whether an endpoint's capabilities are probed on save, on first use, or both.
 
 ## Revisit when

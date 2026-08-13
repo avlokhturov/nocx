@@ -208,15 +208,25 @@ kept at the top of the ADR.
 
 ### 4.1 What the framework gives, and what cannot be given
 
-`cloudwego/eino` runs the agent. We do not write a tool-calling loop, an SSE client, or a
-provider adapter set. Verified in `eino v0.9.13`:
+**The agent is `adk.ChatModelAgent`, not `flow/agent/react`.** An earlier version of this
+section named one and then specified the other's hooks, which are not interchangeable:
+`flow/agent/react` builds a compose graph and wires `compose.ToolsNodeConfig.ToolCallMiddlewares`,
+and never mentions `adk`; `BeforeAgent`, `BeforeModelRewriteState` and `WrapInvokableToolCall`
+are `adk.TypedChatModelAgentMiddleware`. Someone implementing from the old text would have
+picked `react` and found the advertised seam absent. We take `adk` because rewriting the run's
+tool set is exactly what the grant needs.
 
-| We need                                  | eino has                                                                                                                                                                                                                                              |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a place to intervene before a tool runs  | `adk.TypedChatModelAgentMiddleware.WrapInvokableToolCall`, "called at request time when the tool is about to be executed"; and at the lower level `compose.InvokableToolMiddleware func(next) next`, whose `ToolInput` carries `Name` and `Arguments` |
-| to withhold a tool entirely              | `BeforeAgent` rewrites the run's tool configuration; `BeforeModelRewriteState` rewrites `ToolInfos` before each model call                                                                                                                            |
-| to suspend for a human                   | `compose.StatefulInterrupt(ctx, info, state)` against a `CheckPointStore`, resumed from the checkpoint                                                                                                                                                |
-| streaming, tool-call assembly, providers | the framework's, including `eino-ext` adapters for `openai`, `claude`, `ollama`, `openrouter`                                                                                                                                                         |
+We do not write a tool-calling loop, an SSE client, or a provider adapter set. Verified in
+`eino v0.9.13`:
+
+| We need                                  | eino has                                                                                                                                                                                                                                 |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a place to intervene before a tool runs  | `adk.TypedChatModelAgentMiddleware.WrapInvokableToolCall` — "called at request time when the tool is about to be executed" — receiving `next` and the tool's name, call id and arguments                                                 |
+| to withhold a tool entirely              | `BeforeAgent` rewrites the run's tool configuration (per run, and runtime tools are cloned before modification); `BeforeModelRewriteState` rewrites `ToolInfos` before each model call                                                   |
+| to suspend for a human                   | `compose.StatefulInterrupt(ctx, info, state)`; `ToolsNode` recognises it explicitly (`IsInterruptRerunError`), preserves completed siblings in `ExecutedTools`, and resumes from a `CheckPointStore` without re-running what already ran |
+| a terminal failure that is not a message | an ordinary (non-interrupt) error from a tool aborts the node — `failed to invoke tool[...]` — instead of becoming a tool result the model reads                                                                                         |
+| calls in a known order                   | `compose.ToolsNodeConfig.ExecuteSequentially` — default `false` (parallel), which we set `true`                                                                                                                                          |
+| streaming, tool-call assembly, providers | the framework's, including `eino-ext` adapters for `openai`, `claude`, `ollama`, `openrouter`                                                                                                                                            |
 
 **What it cannot give is the policy and the capability, and that is all that stays ours.**
 eino has no grant, no resource scope and no effect classification — and structurally cannot:
@@ -230,9 +240,25 @@ server asked for — a transport shape, not a policy.)
 So we write two small things over our own types: a function answering **permit / ask /
 refuse**, and a constructor for a **narrowed capability**.
 
-**And the ledger stays ours.** eino owns run mechanics; ADR-0019 owns the record. Its
-checkpoints, message history and retries are implementation detail of a run, never the
-authoritative transcript, and nothing in the product reads them to answer "what happened".
+**And the ledger stays ours — which requires a decision, not an assertion.** Calling eino's
+checkpoint "implementation detail" does not make it one: if `agent.approve` cannot resume
+without it, the checkpoint is operationally authoritative until the run terminalizes, and a
+serialization change across an upgrade would strand every suspended run.
+
+So, for v1: **a checkpoint is encrypted process-lifetime state.** It is deleted when the run
+terminalizes and swept at startup, and **approval does not survive a restart** — which is
+already what §4.2's recovery rule says: every non-terminal run becomes `interrupted` and the
+user asks again. Durable approval across restarts would make the checkpoint an artifact with
+its own version, retention and migration rules, and it is deliberately not v1.
+
+Nothing in the product reads eino's state to answer "what happened"; that is the ledger's
+question and ADR-0019 owns it.
+
+**And `logrus` is contained, not tolerated.** It arrives compiled-in through
+`compose → schema → gonja/exec → logrus` — the template engine, not the logic — which
+collides with the rule that structured logging goes through one `log/slog`-backed interface.
+The composition root redirects the standard logrus logger into that interface, so nothing
+reaches stderr around it, and a test asserts it.
 
 ### 4.2 One agent, two run modes
 
@@ -250,21 +276,41 @@ assemble a projection from the ledger + referenced frames
 The modes differ in three named places, and the differences are owned by the mode rather than
 scattered through the driver:
 
-|                            | **explain**                                                                                                          | **agent**                                                |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| tools declared             | none                                                                                                                 | ours                                                     |
-| termination                | after the first completed response                                                                                   | when the model finishes, or policy/lease/cancel stops it |
-| context assembly           | question + referenced frames                                                                                         | plus tool calls and their results                        |
-| a tool call arrives anyway | refused by the dispatcher and the run ends — a model proposing a call it was never offered is a fault, not a request | ordinary path                                            |
+|                            | **explain**                                                                                                                 | **agent**                                                |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| tools declared             | none                                                                                                                        | ours                                                     |
+| termination                | after the first completed response                                                                                          | when the model finishes, or policy/lease/cancel stops it |
+| context assembly           | question + referenced frames                                                                                                | plus tool calls and their results                        |
+| a tool call arrives anyway | refused in the policy middleware and the run ends — a model proposing a call it was never offered is a fault, not a request | ordinary path                                            |
 
-**A refusal ends something.** Suppressing one call and continuing with unchanged context is
-not enforcement: the model simply asks for the same effect by another route — a broader tool,
-a different argument, or a shell command that does it indirectly. So a refusal terminalizes
-the proposal **and** the run, with a recorded reason the user sees; in the middleware that is
-simply not calling `next`. Escalation, not silent continuation, is what "ask instead of
-refuse" means, and it is `StatefulInterrupt` **before** `next` — so nothing has touched the
-domain while a human decides, and approval resumes from the checkpoint as a new attempt with
-a new grant rather than widening a running one.
+**A refusal ends something — and "do not call `next`" is not by itself what ends it.** The
+middleware must return _something_, and the terminal behaviour comes from **which category**
+it returns: a `ToolOutput` with no error becomes a tool result the model reads and works
+around, which is exactly the failure this rule exists to prevent. So the contract is named
+and asserted end to end:
+
+1. the middleware does not call `next`;
+2. it returns **`ErrPolicyRefused`**, a nocx error, not a message;
+3. eino's `ToolsNode` aborts the node on a non-interrupt error rather than producing a tool
+   message;
+4. the run adapter recognises the error and terminalizes the attempt as `refused`;
+5. **no tool message and no second model request are produced.**
+
+A test that only asserts "`next` was not called" would pass while the model reads a polite
+refusal and reformulates.
+
+**Escalation is `StatefulInterrupt` before `next`**, so the call that is asking has not run,
+and approval resumes as a new attempt with a new grant rather than widening a running one.
+Resume must bind the approval to the exact proposal — run, attempt, tool name, call id and a
+hash of the canonical arguments — or approving one thing authorises a changed thing, and a
+wrapper that re-evaluates the same call under the original grant interrupts forever.
+
+**Calls run one at a time, and a refusal refuses the rest.** `ExecuteSequentially` is set, and
+a refused call ends the run before its siblings run. What this does **not** promise is that
+nothing at all has happened: a permitted sibling earlier in the batch will already have run
+when a later call asks for approval. That is correct — everything that ran held the grant —
+but the surface must say it. **The honest invariant is "the call that is asking has not run",
+and what already ran is visible in the attempts**, not "the domain is untouched".
 
 **The strongest refusal is the one never proposed.** A tool the run's grant does not permit
 is not declared to the model at all (`BeforeAgent`), so most of the policy never has to say
@@ -292,17 +338,36 @@ general, because one command tool reaches files, the network, ssh, other process
 vault. So a grant names environments, lanes, paths, destinations and effect classes — the
 lattice ADR-0020 §6 already defines — and the tool name is not an authority at all.
 
-**And the dispatcher narrows, rather than checks.** A check before the call is advisory: the
-tool still holds a full `session.Manager`, the vault and the filesystem, and may use more
-than the grant allowed. Instead the dispatcher resolves the run's grant into a **scoped
-capability** and hands the tool that — so the tool cannot exceed the grant, because it never
-holds more than it.
+**And the policy middleware narrows, rather than checks.** A check before the call is
+advisory: the tool still holds a full `session.Manager`, the vault and the filesystem, and may
+use more than the grant allowed. Instead the middleware resolves the run's grant into a
+**scoped capability** and the tool holds only that — so it cannot exceed the grant, because it
+never has more than it. ("Dispatcher" is retired as a word here: there is no component of ours
+dispatching anything; there is a middleware in eino's own path.)
+
+**The grant does not move; what is on offer does.** `BeforeModelRewriteState` may shrink
+`ToolInfos` as the resource state changes, and that is not a change of authority: the grant is
+immutable once execution starts, and only a new attempt carries a different one. The word
+"scope" must not be used for both.
+
+**All four tool shapes are wrapped, or only one shape is allowed.** `adk` has
+`WrapInvokableToolCall`, `WrapStreamableToolCall` and two `Enhanced` variants, and each is
+called only for tools implementing the matching interface. Wrapping one and later adding a
+streaming tool would route it around the policy entirely. **v1 permits ordinary invokable
+tools only**, enforced at registration, and each further shape is opened by wrapping it and
+testing it.
 
 This replaces an acceptance criterion the first rewrite got wrong. "The registry is
-unexported and the dispatcher is the only caller" is not a security boundary: Go package
+unexported and the middleware is the only caller" is not a security boundary: Go package
 privacy stops another package naming the symbol, not code inside `internal/agent` calling the
 tool directly, and it rots at the first refactor. What is assertable is the narrowing: a tool
 given a capability scoped to lane A **cannot** reach lane B, and the test proves it by trying.
+
+**And the attempt is written before `next`, or `next` does not happen.** The ordering rule of
+§4.2 needs a failure branch: if the ledger write fails, the middleware constructs no
+capability, does not call `next`, and returns a terminal infrastructure error. A middleware
+that logs the write failure and proceeds produces an effect with no durable record, which is
+the one thing an interrupted run cannot recover from.
 
 ### 4.4 Providers
 
@@ -318,11 +383,19 @@ protocol reaches:
   `vision.md:75`;
 - **any hosted provider**, directly or through an aggregator, on a base URL the user sets.
 
-More adapters are **configuration, not code**: `eino-ext/components/model` already carries
-`claude`, `ollama`, `openrouter`, `gemini` and others. The one worth adding early is
-**`claude`**, not for the provider but for the shape of the wire — Anthropic's protocol halts
-at `tool_use` and waits for `tool_result`, so it pauses exactly where §4.1's policy takes
-control, and reaching Claude through an OpenAI-compatible aggregator loses that.
+**Each further adapter is code, not configuration.** An earlier line here said the opposite
+and was wrong: every `eino-ext/components/model` adapter is a separate compiled dependency
+with its own constructor, options, streaming behaviour, error taxonomy and tool-call quirks.
+eino says so itself — `react`'s default `StreamToolCallChecker` documents that "some models
+(like OpenAI) output tool calls directly; others (like Claude) output text first, then tool
+calls", and the default check fails for the second kind. So each adapter arrives with a
+compatibility suite: streaming, tool-call assembly, usage, cancellation, malformed events,
+finish reasons.
+
+The one worth adding early is **`claude`** — not for the provider but because Anthropic's
+protocol halts at `tool_use` and waits for `tool_result`. That is not a security property (the
+pause that matters is ours, in the middleware), but it is a cleaner fit than reaching Claude
+through an OpenAI-compatible aggregator, which loses streamed tool arguments.
 
 **Each adapter is weighed before it is added.** `eino/compose` plus `flow/agent/react`, with
 no provider adapter at all, is already 78 modules in the graph and 126 packages compiled —
@@ -464,7 +537,7 @@ Three rules follow:
 - Frame content is delivered to the model as **quoted, labelled data**, never as instruction,
   and the system prompt says so.
 - **A proposed tool call is authorised by policy on its own merits**, never because the
-  screen or the conversation asked for it convincingly. The dispatcher does not read intent.
+  screen or the conversation asked for it convincingly. The policy does not read intent.
 - **Provenance travels with the proposal**: a call proposed in a turn whose context included
   untrusted screen content is, by that fact, lower-confidence — and ADR-0020 rule 6 says low
   confidence escalates on its own.
@@ -577,9 +650,26 @@ Assertions, in the bead, authored before the implementation.
   adapter actually sends: its tool list contains only what the grant permits. This is the
   explain mode's whole assertion — the list is empty — and it is the strongest refusal there
   is.
-- A scripted model that proposes a tool call anyway has it **refused in the middleware** —
-  `next` is never called, no Go function runs, and the run ends. **And the paired positive:**
-  with a reachable endpoint, an ask succeeds end to end.
+- **The refusal contract, asserted as five things and not one.** A scripted model proposes a
+  call; the middleware does not call `next`; it returns `ErrPolicyRefused`; the attempt is
+  terminalized as `refused`; **no tool message is produced and no second model request is
+  made**. Asserting only "`next` was not called" would pass while the model reads a polite
+  refusal and reformulates. **And the paired positive:** with a reachable endpoint, an ask
+  succeeds end to end.
+- **The security spine is exercised with a real tool, even though production explain declares
+  none.** The suite registers a fake in-memory effect tool and drives argument policy,
+  narrowing, refusal mapping, interrupt, approval resume and the sequential-batch rule through
+  it. A zero-tool run cannot exercise any of them, and a criterion that cannot fail is not one.
+- **A refused call ends the batch.** With `ExecuteSequentially`, a refusal on the second of
+  three calls means the third never runs — and the first, which was permitted and ran, is
+  reported as having run rather than hidden.
+- **Approval binds to the proposal it approved.** Resuming with different arguments, a
+  different call id, or a different tool is refused, not executed.
+- **A ledger write failure before `next` is terminal.** With the store made to fail, no
+  capability is constructed, `next` is not called, and the run ends with an infrastructure
+  reason.
+- **A streaming or enhanced tool cannot be registered in v1** — registration refuses it, so a
+  tool shape cannot route around the one wrapper that is installed.
 - **Capability narrowing, asserted by trying:** a tool invoked under a grant scoped to lane A
   cannot reach lane B, cannot open a path outside its scope, and cannot read a secret the
   grant did not name — because what it holds is scoped, not because a check preceded it.
@@ -611,12 +701,15 @@ Assertions, in the bead, authored before the implementation.
    schema v1, and it still includes the command cutover. Panel work is behind it. If it slips,
    this slips — and the honest failure mode is doing the panel first against a store that
    cannot hold what it shows.
-5. **We depend on two eino APIs on the most security-sensitive path** — the agent middleware
-   and `StatefulInterrupt`. A change to either is a break, and the tests that assert refusal,
-   never-declared and narrowing are what will catch it rather than a runtime surprise.
-6. **The dependency graph is real and partly unwanted.** 78 modules and 126 packages before
-   any provider adapter, including `logrus` against our one-`slog`-interface rule. Undecided:
-   contain it, tolerate it, or let it veto adoption. Measure again after the first adapter.
+5. **The security surface we depend on is wider than two APIs**, and saying "the middleware
+   and the interrupt" understated it. It is: the choice of agent driver (`adk`), the four tool
+   wrapper shapes, `ToolsNode`'s error classification (non-interrupt aborts, interrupt reruns),
+   sequential-versus-parallel execution, interrupt state bookkeeping, and checkpoint
+   serialization. A change to any of them is a break; the tests that assert never-declared,
+   refusal-terminalizes and narrowing are what turn a break into a red build.
+6. **The dependency graph is real.** 78 modules and 126 packages before any provider adapter.
+   `logrus` is decided rather than deferred (§4.1: contained at the composition root), but the
+   graph should be measured again after the first adapter.
 7. **"OpenAI-compatible" is not one protocol.** Endpoints differ on streamed tool arguments,
    parallel calls and usage accounting. The first adapter targets chat + streaming text; tool
    calling is verified per endpoint before the agent rung claims support there.
@@ -641,7 +734,9 @@ codebase rather than against the prose.
 - **"The grant is the process" was false.** The first draft rested authority on
   `pi --mode rpc --no-tools`. Verified by running it: a **client-sent** `{"type":"bash"}`
   executes anyway — `--no-tools` bounds what the _model_ may call, not what the _client_ may
-  request. Superseded entirely: the loop is ours and the dispatcher is the boundary (§4).
+  request. Superseded entirely — first by a loop of our own, and then, when that turned out to
+  rest on a false claim about eino, by the framework's loop with our policy middleware in it
+  (§4, and the third round below).
 - **"A frame is ordinary output, same store, same masking" was fabricated.** Output is not
   stored at all (`content.go:85`, `ws_history_record.go:130` — "a capture path that does not
   exist yet"), and masking covers the submitted command, not output. Replaced by §5 and §6.1.
