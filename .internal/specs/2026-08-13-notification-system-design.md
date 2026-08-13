@@ -1,375 +1,438 @@
 # Notification system — design
 
-- **Date:** 2026-08-13
+- **Date:** 2026-08-13 (revised the same day after two adversarial review rounds)
 - **Status:** Proposed
 - **Brainstorming session:** `nocx-uz7f`
-- **Epics to create:** A — "Что-то произошло, и ты об этом узнал"; B — "Нотификация
-  догоняет тебя в телефоне"
+- **Depends on:** **ADR-0029** — the AD-1 amendment and the ADR-0024 carve-out that make
+  `notify.raise` legal at all. This design is not buildable until that ADR is Accepted.
+- **Epics to create:** A1, A2, A3, B (§9)
 
 ## What a user can do that they could not before
 
-**A.** Run something that takes a while — a build, an agent, a remote deploy — look
-away, and be told when it wants you: a banner on the desktop, a click that lands on
-the exact tab that raised it. Including when the thing that wants you is a program on
-a machine you reached over ssh.
-
-**B.** Get the same on your phone, through a service you already use (Bark, ntfy, a
-Telegram bot), without nocx building an app, a relay or a push protocol.
+Run something that takes a while — a build, an agent, a remote deploy — look away, and be
+told when it wants you. On the desktop as a banner, on the dock as a number that stays
+until you look, and on your phone through a service you already use. Including when the
+thing that wants you is a program on a machine you reached over ssh, which is the case no
+amount of local process-watching can cover.
 
 ## The boundaries this crosses, and what they already decided
 
 Per AGENTS.md, a brief that crosses a boundary names it before it says what to build.
 
-| Binding document           | What it already decided                                                                                                       | What this design does with it                                                                                                                                      |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **AD-1**                   | One WebSocket: raw binary data plane + JSON-RPC 2.0 control plane.                                                            | Notification events cross as JSON-RPC. No PTY bytes are wrapped.                                                                                                   |
-| **AD-6**                   | Single-owner state; the backend never interprets the bytes a session produces. Terminal render state lives in the frontend.   | OSC parsing stays in xterm.js in the renderer. The backend never scans the stream for OSC 9. The round trip renderer → backend is a consequence, not an oversight. |
-| **AD-2**                   | Go backend service as the one core.                                                                                           | Outbound HTTP and the OS notification call live in the backend. The renderer never sees a target URL or a secret.                                                  |
-| **AD-8**                   | Interface-first + DI, one owner per behaviour.                                                                                | Source, router and sink are three interfaces wired at the composition root. One delivery path for all four HTTP presets.                                           |
-| **ADR-0024** (`nocx-u7uh`) | The lifecycle left the byte stream; a program's output can no longer drive your terminal.                                     | Honoured, and the apparent conflict is resolved below (§3.1).                                                                                                      |
-| **ADR-0017**               | A connection references a secret; nothing is called a credential.                                                             | A notification target references a secret the same way. Tokens are never inline.                                                                                   |
-| **ADR-0003**               | No Developer ID, ever; ad-hoc signature only.                                                                                 | Does **not** block notifications — the macOS requirement is a bundle identifier, not a Developer ID (§8).                                                          |
-| **ADR-0011**               | Storage capabilities and secret references.                                                                                   | Targets are a store; their secrets are references.                                                                                                                 |
-| **`nocx-ywhp`**            | Program-scoped grants, OSC 52 clipboard as the first program-initiated action needing consent; the next one reuses the model. | Not reused, deliberately, and §7 says why: routing is a user-owned setting, not a per-program consent.                                                             |
-| **`nocx-sb3f`**            | The transport has three delivery classes and models two; a fact with no successor rides the droppable queue.                  | Epic B depends on it (§6.3).                                                                                                                                       |
+| Binding document           | What it already decided                                                                                                    | What this design does with it                                                                                                  |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| **AD-1**                   | OSC markers stay frontend-side; ledger facts may cross as typed records; no fact may carry the output it was derived from. | **Amended by ADR-0029** — a `notify.raise` record may cross under four named rules. Compliance is not claimed; the AD changes. |
+| **AD-6**                   | The backend never interprets the bytes a session produces; render state lives in the frontend.                             | **Unchanged.** OSC parsing stays in xterm.js; the backend receives a parsed string it does not parse (ADR-0029 §4.4).          |
+| **AD-2**                   | Go backend service as the one core.                                                                                        | Outbound HTTP and the OS calls live in the backend, behind a host port with a Wails adapter (§2.2).                            |
+| **AD-3**                   | Wails v2 as the MVP desktop shell — thin and swappable.                                                                    | The Wails runtime is reached only through that port. devharness and any future host bind an unavailable or fake adapter.       |
+| **AD-8**                   | Interface-first + DI, one owner per behaviour.                                                                             | Source, router and sink are three interfaces at one composition root. The router is the only holder of "where".                |
+| **ADR-0024** (`nocx-u7uh`) | PTY output is render-only; a program's output cannot drive your terminal.                                                  | **Carved out by ADR-0029** for a bounded, attributed presentation effect — and nothing more.                                   |
+| **ADR-0017**               | A connection references a secret; nothing is called a credential.                                                          | A notification target references a secret the same way. Tokens are never inline.                                               |
+| **ADR-0003**               | No Developer ID, ever; ad-hoc signature only.                                                                              | Does not block this: the macOS requirement is a bundle identifier (§8). To be proven on a packaged build, not assumed.         |
+| **`nocx-ywhp`**            | Program-scoped grants; OSC 52 is the first program-initiated action needing consent, and the next one reuses the model.    | Deliberately not reused — ADR-0029 §4.5 records why, as the reuse rule requires.                                               |
+| **`nocx-sb3f`**            | The transport has three delivery classes and models two.                                                                   | Epic B depends on it (§6.4).                                                                                                   |
+| **`nocx-2x8x`**            | Redaction covers scrollback, ledger and clipboard — for secrets **injected from the vault**.                               | Insufficient here, and §7 says so rather than cross-referencing past the problem.                                              |
 
 ## 1. Decisions taken with the owner
 
-| #   | Question                                | Decision                                                                                                                         |
-| --- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Direction of "webhook"                  | **Outbound only.** Event → HTTP POST to a URL the user configured. No listening socket, no inbound endpoint.                     |
-| 2   | Bark / ntfy / Telegram                  | **One sink, three presets.** URL template + method + headers + body template. Not three integrations.                            |
-| 3   | History / notification centre           | **None.** A notification is transient: toast, banner, push, tab badge. No store, no inbox, no read/unread.                       |
-| 4   | May a program-sourced event reach push? | **Yes** — the user chooses the route. Safety comes from the destination being user-configured, not from a per-program grant.     |
-| 5   | Scope of the deliverable                | **The pipeline**, not a list of events. A new source is one registration.                                                        |
-| 6   | Sinks in v1                             | **All four**: in-app toast, OS notification, push, sound. "v1" spans both epics — toast, OS and sound land in A, push in B (§9). |
+| #   | Question                                | Decision                                                                                                                  |
+| --- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Direction of "webhook"                  | **Outbound only.** Event → HTTP POST to a URL the user configured. No listening socket.                                   |
+| 2   | Bark / ntfy / Telegram                  | **One sink, typed presets.** Not three integrations, and not one free-form template either (§4).                          |
+| 3   | History / notification centre           | **None.** A notification is transient. The dock badge is what replaces it (§4.3).                                         |
+| 4   | May a program-sourced event reach push? | **Yes** — the user chooses the route. Safety is the destination being user-configured, enforced by ADR-0029, not a grant. |
+| 5   | Scope of the deliverable                | **The pipeline**, not a list of events. A new source is one registration.                                                 |
+| 6   | Sinks                                   | **Five**: in-app toast, OS banner, sound, dock badge + bounce, push. Push is epic B; the rest are A1–A3.                  |
+| 7   | Trust                                   | Every event carries a `trust` class owned by its source adapter (§3.1). A guess cannot do what an attested fact can.      |
+| 8   | Dock badge                              | Counts **tabs with unseen activity**, reusing the existing `hasActivity`. No new state, no new lifecycle.                 |
 
 ## 2. Architecture: the pipeline
-
-Three parts behind interfaces, wired at one composition root.
 
 ```
 sources ──▶ Event ──▶ router ──▶ [sink, sink, …]
 ```
 
-**Event** — a typed fact:
+**Event** — a closed record. Who may set each field is the point, not decoration:
 
-| field           | meaning                                                                                |
-| --------------- | -------------------------------------------------------------------------------------- |
-| `kind`          | which source produced it (table in §3)                                                 |
-| `title`, `body` | what to say                                                                            |
-| `level`         | info / success / warning / danger                                                      |
-| `attribution`   | session id, tab, host, program name — **stamped by nocx, never taken from the stream** |
-| `at`            | timestamp                                                                              |
+| field           | set by                            | note                                                         |
+| --------------- | --------------------------------- | ------------------------------------------------------------ |
+| `kind`          | the source adapter                | never from payload                                           |
+| `trust`         | the source adapter                | `attested` \| `programRequest` \| `heuristic` (§3.1)         |
+| `title`, `body` | the source; may be stream-derived | untrusted presentation data (ADR-0029 §2.3)                  |
+| `level`         | nocx                              | a program cannot forge `danger`                              |
+| `attribution`   | nocx                              | session, tab, host, program — stamped, never from the stream |
+| `at`            | nocx                              |                                                              |
 
-**Router** — the only place that holds the word "where". Maps `kind` to the enabled
-targets (the user's standing rules) plus any ad-hoc subscriptions (§5), and returns
-the sinks to deliver to.
+**Router** — the only place holding the word "where". Maps `(kind, trust)` to the enabled
+sinks and targets, plus any ad-hoc subscription (§5). **Destination selection happens once,
+here, before any sink is invoked**; a sink receives an immutable resolved destination and
+the presentation fields, and can never select a target, credential, method or retry.
 
-**Sink** — delivers. Local: toast, OS notification, sound. Remote: one HTTP POST.
+**Sink** — delivers, and only encodes (§4.2).
 
 ### 2.1 Where each part lives
 
-- **OSC parsing: renderer.** `parser.registerOscHandler(9, …)` alongside the existing
-  7, 52, 133, 636 and 1337 in `frontend/src/renderers/xterm.ts`. The renderer then
-  raises `notify.raise` as a JSON-RPC **request** to the backend.
-- **Router: backend.** It needs the target list and their secrets.
-- **Local sinks:** toast is the renderer (`showToast`, already in the kit); OS
-  notification and sound are the backend (Wails runtime, §8).
-- **Remote sink: backend.** The token is in the vault; the vault is backend.
+- **OSC parsing: renderer.** `parser.registerOscHandler(9, …)` beside the existing 7, 52,
+  133, 636 and 1337 in `frontend/src/renderers/xterm.ts`. The renderer raises
+  `notify.raise` as a JSON-RPC **request**.
+- **Router: backend.** It holds the targets and their secrets.
+- **Toast: renderer** (`showToast`, already in the kit). Everything else: backend.
 
-The renderer → backend → renderer round trip for a toast raised by OSC 9 looks
-redundant right up to the moment somebody proposes parsing OSC 9 in Go. That is
-exactly what AD-6 forbids and what `nocx-u7uh` closed. The round trip is the design.
+### 2.2 The host port
+
+`runtime.SendNotification`, the dock badge and the attention bounce are all
+host-context-bound. They are reached through one `AttentionHost` interface with a Wails
+adapter; `cmd/devharness` and any future web host bind an adapter that reports itself
+unavailable. Without this seam the "one core" of AD-2 is welded to the AD-3 shell, and the
+pipeline becomes untestable outside a desktop build.
 
 ## 3. Sources
 
-| `kind`              | Origin                                                                                  | Reliability                                            |
-| ------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `program.notify`    | OSC 9 (plain), OSC 777;notify, OSC 1337 RequestAttention — renderer                     | whatever the program printed                           |
-| `block.finished`    | block ledger (ADR-0024): exit code and duration                                         | authenticated; **requires shell integration**          |
-| `session.ended`     | `lifecycle.changed`                                                                     | authenticated; always available                        |
-| `bell`              | BEL, via the existing `onBell`                                                          | always available                                       |
-| `pane.workFinished` | `detectAgentStatus` (`frontend/src/agent-status.ts`): `working → idle` **held for 5 s** | a guess from the title; any spinner, not only an agent |
+| `kind`              | `trust`          | Origin                                                                    |
+| ------------------- | ---------------- | ------------------------------------------------------------------------- |
+| `block.finished`    | `attested`       | block ledger (ADR-0024) — exit code and duration; needs shell integration |
+| `session.ended`     | `attested`       | `lifecycle.changed`                                                       |
+| `program.notify`    | `programRequest` | OSC 9 (plain), OSC 777;notify — renderer                                  |
+| `bell`              | `programRequest` | BEL, via the existing `onBell`                                            |
+| `pane.workFinished` | `heuristic`      | `detectAgentStatus`: `working → idle` held for 5 s (§3.4)                 |
 
-### 3.1 Why OSC 9 does not contradict `nocx-u7uh`
+### 3.1 What each trust class may reach
 
-`nocx-u7uh` stopped a program **forging a fact of nocx's own** — an exit code,
-ownership of the input, a record in the command history. A program that prints OSC 9
-is **asking** for its own message to be shown. The message is attributed to the
-program, displayed as the program's text, and never becomes a fact nocx asserts. Those
-are different things, and the ADR for this design must say so — otherwise the next
-reader concludes we walked the invariant back.
+| `trust`          | May reach                                                          |
+| ---------------- | ------------------------------------------------------------------ |
+| `attested`       | every sink; may close a one-shot completion subscription           |
+| `programRequest` | every sink; may **not** close a completion subscription            |
+| `heuristic`      | local attention only — toast, dock badge, tab dot. **Never push.** |
 
-### 3.2 OSC 9 is overloaded — the parser must disambiguate
+One field on the event and one column in the routing table. Content cannot choose or
+upgrade its own class, because the source adapter sets it and the schema rejects it from
+the payload.
 
-- `ESC ] 9 ; text` — a notification request (iTerm2, Windows Terminal, wezterm).
+### 3.2 OSC 9 is overloaded — the parser must discriminate
+
+- `ESC ] 9 ; text` — a notification request.
 - `ESC ] 9 ; 4 ; state ; pct` — the ConEmu **progress** protocol.
 
-A naive handler registered on 9 turns a progress update into a push to the user's
-phone. OSC 9;4 is parsed and **produces no notification**; it exists in the parser
-solely so it cannot be mistaken for the first form. Evidence: termic handles both,
-separately (`~/repos/termic/src/components/task/TerminalPane.tsx`).
+OSC 9;4 is recognised and **produces no event**; it exists in the parser only so it cannot
+be mistaken for the first form. A naive handler on 9 turns a progress tick into a push.
 
-### 3.3 `pane.workFinished`: three rules bought by other people's bugs
+### 3.3 OSC 1337 is not a new source
 
-1. **Only the `working → idle` edge.** Never `null → idle`. `agent-status.ts` states
-   it directly: _"A title that never mentions an agent is not an idle agent."_ `null`
-   means the title said nothing.
-2. **Idle must be held for 5 seconds.** Claude Code's title oscillates ✳ ↔ spinner
-   every 1–3 s between tool calls. A bare edge fires on every tool call. The 5 s
-   settle window is termic's, with its reasoning recorded in their source: long
-   enough to survive the oscillation, short enough to feel responsive.
-3. **Name it honestly in the UI.** `BRAILLE_SPINNER` matches `⠀-⣿` in any title —
-   `npm install` with ora, `docker pull`, half of all TUIs. The module answers "is
-   something working", not "who". So the label is **"работа в панели завершилась"**,
-   never "агент закончил".
+`xterm.ts:388` already owns 1337 and its comment states the rule: _"One handler owns OSC
+1337 (ADR-8): the recovery fence is the same ident with a different payload kind, so it
+dispatches from here."_ If iTerm2's `RequestAttention` is ever wanted, it discriminates
+**inside** that handler. Registering a second handler for 1337 is two owners for one input.
+Out of scope for now — OSC 9 and 777 cover the case.
 
-### 3.4 Claude Code has a better path than the heuristic
+### 3.4 `pane.workFinished` is new work, not an existing signal
 
-Claude Code has a "Send notification" setting that emits **OSC 9**. Once the OSC 9
-handler exists, Claude notifies with its own text and no Claude-specific code in nocx
-— no heuristic, no settle timer, no false positive on `docker pull`.
+An earlier draft called this "a subscription to an existing signal". That was wrong.
+`detectAgentStatus` (`frontend/src/agent-status.ts`) is a **stateless classifier**, and its
+caller (`frontend/src/tabs.ts:271`) has no timer and calls `markActivity()` whenever the new
+value is `idle`, regardless of the previous one — so `null → idle` fires today. Three rules,
+all of them new state machine:
 
-**To verify in the first iteration** against a live Claude Code. If it holds, `3.5`
-demotes to a fallback for agents that stay silent, rather than the primary path.
+1. **Only the `working → idle` edge.** Never `null → idle`. The module says why: _"A title
+   that never mentions an agent is not an idle agent."_
+2. **Idle held for 5 s.** Claude Code's title oscillates ✳ ↔ spinner every 1–3 s between
+   tool calls; a bare edge fires on each one. The 5 s settle window is termic's, with its
+   reasoning recorded in their source. Cancel on `idle → working`, on the title going
+   `null`, on tab close and on session replacement.
+3. **Named honestly.** `BRAILLE_SPINNER` matches `⠀-⣿` in any title — `npm install` with
+   ora, `docker pull`, half of all TUIs. The label is **"работа в панели завершилась"**,
+   never "агент закончил", and its `trust` is `heuristic` for exactly this reason.
 
-### 3.5 Deliberately not a source
+### 3.5 Claude Code has a better path than the heuristic
 
-- **Agent events (`agent.done`, `agent.needsInput`).** They belong to `nocx-dw3` and
-  arrive as a child of that epic — one registration against this pipeline. This is
-  what keeps epic A unblocked: `nocx-dw3` and this epic do not touch the same code,
-  so a blocking edge between them would be exactly the "not yet" edge AGENTS.md had
-  to strip 13 of 20 times.
-- **Deeper title classification** (per-agent state registries, as termic keeps for
-  Gemini/Codex). `agent-status.ts` is deliberately minimal — "kept to the markers we
-  can actually verify" — and growing it is a separate decision.
+Claude Code has a "Send notification" setting that emits **OSC 9** (termic handles it as
+the first entry in their dialect list). Once the OSC 9 handler exists, Claude notifies with
+its own text and no Claude-specific code in nocx — and at `programRequest` rather than
+`heuristic`. **To verify in the first iteration** (§11); if it holds, §3.4 is a fallback for
+agents that stay silent rather than the primary path.
 
-## 4. Targets and the routing table
+### 3.6 Deliberately not a source
 
-A `NotificationTarget` is **its own entity with its own store and surface**, not a
-setting:
+- **Agent events (`agent.done`, `agent.needsInput`)** — they belong to `nocx-dw3` and arrive
+  as a child of that epic, one registration against this pipeline. This is what keeps these
+  epics unblocked: they touch no common code, so a blocking edge would be the "not yet" edge
+  AGENTS.md had to strip 13 times out of 20.
+- **Deeper per-agent title classification.** `agent-status.ts` is deliberately minimal —
+  "kept to the markers we can actually verify". Growing it is a separate decision.
 
-| field                                              | note                                                            |
-| -------------------------------------------------- | --------------------------------------------------------------- |
-| `id`, `name`                                       |                                                                 |
-| `kind`                                             | `bark` \| `ntfy` \| `telegram` \| `custom`                      |
-| `urlTemplate`, `method`, `headers`, `bodyTemplate` | presets fill these; `custom` exposes them                       |
-| `secretRef`                                        | reference into the vault (ADR-0017) — **never an inline token** |
-| `accepts`                                          | the set of event `kind`s this target takes                      |
+## 4. Sinks and targets
 
-Template variables: `{{title}}`, `{{body}}`, `{{level}}`, `{{host}}`, `{{session}}`,
-`{{tab}}`, `{{program}}`.
+### 4.1 The push target
 
-Local sinks (toast, OS, sound) are not targets — they are built-in rows of the same
-table, with the same per-`kind` switches.
+A `NotificationTarget` is its own entity with its own store and surface:
 
-**Why not settings.** The registry knows exactly five control kinds — toggle, text,
-number, select, secret (`internal/settings/settings.go:53-57`) — and one flat key per
-setting. A list of targets, each with a URL, a secret and a set of events, is a
-collection, and the registry has no collection. The alternative would be inventing a
-sixth control kind and teaching the generated settings screen to render a table, which
-also collides with `nocx-dej6`. A target is shaped exactly like a connection profile,
-which already has a store, a CRUD surface and a secret reference — extend that answer
-rather than write a second one.
+| field                | note                                                       |
+| -------------------- | ---------------------------------------------------------- |
+| `id`, `name`         |                                                            |
+| `preset`             | `bark` \| `ntfy` \| `telegram` \| `custom`                 |
+| `endpoint`           | scheme + host + port + fixed path — **user-supplied only** |
+| `secretRef`          | reference into the vault (ADR-0017); never inline          |
+| preset-specific keys | Telegram `chatId`; ntfy `topic`; Bark `deviceKey`          |
+| `accepts`            | which `kind`s and which `trust` classes this target takes  |
+
+**There is no `urlTemplate` and no payload variable in URL construction.** An earlier draft
+had one, accepting `{{body}}`, which handed the URL authority to program output —
+`https://{{body}}/notify`, and `https://gateway/?next={{body}}` through a query parameter.
+ADR-0029 now makes that an AD violation rather than an oversight. Bark, which wants content
+in a path segment, gets a preset that appends **exactly one percent-encoded segment**; it
+does not get a licence to template.
+
+The presets differ in schema, not configuration: Telegram needs a `chatId` distinct from
+the bot token, ntfy needs a topic distinct from the server, Bark puts both key and content
+in the path. One generic string-substitution engine cannot represent all three safely, so
+each preset declares its payload position and its encoder.
+
+### 4.2 Encoding is the sink's only freedom
+
+Each sink declares maximum encoded sizes and permitted presentation characters. Header
+fields reject CR, LF and NUL; a path field percent-encodes exactly one segment; a JSON
+field goes through a JSON encoder; a raw body sets a fixed content type; OS fields are
+bounded before the platform call. **An invalid payload fails visibly and never falls back
+to string concatenation.** Injection vectors to test: CRLF, `%2F`, `?`, `#`, invalid UTF-8,
+NUL, bidi controls, oversized payloads.
+
+### 4.3 Local sinks
+
+Toast, OS banner, sound, and **dock badge + bounce** are built-in rows of the same routing
+table with the same per-`kind` switches.
+
+The badge and the bounce need **our own cgo** — Wails v2.13 exposes neither (`dockTile`,
+`badgeLabel` and `requestUserAttention` are absent from the entire module, and
+`NotificationOptions` has no badge field). About thirty lines of ObjC behind the
+`AttentionHost` port of §2.2.
+
+They earn it: with no notification centre, they are the **only** surface that persists until
+the user looks. The badge counts **tabs with unseen activity** — `hasActivity` already
+exists, is already set, and already clears when the tab is visited, so there is no new state
+and no new lifecycle. Zero such tabs, no badge. The bounce fires once
+(`NSInformationalRequest`) on a `danger` event while unfocused; never `NSCriticalRequest`,
+which bounces until you come, and a terminal that does that is Clippy.
 
 ## 5. Ad-hoc subscriptions
 
-A user gesture attaches a one-shot notification to a specific block or tab, via the
-kit's existing `ContextMenu` (`frontend/src/ui/context-menu.tsx`):
+A user gesture attaches a one-shot notification to a block or a tab, through the kit's
+existing `ContextMenu`:
 
 - on a **block** — "Уведомить, когда закончится"
 - on a **tab** — "Уведомить, когда сессия завершится"
 
-One-shot: the subscription disarms itself after it fires. It does not survive a
-restart — there is no store, which follows from decision #3. It delivers through the
-same router and the same sinks.
+**Only an `attested` event closes one.** A `heuristic` guess cannot satisfy "notify me when
+this finishes" — that is the whole point of §3.1.
 
-**If the signal does not exist, the menu item is absent — not disabled.** Tabby gates
-"Notify when done" on `await tab.getCurrentProcess()` returning something
-(`~/repos/tabby/tabby-core/src/tabContextMenu.ts:174`). Our equivalent: a block
-subscription requires shell integration on that session; a tab subscription requires
-only lifecycle, so it is always offered.
+**If the signal does not exist, the menu item is absent — not disabled.** A block
+subscription needs shell integration on that session; a tab subscription needs only
+lifecycle, so it is always offered. Tabby does exactly this, gating on
+`await tab.getCurrentProcess()` (`~/repos/tabby/tabby-core/src/tabContextMenu.ts:174`).
+
+The subscription does not survive a restart — there is no store, which follows from
+decision #3.
 
 ## 6. Suppression, rate and failure
 
-### 6.1 Suppression
+### 6.1 Suppression, and its interaction with an explicit request
 
-Nothing is delivered about the tab the user is currently looking at, in a focused
-window. Both termic and iTerm2 gate this way; termic gates the whole focused task.
+Nothing is delivered about the tab the user is looking at, in a focused window.
+
+**An ad-hoc subscription is an explicit user gesture and outranks suppression.** If the user
+asked to be told when this block finishes and is looking at it when it does, the
+subscription fires to the local sinks and disarms. Silently disarming a suppressed
+subscription would defeat the gesture; leaving it armed would make it fire on some unrelated
+later event. Neither is acceptable, so the rule is stated rather than left to fall out.
 
 ### 6.2 Rate
 
-- **Debounce per source: 8 s to start** — termic's `DEBOUNCE_MS`, adopted rather than
-  invented.
-- **Coalescing:** several events from one source inside the window collapse into one
-  notification naming the count.
+- **Debounce, keyed `{sessionId, kind}`** — 8 s to start, termic's number, adopted rather
+  than invented. Keyed by session and not by kind alone, so two tabs never collapse into one
+  notification and lose their attribution.
+- **Coalescing** within the window produces one notification naming the count, carrying the
+  attribution of the session it was keyed on. Memory is bounded.
 
-Without these, `while true; do printf '\e]9;spam\a'; done` is ten thousand pushes and
-a banned Bark key.
+Without these, `while true; do printf '\e]9;spam\a'; done` is ten thousand pushes and a
+banned Bark key.
 
-### 6.3 Failure paths
+### 6.3 Failure paths, as intervals
 
-| Failure                                  | What the user sees                                                                                                                                                                                                      |
-| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Push returns non-2xx, or times out       | A local toast at level `danger` naming the target. Since there is no history, this is the **only** place a failed delivery is visible — required by "a soft degrade must be visible in the product, not only in a log". |
-| `CheckNotificationAuthorization` false   | Settings says "macOS не показывает нотификации", not silence.                                                                                                                                                           |
-| `IsNotificationAvailable` false          | The OS-sink row is unavailable and states why.                                                                                                                                                                          |
-| Vault locked when a push needs its token | The push fails loudly by the row above; it does not silently skip.                                                                                                                                                      |
+AGENTS.md rule 3 wants both ends named, not a list of terminal errors.
 
-**The transport dependency.** `notify.raise` travels renderer → backend as a
-**request**, which the transport already never drops. The reverse direction — "the
-push failed, show a toast" — is a backend → renderer notification with **no
-successor**, which is precisely the class `nocx-sb3f` describes: today it would ride
-the refreshable queue and be dropped under saturation, and the failure would vanish
-silently. Epic B therefore depends on `nocx-sb3f`. This is a legitimate blocking edge
-under the AGENTS.md rule: both live in the outbound queueing of
-`internal/transport`.
+| Interval                                                 | What is true throughout, and how the next start recovers                                                                                                                                                                                                        |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Target creation: secret written, target document not yet | The secret is an orphan from the vault write until the document commits. On failure the secret is deleted; if that delete fails, the orphan is `nocx-2x8x`'s janitor's problem and the target does not exist. **Never a document with a dangling `secretRef`.** |
+| Target deletion: document removed, secret not yet        | ADR-0011 §4 already prefers a brief unreachable orphan over metadata pointing at nothing. Same order here: document first.                                                                                                                                      |
+| Target edited while the router holds it                  | The router resolves destinations once per event from an immutable snapshot. An edit mid-flight affects the next event, never a delivery in progress.                                                                                                            |
+| Store committed, in-memory routing not refreshed         | The refresh is part of the commit's publication, as settings already do. Disk and runtime never disagree past the commit.                                                                                                                                       |
+| One sink succeeds, another fails                         | Each sink's outcome is independent; a failure never retries a sink that succeeded. At-most-once (ADR-0029 §2.1).                                                                                                                                                |
+| Subscription armed → fired                               | It exists from the gesture until either every selected sink has completed or failed, or the tab closes. Disarm happens **after** delivery is attempted, not before, so a failed delivery does not silently consume the gesture.                                 |
+| Vault locked when a push needs its token                 | The push fails loudly by §6.4, and does not silently skip.                                                                                                                                                                                                      |
+
+Independently failing and each needing a test: template rendering, URL parsing, header
+validity, JSON encoding, DNS, TLS, redirect refusal, oversized payload, response read,
+cancellation; and `InitializeNotifications`, the authorization request, the send, the click
+callback decode, the tab lookup, the focus call, and the sound invocation.
+
+### 6.4 A failed delivery must be visible, and the transport can eat it
+
+A push returning non-2xx or timing out raises a local toast at `danger` naming the target.
+With no history, this is the **only** place a failed delivery is visible — required by "a
+soft degrade must be visible in the product, not only in a log".
+
+But that toast is a backend → renderer notification with **no successor**, which is exactly
+the class `nocx-sb3f` describes: today it rides the refreshable queue and is dropped under
+saturation, so the visible failure vanishes silently. **Epic B depends on `nocx-sb3f`** — a
+legitimate blocking edge, since both live in the outbound queueing of `internal/transport`.
+
+Permission failures are not one state but three: `IsNotificationAvailable` false (the row is
+unavailable and says why), authorization never requested (the settings control requests it),
+and authorization denied (the control says macOS is suppressing display and points at System
+Settings, because nocx cannot re-prompt after a denial).
 
 ## 7. Security
 
-**The URL never comes from the byte stream.** A program chooses the _content_ of a
-notification; the user chooses every _destination_. This is the invariant that makes
-decision #4 safe, and it is not negotiable.
+The invariants now live in **ADR-0029** and are binding rather than aspirational: provenance,
+differential noninterference, the enumerated destination rule, and retention with both ends
+named. §4.1 and §4.2 are their design-level consequences.
 
-**Attribution is mandatory.** Because the content is program-chosen, the body carries
-which tab, which host, which session it came from. Without it, `Ваш банк:
-подтвердите вход` from a hostile MOTD arrives on the user's phone indistinguishable
-from their own alert.
+**Redaction is not covered by `nocx-2x8x` and saying so is the point.** That epic masks
+secrets _injected from the vault_, in scrollback, ledger and clipboard — not an HTTP body,
+and not a secret that was never nocx's to know. Program-chosen text can carry anything. So
+epic B must either extend the redaction contract to the push sink explicitly, or state in
+the target UI that unredacted terminal content leaves the machine. A cross-reference does
+neither, and this design does not pretend otherwise.
 
-**Why not a program-scoped grant (`nocx-ywhp`).** That epic decides consent for an
-action a program takes _on the user's behalf_ — writing their clipboard. Here the
-program does not act; it asks, and a user-owned routing rule decides whether anyone
-listens. Adding a per-program consent dialog on top of a routing rule the user already
-set would be a second model for one decision. If `nocx-ywhp` later generalises to
-"program-initiated requests" as a category, this is a candidate to fold in — the ADR
-should say so, so the option is not lost.
-
-**Residual risk, accepted by the owner:** once the user routes terminal-sourced events
-to push, any host they ssh into can put text on their phone. Bounded by attribution,
-the rate limit, and the fact that the destination is theirs.
-
-**Redaction.** A body leaving the machine may carry a command line. `nocx-2x8x`
-(secret lifecycle hygiene: orphan collection and redaction) owns redaction — extend
-it, do not write a second redactor here.
+**Residual risk, accepted deliberately:** ADR-0029 §4.6.
 
 ## 8. macOS specifics — researched, not assumed
 
-**The correct API today is `UNUserNotificationCenter`** (`UserNotifications.framework`).
-`NSUserNotification` has been deprecated since macOS 11 and is the API that silently
-drops the banner sound on modern macOS — the reason termic plays sound separately via
-`afplay`.
+**`UNUserNotificationCenter`** (`UserNotifications.framework`) is the correct API.
+`NSUserNotification` has been deprecated since macOS 11 and is what silently drops the
+banner sound — the reason termic plays sound separately via `afplay`.
 
-**Wails v2.13.0 — already our dependency — implements it.**
-`pkg/runtime/notifications.go` exposes `InitializeNotifications`,
-`IsNotificationAvailable`, `RequestNotificationAuthorization`,
+**Wails v2.13.0 already implements it.** `pkg/runtime/notifications.go` exposes
+`InitializeNotifications`, `IsNotificationAvailable`, `RequestNotificationAuthorization`,
 `CheckNotificationAuthorization`, `SendNotification` (with an `opts.Data` payload),
-`SendNotificationWithActions`, `RegisterNotificationCategory`,
-`OnNotificationResponse`, and the pending/delivered removal calls. Underneath,
-`internal/frontend/desktop/darwin/WailsContext.m` imports
-`<UserNotifications/UserNotifications.h>`, installs a `UNUserNotificationCenterDelegate`,
-and calls `requestAuthorization` with `Alert|Sound|Badge` plus
+`SendNotificationWithActions`, `RegisterNotificationCategory`, `OnNotificationResponse`, and
+the removal calls. Underneath, `internal/frontend/desktop/darwin/WailsContext.m` imports
+`<UserNotifications/UserNotifications.h>`, installs a `UNUserNotificationCenterDelegate`, and
+calls `requestAuthorization` with `Alert|Sound|Badge` plus
 `getNotificationSettingsWithCompletionHandler`.
 
-Every wall the comparable products hit is already scaled by a dependency we ship:
+| Comparable product's wall                                                     | Answer here                                                                                                               |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| termic: osascript has no click callback, so they keep a focus-edge heuristic  | `OnNotificationResponse` + `opts.Data` — the same payload idea, without the heuristic                                     |
+| orca: a native Swift binary purely to learn whether notifications are enabled | `CheckNotificationAuthorization`                                                                                          |
+| termic: the deprecated API swallows the banner sound                          | not applicable — this is not that API                                                                                     |
+| Windows / Linux                                                               | Wails carries both; `go-toast/v2` is indirect in `go.mod` because it **is** the Wails Windows backend, and Linux is D-Bus |
 
-| Their problem                                                                                                                       | Answer                                                                                                                                                  |
-| ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| termic: osascript has no click callback, so they keep a focus-edge heuristic                                                        | `OnNotificationResponse` + `opts.Data` — the same `{tab, session}` payload idea, without the heuristic                                                  |
-| orca: wrote a native Swift binary purely to learn whether notifications are enabled (`native/notification-status-macos/main.swift`) | `CheckNotificationAuthorization`                                                                                                                        |
-| termic: deprecated API swallows the banner sound                                                                                    | not applicable — this is not that API                                                                                                                   |
-| Windows / Linux                                                                                                                     | Wails carries both. `go-toast/v2` is indirect in our `go.mod` because it **is** the Wails Windows backend; Linux is D-Bus, hence `CleanupNotifications` |
+**What Wails does not give us:** the dock badge and the attention bounce (§4.3).
 
-**Ad-hoc signing is sufficient.** The hard requirement is a **bundle identifier** —
-Wails returns `"notifications require a valid bundle identifier"`, and
-`UNUserNotificationCenter.current()` is what raises
-`Invalid parameter not satisfying: bundleIdentifier != nil`. **ADR-0003 does not block
-this feature.**
+**Ad-hoc signing is expected to suffice** — the hard requirement is a bundle identifier, and
+Wails returns `"notifications require a valid bundle identifier"`. **This is not yet
+established**: the Wails check proves only what Wails rejects, not that macOS preserves
+authorization across `wails dev` re-signs or ad-hoc release updates. §11 makes it an
+experiment on a packaged build, not an assumption.
 
-**The trap in the same module.** `pkg/mac/notification_darwin.go` exposes
-`mac.ShowNotification`, the old osascript path: no authorization check, no click
-callback, and it interpolates the message straight into an AppleScript string —
+**Two nocx facts to fix before A1 ships:**
 
-```go
-command := fmt.Sprintf("display notification \"%s\"", message)
-```
-
-Our bodies come from the byte stream, so a body containing `"` escapes the AppleScript
-literal. That is an injection, not a cosmetic flaw. **Use `runtime.SendNotification`;
-never `mac.ShowNotification`.** Written down because the wrong function has the more
-inviting name.
-
-**Two nocx facts to fix before A ships:**
-
-1. `build/darwin/Info.plist` and `Info.dev.plist` both carry the Wails template
-   default `com.wails.{{safeBundleID .Name}}`. macOS keys notification authorization to
-   the bundle identifier, so **taking our own identifier must land before the feature
-   relies on it** — renaming later resets every user's permission.
-2. Both plists carry the **same** identifier, so the dev stand and the shipped app are
-   one identity to macOS. Notification permission does **not** follow the
-   `nocx` / `nocx-dev` split that settings and the vault follow
-   (`internal/storage/appdir.go`). Not a blocker; stated so it is not discovered.
+1. `build/darwin/Info.plist` and `Info.dev.plist` both carry the Wails template default
+   `com.wails.{{safeBundleID .Name}}`. macOS keys notification authorization to the bundle
+   identifier, so **taking our own identifier must land first** — renaming later resets
+   every user's permission.
+2. Both carry the **same** identifier, so the dev stand and the shipped app are one identity
+   to macOS. Notification permission does not follow the `nocx` / `nocx-dev` split that
+   settings and the vault follow (`internal/storage/appdir.go`).
 
 ## 9. Epic decomposition
 
-### Epic A — "Что-то произошло, и ты об этом узнал"
+The first draft had one epic A carrying the pipeline, five sources, four sinks, native
+notification lifecycle, permissions, bundle identity, suppression, debounce and two context
+menu features. That is an area, not a deliverable. Four epics:
 
-The pipeline, the five sources, the local sinks (toast, OS, sound), suppression and
-rate, and the ad-hoc subscriptions.
+### A1 — "Программа из панели дозвалась до тебя"
 
-**DONE WHEN:** a program in a pane prints OSC 9 while the window is unfocused, a macOS
-banner appears, and clicking it opens that exact tab — watched end to end by one
-automated check driving a real pty through `cmd/devharness`.
+The pipeline (event, router, sink interfaces, the `AttentionHost` port), the OSC 9 / 777
+receiver, `program.notify` and `bell`, the toast / OS banner / sound sinks, attribution,
+suppression, debounce and coalescing. Plus the bundle identifier.
 
-### Epic B — "Нотификация догоняет тебя в телефоне"
+**DONE WHEN — automated:** a program on a real pty through `cmd/devharness` prints OSC 9;
+`notify.raise` crosses the real socket conforming to its contract; the router selects the
+expected sinks; and the `AttentionHost` fake is invoked with the exact title, body and
+nocx-stamped attribution. Plus the differential noninterference property test of
+ADR-0029 §2.1.
 
-The target entity, its store and CRUD surface, the vault-backed secret, the four
-presets, the HTTP sink, and the visible delivery failure.
+**DONE WHEN — manual, and named as manual:** on a packaged build, the banner appears and
+clicking it focuses the originating tab. **Clicking a native macOS banner cannot be
+automated — from Playwright or anything else.** Recording it as a manual step is honest;
+claiming an automated check that cannot exist is what the first draft did.
 
-**DONE WHEN:** a `custom` target pointing at a local test HTTP server receives a POST
-carrying the event and its attribution when a command fails — one automated check.
+### A2 — "Ты видишь, что пропустил, не открывая ничего"
 
-**Depends on:** A (they share the routing table) and `nocx-sb3f` (§6.3).
+Dock badge (counting tabs with unseen activity) and the single attention bounce, behind the
+`AttentionHost` port; plus `pane.workFinished` at `trust: heuristic`, which can reach only
+these surfaces.
+
+**DONE WHEN:** with the window unfocused, a spinner in a background tab settling to idle for
+5 s raises the tab dot and increments the badge; visiting the tab clears both. Automated
+against the port's fake, with the badge value asserted.
+
+### A3 — "Скажи мне, когда вот это закончится"
+
+`block.finished` and `session.ended` at `trust: attested`, and the one-shot subscriptions on
+a block and on a tab, including the absent-not-disabled rule and the suppression override.
+
+**DONE WHEN:** with shell integration, right-clicking a running block and choosing "уведомить,
+когда закончится" produces exactly one notification when it exits and no second one; and on a
+session without shell integration the menu item is absent.
+
+### B — "Нотификация догоняет тебя в телефоне"
+
+The target entity, its store and CRUD surface, the vault-backed secret, the four typed
+presets, the HTTP sink with its per-context encoders, and the visible delivery failure.
+
+**DONE WHEN:** a user creates a `custom` target through the UI, its secret goes to the vault,
+the app restarts, a command fails, and the local test HTTP server receives a POST carrying
+the event and its attribution. Driving the UI is the point — a test that pokes the store
+directly proves the sink, not the feature.
+
+**Depends on:** A1 (the pipeline) and `nocx-sb3f` (§6.4).
 
 ### Alongside
 
-- Close `nocx-4clc` — the Toast primitive is delivered: `frontend/src/ui/toast.tsx`
-  exists, `showToast` is imported by 22 files, `ToastHost` is mounted once, `.st-export-status`
-  is gone. All three acceptance criteria are met.
-- Re-parent `nocx-8yg.11` ("Notification when a long command finishes") out of the
-  `nocx-8yg` area epic into A.
-- New bead: own the bundle identifier (§8), landing before A's OS sink.
+- Close `nocx-4clc` — delivered: `frontend/src/ui/toast.tsx` exists, `showToast` is imported
+  by 22 files, `ToastHost` is mounted once, `.st-export-status` is gone.
+- Re-parent `nocx-8yg.11` out of the `nocx-8yg` area epic into A1.
 
 ### Deliberately out
 
-History and a notification centre; agent events (a child of `nocx-dw3`); deeper
-per-agent title classification; an inbound webhook endpoint; per-program grants;
-a second redactor (`nocx-2x8x` owns redaction).
+History and a notification centre; agent events (a child of `nocx-dw3`); deeper per-agent
+title classification; OSC 1337 RequestAttention (§3.3); an inbound webhook endpoint;
+per-program grants (ADR-0029 §4.5); a durable retry queue (ADR-0029 §2.1 — adding one is a
+deliberate amendment, not an HTTP implementation detail).
 
 ## 10. Testing
 
-- **The wire.** `notify.raise` gets its JSON Schema in `contracts/` in the same commit
-  that adds the method, with `additionalProperties: false` and an explicit `required`,
-  plus the `…_OverTheWireConformsToContract` test that validates the real result off
-  the real socket.
-- **Every external call has a failing test:** push returns 401; push times out;
-  `SendNotification` returns an error; `CheckNotificationAuthorization` returns false;
-  the vault is locked when the token is needed.
-- **And each one is paired with "and on an ordinary machine it succeeds"** — the
-  `contentkey` lesson, where every failure path was tested and the success path was
-  never reachable.
-- **Invariants as intervals.** A block subscription exists from the moment it is
-  created until either the event is delivered or the tab is closed — both ends named.
-- **Acceptance criteria written as assertions in the beads,** not prose, so the
-  implementer is not the only author of the test.
-- **The happy path is watched end to end** for each epic, by the checks in §9.
+- **The wire.** `notify.raise` gets its JSON Schema in `contracts/` in the same commit as the
+  method, `additionalProperties: false` plus explicit `required` — the schema is what makes
+  ADR-0029's provenance rule enforceable rather than advisory — with the
+  `…_OverTheWireConformsToContract` test off the real socket.
+- **The differential property test** for noninterference (ADR-0029 §4.2): hostile payload
+  pairs differing only in `title`/`body`, asserting identical routing traces and request
+  metadata.
+- **Injection vectors** per §4.2.
+- **Every external call has a failing test, and each is paired with "and on an ordinary
+  machine it succeeds"** — the `contentkey` lesson, where every failure path was tested and
+  the success path was never reachable.
+- **Invariants as intervals** — §6.3 is written that way so the tests can be.
+- **Acceptance criteria as assertions in the beads**, not prose, so the implementer is not the
+  only author of the test.
 
 ## 11. To verify during implementation
 
-1. Does Claude Code's "Send notification" actually emit OSC 9 against a live run
-   (§3.4)? If yes, `pane.workFinished` demotes to a fallback.
-2. Does `wails dev` re-signing the binary on every run reset notification
-   authorization, the way it re-triggers the keychain prompt (`nocx-o4hg`)? If it
-   does, the dev loop needs a documented workaround and it is not a product defect.
-3. Which of Bark, ntfy and Telegram need a non-JSON body or a path-segment secret, so
-   the template covers all three without a special case.
+1. Does Claude Code's "Send notification" actually emit OSC 9 against a live run (§3.5)? If
+   yes, `pane.workFinished` demotes to a fallback.
+2. **On a packaged, ad-hoc-signed build:** does notification authorization survive an update,
+   and does a `wails dev` re-sign reset it the way it re-triggers the keychain prompt
+   (`nocx-o4hg`)? §8 depends on this and currently assumes it.
+3. Exact request shapes for Bark, ntfy and Telegram, to fix each preset's schema (§4.1).
