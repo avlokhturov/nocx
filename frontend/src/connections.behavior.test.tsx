@@ -669,6 +669,161 @@ describe('inline password minting', () => {
     })
   })
 
+  // The minted row is NOT in the inventory: the mint happens after the
+  // editor's own inventory load, so the vault has the row and this surface
+  // does not. The action must trust the binding it just made and name the
+  // secret from the mint, not from whatever rows were loaded when the editor
+  // opened (W3: "No password set" while options.passwordSecret was bound).
+  it('names a freshly minted secret before the inventory knows it', async () => {
+    const inventory = vi.fn().mockResolvedValue({ entries: [] })
+    const vaultClient = { inventory } as unknown as VaultClient
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      vaultClient,
+    })
+    const savePasswordSpy = vi.spyOn(client, 'savePassword').mockResolvedValue({
+      row: 'secrow:pass-fresh',
+    })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(savePasswordSpy).toHaveBeenCalled()
+    })
+    // The name the backend stored under is the generated one (ADR-0016) —
+    // shown even though no inventory load has ever returned the row.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+    })
+    expect(container.textContent).not.toContain('No password set')
+
+    // The inventory is refreshed after the mint, so the pickers and any other
+    // surface see the row without waiting for the next editor open.
+    await vi.waitFor(() => {
+      expect(inventory.mock.calls.length).toBeGreaterThanOrEqual(2)
+    })
+  })
+
+  // A cancelled vault prompt leaves the user's password unset with nothing on
+  // screen to say why — the dialog closed on OK, so silence reads as success.
+  // The consequence must be said out loud (AGENTS.md: a soft degrade must be
+  // visible in the product).
+  it('says out loud that a cancelled vault prompt left the password unsaved', async () => {
+    const { vaultClient, vaultController } = sealedVaultClient()
+    await vaultController.refresh()
+    const { container, client } = mount({ profiles: [], vaultController, vaultClient })
+    vi.spyOn(client, 'savePassword').mockRejectedValue(
+      new RpcError('vault error', -32000, { reason: 'vault-sealed' }),
+    )
+
+    await waitForProfiles(container, 0)
+    clickButtonByText(container, '+ New connection')
+    await vi.waitFor(() => expect(container.querySelector('#quick-connect-input')).toBeTruthy())
+    fireEvent.input(container.querySelector('#quick-connect-input')!, {
+      target: { value: 'web.example.com' },
+    })
+    clickButtonByText(container, 'Next')
+    await vi.waitFor(() => expect(container.querySelector('#profile-host')).toBeTruthy())
+
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
+    })
+    const prompt = container.querySelector('.ui-prompt')!
+    clickButtonByText(container, 'Cancel', prompt)
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some((t) => t.level === 'warning' && t.message.includes('Password was not saved')),
+      ).toBe(true)
+    })
+  })
+
+  // A refused mint (vault sealed and unlocked, or a store error) must also be
+  // visible: the editor closed on OK and nothing may claim the draft bound.
+  it('shows the failure when the mint is refused outright', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(client, 'savePassword').mockRejectedValue(new RpcError('store is full', -32000))
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some(
+          (t) => t.level === 'danger' && t.message.includes('Could not save the password'),
+        ),
+      ).toBe(true)
+    })
+    // The draft is untouched: no binding was made, so the action says so.
+    expect(container.textContent).toContain('No password set')
+  })
+
+  // Partial failure: the mint lands in the vault, the profile save fails.
+  // The binding stays on the draft and named on screen — a retry of Save
+  // persists it; nothing was silently dropped.
+  it('keeps the minted binding visible when the profile save fails', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(client, 'savePassword').mockResolvedValue({ row: 'secrow:pass-fresh' })
+    vi.spyOn(client, 'patchProfile').mockRejectedValue(new RpcError('backend busy', -32000))
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+    })
+
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some(
+          (t) => t.level === 'danger' && t.message.includes('Could not save the connection'),
+        ),
+      ).toBe(true)
+    })
+    // The dialog stays open and the binding is still named: the secret is in
+    // the vault and the draft still holds it; a retry persists it.
+    expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
+    expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+  })
+
   it('the connection editor no longer offers to create a credential by hand', async () => {
     const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
 

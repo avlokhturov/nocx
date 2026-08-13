@@ -324,6 +324,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [dialogOpen, setDialogOpen] = createSignal(false)
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   const [profilePasswordValue, setProfilePasswordValue] = createSignal('')
+  /**
+   * Row handles minted in THIS editor session, mapped to the display name
+   * they were stored under. The inventory cannot know about a mint until it
+   * is reloaded, but the name is decided at mint time (ADR-0016: the secret
+   * owns its name; secrets.savePassword stores the requested name unchanged),
+   * so the surface can trust the binding it just made instead of waiting for
+   * a round trip. Cleared when the dialog closes, with the draft it belongs
+   * to (W3).
+   */
+  const [mintedPasswordNames, setMintedPasswordNames] = createSignal<Map<string, string>>(new Map())
   const [passphraseAsk, setPassphraseAsk] = createSignal<{
     keyRow: string
     keyName: string
@@ -1462,6 +1472,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setEditing(null)
     setProfilePasswordOpen(false)
     setProfilePasswordValue('')
+    setMintedPasswordNames(new Map())
     setDirtyFields(new Set<string>())
     setProfileMoveImpact(null)
     setProfileKeyMode(DEFAULT_KEY_MODE)
@@ -2034,10 +2045,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       setOption('keySecret', undefined)
     }
 
-    /** The bound password secret's display name, for the Password action. */
-    const boundPasswordName = createMemo(
-      () => secretRows().find((e) => e.id === fvStr('passwordSecret'))?.name,
-    )
+    /** The bound password secret's display name, for the Password action.
+     *  The inventory is the first word, but a row minted in THIS editor
+     *  session is not in it until the post-mint reload lands — the binding
+     *  made a moment ago must not read as "No password set" in the meantime
+     *  (W3). The minted name is authoritative: the backend stores the
+     *  requested name unchanged (ADR-0016). */
+    const boundPasswordName = createMemo(() => {
+      const row = fvStr('passwordSecret')
+      if (!row) return undefined
+      return secretRows().find((e) => e.id === row)?.name ?? mintedPasswordNames().get(row)
+    })
 
     function effField(field: string): EffectiveFieldDTO | undefined {
       const eff = effectiveData()[profile().id]
@@ -2556,16 +2574,39 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 }
                 const bind = () => {
                   if (!row) return
+                  const mintedRow = row
                   const updated = {
                     ...current,
-                    options: { ...current.options, passwordSecret: row.row },
+                    options: { ...current.options, passwordSecret: mintedRow.row },
                   }
                   setEditing(updated)
                   setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
+                  setMintedPasswordNames((prev) => {
+                    const next = new Map(prev)
+                    next.set(mintedRow.row, generatedName)
+                    return next
+                  })
                   setProfilePasswordValue('')
+                  // The inventory does not know about this row yet — reload it
+                  // so the pickers and any later read see the mint. The action
+                  // row already names the secret from mintedPasswordNames, so
+                  // the display never depends on the reload landing.
+                  void loadSecretRows()
                 }
                 const fail = (err: unknown) => {
-                  if (err instanceof VaultOperationCancelledError) return
+                  if (err instanceof VaultOperationCancelledError) {
+                    // The editor closed on OK, so the mint kept running in the
+                    // background; a cancelled vault prompt leaves the password
+                    // unsaved with nothing on screen to say why. Silence here
+                    // reads as success (AGENTS.md: a soft degrade must be
+                    // visible in the product).
+                    log.warn('Password save cancelled: the vault prompt was closed', {})
+                    showToast({
+                      level: 'warning',
+                      message: 'Password was not saved — the vault prompt was cancelled.',
+                    })
+                    return
+                  }
                   const message = (err as Error).message
                   log.error('Failed to save password', { message })
                   showToast({ level: 'danger', message: `Could not save the password: ${message}` })
