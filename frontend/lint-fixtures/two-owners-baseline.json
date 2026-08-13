@@ -23,17 +23,7 @@
   "violations": [
     {
       "file": "src/connections.tsx",
-      "line": 2143,
-      "column": 23,
-      "prop": "value",
-      "operator": "||",
-      "lhs": "fvNum('port')",
-      "fallback": "22",
-      "reason": "The live pre-fix defect (nocx-a88r): the port field invents 22 at the render site while required('Port') judges the raw draft. The fix landing with this epic removes the fallback; this entry then shrinks away."
-    },
-    {
-      "file": "src/connections.tsx",
-      "line": 2367,
+      "line": 2414,
       "column": 27,
       "prop": "value",
       "operator": "||",
