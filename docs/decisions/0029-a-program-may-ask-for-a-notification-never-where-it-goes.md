@@ -50,12 +50,20 @@ goes.** Two documents change.
 > schema-checked `notify.raise` record with `additionalProperties: false`. Five rules bound
 > it, and none is optional:
 >
-> **Provenance is structural, not validated.** The wire record carries **only** the fields
-> the renderer is authorised to originate: `title` and `body`. `kind`, `trust`, `level`,
-> attribution and timestamp are **absent from the wire** and stamped by the backend from the
-> method invoked and the authenticated session context of the connection. A schema proves
-> the shape of a record, never who assigned a field — so the protected fields are not on the
-> wire to be forged.
+> **Provenance is structural, not validated.** `notify.raise` carries exactly `sessionId`,
+> `title` and `body`. **`sessionId` is addressing, not attribution**: one WebSocket multiplexes
+> many server-assigned sessions (AD-1), so the record must say which terminal instance parsed
+> the sequence, and the backend rejects an id that is not live on that connection. It then
+> resolves that id through the authoritative session registry and stamps canonical attribution
+> and timestamp from the resulting session and tab. `kind`, `trust`, `level`, attribution and
+> timestamp are absent from the wire. A schema proves the shape of a record, never who assigned
+> a field — so the protected fields are not on the wire to be forged.
+>
+> **Ingress authority is closed**, which is what makes "stamped from the method invoked" mean
+> anything: `notify.raise` and renderer-originated BEL always produce `programRequest`;
+> heuristic adapters always produce `heuristic`; `block.finished` originates only at the
+> backend's authenticated lifecycle publication boundary; `session.ended` only at the backend
+> session registry. **No renderer-callable method can produce an `attested` event.**
 >
 > **Noninterference, stated differentially because that is what a test can check.** For any
 > two **schema-valid** payloads differing only in `title` or `body`, route resolution MUST
@@ -65,6 +73,9 @@ goes.** Two documents change.
 > attempted delivery that failed, and never removes itself from the resolved set. Payload
 > content may affect only validation outcomes, redaction, context-specific encoding, and the
 > bytes handed to a selected sink.
+> Redaction runs only after resolution; size and encoding validation apply to the redacted,
+> context-encoded payload. A redaction-induced size change may change delivery success, and can
+> never add, remove, replace or re-resolve a sink or a destination.
 >
 > **Destination.** Stream-derived fields — `title` and `body` — MUST NOT participate in URL
 > construction in any position: scheme, userinfo, host, port, path, query or fragment. This
@@ -73,23 +84,42 @@ goes.** Two documents change.
 > Redirects are refused. The request URL derives only from user configuration, trusted target
 > metadata, and secrets (below).
 >
-> **Secret-bearing URLs.** A user-configured secret MAY occupy a URL position where the
-> provider requires it (a Telegram bot token is a path segment). The composed URL is then
-> secret-bearing, and: it is never persisted composed — the stored `endpoint` is a template
-> with a slot resolved from the vault per request; it is never written to a log, a
-> diagnostic, or an error surface; a delivery failure names the **target by name**, never its
-> URL; and it is never followed across a redirect, which is the second and independent
-> reason redirects are refused.
+> **Secret-bearing URLs.** A secret MAY occupy a URL component only in a typed preset that
+> declares one fixed component the provider requires. It may **never** occupy the scheme,
+> userinfo, host, port, query or fragment — a host secret leaks through DNS and TLS SNI before
+> any code of ours runs. The sole present exception is Telegram's bot token in one HTTPS path
+> segment. A `custom` target may place its secret only in a fixed header or body field.
 >
-> **Retention, with a closing event and not merely a predicate.** nocx MUST NOT write a
-> notification instance, its `title`/`body`, or a composed secret-bearing URL to its
-> databases, its configuration, a durable queue or a structured log. **Every sink invocation
-> carries a finite deadline, and expiry converts to failure** — so the instance exists in
-> bounded memory from creation until every selected sink has completed, failed, or timed out,
-> which is an event that always occurs. No retry survives process exit: delivery is
-> at-most-once. Retention performed by an external sink the user selected, or by the
-> operating system's notification centre, is outside nocx's storage ownership and is
-> disclosed in that sink's UI.
+> A secret-bearing request uses a dedicated HTTPS client: redirects disabled before the first
+> request, no ambient proxy selection, no tracing hooks, no wrapping transport that can observe
+> the composed URL. **The raw `http.Request`, `url.URL`, `RequestURI` and any error carrying
+> them never leave the adapter.** This is not satisfied by "we do not log the URL": Go's
+> `http.Client.Do` returns `*url.Error`, whose `Error()` prints the URL, and Go redacts a
+> userinfo password but not a path segment — so `%w`-wrapping a push failure is enough to put a
+> bot token in a log. `*url.Error`, redirect errors, transport errors and recovered panics are
+> classified inside the adapter and replaced with a target-named error before anything logs,
+> wraps, traces or presents them.
+>
+> The composed URL is never persisted and exists only while the synchronous request owns it.
+> Tests use a sentinel secret and must prove the sentinel is absent from logs, returned and
+> wrapped errors, diagnostics, traces, panic output and fixture failure output.
+>
+> **Retention, with bounded ownership and a closing event.** nocx MUST NOT write a notification
+> instance, its `title`/`body`, or a composed secret-bearing URL to a database, configuration, a
+> durable queue or a structured log. Each sink invocation is synchronous, receives a
+> finite-deadline context, must stop retaining request data and return when that context is
+> cancelled, and may not publish a callback after it returns. **Deadline expiry cancels the
+> invocation; the closing event is the invocation's return** — after success, failure or
+> cancellation — and not expiry alone, because a timeout is a logical result and not proof that
+> a goroutine stopped writing. Finalization is one-shot: a late or duplicate result is ignored.
+>
+> The router enforces global limits on in-flight invocations, on queued and coalesced instances,
+> and on retained payload bytes; admission beyond a limit is a **visible failed delivery**, never
+> an unbounded queue. A per-key debounce bounds one key, not the aggregate: many sessions each
+> delivering slowly but inside their deadline is otherwise unbounded growth. No retry survives
+> process exit — delivery is at-most-once. Retention performed by an external sink the user
+> selected, or by the operating system's notification centre, is outside nocx's storage ownership
+> and is disclosed in that sink's UI.
 
 ### 2.2 ADR-0024 — carve-out
 
@@ -145,6 +175,11 @@ event still matches the subscription, adds its sinks, inherits the explicit-gest
 suppression override, delivers — and leaves the subscription armed, so the real completion
 delivers again. A guess must not reach a privileged route at all, not merely fail to
 terminate it.
+
+**The matching attested event consumes the subscription once every selected sink has returned,
+whatever the outcome.** Consuming only on success would leave it armed after a failed delivery,
+to fire on some later unrelated event; and the failure is already visible as a `danger` toast,
+so the user is not left believing they were told. The gesture is honoured exactly once.
 
 The routing table is **default-deny**: a `(kind, trust)` pair reaches a sink only where a row
 says so, and the same table governs the ordinary route and the ad-hoc subscription route.
@@ -215,6 +250,16 @@ event closes a subscription" left the privileged route reachable by a guess (§3
 every sink completed or failed" was a predicate with no guaranteed closing event (§2.1). It
 also correctly rejected `additionalProperties: false` as proof of authorship, narrowed the
 property test's escape hatch, and found the residual overclaim in §4.4.
+
+**Round four** confirmed that overruling round two on Bark was correct — all four presets can
+carry the message outside the URL, so the absolute rule costs nothing — and found four defects
+in the result. One was a regression introduced by the previous fix: removing the protected
+fields from the wire had also removed **addressing**, and AD-1 multiplexes sessions over one
+socket, so `{title, body}` alone cannot say which terminal spoke (§2.1). It also found that
+`*url.Error` carries the URL into any wrapped error, which "we never log the URL" does not
+cover; that a deadline is a logical result rather than proof a goroutine stopped; that per-key
+debounce bounds one key and not aggregate memory; and a contradiction between two halves of the
+subscription interval.
 
 **The owner** supplied the one thing no review round found: a provider secret can itself
 occupy a URL position — Telegram's bot token is a path segment — which is a third category

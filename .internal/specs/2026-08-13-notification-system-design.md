@@ -56,18 +56,31 @@ sources ──▶ Event ──▶ router ──▶ [sink, sink, …]
 
 **Event** — a closed record. Who may set each field is the point:
 
-| field           | set by                            | on the wire?                                     |
-| --------------- | --------------------------------- | ------------------------------------------------ |
-| `title`, `body` | the source; may be stream-derived | **yes** — the only fields `notify.raise` carries |
-| `kind`          | the source adapter                | no — stamped from the method invoked             |
-| `trust`         | the source adapter                | no — stamped from the source                     |
-| `level`         | nocx                              | no — a program cannot forge `danger`             |
-| `attribution`   | nocx                              | no — from the authenticated session context      |
-| `at`            | nocx                              | no                                               |
+| field           | set by                            | on the wire?                                                               |
+| --------------- | --------------------------------- | -------------------------------------------------------------------------- |
+| `sessionId`     | the renderer's terminal adapter   | **yes** — addressing, not attribution; rejected if not live on that socket |
+| `title`, `body` | the source; may be stream-derived | **yes**                                                                    |
+| `kind`          | the source adapter                | no — stamped from the method invoked                                       |
+| `trust`         | the source adapter                | no — stamped from the source                                               |
+| `level`         | nocx                              | no — a program cannot forge `danger`                                       |
+| `attribution`   | nocx                              | no — from the authenticated session context                                |
+| `at`            | nocx                              | no                                                                         |
 
 Provenance is **structural**: the protected fields are not on the wire to be forged. A schema
 proves a record's shape, never who assigned a field, so validating authorship was never the
 answer (ADR-0029 §2.1).
+
+`sessionId` is the exception and it is deliberate. An earlier revision removed it along with the
+protected fields, which was a regression: AD-1 multiplexes many server-assigned sessions over one
+WebSocket, so a record carrying only `{title, body}` cannot say which terminal spoke — and the
+session is what keys the debounce, decides suppression, stamps attribution and receives focus on
+click. It is **addressing**: the backend rejects an id not live on that connection and derives
+every attributed field from its own registry, never from the record.
+
+**Ingress authority is closed** (ADR-0029 §2.1): no renderer-callable method can produce an
+`attested` event. `notify.raise` and BEL are always `programRequest`; `block.finished` originates
+only at the lifecycle publication boundary and `session.ended` only at the session registry.
+Without that rule, "stamped from the method invoked" would only move the forging one level up.
 
 **Router** — the only holder of "where". Maps `(kind, trust)` through a **default-deny** table
 to the enabled sinks and targets, and the same table governs the ad-hoc subscription route
@@ -113,7 +126,10 @@ desktop build.
 **Only an `attested` event may match, activate, deliver through, or disarm a completion
 subscription** (ADR-0029 §3). Saying only that a guess cannot _close_ one leaves it able to
 match, borrow the subscription's sinks and its suppression override, deliver, and leave the
-subscription armed so the real completion delivers again.
+subscription armed so the real completion delivers again. The matching attested event **consumes**
+the subscription once every selected sink has returned, whatever the outcome — consuming only on
+success would leave it armed to fire on something unrelated later, and a failed delivery is
+already visible as a `danger` toast.
 
 ### 3.2 OSC 9 is overloaded — the parser must discriminate
 
@@ -198,11 +214,23 @@ path, the token in an `Authorization` header and the message in the body.
 #### 4.1.1 A secret-bearing URL is handled as a secret
 
 Telegram's `bot<TOKEN>/sendMessage` puts a credential in the path, which is the provider's
-design and not ours to fix. Four consequences, none optional:
+design and not ours to fix. **The permission is narrow: one fixed component that the provider
+requires, declared by a typed preset — never the scheme, userinfo, host, port, query or
+fragment.** A secret in the host would leak through DNS and TLS SNI before any code of ours runs.
+A `custom` target may put its secret only in a fixed header or body field. Five consequences, none
+optional:
 
 - The stored `endpoint` is a template; the composed URL exists only for the duration of a
   request and is **never persisted**.
 - The composed URL is **never logged** — not in a diagnostic, not in an error, not in a trace.
+- **The error carries it even when we do not.** `http.Client.Do` returns `*url.Error`, whose
+  `Error()` prints the URL; Go redacts a userinfo password but not a path segment, so a single
+  `fmt.Errorf("push failed: %w", err)` puts a bot token in the log. `*url.Error`, redirect errors,
+  transport errors and recovered panics are classified **inside the adapter** and replaced with a
+  target-named error before anything logs, wraps, traces or presents them. The request uses a
+  dedicated client with no ambient proxy selection, no tracing hooks and no wrapping transport
+  that could observe the composed URL. Tests use a sentinel secret and assert its absence from
+  logs, wrapped errors, traces, panic output and fixture failure output.
 - A delivery failure names the **target by name**. Never its URL, or a Telegram bot token
   appears in a toast.
 - Redirects are refused — the second and independent reason, since following one hands the
@@ -222,9 +250,15 @@ a fixed content type; OS fields are bounded before the platform call. **An inval
 fails visibly and never falls back to string concatenation**, and a sink-level rejection is a
 failed delivery — it never removes the sink from the resolved set (ADR-0029 §2.1).
 
-**Every sink invocation carries a finite deadline**, and expiry converts to failure. That is
-what closes the retention interval in §6.3; without it a hung request holds the instance
-forever.
+**Every sink invocation is synchronous and carries a finite-deadline context.** Expiry
+_cancels_ the invocation; the closing event is the invocation's **return**, not expiry itself — a
+timeout is a logical result, not proof that a goroutine stopped writing. Finalization is one-shot,
+so a late callback is ignored rather than double-finalising.
+
+**The router holds global limits** on in-flight invocations, on queued and coalesced instances,
+and on retained payload bytes; admission beyond a limit is a visible failed delivery. The per-key
+debounce bounds one key, not the aggregate — many sessions each delivering slowly but inside their
+deadline is otherwise unbounded growth.
 
 Injection vectors to test: CRLF, `%2F`, `?`, `#`, invalid UTF-8, NUL, bidi controls, oversized
 payloads.
@@ -293,15 +327,15 @@ Bark key.
 
 AGENTS.md rule 3 wants both ends named, not a list of terminal errors.
 
-| Interval                                          | What is true throughout, and how the next start recovers                                                                                                                                                 |
-| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Target creation: secret written, document not yet | The secret is an orphan from the vault write until the document commits. On failure the secret is deleted; a failed delete leaves an orphan for `nocx-2x8x`'s janitor. **Never a dangling `secretRef`.** |
-| Target deletion: document removed, secret not yet | Document first, per ADR-0011 §4 — a brief unreachable orphan beats metadata pointing at nothing.                                                                                                         |
-| Target edited while the router holds it           | Resolution takes an immutable snapshot per event; an edit affects the next event, never a delivery in progress.                                                                                          |
-| Store committed, in-memory routing not refreshed  | The refresh is part of the commit's publication, as settings already do. Disk and runtime never disagree past the commit.                                                                                |
-| Notification instance created → released          | Every sink invocation has a deadline, so the closing event is "every selected sink completed, failed, or timed out" — which always occurs (§4.2). At-most-once; no retry survives process exit.          |
-| Subscription armed → disarmed                     | It exists from the gesture until every selected sink has completed, failed or timed out, or the tab closes. Disarm happens **after** delivery is attempted, so a failed delivery does not consume it.    |
-| Vault locked when a push needs its token          | The push fails loudly by §6.4, and does not silently skip.                                                                                                                                               |
+| Interval                                          | What is true throughout, and how the next start recovers                                                                                                                                                                                                                                                              |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Target creation: secret written, document not yet | The secret is an orphan from the vault write until the document commits. On failure the secret is deleted; a failed delete leaves an orphan for `nocx-2x8x`'s janitor. **Never a dangling `secretRef`.**                                                                                                              |
+| Target deletion: document removed, secret not yet | Document first, per ADR-0011 §4 — a brief unreachable orphan beats metadata pointing at nothing.                                                                                                                                                                                                                      |
+| Target edited while the router holds it           | Resolution takes an immutable snapshot per event; an edit affects the next event, never a delivery in progress.                                                                                                                                                                                                       |
+| Store committed, in-memory routing not refreshed  | The refresh is part of the commit's publication, as settings already do. Disk and runtime never disagree past the commit.                                                                                                                                                                                             |
+| Notification instance created → released          | The closing event is every selected invocation **returning** after success, failure or cancellation — expiry cancels, it does not by itself end the interval (§4.2). Finalization is one-shot; a late callback is ignored. Global admission limits bound the aggregate. At-most-once; no retry survives process exit. |
+| Subscription armed → consumed                     | It exists from the gesture until the matching **attested** event has had every selected invocation return, or the tab closes. That event then consumes it regardless of outcome; the failure stays visible as a toast. A non-attested event cannot match, activate, deliver through or consume it.                    |
+| Vault locked when a push needs its token          | The push fails loudly by §6.4, and does not silently skip.                                                                                                                                                                                                                                                            |
 
 Independently failing and each needing a test: template rendering, URL composition, header
 validity, JSON encoding, DNS, TLS, redirect refusal, oversized payload, response read, deadline
@@ -399,13 +433,21 @@ noninterference property test (ADR-0029 §2.1), and — through the port's fake 
 decode, the originating-tab lookup, the focus call, and the unavailable and denied authorization
 states.
 
-**DONE WHEN — on a packaged build, and this is a gate rather than a note:** the banner appears;
-clicking it focuses the originating tab; authorization survives an update; and the effect of a
-`wails dev` re-sign is recorded. Only the banner's appearance and the click itself are manual —
-macOS UI automation exists but is too fragile and permission-heavy for this project's CI, which
-is a choice and not an impossibility. Everything reachable through the adapter is automated
-above. Without this gate a green suite over a fake adapter reports a working feature across a
-platform seam nobody exercised, which is the `nocx-rtg0` failure exactly.
+**DONE WHEN — a packaged-build experiment, and this is a gate rather than a note.** On a clean
+macOS profile the manual actions are exactly three: granting authorization when macOS prompts,
+confirming the banner is visible, and clicking it. Everything around them is automated: the
+harness records authorization before replacement, installs the update under the same bundle
+identifier, relaunches and asserts authorization is still granted; it then emits a notification,
+waits for the operator's click, and asserts callback decoding, originating-tab lookup and focus.
+It records authorization before and after a `wails dev` re-sign. The observations and the build
+identities are the acceptance evidence.
+
+Granting permission is itself an unavoidable manual OS interaction on a clean profile — an
+earlier revision listed only the banner and the click, which understated it. macOS UI automation
+exists and could in principle drive all three; it is too fragile and permission-heavy for this
+project's CI, which is a choice rather than an impossibility. Without this gate a green suite over
+a fake adapter reports a working feature across a platform seam nobody exercised, which is the
+`nocx-rtg0` failure exactly.
 
 ### A2 — "Ты видишь, что пропустил, не открывая ничего"
 
@@ -468,8 +510,13 @@ an HTTP implementation detail).
 - **Every external call has a failing test, and each is paired with "and on an ordinary machine
   it succeeds"** — the `contentkey` lesson, where every failure path was tested and the success
   path was never reachable.
-- **Invariants as intervals** — §6.3 is written that way so the tests can be, including a sink
-  that never returns, which must close by deadline.
+- **Invariants as intervals** — §6.3 is written that way so the tests can be. Named cases: an
+  adapter that blocks until its context is cancelled; a callback arriving _after_ cancellation
+  finalised the instance; a duplicate completion; and saturation by many concurrent sessions,
+  which must produce visible failed deliveries rather than an unbounded queue.
+- **Secret containment**, with a sentinel token in a Telegram-shaped target: assert the sentinel
+  appears in no log, no returned or wrapped error, no trace, no panic output and no fixture
+  failure output — the `*url.Error` path especially (§4.1.1).
 - **Acceptance criteria as assertions in the beads**, not prose, so the implementer is not the
   only author of the test.
 
