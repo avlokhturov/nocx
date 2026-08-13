@@ -790,6 +790,122 @@ describe('XtermRenderer cell metric (nocx-yy9g)', () => {
   })
 })
 
+// The live region hides the shell's echo of the command by translating the
+// grid up by one row (scrollback/controller.ts `_echoShiftPx`), so `cellHeight`
+// has to be the pitch the grid is DRAWN at. It was a second derivation
+// instead: the `.xterm-char-measure-element` box, which xterm styles
+// `line-height: normal`, with `ceil(FONT_SIZE * LINE_HEIGHT)` behind it. On a
+// Retina Mac xterm picks its OffscreenCanvas measure strategy and never
+// creates that element, so the constant 17 was what the shift used against a
+// real pitch of 20 — and 3px of the echoed command stayed on screen, cut
+// across the middle (nocx-rnrl, measured in the app: dpr 2, cell 8.5 × 20).
+describe('XtermRenderer cellHeight is the grid row pitch (nocx-rnrl)', () => {
+  async function mountRenderer() {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return r
+  }
+
+  function publishDims(r: XtermRenderer, cell: { width: number; height: number }): void {
+    const term = (r as unknown as Record<string, unknown>).term as
+      { _core: Record<string, unknown> } | undefined
+    term!._core._renderService = { dimensions: { css: { cell } } }
+  }
+
+  it('reports the pitch the grid is fitted to, not the char box', async () => {
+    const r = await mountRenderer()
+    publishDims(r, { width: 8.5, height: 20 })
+    // The same source cellWidth, fit() and liveContentHeight() already read:
+    // one owner for the grid's geometry, both halves off it.
+    expect(r.cellHeight).toBe(20)
+    expect(r.cellWidth).toBe(8.5)
+    r.dispose()
+  })
+
+  it('does not settle on the pre-measurement guess once the grid can measure', async () => {
+    const r = await mountRenderer()
+    // Before the render service has dimensions there is nothing to report but
+    // a guess; the defect is keeping it. A cached guess outlives every frame
+    // until a grid resize happens to clear it, and a DPR change need not
+    // resize the grid at all.
+    expect(r.cellHeight).toBe(17)
+    publishDims(r, { width: 8.5, height: 20 })
+    expect(r.cellHeight).toBe(20)
+    r.dispose()
+  })
+
+  it('re-reads the pitch when the device pixel ratio changes', async () => {
+    const changeListeners: Array<() => void> = []
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: (type: string, l: EventListenerOrEventListenerObject) => {
+        if (type === 'change') changeListeners.push(l as () => void)
+      },
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    publishDims(r, { width: 8.5, height: 20 })
+    expect(r.cellHeight).toBe(20)
+
+    // Dragged to a display with a different ratio: xterm re-snaps its cell to
+    // whole device pixels, and the grid keeps its rows and columns — so no
+    // resize fires and nothing else would clear the cache.
+    publishDims(r, { width: 8.4, height: 19 })
+    for (const l of changeListeners) l()
+    expect(r.cellHeight).toBe(19)
+    r.dispose()
+  })
+
+  it('never reports a char measurement as a cell', async () => {
+    const r = await mountRenderer()
+    const term = (r as unknown as Record<string, unknown>).term as
+      { element?: HTMLElement; _core: Record<string, unknown> } | undefined
+    term!._core._renderService = undefined
+    // xterm's DOM measure strategy leaves a span of 32 'W's behind when it is
+    // the one selected. Its box is neither a cell width (it is 32 of them) nor
+    // a row pitch (it carries no lineHeight), and reading it was how both lies
+    // got in. Given layout, it must still change nothing.
+    const el = term!.element
+    expect(el).toBeDefined()
+    // jsdom measures nothing, so xterm's own spans report 0 and would be
+    // skipped whatever the code did. Clear them and leave exactly one span
+    // that DOES measure — otherwise this test passes without asserting.
+    for (const stale of Array.from(el!.querySelectorAll('.xterm-char-measure-element'))) {
+      stale.remove()
+    }
+    const span = document.createElement('span')
+    span.className = 'xterm-char-measure-element'
+    span.textContent = 'W'.repeat(32)
+    Object.defineProperty(span, 'getBoundingClientRect', {
+      value: () => ({ width: 272, height: 16.7 }) as DOMRect,
+    })
+    el!.appendChild(span)
+
+    expect(r.cellWidth).toBe(0)
+    expect(r.cellHeight).toBe(17)
+    r.dispose()
+  })
+})
+
 describe('XtermRenderer contrast floor', () => {
   // nocx-3lrm. xterm.js renders the palette literally, and mc's default skin
   // paints its panels with an ANSI colour as the BACKGROUND
