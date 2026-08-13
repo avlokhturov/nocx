@@ -3,8 +3,9 @@
 - **Date:** 2026-08-13 (revised 2026-08-14 after three adversarial review rounds)
 - **Status:** Proposed
 - **Brainstorming session:** `nocx-uz7f`
-- **Depends on:** **ADR-0029** — the AD-1 amendment and the ADR-0024 carve-out that make
-  `notify.raise` legal at all. This design is not buildable until that ADR is Accepted.
+- **Depends on:** **ADR-0029**, which decides the category this feature belongs to — a
+  program-initiated effect: what it may cause and what it may never choose — and adds
+  presentation requests to AD-1's enumeration. Not buildable until that ADR is Accepted.
 - **Epics to create:** A1, A2, A3, B (§9)
 
 ## What a user can do that they could not before
@@ -19,20 +20,20 @@ local process-watching can cover.
 
 Per AGENTS.md, a brief that crosses a boundary names it before it says what to build.
 
-| Binding document           | What it already decided                                                                                                 | What this design does with it                                                                                                  |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **AD-1**                   | OSC markers stay frontend-side; ledger facts may cross as typed records.                                                | **Amended by ADR-0029** — a `notify.raise` record may cross under five named rules. Compliance is not claimed; the AD changes. |
-| **AD-6**                   | The backend never interprets the **bytes** a session produces; render state lives in the frontend.                      | **Unchanged.** Parsing stays in xterm.js; AD-6 never spoke to what the backend does with a typed value (ADR-0029 §4.4).        |
-| **AD-2**                   | Go backend service as the one core.                                                                                     | Outbound HTTP and the OS calls live in the backend, behind a host port with a Wails adapter (§2.2).                            |
-| **AD-3**                   | Wails v2 as the MVP desktop shell — thin and swappable.                                                                 | The Wails runtime is reached only through that port; devharness binds an unavailable adapter.                                  |
-| **AD-8**                   | Interface-first + DI, one owner per behaviour.                                                                          | Source, router and sink are three interfaces at one composition root. The router owns "where" — stated in ADR-0029 §2.3.       |
-| **ADR-0024** (`nocx-u7uh`) | PTY output is render-only; a program's output cannot drive your terminal.                                               | **Carved out by ADR-0029** for an enumerated set of presentation effects — and nothing more.                                   |
-| **ADR-0017**               | A connection references a secret; nothing is called a credential.                                                       | A target references a secret the same way, including when the provider wants it in the URL (§4.1).                             |
-| **ADR-0011** §4            | The delete cascade prefers a brief unreachable orphan over metadata pointing at a missing secret.                       | Target creation and deletion follow the same ordering (§6.3).                                                                  |
-| **ADR-0003**               | No Developer ID, ever; ad-hoc signature only.                                                                           | A bundle identifier is **necessary**; that it is **sufficient** is a hypothesis with an experiment attached (§8, §9).          |
-| **`nocx-ywhp`**            | Program-scoped grants; OSC 52 is the first program-initiated action needing consent, and the next one reuses the model. | Deliberately not reused — ADR-0029 §4.5 records why, as the reuse rule requires.                                               |
-| **`nocx-sb3f`**            | The transport has three delivery classes and models two.                                                                | Epic B depends on it (§6.4).                                                                                                   |
-| **`nocx-2x8x`**            | Redaction covers scrollback, ledger and clipboard — for secrets **injected from the vault**.                            | Insufficient here, and §7 says so rather than cross-referencing past the problem.                                              |
+| Binding document           | What it already decided                                                                                                 | What this design does with it                                                                                                                                                                                                                    |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **AD-1**                   | OSC markers stay frontend-side; ledger facts may cross as typed records.                                                | **Enumeration extended by ADR-0029.** The 2026-08-02 ledger-facts amendment already permits this shape; presentation requests join its closed list, under the rules of ADR-0029 §2.2.                                                            |
+| **AD-6**                   | The backend never interprets the **bytes** a session produces; render state lives in the frontend.                      | **Untouched.** Parsing stays in xterm.js; AD-6 governs the byte stream, and never spoke to what the backend does with a typed value (ADR-0029 §4.2).                                                                                             |
+| **AD-2**                   | Go backend service as the one core.                                                                                     | Outbound HTTP and the OS calls live in the backend, behind a host port with a Wails adapter (§2.2).                                                                                                                                              |
+| **AD-3**                   | Wails v2 as the MVP desktop shell — thin and swappable.                                                                 | The Wails runtime is reached only through that port; devharness binds an unavailable adapter.                                                                                                                                                    |
+| **AD-8**                   | Interface-first + DI, one owner per behaviour.                                                                          | Source, router and sink are three interfaces at one composition root. The router owns "where" — stated in ADR-0029 §2.3.                                                                                                                         |
+| **ADR-0024** (`nocx-u7uh`) | PTY output is render-only; a program's output cannot drive your terminal.                                               | **Untouched.** Its prohibitions are about authority — an execution attempt, an exit status, input ownership, history — and a presentation request asserts none (ADR-0029 §4.1). OSC 52 is the standing precedent for an effect caused by output. |
+| **ADR-0017**               | A connection references a secret; nothing is called a credential.                                                       | A target references a secret the same way, including when the provider wants it in the URL (§4.1).                                                                                                                                               |
+| **ADR-0011** §4            | The delete cascade prefers a brief unreachable orphan over metadata pointing at a missing secret.                       | Target creation and deletion follow the same ordering (§6.3).                                                                                                                                                                                    |
+| **ADR-0003**               | No Developer ID, ever; ad-hoc signature only.                                                                           | A bundle identifier is **necessary**; that it is **sufficient** is a hypothesis with an experiment attached (§8, §9).                                                                                                                            |
+| **`nocx-ywhp`**            | Program-scoped grants; OSC 52 is the first program-initiated action needing consent, and the next one reuses the model. | Deliberately not reused — ADR-0029 §4.5 records why, as the reuse rule requires.                                                                                                                                                                 |
+| **`nocx-sb3f`**            | The transport has three delivery classes and models two.                                                                | Epic B depends on it (§6.4).                                                                                                                                                                                                                     |
+| **`nocx-2x8x`**            | Redaction covers scrollback, ledger and clipboard — for secrets **injected from the vault**.                            | Insufficient here, and §7 says so rather than cross-referencing past the problem.                                                                                                                                                                |
 
 ## 1. Decisions taken with the owner
 
@@ -68,7 +69,7 @@ sources ──▶ Event ──▶ router ──▶ [sink, sink, …]
 
 Provenance is **structural**: the protected fields are not on the wire to be forged. A schema
 proves a record's shape, never who assigned a field, so validating authorship was never the
-answer (ADR-0029 §2.1).
+answer (ADR-0029 §2.2).
 
 `sessionId` is the exception and it is deliberate. An earlier revision removed it along with the
 protected fields, which was a regression: AD-1 multiplexes many server-assigned sessions over one
@@ -77,7 +78,7 @@ session is what keys the debounce, decides suppression, stamps attribution and r
 click. It is **addressing**: the backend rejects an id not live on that connection and derives
 every attributed field from its own registry, never from the record.
 
-**Ingress authority is closed** (ADR-0029 §2.1): no renderer-callable method can produce an
+**Ingress authority is closed** (ADR-0029 §2.2): no renderer-callable method can produce an
 `attested` event. `notify.raise` and BEL are always `programRequest`; `block.finished` originates
 only at the lifecycle publication boundary and `session.ended` only at the session registry.
 Without that rule, "stamped from the method invoked" would only move the forging one level up.
@@ -248,7 +249,7 @@ NUL are rejected everywhere.** A path field percent-encodes exactly one segment;
 goes through a JSON encoder; a header goes through HTTP field-value validation; a raw body sets
 a fixed content type; OS fields are bounded before the platform call. **An invalid payload
 fails visibly and never falls back to string concatenation**, and a sink-level rejection is a
-failed delivery — it never removes the sink from the resolved set (ADR-0029 §2.1).
+failed delivery — it never removes the sink from the resolved set (ADR-0029 §2.2).
 
 **Every sink invocation is synchronous and carries a finite-deadline context.** Expiry
 _cancels_ the invocation; the closing event is the invocation's **return**, not expiry itself — a
@@ -429,7 +430,7 @@ sinks, attribution, suppression, debounce and coalescing. Plus the bundle identi
 `notify.raise` crosses the real socket conforming to its contract and carrying `title` and
 `body` and nothing else; the router resolves the expected sinks; and the `AttentionHost` fake is
 invoked with the exact title, body and backend-stamped attribution. Plus the differential
-noninterference property test (ADR-0029 §2.1), and — through the port's fake — the click-callback
+noninterference property test (ADR-0029 §2.2), and — through the port's fake — the click-callback
 decode, the originating-tab lookup, the focus call, and the unavailable and denied authorization
 states.
 
@@ -493,7 +494,7 @@ into a log or an error surface, asserted.
 
 History and a notification centre; agent events (a child of `nocx-dw3`); deeper per-agent title
 classification; OSC 1337 RequestAttention (§3.3); an inbound webhook endpoint; per-program grants
-(ADR-0029 §4.5); a durable retry queue (ADR-0029 §2.1 — adding one is a deliberate amendment, not
+(ADR-0029 §4.5); a durable retry queue (ADR-0029 §2.2 — adding one is a deliberate amendment, not
 an HTTP implementation detail).
 
 ## 10. Testing
@@ -502,7 +503,7 @@ an HTTP implementation detail).
   method, `additionalProperties: false` plus explicit `required`, carrying `title` and `body` and
   nothing else — that absence is what makes provenance structural — with the
   `…_OverTheWireConformsToContract` test off the real socket.
-- **The differential property test** (ADR-0029 §4.2), ranging over every **schema-valid** input
+- **The differential property test** (ADR-0029 §4.3), ranging over every **schema-valid** input
   and comparing **route resolution**, which is ordered before sink validation. Restricting the
   generator to payloads a sink would accept would exclude exactly the oversized and
   invalid-encoding cases that could diverge.
