@@ -47,7 +47,7 @@ import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
 import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
-import type { ActiveOrigin } from './tab-content'
+import type { ActiveOrigin, SurfaceType } from './tab-content'
 import {
   SIDEBAR_WIDTH_KEY,
   SIDEBAR_WIDTH_DEFAULT,
@@ -304,7 +304,11 @@ async function main() {
   // TabManager.activeOrigin() reads a plain field, so the accessor must be
   // this signal, never a direct call.
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
+  const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
+    tm.activeSurfaceType(),
+  )
   tm.onActiveTabChange = () => {
+    setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
@@ -568,12 +572,14 @@ async function main() {
     undefined,
     /* eslint-disable solid/reactivity -- mountSidebar consumes these
        accessors reactively (SidebarViewProps.activeProfileId and
-       .activeOrigin, fed with the ports target and the Files origin); the
-       reads happen inside the views' tracked scopes, and the gate cannot
-       see across the function boundary. */
+       .activeOrigin, fed with the ports target and the Files origin, plus
+       the settings-mode accessor below); the reads happen inside the
+       views' tracked scopes, and the gate cannot see across the function
+       boundary. */
     () => portsTargetId(),
     () => activeOrigin(),
     sidebarWidthCtrl,
+    () => activeSurfaceType() === SURFACE_SETTINGS,
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.

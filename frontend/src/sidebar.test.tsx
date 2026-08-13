@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { fireEvent } from '@solidjs/testing-library'
-import { createEffect } from 'solid-js'
+import { createEffect, createSignal } from 'solid-js'
 import {
   mountSidebar,
+  type SidebarHandle,
   type SidebarViewDescriptor,
   type SidebarAction,
   type SidebarViewProps,
@@ -355,5 +356,170 @@ describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
     expect(seen[seen.length - 1]?.profile).toBe('ssh:p1:1')
     handle.revealView('probe') // expand — visible flips true
     expect(seen[seen.length - 1]?.visible).toBe(true)
+  })
+})
+
+// ── Settings-tab transient collapse (nocx-3e3b) ──────────────────────────
+// Every sidebar view speaks for the machine a terminal tab is on; a Settings
+// tab is not a place, so arriving on one collapses the panel and the width
+// goes to the settings content. The collapse is a consequence of where the
+// user is, never an edit to their preference: returning restores the exact
+// pre-Settings state, and neither the width nor the collapsed preference is
+// persisted by the visit.
+
+describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    document.body.replaceChildren()
+  })
+
+  /** Mount with a settings-mode accessor the test can flip mid-flight.
+   *  The accessor must read a SIGNAL: Solid's on() subscribes to reactive
+   *  reads only, so a plain closure variable would never re-fire the
+   *  settings-mode effect. */
+  function mountWithSettings(): {
+    bar: HTMLElement
+    panel: HTMLElement
+    handle: SidebarHandle
+    setSettings: (v: boolean) => void
+  } {
+    const [isSettings, setIsSettings] = createSignal(false)
+    const { bar, panel } = mount()
+    const handle = mountSidebar(
+      bar,
+      panel,
+      TWO_VIEWS,
+      [SETTINGS_ACTION],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes
+       this accessor reactively (settings-mode effect, nocx-3e3b); the gate
+       cannot see across the function boundary — same justification as the
+       main.tsx disable. */
+      () => isSettings(),
+    )
+    return { bar, panel, handle, setSettings: setIsSettings }
+  }
+
+  it('collapses on arrival at a Settings tab and restores on return, view retained', async () => {
+    const { bar, panel, setSettings } = mountWithSettings()
+    expect(panel.classList.contains('collapsed')).toBe(false)
+
+    setSettings(true)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+
+    setSettings(false)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    // The active view is untouched by the round trip.
+    expect(panelTitle(panel)).toBe('Alpha')
+    expect(viewBtn(bar, 'alpha').getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('a sidebar opened while on a Settings tab stays open until the user closes it', async () => {
+    const { bar, panel, setSettings } = mountWithSettings()
+    setSettings(true)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+
+    viewBtn(bar, 'beta').click() // user opens the panel while on Settings
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    expect(panelTitle(panel)).toBe('Beta')
+
+    // The rule fired on arrival only; nothing fights the user afterwards.
+    expect(panel.classList.contains('collapsed')).toBe(false)
+  })
+
+  it('restores a deliberately closed sidebar after a Settings round trip', async () => {
+    const { bar, panel, setSettings } = mountWithSettings()
+    viewBtn(bar, 'alpha').click() // deliberately closed — the user's state
+    expect(panel.classList.contains('collapsed')).toBe(true)
+
+    setSettings(true)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+
+    viewBtn(bar, 'alpha').click() // opened while on Settings…
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+
+    setSettings(false)
+    // …and the departure restores the user's closed state, not the detour:
+    // someone who keeps the rail closed must not find it open.
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+  })
+
+  it('the chosen width survives a Settings round trip and is never persisted by it', async () => {
+    const [isSettings, setIsSettings] = createSignal(false)
+    const { bar, panel } = mount()
+    const persist = vi.fn()
+    const ctrl = createSidebarWidthController(panel, 400, persist) // user's non-default width
+    mountSidebar(
+      bar,
+      panel,
+      TWO_VIEWS,
+      [SETTINGS_ACTION],
+      undefined,
+      undefined,
+      undefined,
+      ctrl,
+      /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes
+       this accessor reactively (settings-mode effect, nocx-3e3b); the gate
+       cannot see across the function boundary — same justification as the
+       main.tsx disable. */
+      () => isSettings(),
+    )
+    expect(panel.style.getPropertyValue('--sidebar-width')).toBe('400px')
+
+    setIsSettings(true)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+    setIsSettings(false)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+
+    // The width the user chose is untouched — and no write went to the seam.
+    expect(panel.style.getPropertyValue('--sidebar-width')).toBe('400px')
+    expect(persist).not.toHaveBeenCalled()
+  })
+
+  it('a Settings visit does not persist the transient collapse as a preference', async () => {
+    const [isSettings, setIsSettings] = createSignal(false)
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      TWO_VIEWS,
+      [SETTINGS_ACTION],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      /* eslint-disable-next-line solid/reactivity -- mountSidebar consumes
+       this accessor reactively (settings-mode effect, nocx-3e3b); the gate
+       cannot see across the function boundary — same justification as the
+       main.tsx disable. */
+      () => isSettings(),
+    )
+    // The open state is the persisted preference.
+    await vi.waitFor(() => expect(localStorage.getItem('nocx.sidebar.collapsed')).toBe('0'))
+
+    setIsSettings(true)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+    // The transient collapse must not have rewritten the preference.
+    expect(localStorage.getItem('nocx.sidebar.collapsed')).toBe('0')
+
+    setIsSettings(false)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    expect(localStorage.getItem('nocx.sidebar.collapsed')).toBe('0')
+  })
+
+  it('revealView (the Ctrl/Cmd+Shift+O path) still expands the panel from a Settings tab', async () => {
+    const { panel, handle, setSettings } = mountWithSettings()
+    setSettings(true)
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+
+    handle.revealView('alpha')
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    expect(panelTitle(panel)).toBe('Alpha')
   })
 })

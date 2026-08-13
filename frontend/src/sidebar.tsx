@@ -200,6 +200,9 @@ interface SidebarSolidProps {
   storage: SidebarStorage | null
   state: AppState
   storeActions: AppActions
+  /** Reactive: true while the ACTIVE tab is a Settings tab (nocx-3e3b).
+   *  Wired by the composition root to the active tab's surface type. */
+  getActiveTabIsSettings: () => boolean
 }
 
 function SidebarSolid(props: SidebarSolidProps) {
@@ -238,8 +241,50 @@ function SidebarSolid(props: SidebarSolidProps) {
     onCleanup(() => document.removeEventListener('keydown', handler))
   })
 
+  // ── Settings-tab transient collapse (nocx-3e3b) ─────────────────────
+  // Every sidebar view speaks for the machine a terminal tab is on; a
+  // Settings tab is not a place, so arriving on one collapses the panel and
+  // the width goes to the settings content. The collapse is a consequence of
+  // where the user is, NEVER an edit to their preference: the pre-Settings
+  // collapsed state is snapshotted on arrival and restored on departure, and
+  // the collapsed-preference write below stands down while the collapse is
+  // in force so the transient state cannot leak into the next boot.
+  //
+  // The rule fires only on the settings-mode EDGES (false→true, true→false):
+  // once the user is on Settings, opening or closing the panel is theirs
+  // until they leave — a user who deliberately opens the sidebar there gets
+  // it, and it stays until they close it.
+  let preSettingsCollapsed: boolean | null = null
+  createEffect(
+    on(
+      () => props.getActiveTabIsSettings(),
+      (isSettings, wasSettings) => {
+        const arriving = isSettings && !wasSettings
+        const leaving = !isSettings && wasSettings
+        if (arriving) {
+          // Snapshot the user's state; collapse only when the panel was
+          // open. `untrack` is deliberate — the snapshot is a point-in-time
+          // read, never a tracked dependency.
+          const preCollapsed = untrack(() => props.state.sidebar.collapsed)
+          preSettingsCollapsed = preCollapsed
+          if (!preCollapsed) props.storeActions.collapseSidebar()
+        } else if (leaving && preSettingsCollapsed !== null) {
+          const wanted = preSettingsCollapsed
+          preSettingsCollapsed = null
+          if (untrack(() => props.state.sidebar.collapsed) !== wanted) {
+            props.storeActions.toggleSidebar()
+          }
+        }
+      },
+    ),
+  )
+
   // ── Persist collapsed state ───────────────────────────────────────────
+  // Stands down while the Settings collapse is in force (nocx-3e3b): the
+  // transient collapse is a consequence of where the user is, and persisting
+  // it would rewrite the preference the next boot restores from.
   createEffect(() => {
+    if (props.getActiveTabIsSettings()) return
     props.storage?.setItem(STORAGE_KEY, props.state.sidebar.collapsed ? '1' : '0')
   })
 
@@ -397,6 +442,14 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           the composition root from the `sidebar.width`
  *                           setting. When present the panel renders the
  *                           kit ResizeHandle and drags resize #sidebar.
+ * @param getActiveTabIsSettings reactive accessor for "the active tab is a
+ *                           Settings tab" (nocx-3e3b): while true, the
+ *                           panel collapses transiently on arrival — the
+ *                           user's pre-Settings state is restored on
+ *                           departure, and neither the collapsed preference
+ *                           nor the width is written. Defaults to false —
+ *                           the shell without a Settings surface never
+ *                           collapses for it.
  */
 export function mountSidebar(
   bar: HTMLElement,
@@ -407,10 +460,12 @@ export function mountSidebar(
   getActiveProfileId?: () => string | null,
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
+  getActiveTabIsSettings?: () => boolean,
 ): SidebarHandle {
   const safeStorage = storage ?? safeLocalStorage()
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
+  const activeTabIsSettings = getActiveTabIsSettings ?? (() => false)
 
   const [state, storeActions] = createAppStore()
 
@@ -441,6 +496,7 @@ export function mountSidebar(
         storage={safeStorage}
         state={state}
         storeActions={storeActions}
+        getActiveTabIsSettings={activeTabIsSettings}
       />
     ),
     bar,
