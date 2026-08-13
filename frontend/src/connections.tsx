@@ -323,6 +323,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [dialogOpen, setDialogOpen] = createSignal(false)
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   const [profilePasswordValue, setProfilePasswordValue] = createSignal('')
+  /** An in-flight password mint (W8). A Save pressed while it is resolving
+   *  waits for the mint's bind, which persists the binding and updates the
+   *  draft — the save must write the state that carries the binding. */
+  let mintInFlight: Promise<void> | null = null
   /**
    * Row handles minted in THIS editor session, mapped to the display name
    * they were stored under. The inventory cannot know about a mint until it
@@ -1570,6 +1574,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   async function saveProfile(profile: SSHProfile) {
     if (!gate(profileValidation)) return
 
+    // A Save landing while a password mint is still resolving waits for the
+    // mint's bind: the bind persists the binding AND updates the draft, so
+    // the save must write the freshest state — the one that carries it.
+    // Without this, a save pressed in that window writes auth without
+    // passwordSecret, the exact on-disk shape of the report (W8).
+    if (mintInFlight) {
+      await mintInFlight
+      const fresh = editing()
+      if (fresh) profile = fresh
+    }
+
     // Key material save (publicKey paste/upload mode)
     if (
       profile.options.auth === 'publicKey' &&
@@ -2232,6 +2247,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                             </Button>
                           </div>
                         </div>
+                        <p class="cm-hint">
+                          Setting a password saves it to the connection immediately — closing this
+                          editor afterwards won't undo it.
+                        </p>
                       </Field>
                     }
                     publicKeyAction={
@@ -2568,10 +2587,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               }`}
               onClose={() => setProfilePasswordOpen(false)}
               onSave={(password) => {
-                // Mint-and-bind at the action moment (ADR-0017): the secret is
-                // stored and bound when the user presses OK, not when the
-                // profile is saved. The editor closes immediately; the mint
-                // continues in the background.
+                // Mint-and-bind at the action moment (ADR-0017, W8): the
+                // secret is stored AND the binding is written to the stored
+                // profile when the user presses OK — not when the profile is
+                // saved. The editor closes immediately; the mint continues in
+                // the background and its bind persists the binding, so there
+                // is no window in which a secret exists bound to nothing, and
+                // a later Cancel of the editor will not undo the write (the
+                // action row says so). A new profile has nothing to bind to
+                // yet: the binding rides the draft and creation persists both
+                // halves.
                 const current = profile()
                 const generatedName = secretNameFor(
                   'password',
@@ -2582,14 +2607,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 const run = async () => {
                   row = await savePw()
                 }
-                const bind = () => {
+                const bind = async () => {
                   if (!row) return
                   const mintedRow = row
-                  const updated = {
-                    ...current,
-                    options: { ...current.options, passwordSecret: mintedRow.row },
-                  }
-                  setEditing(updated)
+                  // Merge into the LIVE draft, not the OK-press snapshot: the
+                  // mint runs behind a vault prompt and the user may have
+                  // edited other fields in the meantime (W8).
+                  setEditing((prev) =>
+                    prev
+                      ? { ...prev, options: { ...prev.options, passwordSecret: mintedRow.row } }
+                      : prev,
+                  )
                   setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
                   setMintedPasswordNames((prev) => {
                     const next = new Map(prev)
@@ -2602,6 +2630,35 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   // row already names the secret from mintedPasswordNames, so
                   // the display never depends on the reload landing.
                   void loadSecretRows()
+                  // The stored profile must carry the pair the editor always
+                  // keeps together: a password secret is only ever offered
+                  // under the Password method (authentication-editor.tsx), so
+                  // auth travels with the binding, or a mint-then-cancel on a
+                  // profile without a method would store an invisible secret.
+                  const isNew = !current.id || !profiles().some((p) => p.id === current.id)
+                  if (!isNew) {
+                    try {
+                      await props.client.patchProfile({
+                        id: current.id,
+                        set: {
+                          'options.auth': 'password',
+                          'options.passwordSecret': mintedRow.row,
+                        },
+                      })
+                    } catch (err) {
+                      // The secret was minted, so the failure is the binding:
+                      // name the split out loud, or the half-done state reads
+                      // as a silent success (AGENTS.md: a soft degrade must be
+                      // visible in the product). The draft keeps the binding,
+                      // so Save Connection retries the write.
+                      const message = (err as Error).message
+                      log.error('Failed to persist the password binding', { message })
+                      showToast({
+                        level: 'danger',
+                        message: `The password was stored but this connection was not updated to use it: ${message}. Save Connection to retry.`,
+                      })
+                    }
+                  }
                 }
                 const fail = (err: unknown) => {
                   if (err instanceof VaultOperationCancelledError) {
@@ -2621,13 +2678,26 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                   log.error('Failed to save password', { message })
                   showToast({ level: 'danger', message: `Could not save the password: ${message}` })
                 }
-                if (props.vaultController) {
-                  void props.vaultController
-                    .saveSecretWithVault(run, 'save this password')
-                    .then(bind, fail)
-                } else {
-                  void run().then(bind, fail)
-                }
+                const mint = (async () => {
+                  try {
+                    if (props.vaultController) {
+                      await props.vaultController.saveSecretWithVault(run, 'save this password')
+                    } else {
+                      await run()
+                    }
+                    await bind()
+                  } catch (err) {
+                    fail(err)
+                  }
+                })()
+                // A Save pressed while the mint is still resolving must wait
+                // for the bind: the save must write a profile that carries
+                // the binding (W8 — the save that landed before the bind
+                // produced the auth-without-secret profile on disk).
+                mintInFlight = mint
+                void mint.finally(() => {
+                  mintInFlight = null
+                })
               }}
             />
           </Dialog>
