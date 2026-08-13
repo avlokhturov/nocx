@@ -368,7 +368,14 @@ export class XtermRenderer implements TerminalRenderer {
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
       if (typeof mql.addEventListener === 'function') {
-        this._dprChangeHandler = () => this._fireCellDimsChange()
+        this._dprChangeHandler = () => {
+          // The pitch is snapped to whole DEVICE pixels, so a new ratio is a
+          // new pitch even when the grid keeps its rows and columns — and
+          // then no resize fires and this is the only thing that clears the
+          // cache (nocx-rnrl).
+          this._cachedCellHeight = null
+          this._fireCellDimsChange()
+        }
         mql.addEventListener('change', this._dprChangeHandler)
         this._dprMedia = mql
       }
@@ -378,34 +385,6 @@ export class XtermRenderer implements TerminalRenderer {
     // and the char-size measurement is real now (mount awaited
     // document.fonts.ready above).
     this._fireCellDimsChange()
-
-    // TEMPORARY PROBE — delete before commit. Reports which quantity
-    // `cellHeight` actually returns on this engine, against xterm's real row
-    // pitch, so the echo-shift residual can be attributed instead of guessed.
-    ;(window as unknown as { nocxCellProbe?: () => unknown }).nocxCellProbe = () => {
-      const t = this.term
-      const spans = Array.from(
-        t?.element?.querySelectorAll<HTMLElement>('.xterm-char-measure-element') ?? [],
-      ).map((el) => ({
-        height: el.getBoundingClientRect().height,
-        text: (el.textContent ?? '').slice(0, 4),
-        parent: el.parentElement?.className ?? '(none)',
-        font: getComputedStyle(el).fontFamily,
-      }))
-      const inner = document.querySelector<HTMLElement>('.xterm-inner')
-      const report = {
-        dpr: window.devicePixelRatio,
-        cellHeight_getter: this.cellHeight,
-        realCellDims: this._getCellDims(),
-        measureSpans: spans,
-        rows: t?.rows,
-        cols: t?.cols,
-        echoShiftTransform: inner ? getComputedStyle(inner).transform : '(no .xterm-inner)',
-        webglAttached: this.webgl !== undefined,
-      }
-      console.log('NOCX CELL PROBE', JSON.stringify(report, null, 2))
-      return report
-    }
   }
 
   /** Register the OSC 1337 fence handler exactly once, when the terminal
@@ -454,6 +433,17 @@ export class XtermRenderer implements TerminalRenderer {
   /**
    * Real cell dimensions from the xterm render service (same source as FitAddon).
    * Accesses internal xterm.js API not present on the public Terminal type.
+   *
+   * This is the ONLY place the grid's geometry is read, and null is the whole
+   * degrade: a cell is what the renderer DRAWS at, and nothing else in the DOM
+   * is that number. A fallback here used to measure
+   * `.xterm-char-measure-element` and hand its box back as a cell, which is
+   * wrong twice over — the span holds 32 characters, so its width is 32 cells,
+   * and xterm styles it `line-height: normal`, so its height is the char box
+   * with no `lineHeight` in it and no snap to whole device pixels. Callers
+   * degrade honestly instead: `cellWidth` reports 0 ("keep the previous
+   * metric"), `fit()` leaves the grid alone, `cellHeight` guesses once and
+   * never keeps the guess (nocx-rnrl).
    */
   private _getCellDims(): { width: number; height: number } | null {
     const t = this.term
@@ -466,12 +456,6 @@ export class XtermRenderer implements TerminalRenderer {
       | undefined
     const cell = core?._renderService?.dimensions?.css?.cell
     if (cell && cell.width > 0 && cell.height > 0) return cell
-    // Fallback: measure the char-measure-element xterm creates for font metrics.
-    const el = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
-    if (el) {
-      const rect = el.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height }
-    }
     return null
   }
 
@@ -765,22 +749,25 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
+  /** CSS-pixel pitch of one grid ROW — the same measurement `cellWidth` and
+   *  `fit()` take, off the render service. The live region translates the grid
+   *  by whole rows of this to drop the shell's echo (scrollback/controller.ts),
+   *  so anything short of the drawn pitch leaves the remainder of the echoed
+   *  command on screen, cut across the middle — 3px of it on a Retina Mac,
+   *  where the pitch is 20 and this used to answer 17 (nocx-rnrl). */
   get cellHeight(): number {
-    // M1: cache cellHeight — getBoundingClientRect is expensive per paint.
+    // M1: cache the pitch — this is read per paint by the gutter.
     if (this._cachedCellHeight !== null) return this._cachedCellHeight
-    const t = this.term
-    if (!t) return Math.ceil(FONT_SIZE * LINE_HEIGHT)
-    const measureEl = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
-    if (measureEl) {
-      const rect = measureEl.getBoundingClientRect()
-      if (rect.height > 0) {
-        this._cachedCellHeight = rect.height
-        return rect.height
-      }
+    const measured = this._getCellDims()?.height
+    if (measured !== undefined && measured > 0) {
+      this._cachedCellHeight = measured
+      return measured
     }
-    const fallback = Math.ceil(FONT_SIZE * LINE_HEIGHT)
-    this._cachedCellHeight = fallback
-    return fallback
+    // Nothing has been drawn yet, so there is no pitch to report — only the
+    // size the grid was asked for. Deliberately NOT cached: a guess that
+    // outlives the first frame is the defect, and the invalidations below
+    // (grid resize, DPR change) cannot be relied on to arrive at all.
+    return Math.ceil(FONT_SIZE * LINE_HEIGHT)
   }
 
   get viewportTopLine(): number {
