@@ -532,6 +532,7 @@ async function main() {
     view: (props) => (
       <PortsPanel
         profileId={props.activeProfileId}
+        onOpenAsConnection={(host, user) => tm.openAsConnection(host, user)}
         unavailableIn={portsUnavailable}
         services={portsServices}
         visible={props.visible}

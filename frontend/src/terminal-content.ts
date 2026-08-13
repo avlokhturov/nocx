@@ -451,19 +451,43 @@ export class TerminalContent extends BaseTabContent {
     return this._readyPromise
   }
 
+  /** Whether the pane walked into a child domain that names a remote host
+   *  — the one state in which this tab cannot speak for the machine in
+   *  front of it (nocx-695k.3, regressed by 6cba76fd). The session's own
+   *  domain is the stack's ROOT (seeded from the lane tier at
+   *  establishment, ADR-0024 §6); a child above it is a place we entered
+   *  by hand, and remote discovery needs a MANAGED connection we own — a
+   *  hand-typed `ssh` is a child process of the shell. A child that names
+   *  no host (a local child — docker exec, su) is still on the machine
+   *  the root speaks for, so only a child naming a remote host voids the
+   *  scope. Reads the kernel's domain stack, not the projection view:
+   *  the view carries host/user but no root-vs-child identity, and the
+   *  root position is the only fact that distinguishes "on the profile's
+   *  own host" from "walked onto another one" without comparing host
+   *  strings. */
+  private get _paneWalkedToRemoteChild(): boolean {
+    return this.lifecycle.domainStack.length > 1 && this._host !== ''
+  }
+
   /** The ports.* target this tab's session scopes to (nocx-wzc4.8): the
    *  reserved "local" for a local shell, the saved-profile id for a
    *  saved-profile SSH tab, null for an alias tab — an alias has no
-   *  profile until it is adopted, so it has no valid ports scope. */
+   *  profile until it is adopted, so it has no valid ports scope. Null
+   *  also while the pane walks on a remote host it reached by hand — the
+   *  scope follows where the pane IS, never how it was opened. */
   get portsTargetId(): string | null {
+    if (this._paneWalkedToRemoteChild) return null
     if (this.sshOpts === undefined) return LOCAL_TARGET_ID
     return this.sshOpts.profileId || null
   }
 
   /** Why portsTargetId is null, when it is null because the pane went
-   *  somewhere we cannot enumerate. '' when there is no such reason. The
-   *  environment stack is severed (ADR-0024), so there is never a reason. */
+   *  somewhere we cannot enumerate: the user@host of the remote child the
+   *  pane walked into — the same derivation the location line shows, so
+   *  the panel names the host exactly as the block header does. '' when
+   *  there is no such reason. */
   get portsUnavailableReason(): string {
+    if (this._paneWalkedToRemoteChild) return this.locationLine()
     return ''
   }
   /** The machine this tab's content speaks for (B.9) — the session it was
@@ -529,6 +553,13 @@ export class TerminalContent extends BaseTabContent {
   private _applyEnvironmentView(): void {
     const view = this.env?.view()
     if (!view) return
+    // The ports scope is derived from the ACTIVE domain's host and the
+    // kernel's stack, so the answer must be captured BEFORE the view copy
+    // (which moves the pane's values into `_host`/`_user`) and compared
+    // afterwards — entering or leaving a remote child flips it without a
+    // tab switch, and the panel must re-scope then and only then.
+    const portsTargetBefore = this.portsTargetId
+    const portsReasonBefore = this.portsUnavailableReason
     this._cwd = view.cwd
     this._cwdVerified = view.cwdVerified
     this._host = view.host
@@ -555,6 +586,17 @@ export class TerminalContent extends BaseTabContent {
     // origin-following surfaces (the Files panel's reveal) follow it live,
     // not on the next tab switch.
     this.hooks.onActiveOriginChange?.()
+    // The ports scope follows the pane (nocx-695k.3): entering or leaving
+    // a remote child changes the target or the unavailable reason without
+    // a tab switch, and the panel must re-scope immediately. Fired on
+    // CHANGE only — a cwd-only view change on the same child (an OSC 7)
+    // must not spin the panel's poll.
+    if (
+      this.portsTargetId !== portsTargetBefore ||
+      this.portsUnavailableReason !== portsReasonBefore
+    ) {
+      this.hooks.onPortsTargetChange?.()
+    }
   }
 
   // ── The ssh environment boundary (nocx-mlm7 P9) — SEVERED ────────────

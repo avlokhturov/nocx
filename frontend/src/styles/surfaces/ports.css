@@ -155,6 +155,18 @@
   background: color-mix(in srgb, white, transparent 97%);
 }
 
+/* The row's live state is a tone on the row itself — the legibility that
+   does not need reading (W2): a forwarded row is tinted, a self-stopped
+   one is tinted red. The state lives on the row's own background, so the
+   hover highlight (the pseudo-element above) stays above it. */
+.ports-row[data-state='forwarded'] {
+  background: color-mix(in srgb, var(--color-accent), transparent 94%);
+}
+
+.ports-row[data-state='failed'] {
+  background: color-mix(in srgb, var(--color-danger), transparent 94%);
+}
+
 /* The row action is revealed by pointing at the row — a column of identical
    icons down a narrow rail is noise, and the address is what the eye is
    scanning. `:focus-within` keeps it reachable from the keyboard, where

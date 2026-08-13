@@ -170,7 +170,7 @@ describe('PortsPanel — detected rows', () => {
     expect(screen.getByText('additional sessions refused')).toBeTruthy()
   })
 
-  it('the forward action on a detected row reaches the client method and moves the row to Forwarded', async () => {
+  it('the forward action on a detected row reaches the client method and changes that row in place', async () => {
     const openForward = vi.fn().mockResolvedValue(runningRecord())
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
@@ -186,9 +186,23 @@ describe('PortsPanel — detected rows', () => {
     await waitFor(() =>
       expect(openForward).toHaveBeenCalledWith('ssh:p1:1', 'host.example:6768', 6768),
     )
-    // The row moves to Forwarded, showing the usable local address.
-    await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+    // The SAME row now shows the usable local address and its action is
+    // Stop — one port, one row (W2). The old behavior left this row
+    // unchanged and added a second row under "Forwarded".
+    await waitFor(() => expect(screen.getByTestId('ports-stop')).toBeTruthy())
     expect(screen.getByText(/127.0.0.1:6768/)).toBeTruthy()
+    const rows = [...document.querySelectorAll('.ports-row')].filter((r) =>
+      (r.textContent ?? '').includes('6768'),
+    )
+    expect(rows).toHaveLength(1)
+    expect(screen.queryByTestId('forwarded-row')).toBeNull()
+    // The orphan section has no subject here: the forward lives on its own
+    // row, so the section must not render — its old "No active forwards"
+    // fallback announced an empty section directly under a forward shown
+    // live on the row above it (W2 revision). Assert the text, not just a
+    // testid: the testid absence passed while the empty state was on screen.
+    expect(screen.queryByText('No active forwards')).toBeNull()
+    expect(screen.queryByText('Orphaned forwards')).toBeNull()
   })
 
   it('a busy local port falls back to an allocated loopback port', async () => {
@@ -216,8 +230,12 @@ describe('PortsPanel — detected rows', () => {
     await waitFor(() =>
       expect(openForward).toHaveBeenCalledWith('ssh:p1:1', 'host.example:6768', 0),
     )
-    await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId('ports-stop')).toBeTruthy())
     expect(screen.getByText(/127.0.0.1:43210/)).toBeTruthy()
+    const rows = [...document.querySelectorAll('.ports-row')].filter((r) =>
+      (r.textContent ?? '').includes('6768'),
+    )
+    expect(rows).toHaveLength(1)
   })
 })
 
@@ -362,7 +380,21 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
 // ── Forwarded / Stopped lifecycle ─────────────────────────────────────────
 
 describe('PortsPanel — forwards', () => {
-  it('stopping a forwarded row moves it to Stopped with its reason', async () => {
+  it('with no forwards at all, no forwards section and no "No active forwards"', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
+    // Nothing was ever forwarded, so the section has no subject: no heading
+    // and no empty state under it — the old fallback announced "No active
+    // forwards" below rows that already said so (W2 revision).
+    expect(screen.queryByText('Orphaned forwards')).toBeNull()
+    expect(screen.queryByText('No active forwards')).toBeNull()
+    expect(screen.queryByTestId('forwarded-row')).toBeNull()
+  })
+  it('stopping a forwarded row returns it to its un-forwarded state and adds nothing anywhere else', async () => {
+    const status = vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] }))
     const stopForward = vi.fn().mockResolvedValue({
       ...runningRecord(),
       state: 'stopped',
@@ -370,29 +402,51 @@ describe('PortsPanel — forwards', () => {
       error: null,
     })
     const services = fakeServices({
-      status: vi.fn().mockResolvedValue(statusFixture({ listeners: [listenerFixture(6768)] })),
+      status,
       openForward: vi.fn().mockResolvedValue(runningRecord()),
       stopForward,
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByText('0.0.0.0:6768')).toBeTruthy())
     fireEvent.click(screen.getByTestId('ports-forward'))
-    await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId('ports-stop')).toBeTruthy())
 
     fireEvent.click(screen.getByTestId('ports-stop'))
     await waitFor(() => expect(stopForward).toHaveBeenCalledWith('fwd-1'))
-    await waitFor(() => expect(screen.getByTestId('stopped-row')).toBeTruthy())
+    await waitFor(() => {
+      // The row is back to its un-forwarded state: Forward is live again.
+      expect(screen.queryByTestId('ports-stop')).toBeNull()
+      expect(screen.getByTestId('ports-forward')).toBeTruthy()
+      // And nothing was added anywhere else: no stopped row exists for any
+      // stop reason, and no Stopped section exists at all — the section is
+      // deleted, not hidden (W2).
+      expect(screen.queryByTestId('stopped-row')).toBeNull()
+    })
+    expect(screen.queryByText('Stopped')).toBeNull()
+    // And no orphan section either — the row owns the state, and the section
+    // renders only when it holds a forward with no detected row. Its old
+    // "No active forwards" fallback was on screen for the whole flow above,
+    // contradicting the row's own forwarded state (W2 revision).
+    expect(screen.queryByText('Orphaned forwards')).toBeNull()
+    expect(screen.queryByText('No active forwards')).toBeNull()
   })
 
-  it('a connection-lost forward renders in Stopped with the reason and a Retry', async () => {
+  it('a forward stopped with connection lost shows the reason and a working Retry on the port row', async () => {
+    const openForward = vi
+      .fn()
+      .mockResolvedValue(runningRecord({ id: 'fwd-retried', destination: 'host.example:5432' }))
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(
         statusFixture(
-          {},
+          { listeners: [listenerFixture(5432)] },
           {
             forwards: [
               {
-                ...runningRecord({ id: 'fwd-lost', destination: 'host.example:5432' }),
+                ...runningRecord({
+                  id: 'fwd-lost',
+                  destination: 'host.example:5432',
+                  requestedBind: { host: '127.0.0.1', port: 5432 },
+                }),
                 state: 'stopped' as const,
                 stopReason: 'connection lost' as const,
                 error: 'connection closed',
@@ -401,19 +455,74 @@ describe('PortsPanel — forwards', () => {
           },
         ),
       ),
+      openForward,
     })
     renderPanel(services)
-    await waitFor(() => expect(screen.getByTestId('stopped-row')).toBeTruthy())
-    expect(screen.getByText(/connection lost/)).toBeTruthy()
+    await waitFor(() => expect(screen.getByText(/connection lost/)).toBeTruthy())
     expect(screen.getByText('connection closed')).toBeTruthy()
     expect(screen.getByTestId('ports-retry-forward')).toBeTruthy()
+    // The port's own row is the single owner of its state: exactly one row
+    // mentions the port, and the Stopped section is gone.
+    const rows = [...document.querySelectorAll('.ports-row')].filter((r) =>
+      (r.textContent ?? '').includes('5432'),
+    )
+    expect(rows).toHaveLength(1)
+    expect(screen.queryByTestId('stopped-row')).toBeNull()
+    // The failure lives on the port's own row; the orphan section is absent —
+    // its empty fallback used to contradict the row's failure state.
+    expect(screen.queryByText('Orphaned forwards')).toBeNull()
+    expect(screen.queryByText('No active forwards')).toBeNull()
+
+    // Retry re-opens the forward for the same destination and port.
+    fireEvent.click(screen.getByTestId('ports-retry-forward'))
+    await waitFor(() =>
+      expect(openForward).toHaveBeenCalledWith('ssh:p1:1', 'host.example:5432', 5432),
+    )
   })
 
-  it('a user stop offers no retry — the reason is the message', async () => {
+  it('a self-stopped forward whose port is no longer detected stays visible, with its reason and Retry', async () => {
+    const openForward = vi.fn().mockResolvedValue(runningRecord())
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(
         statusFixture(
-          {},
+          { listeners: [] },
+          {
+            forwards: [
+              {
+                ...runningRecord({
+                  id: 'fwd-lost',
+                  destination: 'host.example:5432',
+                  requestedBind: { host: '127.0.0.1', port: 5432 },
+                }),
+                state: 'stopped' as const,
+                stopReason: 'error' as const,
+                error: 'remote refused the channel',
+              },
+            ],
+          },
+        ),
+      ),
+      openForward,
+    })
+    renderPanel(services)
+    // The port has no detected row, so the failure lives in the forwards
+    // section — the one place that is not a resurrected Stopped, and never
+    // silent (W2).
+    await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+    // The section names what it holds — forwards with no detected row to own
+    // them — and holds exactly this one.
+    expect(screen.getByText('Orphaned forwards')).toBeTruthy()
+    expect(screen.queryAllByTestId('forwarded-row')).toHaveLength(1)
+    expect(screen.getByText(/remote refused the channel/)).toBeTruthy()
+    expect(screen.getByTestId('ports-retry-forward')).toBeTruthy()
+    expect(screen.queryByTestId('stopped-row')).toBeNull()
+  })
+
+  it('a user stop offers no retry — the row is simply back to un-forwarded', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture(
+          { listeners: [listenerFixture(5432)] },
           {
             forwards: [
               {
@@ -428,9 +537,48 @@ describe('PortsPanel — forwards', () => {
       ),
     })
     renderPanel(services)
-    await waitFor(() => expect(screen.getByTestId('stopped-row')).toBeTruthy())
-    expect(screen.getByText(/user/)).toBeTruthy()
+    await waitFor(() => expect(screen.getByText('0.0.0.0:5432')).toBeTruthy())
+    // The row is its normal self: Forward is live, nothing failed is shown.
+    expect(screen.getByTestId('ports-forward')).toBeTruthy()
     expect(screen.queryByTestId('ports-retry-forward')).toBeNull()
+    expect(screen.queryByTestId('stopped-row')).toBeNull()
+  })
+
+  it('a running forward with no matching detected listener stays visible and its Stop reaches the client', async () => {
+    const stopForward = vi.fn().mockResolvedValue({
+      ...runningRecord({ id: 'fwd-orphan' }),
+      state: 'stopped',
+      stopReason: 'user',
+      error: null,
+    })
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture(
+          { listeners: [] },
+          {
+            forwards: [
+              runningRecord({
+                id: 'fwd-orphan',
+                destination: 'host.example:9999',
+                actualBind: { host: '127.0.0.1', port: 9999 },
+              }),
+            ],
+          },
+        ),
+      ),
+      stopForward,
+    })
+    renderPanel(services)
+    // The host may have stopped listening, discovery may be degraded, or the
+    // forward may have been replayed — either way it must not vanish: the
+    // orphan row keeps Stop reachable (W2).
+    await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+    // The section appears, titled for what it holds, holding exactly this row.
+    expect(screen.getByText('Orphaned forwards')).toBeTruthy()
+    expect(screen.queryAllByTestId('forwarded-row')).toHaveLength(1)
+    expect(screen.getByText(/host.example:9999/)).toBeTruthy()
+    fireEvent.click(screen.getByTestId('ports-stop'))
+    await waitFor(() => expect(stopForward).toHaveBeenCalledWith('fwd-orphan'))
   })
 
   it('a -R forward whose bind sshd replaced shows the caveat as a caution, never as "failed"', async () => {
@@ -457,6 +605,7 @@ describe('PortsPanel — forwards', () => {
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByTestId('forwarded-row')).toBeTruthy())
+    expect(screen.getByText('Orphaned forwards')).toBeTruthy()
 
     // The caveat is the backend's Caveat() verbatim: the bind was requested and
     // is not verified — a caution, never an error. Nothing failed; the forward
@@ -614,6 +763,7 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
     // No forwarding vocabulary at all on a local scope — the sections would
     // be an empty offer of an impossible action.
     expect(screen.queryByText('Forwarded')).toBeNull()
+    expect(screen.queryByText('Orphaned forwards')).toBeNull()
     expect(screen.queryByText('No active forwards')).toBeNull()
   })
 
@@ -685,5 +835,79 @@ describe('PortsPanel — the local machine (nocx-wzc4.8)', () => {
     // plus a round trip is exactly the window a spinner is for (nocx-wzc4.11).
     await waitFor(() => expect(screen.getByTestId('ports-loading')).toBeTruthy())
     expect(screen.queryByText('No active connection')).toBeNull()
+  })
+})
+
+// ── The unavailable-host empty state gets an action (W2) ─────────────────
+// The panel says "Cannot see the ports on <host>" when the pane walked into
+// a shell reached by hand; the action must make that sentence actionable —
+// open the host as a nocx connection. AGENTS.md rule 1: the action is
+// present and enabled from the state a user starts in, activating it reaches
+// the seam with the host and user, and it offers itself nowhere else.
+
+describe('PortsPanel — the unavailable-host empty state (W2)', () => {
+  it('renders the empty state with an enabled action when unavailableIn names a host', async () => {
+    const onOpenAsConnection = vi.fn()
+    const { container } = renderPanel(fakeServices(), {
+      profileId: () => null,
+      unavailableIn: () => 'pi@192.168.0.93',
+      onOpenAsConnection,
+    })
+
+    await waitFor(() => {
+      expect(container.textContent ?? '').toContain('Cannot see the ports on pi@192.168.0.93')
+    })
+    const action = screen.getByTestId<HTMLButtonElement>('ports-open-as-connection')
+    expect(action).toBeTruthy()
+    expect(action.disabled).toBe(false)
+  })
+
+  it('activating it reaches the seam with the host and user split out of unavailableIn', async () => {
+    const onOpenAsConnection = vi.fn()
+    renderPanel(fakeServices(), {
+      profileId: () => null,
+      unavailableIn: () => 'pi@192.168.0.93',
+      onOpenAsConnection,
+    })
+    await waitFor(() => expect(screen.getByTestId('ports-open-as-connection')).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId('ports-open-as-connection'))
+    await waitFor(() => expect(onOpenAsConnection).toHaveBeenCalledWith('192.168.0.93', 'pi'))
+  })
+
+  it('passes an undefined user when unavailableIn names a bare host', async () => {
+    const onOpenAsConnection = vi.fn()
+    renderPanel(fakeServices(), {
+      profileId: () => null,
+      unavailableIn: () => '192.168.0.93',
+      onOpenAsConnection,
+    })
+    await waitFor(() => expect(screen.getByTestId('ports-open-as-connection')).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId('ports-open-as-connection'))
+    await waitFor(() => expect(onOpenAsConnection).toHaveBeenCalledWith('192.168.0.93', undefined))
+  })
+
+  it('offers no action when there is no unavailable host', async () => {
+    const onOpenAsConnection = vi.fn()
+    renderPanel(fakeServices(), {
+      profileId: () => null,
+      unavailableIn: () => '',
+      onOpenAsConnection,
+    })
+    await waitFor(() => expect(screen.getByText('No active connection')).toBeTruthy())
+    expect(screen.queryByTestId('ports-open-as-connection')).toBeNull()
+    expect(onOpenAsConnection).not.toHaveBeenCalled()
+  })
+
+  it('offers no action when no seam is wired (a dead action would be worse than none)', async () => {
+    renderPanel(fakeServices(), {
+      profileId: () => null,
+      unavailableIn: () => 'pi@192.168.0.93',
+    })
+    await waitFor(() => {
+      expect(screen.getByText(/Cannot see the ports/)).toBeTruthy()
+    })
+    expect(screen.queryByTestId('ports-open-as-connection')).toBeNull()
   })
 })
