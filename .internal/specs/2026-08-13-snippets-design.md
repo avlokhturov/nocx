@@ -20,10 +20,10 @@ running in a nocx pane, several times a day, by hand.
 
 ## 2. Deliberately out
 
-- **Markdown notes.** Next spec. They will reuse this one's reference grammar (§7) and
-  its resolver registry; they do **not** share its store, because the shape a note store
-  needs is not yet known and guessing it here would be guessing wrong in a file that is
-  hard to change later.
+- **Markdown notes.** Next spec. They will reuse this one's namespace registry (§7.2) and
+  its destination seam (§9); they do **not** share its store, because the shape a note
+  store needs is not yet known and guessing it here would be guessing wrong in a file that
+  is hard to change later.
 - **Sync between machines, sharing a library, importing someone else's.** No transport,
   no merge, no conflict model. A library is one machine's.
 - **Any new mechanism around secrets.** nocx already owns "this looks like a secret"
@@ -103,9 +103,11 @@ what they already decided, **before** it says what to build.
   resolved by `vault.resolveLine` at submit. → §7 shares the **namespace registry** and
   leaves `secret-reference.ts` and the secret path untouched.
 
-Nothing here proposes changing an `AD`. If §7's grammar extension is judged to be a
-change of decided behaviour rather than an extension of it, that becomes an ADR before
-implementation, not during.
+Nothing here proposes changing an `AD`, and after the stress test nothing here edits a
+file on the vault's path either (§7.3). The one addition to an existing interface is
+`InputTarget.insert` (§9.1), which is the extension ADR-0004 §3 was written to invite. If
+a reviewer reads it as a change to a settled interface rather than an extension of it,
+that becomes an ADR before implementation, not during.
 
 ## 5. The store
 
