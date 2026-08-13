@@ -25,6 +25,12 @@ Afterwards `git commit` stages the export and `git push` runs `bd dolt push`. If
 fails on beads, fix the sync; `--no-verify` leaves everyone on a backlog that looks
 current and is not.
 
+**Never resolve a conflict in `.beads/issues.jsonl` by hand** — neither side is the
+answer. The backlog is merged in Dolt by `bd dolt pull`; the file only restates what the
+database says, so the resolution is to regenerate it. `make hooks` installs a merge
+driver that does exactly that, and `.gitattributes` says when it lags by a commit. If you
+ever see this file in a conflict, your clone is missing the driver — run `make hooks`.
+
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
 which launches a backend of its own — resolves `nocx-dev` rather than `nocx`,
