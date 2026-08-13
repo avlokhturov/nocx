@@ -817,3 +817,58 @@ describe('XtermRenderer contrast floor', () => {
     expect(term!.options.minimumContrastRatio).toBe(4.5)
   })
 })
+
+// ── The repaint that has to follow a grid resize (nocx-q18, nocx-jfgb) ────
+//
+// A resize rebuilds xterm's char atlas, and on the real WKWebView the cells
+// that are not re-marked dirty go on drawing from the old one — mangled,
+// overlapping glyphs. nocx-q18 shipped a viewport-wide repaint after every
+// fit; e0d0a490 replaced the renderer's own ResizeObserver with fitViewport
+// and did not carry the repaint across, so the corruption came back.
+//
+// It lives inside fitViewport rather than in the caller: the atlas belongs
+// to the renderer, and a caller that has to remember to repaint after a
+// resize is the caller that stopped remembering.
+describe('XtermRenderer repaints after a grid resize (nocx-jfgb)', () => {
+  /** Mount with a stubbed cell metric — jsdom has no layout, so the real
+   *  measurement returns null and fitViewport would bail before resizing. */
+  const mountWithCell = async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    ;(r as unknown as Record<string, unknown>)._getCellDims = () => ({ width: 10, height: 20 })
+    const term = (r as unknown as Record<string, unknown>).term as {
+      rows: number
+      cols: number
+      resize: (cols: number, rows: number) => void
+      refresh: (start: number, end: number) => void
+    }
+    return { r, term }
+  }
+
+  it('repaints every row after the grid changes size', async () => {
+    const { r, term } = await mountWithCell()
+    const resize = vi.spyOn(term, 'resize')
+    const refresh = vi.spyOn(term, 'refresh')
+
+    r.fitViewport({ width: 800, height: 400 })
+
+    expect(resize).toHaveBeenCalledWith(80, 20)
+    expect(refresh).toHaveBeenCalledWith(0, term.rows - 1)
+  })
+
+  it('does not repaint when the grid is unchanged, so a growing live region does not repaint per frame', async () => {
+    const { r, term } = await mountWithCell()
+    r.fitViewport({ width: 800, height: 400 })
+    const refresh = vi.spyOn(term, 'refresh')
+
+    // Same grid, a viewport a few pixels taller: the live region delivers
+    // this on every layout tick as output grows.
+    r.fitViewport({ width: 800, height: 405 })
+
+    expect(refresh).not.toHaveBeenCalled()
+  })
+})

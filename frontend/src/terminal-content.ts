@@ -1983,8 +1983,21 @@ export class TerminalContent extends BaseTabContent {
     this.renderer?.focus()
   }
 
-  refreshAtlas(): void {
-    this.renderer?.refreshAtlas()
+  /**
+   * A pane is hidden with a CSS class rather than unmounted, so while it is
+   * hidden the WebGL texture atlas behind it goes stale and its glyphs come
+   * back drawn from coordinates that have moved (nocx-e27). Repaint on the
+   * way in.
+   *
+   * The repaint hangs off setVisible rather than off an activation call in
+   * TabManager because visibility is owned here: the seam refactor 21fd7f6a
+   * carried the method across and left `tab.refreshAtlas()` behind, and the
+   * fix sat unreachable until the corruption was reported again (nocx-jfgb).
+   * A caller that has to remember is a caller that forgets.
+   */
+  setVisible(visible: boolean): void {
+    super.setVisible(visible)
+    if (visible) this.renderer?.refreshAtlas()
   }
 
   // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────
