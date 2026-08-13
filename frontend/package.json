@@ -8,7 +8,7 @@
     "build": "tsc --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
-    "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs",
+    "lint": "eslint . --max-warnings 0 && node lint-fixtures/check-css-colors.mjs && node lint-fixtures/check-css-integrity.mjs && node lint-fixtures/check-dead-exports.mjs && node lint-fixtures/check-two-owners.mjs",
     "lint:dead-exports": "node lint-fixtures/check-dead-exports.mjs",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
@@ -20,7 +20,9 @@
     "baseline:inline-update": "node lint-fixtures/update-inline-markup-baseline.mjs",
     "baseline:dead-exports-update": "node lint-fixtures/update-dead-exports-baseline.mjs",
     "contracts": "node scripts/gen-contracts.mjs",
-    "contracts:check": "node scripts/gen-contracts.mjs --check"
+    "contracts:check": "node scripts/gen-contracts.mjs --check",
+    "lint:two-owners": "node lint-fixtures/check-two-owners.mjs",
+    "baseline:two-owners-update": "node lint-fixtures/update-two-owners-baseline.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "6.10.4",
