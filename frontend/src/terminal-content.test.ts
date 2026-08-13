@@ -46,6 +46,7 @@ import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
 import { CommandLedger } from './command-ledger'
 import { TerminalContent, type TerminalContentHooks } from './terminal-content'
+import { LOCAL_TARGET_ID } from './ports-client'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
@@ -1571,6 +1572,147 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       exitCb(session.sessionId)
       expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
       expect(content.activeOrigin()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the ports target follows where the pane IS, not how it was opened (nocx-695k.3)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return subscribe.mock.calls[0][1] as (p: unknown) => void
+  }
+
+  it('a local tab with no remote domain scopes to the local machine', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsUnavailableReason).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a local tab whose pane walks onto a remote host loses the local scope and names that host', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      // The local shell's own domain first: a destination-bearing domain is
+      // a CHILD of it, and only a child voids the scope. (The root is
+      // seeded from the session facts; its destination is deliberately not
+      // the child's.)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      // The parent suspends as the child establishes (protocol §9: the
+      // kernel rejects a second prompt_ready without a native between).
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      // The hand-typed `ssh pi@192.168.0.93`.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: '192.168.0.93', user: 'pi' },
+      })
+      expect(content.portsTargetId).toBeNull()
+      // The reason is the same user@host the block header shows (the one
+      // existing derivation, not a second one).
+      expect(content.portsUnavailableReason).toBe('pi@192.168.0.93')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('walking in and back out fires onPortsTargetChange and the answer returns to local', async () => {
+    const onPortsTargetChange = vi.fn()
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onPortsTargetChange } },
+      client,
+    )
+    try {
+      const handler = factHandler(client)
+      // The session's own domain is not a change: still the local machine.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(onPortsTargetChange).not.toHaveBeenCalled()
+      // The parent suspends, then the child establishes (§9).
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: '192.168.0.93', user: 'pi' },
+      })
+      expect(onPortsTargetChange).toHaveBeenCalledTimes(1)
+      expect(content.portsTargetId).toBeNull()
+
+      // Walk back out: the child suspends, then the parent re-activates
+      // (activation is the only way a suspended domain returns, §9). The
+      // one-way test would pass with a latched answer; this asserts the
+      // pane is local again.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(onPortsTargetChange).toHaveBeenCalledTimes(2)
+      expect(content.portsTargetId).toBe(LOCAL_TARGET_ID)
+      expect(content.portsUnavailableReason).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a saved-profile tab sitting on its own host keeps its profile scope', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ct-pihole', host: 'pihole.local' } },
+      client,
+    )
+    try {
+      expect(content.portsTargetId).toBe('ct-pihole')
+      expect(content.portsUnavailableReason).toBe('')
+      // Even once the session's own root domain is live — whose host IS the
+      // profile host — the pane is still on the machine the profile owns.
+      // Host presence alone must not void the scope.
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(content.portsTargetId).toBe('ct-pihole')
+      expect(content.portsUnavailableReason).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a saved-profile tab whose pane walks onto a different host loses the profile scope (the hole)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { ssh: { profileId: 'ct-pihole', host: 'pihole.local' } },
+      client,
+    )
+    try {
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      // Hand-typed onward: the pane left the machine the profile owns, and
+      // the Forward button must not stay live for the profile's host.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: '10.0.0.5', user: 'root' },
+      })
+      expect(content.portsTargetId).toBeNull()
+      expect(content.portsUnavailableReason).toBe('root@10.0.0.5')
     } finally {
       teardown()
     }

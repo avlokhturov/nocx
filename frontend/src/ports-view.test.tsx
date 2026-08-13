@@ -9,7 +9,7 @@
 // These start from a real TabManager and the real mountSidebar — the panel
 // never mounts in a vacuum.
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
 import { PortsPanel, createPortsPauseControl, type PortsPanelServices } from './ports'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from './sidebar'
@@ -220,6 +220,37 @@ describe('ports sidebar view', () => {
 
     manager.newSSHTab('ssh:p2:2', 'other.example', 'bob')
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
+  })
+  it('switching SSH tabs clears the filter — one host query never carries over', async () => {
+    const status = vi.fn().mockResolvedValue({
+      ...statusFixture('ssh:p1:1'),
+      discovery: {
+        ...statusFixture('ssh:p1:1').discovery,
+        listeners: [listenerFixture(22)],
+      },
+    })
+    const services = fakeServices({ status })
+    const { manager, panel } = await mountApp(services)
+    await vi.waitFor(() => expect(panel.textContent).toContain('0.0.0.0:22'))
+
+    const field = panel.querySelector<HTMLInputElement>('input[aria-label="Filter ports"]')
+    expect(field).not.toBeNull()
+    fireEvent.input(field!, { target: { value: 'nothing-matches' } })
+    await vi.waitFor(() =>
+      expect(panel.querySelectorAll('[data-testid="detected-row"]')).toHaveLength(0),
+    )
+    expect(panel.textContent).toContain('No ports match that')
+
+    // The filter is part of the re-scoped state (decision 4): a query typed
+    // for host A's ports must not meet host B's list already half-filtered.
+    manager.newSSHTab('ssh:p2:2', 'other.example', 'bob')
+    await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
+    await vi.waitFor(() =>
+      expect(panel.querySelectorAll('[data-testid="detected-row"]')).toHaveLength(1),
+    )
+    expect(panel.querySelector<HTMLInputElement>('input[aria-label="Filter ports"]')?.value).toBe(
+      '',
+    )
   })
   it("a local tab shows THIS machine's listeners, scoped to 'local'", async () => {
     const status = vi.fn().mockResolvedValue({

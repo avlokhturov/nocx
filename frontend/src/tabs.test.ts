@@ -1283,6 +1283,31 @@ describe('TabManager', () => {
   // Mount-once enforcement at the seam (nocx-njrx.2)
   // ═════════════════════════════════════════════════════════════════════════
 
+  it('activeSurfaceType answers the ACTIVE tab descriptor, and follows activation both ways', async () => {
+    const { manager } = await mountTabManager()
+    const { SURFACE_TERMINAL } = await import('./tab-content')
+
+    // The mounted tab is a terminal, and the descriptor is what answers —
+    // not an instanceof test and not an inference from the session (B.8).
+    expect(manager.activeSurfaceType()).toBe(SURFACE_TERMINAL)
+
+    const content = new CountingTestContent()
+    const descriptor: ContentDescriptor = {
+      surfaceType: 'test.mock' as unknown as SurfaceType,
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Test',
+    }
+    manager.openTab(content, descriptor)
+    expect(manager.activeSurfaceType()).toBe('test.mock')
+
+    // And back: a one-way assertion cannot report an answer that latches,
+    // which is exactly what the sidebar's Settings collapse would then do.
+    manager.activateByIndex(0)
+    expect(manager.activeSurfaceType()).toBe(SURFACE_TERMINAL)
+  })
+
   it('mounts content exactly once when activated repeatedly — seam guard, not TerminalContent private flag', async () => {
     const { manager } = await mountTabManager()
 

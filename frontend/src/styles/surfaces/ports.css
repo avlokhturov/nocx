@@ -17,6 +17,7 @@
    the same row, so the divided list's hairline still bounds one record. */
 .ports-row__main {
   display: flex;
+  position: relative;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
@@ -61,12 +62,15 @@
   color: var(--color-text-dim);
 }
 
-/* Secondary text (the forward's destination) yields before the address does:
-   a capped share that shrinks to nothing when the row is tight. */
+/* The destination, on its own line in the quiet register beneath the
+   address: the remote end the bind on the line above reaches. It used to
+   sit BESIDE the address and yield to it through a capped share; the rework
+   moved it onto its own line, where nothing else uses the width — so the
+   cap only ever cut the string the row exists to show. Like the address,
+   the ellipsis is a floor that should never be reached at the rail's
+   default width (nocx-na05). */
 .ports-row__dest {
-  flex: 0 1 auto;
   min-width: 0;
-  max-width: 40%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -155,17 +159,45 @@
   background: color-mix(in srgb, white, transparent 97%);
 }
 
-/* The row action is revealed by pointing at the row — a column of identical
-   icons down a narrow rail is noise, and the address is what the eye is
-   scanning. `:focus-within` keeps it reachable from the keyboard, where
-   hover does not exist (nocx-wzc4.11). */
-.ports-row__main > .ui-icon-button {
+/* The row's live state is a tone on the row itself — the legibility that
+   does not need reading (W2): a forwarded row is tinted, a self-stopped
+   one is tinted red. The state lives on the row's own background, so the
+   hover highlight (the pseudo-element above) stays above it. */
+.ports-row[data-state='forwarded'] {
+  background: color-mix(in srgb, var(--color-accent), transparent 94%);
+}
+
+.ports-row[data-state='failed'] {
+  background: color-mix(in srgb, var(--color-danger), transparent 94%);
+}
+
+/* The row action GROUP is revealed by pointing at the row — a column of
+   identical icons down a narrow rail is noise, and the address is what the
+   eye is scanning. `:focus-within` keeps it reachable from the keyboard,
+   where hover does not exist (nocx-wzc4.11).
+
+   The group is absolutely POSITIONED, not merely transparent — and that is
+   the fix (nocx-4wbx). `opacity` does not remove a flex item from layout:
+   a forwarded row's three hidden 18px buttons plus their gaps were still
+   taking ~70px of the text column — 52px more than a plain row's one — so
+   the ADDRESS line truncated at the default rail width while the pointer
+   was elsewhere. Out of flow, the group reserves nothing, hidden or shown;
+   revealed, it overlays the row's right edge, which the text column's
+   ellipsis floor already yields. */
+.ports-row__actions {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   opacity: 0;
   transition: opacity 100ms ease;
 }
 
-.ports-row:hover > .ports-row__main > .ui-icon-button,
-.ports-row:focus-within > .ports-row__main > .ui-icon-button {
+.ports-row:hover > .ports-row__main > .ports-row__actions,
+.ports-row:focus-within > .ports-row__main > .ports-row__actions {
   opacity: 1;
 }
 

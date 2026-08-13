@@ -1,0 +1,35 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `npm run baseline:two-owners-update`.",
+    "",
+    "Every entry is a value-bearing JSX prop (value/checked/selected/defaultValue)",
+    "whose expression is `lhs || literal` or `lhs ?? literal` — a default invented",
+    "at the render site, which by construction no validator or model can see",
+    "(nocx-a88r: the port input painted 22 while the validator judged an empty",
+    "draft). The baseline may only shrink; a violation it does not list is new and",
+    "fails the pre-commit hook.",
+    "",
+    "The absence-preserving forms never appear here: `?? undefined` invents",
+    "nothing, and `?? null` / `?? ''` narrow absent to absent, so the surface",
+    "and a validator reading the raw value agree. `?? 0`, `?? false` and any",
+    "other non-empty literal stay violations. `|| ''` is a violation too — `||`",
+    "is falsy-triggered, so `0 || ''` paints empty where the raw value is 0,",
+    "the same shape as `|| 22`.",
+    "",
+    "Each entry carries the one-line reason that makes it acceptable to keep.",
+    "When the reason stops holding, delete the entry (or regenerate — the updater",
+    "copies reasons forward by key and refuses to grow)."
+  ],
+  "violations": [
+    {
+      "file": "src/connections.tsx",
+      "line": 2414,
+      "column": 27,
+      "prop": "value",
+      "operator": "||",
+      "lhs": "fvStr('relayConsent')",
+      "fallback": "'unknown'",
+      "reason": "Select with no required rule; the fallback is display-only, so no validator or model can disagree with it."
+    }
+  ]
+}

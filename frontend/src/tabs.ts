@@ -24,6 +24,7 @@ import type {
   ContentDescriptor,
   ContentViewport,
   ActiveOrigin,
+  SurfaceType,
 } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
 import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
@@ -561,6 +562,31 @@ export class TabManager {
       })
   }
 
+  /** Open a hand-typed ssh target as a saved nocx connection: build the
+   *  profile from the host the pane walked into (adoptAliasProfile — the
+   *  backend mints the id, so createProfile's record is the id source) and
+   *  open a NEW tab on the saved profile. A new tab is deliberate: the
+   *  current tab's ssh is a child of the local shell, nocx owns no channel
+   *  on it, and re-scoping that tab to a profile with no session would land
+   *  the Ports panel on "open a session first" — the tab on the saved
+   *  profile connects immediately, so Ports works and Forward exists there
+   *  (W2). */
+  openAsConnection(host: string, user: string | undefined): void {
+    const profile = adoptAliasProfile(host, user, undefined)
+    void this.profileClient
+      .createProfile(profile)
+      .then((saved) => {
+        log.info('nocx: opened host as a connection', { host, profileId: saved.id })
+        this.newSSHTab(saved.id, host, user)
+        showToast({ level: 'success', message: `Opened "${host}" as a connection` })
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        log.error('nocx: open-as-connection failed', { host, error: message })
+        showToast({ level: 'danger', message: `Could not connect to ${host}: ${message}` })
+      })
+  }
+
   /**
    * Open a tab with the given content, deduplicating by singletonKey.
    * If a tab with the same singletonKey already exists, activates it.
@@ -755,6 +781,17 @@ export class TabManager {
     const tab = this.activeTab
     const origin = tab?.content.activeOrigin?.()
     return tab && origin ? { tabId: tab.id, ...origin } : null
+  }
+
+  /** The ACTIVE tab's surface type (B.8) — the seam chrome reads to answer
+   *  "what kind of tab is in front" without instanceof tests. The sidebar's
+   *  Settings collapse (nocx-3e3b) reads this through the composition root:
+   *  the descriptor is the single owner of what a tab is, and neither
+   *  activeTerminalContent() (null for viewer tabs too) nor activeOrigin()
+   *  (null transiently while a session opens) can tell Settings apart.
+   *  Null when no tab is active yet. */
+  activeSurfaceType(): SurfaceType | null {
+    return this.activeTab?.descriptor.surfaceType ?? null
   }
 
   reorderTab(draggedId: number, targetId: number): void {

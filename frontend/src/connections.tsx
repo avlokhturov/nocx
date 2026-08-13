@@ -49,7 +49,6 @@ import type {
   AuthMode,
   TreeNode,
   EffectiveProfileDTO,
-  EffectiveFieldDTO,
   FieldSourceDTO,
   SessionStatus,
   ProbeOutcome,
@@ -324,6 +323,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [dialogOpen, setDialogOpen] = createSignal(false)
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
   const [profilePasswordValue, setProfilePasswordValue] = createSignal('')
+  /** An in-flight password mint (W8). A Save pressed while it is resolving
+   *  waits for the mint's bind, which persists the binding and updates the
+   *  draft — the save must write the state that carries the binding. */
+  let mintInFlight: Promise<void> | null = null
+  /**
+   * Row handles minted in THIS editor session, mapped to the display name
+   * they were stored under. The inventory cannot know about a mint until it
+   * is reloaded, but the name is decided at mint time (ADR-0016: the secret
+   * owns its name; secrets.savePassword stores the requested name unchanged),
+   * so the surface can trust the binding it just made instead of waiting for
+   * a round trip. Cleared when the dialog closes, with the draft it belongs
+   * to (W3).
+   */
+  const [mintedPasswordNames, setMintedPasswordNames] = createSignal<Map<string, string>>(new Map())
   const [passphraseAsk, setPassphraseAsk] = createSignal<{
     keyRow: string
     keyName: string
@@ -1462,6 +1475,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     setEditing(null)
     setProfilePasswordOpen(false)
     setProfilePasswordValue('')
+    setMintedPasswordNames(new Map())
     setDirtyFields(new Set<string>())
     setProfileMoveImpact(null)
     setProfileKeyMode(DEFAULT_KEY_MODE)
@@ -1476,10 +1490,43 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return editing()
   })
 
+  /**
+   * THE owner of "what value does this field resolve to while the editor is
+   * open". The inputs paint it and validation reads it, so a fallback the
+   * field invents cannot disagree with a validator that never saw it
+   * (nocx-a88r: the port input painted 22 while the validator rejected the
+   * empty draft). Draft edits win while dirty; an explicit stored value wins
+   * over the inherited one; the effective cascade (group/global/hardcoded
+   * default) answers only the fields this profile omits.
+   */
+  function fieldValue(key: string): unknown {
+    const draft = editing()
+    if (!draft) return undefined
+    const dirty = dirtyFields()
+    if (dirty.has(key)) {
+      return (draft.options as unknown as Record<string, unknown>)[key]
+    }
+    const own = (draft.options as unknown as Record<string, unknown>)[key]
+    if (own !== undefined && own !== null) return own
+    const eff = effectiveData()[draft.id]?.fields[key]
+    if (eff !== undefined) return eff.value
+    return undefined
+  }
+
+  /** The resolved value as text — the shape the validators judge. A value
+   *  that is neither string nor number (an object, a bare boolean) is not
+   *  text a rule can judge, so it reads as empty. */
+  function fieldText(key: string): string {
+    const v = fieldValue(key)
+    if (typeof v === 'string') return v
+    if (typeof v === 'number') return String(v)
+    return ''
+  }
+
   const profileValidation = createFormValidation({
     name: () => required('Name')(formProfile()?.name ?? ''),
     host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
-    port: () => combine(required('Port'), portRule())(String(formProfile()?.options.port ?? '')),
+    port: () => combine(required('Port'), portRule())(fieldText('port')),
     // A Public Key connection with no key is a dead end: nothing to offer
     // at connect time. The key may come from a stored secret, a path, or
     // material about to be minted on save — but it must come from somewhere.
@@ -1526,6 +1573,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
 
   async function saveProfile(profile: SSHProfile) {
     if (!gate(profileValidation)) return
+
+    // A Save landing while a password mint is still resolving waits for the
+    // mint's bind: the bind persists the binding AND updates the draft, so
+    // the save must write the freshest state — the one that carries it.
+    // Without this, a save pressed in that window writes auth without
+    // passwordSecret, the exact on-disk shape of the report (W8).
+    if (mintInFlight) {
+      await mintInFlight
+      const fresh = editing()
+      if (fresh) profile = fresh
+    }
 
     // Key material save (publicKey paste/upload mode)
     if (
@@ -2034,32 +2092,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       setOption('keySecret', undefined)
     }
 
-    /** The bound password secret's display name, for the Password action. */
-    const boundPasswordName = createMemo(
-      () => secretRows().find((e) => e.id === fvStr('passwordSecret'))?.name,
-    )
-
-    function effField(field: string): EffectiveFieldDTO | undefined {
-      const eff = effectiveData()[profile().id]
-      return eff?.fields[field]
-    }
-
-    function fieldValue(key: string): unknown {
-      const dirty = dirtyFields()
-      if (dirty.has(key)) {
-        const draft = editing()
-        if (draft) return (draft.options as unknown as Record<string, unknown>)[key]
-      }
-      // The editor edits the stored profile, so an explicit profile value wins.
-      // Effective values are only the fallback for a field this profile omits.
-      // Reading effective first replaced a saved host with the resolver's empty
-      // default and rendered the Host input blank.
-      const own = (profile().options as unknown as Record<string, unknown>)[key]
-      if (own !== undefined && own !== null) return own
-      const eff = effField(key)
-      if (eff !== undefined) return eff.value
-      return undefined
-    }
+    /** The bound password secret's display name, for the Password action.
+     *  The inventory is the first word, but a row minted in THIS editor
+     *  session is not in it until the post-mint reload lands — the binding
+     *  made a moment ago must not read as "No password set" in the meantime
+     *  (W3). The minted name is authoritative: the backend stores the
+     *  requested name unchanged (ADR-0016). */
+    const boundPasswordName = createMemo(() => {
+      const row = fvStr('passwordSecret')
+      if (!row) return undefined
+      return secretRows().find((e) => e.id === row)?.name ?? mintedPasswordNames().get(row)
+    })
 
     const isSaved = () => !!profile().id && profiles().some((x) => x.id === profile().id)
     function fvStr(key: string): string {
@@ -2140,7 +2183,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       id="profile-port"
                       label="Port"
                       required
-                      value={fvNum('port') || 22}
+                      value={fvNum('port')}
                       type="number"
                       error={profileValidation.error('port')}
                       onInput={(v) => {
@@ -2204,6 +2247,10 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                             </Button>
                           </div>
                         </div>
+                        <p class="cm-hint">
+                          Setting a password saves it to the connection immediately — closing this
+                          editor afterwards won't undo it.
+                        </p>
                       </Field>
                     }
                     publicKeyAction={
@@ -2540,10 +2587,16 @@ export function ConnectionsView(props: ConnectionsViewProps) {
               }`}
               onClose={() => setProfilePasswordOpen(false)}
               onSave={(password) => {
-                // Mint-and-bind at the action moment (ADR-0017): the secret is
-                // stored and bound when the user presses OK, not when the
-                // profile is saved. The editor closes immediately; the mint
-                // continues in the background.
+                // Mint-and-bind at the action moment (ADR-0017, W8): the
+                // secret is stored AND the binding is written to the stored
+                // profile when the user presses OK — not when the profile is
+                // saved. The editor closes immediately; the mint continues in
+                // the background and its bind persists the binding, so there
+                // is no window in which a secret exists bound to nothing, and
+                // a later Cancel of the editor will not undo the write (the
+                // action row says so). A new profile has nothing to bind to
+                // yet: the binding rides the draft and creation persists both
+                // halves.
                 const current = profile()
                 const generatedName = secretNameFor(
                   'password',
@@ -2554,29 +2607,97 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                 const run = async () => {
                   row = await savePw()
                 }
-                const bind = () => {
+                const bind = async () => {
                   if (!row) return
-                  const updated = {
-                    ...current,
-                    options: { ...current.options, passwordSecret: row.row },
-                  }
-                  setEditing(updated)
+                  const mintedRow = row
+                  // Merge into the LIVE draft, not the OK-press snapshot: the
+                  // mint runs behind a vault prompt and the user may have
+                  // edited other fields in the meantime (W8).
+                  setEditing((prev) =>
+                    prev
+                      ? { ...prev, options: { ...prev.options, passwordSecret: mintedRow.row } }
+                      : prev,
+                  )
                   setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
+                  setMintedPasswordNames((prev) => {
+                    const next = new Map(prev)
+                    next.set(mintedRow.row, generatedName)
+                    return next
+                  })
                   setProfilePasswordValue('')
+                  // The inventory does not know about this row yet — reload it
+                  // so the pickers and any later read see the mint. The action
+                  // row already names the secret from mintedPasswordNames, so
+                  // the display never depends on the reload landing.
+                  void loadSecretRows()
+                  // The stored profile must carry the pair the editor always
+                  // keeps together: a password secret is only ever offered
+                  // under the Password method (authentication-editor.tsx), so
+                  // auth travels with the binding, or a mint-then-cancel on a
+                  // profile without a method would store an invisible secret.
+                  const isNew = !current.id || !profiles().some((p) => p.id === current.id)
+                  if (!isNew) {
+                    try {
+                      await props.client.patchProfile({
+                        id: current.id,
+                        set: {
+                          'options.auth': 'password',
+                          'options.passwordSecret': mintedRow.row,
+                        },
+                      })
+                    } catch (err) {
+                      // The secret was minted, so the failure is the binding:
+                      // name the split out loud, or the half-done state reads
+                      // as a silent success (AGENTS.md: a soft degrade must be
+                      // visible in the product). The draft keeps the binding,
+                      // so Save Connection retries the write.
+                      const message = (err as Error).message
+                      log.error('Failed to persist the password binding', { message })
+                      showToast({
+                        level: 'danger',
+                        message: `The password was stored but this connection was not updated to use it: ${message}. Save Connection to retry.`,
+                      })
+                    }
+                  }
                 }
                 const fail = (err: unknown) => {
-                  if (err instanceof VaultOperationCancelledError) return
+                  if (err instanceof VaultOperationCancelledError) {
+                    // The editor closed on OK, so the mint kept running in the
+                    // background; a cancelled vault prompt leaves the password
+                    // unsaved with nothing on screen to say why. Silence here
+                    // reads as success (AGENTS.md: a soft degrade must be
+                    // visible in the product).
+                    log.warn('Password save cancelled: the vault prompt was closed', {})
+                    showToast({
+                      level: 'warning',
+                      message: 'Password was not saved — the vault prompt was cancelled.',
+                    })
+                    return
+                  }
                   const message = (err as Error).message
                   log.error('Failed to save password', { message })
                   showToast({ level: 'danger', message: `Could not save the password: ${message}` })
                 }
-                if (props.vaultController) {
-                  void props.vaultController
-                    .saveSecretWithVault(run, 'save this password')
-                    .then(bind, fail)
-                } else {
-                  void run().then(bind, fail)
-                }
+                const mint = (async () => {
+                  try {
+                    if (props.vaultController) {
+                      await props.vaultController.saveSecretWithVault(run, 'save this password')
+                    } else {
+                      await run()
+                    }
+                    await bind()
+                  } catch (err) {
+                    fail(err)
+                  }
+                })()
+                // A Save pressed while the mint is still resolving must wait
+                // for the bind: the save must write a profile that carries
+                // the binding (W8 — the save that landed before the bind
+                // produced the auth-without-secret profile on disk).
+                mintInFlight = mint
+                void mint.finally(() => {
+                  mintInFlight = null
+                })
               }}
             />
           </Dialog>

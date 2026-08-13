@@ -3,22 +3,35 @@ import { test, expect } from './harness'
 const CARET = '[aria-label="Quick connect"]'
 const QUICK_CONNECT_ITEM = '.quick-connect__item'
 const QUICK_CONNECT_SEARCH = '.quick-connect__search input'
-const QUICK_CONNECT_EMPTY = '.quick-connect__empty'
 
 test.describe('quick-connect picker', () => {
-  test('the caret opens the plain server list — hosts only, no commands', async ({ page }) => {
+  test('the caret lists "New connection" — the one command admitted to the server list', async ({
+    page,
+  }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
     // Click the caret beside +.
     await page.locator(CARET).click()
 
-    // The picker dialog is open. The caret's presentation is the plain
-    // server list: on the disposable dev stand there are no profiles or
-    // aliases, so it says so instead of showing commands.
+    // The caret's presentation is the plain server list, with exactly one
+    // command admitted to it: "New connection" (nocx-d4us). Creating a
+    // connection is still connecting to a machine — one not saved yet — so
+    // on the disposable dev stand (no profiles, no aliases) the list holds
+    // that one row and nothing else. The old "No matches" assertion is gone
+    // from this case: an empty query always matches the admitted row. (The
+    // empty notice still exists — a malformed query like "user@" renders a
+    // parse-failure message there — it is just unreachable on open.)
     await expect(page.locator(QUICK_CONNECT_SEARCH)).toBeVisible()
-    await expect(page.locator(QUICK_CONNECT_EMPTY)).toContainText('No matches')
-    await expect(page.locator(QUICK_CONNECT_ITEM)).toHaveCount(0)
+    await expect(page.locator(QUICK_CONNECT_ITEM)).toHaveCount(1)
+    await expect(page.locator(QUICK_CONNECT_ITEM)).toContainText('New connection')
+
+    // The guard that must survive: admitting kind === 'command' wholesale
+    // would put every command in front of the caret. Forwarding a port and
+    // opening a local shell are different jobs from connecting to a machine,
+    // so neither row may appear here.
+    await expect(page.locator(QUICK_CONNECT_ITEM)).not.toContainText('Forward a port')
+    await expect(page.locator(QUICK_CONNECT_ITEM)).not.toContainText('Local shell')
   })
 
   test('Escape closes the picker and restores focus to the caret', async ({ page }) => {

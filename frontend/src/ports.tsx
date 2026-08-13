@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// PortsPanel — the Detected / Forwarded / Stopped surface (spec §9,
-// nocx-wzc4.2), now a SIDEBAR VIEW (nocx-wzc4.7): the owner's reference
+// PortsPanel — the Detected / orphan-forwards surface (spec §9, nocx-wzc4.2),
+// now a SIDEBAR VIEW (nocx-wzc4.7): the owner's reference
 // (Orca's PORTS panel) sits beside the terminal so a port can be watched
 // while the command that opens it is being typed. The panel follows the
 // ACTIVE tab — profileId is a reactive accessor, never a capture — and
@@ -27,11 +27,27 @@ import { EmptyState } from './ui/empty-state'
 import { IconButton } from './ui/icon-button'
 import { ArrowRightIcon, CopyIcon, ExternalLinkIcon, SquareIcon } from './ui/icons'
 import { MarkerList } from './ui/marker-list'
+import { SearchField } from './ui/search-field'
 import { Section } from './ui/section'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { showToast } from './ui/toast'
 import { LOCAL_TARGET_ID } from './ports-client'
+
+/** Split a `user@host` target into its parts, the way the product spells
+ *  the target: W1's `portsUnavailableReason` reuses locationLine's
+ *  `user@host` (bare `host` when there is no user), so this is the ONE
+ *  parse of that string and the only place the empty state's action learns
+ *  who the host is. No port is ever read — a hand-typed ssh gives us none,
+ *  and "not set" must stay not set (adoptAliasProfile). */
+function splitUnavailableTarget(target: string): {
+  host: string
+  user: string | undefined
+} {
+  const at = target.lastIndexOf('@')
+  if (at === -1) return { host: target, user: undefined }
+  return { host: target.slice(at + 1), user: target.slice(0, at) || undefined }
+}
 
 // ── Services seam ─────────────────────────────────────────────────────────
 
@@ -112,6 +128,12 @@ export interface PortsPanelProps {
    *  connection, so there is no second exec channel to ask on. '' otherwise
    *  (nocx-695k.3). */
   unavailableIn?: () => string
+  /** The unavailable-host empty state's action: open that host as a nocx
+   *  connection. The panel stays dumb — it hands over only the host/user it
+   *  parsed out of `unavailableIn`; how a connection is made is the
+   *  composition root's business (W2). Absent, the state offers no action
+   *  rather than a dead one. */
+  onOpenAsConnection?: (host: string, user: string | undefined) => void
 }
 
 type ForwardRecord = TunnelOpenResult | TunnelStopResult
@@ -120,6 +142,7 @@ export function PortsPanel(props: PortsPanelProps) {
   const [status, setStatus] = createSignal<PortsStatusResult | null>(null)
   const [error, setError] = createSignal<string | null>(null)
   const [forwards, setForwards] = createSignal<Map<string, ForwardRecord>>(new Map())
+  const [query, setQuery] = createSignal('')
 
   /** The panel's view of the shared pause state. */
   const paused = () => props.pause.paused()
@@ -127,6 +150,11 @@ export function PortsPanel(props: PortsPanelProps) {
   /** The panel's current scope — an alias for the reactive prop, read at
    *  call sites so every fetch and mutation targets the ACTIVE tab. */
   const profileId = () => props.profileId()
+
+  /** The host the pane walked into without a managed connection — the
+   *  no-connection state's subject and the source of its action. '' when
+   *  there is none (W1 feeds this from locationLine). */
+  const unavailableTarget = () => props.unavailableIn?.() ?? ''
 
   /** True while the panel is scoped to the machine nocx itself runs on —
    *  the reserved "local" target (nocx-wzc4.8). Nothing can be forwarded
@@ -175,6 +203,10 @@ export function PortsPanel(props: PortsPanelProps) {
       setError(null)
       props.pause.reset()
       setForwards(new Map())
+      // The filter is part of the re-scoped state: a query typed for the
+      // previous host must not meet the next host's list half-filtered
+      // (nocx-cdub decision 4).
+      setQuery('')
     }),
   )
 
@@ -302,6 +334,11 @@ export function PortsPanel(props: PortsPanelProps) {
   const st = () => status()?.discovery
   const host = () => status()?.host ?? ''
   const listeners = () => st()?.listeners ?? []
+  /** The discovery states that can hold rows — the only states the filter
+   *  and the rows appear in. A failure state has no list to filter, and
+   *  showing a search box above an explanation reads as noise (nocx-cdub). */
+  const listAvailable = (): boolean =>
+    st()?.state === 'available' || st()?.state === 'available-limited'
   /** Reading, as opposed to having nothing to read. No status yet is always
    *  loading; a connected target whose first sample has not landed is too —
    *  that window is the settle delay plus a round trip, and showing nothing
@@ -350,8 +387,102 @@ export function PortsPanel(props: PortsPanelProps) {
     return DETECTED_ARMS.has(s.state) ? '' : s.state || '(empty)'
   }
 
-  const runningForwards = () => [...forwards().values()].filter((f) => f.state === 'running')
-  const stoppedForwards = () => [...forwards().values()].filter((f) => f.state === 'stopped')
+  /** The one forward that owns a DESTINATION's state (W7 revision,
+   *  nocx-4wbx): a running record beats a self-stopped one for the same
+   *  destination. A forward that is running is the destination's current
+   *  truth; an earlier failure for the SAME destination is no longer news —
+   *  its Retry would offer to redo what has already been done — so the row
+   *  a destination gets is the live one. Bought by a webkit CI failure: a
+   *  first connection's stored forward stopped with "connection lost" while
+   *  a reconnect's replay ran, and the panel showed both as two truths
+   *  about one thing — the exact shape this epic removed from
+   *  Detected/Forwarded, reappearing among orphans. Records for DIFFERENT
+   *  destinations are untouched: two live forwards to two destinations are
+   *  two rows. */
+  const forwardForDestination = (dest: string): ForwardRecord | undefined => {
+    const matches = [...forwards().values()].filter((f) => f.destination === dest)
+    return matches.find((f) => f.state === 'running') ?? matches[0]
+  }
+
+  /** The one forward for a detected row, keyed by the ONE destination
+   *  derivation: a forward carries the same string destinationFor() builds,
+   *  so the row that owns a port is the row that shows its state — the old
+   *  separate Forwarded list made the same port two rows with two owners
+   *  (W2). */
+  const forwardFor = (
+    l: PortsStatusResult['discovery']['listeners'][number],
+  ): ForwardRecord | undefined => forwardForDestination(destinationFor(l))
+
+  /** A forward the connection lost on its own — the two reasons that earn a
+   *  Retry. A user stop is not information and renders nothing (W2). */
+  const isSelfStopped = (f: ForwardRecord): boolean =>
+    f.state === 'stopped' && (f.stopReason === 'error' || f.stopReason === 'connection lost')
+
+  /** Forwards with no detected row to own them — the host may have stopped
+   *  listening, discovery may be degraded, or the forward may have been
+   *  replayed rather than started from this list. Running ones must stay
+   *  stoppable and self-stopped ones must stay visible; folding them into
+   *  the Detected list would make them vanish, a worse bug than the one
+   *  this replaces (W2). A self-stopped record whose destination a live
+   *  forward owns is superseded before this filter sees it (W7): the live
+   *  row carries the destination's state, and a second row beside it would
+   *  only offer a Retry that redoes what is already done. */
+  const orphanForwards = (): ForwardRecord[] =>
+    [...forwards().values()].filter((f) => {
+      if (f.state !== 'running' && !isSelfStopped(f)) return false
+      if (f.state !== 'running' && forwardForDestination(f.destination)?.state === 'running') {
+        return false
+      }
+      return !listeners().some((l) => destinationFor(l) === f.destination)
+    })
+
+  /** The Detected section's rows: each listener plus the forward that owns
+   *  its state, if any. Derived as ONE list so the section re-renders when
+   *  either discovery or the forwards map changes — a plain `For` over
+   *  listeners() would not re-run its item bodies when a forward appears
+   *  (mapArray untracks the mapping, so only the list signal itself is
+   *  tracked), and the row would never change (W2). */
+  const detectedRows = () => listeners().map((l) => ({ listener: l, fwd: forwardFor(l) }))
+
+  type DetectedRow = {
+    listener: PortsStatusResult['discovery']['listeners'][number]
+    fwd: ForwardRecord | undefined
+  }
+
+  /** A row that carries a forward in a state the user must still be able to
+   *  act on — running (Stop) or self-stopped (Retry) — is never hidden by
+   *  the filter: the filter exists to find rows, never to strand an action
+   *  (nocx-cdub decision 3). */
+  const carriesActionableForward = (r: DetectedRow): boolean =>
+    r.fwd !== undefined && (r.fwd.state === 'running' || isSelfStopped(r.fwd))
+
+  /** What a row matches against: the rendered address (which carries the
+   *  port), the port on its own, the process name when the probe could name
+   *  it, and the forward's destination when one owns the row. The pid is
+   *  deliberately not matched — it is restart-unstable and not something a
+   *  user types, and matching it lets a query hit a row nobody meant
+   *  (nocx-cdub decision 1). */
+  const rowHaystack = (r: DetectedRow): string => {
+    const l = r.listener
+    const parts = [`${l.address}:${l.port}`, String(l.port)]
+    if (l.process.evidence === 'known') parts.push(l.process.name)
+    if (r.fwd !== undefined) parts.push(r.fwd.destination)
+    return parts.join(' ')
+  }
+
+  /** The Detected section's rows after the filter. A row carrying a live or
+   *  self-stopped forward keeps its Stop/Retry on screen whatever the query
+   *  says; everything else must match the query. The orphaned forwards are
+   *  deliberately outside the filter: every one of them is by construction
+   *  running or self-stopped, so filtering them could only hide a stoppable
+   *  or retryable forward (nocx-cdub decision 3). */
+  const visibleRows = (): DetectedRow[] => {
+    const q = query().trim().toLowerCase()
+    if (q === '') return detectedRows()
+    return detectedRows().filter(
+      (r) => carriesActionableForward(r) || rowHaystack(r).toLowerCase().includes(q),
+    )
+  }
 
   const processLabel = (p: { evidence: string; name: string; pid: number }): string => {
     switch (p.evidence) {
@@ -369,7 +500,7 @@ export function PortsPanel(props: PortsPanelProps) {
       when={profileId() !== null}
       fallback={
         <Show
-          when={props.unavailableIn?.()}
+          when={unavailableTarget()}
           fallback={
             <EmptyState
               title="No active connection"
@@ -380,10 +511,25 @@ export function PortsPanel(props: PortsPanelProps) {
           {/* The pane walked somewhere we cannot see. Say which host and why,
               and name what would change it — showing this machine's listeners
               instead is what made a tab sitting on a Pi look like it was
-              listing the Pi's ports (owner, 2026-08-04). */}
+              listing the Pi's ports (owner, 2026-08-04). The action is the
+              second half: the sentence tells the user to open the host as a
+              connection, and the button does it (W2). */}
           <EmptyState
-            title={`Cannot see the ports on ${props.unavailableIn?.() ?? ''}`}
+            title={`Cannot see the ports on ${unavailableTarget()}`}
             description="You reached this shell by hand, so nocx has no connection of its own to it and cannot ask what is listening. Open the host as a connection to see its ports."
+            action={
+              <Show when={props.onOpenAsConnection}>
+                <Button
+                  data-testid="ports-open-as-connection"
+                  onClick={() => {
+                    const { host, user } = splitUnavailableTarget(unavailableTarget())
+                    props.onOpenAsConnection?.(host, user)
+                  }}
+                >
+                  Open as connection
+                </Button>
+              </Show>
+            }
           />
         </Show>
       }
@@ -420,6 +566,25 @@ export function PortsPanel(props: PortsPanelProps) {
               />
             </Show>
             <Show when={!st()?.connLost}>
+              {/* The filter sits ABOVE the sections it governs — a query
+                    is about the whole panel, and the kit's SearchField is
+                    the one search vocabulary (the one connections.tsx and
+                    secrets.tsx drive). It appears only in the discovery
+                    states that can hold rows: a failure state has no list
+                    to filter, so a search box above an explanation would be
+                    noise. The orphaned forwards are deliberately outside
+                    the filter — every one of them is running or self-stopped
+                    by construction, so filtering them could only hide a
+                    forward the user must still be able to stop or retry
+                    (nocx-cdub decision 3). */}
+              <Show when={listAvailable()}>
+                <SearchField
+                  value={query()}
+                  onInput={setQuery}
+                  placeholder="Filter ports"
+                  ariaLabel="Filter ports"
+                />
+              </Show>
               <Section title="Detected" divided dense>
                 {/* Whose listeners these are, said out loud and always. The
                     panel had no such statement, so a tab titled
@@ -471,95 +636,249 @@ export function PortsPanel(props: PortsPanelProps) {
                     description="The settle sample runs shortly after the connection comes up."
                   />
                 </Show>
-                <Show when={st()?.state === 'available' || st()?.state === 'available-limited'}>
+                <Show when={listAvailable()}>
                   {/* Stated once, above the rows it applies to. */}
                   <Show when={hiddenOwners()}>
                     <p class="ports-note" data-testid="ports-owners-note">
                       Some owners are hidden — run as root to see them.
                     </p>
                   </Show>
-                  <Show
-                    when={listeners().length > 0}
-                    fallback={
+                  <Show when={visibleRows().length > 0}>
+                    <For each={visibleRows()}>
+                      {(row) => {
+                        const fwd = row.fwd
+                        const running = fwd?.state === 'running' ? fwd : undefined
+                        const failed = fwd !== undefined && isSelfStopped(fwd) ? fwd : undefined
+                        const caveat = running?.caveat ?? ''
+                        const l = row.listener
+                        return (
+                          <div
+                            class="ports-row"
+                            data-testid="detected-row"
+                            data-state={running ? 'forwarded' : failed ? 'failed' : undefined}
+                          >
+                            <div class="ports-row__main">
+                              <div class="ports-row__text">
+                                {/* The row is the port's single owner (W2):
+                                    when its forward is running the address
+                                    becomes the local bind the port is now
+                                    reachable on; when the forward self-stopped
+                                    the reason takes the quiet line. */}
+                                <Show
+                                  when={running}
+                                  fallback={
+                                    <Show
+                                      when={failed}
+                                      fallback={
+                                        <>
+                                          <span class="ports-row__addr">
+                                            {l.address}:{l.port}
+                                          </span>
+                                          {/* Only a known owner earns a line.
+                                              "Owners hidden" is one fact about the
+                                              probe, not a banner repeated down every
+                                              row where it does not fit
+                                              (nocx-wzc4.11). */}
+                                          <Show when={l.process.evidence === 'known'}>
+                                            <span class="ports-row__proc">
+                                              {processLabel(l.process)}
+                                            </span>
+                                          </Show>
+                                        </>
+                                      }
+                                    >
+                                      {(f) => {
+                                        const rec = f()
+                                        return (
+                                          <>
+                                            <span class="ports-row__addr">
+                                              {l.address}:{l.port}
+                                            </span>
+                                            <Badge tone="danger" truncate>
+                                              {rec.stopReason ?? 'stopped'}
+                                            </Badge>
+                                            <Show when={rec.error}>
+                                              <span class="ports-row__proc">{rec.error}</span>
+                                            </Show>
+                                          </>
+                                        )
+                                      }}
+                                    </Show>
+                                  }
+                                >
+                                  {(r) => {
+                                    const rec = r()
+                                    return (
+                                      <>
+                                        <span class="ports-row__addr">
+                                          {rec.actualBind.host}:{rec.actualBind.port}
+                                        </span>
+                                        <span class="ports-row__dest">
+                                          <span class="ports-row__arrow" aria-hidden="true">
+                                            →{' '}
+                                          </span>
+                                          {rec.destination}
+                                        </span>
+                                        {/* The tone is the legibility that does
+                                            not need reading: a column of forwarded
+                                            rows reads as one thing before the
+                                            words do (W2). */}
+                                        <Badge tone="info" truncate>
+                                          Forwarded
+                                        </Badge>
+                                      </>
+                                    )
+                                  }}
+                                </Show>
+                              </div>
+                              <Show
+                                when={isLocal()}
+                                fallback={
+                                  running ? (
+                                    <div class="ports-row__actions">
+                                      <IconButton
+                                        data-testid="ports-copy"
+                                        size="xs"
+                                        ariaLabel={`Copy ${running.actualBind.host}:${running.actualBind.port}`}
+                                        title={`Copy ${running.actualBind.host}:${running.actualBind.port}`}
+                                        onClick={() =>
+                                          copyAddress(
+                                            `${running.actualBind.host}:${running.actualBind.port}`,
+                                          )
+                                        }
+                                      >
+                                        <CopyIcon />
+                                      </IconButton>
+                                      <IconButton
+                                        data-testid="ports-open"
+                                        size="xs"
+                                        ariaLabel={`Open ${running.actualBind.host}:${running.actualBind.port}`}
+                                        title={`Open ${running.actualBind.host}:${running.actualBind.port}`}
+                                        onClick={() =>
+                                          openAddress(
+                                            `${running.actualBind.host}:${running.actualBind.port}`,
+                                          )
+                                        }
+                                      >
+                                        <ExternalLinkIcon />
+                                      </IconButton>
+                                      <IconButton
+                                        data-testid="ports-stop"
+                                        size="xs"
+                                        ariaLabel={`Stop forward ${running.destination}`}
+                                        title={`Stop forward ${running.destination}`}
+                                        onClick={() => void stop(running.id)}
+                                      >
+                                        <SquareIcon />
+                                      </IconButton>
+                                    </div>
+                                  ) : failed ? (
+                                    <Button
+                                      data-testid="ports-retry-forward"
+                                      onClick={() => retry(failed)}
+                                    >
+                                      Retry
+                                    </Button>
+                                  ) : (
+                                    <div class="ports-row__actions">
+                                      <IconButton
+                                        data-testid="ports-forward"
+                                        size="xs"
+                                        ariaLabel={`Forward ${destinationFor(l)}`}
+                                        title={`Forward ${destinationFor(l)}`}
+                                        onClick={() => void forward(destinationFor(l), l.port)}
+                                      >
+                                        <ArrowRightIcon />
+                                      </IconButton>
+                                    </div>
+                                  )
+                                }
+                              >
+                                <div class="ports-row__actions">
+                                  <IconButton
+                                    data-testid="ports-copy"
+                                    size="xs"
+                                    ariaLabel={`Copy ${destinationFor(l)}`}
+                                    title={`Copy ${destinationFor(l)}`}
+                                    onClick={() => copyAddress(destinationFor(l))}
+                                  >
+                                    <CopyIcon />
+                                  </IconButton>
+                                </div>
+                              </Show>
+                            </div>
+                            <Show when={caveat}>
+                              <MarkerList items={[{ text: caveat, tone: 'note' }]} />
+                            </Show>
+                          </div>
+                        )
+                      }}
+                    </For>
+                  </Show>
+                  {/* A query matching nothing says so: a heading with a
+                      hairline and nothing under it is the shape a user
+                      reads as broken, and "Nothing is listening" would be
+                      a lie the user can disprove by clearing the box. */}
+                  <Show when={visibleRows().length === 0}>
+                    <Show
+                      when={query().trim() === ''}
+                      fallback={
+                        <EmptyState
+                          title="No ports match that"
+                          description="Clear the filter to see the full list."
+                        />
+                      }
+                    >
                       <EmptyState
                         title="Nothing is listening"
                         description={`No listeners observed on ${host()}.`}
                       />
-                    }
-                  >
-                    <For each={listeners()}>
-                      {(l) => (
-                        <div class="ports-row" data-testid="detected-row">
-                          <div class="ports-row__main">
-                            <div class="ports-row__text">
-                              <span class="ports-row__addr">
-                                {l.address}:{l.port}
-                              </span>
-                              {/* A name and a pid are a label and read as
-                                  quiet text; the states that are a caution
-                                  keep the chip, because there the tone IS the
-                                  information (nocx-wzc4.10). */}
-                              {/* Only a known owner earns a line. "Owners
-                                  hidden" is one fact about the probe, not a
-                                  banner repeated down every row where it does
-                                  not fit — it is stated once above the list
-                                  (nocx-wzc4.11). */}
-                              <Show when={l.process.evidence === 'known'}>
-                                <span class="ports-row__proc">{processLabel(l.process)}</span>
-                              </Show>
-                            </div>
-                            <Show
-                              when={isLocal()}
-                              fallback={
-                                <IconButton
-                                  data-testid="ports-forward"
-                                  size="xs"
-                                  ariaLabel={`Forward ${destinationFor(l)}`}
-                                  title={`Forward ${destinationFor(l)}`}
-                                  onClick={() => void forward(destinationFor(l), l.port)}
-                                >
-                                  <ArrowRightIcon />
-                                </IconButton>
-                              }
-                            >
-                              <IconButton
-                                data-testid="ports-copy"
-                                size="xs"
-                                ariaLabel={`Copy ${destinationFor(l)}`}
-                                title={`Copy ${destinationFor(l)}`}
-                                onClick={() => copyAddress(destinationFor(l))}
-                              >
-                                <CopyIcon />
-                              </IconButton>
-                            </Show>
-                          </div>
-                        </div>
-                      )}
-                    </For>
+                    </Show>
                   </Show>
                 </Show>
               </Section>
 
               {/* The forwarding vocabulary exists only off this machine:
-                  local rows offer copy-address, and the Forwarded / Stopped
-                  sections would be an empty offer of an impossible action
-                  (nothing to forward from the machine you are on,
-                  nocx-wzc4.8). */}
-              <Show when={!isLocal()}>
-                {/* ── Forwarded ─────────────────────────────────────── */}
-                <Section title="Forwarded" divided dense>
-                  <Show
-                    when={runningForwards().length > 0}
-                    fallback={
-                      <EmptyState
-                        title="No active forwards"
-                        description="Forward a detected port to make it reachable locally."
-                      />
-                    }
-                  >
-                    <For each={runningForwards()}>
-                      {(f) => (
-                        <div class="ports-row" data-testid="forwarded-row">
+                  local rows offer copy-address, and an orphan section would
+                  be an empty offer of an impossible action (nothing to
+                  forward from the machine you are on, nocx-wzc4.8). The
+                  section itself renders only when it has a row to hold —
+                  an empty section has no subject, and its old "No active
+                  forwards" fallback contradicted a forward shown live on
+                  its own row (W2 revision). */}
+              <Show when={!isLocal() && orphanForwards().length > 0}>
+                {/* ── Orphaned forwards ─────────────────────────────── */}
+                {/* Forwards with no detected row to own them. A running one
+                    is a forward the host no longer reports — still alive,
+                    still stoppable; a self-stopped one is a failure the user
+                    must be able to retry. The Stopped section is deleted: a
+                    stop the user performed is not information, and a detected
+                    port's state lives on its own row (W2). */}
+                <Section title="Orphaned forwards" divided dense>
+                  <For each={orphanForwards()}>
+                    {(f) => (
+                      <Show
+                        when={f.state === 'running'}
+                        fallback={
+                          <div class="ports-row" data-testid="forwarded-row" data-state="failed">
+                            <div class="ports-row__main">
+                              <div class="ports-row__text">
+                                <span class="ports-row__addr">{f.destination}</span>
+                                <Badge tone="danger" truncate>
+                                  {f.stopReason ?? 'stopped'}
+                                </Badge>
+                                <Show when={f.error}>
+                                  <span class="ports-row__proc">{f.error}</span>
+                                </Show>
+                              </div>
+                              <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
+                                Retry
+                              </Button>
+                            </div>
+                          </div>
+                        }
+                      >
+                        <div class="ports-row" data-testid="forwarded-row" data-state="forwarded">
                           <div class="ports-row__main">
                             <div class="ports-row__text">
                               <span class="ports-row__addr">
@@ -572,80 +891,53 @@ export function PortsPanel(props: PortsPanelProps) {
                                 {f.destination}
                               </span>
                             </div>
-                            <IconButton
-                              data-testid="ports-copy"
-                              size="xs"
-                              ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
-                              title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
-                              onClick={() =>
-                                copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
-                              }
-                            >
-                              <CopyIcon />
-                            </IconButton>
-                            <IconButton
-                              data-testid="ports-open"
-                              size="xs"
-                              ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
-                              title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
-                              onClick={() =>
-                                openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
-                              }
-                            >
-                              <ExternalLinkIcon />
-                            </IconButton>
-                            <IconButton
-                              data-testid="ports-stop"
-                              size="xs"
-                              ariaLabel={`Stop forward ${f.destination}`}
-                              title={`Stop forward ${f.destination}`}
-                              onClick={() => void stop(f.id)}
-                            >
-                              <SquareIcon />
-                            </IconButton>
+                            <div class="ports-row__actions">
+                              <IconButton
+                                data-testid="ports-copy"
+                                size="xs"
+                                ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                                title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                                onClick={() =>
+                                  copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                                }
+                              >
+                                <CopyIcon />
+                              </IconButton>
+                              <IconButton
+                                data-testid="ports-open"
+                                size="xs"
+                                ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                                title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                                onClick={() =>
+                                  openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                                }
+                              >
+                                <ExternalLinkIcon />
+                              </IconButton>
+                              <IconButton
+                                data-testid="ports-stop"
+                                size="xs"
+                                ariaLabel={`Stop forward ${f.destination}`}
+                                title={`Stop forward ${f.destination}`}
+                                onClick={() => void stop(f.id)}
+                              >
+                                <SquareIcon />
+                              </IconButton>
+                            </div>
                           </div>
-                          {/* A -R forward whose bind sshd silently replaced carries
-                              Caveat() — render it as the kit's note (a caveat about
-                              the item above it), never as an error: the forward is
-                              running. Empty caveat renders nothing. */}
+                          {/* A -R forward whose bind sshd silently replaced
+                                carries Caveat() — render it as the kit's note
+                                (a caveat about the item above it), never as an
+                                error: the forward is running. Empty caveat
+                                renders nothing. */}
                           <Show when={f.caveat}>
                             <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
                           </Show>
                         </div>
-                      )}
-                    </For>
-                  </Show>
+                      </Show>
+                    )}
+                  </For>
                 </Section>
-
-                {/* ── Stopped (only when non-empty) ─────────────────── */}
-                <Show when={stoppedForwards().length > 0}>
-                  <Section title="Stopped" divided dense>
-                    <For each={stoppedForwards()}>
-                      {(f) => (
-                        <div class="ports-row" data-testid="stopped-row">
-                          <div class="ports-row__main">
-                            <div class="ports-row__text">
-                              <span class="ports-row__addr">{f.destination}</span>
-                              <span class="ports-row__proc">{f.stopReason ?? 'stopped'}</span>
-                              <Show when={f.error}>
-                                <Badge tone="danger" truncate>
-                                  {f.error ?? ''}
-                                </Badge>
-                              </Show>
-                            </div>
-                            <Show
-                              when={f.stopReason === 'error' || f.stopReason === 'connection lost'}
-                            >
-                              <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
-                                Retry
-                              </Button>
-                            </Show>
-                          </div>
-                        </div>
-                      )}
-                    </For>
-                  </Section>
-                </Show>
               </Show>
             </Show>
           </Show>
