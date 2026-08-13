@@ -33,6 +33,7 @@ The end-to-end check that watches the first sentence happen is in
 | **ADR-0019**            | **One authoritative ledger.** Schema v1 — `environments`, `entries`, `edges`, `artifacts`, `artifact_chunks` — is designed (`nocx-rtg0.2`) and not implemented; `command_history` is interim and says so. A human command and an agent command are both `entries`, distinguished by `kind` and joined by `caused-by` edges. §6: derived text is an **artifact with provenance, not a string**. | Frames, questions and answers are entries and artifacts in that one ledger. No second store, no blob hidden in a text column.                                                    |
 | **ADR-0020**            | The agent gets a lane, never the user's PTY; execution runs under a lease; **authority is a per-run grant, immutable once execution starts**; policy decides act/ask/refuse; on interactivity the agent is demoted to read-and-advise.                                                                                                                                                         | The **policy** is ours and sits in the framework's own middleware: refusal and escalation are decided before a domain call, never returned to the model as a result.             |
 | **ADR-0018 / ADR-0021** | The ledger is encrypted at rest. Masking happens in exactly one place — `history.record` — and today it masks the **submitted command**, not output.                                                                                                                                                                                                                                           | Frames are output. The existing masking owner must be **extended to the artifact-ingest path**, never duplicated by a second detector.                                           |
+| **ADR-0029**            | A proposed keystroke is bound to **what makes it meaningful**, not to the frame: generation inequality triggers a re-evaluation and is never itself the verdict, an identity change refuses outright, and **no model call sits in the delivery path**. Written after the owner found that identity-equality refusal makes every self-refreshing program permanently undrivable.                | Nothing in this slice may wire `generation != saved` to a refusal, and no surface may present generation drift to the user as "stale". The refusal itself arrives with DRIVE.    |
 | **ADR-0016 / ADR-0017** | A secret owns its name; a record references a secret by opaque reference.                                                                                                                                                                                                                                                                                                                      | An endpoint stores a **secret reference**, never an API key.                                                                                                                     |
 
 ---
@@ -745,9 +746,12 @@ Assertions, in the bead, authored before the implementation.
 ## Follow-on rungs
 
 **GUIDE** — key sequences rendered as keycaps attached to the frame they were computed from.
-**DRIVE** — the keycaps gain "press it for me": delivery goes to the live program, is refused
-when the capture identity no longer matches, and the result is watched without closing
-anything. Each delivered key leaves a frame, so the thread becomes the readable form of
+**DRIVE** — the keycaps gain "press it for me": delivery goes to the live program and the
+result is watched without closing anything. **What refuses it is ADR-0029, not identity
+equality** — an identity change refuses outright, a moved generation triggers a scoped diff,
+and only a diff that reached what the key was about costs a model call, which authors a
+condition the lane then evaluates locally at delivery. The earlier line here said "refused
+when the capture identity no longer matches", which would have refused `top` forever. Each delivered key leaves a frame, so the thread becomes the readable form of
 ADR-0020's attempts table.
 
 ---
