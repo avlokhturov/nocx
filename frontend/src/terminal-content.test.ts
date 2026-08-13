@@ -3349,3 +3349,52 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
     }
   })
 })
+
+// ── The atlas repaint on becoming visible (nocx-e27, nocx-jfgb) ───────────
+//
+// Panes are hidden with a CSS class, not unmounted, so the WebGL texture
+// atlas of a hidden pane goes stale and its glyphs come back drawn from
+// wrong coordinates. nocx-e27 fixed that with a viewport-wide repaint on
+// activation; 21fd7f6a (the TabContent seam) carried refreshAtlas() down
+// into TerminalContent and left the call behind in TabManager, so the fix
+// became dead code and the corruption came back.
+//
+// The repaint therefore hangs off setVisible, which is where visibility is
+// owned — a caller that has to remember is a caller that forgets.
+describe('TerminalContent visibility repaints the grid', () => {
+  it('repaints the whole viewport when the pane becomes visible (nocx-jfgb)', async () => {
+    const { content, teardown } = await mountTerminal()
+    try {
+      const repaint = vi.spyOn(rendererOf(content), 'refreshAtlas')
+
+      content.setVisible(true)
+      expect(repaint).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not repaint when the pane is hidden — the atlas is stale, not the screen', async () => {
+    const { content, teardown } = await mountTerminal()
+    try {
+      const repaint = vi.spyOn(rendererOf(content), 'refreshAtlas')
+
+      content.setVisible(false)
+      expect(repaint).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('still toggles the active class, so the repaint is added to setVisible and not swapped for it', async () => {
+    const { content, tab, teardown } = await mountTerminal()
+    try {
+      content.setVisible(true)
+      expect(tab.pane.classList.contains('active')).toBe(true)
+      content.setVisible(false)
+      expect(tab.pane.classList.contains('active')).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+})
