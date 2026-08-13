@@ -44,7 +44,9 @@ export {
   combine,
   type Validator,
   type FormValidation,
+  type FormValidationOptions,
 } from './validation'
+export { createSubmitGate, type SubmitGateOptions } from './submit-gate'
 export {
   MarkerList,
   type MarkerListProps,

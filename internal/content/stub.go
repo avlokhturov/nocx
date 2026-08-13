@@ -85,6 +85,12 @@ func (s *Stub) CommandHistory() CommandHistoryRepository {
 	return &histStub{log: s.log}
 }
 
+// Ledger returns a stub LedgerRepository.
+func (s *Stub) Ledger() LedgerRepository {
+	s.log.Info("content stub: Ledger called (no-op)")
+	return &ledgerStub{log: s.log}
+}
+
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {
 	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)
@@ -101,4 +107,91 @@ func (s *Stub) RestorePrivate(_ context.Context, conversations []Conversation, h
 func (s *Stub) Close() error {
 	s.log.Info("content stub: Close called (no-op)")
 	return nil
+}
+
+var _ LedgerRepository = (*ledgerStub)(nil)
+
+// ledgerStub implements LedgerRepository for the stub.
+type ledgerStub struct {
+	log log.Logger
+}
+
+func (s *ledgerStub) CreateWorkspace(_ context.Context, ws Workspace) error {
+	s.log.Info("content stub: LedgerRepository.CreateWorkspace", "id", ws.ID)
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) CreateSession(_ context.Context, sess Session) error {
+	s.log.Info("content stub: LedgerRepository.CreateSession", "id", sess.ID)
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) DeleteSession(_ context.Context, id string) error {
+	s.log.Info("content stub: LedgerRepository.DeleteSession", "id", id)
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) EnsureEnvironment(_ context.Context, env Environment) error {
+	s.log.Info("content stub: LedgerRepository.EnsureEnvironment", "id", env.ID)
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) RecordObservation(_ context.Context, obs Observation) (int64, error) {
+	s.log.Info("content stub: LedgerRepository.RecordObservation", "environment", obs.EnvironmentID)
+	return 0, ErrNotImplemented
+}
+
+func (s *ledgerStub) Submit(_ context.Context, in SubmitEntry) (SubmitResult, error) {
+	s.log.Info("content stub: LedgerRepository.Submit", "id", in.ID, "intent", in.Intent)
+	return SubmitResult{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) Entry(_ context.Context, id string) (*LedgerEntry, error) {
+	s.log.Info("content stub: LedgerRepository.Entry", "id", id)
+	return nil, ErrNotImplemented
+}
+
+func (s *ledgerStub) ListEntries(_ context.Context, limit int) ([]LedgerEntrySummary, error) {
+	s.log.Info("content stub: LedgerRepository.ListEntries", "limit", limit)
+	return nil, ErrNotImplemented
+}
+
+func (s *ledgerStub) DeleteEntry(_ context.Context, id string) error {
+	s.log.Info("content stub: LedgerRepository.DeleteEntry", "id", id)
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) StartExecution(_ context.Context, in StartExecution) (int64, error) {
+	s.log.Info("content stub: LedgerRepository.StartExecution", "entry", in.EntryID)
+	return 0, ErrNotImplemented
+}
+
+func (s *ledgerStub) FinishExecution(_ context.Context, executionID int64, end FinishExecution) error {
+	s.log.Info("content stub: LedgerRepository.FinishExecution", "execution", executionID)
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) AppendArtifact(_ context.Context, in AppendArtifact) (string, error) {
+	s.log.Info("content stub: LedgerRepository.AppendArtifact", "id", in.ID)
+	return "", ErrNotImplemented
+}
+
+func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, body []byte) error {
+	s.log.Info("content stub: LedgerRepository.AppendChunk", "artifact", artifactID, "bytes", len(body))
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) Artifact(_ context.Context, id string) (*Artifact, error) {
+	s.log.Info("content stub: LedgerRepository.Artifact", "id", id)
+	return nil, ErrNotImplemented
+}
+
+func (s *ledgerStub) AddEdge(_ context.Context, e Edge) error {
+	s.log.Info("content stub: LedgerRepository.AddEdge", "from", e.From, "to", e.To, "rel", string(e.Rel))
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) Edges(_ context.Context, entryID string) ([]Edge, error) {
+	s.log.Info("content stub: LedgerRepository.Edges", "entry", entryID)
+	return nil, ErrNotImplemented
 }

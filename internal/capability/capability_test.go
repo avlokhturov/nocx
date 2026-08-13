@@ -520,6 +520,7 @@ func (f *fakeContentDB) Close() error                         { return nil }
 func (f *fakeContentDB) RestorePrivate(context.Context, []content.Conversation, []content.CommandRecord) error {
 	return nil
 }
+func (f *fakeContentDB) Ledger() content.LedgerRepository { return nil }
 
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {

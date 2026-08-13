@@ -103,6 +103,7 @@ const (
 	opAdd writeOp = iota
 	opRewrite
 	opRestore
+	opRun // one ledger mutation, executed as fn on the writer goroutine
 )
 
 // writeReq is one mutation on the serialized write path. The writer answers
@@ -110,9 +111,10 @@ const (
 type writeReq struct {
 	ctx     context.Context
 	op      writeOp
-	record  CommandRecord  // opAdd
-	rew     rewriteRequest // opRewrite
-	restore restoreRequest // opRestore
+	fn      func(ctx context.Context) error // opRun: the ledger mutation
+	record  CommandRecord                   // opAdd
+	rew     rewriteRequest                  // opRewrite
+	restore restoreRequest                  // opRestore
 	done    chan writeOutcome
 }
 
@@ -139,6 +141,38 @@ type writeOutcome struct {
 }
 
 var _ ContentDB = (*sqliteContent)(nil)
+
+// run serializes one ledger mutation through the single writer goroutine
+// (design §5.3). fn executes ON the writer goroutine, so its transactions
+// serialize with every other mutation; it must use the pool directly and
+// never call back into run or any other writer-serialized method — that
+// would deadlock the writer against itself.
+func (s *sqliteContent) run(ctx context.Context, fn func(ctx context.Context) error) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	req := writeReq{ctx: ctx, op: opRun, fn: fn, done: make(chan writeOutcome, 1)}
+	select {
+	case s.writeCh <- req:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.stop:
+		return ErrClosed
+	}
+	select {
+	case out := <-req.done:
+		// Matches the other write paths: the at-rest posture (0600 on every
+		// database file) is re-asserted after any outcome — a failed
+		// transaction is a no-op for chmod, and a committed one must not be
+		// skipped because of an error that followed it.
+		enforceFileModes(s.path)
+		return out.err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.stop:
+		return ErrClosed
+	}
+}
 
 // Open creates or opens the encrypted ContentDB at cfg.Path. A wrong key
 // fails here, cleanly, before the store is handed out: the first real
@@ -218,8 +252,16 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if err := resetIfSchemaChanged(ctx, createConn, cfg.Logger); err != nil {
 			return err
 		}
-		if _, err := createConn.ExecContext(ctx, schemaV0); err != nil {
+		if _, err := createConn.ExecContext(ctx, schemaV1); err != nil {
 			return fmt.Errorf("content: schema: %w", err)
+		}
+		// Startup reconciliation (spec §4.3): every entry that never reached
+		// 'closed' — a crash, a force-quit, a session that died — is closed
+		// as status='unknown' through the entries_open partial index. Must
+		// run before the store is handed out: after this, no open row
+		// survives a restart.
+		if err := closeOpenEntries(ctx, createConn, cfg.Logger); err != nil {
+			return err
 		}
 		if _, err := createConn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 			return fmt.Errorf("content: stamp schema version: %w", err)
@@ -254,8 +296,28 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	return s, nil
 }
 
+// closeOpenEntries is the startup sweep of spec §4.3, run once per Open on
+// the creation connection. It is the consumer the entries_open partial index
+// exists for. Entries closed by the sweep read back status='unknown' — the
+// reconstruction UI shows the gap, never a fabricated outcome.
+func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
+	res, err := conn.ExecContext(ctx,
+		`UPDATE entries SET phase = 'closed', status = 'unknown' WHERE phase != 'closed'`)
+	if err != nil {
+		return fmt.Errorf("content: startup sweep: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("content: startup sweep: %w", err)
+	}
+	if n > 0 && logger != nil {
+		logger.Info("content: startup sweep closed open entries", "closed", n)
+	}
+	return nil
+}
+
 // schemaVersion stamps the shape below into the file's user_version. Bump it
-// in the same commit as any change to schemaV0 — that is the whole protocol.
+// in the same commit as any change to schemaV1 — that is the whole protocol.
 //
 // We write no migrations (greenfield), and `CREATE TABLE IF NOT EXISTS` is a
 // no-op against a table that already exists, so before this check an added
@@ -266,7 +328,7 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // resetIfSchemaChanged rebuilds the file when it was written by a different
 // schema. Rows are lost by design: they belong to a shape this build cannot
@@ -281,11 +343,13 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 		return nil
 	}
 	// A fresh file is version 0 with no tables — that is a creation, not a
-	// reset, and must not be announced as data loss.
+	// reset, and must not be announced as data loss. Any user table (the
+	// interim command_history on a pre-v1 file, a v1 table on a future one)
+	// means the file belongs to a different schema and is rebuilt.
 	var tables int
 	if err := conn.QueryRowContext(
 		ctx,
-		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='command_history'",
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
 	).Scan(&tables); err != nil {
 		return fmt.Errorf("content: probe schema: %w", err)
 	}
@@ -293,14 +357,24 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 		return nil
 	}
 	// Count first: the number is the only measure of what the user lost, and
-	// after the DROP nobody can state it. A count that fails is not a reason
-	// to abandon the rebuild — report it as unknown and carry on.
+	// after the DROP nobody can state it. The interim table carried the
+	// history rows; a count that fails is not a reason to abandon the rebuild
+	// — report it as unknown and carry on.
 	rows := -1
 	if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&rows); err != nil {
 		rows = -1
 	}
-	if _, err := conn.ExecContext(ctx, "DROP TABLE command_history"); err != nil {
-		return fmt.Errorf("content: rebuild for schema %d: %w", schemaVersion, err)
+	// Children first: with foreign_keys=ON a DROP of a parent table fails
+	// while a child still references it.
+	for _, t := range []string{
+		"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
+		"edges", "executions", "environment_observations", "entries",
+		"sessions", "environments", "workspaces", "ledger_sequence",
+		"command_history",
+	} {
+		if _, err := conn.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
+			return fmt.Errorf("content: rebuild for schema %d: %w", schemaVersion, err)
+		}
 	}
 	if logger != nil {
 		logger.Warn("content: history discarded — the database was written by an older schema",
@@ -309,10 +383,40 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 	return nil
 }
 
-// schemaV0 is the interim command-history table. The full entry/edge/artifact
-// schema is the next task (nocx-rtg0.2) and will migrate this table; what is
-// fixed here is the engine posture around it (STRICT, auto_vacuum, WAL).
-const schemaV0 = `
+// schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
+// design §5.2 as amended by ADR-0019 and ADR-0020: the interim
+// command_history table plus the v1 tables. command_history stays the live
+// path until nocx-rtg0.3 cuts the wire over to ledger.*; nothing writes both
+// (ADR-0019 §4). The engine posture is fixed here: STRICT, auto_vacuum, WAL.
+//
+// The six open review questions, decided conservatively:
+//
+//  1. CHECK constraints on the closed enums — YES, on every one. The reason
+//     to have a schema is that it says no (STRICT is type, CHECK is value).
+//  2. Crash-safe ingest_seq — a one-row ledger_sequence counter, incremented
+//     with RETURNING in the SAME transaction as the entry insert. Commit
+//     order is the counter's order; a crash rolls both back together, and
+//     the UNIQUE constraint is the backstop against any other writer.
+//  3. derived_from ON DELETE SET NULL — derived text is durable by default
+//     (§3.5 rule 3) and must survive eviction of the raw capture it came
+//     from; the link going null is the honest "provenance lost" state.
+//     RESTRICT would make raw-VT eviction impossible while any derived text
+//     exists, which is always.
+//  4. Pinning vs eviction — pinned=1 exempts an artifact from background
+//     eviction (a capsule whose content can be evicted underneath it is a
+//     broken promise, §3.5); an explicit DeleteEntry still cascades. A pin
+//     protects against the background, never against the user. Eviction
+//     itself lands with retention, not in this task.
+//  5. Edge cascades — ON DELETE CASCADE, the design's own choice. An edge
+//     whose endpoint is gone is meaningless; the incident graph is a query
+//     over surviving entries, and a separate edge-retention horizon would be
+//     a policy nobody asked for.
+//  6. byte_len is LOGICAL content bytes (the sum of chunk bodies,
+//     maintained by AppendChunk). It deliberately excludes FTS (none yet),
+//     B-tree overhead, WAL and free pages: the retention budget is logical
+//     retained content (§5.4), and physical disk use is the separate
+//     Budget.DiskCeiling number.
+const schemaV1 = `
 CREATE TABLE IF NOT EXISTS command_history (
   id           INTEGER PRIMARY KEY AUTOINCREMENT, -- backend seq; the only total order
   command      TEXT    NOT NULL,
@@ -330,6 +434,154 @@ CREATE TABLE IF NOT EXISTS command_history (
 CREATE INDEX IF NOT EXISTS command_history_by_scope ON command_history (cwd, host, id DESC);
 CREATE INDEX IF NOT EXISTS command_history_by_host  ON command_history (host, id DESC);
 CREATE INDEX IF NOT EXISTS command_history_by_ended ON command_history (ended_at);
+
+CREATE TABLE IF NOT EXISTS workspaces (
+  id           TEXT PRIMARY KEY,           -- client-minted UUIDv7
+  name         TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,           -- backend wall clock, display only
+  payload      TEXT NOT NULL DEFAULT '{}'  -- sparse extension only
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id           TEXT PRIMARY KEY,           -- server-authoritative (AD-7)
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  started_at   INTEGER NOT NULL,
+  ended_at     INTEGER,
+  payload      TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS environments (
+  id          TEXT PRIMARY KEY,            -- derived from facets, never from a session
+  kind        TEXT NOT NULL CHECK (kind IN ('local','ssh','container','unknown')),
+  endpoint    TEXT,                        -- canonical user@host:port; NULL for local
+  profile_id  TEXT,
+  first_seen  INTEGER NOT NULL,            -- backend wall clock
+  payload     TEXT NOT NULL DEFAULT '{}'   -- identity facets (sparse extension)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS environment_observations (
+  id             INTEGER PRIMARY KEY,      -- row identity an execution pins
+  environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+  version        INTEGER NOT NULL,         -- per-environment ascending
+  observed_at    INTEGER NOT NULL,         -- backend wall clock
+  confidence     TEXT NOT NULL DEFAULT '{}', -- JSON per-facet: asserted|derived|unknown
+  criticality    TEXT NOT NULL CHECK (criticality IN ('routine','sensitive','critical')),
+  payload        TEXT NOT NULL DEFAULT '{}', -- facet values: branch, containerId, privilege, …
+  UNIQUE (environment_id, version)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS entries (
+  id              TEXT PRIMARY KEY,        -- client-minted UUIDv7: UNTRUSTED idempotency key
+  ingest_seq      INTEGER NOT NULL UNIQUE, -- backend monotonic; commit order, NOT causality
+  client          TEXT NOT NULL,           -- binds the idempotency key to a client
+  digest          TEXT NOT NULL,           -- payload digest binding the idempotency key
+  environment_id  TEXT NOT NULL REFERENCES environments(id),
+  session_id      TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  cwd             TEXT NOT NULL,
+  kind            TEXT NOT NULL CHECK (kind IN ('shell','agent','action')),
+  intent          TEXT NOT NULL,
+  phase           TEXT NOT NULL CHECK (phase IN ('open','bound','closed')),
+  status          TEXT NOT NULL CHECK (status IN ('pending','running','success','failure','interrupted','unknown')),
+  conversation_id TEXT,
+  submitted_at    INTEGER NOT NULL,        -- backend wall clock, display only
+  started_at      INTEGER,                 -- frontend monotonic clock — durations only
+  ended_at        INTEGER,
+  duration_ms     INTEGER,
+  sensitivity     TEXT NOT NULL DEFAULT 'normal' CHECK (sensitivity IN ('normal','sensitive')),
+  reviewed_at     INTEGER,
+  payload         TEXT NOT NULL DEFAULT '{}' -- kind payload, sparse extension only
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS edges (
+  from_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  to_id   TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  rel     TEXT NOT NULL CHECK (rel IN ('rerun-of','supersedes','caused-by','cites','in-span')),
+  PRIMARY KEY (from_id, to_id, rel)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS executions (
+  id                  INTEGER PRIMARY KEY,
+  entry_id            TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  lane                TEXT,                -- agent lane; NULL for a human's shell
+  attempt             INTEGER NOT NULL DEFAULT 1,
+  environment_obs_id  INTEGER NOT NULL REFERENCES environment_observations(id),
+  lease_deadline      INTEGER,             -- wall clock, renewable, bounded ceiling
+  inactivity_deadline INTEGER,             -- silence is a different failure from slowness
+  interactivity       TEXT NOT NULL DEFAULT 'none'
+                      CHECK (interactivity IN ('none','stdin','tty','awaiting-takeover')),
+  process_group       TEXT,
+  started_at          INTEGER,
+  ended_at            INTEGER,
+  termination_reason  TEXT CHECK (termination_reason IN
+                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted')),
+  executor            TEXT,                -- executor identity
+  payload             TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS authority_grants (
+  id           INTEGER PRIMARY KEY,
+  execution_id INTEGER NOT NULL UNIQUE REFERENCES executions(id) ON DELETE CASCADE,
+  version      INTEGER NOT NULL,
+  issued_at    INTEGER NOT NULL,           -- backend wall clock
+  expires_at   INTEGER NOT NULL,           -- expiring: a grant is not a toggle
+  policy       TEXT NOT NULL CHECK (policy IN ('ask-every-time','ask-on-mutate','autonomous')),
+  payload      TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS grant_scopes (
+  grant_id      INTEGER NOT NULL REFERENCES authority_grants(id) ON DELETE CASCADE,
+  resource_kind TEXT NOT NULL CHECK (resource_kind IN
+                ('environment','session','path','credential','destination','tool')),
+  resource_id   TEXT NOT NULL,
+  PRIMARY KEY (grant_id, resource_kind, resource_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  id              TEXT PRIMARY KEY,        -- client-minted UUIDv7
+  execution_id    INTEGER NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+  media_type      TEXT NOT NULL CHECK (media_type IN
+                  ('application/vt','text/plain','text/markdown','application/json')),
+  derived_from    TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+  state           TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed')),
+  byte_len        INTEGER NOT NULL DEFAULT 0, -- logical content bytes (question 6)
+  pinned          INTEGER NOT NULL DEFAULT 0, -- eviction-exempt (question 4)
+  truncated       TEXT CHECK (truncated IN ('cap','gap','suppressed')),
+  capture_method  TEXT NOT NULL DEFAULT 'none'
+                  CHECK (capture_method IN ('terminal-cells','raw-output','serialized-html','none')),
+  capture_version INTEGER NOT NULL DEFAULT 1,
+  terminal_cols   INTEGER,
+  terminal_rows   INTEGER,
+  stream          TEXT CHECK (stream IN ('stdout','stderr','combined')),
+  byte_offset     INTEGER,                 -- capture provenance: stream position
+  byte_end        INTEGER,
+  encoding        TEXT NOT NULL DEFAULT 'utf-8',
+  gaps            TEXT NOT NULL DEFAULT '[]', -- JSON [{start,end,reason}]
+  payload         TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS artifact_chunks (
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL,
+  body        BLOB NOT NULL,               -- append-only; never one BLOB
+  PRIMARY KEY (artifact_id, seq)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS ledger_sequence (
+  id   INTEGER PRIMARY KEY CHECK (id = 1), -- exactly one row
+  next INTEGER NOT NULL
+) STRICT;
+INSERT INTO ledger_sequence (id, next) VALUES (1, 0)
+  ON CONFLICT(id) DO NOTHING;  -- schemaV1 re-runs on every open; the seed must be idempotent.
+                               -- next=0: the first Submit increments to ingest_seq 1.
+
+CREATE INDEX IF NOT EXISTS entries_by_env        ON entries(environment_id, cwd, ingest_seq DESC);
+CREATE INDEX IF NOT EXISTS entries_by_status     ON entries(status, ingest_seq DESC);
+CREATE INDEX IF NOT EXISTS entries_open          ON entries(phase) WHERE phase != 'closed';
+CREATE INDEX IF NOT EXISTS entries_by_session    ON entries(session_id);
+CREATE INDEX IF NOT EXISTS edges_by_to           ON edges(to_id);
+CREATE INDEX IF NOT EXISTS executions_by_entry   ON executions(entry_id, attempt);
+CREATE INDEX IF NOT EXISTS artifacts_by_execution ON artifacts(execution_id);
+CREATE INDEX IF NOT EXISTS observations_by_env   ON environment_observations(environment_id, version DESC);
 `
 
 // keyedURI is the ONE file-creating path (canary rule): every file this
@@ -369,6 +621,8 @@ func (s *sqliteContent) process(req writeReq) {
 		req.done <- writeOutcome{err: s.doRewrite(req.ctx, req.rew)}
 	case opRestore:
 		req.done <- writeOutcome{err: s.doRestore(req.ctx, req.restore)}
+	case opRun:
+		req.done <- writeOutcome{err: req.fn(req.ctx)}
 	}
 }
 
@@ -867,6 +1121,14 @@ func (s *sqliteContent) Conversations() ConversationRepository {
 }
 
 func (s *sqliteContent) CommandHistory() CommandHistoryRepository {
+	return s
+}
+
+// Ledger returns the schema-v1 repository (ledger.go). Until nocx-rtg0.3
+// wires the ledger.* wire methods to this surface, its only callers are
+// tests — the v1 write path has no production caller yet (stated loudly in
+// the task report: the same shape shipped once before as a silent dead path).
+func (s *sqliteContent) Ledger() LedgerRepository {
 	return s
 }
 

@@ -8,13 +8,20 @@
  * and then produced a backend error on connect) or grew a private one (that same
  * file's `cm-form-error`, a single string for the whole form, in a colour token
  * that pointed at nothing).
- *
- * Two pieces, deliberately separable:
+ * Three pieces, deliberately separable:
  *
  * - **Validators** — `(value: string) => message | undefined`. Plain functions,
  *   no reactivity, trivially testable, composable with `combine`.
  * - **`createFormValidation`** — decides *when* a message is shown, which is a
  *   different question from whether the value is wrong.
+ * - **`createSubmitGate`** — owns how a form refuses a submit: reveal every
+ *   failing field, focus the first one, and announce how many need attention
+ *   through the toast region. One owner, so surfaces stop each writing their
+ *   own `valid() → revealAll() → showToast(firstError)` sequence — the count
+ *   used to be lost, and the first invalid field used to sit unfocused. The
+ *   gate lives in `submit-gate.ts`, its own module: it is browser-bound
+ *   (announcing goes through the toast host), while this file stays pure and
+ *   importable in a DOM-less test environment.
  *
  * ## When an error is shown
  *
@@ -22,9 +29,9 @@
  * form that turns red before you have finished answering it is reporting your
  * progress as failure. A message appears when the user has left the field
  * (`touch`), when they have typed something for it to judge (`answer`), or when
- * they have tried to submit (`revealAll`). `valid()` and `firstError()` ignore
- * all three and answer about the values themselves, which is what a submit
- * handler needs.
+ * they have tried to submit (`revealAll`). `valid()`, `firstError()`,
+ * `firstErrorField()` and `errorCount()` ignore all three and answer about the
+ * values themselves, which is what a submit handler needs.
  *
  * The distinction that matters is between "you have not answered yet" and "what
  * you answered is wrong". The first must wait — the second should not. A host
@@ -128,10 +135,27 @@ export interface FormValidation<K extends string> {
   valid(): boolean
   /** First failing message in declaration order — the one to put in a toast. */
   firstError(): string | undefined
+  /** First failing field in declaration order — the one to focus. */
+  firstErrorField(): K | undefined
+  /** How many fields are failing now, regardless of what is shown. */
+  errorCount(): number
+  /** The DOM id of a field's control — the rule key by default, or the
+   *  configured mapper's answer, which may be `undefined` for a field that
+   *  has no focusable control. */
+  controlId(field: K): string | undefined
   /** Forget every touch. Call when the form switches to a different record. */
   reset(): void
 }
 
+export interface FormValidationOptions<K extends string> {
+  /**
+   * Map a rule key to the DOM id of its control. Defaults to the key itself —
+   * a form whose control ids are the logical field names needs nothing.
+   * Return `undefined` for a field that has no focusable control, and the
+   * submit gate will say it could not focus rather than pretend it did.
+   */
+  controlId?: (field: K) => string | undefined
+}
 /**
  * Wire a set of rules to the show-it-yet decision.
  *
@@ -146,6 +170,7 @@ export interface FormValidation<K extends string> {
  */
 export function createFormValidation<K extends string>(
   rules: Record<K, () => string | undefined>,
+  options: FormValidationOptions<K> = {},
 ): FormValidation<K> {
   const [touched, setTouched] = createSignal<ReadonlySet<K>>(new Set<K>())
   const [revealed, setRevealed] = createSignal(false)
@@ -153,6 +178,7 @@ export function createFormValidation<K extends string>(
   const messageOf = (field: K) => rules[field]()
   const touch = (field: K) =>
     setTouched((current) => (current.has(field) ? current : new Set([...current, field])))
+  const controlId = options.controlId ?? ((field: K) => field)
 
   return {
     error: (field) => (revealed() || touched().has(field) ? messageOf(field) : undefined),
@@ -170,6 +196,15 @@ export function createFormValidation<K extends string>(
       }
       return undefined
     },
+    firstErrorField: () => {
+      for (const key of keys) {
+        if (messageOf(key) !== undefined) return key
+      }
+      return undefined
+    },
+    errorCount: () =>
+      keys.reduce((count, key) => (messageOf(key) !== undefined ? count + 1 : count), 0),
+    controlId,
     reset: () => {
       setTouched(new Set<K>())
       setRevealed(false)

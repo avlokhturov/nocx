@@ -108,10 +108,18 @@ generation, so a screen can be reported as moved when it did not. **We prefer a 
 moved" to a false "unchanged"** — the first costs a re-ask, the second delivers advice about
 a screen that is gone.
 
-**`onWriteParsed` is also the capture fence.** `write()` queues parsing, so "the frame at that
-instant" is meaningless without one: a snapshot taken mid-queue can hold row 1 from before a
-write and row 20 from after it, and its generation would then describe no state that ever
-existed. The frame is taken after the parse settles.
+**There is also a capture fence, and `onWriteParsed` alone cannot be it.** `write()` queues
+parsing, so "the frame at that instant" is meaningless without one: a snapshot taken mid-queue
+can hold row 1 from before a write and row 20 from after it, and its generation would then
+describe no state that ever existed. The frame is taken after the parse settles.
+
+But **`onWriteParsed` fires at the end of every parse pass, and a pass can land between the
+chunks of one large write** — so waiting for one fire settles nothing, and this paragraph said
+otherwise until the implementation found it (`nocx-3j9b`). The exact signal is xterm's
+**per-write callback**, `write(data, cb)`, which fires when _that_ write's bytes have been
+parsed: the renderer keeps a count of unsettled writes from it, and the fence waits until the
+count is zero, re-checking after every `onWriteParsed` fire. `onWriteParsed` keeps the two jobs
+it can do — advancing the generation, and waking the waiter.
 
 A frozen block is the degenerate case: its identity is closed and its generation never
 advances again.

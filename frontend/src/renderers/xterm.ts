@@ -238,6 +238,16 @@ export class XtermRenderer implements TerminalRenderer {
   readonly snapshotStore = new CommandSnapshotStore()
   /** Unsubscribe from the module-level theme watcher. */
   private _themeUnsub: (() => void) | null = null
+  /** Frame capture (nocx-3j9b): subscribers to the parse-settle event. */
+  private writeParsedSubs: Array<() => void> = []
+  private writeParsedDisposable?: { dispose(): void }
+  /** Subscribers to the explicit clear/reset operations. */
+  private clearSubs: Array<() => void> = []
+  private resetSubs: Array<() => void> = []
+  /** Writes queued via write() whose bytes have not finished parsing — the
+   *  capture fence's pending count. Settled via the per-write callback, so
+   *  it is exact even when onWriteParsed fires between chunks. */
+  private unsettledWrites = 0
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -290,6 +300,12 @@ export class XtermRenderer implements TerminalRenderer {
     term.unicode.activeVersion = '11'
 
     term.open(container)
+
+    // Attach the parse-settle listener now: a subscriber registered before
+    // mount (frame tracker construction) must not lose the generation's
+    // advance signal. The fence state (unsettledWrites) and the renderer-
+    // side clear/reset subscribers were never mount-dependent.
+    this._ensureWriteParsed()
 
     // Shift+Enter as its own chord (nocx-nt70) — see SHIFT_ENTER_SEQUENCE.
     // xterm's blessed hook runs before any key processing; returning false
@@ -503,11 +519,32 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   write(data: string): void {
-    this.term?.write(data)
+    const t = this.term
+    if (!t) return
+    this.unsettledWrites++
+    try {
+      t.write(data, () => {
+        // The per-write callback fires exactly when THIS write's bytes have
+        // been parsed (WriteBuffer's per-chunk callback) — the capture
+        // fence's settle signal. onWriteParsed alone cannot be that signal:
+        // xterm fires it at the end of EVERY parse pass, which can be
+        // BETWEEN chunks of one large write.
+        this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
+      })
+    } catch {
+      // write() can throw (flow-control watermark); nothing was queued, so
+      // the pending count must not stay stuck.
+      this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
+    }
   }
 
   reset(): void {
-    this.term?.reset()
+    const t = this.term
+    if (!t) return
+    t.reset()
+    // Report the explicit reset AFTER it executed, so a subscriber reading
+    // state (e.g. the frame generation) observes the post-reset terminal.
+    for (const sub of this.resetSubs) sub()
   }
 
   onData(cb: DataCallback): void {
@@ -669,6 +706,11 @@ export class XtermRenderer implements TerminalRenderer {
     this.renderDisposable?.dispose()
     this.renderDisposable = undefined
     this.renderSubs = []
+    this.writeParsedDisposable?.dispose()
+    this.writeParsedDisposable = undefined
+    this.writeParsedSubs = []
+    this.clearSubs = []
+    this.resetSubs = []
     if (this._themeUnsub !== null) {
       this._themeUnsub()
       this._themeUnsub = null
@@ -778,6 +820,38 @@ export class XtermRenderer implements TerminalRenderer {
       for (const sub of this.renderSubs) sub(r)
     })
   }
+  /** Subscribe to parse-settles: fires after a written chunk has been
+   *  parsed into the buffer. The frame generation advances here, and the
+   *  capture fence waits on it. Subscribers registered before mount are
+   *  attached when mount creates the terminal. */
+  onWriteParsed(cb: () => void): void {
+    this.writeParsedSubs.push(cb)
+    this._ensureWriteParsed()
+  }
+
+  private _ensureWriteParsed(): void {
+    const t = this.term
+    if (this.writeParsedDisposable || !t) return
+    this.writeParsedDisposable = t.onWriteParsed(() => {
+      for (const sub of this.writeParsedSubs) sub()
+    })
+  }
+
+  /** Subscribe to explicit clears — fired after clearViewport() executed. */
+  onClear(cb: () => void): void {
+    this.clearSubs.push(cb)
+  }
+
+  /** Subscribe to explicit resets — fired after reset() executed. */
+  onReset(cb: () => void): void {
+    this.resetSubs.push(cb)
+  }
+
+  /** True while bytes queued via write() have not finished parsing — the
+   *  capture fence. */
+  hasUnsettledWrite(): boolean {
+    return this.unsettledWrites > 0
+  }
 
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined {
     return this.term?.buffer.active.getLine(line)
@@ -790,14 +864,23 @@ export class XtermRenderer implements TerminalRenderer {
     return buf.baseY + buf.cursorY
   }
 
+  /** Column of the cursor — the column the next write lands on. */
+  cursorCol(): number {
+    return this.term?.buffer.active.cursorX ?? 0
+  }
+
   /** Clear the whole buffer — "making the prompt line the new first
    *  line" (xterm's own contract). Called at a block freeze so the rows
    *  the DOM block now owns leave the grid; the grid only ever holds the
    *  running command's rows, and the DOM owns the scrollback (nocx-m87n). */
   clearViewport(): void {
-    this.term?.clear()
+    const t = this.term
+    if (!t) return
+    t.clear()
+    // Report the explicit clear AFTER it executed, so a subscriber reading
+    // state (e.g. the frame generation) observes the post-clear buffer.
+    for (const sub of this.clearSubs) sub()
   }
-
   get paneElement(): HTMLElement {
     return this.container ?? document.createElement('div')
   }

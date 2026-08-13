@@ -10,6 +10,8 @@ import {
 import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
+import { CaptureIdentityTracker } from '../frame/capture-identity'
+import { getCurrentTheme } from './theme-adapter'
 
 const stubBrowser = () => {
   window.matchMedia = (query: string) => ({
@@ -815,5 +817,126 @@ describe('XtermRenderer contrast floor', () => {
     // 4.5 is the WCAG AA floor — the threshold the theme audit measured
     // against. Anything at or below 1 is xterm's "do nothing".
     expect(term!.options.minimumContrastRatio).toBe(4.5)
+  })
+})
+
+describe('XtermRenderer frame capture surface (nocx-3j9b)', () => {
+  // The renderer reports the frame facts: parse-settles, explicit clear/
+  // reset, the pending-write fence, the cursor column. The identity semantics
+  // (generation, comparability, alt-session minting) live in frame/ and are
+  // tested there; this surface is the wire into xterm.
+  it('fires onWriteParsed after a write parses into the buffer', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const fired = vi.fn()
+    r.onWriteParsed(fired)
+    r.write('hello')
+    // Wait on the observable state (the event), never on a duration.
+    await vi.waitFor(() => expect(fired).toHaveBeenCalled())
+    r.dispose()
+  })
+
+  it('hasUnsettledWrite is true right after write() and false once the parse settles — the capture fence', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    r.write('x')
+    expect(r.hasUnsettledWrite()).toBe(true)
+    await vi.waitFor(() => expect(r.hasUnsettledWrite()).toBe(false))
+    r.dispose()
+  })
+
+  it('attaches a subscriber registered BEFORE mount — the generation signal is not lost', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+
+    const fired = vi.fn()
+    r.onWriteParsed(fired)
+    await r.mount(container)
+    r.write('x')
+    await vi.waitFor(() => expect(fired).toHaveBeenCalled())
+    r.dispose()
+  })
+
+  it('fires onClear after clearViewport and onReset after reset — the explicit mutations', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const cleared = vi.fn()
+    const reset = vi.fn()
+    r.onClear(cleared)
+    r.onReset(reset)
+    r.clearViewport()
+    expect(cleared).toHaveBeenCalledTimes(1)
+    r.reset()
+    expect(reset).toHaveBeenCalledTimes(1)
+    r.dispose()
+  })
+  it('reports the cursor column after a write', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    r.write('ab')
+    await vi.waitFor(() => expect(r.cursorCol()).toBe(2))
+    r.dispose()
+  })
+
+  it('a repaint does NOT advance the frame generation — refreshAtlas and applyTheme leave the identity untouched (ADR-0005)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const tracker = new CaptureIdentityTracker(r)
+    const before = tracker.identity()
+    // Both of these force a full viewport refresh — the same class of
+    // repaint ADR-0005's pump performs every 42ms on Linux/WebKitGTK. If the
+    // generation moved on paint, a motionless screen would go stale forever
+    // on one platform only.
+    r.refreshAtlas()
+    r.applyTheme(getCurrentTheme())
+    expect(tracker.identity()).toEqual(before)
+    r.dispose()
+  })
+
+  it('a write advances the generation through the real renderer, and awaitSettled opens the fence', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const tracker = new CaptureIdentityTracker(r)
+    const before = tracker.identity()
+    r.write('hello')
+    await vi.waitFor(() => expect(tracker.identity().generation).toBe(before.generation + 1))
+    // The fence on the real renderer: after the write settles there is
+    // nothing pending, so awaitSettled resolves immediately.
+    await tracker.awaitSettled()
+    expect(r.hasUnsettledWrite()).toBe(false)
+    r.dispose()
   })
 })

@@ -201,3 +201,67 @@ describe('answer', () => {
     })
   })
 })
+
+describe('firstErrorField', () => {
+  it('is the first failing field in declaration order — the one to focus', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({
+        host: () => required('Host')(''),
+        port: () => required('Port')(''),
+      })
+      expect(v.firstErrorField()).toBe('host')
+      dispose()
+    })
+  })
+
+  it('is undefined when every rule passes', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({ host: () => required('Host')('box') })
+      expect(v.firstErrorField()).toBeUndefined()
+      dispose()
+    })
+  })
+})
+
+describe('errorCount', () => {
+  it('counts failing fields regardless of what is shown', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({
+        host: () => required('Host')(''),
+        port: () => required('Port')('8080'),
+      })
+      expect(v.error('host')).toBeUndefined()
+      expect(v.errorCount()).toBe(1)
+      dispose()
+    })
+  })
+})
+
+describe('controlId', () => {
+  it('defaults to the field key itself', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({ host: () => undefined })
+      expect(v.controlId('host')).toBe('host')
+      dispose()
+    })
+  })
+
+  it('applies a mapper when one is given', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation(
+        { host: () => undefined },
+        { controlId: (field) => `profile-${field}` },
+      )
+      expect(v.controlId('host')).toBe('profile-host')
+      dispose()
+    })
+  })
+
+  it('lets a mapper return undefined for a field with no focusable control', () => {
+    createRoot((dispose) => {
+      const v = createFormValidation({ forwards: () => undefined }, { controlId: () => undefined })
+      expect(v.controlId('forwards')).toBeUndefined()
+      dispose()
+    })
+  })
+})

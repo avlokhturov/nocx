@@ -176,6 +176,41 @@ not caused.
 **Messages carry no trailing full stop.** They are fragments, and the same string is
 shown inline under a field and inside a Toast.
 
+**How a form refuses a submit is one decision, owned once.** The submit handler
+calls `createSubmitGate(v)` first: `true` means the values pass and the handler
+proceeds; `false` means the form refused. On a refusal the gate reveals every
+failing field, focuses the first one, and announces through the existing Toast
+region the first failing rule's message — with how many fields need attention
+when more than one fails ("Port must be between 1 and 65535" for one field,
+"Host is required — 2 fields need attention" for several). Never a bare
+count, never "1 fields". Surfaces do not write their own `valid() →
+revealAll() → showToast(firstError)` sequence, and none of them call
+`revealAll()` itself.
+
+```tsx
+const gate = createSubmitGate(v)
+// in the submit handler:
+if (!(await gate())) return
+```
+
+Two optional pieces make the gate find the field it must focus:
+
+- **`createFormValidation(rules, { controlId })`** maps a rule key to the DOM id
+  of its control. The default is the key itself, which is right when the ids
+  are the logical field names. Return `undefined` for a field with no focusable
+  control (the forwards list's error is a row-level message, not a control),
+  and the gate says it could not focus rather than pretend it did.
+- **`createSubmitGate(v, { reveal })`** opens the panel holding the field before
+  focus is attempted. A Tabs editor renders every panel but marks the inactive
+  ones `hidden` — their controls exist in the DOM yet cannot take focus — so
+  the hook switches the section (`setProfileSection(sectionFor(field))`) and
+  the gate waits for it. With no hook (or one that does not help), the gate
+  reports the focus failure in the same message; it never silently skips.
+
+The gate verifies its own work: focus is only attempted on a control that is
+present and not hidden, and afterwards `document.activeElement` must actually
+be on it.
+
 ## Telling the user something happened: Toast
 
 **Toast** (`toast.tsx`) is the only notification affordance. An operation's outcome is
