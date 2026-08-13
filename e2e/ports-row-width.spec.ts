@@ -27,6 +27,17 @@
 //
 // The remote-forward destination is the brief's own failing example
 // (`192.168.0.93:9993`), the string the bug report shows truncating.
+//
+// W7 revision (nocx-4wbx): CI webkit once failed this spec before the
+// measurement — the setup produced TWO rows for the same destination (a
+// stale failed one and the live one) and the forwarded-row locator was
+// strict-mode ambiguous. The product now supersedes that shape: a running
+// forward hides an earlier failure for the same destination. The locator
+// below is additionally scoped by data-state, so the stale failed row can
+// never satisfy it. In this scene at most one RUNNING row can exist — the
+// profile carries a single forward, and a second replay of it would fail
+// its bind rather than mint a second running record.
+//
 import { test, expect, promptReady } from './harness'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
@@ -289,13 +300,23 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     // The connection is up when the editor is.
     const editor = page.locator('.pane.active .nocx-editor-input')
     await expect(editor).toBeVisible({ timeout: 30_000 })
-
     // Open the Ports view: the replayed forward has no detected row to own
     // it (this container has no probe tool, so discovery says unavailable),
     // and renders as a forwarded row in Orphaned forwards — the same
     // three-action row the fix is about.
     await page.locator(VIEW_PORTS).click()
-    const row = page.locator(FORWARDED_ROW, { hasText: LONG_DESTINATION })
+    // The RUNNING forwarded row, by state: a locator that can match two
+    // rows is a spec that fails for reasons unrelated to what it asserts —
+    // that is exactly the webkit strict-mode failure this spec was sent
+    // back for (a stale failed row plus the live one for the same
+    // destination). The product now supersedes the stale row too (a running
+    // forward hides an earlier failure for the same destination, W7
+    // revision), and the state scoping alone excludes it: the fixture's
+    // single forward can yield at most one running row, because a second
+    // replay would fail its bind rather than mint another running record.
+    const row = page.locator('[data-testid="forwarded-row"][data-state="forwarded"]', {
+      hasText: LONG_DESTINATION,
+    })
     await expect(row).toBeVisible({ timeout: 30_000 })
     await expectDefaultRail(page)
 

@@ -387,6 +387,23 @@ export function PortsPanel(props: PortsPanelProps) {
     return DETECTED_ARMS.has(s.state) ? '' : s.state || '(empty)'
   }
 
+  /** The one forward that owns a DESTINATION's state (W7 revision,
+   *  nocx-4wbx): a running record beats a self-stopped one for the same
+   *  destination. A forward that is running is the destination's current
+   *  truth; an earlier failure for the SAME destination is no longer news —
+   *  its Retry would offer to redo what has already been done — so the row
+   *  a destination gets is the live one. Bought by a webkit CI failure: a
+   *  first connection's stored forward stopped with "connection lost" while
+   *  a reconnect's replay ran, and the panel showed both as two truths
+   *  about one thing — the exact shape this epic removed from
+   *  Detected/Forwarded, reappearing among orphans. Records for DIFFERENT
+   *  destinations are untouched: two live forwards to two destinations are
+   *  two rows. */
+  const forwardForDestination = (dest: string): ForwardRecord | undefined => {
+    const matches = [...forwards().values()].filter((f) => f.destination === dest)
+    return matches.find((f) => f.state === 'running') ?? matches[0]
+  }
+
   /** The one forward for a detected row, keyed by the ONE destination
    *  derivation: a forward carries the same string destinationFor() builds,
    *  so the row that owns a port is the row that shows its state — the old
@@ -394,8 +411,7 @@ export function PortsPanel(props: PortsPanelProps) {
    *  (W2). */
   const forwardFor = (
     l: PortsStatusResult['discovery']['listeners'][number],
-  ): ForwardRecord | undefined =>
-    [...forwards().values()].find((f) => f.destination === destinationFor(l))
+  ): ForwardRecord | undefined => forwardForDestination(destinationFor(l))
 
   /** A forward the connection lost on its own — the two reasons that earn a
    *  Retry. A user stop is not information and renders nothing (W2). */
@@ -407,10 +423,16 @@ export function PortsPanel(props: PortsPanelProps) {
    *  replayed rather than started from this list. Running ones must stay
    *  stoppable and self-stopped ones must stay visible; folding them into
    *  the Detected list would make them vanish, a worse bug than the one
-   *  this replaces (W2). */
+   *  this replaces (W2). A self-stopped record whose destination a live
+   *  forward owns is superseded before this filter sees it (W7): the live
+   *  row carries the destination's state, and a second row beside it would
+   *  only offer a Retry that redoes what is already done. */
   const orphanForwards = (): ForwardRecord[] =>
     [...forwards().values()].filter((f) => {
       if (f.state !== 'running' && !isSelfStopped(f)) return false
+      if (f.state !== 'running' && forwardForDestination(f.destination)?.state === 'running') {
+        return false
+      }
       return !listeners().some((l) => destinationFor(l) === f.destination)
     })
 

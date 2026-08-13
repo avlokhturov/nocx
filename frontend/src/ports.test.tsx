@@ -518,6 +518,88 @@ describe('PortsPanel — forwards', () => {
     expect(screen.queryByTestId('stopped-row')).toBeNull()
   })
 
+  it('a running forward supersedes an earlier failure for the SAME destination — one orphan row, not two (W7 revision)', async () => {
+    // The webkit CI shape that sent the width spec back: a first
+    // connection's stored forward stopped with "connection lost" while a
+    // reconnect's replay ran, and the panel showed BOTH as orphaned rows —
+    // a failed one and a running one, two truths about one destination,
+    // exactly the shape the epic removed from Detected/Forwarded. Once a
+    // forward for a destination is running, an earlier failure for the same
+    // destination is no longer news: the running row carries the
+    // destination's state, and the stale row's Retry would offer to redo
+    // what has already been done.
+    const dest = '192.168.0.93:9993'
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture(
+          { listeners: [] },
+          {
+            forwards: [
+              {
+                ...runningRecord({
+                  id: 'fwd-first',
+                  destination: dest,
+                  requestedBind: { host: '127.0.0.1', port: 39871 },
+                }),
+                state: 'stopped' as const,
+                stopReason: 'connection lost' as const,
+                error: 'ssh: connection lost',
+              },
+              runningRecord({ id: 'fwd-live', destination: dest }),
+            ],
+          },
+        ),
+      ),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(screen.getByText('Orphaned forwards')).toBeTruthy())
+    // One destination, one row — the running one. The stale failure adds no
+    // second row, no reason text, and no Retry beside a live forward.
+    const rows = [...document.querySelectorAll('[data-testid="forwarded-row"]')]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].getAttribute('data-state')).toBe('forwarded')
+    expect(screen.getByText(dest)).toBeTruthy()
+    expect(screen.queryByText(/connection lost/)).toBeNull()
+    expect(screen.queryByTestId('ports-retry-forward')).toBeNull()
+  })
+
+  it('a detected row shows the RUNNING forward, never a stale failure for the same destination', async () => {
+    const dest = 'host.example:6768'
+    const services = fakeServices({
+      status: vi.fn().mockResolvedValue(
+        statusFixture(
+          { listeners: [listenerFixture(6768)] },
+          {
+            forwards: [
+              {
+                ...runningRecord({
+                  id: 'fwd-lost',
+                  destination: dest,
+                  requestedBind: { host: '127.0.0.1', port: 6768 },
+                }),
+                state: 'stopped' as const,
+                stopReason: 'connection lost' as const,
+                error: 'connection closed',
+              },
+              runningRecord({ id: 'fwd-live', destination: dest }),
+            ],
+          },
+        ),
+      ),
+    })
+    renderPanel(services)
+    // The port's own row carries the LIVE forward: Stop is reachable, the
+    // address is the live bind, and the stale failure neither takes the row
+    // over nor adds a second row anywhere.
+    await waitFor(() => expect(screen.getByTestId('ports-stop')).toBeTruthy())
+    const rows = [...document.querySelectorAll('.ports-row')]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].getAttribute('data-state')).toBe('forwarded')
+    expect(screen.getByText(/127\.0\.0\.1:6768/)).toBeTruthy()
+    expect(screen.queryByText('Orphaned forwards')).toBeNull()
+    expect(screen.queryByTestId('ports-retry-forward')).toBeNull()
+  })
+
   it('a user stop offers no retry — the row is simply back to un-forwarded', async () => {
     const services = fakeServices({
       status: vi.fn().mockResolvedValue(
