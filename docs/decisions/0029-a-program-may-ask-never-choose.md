@@ -1,7 +1,7 @@
 # ADR-0029 — A program may ask; it never chooses
 
-- **Status:** Proposed
-- **Date:** 2026-08-13 (rescoped 2026-08-14 — see §1.1)
+- **Status:** Accepted
+- **Date:** 2026-08-13 (rescoped and accepted 2026-08-14 — see §1.1)
 - **Related:** AD-1 (this extends its ledger-facts enumeration), AD-6 (untouched, §4.2),
   AD-8 (one owner per behaviour), ADR-0024 (untouched, §4.1), ADR-0017 (a connection
   references a secret), ADR-0011 §4 (delete-cascade ordering), beads `nocx-uz7f`,
@@ -251,7 +251,7 @@ Left, on purpose:
 
 ## 6. Consequences
 
-- **AD-1's enumeration gains one line**, and `docs/architecture.md` changes only there.
+- **AD-1's enumeration gained one line** (`docs/architecture.md:110`); nothing else in the spine changed.
 - **A presentation request's schema in `contracts/`** carries `sessionId`, `title` and
   `body` and nothing else, with `additionalProperties: false` — that absence is what makes
   provenance structural rather than validated.

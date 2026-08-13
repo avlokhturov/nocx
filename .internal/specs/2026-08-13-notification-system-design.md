@@ -1,11 +1,11 @@
 # Notification system — design
 
 - **Date:** 2026-08-13 (revised 2026-08-14 after three adversarial review rounds)
-- **Status:** Proposed
+- **Status:** Accepted — ADR-0029 accepted 2026-08-14; AD-1 amended
 - **Brainstorming session:** `nocx-uz7f`
 - **Depends on:** **ADR-0029**, which decides the category this feature belongs to — a
   program-initiated effect: what it may cause and what it may never choose — and adds
-  presentation requests to AD-1's enumeration. Not buildable until that ADR is Accepted.
+  presentation requests to AD-1's enumeration. **Accepted 2026-08-14.**
 - **Epics to create:** A1, A2, A3, B (§9)
 
 ## What a user can do that they could not before
