@@ -847,6 +847,149 @@ describe('inline password minting', () => {
   })
 })
 
+// ── Port resolution: the field and the validator read one value ───────────
+//
+// A saved profile adopted from an SSH alias omits options.port entirely
+// (profiles.ts adoptAliasProfile — absent stays distinguishable from an
+// explicit 22). The editor painted 22 in that state while validation rejected
+// the empty draft: two derivations of one question, disagreeing exactly where
+// it matters (nocx-a88r). The validator now reads the same resolved value the
+// field paints — the effective/inheritance machinery — so the inherited
+// default satisfies it and the password mint completes end to end.
+
+describe('port resolution', () => {
+  // The profile shape adoptAliasProfile produces: no port key at all. The
+  // backend's effective resolution answers 22 (hardcoded default, source
+  // "default"), which is what the field paints.
+  const aliasAdopted: SSHProfile = {
+    id: 'ssh:no-port',
+    type: 'ssh',
+    name: 'alias-box',
+    options: { host: 'alias.example.com', user: 'deploy' },
+  }
+  const effectiveNoPort: EffectiveProfileDTO = {
+    id: 'ssh:no-port',
+    fields: {
+      port: { value: 22, source: { kind: 'default', id: 'default', label: 'Default' } },
+    },
+  }
+
+  // The owner's exact case: editing a connection whose port was never
+  // explicit, setting a password, and saving — no "Port is required" anywhere
+  // in the flow, and the save carries no synthesized port.
+  it('a profile with no explicit port passes validation and its password mints and binds end to end', async () => {
+    const { container, client } = mount({
+      profiles: [aliasAdopted],
+      effectiveProfiles: [effectiveNoPort],
+    })
+    const savePasswordSpy = vi.spyOn(client, 'savePassword').mockResolvedValue({
+      row: 'secrow:pass-noport',
+    })
+    const patchSpy = vi
+      .spyOn(client, 'patchProfile')
+      .mockResolvedValue({ id: 'ssh:no-port', fields: {} })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'alias-box')
+
+    // The field paints the inherited default — the value validation must see.
+    const portInput = container.querySelector('#profile-port') as HTMLInputElement
+    await vi.waitFor(() => {
+      expect(portInput.value).toBe('22')
+    })
+
+    // The password flow the owner hit: mint, bind, save.
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+    await vi.waitFor(() => {
+      expect(savePasswordSpy).toHaveBeenCalled()
+    })
+    // bind() lands asynchronously after the mint resolves — wait for the
+    // binding to be named on screen (as the sibling minting tests do) before
+    // saving, so the save carries the binding, not a race with it.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Password: Password for deploy@alias.example.com')
+    })
+
+    const dialog = findDialogByTitleContaining(container, 'alias-box')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    // The validator saw the resolved port, so nothing claimed it missing.
+    expect(toasts().some((t) => t.message.includes('Port is required'))).toBe(false)
+    // Absent stays absent: the save carries the binding and nothing else —
+    // no synthesized options.port (nocx-a88r constraint).
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.passwordSecret': 'secrow:pass-noport',
+    })
+    expect(patchSpy.mock.calls[0][0].set).not.toHaveProperty('options.port')
+  })
+
+  // `|| 22` on the input also swallowed a genuine stored 0, so an invalid
+  // stored port could never be shown back. The input now paints the resolved
+  // value as-is, and the rule still rejects it with its own message.
+  it('shows a stored port of 0 back as 0 and still rejects it with the rule message', async () => {
+    const zeroPort: SSHProfile = {
+      id: 'ssh:zero',
+      type: 'ssh',
+      name: 'zero-box',
+      options: { host: 'zero.example.com', port: 0 },
+    }
+    const { container, client } = mount({ profiles: [zeroPort] })
+    const patchSpy = vi
+      .spyOn(client, 'patchProfile')
+      .mockResolvedValue({ id: 'ssh:zero', fields: {} })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'zero-box')
+
+    const portInput = container.querySelector('#profile-port') as HTMLInputElement
+    expect(portInput.value, 'a stored 0 must be shown, not painted over').toBe('0')
+
+    // Saving with the invalid stored port is refused with the rule's message.
+    const dialog = findDialogByTitleContaining(container, 'zero-box')!
+    clickButtonByText(container, 'Save Connection', dialog)
+    await vi.waitFor(() => {
+      expect(toasts().some((t) => t.message.includes('Port must be between 1 and 65535'))).toBe(
+        true,
+      )
+    })
+    expect(patchSpy).not.toHaveBeenCalled()
+  })
+
+  // The paired ordinary case for the rule above: an explicitly typed valid
+  // port still validates and saves, carried in the patch.
+  it('an explicitly typed valid port still validates and saves', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(1, 2) })
+    const patchSpy = vi
+      .spyOn(client, 'patchProfile')
+      .mockResolvedValue({ id: 'ssh:p2', fields: {} })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-db')
+
+    const portInput = container.querySelector('#profile-port') as HTMLInputElement
+    expect(portInput.value).toBe('5432')
+    fireEvent.input(portInput, { target: { value: '5433' } })
+
+    const dialog = findDialogByTitleContaining(container, 'prod-db')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({ 'options.port': 5433 })
+  })
+})
+
 // ── Shared impact stubs ──────────────────────────────────────────────────
 
 const IMPACT_DANGEROUS: GroupImpactResponse = {

@@ -49,7 +49,6 @@ import type {
   AuthMode,
   TreeNode,
   EffectiveProfileDTO,
-  EffectiveFieldDTO,
   FieldSourceDTO,
   SessionStatus,
   ProbeOutcome,
@@ -1487,10 +1486,43 @@ export function ConnectionsView(props: ConnectionsViewProps) {
     return editing()
   })
 
+  /**
+   * THE owner of "what value does this field resolve to while the editor is
+   * open". The inputs paint it and validation reads it, so a fallback the
+   * field invents cannot disagree with a validator that never saw it
+   * (nocx-a88r: the port input painted 22 while the validator rejected the
+   * empty draft). Draft edits win while dirty; an explicit stored value wins
+   * over the inherited one; the effective cascade (group/global/hardcoded
+   * default) answers only the fields this profile omits.
+   */
+  function fieldValue(key: string): unknown {
+    const draft = editing()
+    if (!draft) return undefined
+    const dirty = dirtyFields()
+    if (dirty.has(key)) {
+      return (draft.options as unknown as Record<string, unknown>)[key]
+    }
+    const own = (draft.options as unknown as Record<string, unknown>)[key]
+    if (own !== undefined && own !== null) return own
+    const eff = effectiveData()[draft.id]?.fields[key]
+    if (eff !== undefined) return eff.value
+    return undefined
+  }
+
+  /** The resolved value as text — the shape the validators judge. A value
+   *  that is neither string nor number (an object, a bare boolean) is not
+   *  text a rule can judge, so it reads as empty. */
+  function fieldText(key: string): string {
+    const v = fieldValue(key)
+    if (typeof v === 'string') return v
+    if (typeof v === 'number') return String(v)
+    return ''
+  }
+
   const profileValidation = createFormValidation({
     name: () => required('Name')(formProfile()?.name ?? ''),
     host: () => combine(required('Host'), hostname())(formProfile()?.options.host ?? ''),
-    port: () => combine(required('Port'), portRule())(String(formProfile()?.options.port ?? '')),
+    port: () => combine(required('Port'), portRule())(fieldText('port')),
     // A Public Key connection with no key is a dead end: nothing to offer
     // at connect time. The key may come from a stored secret, a path, or
     // material about to be minted on save — but it must come from somewhere.
@@ -2057,28 +2089,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       return secretRows().find((e) => e.id === row)?.name ?? mintedPasswordNames().get(row)
     })
 
-    function effField(field: string): EffectiveFieldDTO | undefined {
-      const eff = effectiveData()[profile().id]
-      return eff?.fields[field]
-    }
-
-    function fieldValue(key: string): unknown {
-      const dirty = dirtyFields()
-      if (dirty.has(key)) {
-        const draft = editing()
-        if (draft) return (draft.options as unknown as Record<string, unknown>)[key]
-      }
-      // The editor edits the stored profile, so an explicit profile value wins.
-      // Effective values are only the fallback for a field this profile omits.
-      // Reading effective first replaced a saved host with the resolver's empty
-      // default and rendered the Host input blank.
-      const own = (profile().options as unknown as Record<string, unknown>)[key]
-      if (own !== undefined && own !== null) return own
-      const eff = effField(key)
-      if (eff !== undefined) return eff.value
-      return undefined
-    }
-
     const isSaved = () => !!profile().id && profiles().some((x) => x.id === profile().id)
     function fvStr(key: string): string {
       const v = fieldValue(key)
@@ -2158,7 +2168,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       id="profile-port"
                       label="Port"
                       required
-                      value={fvNum('port') || 22}
+                      value={fvNum('port')}
                       type="number"
                       error={profileValidation.error('port')}
                       onInput={(v) => {
