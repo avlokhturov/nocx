@@ -24,6 +24,7 @@ import type {
   SessionStatus,
   ConnectionTestResult,
   GroupImpactResponse,
+  AuthMode,
 } from './profiles'
 
 const MOCK_PROFILES: SSHProfile[] = [
@@ -669,6 +670,161 @@ describe('inline password minting', () => {
     })
   })
 
+  // The minted row is NOT in the inventory: the mint happens after the
+  // editor's own inventory load, so the vault has the row and this surface
+  // does not. The action must trust the binding it just made and name the
+  // secret from the mint, not from whatever rows were loaded when the editor
+  // opened (W3: "No password set" while options.passwordSecret was bound).
+  it('names a freshly minted secret before the inventory knows it', async () => {
+    const inventory = vi.fn().mockResolvedValue({ entries: [] })
+    const vaultClient = { inventory } as unknown as VaultClient
+    const { container, client } = mount({
+      profiles: MOCK_PROFILES.slice(0, 1),
+      vaultClient,
+    })
+    const savePasswordSpy = vi.spyOn(client, 'savePassword').mockResolvedValue({
+      row: 'secrow:pass-fresh',
+    })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(savePasswordSpy).toHaveBeenCalled()
+    })
+    // The name the backend stored under is the generated one (ADR-0016) —
+    // shown even though no inventory load has ever returned the row.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+    })
+    expect(container.textContent).not.toContain('No password set')
+
+    // The inventory is refreshed after the mint, so the pickers and any other
+    // surface see the row without waiting for the next editor open.
+    await vi.waitFor(() => {
+      expect(inventory.mock.calls.length).toBeGreaterThanOrEqual(2)
+    })
+  })
+
+  // A cancelled vault prompt leaves the user's password unset with nothing on
+  // screen to say why — the dialog closed on OK, so silence reads as success.
+  // The consequence must be said out loud (AGENTS.md: a soft degrade must be
+  // visible in the product).
+  it('says out loud that a cancelled vault prompt left the password unsaved', async () => {
+    const { vaultClient, vaultController } = sealedVaultClient()
+    await vaultController.refresh()
+    const { container, client } = mount({ profiles: [], vaultController, vaultClient })
+    vi.spyOn(client, 'savePassword').mockRejectedValue(
+      new RpcError('vault error', -32000, { reason: 'vault-sealed' }),
+    )
+
+    await waitForProfiles(container, 0)
+    clickButtonByText(container, '+ New connection')
+    await vi.waitFor(() => expect(container.querySelector('#quick-connect-input')).toBeTruthy())
+    fireEvent.input(container.querySelector('#quick-connect-input')!, {
+      target: { value: 'web.example.com' },
+    })
+    clickButtonByText(container, 'Next')
+    await vi.waitFor(() => expect(container.querySelector('#profile-host')).toBeTruthy())
+
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
+    })
+    const prompt = container.querySelector('.ui-prompt')!
+    clickButtonByText(container, 'Cancel', prompt)
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some((t) => t.level === 'warning' && t.message.includes('Password was not saved')),
+      ).toBe(true)
+    })
+  })
+
+  // A refused mint (vault sealed and unlocked, or a store error) must also be
+  // visible: the editor closed on OK and nothing may claim the draft bound.
+  it('shows the failure when the mint is refused outright', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(client, 'savePassword').mockRejectedValue(new RpcError('store is full', -32000))
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some(
+          (t) => t.level === 'danger' && t.message.includes('Could not save the password'),
+        ),
+      ).toBe(true)
+    })
+    // The draft is untouched: no binding was made, so the action says so.
+    expect(container.textContent).toContain('No password set')
+  })
+
+  // Partial failure: the mint lands in the vault, the profile save fails.
+  // The binding stays on the draft and named on screen — a retry of Save
+  // persists it; nothing was silently dropped.
+  it('keeps the minted binding visible when the profile save fails', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(client, 'savePassword').mockResolvedValue({ row: 'secrow:pass-fresh' })
+    vi.spyOn(client, 'patchProfile').mockRejectedValue(new RpcError('backend busy', -32000))
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+    })
+
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some(
+          (t) => t.level === 'danger' && t.message.includes('Could not save the connection'),
+        ),
+      ).toBe(true)
+    })
+    // The dialog stays open and the binding is still named: the secret is in
+    // the vault and the draft still holds it; a retry persists it.
+    expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
+    expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+  })
+
   it('the connection editor no longer offers to create a credential by hand', async () => {
     const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
 
@@ -689,6 +845,330 @@ describe('inline password minting', () => {
     expect(plusBtn).toBeNull()
     // And no credential creation form is reachable from the editor.
     expect(container.querySelector('#cred-name')).toBeNull()
+  })
+})
+
+// ── The minted binding is persisted at the mint (W8, nocx-tmis) ─────────
+//
+// The report: a profile on disk with auth "password" and no passwordSecret.
+// The mint's bind only drafted the binding, so the stored profile never
+// carried it, and a Save landing while the mint was still resolving wrote
+// auth without the secret. The fix: OK on the password dialog writes the
+// binding to the stored profile, and a Save pressed while the mint is still
+// resolving waits for the mint's write.
+
+describe('password binding persists at the mint', () => {
+  it('the mint itself writes the binding to the stored profile — no Save click', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(client, 'savePassword').mockResolvedValue({ row: 'secrow:pass-w8' })
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    // The binding is on the wire without any Save press: the mint is the
+    // write. Inspecting the draft is what let this through the first time —
+    // the assertion is the patch that is sent.
+    await vi.waitFor(() => expect(patchSpy).toHaveBeenCalled())
+    expect(patchSpy.mock.calls[0][0].id).toBe('ssh:p1')
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.passwordSecret': 'secrow:pass-w8',
+    })
+    // The pair stays together: the editor only ever offers a password under
+    // the Password method, and the stored profile must say so too, or the
+    // binding becomes invisible on reopen.
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.auth': 'password',
+    })
+
+    // The editor's done appearance is true: the action row names the secret
+    // the store now carries.
+    expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+  })
+
+  it('a Save pressed while the mint is still resolving still ends with the binding persisted', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    let resolveMint!: (value: { row: string }) => void
+    const savePasswordSpy = vi.spyOn(client, 'savePassword').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveMint = resolve
+        }),
+    )
+    const patchSpy = vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    // The mint is now in flight behind the deferred vault save. The user
+    // presses Save Connection before it resolves — the reported shape.
+    await vi.waitFor(() => expect(savePasswordSpy).toHaveBeenCalled())
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    // Now the vault answers.
+    resolveMint({ row: 'secrow:pass-race' })
+
+    // The wire ends coherent: the stored profile carries the binding, not
+    // auth-without-secret (the exact on-disk shape of the report).
+    await vi.waitFor(() => {
+      const sets = patchSpy.mock.calls.map((c) => c[0].set ?? {})
+      expect(sets.some((s) => s['options.passwordSecret'] === 'secrow:pass-race')).toBe(true)
+      expect(sets.some((s) => s['options.auth'] === 'password')).toBe(true)
+    })
+  })
+
+  it('a password set on a normal connection survives reopening the editor', async () => {
+    // Session 1: set the password. The write happens at the mint.
+    const first = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(first.client, 'savePassword').mockResolvedValue({ row: 'secrow:prod-pass' })
+    const patchSpy = vi.spyOn(first.client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+
+    await waitForProfiles(first.container, 1)
+    await openProfileEditor(first.container, 'prod-web')
+    selectProfileSection(first.container, 'Authentication')
+    clickSegmentedOption(first.container, 'Password')
+    clickButtonByText(first.container, 'Set Password')
+    await vi.waitFor(() => expect(first.container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(first.container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(first.container, 'OK')
+    await vi.waitFor(() => expect(patchSpy).toHaveBeenCalled())
+
+    // Reopen the editor on the profile exactly as the wire left it: the
+    // binding must be visible from the store (through the inventory), not
+    // from a mint in this session.
+    const set = patchSpy.mock.calls[0][0].set as Record<string, unknown>
+    const persisted: SSHProfile = {
+      ...MOCK_PROFILES[0],
+      options: {
+        ...MOCK_PROFILES[0].options,
+        auth: set['options.auth'] as AuthMode,
+        passwordSecret: set['options.passwordSecret'] as string,
+      },
+    }
+    cleanup()
+    const second = mount({ profiles: [persisted], secretRows: MOCK_SECRET_ROWS })
+    await waitForProfiles(second.container, 1)
+    await openProfileEditor(second.container, 'prod-web')
+    selectProfileSection(second.container, 'Authentication')
+
+    // The bound row is the picker's current value (passwordMode starts on
+    // 'secret' because the reopened profile carries a binding).
+    await vi.waitFor(() => {
+      const picker = second.container
+        .querySelector('label[for="profile-auth-secret"]')!
+        .closest('.ui-field')!
+        .querySelector('.ui-select') as HTMLSelectElement
+      expect(picker, 'password picker not found').toBeTruthy()
+      expect(picker.value).toBe('secrow:prod-pass')
+    })
+    expect(second.container.textContent).not.toContain('No password set')
+  })
+
+  it('says on the action row that setting a password saves to the connection immediately', async () => {
+    const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+
+    expect(container.textContent).toContain('saves it to the connection immediately')
+  })
+
+  it('a refused binding write says the password was stored but the connection was not updated, and Save retries', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    vi.spyOn(client, 'savePassword').mockResolvedValue({ row: 'secrow:pass-w8' })
+    const patchSpy = vi
+      .spyOn(client, 'patchProfile')
+      .mockRejectedValue(new RpcError('backend busy', -32000))
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+
+    // The mint's own write failed: said out loud, with the split named — the
+    // secret is in the vault, the connection does not reference it yet, and
+    // the draft keeps the binding so Save retries.
+    await vi.waitFor(() => {
+      expect(
+        toasts().some(
+          (t) => t.level === 'danger' && t.message.includes('stored but this connection'),
+        ),
+      ).toBe(true)
+    })
+    expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+
+    const dialog = findDialogByTitleContaining(container, 'prod-web')!
+    clickButtonByText(container, 'Save Connection', dialog)
+    await vi.waitFor(() => expect(patchSpy.mock.calls.length).toBeGreaterThanOrEqual(2))
+  })
+})
+
+// ── Port resolution: the field and the validator read one value ───────────
+//
+// A saved profile adopted from an SSH alias omits options.port entirely
+// (profiles.ts adoptAliasProfile — absent stays distinguishable from an
+// explicit 22). The editor painted 22 in that state while validation rejected
+// the empty draft: two derivations of one question, disagreeing exactly where
+// it matters (nocx-a88r). The validator now reads the same resolved value the
+// field paints — the effective/inheritance machinery — so the inherited
+// default satisfies it and the password mint completes end to end.
+
+describe('port resolution', () => {
+  // The profile shape adoptAliasProfile produces: no port key at all. The
+  // backend's effective resolution answers 22 (hardcoded default, source
+  // "default"), which is what the field paints.
+  const aliasAdopted: SSHProfile = {
+    id: 'ssh:no-port',
+    type: 'ssh',
+    name: 'alias-box',
+    options: { host: 'alias.example.com', user: 'deploy' },
+  }
+  const effectiveNoPort: EffectiveProfileDTO = {
+    id: 'ssh:no-port',
+    fields: {
+      port: { value: 22, source: { kind: 'default', id: 'default', label: 'Default' } },
+    },
+  }
+
+  // The owner's exact case: editing a connection whose port was never
+  // explicit, setting a password, and saving — no "Port is required" anywhere
+  // in the flow, and the save carries no synthesized port.
+  it('a profile with no explicit port passes validation and its password mints and binds end to end', async () => {
+    const { container, client } = mount({
+      profiles: [aliasAdopted],
+      effectiveProfiles: [effectiveNoPort],
+    })
+    const savePasswordSpy = vi.spyOn(client, 'savePassword').mockResolvedValue({
+      row: 'secrow:pass-noport',
+    })
+    const patchSpy = vi
+      .spyOn(client, 'patchProfile')
+      .mockResolvedValue({ id: 'ssh:no-port', fields: {} })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'alias-box')
+
+    // The field paints the inherited default — the value validation must see.
+    const portInput = container.querySelector('#profile-port') as HTMLInputElement
+    await vi.waitFor(() => {
+      expect(portInput.value).toBe('22')
+    })
+
+    // The password flow the owner hit: mint, bind, save.
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+    clickButtonByText(container, 'Set Password')
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'hunter2' },
+    })
+    clickButtonByText(container, 'OK')
+    await vi.waitFor(() => {
+      expect(savePasswordSpy).toHaveBeenCalled()
+    })
+    // bind() lands asynchronously after the mint resolves — wait for the
+    // binding to be named on screen (as the sibling minting tests do) before
+    // saving, so the save carries the binding, not a race with it.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Password: Password for deploy@alias.example.com')
+    })
+
+    const dialog = findDialogByTitleContaining(container, 'alias-box')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    // The validator saw the resolved port, so nothing claimed it missing.
+    expect(toasts().some((t) => t.message.includes('Port is required'))).toBe(false)
+    // Absent stays absent: the save carries the binding and nothing else —
+    // no synthesized options.port (nocx-a88r constraint).
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({
+      'options.passwordSecret': 'secrow:pass-noport',
+    })
+    expect(patchSpy.mock.calls[0][0].set).not.toHaveProperty('options.port')
+  })
+
+  // `|| 22` on the input also swallowed a genuine stored 0, so an invalid
+  // stored port could never be shown back. The input now paints the resolved
+  // value as-is, and the rule still rejects it with its own message.
+  it('shows a stored port of 0 back as 0 and still rejects it with the rule message', async () => {
+    const zeroPort: SSHProfile = {
+      id: 'ssh:zero',
+      type: 'ssh',
+      name: 'zero-box',
+      options: { host: 'zero.example.com', port: 0 },
+    }
+    const { container, client } = mount({ profiles: [zeroPort] })
+    const patchSpy = vi
+      .spyOn(client, 'patchProfile')
+      .mockResolvedValue({ id: 'ssh:zero', fields: {} })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'zero-box')
+
+    const portInput = container.querySelector('#profile-port') as HTMLInputElement
+    expect(portInput.value, 'a stored 0 must be shown, not painted over').toBe('0')
+
+    // Saving with the invalid stored port is refused with the rule's message.
+    const dialog = findDialogByTitleContaining(container, 'zero-box')!
+    clickButtonByText(container, 'Save Connection', dialog)
+    await vi.waitFor(() => {
+      expect(toasts().some((t) => t.message.includes('Port must be between 1 and 65535'))).toBe(
+        true,
+      )
+    })
+    expect(patchSpy).not.toHaveBeenCalled()
+  })
+
+  // The paired ordinary case for the rule above: an explicitly typed valid
+  // port still validates and saves, carried in the patch.
+  it('an explicitly typed valid port still validates and saves', async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(1, 2) })
+    const patchSpy = vi
+      .spyOn(client, 'patchProfile')
+      .mockResolvedValue({ id: 'ssh:p2', fields: {} })
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-db')
+
+    const portInput = container.querySelector('#profile-port') as HTMLInputElement
+    expect(portInput.value).toBe('5432')
+    fireEvent.input(portInput, { target: { value: '5433' } })
+
+    const dialog = findDialogByTitleContaining(container, 'prod-db')!
+    clickButtonByText(container, 'Save Connection', dialog)
+
+    await vi.waitFor(() => {
+      expect(patchSpy).toHaveBeenCalled()
+    })
+    expect(patchSpy.mock.calls[0][0].set).toMatchObject({ 'options.port': 5433 })
   })
 })
 
