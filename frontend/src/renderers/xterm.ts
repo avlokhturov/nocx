@@ -378,6 +378,34 @@ export class XtermRenderer implements TerminalRenderer {
     // and the char-size measurement is real now (mount awaited
     // document.fonts.ready above).
     this._fireCellDimsChange()
+
+    // TEMPORARY PROBE — delete before commit. Reports which quantity
+    // `cellHeight` actually returns on this engine, against xterm's real row
+    // pitch, so the echo-shift residual can be attributed instead of guessed.
+    ;(window as unknown as { nocxCellProbe?: () => unknown }).nocxCellProbe = () => {
+      const t = this.term
+      const spans = Array.from(
+        t?.element?.querySelectorAll<HTMLElement>('.xterm-char-measure-element') ?? [],
+      ).map((el) => ({
+        height: el.getBoundingClientRect().height,
+        text: (el.textContent ?? '').slice(0, 4),
+        parent: el.parentElement?.className ?? '(none)',
+        font: getComputedStyle(el).fontFamily,
+      }))
+      const inner = document.querySelector<HTMLElement>('.xterm-inner')
+      const report = {
+        dpr: window.devicePixelRatio,
+        cellHeight_getter: this.cellHeight,
+        realCellDims: this._getCellDims(),
+        measureSpans: spans,
+        rows: t?.rows,
+        cols: t?.cols,
+        echoShiftTransform: inner ? getComputedStyle(inner).transform : '(no .xterm-inner)',
+        webglAttached: this.webgl !== undefined,
+      }
+      console.log('NOCX CELL PROBE', JSON.stringify(report, null, 2))
+      return report
+    }
   }
 
   /** Register the OSC 1337 fence handler exactly once, when the terminal
