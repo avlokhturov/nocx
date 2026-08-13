@@ -80,8 +80,16 @@ init: hooks
 	@echo ""
 	@echo "Ready. Run 'wails dev' to start the app, 'bd ready' for the backlog."
 
+# Per-clone git configuration. Both lines are the same kind of thing: git
+# behaviour this repo needs that a clone cannot carry by itself.
+#
+# The merge driver resolves `.beads/issues.jsonl` by regenerating it from the
+# issue database instead of asking which side to keep — see .gitattributes for
+# why neither side is ever the answer.
 hooks:
 	git config core.hooksPath .githooks
+	git config merge.beads-export.name "regenerate the beads export from the issue database"
+	git config merge.beads-export.driver "bd export -o %A"
 	@echo "git hooks installed from .githooks/"
 
 # `ci` is the HOST-SIDE half of CI: the `backend` job (macos-latest) plus the
