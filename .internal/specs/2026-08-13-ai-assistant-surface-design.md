@@ -245,8 +245,11 @@ checkpoint "implementation detail" does not make it one: if `agent.approve` cann
 without it, the checkpoint is operationally authoritative until the run terminalizes, and a
 serialization change across an upgrade would strand every suspended run.
 
-So, for v1: **a checkpoint is encrypted process-lifetime state.** It is deleted when the run
-terminalizes and swept at startup, and **approval does not survive a restart** — which is
+So, for v1: **a checkpoint is encrypted process-lifetime state.** It exists from the moment an
+interrupt persists it until cleanup succeeds — on terminalization, or by the startup sweep if
+that delete failed — and a run is not reported terminal until its checkpoint is gone or its
+cleanup is durably scheduled. A terminal ledger record beside a live, reusable checkpoint id
+is the state this rule exists to forbid. **Approval does not survive a restart** — which is
 already what §4.2's recovery rule says: every non-terminal run becomes `interrupted` and the
 user asks again. Durable approval across restarts would make the checkpoint an artifact with
 its own version, retention and migration rules, and it is deliberately not v1.
@@ -268,7 +271,8 @@ assemble a projection from the ledger + referenced frames
   → OUR middleware sees a call about to execute, with its arguments
   → evaluate it against the run's immutable grant
         refuse  ·  suspend for approval  ·  permit
-  → on permit: the tool runs holding a NARROWED capability; record the attempt
+  → on permit: RECORD THE ATTEMPT, then construct the narrowed capability, then call the tool
+       (a write that fails means the tool is not called at all)
   → continue until the model finishes, the user cancels, a lease expires, or policy stops it
 ```
 
@@ -276,12 +280,12 @@ assemble a projection from the ledger + referenced frames
 The modes differ in three named places, and the differences are owned by the mode rather than
 scattered through the driver:
 
-|                            | **explain**                                                                                                                 | **agent**                                                |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| tools declared             | none                                                                                                                        | ours                                                     |
-| termination                | after the first completed response                                                                                          | when the model finishes, or policy/lease/cancel stops it |
-| context assembly           | question + referenced frames                                                                                                | plus tool calls and their results                        |
-| a tool call arrives anyway | refused in the policy middleware and the run ends — a model proposing a call it was never offered is a fault, not a request | ordinary path                                            |
+|                            | **explain**                                                                                                                                                                                                      | **agent**                                                |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| tools declared             | none                                                                                                                                                                                                             | ours                                                     |
+| termination                | after the first completed response                                                                                                                                                                               | when the model finishes, or policy/lease/cancel stops it |
+| context assembly           | question + referenced frames                                                                                                                                                                                     | plus tool calls and their results                        |
+| a tool call arrives anyway | rejected by the run adapter as malformed model output. NOT by the middleware: with zero tools ADK builds `buildNoToolsRunFunc`, a direct model chain with no tools node, so there is no middleware to receive it | ordinary path                                            |
 
 **A refusal ends something — and "do not call `next`" is not by itself what ends it.** The
 middleware must return _something_, and the terminal behaviour comes from **which category**
@@ -305,12 +309,24 @@ Resume must bind the approval to the exact proposal — run, attempt, tool name,
 hash of the canonical arguments — or approving one thing authorises a changed thing, and a
 wrapper that re-evaluates the same call under the original grant interrupts forever.
 
-**Calls run one at a time, and a refusal refuses the rest.** `ExecuteSequentially` is set, and
-a refused call ends the run before its siblings run. What this does **not** promise is that
-nothing at all has happened: a permitted sibling earlier in the batch will already have run
-when a later call asks for approval. That is correct — everything that ran held the grant —
-but the surface must say it. **The honest invariant is "the call that is asking has not run",
-and what already ran is visible in the attempts**, not "the domain is untouched".
+**Calls run one at a time, and stopping the batch is OUR job, not the framework's.**
+`ExecuteSequentially` is set, but read what it does: `sequentialRunToolCall` loops over every
+task and calls `run` on each, skipping only ones already executed. It never inspects
+`tasks[i].err` and never breaks — the node collects all results and only then returns the
+first non-interrupt error. So "sequential" means _in order_, not _stop on failure_, and a
+refusal on the second of three calls would not prevent the third.
+
+So the policy middleware carries a **batch latch** in the run context: once it has refused or
+interrupted one call in a model response, every later call in that same response returns
+immediately without calling `next`. This is the owner's rule — refuse one, refuse the rest —
+implemented where it actually holds rather than assumed from a config flag.
+
+What this still does **not** promise is that nothing at all has happened: a permitted sibling
+_earlier_ in the batch has already run when a later call asks for approval. That is correct —
+everything that ran held the grant, and the user refused the call they refused, not
+retroactively the one before it — but the surface must say so. **The honest invariant is "the
+call that is asking has not run, and no call after it will", and what already ran is visible
+in the attempts** — not "the domain is untouched".
 
 **The strongest refusal is the one never proposed.** A tool the run's grant does not permit
 is not declared to the model at all (`BeforeAgent`), so most of the policy never has to say
@@ -397,8 +413,9 @@ protocol halts at `tool_use` and waits for `tool_result`. That is not a security
 pause that matters is ours, in the middleware), but it is a cleaner fit than reaching Claude
 through an OpenAI-compatible aggregator, which loses streamed tool arguments.
 
-**Each adapter is weighed before it is added.** `eino/compose` plus `flow/agent/react`, with
-no provider adapter at all, is already 78 modules in the graph and 126 packages compiled —
+**Each adapter is weighed before it is added.** `eino/compose` plus `eino/adk` — the driver we
+actually chose — with no provider adapter at all, is 78 modules in the graph and 124 packages
+compiled —
 including `logrus`, which is a second logging vocabulary in a repo whose rule is one
 `log/slog`-backed interface. Adding a provider means `go list -deps` and the stripped binary
 size before and after, not an argument about breadth.
@@ -654,22 +671,33 @@ Assertions, in the bead, authored before the implementation.
   call; the middleware does not call `next`; it returns `ErrPolicyRefused`; the attempt is
   terminalized as `refused`; **no tool message is produced and no second model request is
   made**. Asserting only "`next` was not called" would pass while the model reads a polite
-  refusal and reformulates. **And the paired positive:** with a reachable endpoint, an ask
-  succeeds end to end.
+  refusal and reformulates. The adapter matches with `errors.Is` — eino wraps the error, so an
+  equality check would silently miss it, and the test uses a wrapped error to prove it.
+  **And the paired positive:** with a reachable endpoint, an ask succeeds end to end.
+- **In explain mode a hallucinated tool call is rejected by the run adapter**, not by a
+  middleware — there is none on that path — and the run ends rather than the response being
+  rendered as an answer.
 - **The security spine is exercised with a real tool, even though production explain declares
   none.** The suite registers a fake in-memory effect tool and drives argument policy,
   narrowing, refusal mapping, interrupt, approval resume and the sequential-batch rule through
   it. A zero-tool run cannot exercise any of them, and a criterion that cannot fail is not one.
-- **A refused call ends the batch.** With `ExecuteSequentially`, a refusal on the second of
-  three calls means the third never runs — and the first, which was permitted and ran, is
-  reported as having run rather than hidden.
+- **A refused call ends the batch — because our latch ends it.** With three calls and a
+  refusal on the second, the third **never reaches its tool**, asserted against real eino
+  rather than against `ExecuteSequentially`, whose sequential runner does not break on error.
+  The first, which was permitted and ran, is reported as having run rather than hidden. The
+  same test with an escalation in place of the refusal.
 - **Approval binds to the proposal it approved.** Resuming with different arguments, a
   different call id, or a different tool is refused, not executed.
 - **A ledger write failure before `next` is terminal.** With the store made to fail, no
   capability is constructed, `next` is not called, and the run ends with an infrastructure
   reason.
 - **A streaming or enhanced tool cannot be registered in v1** — registration refuses it, so a
-  tool shape cannot route around the one wrapper that is installed.
+  tool shape cannot route around the one wrapper that is installed. **Including a tool that
+  implements several shapes at once**: asking "does it implement the invokable interface" is
+  not enough, because a dual-shape tool answers yes and is then dispatched through the other.
+- **The contained logger is asserted by receipt, not by silence.** A logrus write arrives at
+  the injected `slog`-backed sink with its level and fields intact, **and** nothing is written
+  to stderr. Silence alone would also be produced by discarding the records.
 - **Capability narrowing, asserted by trying:** a tool invoked under a grant scoped to lane A
   cannot reach lane B, cannot open a path outside its scope, and cannot read a secret the
   grant did not name — because what it holds is scoped, not because a check preceded it.

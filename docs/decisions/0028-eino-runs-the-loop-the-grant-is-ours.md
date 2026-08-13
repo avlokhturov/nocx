@@ -130,6 +130,10 @@ uses all three, strongest first:
   non-interrupt error rather than producing a tool message, so the category is what makes the
   refusal a control decision; the run adapter terminalizes the attempt as `refused`, and no
   second model request is made.
+- **stop the rest** — eino's sequential runner invokes every task and inspects errors only
+  afterwards, so the middleware carries a batch latch: after a refusal or an interrupt, later
+  calls in the same model response return without calling `next`. The framework's
+  `ExecuteSequentially` gives order, not short-circuiting.
 - **escalate** — `StatefulInterrupt` **before** calling `next`, so the call that is asking has
   not run; approval resumes from the checkpoint as a **new attempt with
   a new grant**, never by mutating a running one (ADR-0020 §5).
@@ -172,8 +176,9 @@ second implementation of iteration that is already written and tested.
 
 ## Consequences
 
-- **A real dependency, measured rather than argued.** `eino/compose` plus an agent, with **no
-  provider adapter yet**, is 78 modules in the graph and 126 packages compiled — including
+- **A real dependency, measured rather than argued.** `eino/compose` plus `eino/adk` — the
+  driver actually chosen — with **no provider adapter yet**, is 78 modules in the graph and
+  124 packages compiled — including
   sonic, gonja, json-iterator, easyjson and **logrus**. `logrus` arrives through
   `compose → schema → gonja/exec` — the template engine, not the logic — and it collides with
   our rule that structured logging goes through one `log/slog`-backed interface. It is
