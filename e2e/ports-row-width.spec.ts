@@ -48,7 +48,6 @@ import type { Locator, Page } from '@playwright/test'
 
 const VIEW_PORTS = 'button[data-view="ports"]'
 const DETECTED_ROW = '[data-testid="detected-row"]'
-const FORWARDED_ROW = '[data-testid="forwarded-row"]'
 const ACTIONS = '.ports-row__actions'
 const ADDR = '.ports-row__addr'
 const DEST = '.ports-row__dest'
