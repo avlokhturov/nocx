@@ -17,6 +17,7 @@
    the same row, so the divided list's hairline still bounds one record. */
 .ports-row__main {
   display: flex;
+  position: relative;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
@@ -170,17 +171,33 @@
   background: color-mix(in srgb, var(--color-danger), transparent 94%);
 }
 
-/* The row action is revealed by pointing at the row — a column of identical
-   icons down a narrow rail is noise, and the address is what the eye is
-   scanning. `:focus-within` keeps it reachable from the keyboard, where
-   hover does not exist (nocx-wzc4.11). */
-.ports-row__main > .ui-icon-button {
+/* The row action GROUP is revealed by pointing at the row — a column of
+   identical icons down a narrow rail is noise, and the address is what the
+   eye is scanning. `:focus-within` keeps it reachable from the keyboard,
+   where hover does not exist (nocx-wzc4.11).
+
+   The group is absolutely POSITIONED, not merely transparent — and that is
+   the fix (nocx-4wbx). `opacity` does not remove a flex item from layout:
+   a forwarded row's three hidden 18px buttons plus their gaps were still
+   taking ~70px of the text column — 52px more than a plain row's one — so
+   the ADDRESS line truncated at the default rail width while the pointer
+   was elsewhere. Out of flow, the group reserves nothing, hidden or shown;
+   revealed, it overlays the row's right edge, which the text column's
+   ellipsis floor already yields. */
+.ports-row__actions {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   opacity: 0;
   transition: opacity 100ms ease;
 }
 
-.ports-row:hover > .ports-row__main > .ui-icon-button,
-.ports-row:focus-within > .ports-row__main > .ui-icon-button {
+.ports-row:hover > .ports-row__main > .ports-row__actions,
+.ports-row:focus-within > .ports-row__main > .ports-row__actions {
   opacity: 1;
 }
 

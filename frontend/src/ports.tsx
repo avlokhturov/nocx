@@ -713,7 +713,7 @@ export function PortsPanel(props: PortsPanelProps) {
                                 when={isLocal()}
                                 fallback={
                                   running ? (
-                                    <>
+                                    <div class="ports-row__actions">
                                       <IconButton
                                         data-testid="ports-copy"
                                         size="xs"
@@ -749,7 +749,7 @@ export function PortsPanel(props: PortsPanelProps) {
                                       >
                                         <SquareIcon />
                                       </IconButton>
-                                    </>
+                                    </div>
                                   ) : failed ? (
                                     <Button
                                       data-testid="ports-retry-forward"
@@ -758,27 +758,31 @@ export function PortsPanel(props: PortsPanelProps) {
                                       Retry
                                     </Button>
                                   ) : (
-                                    <IconButton
-                                      data-testid="ports-forward"
-                                      size="xs"
-                                      ariaLabel={`Forward ${destinationFor(l)}`}
-                                      title={`Forward ${destinationFor(l)}`}
-                                      onClick={() => void forward(destinationFor(l), l.port)}
-                                    >
-                                      <ArrowRightIcon />
-                                    </IconButton>
+                                    <div class="ports-row__actions">
+                                      <IconButton
+                                        data-testid="ports-forward"
+                                        size="xs"
+                                        ariaLabel={`Forward ${destinationFor(l)}`}
+                                        title={`Forward ${destinationFor(l)}`}
+                                        onClick={() => void forward(destinationFor(l), l.port)}
+                                      >
+                                        <ArrowRightIcon />
+                                      </IconButton>
+                                    </div>
                                   )
                                 }
                               >
-                                <IconButton
-                                  data-testid="ports-copy"
-                                  size="xs"
-                                  ariaLabel={`Copy ${destinationFor(l)}`}
-                                  title={`Copy ${destinationFor(l)}`}
-                                  onClick={() => copyAddress(destinationFor(l))}
-                                >
-                                  <CopyIcon />
-                                </IconButton>
+                                <div class="ports-row__actions">
+                                  <IconButton
+                                    data-testid="ports-copy"
+                                    size="xs"
+                                    ariaLabel={`Copy ${destinationFor(l)}`}
+                                    title={`Copy ${destinationFor(l)}`}
+                                    onClick={() => copyAddress(destinationFor(l))}
+                                  >
+                                    <CopyIcon />
+                                  </IconButton>
+                                </div>
                               </Show>
                             </div>
                             <Show when={caveat}>
@@ -865,37 +869,39 @@ export function PortsPanel(props: PortsPanelProps) {
                                 {f.destination}
                               </span>
                             </div>
-                            <IconButton
-                              data-testid="ports-copy"
-                              size="xs"
-                              ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
-                              title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
-                              onClick={() =>
-                                copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
-                              }
-                            >
-                              <CopyIcon />
-                            </IconButton>
-                            <IconButton
-                              data-testid="ports-open"
-                              size="xs"
-                              ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
-                              title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
-                              onClick={() =>
-                                openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
-                              }
-                            >
-                              <ExternalLinkIcon />
-                            </IconButton>
-                            <IconButton
-                              data-testid="ports-stop"
-                              size="xs"
-                              ariaLabel={`Stop forward ${f.destination}`}
-                              title={`Stop forward ${f.destination}`}
-                              onClick={() => void stop(f.id)}
-                            >
-                              <SquareIcon />
-                            </IconButton>
+                            <div class="ports-row__actions">
+                              <IconButton
+                                data-testid="ports-copy"
+                                size="xs"
+                                ariaLabel={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                                title={`Copy ${f.actualBind.host}:${f.actualBind.port}`}
+                                onClick={() =>
+                                  copyAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                                }
+                              >
+                                <CopyIcon />
+                              </IconButton>
+                              <IconButton
+                                data-testid="ports-open"
+                                size="xs"
+                                ariaLabel={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                                title={`Open ${f.actualBind.host}:${f.actualBind.port}`}
+                                onClick={() =>
+                                  openAddress(`${f.actualBind.host}:${f.actualBind.port}`)
+                                }
+                              >
+                                <ExternalLinkIcon />
+                              </IconButton>
+                              <IconButton
+                                data-testid="ports-stop"
+                                size="xs"
+                                ariaLabel={`Stop forward ${f.destination}`}
+                                title={`Stop forward ${f.destination}`}
+                                onClick={() => void stop(f.id)}
+                              >
+                                <SquareIcon />
+                              </IconButton>
+                            </div>
                           </div>
                           {/* A -R forward whose bind sshd silently replaced
                                 carries Caveat() — render it as the kit's note
