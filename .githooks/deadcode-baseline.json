@@ -71,6 +71,34 @@
       "func": "UnavailableHost.Bounce"
     },
     {
+      "file": "internal/notify/clock.go",
+      "func": "ManualClock.Advance"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "ManualClock.AfterFunc"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "ManualClock.Now"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "manualTimer.Stop"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "NewManualClock"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "RealClock.AfterFunc"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "RealClock.Now"
+    },
+    {
       "file": "internal/notify/notify.go",
       "func": "NewRouter"
     },
@@ -97,6 +125,34 @@
     {
       "file": "internal/notify/notify.go",
       "func": "Router.Resolve"
+    },
+    {
+      "file": "internal/notify/policy.go",
+      "func": "Disposition.String"
+    },
+    {
+      "file": "internal/notify/policy.go",
+      "func": "NewPolicy"
+    },
+    {
+      "file": "internal/notify/policy.go",
+      "func": "Policy.deliverWindow"
+    },
+    {
+      "file": "internal/notify/policy.go",
+      "func": "Policy.flush"
+    },
+    {
+      "file": "internal/notify/policy.go",
+      "func": "Policy.Submit"
+    },
+    {
+      "file": "internal/notify/policy.go",
+      "func": "Policy.suppressed"
+    },
+    {
+      "file": "internal/notify/policy.go",
+      "func": "WithResultHandler"
     },
     {
       "file": "internal/profile/profile.go",
