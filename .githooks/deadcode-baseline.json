@@ -44,10 +44,6 @@
     },
     {
       "file": "internal/importer/tabby.go",
-      "func": "dedupKeySet"
-    },
-    {
-      "file": "internal/importer/tabby.go",
       "func": "ImportGroups"
     },
     {
@@ -57,6 +53,10 @@
     {
       "file": "internal/importer/tabby.go",
       "func": "ImportTabbyWithService"
+    },
+    {
+      "file": "internal/importer/tabby.go",
+      "func": "dedupKeySet"
     },
     {
       "file": "internal/notify/attention.go",
@@ -80,11 +80,15 @@
     },
     {
       "file": "internal/notify/notify.go",
-      "func": "Router.deliver"
+      "func": "Router.Raise"
     },
     {
       "file": "internal/notify/notify.go",
-      "func": "Router.Raise"
+      "func": "Router.Resolve"
+    },
+    {
+      "file": "internal/notify/notify.go",
+      "func": "Router.deliver"
     },
     {
       "file": "internal/notify/notify.go",
@@ -95,24 +99,48 @@
       "func": "Router.removeQueued"
     },
     {
-      "file": "internal/notify/notify.go",
-      "func": "Router.Resolve"
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "Host.Badge"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "Host.Banner"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "Host.Bounce"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "Host.Permission"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "Host.Refresh"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "Host.RequestAuthorization"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "Host.handleResponse"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host.go",
+      "func": "New"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host_sink.go",
+      "func": "HostSink.Deliver"
+    },
+    {
+      "file": "internal/notify/wailsadapter/host_sink.go",
+      "func": "HostSink.LeavesMachine"
     },
     {
       "file": "internal/profile/profile.go",
       "func": "BuildGroupTree"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "expandFromMap"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "isNamespacedID"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "parseNamespacedID"
     },
     {
       "file": "internal/profile/profile.go",
@@ -125,6 +153,18 @@
     {
       "file": "internal/profile/profile.go",
       "func": "StoredOptionsFromDense"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "expandFromMap"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "isNamespacedID"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "parseNamespacedID"
     },
     {
       "file": "internal/profile/store.go",
@@ -215,10 +255,6 @@
       "func": "Publisher.verifyFile"
     },
     {
-      "file": "internal/ssh/ssh_real.go",
-      "func": "WithKnownHostsFile"
-    },
-    {
       "file": "internal/ssh/ssh.go",
       "func": "NewStub"
     },
@@ -244,10 +280,6 @@
     },
     {
       "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.onceClose"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Read"
     },
     {
@@ -261,6 +293,10 @@
     {
       "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Write"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.onceClose"
     },
     {
       "file": "internal/ssh/ssh.go",
@@ -279,6 +315,10 @@
       "func": "WithTimeout"
     },
     {
+      "file": "internal/ssh/ssh_real.go",
+      "func": "WithKnownHostsFile"
+    },
+    {
       "file": "internal/transport/transport.go",
       "func": "NewStub"
     },
@@ -289,6 +329,18 @@
     {
       "file": "internal/transport/transport.go",
       "func": "Stub.Stop"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithCaptureRegistry"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithFilesRevealer"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithProfileResolver"
     },
     {
       "file": "internal/transport/ws_auth.go",
@@ -345,18 +397,6 @@
     {
       "file": "internal/transport/ws_test_helper.go",
       "func": "wedgedSocket.WriteMessage"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithCaptureRegistry"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithFilesRevealer"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithProfileResolver"
     },
     {
       "file": "internal/vault/inventory.go",
