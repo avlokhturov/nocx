@@ -182,6 +182,70 @@ func TestEndpointsCRUD_OverTheWire(t *testing.T) {
 	}
 }
 
+// The renderer's create/update params (frontend/src/endpoints.ts
+// EndpointWrite) carry NO schema field — the form has no dialect control
+// until a second implementation exists (design §4.5, decision 2), and the
+// backend owns the value until it does. This is the exact shape that
+// shipped nocx-qtim: the harness helpers above always send a schema, so a
+// test built on them can never see what the renderer actually sends
+// (AGENTS.md rule 5 — the payload must not be one the test invented).
+// Driving the real socket with the renderer's shape must create and update
+// a stored endpoint whose schema is openai-compatible.
+func TestEndpoints_RendererShapeCreateAndUpdate_StoresOpenAICompatible(t *testing.T) {
+	h := newEndpointHarness(t)
+	h.setupAndUnseal()
+
+	// Exactly frontend/src/endpoints.ts EndpointWrite as save() builds it:
+	// name, baseUrl, key, models with an explicit alias per row (a blank
+	// alias becomes null) — and no schema.
+	createParams := map[string]any{
+		"name":    "My provider",
+		"baseUrl": "http://127.0.0.1:8787/v1",
+		"key":     "sk-renderer-shape",
+		"models":  []map[string]any{{"name": "gpt-4o", "alias": nil}},
+	}
+	raw := jsonrpcCall(t, h.conn, "endpoints.create", createParams)
+	created, code := decodeEndpointResult(t, raw)
+	if code != 0 {
+		t.Fatalf("endpoints.create with the renderer's schema-less params: code %d\nraw: %s", code, raw)
+	}
+	if created.Schema != profile.EndpointSchemaOpenAICompatible {
+		t.Fatalf("created schema = %q, want %q", created.Schema, profile.EndpointSchemaOpenAICompatible)
+	}
+
+	// The STORED record carries the schema, not just the create result.
+	listed := h.listEndpoints(t)
+	if len(listed) != 1 || listed[0].Schema != profile.EndpointSchemaOpenAICompatible {
+		t.Fatalf("list = %+v, want one endpoint with schema %q", listed, profile.EndpointSchemaOpenAICompatible)
+	}
+
+	// The update path has the same hole: the renderer's edit sends the same
+	// schema-less shape, and it must replace the record without refusing or
+	// dropping the schema.
+	updateParams := map[string]any{
+		"id":      created.ID,
+		"name":    "Renamed provider",
+		"baseUrl": "http://127.0.0.1:8787/v1",
+		"key":     "",
+		"models":  []map[string]any{{"name": "gpt-4o", "alias": nil}},
+	}
+	raw = jsonrpcCall(t, h.conn, "endpoints.update", updateParams)
+	updated, code := decodeEndpointResult(t, raw)
+	if code != 0 {
+		t.Fatalf("endpoints.update with the renderer's schema-less params: code %d\nraw: %s", code, raw)
+	}
+	if updated.Schema != profile.EndpointSchemaOpenAICompatible {
+		t.Fatalf("updated schema = %q, want %q", updated.Schema, profile.EndpointSchemaOpenAICompatible)
+	}
+
+	// The STORED record after update carries the schema too — persistence,
+	// not just the response.
+	listed = h.listEndpoints(t)
+	if len(listed) != 1 || listed[0].Schema != profile.EndpointSchemaOpenAICompatible {
+		t.Fatalf("list after update = %+v, want one endpoint with schema %q", listed, profile.EndpointSchemaOpenAICompatible)
+	}
+}
+
 // The key given at creation is stored in the vault with only an opaque
 // reference on the record: reading the persisted document back must find no
 // key material (the brief's assertion, checked on the file).

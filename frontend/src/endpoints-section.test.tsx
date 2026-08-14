@@ -220,7 +220,7 @@ function toastMessages(): string[] {
 }
 
 describe('AI endpoints surface — real surface, real client seam', () => {
-  it('adds an endpoint end to end: the button, the fields, the wire, the list', async () => {
+  it('adds an endpoint: the fields reach endpoints.create and the saved row appears', async () => {
     const { container, createEndpoint } = mount()
     await waitForRows(container, 0)
 
@@ -236,6 +236,12 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     await vi.waitFor(() => {
       expect(createEndpoint).toHaveBeenCalledTimes(1)
     })
+    // No schema on the wire: the form has no dialect control while one
+    // schema exists (design §4.5, decision 2), so the backend owns the
+    // value and completes it at the wire seam (ws_endpoints.go
+    // resolveEndpointSchema) — this exact absence is what that default
+    // fills, and it is pinned on the other side by the transport's
+    // renderer-shape over-socket test (nocx-qtim).
     expect(createEndpoint.mock.calls[0][0]).toEqual({
       name: 'My provider',
       baseUrl: 'https://api.example.com/v1',
