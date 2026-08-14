@@ -1705,6 +1705,20 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if rej == nil {
 		return
 	}
+	disposition := "request"
+	if req.ID == nil {
+		disposition = "notification"
+	}
+	sat := saturationErrorFor(rej)
+	// The frame may carry secrets, so the diagnostic names only registered
+	// server vocabulary and the normalized retry hint. Never log params,
+	// payload bytes, or Rejection.Reason (nocx-rq9p).
+	s.log.Debug("control action refused",
+		"method", req.Method,
+		"methodClass", methodClassFor(req.Method),
+		"scope", sat.Data.Scope,
+		"disposition", disposition,
+		"retryAfterMs", sat.Data.RetryAfterMs)
 	// Refused. A request (has an id) answers with the saturation error; a
 	// notification (no id) has no response to carry it, so the server emits
 	// the rate-limited control.saturated notification instead.

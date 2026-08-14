@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -78,8 +79,16 @@ func waitForEcho(t *testing.T, conn *websocket.Conn, sid string, needle string) 
 // prober until released, with the given lane capacity.
 func blockingProbeServer(t *testing.T, laneCapacity int) (*WSServer, *probeCallRecorder) {
 	t.Helper()
+	return blockingProbeServerWithLogger(t, laneCapacity, log.NewSlogAdapter(nil))
+}
+
+func blockingProbeServerWithLogger(
+	t *testing.T,
+	laneCapacity int,
+	logger log.Logger,
+) (*WSServer, *probeCallRecorder) {
+	t.Helper()
 	rec := &probeCallRecorder{started: make(chan struct{}), cancelled: make(chan struct{})}
-	logger := log.NewSlogAdapter(nil)
 	srv := NewWSServer(logger, newRegWithStub(logger),
 		WithControlLaneCapacity(laneCapacity),
 		WithProber(rec),
@@ -218,6 +227,71 @@ func TestUnlockResolvedCompletesWhileLaneSaturated(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("vault.unlockResolved did not release the waiter under lane saturation")
 	}
+}
+
+func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
+	var buf syncBuffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := log.NewSlogAdapter(slog.New(handler))
+	srv, rec := blockingProbeServerWithLogger(t, 1, logger)
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	startBlockedProbe(t, conn, rec)
+
+	assertDiagnostic := func(secret, disposition string) {
+		t.Helper()
+		logged := buf.String()
+		for _, forbidden := range []string{secret, "capacity exhausted"} {
+			if strings.Contains(logged, forbidden) {
+				t.Fatalf("saturation diagnostic leaked %q:\n%s", forbidden, logged)
+			}
+		}
+		for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+			var record map[string]any
+			if err := json.Unmarshal([]byte(line), &record); err != nil {
+				t.Fatalf("bad log line %q: %v", line, err)
+			}
+			if record["msg"] != "control action refused" {
+				continue
+			}
+			if record["method"] != "fs.complete" ||
+				record["methodClass"] != "fs" ||
+				record["scope"] != "control" ||
+				record["disposition"] != disposition ||
+				record["retryAfterMs"] != float64(0) {
+				t.Fatalf("incomplete saturation diagnostic: %v", record)
+			}
+			return
+		}
+		t.Fatalf("missing control action refusal diagnostic:\n%s", logged)
+	}
+
+	requestSecret := "request-secret-must-not-be-logged"
+	resp := jsonrpcCall(t, conn, "fs.complete", map[string]any{
+		"text":  requestSecret,
+		"cwd":   "/",
+		"limit": 5,
+	})
+	if !strings.Contains(string(resp), `"code":-32004`) {
+		t.Fatalf("expected saturation response, got %s", resp)
+	}
+	assertDiagnostic(requestSecret, "request")
+
+	buf.Reset()
+	notificationSecret := "notification-secret-must-not-be-logged"
+	frame := fmt.Sprintf(
+		`{"jsonrpc":"2.0","method":"fs.complete","params":{"text":%q,"cwd":"/","limit":5}}`,
+		notificationSecret,
+	)
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+		t.Fatalf("write notification: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
+	if _, _, err := conn.ReadMessage(); err != nil {
+		t.Fatalf("read saturation notification: %v", err)
+	}
+	assertDiagnostic(notificationSecret, "notification")
 }
 
 // ── Ordinary saturation returns the structured retryable error immediately
