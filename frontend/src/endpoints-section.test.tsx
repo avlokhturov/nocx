@@ -544,15 +544,19 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     })
   })
 
-  it('shows the assistant readiness line from agent.status', async () => {
+  it('leaves the no-endpoint sentence to the empty state, which carries the action', async () => {
     const { container } = mountWithAgent({
       endpointConfigured: false,
       credentialResolvable: false,
       lastProbe: null,
     })
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('No endpoint configured yet')
+      expect(container.textContent).toContain('No endpoints yet')
     })
+    // One fact, one sentence: the readiness badge would only repeat what the
+    // empty state says, without the button that fixes it.
+    expect(container.querySelector('.ep-status-row')).toBeNull()
+    expect(container.textContent).not.toContain('No endpoint configured yet')
   })
 
   it('shows the last probe outcome in the readiness line', async () => {

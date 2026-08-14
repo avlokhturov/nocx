@@ -122,7 +122,10 @@ async function openAIEndpoints(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
   await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 10_000 })
   await page.locator(SETTINGS_AI_NAV).click()
-  await expect(page.locator(STATUS_ROW)).toBeVisible({ timeout: 10_000 })
+  // Wait on the page root, not on the readiness badge: the badge appears
+  // only once an endpoint is configured, so waiting on it would make this
+  // helper unusable in the first state a user is ever in.
+  await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
 }
 
 /** Set up the vault through the Vault settings page — the documented
@@ -217,10 +220,14 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
       { timeout: 10_000 },
     )
 
-    // The Settings surface renders the same fact.
+    // The Settings surface says it too, through its empty state — which owns
+    // this fact because it also carries the button that fixes it. The
+    // readiness badge deliberately does NOT repeat it here; it appears only
+    // for what the list cannot say (an unresolvable credential, a failed
+    // probe, a ready endpoint), and test 2 asserts it there.
     await openAIEndpoints(page)
-    await expect(page.locator(STATUS_ROW)).toContainText('No endpoint configured yet')
     await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
+    await expect(page.locator(STATUS_ROW)).toHaveCount(0)
   })
 
   test("point at a finished block, ask, and the answer streams in naming the block's output", async ({
@@ -229,7 +236,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // ── The endpoint, configured through the surface a user uses ────────
     await openApp(page)
     await openAIEndpoints(page)
-    await expect(page.locator(STATUS_ROW)).toContainText('No endpoint configured yet')
+    // The starting state, asserted so the "Ready" below means something: the
+    // empty state owns the no-endpoint sentence here, and the readiness badge
+    // is deliberately absent until there is something to be ready about.
+    await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
 
     // A fresh home has NO vault, and the endpoint's key is minted INTO the
     // vault (design §4.5.3), so the first-run vault setup must happen first.
@@ -237,9 +247,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // — it fails with a toast; that finding is in the spec header. The
     // documented journey is the Vault page's "Set up protection".)
     await setupVault(page, `vault-pass-${nonce}`)
-    // Back to the AI Endpoints section; still no endpoint configured.
+    // Back to the AI Endpoints section; still no endpoint configured, so the
+    // empty state still owns the sentence and the readiness badge is absent.
     await page.locator(SETTINGS_AI_NAV).click()
-    await expect(page.locator(STATUS_ROW)).toContainText('No endpoint configured yet')
+    await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
 
     await page.getByRole('button', { name: '+ New endpoint' }).first().click()
     const dialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })

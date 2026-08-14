@@ -449,7 +449,15 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   return (
     <div class="ep-root">
-      <Show when={props.agentClient}>
+      {/* The readiness line earns its place only when it says something the
+          list cannot: a credential that will not resolve, a probe that
+          failed, a configured endpoint that is ready. With NO endpoint the
+          list already says so, in the middle of the page and with the button
+          that fixes it — a badge repeating it above the search row is a
+          second sentence for one fact, and the weaker of the two. The ask
+          chip still carries the no-endpoint sentence, because there the list
+          is not on screen and nothing else would say it. */}
+      <Show when={props.agentClient && agentStatus()?.endpointConfigured}>
         <div class="ep-status-row">
           <Badge tone={statusLine()?.tone ?? 'neutral'}>{statusLine()?.text ?? '…'}</Badge>
         </div>
