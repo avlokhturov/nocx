@@ -11,6 +11,7 @@ import type {
   CwdCallback,
   DataCallback,
   MarkerAdapter,
+  NotificationRequestCallback,
   RenderFenceCallback,
   RenderFenceEvent,
   ResizeCallback,
@@ -21,6 +22,7 @@ import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
 import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
+import { parseOscNotification } from '../osc-notification'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -217,6 +219,8 @@ export class XtermRenderer implements TerminalRenderer {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
+  private notificationSubs: NotificationRequestCallback[] = []
+  private notifyOscDisposables: Array<{ dispose(): void }> = []
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private fenceSubs: Array<(event: RenderFenceEvent) => void> = []
@@ -555,6 +559,38 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
+  /** Subscribe to notification requests: a program asked nocx to present a
+   *  message (ADR-0029). OSC 9 and OSC 777 are two spellings of one request,
+   *  so both register here and fan out to one subscriber list — the consumer
+   *  never learns which sequence a program chose, because nothing downstream
+   *  may depend on it.
+   *
+   *  Render-only, exactly like every other OSC on this renderer: the request
+   *  is reported, never granted. This handler decides nothing about where the
+   *  message goes — that is the router's, on the backend — and it cannot,
+   *  because the only thing it can send is the text the program supplied. */
+  onNotification(cb: NotificationRequestCallback): void {
+    this.notificationSubs.push(cb)
+    if (this.notifyOscDisposables.length || !this.term) return
+    for (const ident of [9, 777] as const) {
+      this.notifyOscDisposables.push(
+        this.term.parser.registerOscHandler(ident, (data: string) => {
+          // Untrusted bytes from whatever the user ran. parseOscNotification
+          // is total and returns null rather than throwing; a throw inside a
+          // parser callback would take the renderer down.
+          const parsed = parseOscNotification(ident, data)
+          if (parsed) {
+            for (const sub of this.notificationSubs) sub(parsed)
+          }
+          // false: xterm.js may also handle the ident. This matters for 9 —
+          // the ConEmu progress payload (9;4;…) parses to null here and must
+          // stay available to anything that renders progress.
+          return false
+        }),
+      )
+    }
+  }
+
   onRenderFence(cb: RenderFenceCallback): void {
     this.fenceSubs.push(cb)
     this._ensureFenceOsc()
@@ -657,6 +693,9 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
+    for (const d of this.notifyOscDisposables) d.dispose()
+    this.notifyOscDisposables = []
+    this.notificationSubs = []
     if (this._dprMedia !== null && this._dprChangeHandler !== null) {
       this._dprMedia.removeEventListener('change', this._dprChangeHandler)
       this._dprMedia = null

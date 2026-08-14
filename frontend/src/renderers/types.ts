@@ -1,5 +1,7 @@
 import type { ITheme } from '@xterm/xterm'
 
+import type { OscNotification } from '../osc-notification'
+
 // Renderer-agnostic terminal contract. The backend (PTY over WS) is renderer-
 // agnostic, so any VT frontend just needs to satisfy this small surface:
 // write PTY output in, emit user input out, and report its grid size.
@@ -48,6 +50,12 @@ export interface CommandMarkerEvent extends CommandMarker {
 // The VT frontend parses OSC 133 via parser.registerOscHandler and surfaces
 // each enriched marker as an event — the backend never sniffs the byte stream.
 export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
+
+// NotificationRequestCallback fires when a program asks nocx to present a
+// message (ADR-0029) — OSC 9 or OSC 777. Like every other OSC on this
+// contract the renderer parses and reports; it carries only what the program
+// supplied, and never where the message should go.
+export type NotificationRequestCallback = (request: OscNotification) => void
 
 // RenderFenceEvent — the ADR-0024 §7 carve-out rendezvous: the shell writes
 // ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER a command's output, and
@@ -125,6 +133,16 @@ export interface TerminalRenderer {
   // renderer that does not parse fences degrades to the documented
   // no-fence deferral instead of failing to mount.
   onRenderFence?(cb: RenderFenceCallback): void
+
+  // onNotification registers a callback that fires when a program asks nocx
+  // to present a message (ADR-0029) — OSC 9 or OSC 777, two spellings of one
+  // request, fanned out identically so nothing downstream depends on which
+  // one a program chose. Parse-and-report only: the renderer says a program
+  // asked and never says where the message goes; the backend's router is the
+  // only holder of that. Optional, like onRenderFence, so a renderer that
+  // does not parse these degrades to raising nothing rather than failing to
+  // mount.
+  onNotification?(cb: NotificationRequestCallback): void
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the
   // tab bar always lights the activity indicator on bell.
