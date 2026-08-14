@@ -68,17 +68,17 @@ func shellIntegrateResultFromPlan(plan shellintegration.InBandPlan) shellIntegra
 	}
 }
 
-// sessionShellHandlers answers shell.complete and shell.integrate. Both are
-// per-session operations (SessionOperation via ForSession) whose registry
-// liveness check runs inside the capability; the completion and integration
-// logic itself stays in the handler, on the completion / in-band seams. It
-// holds the operation factory, the Responder and its seams — never the
-// *WSServer.
+// sessionShellHandlers answers shell.complete and shell.integrate. Completion
+// uses a staged SessionTargetOperation: copy immutable route facts while the
+// session gate is held, then release it before remote I/O while retaining the
+// ordinary execution lane. Integration remains a regular SessionOperation.
+// The handler holds the operation factory, the Responder and its seams —
+// never the *WSServer.
 type sessionShellHandlers struct {
 	ops    *capability.SessionOperations // session gate; nil → session store not wired
 	r      Responder
 	local  completion.Completer // shell.complete for KindLocal sessions
-	remote completion.Completer // shell.complete for KindRemote sessions
+	remote RemoteCompleter      // shell.complete for KindRemote sessions
 	inBand InBandBootstrapper   // shell.integrate plan builder
 }
 
@@ -136,13 +136,12 @@ func (h sessionShellHandlers) handleIntegrate(ctx context.Context, req jsonrpcRe
 }
 
 // shellSpecs declares the shell-plane control methods (migration map, "The
-// rest"): shell.complete and shell.integrate run under the per-session
-// SessionOperation (the session gate — the registry liveness check is the
-// capability's) and register on the operation queue; the launcher /
-// footprint methods are seam handlers on the ordinary lane under no
-// operation, holding only the seams the migration map names. The
-// SessionOperations factory is built here from the wired stores and shared
-// across the shell methods.
+// rest"): shell.complete snapshots its session target before remote work;
+// shell.integrate runs under the regular per-session SessionOperation. Both
+// register on the operation queue. The launcher / footprint methods are seam
+// handlers on the ordinary lane under no operation, holding only the seams
+// the migration map names. The SessionOperations factory is built here from
+// the wired stores and shared across the shell methods.
 func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	shellSub := s.operationQueue("shell")

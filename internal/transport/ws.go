@@ -182,9 +182,10 @@ type WSServer struct {
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
 	localCompleter completion.Completer
-	// sshCompleter answers shell.complete for KindRemote sessions.
-	// When nil, the method returns a stated empty reason for SSH sessions.
-	sshCompleter completion.Completer
+	// sshCompleter answers shell.complete for KindRemote sessions with the
+	// exact SSH options captured from the live terminal session. When nil,
+	// the method returns a stated empty reason for SSH sessions.
+	sshCompleter RemoteCompleter
 
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created
@@ -582,15 +583,22 @@ func WithRemoteLifecycle(l ssh.RemoteLifecycle) WSServerOption {
 	return func(s *WSServer) { s.remoteLifecycle = l }
 }
 
+// RemoteCompleter runs one completion against the immutable SSH route copied
+// from the live session. The options are part of the contract: omitting them
+// silently replaces a jump-routed pooled connection with a direct dial.
+type RemoteCompleter interface {
+	Complete(context.Context, completion.Request, ...ssh.ConnectOption) (*completion.Response, error)
+}
+
 // WithCompleters attaches the completion sources for shell.complete
-// (nocx-w7h.15). local answers KindLocal sessions; ssh answers KindRemote
-// sessions through the DiscoveryConn lane. Either may be nil — the handler
-// then returns a stated empty reason for that session kind rather than
-// a JSON-RPC error.
-func WithCompleters(local, ssh completion.Completer) WSServerOption {
+// (nocx-w7h.15). local answers KindLocal sessions; remote answers
+// KindRemote sessions through a DiscoveryConn acquired with that session's
+// exact SSH options. Either may be nil — the handler then returns a stated
+// empty reason for that session kind rather than a JSON-RPC error.
+func WithCompleters(local completion.Completer, remote RemoteCompleter) WSServerOption {
 	return func(s *WSServer) {
 		s.localCompleter = local
-		s.sshCompleter = ssh
+		s.sshCompleter = remote
 	}
 }
 
