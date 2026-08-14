@@ -88,6 +88,12 @@ type ConfigService interface {
 	// bounds the vault calls (mint, rotate, material delete), exactly as
 	// TabbyImportService.CreateSecret's does.
 	ListEndpoints() ([]profile.Endpoint, error)
+	// GetEndpoint returns the stored endpoint with the given id — the
+	// single-record lookup the Test button's credential resolution needs
+	// (nocx-reu5): the probe names the endpoint and the backend resolves
+	// the credential it owns, exactly as connections.test resolves a
+	// profile by its id. profile.ErrEndpointNotFound when none exists.
+	GetEndpoint(id string) (profile.Endpoint, error)
 	// CreateEndpoint stores the endpoint, minting key into the vault first
 	// when it is non-empty: the material must exist before the record
 	// references it (ADR-0011 §4's order, ADR-0030).
@@ -349,6 +355,25 @@ func (s *configService) ListEndpoints() ([]profile.Endpoint, error) {
 		return nil, err
 	}
 	return s.endpoints.LoadEndpoints()
+}
+
+// GetEndpoint returns one stored endpoint by id, or a wrapped
+// profile.ErrEndpointNotFound when none exists — the Test button's
+// credential resolution names a record and the backend resolves its
+// credential (nocx-reu5), so the lookup must be distinguishable from a
+// store failure.
+func (s *configService) GetEndpoint(id string) (profile.Endpoint, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.Endpoint{}, err
+	}
+	ep, err := s.loadEndpoint(id)
+	if err != nil {
+		return profile.Endpoint{}, err
+	}
+	if ep == nil {
+		return profile.Endpoint{}, fmt.Errorf("%s: %w", id, profile.ErrEndpointNotFound)
+	}
+	return *ep, nil
 }
 
 // CreateEndpoint stores the endpoint, minting the key into the vault FIRST

@@ -124,7 +124,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   /** The Test button: probe the form's DRAFT values with a real streaming
    *  completion — what will actually be used, not one cheap completion
-   *  (design §4.5). The first model is the one the picker would use. */
+   *  (design §4.5). The first model is the one the picker would use.
+   *
+   *  When editing a SAVED endpoint the probe NAMES the record (endpointId)
+   *  and the backend resolves the credential it owns — exactly how
+   *  connections.test names a profile. A key typed into the form is sent
+   *  too and WINS on the backend: testing a new key before saving it is
+   *  the other half of what this button is for. The renderer never reads a
+   *  key back (ADR-0030 §3), so it cannot send a stored one. */
   async function runProbe() {
     const d = draft()
     const model = d.models[0]?.name.trim() ?? ''
@@ -137,6 +144,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         baseUrl: d.baseUrl.trim(),
         key: d.key,
         model,
+        ...(editing() ? { endpointId: editing()!.id } : {}),
       })
       setProbeResult(res)
     } catch (err) {

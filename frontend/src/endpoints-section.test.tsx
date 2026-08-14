@@ -518,6 +518,45 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     })
   })
 
+  it('tests a SAVED endpoint by naming it — the key stays blank and the backend resolves the stored credential', async () => {
+    const { container, probeEndpoint } = mount([
+      ep({
+        id: 'endpoint:custom:provider:1',
+        name: 'provider',
+        baseUrl: 'https://api.example.com/v1',
+        credential: 'secrow:0123456789abcdef',
+        models: [{ name: 'gpt-4o', alias: null }],
+      }),
+    ])
+    await waitForRows(container, 1)
+
+    const dialog = openEdit(container, 'provider')
+    // The key field is never pre-filled (ADR-0030 §3) — the record cannot
+    // be read back, and an empty key means "keep the existing material".
+    const keyInput = dialog.querySelector('#endpoint-key') as HTMLInputElement
+    expect(keyInput.value).toBe('')
+
+    clickButton(dialog, 'Test endpoint')
+
+    await vi.waitFor(() => {
+      expect(probeEndpoint).toHaveBeenCalledTimes(1)
+    })
+    // The probe NAMES the record and lets the backend resolve its
+    // credential — exactly how connections.test names a profile. The key
+    // never crosses the wire in the direction the renderer could have sent
+    // it (it has none), and it must not be re-fetched here either.
+    expect(probeEndpoint.mock.calls[0][0]).toEqual({
+      name: 'provider',
+      baseUrl: 'https://api.example.com/v1',
+      key: '',
+      model: 'gpt-4o',
+      endpointId: 'endpoint:custom:provider:1',
+    })
+    await vi.waitFor(() => {
+      expect(dialog.textContent).toContain('Streamed an answer in')
+    })
+  })
+
   it('shows a failed probe as a result, not a crash', async () => {
     const { container, probeEndpoint } = mount()
     await waitForRows(container, 0)

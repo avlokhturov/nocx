@@ -1461,7 +1461,14 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		// connections.test; agent.status is a fast config read under the
 		// config queue.
 		regResponder(s.agentProbeSub, "endpoints.probe", func(r Responder) handlerFunc {
-			h := assistantProbeHandlers{client: s.assistantClient, probes: s.assistantProbes, wired: s.assistantClient != nil, r: r}
+			// op + secrets are the credential resolution (nocx-reu5): the
+			// probe names a saved endpoint and the backend resolves the
+			// credential it owns — the same seams agent.status holds.
+			h := assistantProbeHandlers{
+				op: configOp, secrets: s.credentials,
+				client: s.assistantClient, probes: s.assistantProbes,
+				wired: s.assistantClient != nil, r: r,
+			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
 		regResponder(configSub, "agent.status", func(r Responder) handlerFunc {
