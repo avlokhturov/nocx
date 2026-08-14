@@ -35,6 +35,7 @@ import {
   makeBanner,
   makeSession,
   integrationHandler,
+  lifecycleHandler,
   type ClipboardFake,
   type ClientFake,
   type LiveContentHeightSpy,
@@ -1112,7 +1113,7 @@ describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
       // The LifecycleClient subscribed through the fake dispatcher.
       const subscribe = client.dispatcher.subscribe
       expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       // An authenticated prompt_ready fact for a live domain gives the
       // editor the keyboard.
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -1139,8 +1140,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       const ed = editorOf(content)
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const setAction = vi.spyOn(ed, 'setRecoveryAction')
 
       // The interval: from the lost fact until the acknowledgement lands,
@@ -1165,8 +1165,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       const renderer = rendererOf(content)
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const call = client.dispatcher.call
       handler(LOST_WITH_RECOVERY)
 
@@ -1197,8 +1196,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       const ed = editorOf(content)
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const setAction = vi.spyOn(ed, 'setRecoveryAction')
       handler(LOST_WITH_RECOVERY)
       rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
@@ -1224,8 +1222,7 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
     const client = makeClient()
     const { teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const call = client.dispatcher.call
 
       // No generation on the fact: there is no establishment episode open,
@@ -1233,14 +1230,18 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
 
-      // The establishment fact carries the backend-minted generation.
-      handler({
+      // A live transition and the post-open replay can carry the same
+      // backend-minted generation. Both apply idempotently, but only one
+      // acknowledgement may claim the generation.
+      const establishment = {
         lane: 'lane-1',
         lifecycle: 'prompt_ready',
         domain: 'd1',
         epoch: 1,
         generation: 'est-0000000000000000',
-      })
+      } as const
+      handler(establishment)
+      handler(establishment)
       const sid = client._sessions[0].sessionId
       expect(call).toHaveBeenCalledWith('lifecycle.establishAck', {
         sessionId: sid,
@@ -1261,8 +1262,7 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
     const client = makeClient()
     const { teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const call = client.dispatcher.call
       // native and lost carry no establishment; a running fact is past the
       // gate. None of them may release an accept.
@@ -1584,7 +1584,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   it('a local tab with no remote domain scopes to the local machine', async () => {
@@ -1725,7 +1725,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   it('the native escape holds through a later prompt_ready fact — the input router (ADR-0024 §6)', async () => {
@@ -2275,7 +2275,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   it('two shell-originated attempts keep their own blocks while the first is still settling its fence (nocx-m87n)', async () => {
@@ -2650,7 +2650,7 @@ describe('alt-screen exit and the ready prompt present the structured layout (no
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   const scrollbackOf = (content: TerminalContent): ScrollbackController =>
@@ -2760,7 +2760,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   /** Dispatch a keydown exactly where a user's keystroke lands. */

@@ -116,6 +116,7 @@ async function connectAndAccept(d: Dispatcher): Promise<void> {
 
 function fact(over: Partial<LifecycleChanged> = {}): LifecycleChanged {
   return {
+    sessionId: 'sid-2',
     lane: 'lane-1',
     lifecycle: 'prompt_ready',
     domain: 'dom-1',
@@ -130,7 +131,7 @@ describe('LifecycleClient', () => {
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
-    client.subscribeLifecycleChanged(handler)
+    client.subscribeLifecycleChanged('sid-2', handler)
 
     const f = fact({ lifecycle: 'running', attempt: { id: 'a1', state: 'open' } })
     lastSocket().deliver({ method: 'lifecycle.changed', params: f })
@@ -139,12 +140,29 @@ describe('LifecycleClient', () => {
     expect(handler).toHaveBeenCalledWith(f)
   })
 
+  it('delivers a shared-socket notification only to its owning session', async () => {
+    const dispatcher = new Dispatcher()
+    await connectAndAccept(dispatcher)
+    const client = new LifecycleClient(dispatcher)
+    const first = vi.fn()
+    const second = vi.fn()
+    client.subscribeLifecycleChanged('sid-1', first)
+    client.subscribeLifecycleChanged('sid-2', second)
+
+    const f = fact({ lifecycle: 'running', attempt: { id: 'a1', state: 'open' } })
+    lastSocket().deliver({ method: 'lifecycle.changed', params: f })
+
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledOnce()
+    expect(second).toHaveBeenCalledWith(f)
+  })
+
   it('does not deliver a payload without a lane (not a fact)', async () => {
     const dispatcher = new Dispatcher()
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
-    client.subscribeLifecycleChanged(handler)
+    client.subscribeLifecycleChanged('sid-2', handler)
 
     lastSocket().deliver({ method: 'lifecycle.changed', params: { lifecycle: 'lost' } })
     lastSocket().deliver({ method: 'lifecycle.changed', params: null })
@@ -157,7 +175,7 @@ describe('LifecycleClient', () => {
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
-    const unsub = client.subscribeLifecycleChanged(handler)
+    const unsub = client.subscribeLifecycleChanged('sid-2', handler)
     unsub()
 
     lastSocket().deliver({ method: 'lifecycle.changed', params: fact() })

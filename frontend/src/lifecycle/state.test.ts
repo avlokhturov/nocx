@@ -16,7 +16,6 @@
 //   - no boolean named `trusted` exists anywhere in the module.
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import type { LifecycleChanged } from '../generated/lifecycle.changed'
 import {
   LifecycleKernel,
   shouldShowEditor,
@@ -25,6 +24,7 @@ import {
   completeAttempt,
   freezeBlock,
   type ExecutionAttempt,
+  type LifecycleFact,
   type LifecycleState,
 } from './state'
 import {
@@ -37,15 +37,15 @@ import {
 
 const LANE = 'lane-1'
 
-function promptReady(domain = 'd1', epoch = 1): LifecycleChanged {
+function promptReady(domain = 'd1', epoch = 1): LifecycleFact {
   return { lane: LANE, lifecycle: 'prompt_ready', domain, epoch }
 }
 
 function running(
   domain = 'd1',
   epoch = 1,
-  attempt: Partial<NonNullable<LifecycleChanged['attempt']>> = {},
-): LifecycleChanged {
+  attempt: Partial<NonNullable<LifecycleFact['attempt']>> = {},
+): LifecycleFact {
   return {
     lane: LANE,
     lifecycle: 'running',
@@ -55,15 +55,15 @@ function running(
   }
 }
 
-function desynchronized(domain = 'd1', epoch = 1): LifecycleChanged {
+function desynchronized(domain = 'd1', epoch = 1): LifecycleFact {
   return { lane: LANE, lifecycle: 'desynchronized', domain, epoch }
 }
 
-function nativeF(): LifecycleChanged {
+function nativeF(): LifecycleFact {
   return { lane: LANE, lifecycle: 'native' }
 }
 
-function lostF(): LifecycleChanged {
+function lostF(): LifecycleFact {
   return { lane: LANE, lifecycle: 'lost' }
 }
 
@@ -451,7 +451,7 @@ describe('the lifecycle kernel (ADR-0024 §6)', () => {
 })
 
 describe('authority derivations (ADR-0024)', () => {
-  function minted(over: Partial<LifecycleChanged> = {}): LifecycleChanged {
+  function minted(over: Partial<LifecycleFact> = {}): LifecycleFact {
     return { lane: LANE, lifecycle: 'prompt_ready', domain: 'd1', epoch: 1, ...over }
   }
   const d = (): IntegrationDomain => mintDomain(minted()) as IntegrationDomain

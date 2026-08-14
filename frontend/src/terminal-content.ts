@@ -311,6 +311,11 @@ export class TerminalContent extends BaseTabContent {
    *  be sighted more than once before the await resolves, and only the
    *  first sighting may claim the episode. */
   private _recoveryAcking = false
+  /** Last establishment generation acknowledged by this tab. Replays are
+   *  intentionally idempotent; the same published projection may arrive from
+   *  a live transition and the post-open/reconnect replay, but only one
+   *  acknowledgement may claim a generation. */
+  private _establishmentAckedGeneration: string | null = null
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -1187,75 +1192,6 @@ export class TerminalContent extends BaseTabContent {
         }
       })
 
-      // ── The authenticated lifecycle (ADR-0024 §6, decision 7) ──────────
-      // The published fact is the ONLY input to the lifecycle kernel: no
-      // stream sequence reaches it, and the eslint Rule 9 boundary forbids
-      // the import that would create a path. The backend routes facts to
-      // this session's lane; the kernel adopts the first lane and rejects
-      // the rest.
-      this._lifecycleUnsub = new LifecycleClient(this.client.dispatcher).subscribeLifecycleChanged(
-        (fact) => {
-          // ADR-0024 decision 8: a lost fact carrying a recovery contract
-          // opens a restoration episode — the channel died while the shell
-          // was reachable, and the shell will restore its visible native
-          // prompt at the next prompt boundary, writing the one-shot fence.
-          // From this instant until the acknowledgement lands, the session
-          // is neither an authenticated terminal nor advertised as a usable
-          // conventional one (the capability rail is suppressed below; the
-          // editor holds no authority and offers none). A native fact ends
-          // the episode.
-          if (fact.lifecycle === 'lost' && fact.recovery) {
-            this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
-          } else if (fact.lifecycle === 'native') {
-            this._recovery = null
-          }
-          // The kernel applies the fact and notifies onChange on a real
-          // change; the ownership sync runs there, once.
-          this.lifecycle.applyFact(fact)
-          // ADR-0024 decision 9: the establishment is acknowledged only
-          // AFTER the presentation is committed — applyFact above is what
-          // makes the editor available (ownership syncs on its onChange).
-          // The backend flushes the pending accept, and the shell may
-          // suppress its native prompt, ONLY on this acknowledgement for
-          // this exact generation. Without it the handshake times out and
-          // the session stays conventional with a visible prompt, which is
-          // the fail-open direction: no window in which the prompt is
-          // suppressed and no editor exists.
-          if (fact.lifecycle === 'prompt_ready' && fact.generation && this.session) {
-            new LifecycleClient(this.client.dispatcher)
-              .establishAck(
-                this.session.sessionId,
-                fact.lane,
-                fact.domain ?? '',
-                fact.epoch ?? 0,
-                fact.generation,
-              )
-              .catch((e: unknown) => {
-                // A refusal is the backend's own bookkeeping (stale
-                // generation, superseded establishment, replaced
-                // subscriber). The accept stays unflushed and the session
-                // stays conventional — safe, and nothing to retry here.
-                //
-                // The MESSAGE, not just the error object: five distinct
-                // backend rules all refuse with -32603, and logging the
-                // error alone rendered as `{"code":-32603,"name":"RpcError"}`
-                // — identical for every one of them. A reader could see that
-                // the handshake had been refused and never which rule did it,
-                // which is how the cause of six failing specs stayed
-                // "unknown" across three triage rounds (nocx-cbtc). The
-                // backend names the rule in its own log; this is the half a
-                // trace carries.
-                log.warn('nocx: establishment acknowledgement refused', {
-                  reason: e instanceof Error ? e.message : String(e),
-                  generation: fact.generation,
-                  lane: fact.lane,
-                  domain: fact.domain ?? '',
-                  epoch: fact.epoch ?? 0,
-                })
-              })
-          }
-        },
-      )
       // Match the shell's one-shot recovery fence in the render stream — an
       // explicit rendezvous, never a grid inspection or a pattern-matched
       // prompt (decision 1 carve-out). Only after BOTH the fence matched
@@ -1592,6 +1528,82 @@ export class TerminalContent extends BaseTabContent {
 
       this.session = session
       log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
+      // ── The authenticated lifecycle (ADR-0024 §6, decision 7) ──────────
+      // The published fact is the ONLY input to the lifecycle kernel: no
+      // stream sequence reaches it, and the eslint Rule 9 boundary forbids
+      // the import that would create a path. The backend routes facts to
+      // this session's lane; the kernel adopts the first lane and rejects
+      // the rest.
+      this._lifecycleUnsub = new LifecycleClient(this.client.dispatcher).subscribeLifecycleChanged(
+        session.sessionId,
+        (fact) => {
+          // ADR-0024 decision 8: a lost fact carrying a recovery contract
+          // opens a restoration episode — the channel died while the shell
+          // was reachable, and the shell will restore its visible native
+          // prompt at the next prompt boundary, writing the one-shot fence.
+          // From this instant until the acknowledgement lands, the session
+          // is neither an authenticated terminal nor advertised as a usable
+          // conventional one (the capability rail is suppressed below; the
+          // editor holds no authority and offers none). A native fact ends
+          // the episode.
+          if (fact.lifecycle === 'lost' && fact.recovery) {
+            this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+          } else if (fact.lifecycle === 'native') {
+            this._recovery = null
+          }
+          // The kernel applies the fact and notifies onChange on a real
+          // change; the ownership sync runs there, once.
+          this.lifecycle.applyFact(fact)
+          // ADR-0024 decision 9: the establishment is acknowledged only
+          // AFTER the presentation is committed — applyFact above is what
+          // makes the editor available (ownership syncs on its onChange).
+          // The backend flushes the pending accept, and the shell may
+          // suppress its native prompt, ONLY on this acknowledgement for
+          // this exact generation. Without it the handshake times out and
+          // the session stays conventional with a visible prompt, which is
+          // the fail-open direction: no window in which the prompt is
+          // suppressed and no editor exists.
+          if (
+            fact.lifecycle === 'prompt_ready' &&
+            fact.generation &&
+            fact.generation !== this._establishmentAckedGeneration &&
+            this.session
+          ) {
+            this._establishmentAckedGeneration = fact.generation
+            new LifecycleClient(this.client.dispatcher)
+              .establishAck(
+                this.session.sessionId,
+                fact.lane,
+                fact.domain ?? '',
+                fact.epoch ?? 0,
+                fact.generation,
+              )
+              .catch((e: unknown) => {
+                // A refusal is the backend's own bookkeeping (stale
+                // generation, superseded establishment, replaced
+                // subscriber). The accept stays unflushed and the session
+                // stays conventional — safe, and nothing to retry here.
+                //
+                // The MESSAGE, not just the error object: five distinct
+                // backend rules all refuse with -32603, and logging the
+                // error alone rendered as `{"code":-32603,"name":"RpcError"}`
+                // — identical for every one of them. A reader could see that
+                // the handshake had been refused and never which rule did it,
+                // which is how the cause of six failing specs stayed
+                // "unknown" across three triage rounds (nocx-cbtc). The
+                // backend names the rule in its own log; this is the half a
+                // trace carries.
+                log.warn('nocx: establishment acknowledgement refused', {
+                  reason: e instanceof Error ? e.message : String(e),
+                  generation: fact.generation,
+                  lane: fact.lane,
+                  domain: fact.domain ?? '',
+                  epoch: fact.epoch ?? 0,
+                })
+              })
+          }
+        },
+      )
 
       // The open ack carries the resolved launch policy and the refusal
       // reason (nocx-4t37.2): the capability control starts from the

@@ -11,19 +11,19 @@
 //
 // The wire shape is guarded at the boundary like files.changed and git.changed
 // (the same unsolicited-notification defect class): a payload without a string
-// lane is not a fact and is not delivered.
+// sessionId/lane pair is not a fact, and a session receives only its own facts.
 
 import type { Dispatcher } from '../dispatcher'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import type { LifecycleFact } from './state'
 import type { LifecycleRecoverAck } from '../generated/lifecycle.recoverAck'
 import type { LifecycleEstablishAck } from '../generated/lifecycle.establishAck'
 import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttempt'
 
-/** One lifecycle fact, delivered to a subscriber with its lane intact. The
- *  lane is what lets the projection attach the fact to the right tab's state
- *  machine; a fact is routed to the lane's own session, and the renderer
- *  filters nothing. */
-export type LifecycleFactHandler = (fact: LifecycleChanged) => void
+/** One lifecycle fact after routing by its server-authoritative session id.
+ *  The lane then lets that session's projection attach the fact to the right
+ *  state machine. */
+export type LifecycleFactHandler = (fact: LifecycleFact) => void
 
 /** The payload of lifecycle.submitAttempt: the app-owned half of a command's
  *  execution, declared before the bytes that can cause the shell's own start
@@ -44,13 +44,15 @@ export interface LifecycleSubmitAttemptParams {
 export class LifecycleClient {
   constructor(private dispatcher: Dispatcher) {}
 
-  /** Subscribe to the server-initiated lifecycle.changed notification: the
-   *  per-lane authority axis (Native | PromptReady(domain) | Running(attempt)
-   *  | Desynchronized(domain) | Lost). Returns the unsubscribe. */
-  subscribeLifecycleChanged(handler: LifecycleFactHandler): () => void {
+  /** Subscribe to this session's server-initiated lifecycle.changed facts:
+   *  the per-lane authority axis (Native | PromptReady(domain) |
+   *  Running(attempt) | Desynchronized(domain) | Lost). The WebSocket is
+   *  shared by every tab, so routing by the server-authoritative session id
+   *  happens here before a surface can mutate or acknowledge state. */
+  subscribeLifecycleChanged(sessionId: string, handler: LifecycleFactHandler): () => void {
     return this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
       const p = params as LifecycleChanged
-      if (p && typeof p.lane === 'string') handler(p)
+      if (p && p.sessionId === sessionId && typeof p.lane === 'string') handler(p)
     })
   }
 

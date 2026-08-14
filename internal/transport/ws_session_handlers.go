@@ -64,6 +64,9 @@ type openMachine interface {
 	replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUp(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUpLocal()
+	// Replays any lifecycle fact that arrived while open was still dialing.
+	// Called only after the result has published the authoritative session id.
+	replayLifecycleFacts(sid session.ID)
 	// The session integration axis (nocx-dvql): the remote registration
 	// from the connect path's own decision, and the first emission — which
 	// must happen AFTER the open ack (AD-7).
@@ -316,7 +319,6 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		_ = respond(wconn, resp)
 		return
 	}
-	rx.setSubscriber(wconn, state)
 
 	// Port discovery (nocx-wzc4.2): only now, once the session is fully
 	// established (ring created, subscriber attached) is the target "up" —
@@ -356,12 +358,14 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = respond(wconn, resp)
 
-	// The session's integration axis, AFTER the ack. AD-7: the ack must
-	// precede the session's own traffic in both directions, and the launch
-	// (which registered the axis) ran inside the dial above — a
-	// notification sent from there would reach a renderer whose sessionId
-	// is still null and be dropped.
-	//
+	// Every session-scoped notification must follow the open result (AD-7).
+	// Install the subscriber only now: lifecycle can authenticate during the
+	// dial above, and publishing it to this shared WebSocket before the
+	// renderer knows sessionId lets an existing tab claim the fact. The
+	// current projection is replayed immediately after installation, so a
+	// fact dropped during the pre-result window is not lost.
+	rx.setSubscriber(wconn, state)
+	h.sess.replayLifecycleFacts(sess.ID())
 	// A remote session's launch-time refusal is registered here rather than
 	// at the dial because ShellIntegrationReason is the ssh channel's own
 	// answer and this is where the session first exists as a session. A
