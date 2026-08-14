@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
@@ -385,5 +386,209 @@ func TestEndpointsProbe_Unwired(t *testing.T) {
 	})
 	if !strings.Contains(string(raw), "-32601") {
 		t.Fatalf("endpoints.probe without an engine = %s, want -32601", raw)
+	}
+}
+
+// ── endpoints.probe: the credential resolution rule (nocx-reu5) ──────────
+
+// secretMaterial reads a credential.Secret's plaintext for an assertion.
+func secretMaterial(t *testing.T, s credential.Secret) string {
+	t.Helper()
+	var material string
+	if err := s.Use(func(b []byte) error {
+		material = string(b)
+		return nil
+	}); err != nil {
+		t.Fatalf("Use: %v", err)
+	}
+	return material
+}
+
+// The saved-endpoint case the button exists for: an EMPTY key field probes
+// with the credential the endpoint OWNS — resolved by the backend from the
+// vault, never re-sent by the renderer (ADR-0030 §3). The draft's baseUrl
+// and model stay the probe target; only the credential is resolved.
+func TestEndpointsProbe_SavedEndpointResolvesStoredCredential(t *testing.T) {
+	var got assistant.ProbeParams
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			got = p
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, At: time.Now()}, nil
+		},
+	})
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, map[string]any{
+		"name":    "OpenAI",
+		"baseUrl": "http://127.0.0.1:11434/v1",
+		"schema":  "openai-compatible",
+		"key":     "sk-stored-123",
+		"models":  []map[string]any{{"name": "qwen3"}},
+	})
+
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"endpointId": created.ID,
+		"name":       "OpenAI",
+		"baseUrl":    "http://127.0.0.1:11434/v1",
+		"key":        "",
+		"model":      "qwen3",
+	})
+	if isErrorResponse(t, raw) {
+		t.Fatalf("endpoints.probe on a saved endpoint: %s", raw)
+	}
+	if got.Key.IsEmpty() {
+		t.Fatal("engine received an empty key, want the stored credential")
+	}
+	if material := secretMaterial(t, got.Key); material != "sk-stored-123" {
+		t.Fatalf("engine key = %q, want the stored credential sk-stored-123", material)
+	}
+	if got.BaseURL != "http://127.0.0.1:11434/v1" || got.Model != "qwen3" {
+		t.Fatalf("engine got %+v, want the draft's target", got)
+	}
+}
+
+// A key typed into the form WINS over the stored one — testing a new key
+// before saving it is the other half of what the button is for. The stored
+// credential must not be consulted (or dialled) when the form has a key.
+func TestEndpointsProbe_TypedKeyWinsOverStored(t *testing.T) {
+	var got assistant.ProbeParams
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			got = p
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, At: time.Now()}, nil
+		},
+	})
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, map[string]any{
+		"name":    "OpenAI",
+		"baseUrl": "http://127.0.0.1:11434/v1",
+		"schema":  "openai-compatible",
+		"key":     "sk-stored-123",
+		"models":  []map[string]any{{"name": "qwen3"}},
+	})
+
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"endpointId": created.ID,
+		"name":       "OpenAI",
+		"baseUrl":    "http://127.0.0.1:11434/v1",
+		"key":        "sk-typed-456",
+		"model":      "qwen3",
+	})
+	if isErrorResponse(t, raw) {
+		t.Fatalf("endpoints.probe with a typed key: %s", raw)
+	}
+	if material := secretMaterial(t, got.Key); material != "sk-typed-456" {
+		t.Fatalf("engine key = %q, want the TYPED key sk-typed-456 — a typed key must win over the stored one", material)
+	}
+}
+
+// A sealed vault with a saved credential is a probe RESULT naming that —
+// never a Go error, never a silent no-key dial (which would 401 and lie).
+// The engine must not be called at all.
+func TestEndpointsProbe_SealedVaultIsAResult(t *testing.T) {
+	called := false
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			called = true
+			return assistant.ProbeResult{OK: true}, nil
+		},
+	})
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, map[string]any{
+		"name":    "OpenAI",
+		"baseUrl": "http://127.0.0.1:11434/v1",
+		"schema":  "openai-compatible",
+		"key":     "sk-stored-123",
+		"models":  []map[string]any{{"name": "qwen3"}},
+	})
+	h.v.Seal()
+
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"endpointId": created.ID,
+		"name":       "OpenAI",
+		"baseUrl":    "http://127.0.0.1:11434/v1",
+		"key":        "",
+		"model":      "qwen3",
+	})
+	if isErrorResponse(t, raw) {
+		t.Fatalf("a sealed vault must be a probe RESULT, not an RPC error: %s", raw)
+	}
+	if called {
+		t.Fatal("the engine was called without a credential — the probe must refuse, not dial unauthenticated")
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\nraw: %s", err, raw)
+	}
+	var res assistant.ProbeResult
+	if err := json.Unmarshal(env.Result, &res); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, env.Result)
+	}
+	if res.OK || !strings.Contains(res.Error, "unlock the vault") {
+		t.Fatalf("result = %+v, want !OK naming the sealed vault", res)
+	}
+	// The outcome is recorded: agent.status reports the last probe whatever
+	// the endpoint list says now.
+	if last := h.probes.Last(); last == nil || last.OK {
+		t.Fatalf("probe store last = %+v, want the recorded sealed-vault outcome", last)
+	}
+}
+
+// An endpoint with NO credential (a local model) still probes without one.
+func TestEndpointsProbe_KeylessEndpointProbesWithoutAKey(t *testing.T) {
+	var got assistant.ProbeParams
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			got = p
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, At: time.Now()}, nil
+		},
+	})
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, map[string]any{
+		"name":    "Local",
+		"baseUrl": "http://127.0.0.1:11434/v1",
+		"schema":  "openai-compatible",
+		"models":  []map[string]any{{"name": "qwen3"}},
+	})
+
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"endpointId": created.ID,
+		"name":       "Local",
+		"baseUrl":    "http://127.0.0.1:11434/v1",
+		"key":        "",
+		"model":      "qwen3",
+	})
+	if isErrorResponse(t, raw) {
+		t.Fatalf("endpoints.probe on a keyless endpoint: %s", raw)
+	}
+	if !got.Key.IsEmpty() {
+		t.Fatal("engine received a key, want none for a credential-less endpoint")
+	}
+}
+
+// The renderer names a record that does not exist (deleted meanwhile): a
+// caller error, exactly as connections.test surfaces a profile that does
+// not resolve — never a fabricated probe verdict.
+func TestEndpointsProbe_UnknownEndpointIsAnRPCError(t *testing.T) {
+	called := false
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			called = true
+			return assistant.ProbeResult{OK: true}, nil
+		},
+	})
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"endpointId": "endpoint:custom:nope:1",
+		"name":       "OpenAI",
+		"baseUrl":    "http://127.0.0.1:11434/v1",
+		"key":        "",
+		"model":      "qwen3",
+	})
+	if !strings.Contains(string(raw), "-32603") {
+		t.Fatalf("endpoints.probe with an unknown endpoint id = %s, want -32603", raw)
+	}
+	if called {
+		t.Fatal("the engine was called for an endpoint that does not exist")
 	}
 }

@@ -471,3 +471,43 @@ func TestEndpointDelete_MaterialDeleteFails_RecordStillGone(t *testing.T) {
 		t.Fatalf("endpoints = %+v, want none", eps)
 	}
 }
+
+// GetEndpoint names one record by id — the lookup the Test button's
+// credential resolution needs (nocx-reu5): the probe names the endpoint and
+// the backend resolves the credential it owns, exactly as connections.test
+// resolves a profile by its id. A missing id is a NAMED sentinel so the
+// caller can tell "no such endpoint" from a store failure.
+func TestEndpointGet_ReturnsStoredRecord(t *testing.T) {
+	op, _, _ := newEndpointEnv(t, &fakeEndpointSecrets{})
+	if err := runConfig(t, op, func(ctx context.Context, svc capability.ConfigService) error {
+		_, err := svc.CreateEndpoint(ctx, testEndpoint(), credential.Secret{})
+		return err
+	}); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+
+	want := testEndpoint()
+	if err := runConfig(t, op, func(ctx context.Context, svc capability.ConfigService) error {
+		got, err := svc.GetEndpoint(want.ID)
+		if err != nil {
+			return err
+		}
+		if got.ID != want.ID || got.BaseURL != want.BaseURL || got.Schema != want.Schema {
+			t.Errorf("GetEndpoint = %+v, want the stored record %+v", got, want)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("GetEndpoint: %v", err)
+	}
+}
+
+func TestEndpointGet_MissingIDIsANamedSentinel(t *testing.T) {
+	op, _, _ := newEndpointEnv(t, &fakeEndpointSecrets{})
+	err := runConfig(t, op, func(ctx context.Context, svc capability.ConfigService) error {
+		_, err := svc.GetEndpoint("endpoint:custom:nope:1")
+		return err
+	})
+	if !errors.Is(err, profile.ErrEndpointNotFound) {
+		t.Fatalf("GetEndpoint for a missing id = %v, want profile.ErrEndpointNotFound", err)
+	}
+}

@@ -440,4 +440,80 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(blockQ1.locator('.cmd-header-exit')).toHaveText('completed')
     await expect(blockQ2.locator('.cmd-header-exit')).toHaveText('completed')
   })
+
+  test('the Test button on a saved endpoint probes with the STORED credential, and a typed key wins (nocx-reu5)', async ({
+    page,
+  }) => {
+    // The serial describe shares one backend; the first endpoint-creating
+    // test above set up the vault and minted a key into it, so a save with
+    // a key works from here without the setup sheet.
+    await openApp(page)
+    await openAIEndpoints(page)
+    await expect(page.locator(STATUS_ROW)).toContainText('Ready', { timeout: 10_000 })
+
+    const name = `E2E Probe ${nonce}`
+    const storedKey = `stored-key-${nonce}`
+    await page.getByRole('button', { name: '+ New endpoint' }).first().click()
+    const newDialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
+    await expect(newDialog).toBeVisible()
+    await newDialog.locator('#endpoint-name').fill(name)
+    await newDialog.locator('#endpoint-base-url').fill(fake.baseUrl())
+    await newDialog.locator('#endpoint-key').fill(storedKey)
+    await newDialog.getByRole('button', { name: 'Add model' }).click()
+    await newDialog.locator('#endpoint-model-0-name').fill('e2e-model')
+    await newDialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
+    await expect(newDialog).not.toBeVisible({ timeout: 10_000 })
+
+    // ── Stored credential, blank key field ──────────────────────────────
+    // Open the saved endpoint for editing. The key field is BLANK by
+    // design (ADR-0030 §3 — the material never crosses back), and the
+    // probe must still authenticate with the credential the endpoint
+    // OWNS, resolved by the backend from the vault.
+    await page.getByRole('button', { name: `Edit ${name}` }).click()
+    const editDialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
+    await expect(editDialog).toBeVisible()
+    const keyInput = editDialog.locator('#endpoint-key')
+    await expect(keyInput).toHaveValue('')
+
+    let base = fake.requests().length
+    await editDialog.getByRole('button', { name: 'Test endpoint' }).click()
+    let reqs = await fake.waitForRequests(base + 1)
+    expect(reqs[base].authorization).toBe(`Bearer ${storedKey}`)
+    // The probe succeeded end to end — a streamed answer through the real
+    // backend, not merely a request that arrived.
+    await expect(editDialog).toContainText('Streamed an answer in', { timeout: 15_000 })
+    // The key was never sent back to the renderer: the field is still
+    // blank after a probe that resolved the stored material.
+    await expect(keyInput).toHaveValue('')
+
+    // ── A key typed into the form WINS over the stored one ──────────────
+    const typedKey = `typed-key-${nonce}`
+    await keyInput.fill(typedKey)
+    base = fake.requests().length
+    await editDialog.getByRole('button', { name: 'Test endpoint' }).click()
+    reqs = await fake.waitForRequests(base + 1)
+    expect(reqs[base].authorization).toBe(`Bearer ${typedKey}`)
+    await expect(editDialog).toContainText('Streamed an answer in', { timeout: 15_000 })
+
+    // ── No credential at all (a local model) still probes without one ───
+    await editDialog.getByRole('button', { name: 'Cancel' }).click()
+    const localName = `E2E Local ${nonce}`
+    await page.getByRole('button', { name: '+ New endpoint' }).first().click()
+    const localDialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
+    await expect(localDialog).toBeVisible()
+    await localDialog.locator('#endpoint-name').fill(localName)
+    await localDialog.locator('#endpoint-base-url').fill(fake.baseUrl())
+    await localDialog.getByRole('button', { name: 'Add model' }).click()
+    await localDialog.locator('#endpoint-model-0-name').fill('e2e-model')
+    await localDialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
+    await expect(localDialog).not.toBeVisible({ timeout: 10_000 })
+    await page.getByRole('button', { name: `Edit ${localName}` }).click()
+    const localEdit = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
+    await expect(localEdit).toBeVisible()
+    base = fake.requests().length
+    await localEdit.getByRole('button', { name: 'Test endpoint' }).click()
+    reqs = await fake.waitForRequests(base + 1)
+    expect(reqs[base].authorization).toBe('')
+    await expect(localEdit).toContainText('Streamed an answer in', { timeout: 15_000 })
+  })
 })

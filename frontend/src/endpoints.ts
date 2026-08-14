@@ -79,17 +79,25 @@ export class EndpointClient {
   }
 
   /**
-   * The Test button (nocx-edio, design §4.5): probes the form's DRAFT
-   * values with a real streaming completion — what will actually be used,
-   * not one cheap completion. The key is an input that rides the params
-   * once and never crosses back (ADR-0030). The model tested is the
+   * The Test button (nocx-edio, design §4.5; nocx-reu5): probes the form's
+   * DRAFT values with a real streaming completion — what will actually be
+   * used, not one cheap completion. The key is an input that rides the
+   * params once and never crosses back (ADR-0030). The model tested is the
    * form's first model.
+   *
+   * endpointId names the record when the form is editing a SAVED endpoint
+   * and the key field is blank: the BACKEND then resolves the credential
+   * that endpoint owns, exactly as connections.test resolves a profile by
+   * its id. A key typed into the form always wins over the stored one (the
+   * backend's rule) — the renderer never reads a key back, so it never has
+   * a stored key to send.
    */
   probeEndpoint(input: {
     name: string
     baseUrl: string
     key: string
     model: string
+    endpointId?: string
   }): Promise<EndpointsProbeResult> {
     return this.dispatcher.call<EndpointsProbeResult>('endpoints.probe', input)
   }
