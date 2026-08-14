@@ -11,19 +11,27 @@
 //
 // The wire shape is guarded at the boundary like files.changed and git.changed
 // (the same unsolicited-notification defect class): a payload without a string
-// lane is not a fact and is not delivered.
+// sessionId/lane pair is not a fact, and a session receives only its own facts.
 
 import type { Dispatcher } from '../dispatcher'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
+import type { LifecycleFact } from './state'
 import type { LifecycleRecoverAck } from '../generated/lifecycle.recoverAck'
 import type { LifecycleEstablishAck } from '../generated/lifecycle.establishAck'
 import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttempt'
 
-/** One lifecycle fact, delivered to a subscriber with its lane intact. The
- *  lane is what lets the projection attach the fact to the right tab's state
- *  machine; a fact is routed to the lane's own session, and the renderer
- *  filters nothing. */
-export type LifecycleFactHandler = (fact: LifecycleChanged) => void
+/** One lifecycle fact after routing by its server-authoritative session id.
+ *  The lane then lets that session's projection attach the fact to the right
+ *  state machine. */
+export type LifecycleFactHandler = (fact: LifecycleFact) => void
+/** A lifecycle subscription is installed before session.open starts, then
+ *  bound exactly once to the server-authoritative session id from its result.
+ *  Facts can arrive between those two events: keep the latest projection for
+ *  each {session, lane}, then deliver only the bound session. */
+export interface LifecycleChangedSubscription {
+  bindSession: (sessionId: string) => void
+  unsubscribe: () => void
+}
 
 /** The payload of lifecycle.submitAttempt: the app-owned half of a command's
  *  execution, declared before the bytes that can cause the shell's own start
@@ -44,14 +52,42 @@ export interface LifecycleSubmitAttemptParams {
 export class LifecycleClient {
   constructor(private dispatcher: Dispatcher) {}
 
-  /** Subscribe to the server-initiated lifecycle.changed notification: the
-   *  per-lane authority axis (Native | PromptReady(domain) | Running(attempt)
-   *  | Desynchronized(domain) | Lost). Returns the unsubscribe. */
-  subscribeLifecycleChanged(handler: LifecycleFactHandler): () => void {
-    return this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
+  /** Subscribe before session.open so the result and its immediately following
+   *  replay cannot overtake registration. Until bindSession supplies the
+   *  server-authoritative id, retain only the latest projection per
+   *  {session, lane}; this is the same state ReplayLane would publish and keeps
+   *  unrelated shared-socket traffic bounded. Binding filters before any
+   *  surface can mutate or acknowledge state. */
+  subscribeLifecycleChanged(handler: LifecycleFactHandler): LifecycleChangedSubscription {
+    let sessionId: string | null = null
+    let closed = false
+    const pending = new Map<string, LifecycleChanged>()
+    const unsubscribe = this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
       const p = params as LifecycleChanged
-      if (p && typeof p.lane === 'string') handler(p)
+      if (!p || typeof p.sessionId !== 'string' || typeof p.lane !== 'string') return
+      if (sessionId === null) {
+        pending.set(`${p.sessionId}\u0000${p.lane}`, p)
+        return
+      }
+      if (p.sessionId === sessionId) handler(p)
     })
+    return {
+      bindSession: (authoritativeSessionId: string): void => {
+        if (closed) return
+        if (sessionId !== null) throw new Error('lifecycle subscription is already bound')
+        sessionId = authoritativeSessionId
+        for (const fact of pending.values()) {
+          if (fact.sessionId === sessionId) handler(fact)
+        }
+        pending.clear()
+      },
+      unsubscribe: (): void => {
+        if (closed) return
+        closed = true
+        pending.clear()
+        unsubscribe()
+      },
+    }
   }
 
   /** Open an app-originated attempt on the live domain — the ordering seam

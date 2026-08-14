@@ -116,6 +116,7 @@ async function connectAndAccept(d: Dispatcher): Promise<void> {
 
 function fact(over: Partial<LifecycleChanged> = {}): LifecycleChanged {
   return {
+    sessionId: 'sid-2',
     lane: 'lane-1',
     lifecycle: 'prompt_ready',
     domain: 'dom-1',
@@ -130,7 +131,7 @@ describe('LifecycleClient', () => {
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
-    client.subscribeLifecycleChanged(handler)
+    client.subscribeLifecycleChanged(handler).bindSession('sid-2')
 
     const f = fact({ lifecycle: 'running', attempt: { id: 'a1', state: 'open' } })
     lastSocket().deliver({ method: 'lifecycle.changed', params: f })
@@ -139,12 +140,47 @@ describe('LifecycleClient', () => {
     expect(handler).toHaveBeenCalledWith(f)
   })
 
+  it('delivers a shared-socket notification only to its owning session', async () => {
+    const dispatcher = new Dispatcher()
+    await connectAndAccept(dispatcher)
+    const client = new LifecycleClient(dispatcher)
+    const first = vi.fn()
+    const second = vi.fn()
+    client.subscribeLifecycleChanged(first).bindSession('sid-1')
+    client.subscribeLifecycleChanged(second).bindSession('sid-2')
+
+    const f = fact({ lifecycle: 'running', attempt: { id: 'a1', state: 'open' } })
+    lastSocket().deliver({ method: 'lifecycle.changed', params: f })
+
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledOnce()
+    expect(second).toHaveBeenCalledWith(f)
+  })
+  it('keeps only the owning session projections that arrive before open binds its id', async () => {
+    const dispatcher = new Dispatcher()
+    await connectAndAccept(dispatcher)
+    const client = new LifecycleClient(dispatcher)
+    const handler = vi.fn()
+    const subscription = client.subscribeLifecycleChanged(handler)
+    const stale = fact({ sessionId: 'sid-2', lifecycle: 'native' })
+    const ready = fact({ sessionId: 'sid-2' })
+
+    lastSocket().deliver({ method: 'lifecycle.changed', params: fact({ sessionId: 'sid-1' }) })
+    lastSocket().deliver({ method: 'lifecycle.changed', params: stale })
+    lastSocket().deliver({ method: 'lifecycle.changed', params: ready })
+    expect(handler).not.toHaveBeenCalled()
+
+    subscription.bindSession('sid-2')
+    expect(handler).toHaveBeenCalledOnce()
+    expect(handler).toHaveBeenCalledWith(ready)
+  })
+
   it('does not deliver a payload without a lane (not a fact)', async () => {
     const dispatcher = new Dispatcher()
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
-    client.subscribeLifecycleChanged(handler)
+    client.subscribeLifecycleChanged(handler).bindSession('sid-2')
 
     lastSocket().deliver({ method: 'lifecycle.changed', params: { lifecycle: 'lost' } })
     lastSocket().deliver({ method: 'lifecycle.changed', params: null })
@@ -157,8 +193,9 @@ describe('LifecycleClient', () => {
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
-    const unsub = client.subscribeLifecycleChanged(handler)
-    unsub()
+    const subscription = client.subscribeLifecycleChanged(handler)
+    subscription.bindSession('sid-2')
+    subscription.unsubscribe()
 
     lastSocket().deliver({ method: 'lifecycle.changed', params: fact() })
 
