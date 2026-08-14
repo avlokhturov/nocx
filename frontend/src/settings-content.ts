@@ -14,6 +14,7 @@ import { type SettingsObserver } from './settings-observer'
 import { SolidTabContent, type TabHost } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
+import type { EndpointClient } from './endpoints'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -35,6 +36,7 @@ export class SettingsContent extends SolidTabContent {
     private readonly vaultClient?: import('./vault-client').VaultClient,
     private readonly dialogClient?: import('./dialog-client').DialogClient,
     private readonly footprintClient?: import('./footprint-client').FootprintClient,
+    private readonly endpointsClient?: EndpointClient,
   ) {
     super()
   }
@@ -48,6 +50,7 @@ export class SettingsContent extends SolidTabContent {
           vaultClient: this.vaultClient,
           dialogClient: this.dialogClient,
           footprintClient: this.footprintClient,
+          endpointsClient: this.endpointsClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

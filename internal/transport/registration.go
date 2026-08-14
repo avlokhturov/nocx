@@ -140,6 +140,7 @@ func methodClassFor(method string) string {
 var coarseMethodClasses = map[string]string{
 	"profiles":    "config",
 	"groups":      "config",
+	"endpoints":   "config",
 	"settings":    "config",
 	"secrets":     "secrets",
 	"vault":       "vault",

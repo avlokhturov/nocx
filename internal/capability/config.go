@@ -21,6 +21,17 @@ type RowResolver interface {
 	ResolveRow(row string, inputs []vault.CredentialInventory) (credential.SecretID, bool)
 }
 
+// EndpointSecrets is the vault surface the endpoint write paths need
+// (ADR-0030): mint a secret from its value, rotate the material behind the
+// endpoint's own secret (same id, same name — ADR-0017 §2's rotate), and
+// destroy the material behind one. Satisfied by *vault.Vault. Narrow on
+// purpose — endpoint CRUD touches nothing else in the vault.
+type EndpointSecrets interface {
+	CreateNamed(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, error)
+	ReplaceSecret(ctx context.Context, row string, value credential.Secret, inputs []vault.CredentialInventory) error
+	Delete(ctx context.Context, id credential.SecretID) error
+}
+
 // ConfigService is the config domain surface: profiles, groups, settings
 // and the atomic import. It is what a ConfigOperation hands its callback.
 //
@@ -68,6 +79,30 @@ type ConfigService interface {
 	// deletion (ADR-0011 §4).
 	ClearSecretRefs(ref string) error
 
+	// Endpoints (ADR-0030). The write methods take the endpoint record in
+	// its STORED form — CredentialRef is a backend reference, never
+	// something the renderer sends — plus the API key as an input: a
+	// credential.Secret that is minted (create), rotated (update with a
+	// new key) or left alone (update without one). The key never survives
+	// the call, never crosses back, and never appears in a result. The ctx
+	// bounds the vault calls (mint, rotate, material delete), exactly as
+	// TabbyImportService.CreateSecret's does.
+	ListEndpoints() ([]profile.Endpoint, error)
+	// CreateEndpoint stores the endpoint, minting key into the vault first
+	// when it is non-empty: the material must exist before the record
+	// references it (ADR-0011 §4's order, ADR-0030).
+	CreateEndpoint(ctx context.Context, e profile.Endpoint, key credential.Secret) (profile.Endpoint, error)
+	// UpdateEndpoint replaces the record. A nil or empty key keeps the
+	// existing credential — "absent or empty" means "keep the existing
+	// material", never "erase it" (design §4.5.4); a non-empty one rotates
+	// the material behind the endpoint's OWN secret (same id, same name)
+	// or mints when the endpoint had none.
+	UpdateEndpoint(ctx context.Context, e profile.Endpoint, key *credential.Secret) (profile.Endpoint, error)
+	// DeleteEndpoint removes the record (clearing its reference from every
+	// remaining record in the same write) and then deletes the material,
+	// metadata-first.
+	DeleteEndpoint(ctx context.Context, id string) error
+
 	// AtomicImport merges profiles and groups into the store atomically.
 	AtomicImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) *profile.ImportResult
 
@@ -92,12 +127,14 @@ func NewConfigOperation(
 	configGate, vaultGate, lane control.Admission,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
+	endpoints profile.EndpointRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
+	secrets EndpointSecrets,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, svc, reg, rows))
+	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, svc, reg, rows, secrets))
 }
 
 // newConfigService builds the concrete config service bound to guard g.
@@ -107,27 +144,33 @@ func newConfigService(
 	g *guard,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
+	endpoints profile.EndpointRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
+	secrets EndpointSecrets,
 ) *configService {
 	return &configService{
-		guard:    g,
-		profiles: profiles,
-		groups:   groups,
-		svc:      svc,
-		settings: reg,
-		rows:     rows,
+		guard:     g,
+		profiles:  profiles,
+		groups:    groups,
+		endpoints: endpoints,
+		svc:       svc,
+		settings:  reg,
+		rows:      rows,
+		secrets:   secrets,
 	}
 }
 
 type configService struct {
-	guard    *guard
-	profiles profile.ProfileRepository
-	groups   profile.GroupRepository
-	svc      *profile.ProfileService
-	settings *settings.Registry
-	rows     RowResolver
+	guard     *guard
+	profiles  profile.ProfileRepository
+	groups    profile.GroupRepository
+	endpoints profile.EndpointRepository
+	svc       *profile.ProfileService
+	settings  *settings.Registry
+	rows      RowResolver
+	secrets   EndpointSecrets
 }
 
 func (s *configService) ListProfiles() ([]profile.SSHProfile, error) {
@@ -299,6 +342,155 @@ func (s *configService) ClearSecretRefs(ref string) error {
 		return errors.New("profile store does not support reference clearing")
 	}
 	return pc.ClearSecretRefs(ref)
+}
+
+func (s *configService) ListEndpoints() ([]profile.Endpoint, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.endpoints.LoadEndpoints()
+}
+
+// CreateEndpoint stores the endpoint, minting the key into the vault FIRST
+// when one is given: the material must exist before the record references
+// it, so a crash between the two leaves an ownerless secret the vault's
+// journal retires rather than a record pointing at a secret that cannot
+// exist (ADR-0011 §4's order, ADR-0030). The record is validated BEFORE
+// the mint — a bad record must not orphan a freshly-minted key.
+func (s *configService) CreateEndpoint(ctx context.Context, e profile.Endpoint, key credential.Secret) (profile.Endpoint, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.Endpoint{}, err
+	}
+	if err := profile.ValidateEndpoint(e); err != nil {
+		return profile.Endpoint{}, err
+	}
+	if !key.IsEmpty() {
+		if s.secrets == nil {
+			return profile.Endpoint{}, errors.New("endpoint credentials unavailable: vault not wired")
+		}
+		id, err := s.secrets.CreateNamed(ctx, key, vault.SecretMeta{
+			Name: endpointKeyName(e.Name),
+			Kind: vault.KindPassword,
+		})
+		if err != nil {
+			return profile.Endpoint{}, fmt.Errorf("store endpoint key: %w", err)
+		}
+		e.CredentialRef = string(id)
+	}
+	if err := s.endpoints.CreateEndpoint(e); err != nil {
+		return profile.Endpoint{}, err
+	}
+	return e, nil
+}
+
+// UpdateEndpoint replaces the record. A nil or empty key keeps the existing
+// credential; a non-empty one rotates the material behind the endpoint's
+// OWN secret — same id, same name (ADR-0017 §2's rotate, which is why an
+// update never orphans a key and never dangles another record that happens
+// to share the secret) — or mints when the endpoint had no credential.
+//
+// Vault-first for the key paths: the rotation's reference never changes, so
+// a record write that fails afterwards leaves the endpoint with its old
+// fields and the rotated material — consistent, and the user retries.
+func (s *configService) UpdateEndpoint(ctx context.Context, e profile.Endpoint, key *credential.Secret) (profile.Endpoint, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.Endpoint{}, err
+	}
+	if err := profile.ValidateEndpoint(e); err != nil {
+		return profile.Endpoint{}, err
+	}
+
+	existing, err := s.loadEndpoint(e.ID)
+	if err != nil {
+		return profile.Endpoint{}, err
+	}
+	if existing == nil {
+		return profile.Endpoint{}, fmt.Errorf("%s: %w", e.ID, profile.ErrEndpointNotFound)
+	}
+
+	if key != nil && !key.IsEmpty() {
+		if s.secrets == nil {
+			return profile.Endpoint{}, errors.New("endpoint credentials unavailable: vault not wired")
+		}
+		if existing.CredentialRef == "" {
+			// The endpoint had no key; this update adds one. mintID and
+			// mintErr are distinct names on purpose: err already lives at
+			// function scope, and the repo's lint gate flags the shadow.
+			mintID, mintErr := s.secrets.CreateNamed(ctx, *key, vault.SecretMeta{
+				Name: endpointKeyName(e.Name),
+				Kind: vault.KindPassword,
+			})
+			if mintErr != nil {
+				return profile.Endpoint{}, fmt.Errorf("store endpoint key: %w", mintErr)
+			}
+			e.CredentialRef = string(mintID)
+		} else {
+			// Rotate the material behind the endpoint's own secret. The
+			// catalogue record resolves the row without inventory inputs.
+			if err := s.secrets.ReplaceSecret(ctx, vault.RowFor(credential.SecretID(existing.CredentialRef)), *key, nil); err != nil {
+				return profile.Endpoint{}, fmt.Errorf("rotate endpoint key: %w", err)
+			}
+			e.CredentialRef = existing.CredentialRef
+		}
+	} else {
+		// Keep the existing credential, whatever it is.
+		e.CredentialRef = existing.CredentialRef
+	}
+
+	if err := s.endpoints.UpdateEndpoint(e); err != nil {
+		return profile.Endpoint{}, err
+	}
+	return e, nil
+}
+
+// DeleteEndpoint removes the record — one atomic store write that also
+// clears its reference from every remaining record (ADR-0030) — then
+// deletes the material through the vault, metadata-first (ADR-0011 §4).
+//
+// The record deletion never depends on the vault: the endpoint is the
+// user's intent, and a keyless endpoint needs no vault at all. The
+// material delete is best-effort exactly as vault.deleteSecret's is: a
+// provider failure leaves the vault's journaled pending delete, retried by
+// Reconcile at the next start, and a sealed vault refuses before
+// journaling, leaving the secret visible and deletable on the Secrets
+// page. When the vault seam is missing (impossible in the production
+// composition root, which always wires the vault), the record is still
+// removed and the secret remains visible on the Secrets page.
+func (s *configService) DeleteEndpoint(ctx context.Context, id string) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	ref, err := s.endpoints.DeleteEndpoint(id)
+	if err != nil {
+		return err
+	}
+	if ref == "" || s.secrets == nil {
+		return nil // no credential to remove, or no vault to remove it with
+	}
+	_ = s.secrets.Delete(ctx, credential.SecretID(ref))
+	return nil
+}
+
+// loadEndpoint returns the stored endpoint with the given id, or nil when
+// none exists.
+func (s *configService) loadEndpoint(id string) (*profile.Endpoint, error) {
+	all, err := s.endpoints.LoadEndpoints()
+	if err != nil {
+		return nil, err
+	}
+	for i := range all {
+		if all[i].ID == id {
+			return &all[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// endpointKeyName derives the auto-name of an endpoint's minted key
+// (ADR-0016: the name is generated from what is already known — the
+// endpoint's display name — never from the material).
+func endpointKeyName(endpointName string) string {
+	return fmt.Sprintf("%s API key", endpointName)
 }
 
 func (s *configService) AtomicImport(profiles []profile.SSHProfile, groups []profile.ProfileGroup) *profile.ImportResult {

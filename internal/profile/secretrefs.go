@@ -25,11 +25,18 @@ type SecretReferenceImpact struct {
 	// Profiles that store nothing — agent auth, a key read from a path —
 	// are not affected and are not counted.
 	ProfileCount int
+	// EndpointCount is AI endpoints holding at least one reference
+	// (ADR-0030). Endpoints that store no credential are not affected and
+	// are not counted. Counted separately from ProfileCount on purpose:
+	// "9 connections" and "2 endpoints" answer different questions
+	// (ADR-0031).
+	EndpointCount int
 }
 
 func impactOf(d *storeData) SecretReferenceImpact {
 	distinct := make(map[string]struct{})
 	heldByProfiles := make(map[string]struct{})
+	heldByEndpoints := make(map[string]struct{})
 
 	for i := range d.Profiles {
 		o := &d.Profiles[i].Options
@@ -44,10 +51,17 @@ func impactOf(d *storeData) SecretReferenceImpact {
 			heldByProfiles[d.Profiles[i].ID] = struct{}{}
 		}
 	}
+	for i := range d.Endpoints {
+		if d.Endpoints[i].CredentialRef != "" {
+			distinct[d.Endpoints[i].CredentialRef] = struct{}{}
+			heldByEndpoints[d.Endpoints[i].ID] = struct{}{}
+		}
+	}
 
 	return SecretReferenceImpact{
-		SecretCount:  len(distinct),
-		ProfileCount: len(heldByProfiles),
+		SecretCount:   len(distinct),
+		ProfileCount:  len(heldByProfiles),
+		EndpointCount: len(heldByEndpoints),
 	}
 }
 
@@ -100,6 +114,9 @@ func (s *JSONStore) ClearAllSecretReferences() (SecretReferenceImpact, error) {
 		o.KeySecret = ""
 		o.KeyPassphraseSecret = ""
 	}
+	for i := range d.Endpoints {
+		d.Endpoints[i].CredentialRef = ""
+	}
 
 	if err := s.writeLocked(d); err != nil {
 		return SecretReferenceImpact{}, err
@@ -124,6 +141,17 @@ func (s *JSONStore) ClearSecretRefs(secretID string) error {
 		return err
 	}
 
+	if !clearSecretRefLocked(d, secretID) {
+		return nil
+	}
+	return s.writeLocked(d)
+}
+
+// clearSecretRefLocked removes every reference to secretID from every
+// record kind in d — profile options, group defaults and endpoint
+// credentials — reporting whether anything changed. The caller holds s.mu
+// and owns the subsequent write.
+func clearSecretRefLocked(d *storeData, secretID string) bool {
 	changed := false
 	for i := range d.Profiles {
 		o := &d.Profiles[i].Options
@@ -159,9 +187,11 @@ func (s *JSONStore) ClearSecretRefs(secretID string) error {
 			changed = true
 		}
 	}
-
-	if !changed {
-		return nil
+	for i := range d.Endpoints {
+		if d.Endpoints[i].CredentialRef == secretID {
+			d.Endpoints[i].CredentialRef = ""
+			changed = true
+		}
 	}
-	return s.writeLocked(d)
+	return changed
 }

@@ -1380,10 +1380,23 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	settingsWired := s.settings != nil
 	executeWired := profilesWired && groupsWired && s.credentials != nil && s.profileSvc != nil
 
+	// Endpoints ride the profile store (ADR-0030): the same JSON document,
+	// so the profile store satisfies the endpoint repository. endpointWired
+	// is the "endpoints not available" gate the handlers check first. The
+	// nil guard is real: the type assertion below panics on a nil
+	// interface, and profiles may simply not be wired.
+	var endpointsRepo profile.EndpointRepository
+	if profilesWired {
+		if er, ok := s.profiles.(profile.EndpointRepository); ok {
+			endpointsRepo = er
+		}
+	}
+	endpointWired := endpointsRepo != nil
+
 	configOp := capability.NewConfigOperation(
 		configGate, vaultGate, lane,
-		s.profiles, s.groups, s.profileSvc, s.settings,
-		s.vaultRowResolver(),
+		s.profiles, s.groups, endpointsRepo, s.profileSvc, s.settings,
+		s.vaultRowResolver(), s.vaultEndpointSecrets(),
 	)
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
@@ -1419,6 +1432,22 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		}),
 		regResponder(configSub, "profiles.patch", func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "endpoints.list", func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "endpoints.create", func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "endpoints.update", func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "endpoints.delete", func(r Responder) handlerFunc {
+			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "groups.list", func(r Responder) handlerFunc {
@@ -1517,6 +1546,19 @@ func (s *WSServer) vaultSecretSeam() capability.SecretVault {
 	}
 	if sv, ok := s.vaultLifecycle.(capability.SecretVault); ok {
 		return sv
+	}
+	return nil
+}
+
+// vaultEndpointSecrets returns the EndpointSecrets seam for the endpoint
+// write paths, or nil when no vault is wired — key-bearing endpoint writes
+// and material deletes then fail loudly, the documented nil-seam contract.
+func (s *WSServer) vaultEndpointSecrets() capability.EndpointSecrets {
+	if s.vaultLifecycle == nil {
+		return nil
+	}
+	if es, ok := s.vaultLifecycle.(capability.EndpointSecrets); ok {
+		return es
 	}
 	return nil
 }

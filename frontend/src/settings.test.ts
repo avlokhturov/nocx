@@ -240,6 +240,7 @@ describe('SettingsContent', () => {
       'Connections',
       'Secrets',
       'Vault',
+      'AI Endpoints',
     ])
   })
 

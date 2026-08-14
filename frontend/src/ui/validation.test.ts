@@ -6,6 +6,7 @@ import {
   hostname,
   port,
   nonNegativeInteger,
+  absoluteHttpUrl,
   combine,
 } from './validation'
 
@@ -75,6 +76,33 @@ describe('port', () => {
   it('rejects a non-integer', () => {
     expect(port()('22.5')).toBe('Port must be a whole number')
     expect(port()('-1')).toBe('Port must be a whole number')
+  })
+})
+
+describe('absoluteHttpUrl', () => {
+  it('passes an empty value — emptiness is `required`’s job, not this rule’s', () => {
+    expect(absoluteHttpUrl()('')).toBeUndefined()
+  })
+
+  it.each(['https://api.example.com/v1', 'http://127.0.0.1:11434/v1', 'https://x', 'http://host'])(
+    'accepts %s',
+    (url) => {
+      expect(absoluteHttpUrl()(url)).toBeUndefined()
+    },
+  )
+
+  // Parse-level only (design §4.5, decision 3): loopback and private
+  // addresses are legal here — the restriction is dial-time (nocx-edio).
+  it('accepts a loopback http URL — the address policy is not this rule’s', () => {
+    expect(absoluteHttpUrl()('http://127.0.0.1:11434/v1')).toBeUndefined()
+  })
+
+  it('rejects what cannot be a base URL at all', () => {
+    expect(absoluteHttpUrl()('not a url')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('api.example.com/v1')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('ftp://example.com')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('https://')).toBe('Must be an absolute http(s) URL')
+    expect(absoluteHttpUrl()('file:///etc/passwd')).toBe('Must be an absolute http(s) URL')
   })
 })
 

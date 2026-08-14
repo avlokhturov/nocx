@@ -1,0 +1,69 @@
+/**
+ * AI endpoint model + IPC client (bead nocx-kn9q, design §4.5.4, ADR-0030).
+ *
+ * Mirrors the backend internal/profile Endpoint record and the four
+ * endpoints.* JSON-RPC control-plane methods wired in the transport. The
+ * wire shapes are declared once, in contracts/endpoints.*.schema.json; the
+ * renderer's types are generated from them and this module is their single
+ * consumer.
+ *
+ * The API key is an INPUT only: it rides the create/update params once, is
+ * minted or rotated by the backend, and never survives a result (ADR-0030
+ * §3). Nothing here reads a key back.
+ */
+import { Dispatcher } from './dispatcher'
+import type { EndpointsListResult, Endpoint as ListEndpoint } from './generated/endpoints.list'
+import type {
+  EndpointsCreateResult,
+  Endpoint as CreatedEndpoint,
+} from './generated/endpoints.create'
+import type {
+  EndpointsUpdateResult,
+  Endpoint as UpdatedEndpoint,
+} from './generated/endpoints.update'
+import type { EndpointsDeleteResult } from './generated/endpoints.delete'
+
+/**
+ * The stored endpoint as the wire declares it. The schema declares the
+ * endpoint shape once (endpoints.list.schema.json's $defs, referenced
+ * cross-file by create and update), and each generated file re-exports its
+ * own `Endpoint` — structurally identical by construction. This union names
+ * all three declarations so the dead-export ratchet sees every generated
+ * file consumed; the surface reads the list's.
+ */
+export type Endpoint = ListEndpoint | CreatedEndpoint | UpdatedEndpoint
+
+/** The create/update params: the key is an input, never read back. */
+export interface EndpointWrite {
+  name: string
+  baseUrl: string
+  key: string
+  models: { name: string; alias: string | null }[]
+}
+
+export class EndpointClient {
+  constructor(private readonly dispatcher: Dispatcher) {}
+
+  listEndpoints(): Promise<EndpointsListResult['endpoints']> {
+    return this.dispatcher.call<EndpointsListResult>('endpoints.list', {}).then((r) => r.endpoints)
+  }
+
+  createEndpoint(input: EndpointWrite): Promise<EndpointsCreateResult['endpoint']> {
+    return this.dispatcher
+      .call<EndpointsCreateResult>('endpoints.create', input)
+      .then((r) => r.endpoint)
+  }
+
+  /** Full-replace update. An empty key keeps the existing material
+   *  (design §4.5.4) — a blank key cannot erase a saved key. */
+  updateEndpoint(id: string, input: EndpointWrite): Promise<EndpointsUpdateResult['endpoint']> {
+    return this.dispatcher
+      .call<EndpointsUpdateResult>('endpoints.update', { id, ...input })
+      .then((r) => r.endpoint)
+  }
+
+  /** Nothing to return; the list is the state (like vault.deleteSecret). */
+  deleteEndpoint(id: string): Promise<EndpointsDeleteResult> {
+    return this.dispatcher.call<EndpointsDeleteResult>('endpoints.delete', { id })
+  }
+}

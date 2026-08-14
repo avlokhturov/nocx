@@ -92,6 +92,31 @@ export function port(): Validator {
 }
 
 /**
+ * An absolute http(s) URL — the parse-level floor for an AI endpoint's base
+ * URL (design §4.5, decision 3): only "is this an absolute http(s) URL" is
+ * checked here. The loopback/private policy is enforced at dial time by the
+ * HTTP client (nocx-edio) — a form-time check on that is decoration, for the
+ * four reasons the design records. Empty passes — compose with `required`.
+ */
+export function absoluteHttpUrl(): Validator {
+  return (value) => {
+    const text = value.trim()
+    if (text === '') return undefined
+    let parsed: URL
+    try {
+      parsed = new URL(text)
+    } catch {
+      return 'Must be an absolute http(s) URL'
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'Must be an absolute http(s) URL'
+    }
+    if (parsed.hostname === '') return 'Must be an absolute http(s) URL'
+    return undefined
+  }
+}
+
+/**
  * A whole number ≥ 0. For the timeout and count fields where `0` is a legal
  * value meaning "off", so `required` is wrong and a range check is all there is.
  */

@@ -1,0 +1,44 @@
+/* AI Endpoints surface — placement for the endpoint manager (nocx-kn9q).
+   Placed in styles/components/ per the form-pass brief; the surface owns
+   only layout of its own wrappers and their text, never kit paint. */
+
+.ep-root {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ep-item-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ep-item-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.ep-item-models {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* One model row in the editor: the id and its optional picker label side
+   by side. The fields are the kit's; this wrapper only places them. */
+.ep-model-row {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.ep-model-row .ui-text-field {
+  flex: 1 1 0;
+  min-width: 0;
+}

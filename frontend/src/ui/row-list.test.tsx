@@ -54,6 +54,23 @@ describe('EditableRowList', () => {
     expect(screen.getByRole('button', { name: 'Add row' })).toBeTruthy()
   })
 
+  it('renders a group error through the kit field-error identity, at the foot', () => {
+    subject({ error: 'Add at least one model' })
+    const list = screen.getByRole('list', { name: 'Rows' })
+    const err = list.querySelector('.ui-field-error')
+    expect(err).toBeTruthy()
+    expect(err?.textContent).toBe('Add at least one model')
+    expect(err?.getAttribute('role')).toBe('alert')
+    // Below the add control, never between the rows and their affordance.
+    const add = list.querySelector('.ui-row-list__add')
+    expect(add?.nextElementSibling).toBe(err)
+  })
+
+  it('renders no error element when there is none', () => {
+    subject()
+    expect(screen.getByRole('list', { name: 'Rows' }).querySelector('.ui-field-error')).toBeNull()
+  })
+
   it('hides the empty message when rows exist', () => {
     subject({ emptyLabel: 'Nothing here yet' })
     expect(screen.queryByText('Nothing here yet')).toBeNull()

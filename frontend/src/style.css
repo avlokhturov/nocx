@@ -64,6 +64,7 @@
 @import './styles/components/tree-row.css';
 @import './styles/components/context-menu.css';
 @import './styles/components/file-viewer.css';
+@import './styles/components/endpoints.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';

@@ -15,6 +15,14 @@
  * wrapper for the foot add Button). The remove and add are kit Buttons —
  * the wrappers only place them, they never repaint them.
  *
+ * A group-level error — "at least one row must have a name" — is the same
+ * concept as a field's error and renders through the kit's one error
+ * identity (`ui-field-error`, painted by field.css), so the surface never
+ * re-declares the colour or the size. It sits below the add control, at
+ * the foot of the list: that is where a reader looks for a message about
+ * the field they just finished, and it never separates the rows from the
+ * control that adds one.
+ *
  * The rows are controlled: the caller owns the data and passes `rows`,
  * `renderRow`, `onRemove` and `onAdd`. Nothing here mutates state.
  */
@@ -38,6 +46,13 @@ export interface EditableRowListProps<T> {
   removeLabel: (index: number) => string
   /** Shown above the add control when there are no rows. */
   emptyLabel?: string
+  /**
+   * A group-level error message, rendered through the kit's `ui-field-error`
+   * identity at the foot of the list, below the add control — the position
+   * a reader looks for a field's message, and never between the rows and
+   * their add affordance. `undefined` renders nothing.
+   */
+  error?: string
   /** Accessible name for the list itself. */
   ariaLabel: string
   disabled?: boolean
@@ -73,6 +88,11 @@ export function EditableRowList<T>(props: EditableRowListProps<T>) {
           {props.addLabel}
         </Button>
       </div>
+      <Show when={props.error !== undefined}>
+        <p class="ui-field-error" role="alert">
+          {props.error}
+        </p>
+      </Show>
     </div>
   )
 }

@@ -17,7 +17,9 @@ import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup }
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
+import { EndpointsSection } from './endpoints-section'
 import type { FootprintClient } from './footprint-client'
+import type { EndpointClient } from './endpoints'
 import type { ProfileClient, SSHProfile } from './profiles'
 import type { DialogClient } from './dialog-client'
 import { SettingsObserver } from './settings-observer'
@@ -115,6 +117,7 @@ export interface SettingsComponentProps {
   /** Remote footprint (nocx-mlm7 P10) for the Connections page. Absent in
    *  the dev-web harness; the section then renders nothing. */
   footprintClient?: FootprintClient
+  endpointsClient?: EndpointClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -376,7 +379,28 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, backupPage, connectionPage, secretsPage, vaultPage]
+    const endpointsPage: SettingsPage = {
+      kind: 'component',
+      id: 'endpoints',
+      title: 'AI Endpoints',
+      scrollMode: 'contained',
+      // Registered unconditionally for the same reason vaultPage is: a
+      // surface that appears only once some other state exists is how a
+      // feature ships unreachable. The guard is the client being absent.
+      renderContent: () => (
+        <Show
+          when={props.endpointsClient}
+          fallback={
+            <PageSection title="AI Endpoints">
+              AI endpoints are not available in this window.
+            </PageSection>
+          }
+        >
+          <EndpointsSection client={props.endpointsClient!} />
+        </Show>
+      ),
+    }
+    return [...generated, backupPage, connectionPage, secretsPage, vaultPage, endpointsPage]
   })
 
   /** The active component page, or null when a generated section is showing. */
