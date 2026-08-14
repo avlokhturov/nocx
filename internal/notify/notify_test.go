@@ -401,10 +401,9 @@ func TestLimits_QueuedInstance_Bounded(t *testing.T) {
 		MaxRetained:     1 << 20,
 		DeliveryTimeout: time.Second,
 	}
-	gate := &gateSink{
-		called:    make(chan struct{}, 1),
-		cancelled: make(chan struct{}),
-		release:   make(chan struct{}),
+	gate := &unlockSink{
+		called:  make(chan struct{}, 1),
+		release: make(chan struct{}),
 	}
 	b := &recordingSink{notified: make(chan struct{}, 1)}
 	c := &recordingSink{notified: make(chan struct{}, 1)}
@@ -444,16 +443,53 @@ func TestLimits_QueuedInstance_Bounded(t *testing.T) {
 		t.Fatal("event delivered while the in-flight slot was held")
 	}
 
+	// Admission is settled the moment the third racer's Raise returns:
+	// the first two found queue places, the last found the queue full.
+	// That refusal is the observable that all three have passed admission,
+	// so the test releases the slot then — never sleeping out the delivery
+	// deadline (AGENTS.md: a test may not depend on timing).
+	var refusedOut notify.Outcome
+	select {
+	case refusedOut = <-bDone:
+	case refusedOut = <-cDone:
+	case refusedOut = <-dDone:
+	}
+	var rej *notify.RefusedError
+	if !errors.As(refusedOut.Err, &rej) {
+		t.Fatalf("want RefusedError, got %v", refusedOut.Err)
+	}
+	if rej.Limit != notify.LimitQueued {
+		t.Fatalf("want limit %q, got %q", notify.LimitQueued, rej.Limit)
+	}
+
 	close(gate.release)
 	if out := <-aDone; out.Err != nil {
 		t.Fatalf("first raise failed: %v", out.Err)
 	}
-	ob, oc, od := <-bDone, <-cDone, <-dDone
+	// The two queued events deliver once the slot is free, in either order.
+	rest := make([]notify.Outcome, 0, 2)
+	select {
+	case o := <-bDone:
+		rest = append(rest, o)
+	case o := <-cDone:
+		rest = append(rest, o)
+	case o := <-dDone:
+		rest = append(rest, o)
+	}
+	select {
+	case o := <-bDone:
+		rest = append(rest, o)
+	case o := <-cDone:
+		rest = append(rest, o)
+	case o := <-dDone:
+		rest = append(rest, o)
+	}
 
 	// Exactly two were admitted and delivered; exactly one was refused on
 	// the queue bound, and its sink was never reached.
+	outs := append(rest, refusedOut)
 	refused := 0
-	for _, out := range []notify.Outcome{ob, oc, od} {
+	for _, out := range outs {
 		switch {
 		case out.Err == nil:
 			if len(out.Results) != 1 {
@@ -461,13 +497,6 @@ func TestLimits_QueuedInstance_Bounded(t *testing.T) {
 			}
 		default:
 			refused++
-			var rej *notify.RefusedError
-			if !errors.As(out.Err, &rej) {
-				t.Fatalf("want RefusedError, got %v", out.Err)
-			}
-			if rej.Limit != notify.LimitQueued {
-				t.Fatalf("want limit %q, got %q", notify.LimitQueued, rej.Limit)
-			}
 		}
 	}
 	if refused != 1 {
@@ -488,10 +517,9 @@ func TestLimits_RetainedBytes_Bounded(t *testing.T) {
 		MaxRetained:     10,
 		DeliveryTimeout: time.Second,
 	}
-	gate := &gateSink{
-		called:    make(chan struct{}, 1),
-		cancelled: make(chan struct{}),
-		release:   make(chan struct{}),
+	gate := &unlockSink{
+		called:  make(chan struct{}, 1),
+		release: make(chan struct{}),
 	}
 	b := &recordingSink{notified: make(chan struct{}, 1)}
 	c := &recordingSink{notified: make(chan struct{}, 1)}
@@ -527,18 +555,16 @@ func TestLimits_RetainedBytes_Bounded(t *testing.T) {
 	go func() { bDone <- r.Raise(context.Background(), big(kindB)) }()
 	go func() { cDone <- r.Raise(context.Background(), big(kindC)) }()
 
-	close(gate.release)
-	if out := <-aDone; out.Err != nil {
-		t.Fatalf("first raise failed: %v", out.Err)
-	}
-	ob, oc := <-bDone, <-cDone
-
-	queued, refusedOut := ob, oc
-	if ob.Err != nil {
-		queued, refusedOut = oc, ob
-	}
-	if queued.Err != nil || len(queued.Results) != 1 {
-		t.Fatalf("the queued event was not delivered: %+v", queued)
+	// Admission is settled the moment one of the two raises returns: the
+	// 10-byte budget admits exactly one event, so the first racer queued
+	// and the second was refused on the byte bound while the slot was
+	// held. The refusal is the observable; the test releases the slot
+	// then, never sleeping out the delivery deadline (AGENTS.md: a test
+	// may not depend on timing).
+	var refusedOut notify.Outcome
+	select {
+	case refusedOut = <-bDone:
+	case refusedOut = <-cDone:
 	}
 	var refused *notify.RefusedError
 	if !errors.As(refusedOut.Err, &refused) {
@@ -546,6 +572,20 @@ func TestLimits_RetainedBytes_Bounded(t *testing.T) {
 	}
 	if refused.Limit != notify.LimitRetained {
 		t.Fatalf("want limit %q, got %q", notify.LimitRetained, refused.Limit)
+	}
+
+	close(gate.release)
+	if out := <-aDone; out.Err != nil {
+		t.Fatalf("first raise failed: %v", out.Err)
+	}
+	// The queued event delivers once the slot is free.
+	var queued notify.Outcome
+	select {
+	case queued = <-bDone:
+	case queued = <-cDone:
+	}
+	if queued.Err != nil || len(queued.Results) != 1 {
+		t.Fatalf("the queued event was not delivered: %+v", queued)
 	}
 	if queued.Results[0].Route.Sink == b {
 		if b.count() != 1 || c.count() != 0 {
@@ -568,10 +608,9 @@ func TestQueuedRaise_CancelledCaller_RemovedAndBytesRefunded(t *testing.T) {
 		MaxRetained:     10,
 		DeliveryTimeout: time.Second,
 	}
-	gate := &gateSink{
-		called:    make(chan struct{}, 1),
-		cancelled: make(chan struct{}),
-		release:   make(chan struct{}),
+	gate := &unlockSink{
+		called:  make(chan struct{}, 1),
+		release: make(chan struct{}),
 	}
 	b := &recordingSink{notified: make(chan struct{}, 1)}
 	c := &recordingSink{notified: make(chan struct{}, 1)}
