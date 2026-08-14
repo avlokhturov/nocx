@@ -42,18 +42,24 @@ import type { FilesPanelServices } from './files-client'
 import type { ActiveOrigin } from '../tab-content'
 import { isExpandable, type TreeRowKind } from '../ui/tree-row-kind'
 
-/** The watch set for a tree: the root (its rows are always on screen) plus
- *  every EXPANDED directory — the panel's change surface is exactly what it
- *  renders (§5.2). The backend REPLACES the set on every files.watch, so the
- *  client sends the whole set it currently wants and the backend diffs:
- *  collapsing a directory removes it by construction and can never leak a
- *  watch. The notification carries the same provider-syntax paths, so the
- *  changed handler matches against this vocabulary. */
+/** The watch set for a tree: the successfully listed root plus every
+ *  successfully listed EXPANDED directory — exactly the rows the panel can
+ *  render (§5.2). A directory whose first list is pending or failed must not
+ *  enter the set: files.watch takes its own baseline listing, so publishing
+ *  it early races the foreground files.list on the capacity-one filesystem
+ *  gate and can make the panel refuse its own startup work.
+ *
+ *  The backend REPLACES the set on every files.watch, so collapsing a
+ *  directory removes it by construction and can never leak a watch. The
+ *  notification carries the same provider-syntax paths, so the changed
+ *  handler matches against this vocabulary. */
 function currentWatchPaths(root: FilesRoot): string[] {
-  const paths = [root.path]
+  const paths: string[] = []
+  if (root.state !== 'ok') return paths
+  paths.push(root.path)
   const collect = (dir: FilesRoot | FilesNode): void => {
     for (const child of dir.children) {
-      if (child.expanded) {
+      if (child.expanded && child.state === 'ok') {
         paths.push(child.path)
         collect(child)
       }
@@ -277,6 +283,11 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  dirs it touches; the next poll's change (or the walk's re-sent watch
    *  set) re-validates anything missed in the few milliseconds it runs. */
   let revealing = false
+  /** True when the current reveal expanded at least one directory. Reveal
+   *  lists every level first, then replaces the watch set once at the end:
+   *  baselining after every level would re-list the whole growing path and
+   *  turn a depth-N reveal into quadratic remote work. */
+  let revealWatchDirty = false
   /** The current reveal walk's identity. Every walk captures it; a step
    *  applies only while it still matches — a reveal in flight when the
    *  origin changes (or a newer reveal starts) must drop, never paint. */
@@ -506,10 +517,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     offset: number,
     limit: number,
     ctx: ListCtx,
-  ): void {
+  ): Promise<void> {
     dir.busy = true
     bumpTree()
-    services.list(ctx.bindingId as string, dir.path, offset, limit).then(
+    return services.list(ctx.bindingId as string, dir.path, offset, limit).then(
       (res) => applyListing(dir, ctx, res),
       (e) => applyListError(dir, ctx, e),
     )
@@ -522,23 +533,24 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const next = ctx ?? captureCtx()
     if (next === null) return
     const limit = dir.children.length > 0 ? dir.children.length : FILES_PAGE_SIZE
-    issueList(dir, 0, limit, next)
+    void issueList(dir, 0, limit, next)
   }
 
-  /** Send the watch set the panel currently wants — files.watch REPLACES
-   *  the set rather than adding to it, so this is the whole set, every
-   *  time: the backend diffs and collapsing a directory cannot leak a
-   *  watch. Called when the binding opens, when a directory expands or
-   *  collapses, on reconnect, and by refresh() — the Retry for a failed
-   *  watch. The response carries the refresh mode (§5.5): 'polling' with a
-   *  reason on a local binding is a real degrade and gets the persistent
-   *  badge; a rejection means the change stream may be gone and becomes
-   *  the sticky inline message. */
-  function pushWatchSet(): void {
+  /** Send the watch set the panel currently renders — files.watch REPLACES
+   *  the set rather than adding to it. Callers that are about to issue
+   *  another filesystem operation await this promise: files.watch takes a
+   *  synchronous baseline, so overlapping it with files.list would make the
+   *  panel contend with itself for the capacity-one filesystem gate.
+   *
+   *  Called after a directory's first successful listing, when a loaded
+   *  directory expands or collapses, on reconnect, and after refresh() —
+   *  the Retry for a failed watch. The response carries the refresh mode
+   *  (§5.5); a rejection becomes the sticky inline message. */
+  function pushWatchSet(): Promise<void> {
     const ctx = captureCtx()
     const r = untrack(root)
-    if (ctx === null || r === null) return
-    services.watch(ctx.bindingId as string, currentWatchPaths(r)).then(
+    if (ctx === null || r === null) return Promise.resolve()
+    return services.watch(ctx.bindingId as string, currentWatchPaths(r)).then(
       (res) => {
         if (!scopeCurrent(ctx)) return
         setWatchFailed(null)
@@ -634,23 +646,26 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         setPhase('ready')
         // One-shot reads at response time, untracked for the same reason as
         // the guards: the first list is issued against the state that just
-        // landed, never re-run for a state that replaced it.
+        // landed, never re-run for a state that replaced it. The initial
+        // watch follows that list and settles before reveal starts: all
+        // three consume the same capacity-one filesystem admission, so
+        // launching any pair together can make the panel refuse itself.
         const b = untrack(binding)
-        if (b !== null) {
+        const r = untrack(root)
+        if (b !== null && r !== null) {
           const listCtx: ListCtx = { tabId: o.tabId, generation, bindingId: b.bindingId }
-          const r = untrack(root)
-          if (r !== null) issueList(r, 0, FILES_PAGE_SIZE, listCtx)
-        }
-        // The root's rows are on screen from the first list, so the watch
-        // set starts with the root (the e2e clause: a file created outside
-        // nocx in the root appears with nobody pressing anything).
-        pushWatchSet()
-        // Reveal-on-open: land where the terminal is. Read the LIVE origin
-        // — the cwd may have moved while the open was in flight (an OSC 7
-        // that arrived mid-open), and the walk reads the committed root.
-        const live = untrack(origin)
-        if (live !== null && live.cwdVerified && live.cwd !== null && live.cwdFollow) {
-          revealPath(live.cwd)
+          void issueList(r, 0, FILES_PAGE_SIZE, listCtx).then(async () => {
+            if (!scopeCurrent(listCtx) || r.state !== 'ok') return
+            await pushWatchSet()
+            if (!scopeCurrent(listCtx)) return
+            // Reveal-on-open: land where the terminal is. Read the LIVE
+            // origin — the cwd may have moved while open/list/watch were in
+            // flight, and the walk reads the committed root.
+            const live = untrack(origin)
+            if (live !== null && live.cwdVerified && live.cwd !== null && live.cwdFollow) {
+              revealPath(live.cwd)
+            }
+          })
         }
       })
       .catch((e) => {
@@ -735,7 +750,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       // The collapsed directory leaves the watch set: the set is what the
       // panel renders, and files.watch replaces it wholesale, so sending
       // the set without the collapsed path is what stops the watch.
-      pushWatchSet()
+      void pushWatchSet()
       return
     }
     node.expanded = true
@@ -743,7 +758,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // instant, and the header refresh is what re-validates it.
     if (node.state === 'ok' && node.children.length > 0) {
       bumpTree()
-      pushWatchSet()
+      void pushWatchSet()
       return
     }
     const ctx = captureCtx()
@@ -752,8 +767,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       bumpTree()
       return
     }
-    issueList(node, 0, FILES_PAGE_SIZE, ctx)
-    pushWatchSet()
+    void issueList(node, 0, FILES_PAGE_SIZE, ctx).then(() => {
+      if (scopeCurrent(ctx) && node.expanded && node.state === 'ok') void pushWatchSet()
+    })
   }
 
   // ── Reveal (the product rule: the terminal owns "where am I"; the
@@ -787,6 +803,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     pendingReveal = targetPath
     const walk = ++revealWalkId
     revealing = true
+    revealWatchDirty = false
     // The path segments of the target below the root, in order; empty
     // when the target IS the root (it has no row — selecting the root
     // is selecting nothing, and that is the correct answer to `cd /`).
@@ -843,12 +860,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         return
       }
       // A level ON the way: expand it (never collapse — a directory the
-      // user opened by hand stays open), join its path to the watch set,
-      // and descend.
+      // user opened by hand stays open) and descend. The reveal publishes
+      // its whole watch set once its final list settles; doing so at every
+      // level would baseline the growing path repeatedly.
       if (!child.expanded) {
         child.expanded = true
+        revealWatchDirty = true
         bumpTree()
-        pushWatchSet()
       }
       descend(child, segments, i + 1, walk)
       return
@@ -944,9 +962,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       isExpandable(node.kind, node.linkKind, node.cyclic === true)
     ) {
       node.expanded = true
-      pushWatchSet()
+      revealWatchDirty = true
       // Mirrors toggle(): a directory listed once and collapsed re-opens
-      // instantly; anything else needs its first page.
+      // instantly; anything else needs its first page. The final watch
+      // baseline follows revealList, never overlaps it.
       if (node.state !== 'ok' || node.children.length === 0) {
         const ctx = captureCtx()
         if (ctx !== null) {
@@ -958,25 +977,41 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     completeReveal(dir, walk)
   }
 
-  /** Land the reveal: publish the target and release the walk. bumpTree so
-   *  the rows recompute — the selection is derived from revealTarget, and a
-   *  referentially-unchanged rows array would not re-render the row. */
+  /** Land the reveal only after its final watch baseline settles. The row
+   *  becoming selected is the observable completion seam used by the E2E,
+   *  so anything created outside nocx immediately afterwards is covered. */
   function completeReveal(dir: FilesRoot | FilesNode, walk: number): void {
     if (walk !== revealWalkId) return
-    pendingReveal = null
-    revealing = false
-    setRevealTarget(dir.path)
-    bumpTree()
+    const finish = (): void => {
+      if (walk !== revealWalkId) return
+      pendingReveal = null
+      revealing = false
+      setRevealTarget(dir.path)
+      bumpTree()
+    }
+    if (!revealWatchDirty) {
+      finish()
+      return
+    }
+    revealWatchDirty = false
+    void pushWatchSet().then(finish)
   }
-  /** The walk stopped before the target (a refused level, a missing
-   *  child, a superseding walk): release the pending marker. What was
-   *  expanded stays expanded; revealTarget stays at the last level the
-   *  walk actually reached. A SUPERSEDED walk does not clear the flag —
-   *  the newer walk is still revealing. */
+  /** A stopped walk keeps successful expansions and publishes their watch
+   *  set before releasing the pending marker. A superseded walk never clears
+   *  the newer walk's state. */
   function endWalk(walk: number): void {
     if (walk !== revealWalkId) return
-    pendingReveal = null
-    revealing = false
+    const finish = (): void => {
+      if (walk !== revealWalkId) return
+      pendingReveal = null
+      revealing = false
+    }
+    if (!revealWatchDirty) {
+      finish()
+      return
+    }
+    revealWatchDirty = false
+    void pushWatchSet().then(finish)
   }
 
   function showMore(dir: FilesRoot | FilesNode): void {
@@ -1045,7 +1080,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (dir.busy || (dir.state !== 'timedOut' && dir.state !== 'error')) return
     const ctx = captureCtx()
     if (ctx === null) return
-    issueList(dir, dir.nextOffset, FILES_PAGE_SIZE, ctx)
+    void issueList(dir, dir.nextOffset, FILES_PAGE_SIZE, ctx).then(() => {
+      if (scopeCurrent(ctx) && dir.state === 'ok') void pushWatchSet()
+    })
   }
 
   function refresh(): void {
@@ -1061,26 +1098,37 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // One cycle for the whole tree: every expanded directory is re-listed
     // at its displayed count, so a refresh is a single snapshot per
     // directory and in-flight page requests are superseded by the bump.
+    // Submit those listings serially: they all claim the same filesystem
+    // conflict gate, and parallel refresh work would make sibling
+    // directories refuse one another after the bounded gate wait.
     generation++
     const ctx = captureCtx()
     const r = root()
     if (ctx === null || r === null) return
-    refreshDir(r, ctx)
-    const expanded: FilesNode[] = []
+    const dirs: (FilesRoot | FilesNode)[] = [r]
     const collect = (dir: FilesRoot | FilesNode): void => {
       for (const child of dir.children) {
         if (child.expanded) {
-          expanded.push(child)
+          dirs.push(child)
           collect(child)
         }
       }
     }
     collect(r)
-    for (const node of expanded) refreshDir(node, ctx)
-    // The watch set rides the refresh cycle too: re-establishing it is
-    // what recovers a failed watch, and the header refresh is the sticky
-    // message's Retry. Success clears watchFailed inside pushWatchSet.
-    pushWatchSet()
+    void dirs
+      .reduce<Promise<void>>((chain, dir) => {
+        return chain.then(() => {
+          if (!scopeCurrent(ctx)) return
+          const limit = dir.children.length > 0 ? dir.children.length : FILES_PAGE_SIZE
+          return issueList(dir, 0, limit, ctx)
+        })
+      }, Promise.resolve())
+      // The watch set rides the refresh cycle too: re-establishing it is
+      // what recovers a failed watch. It follows every list so retrying the
+      // watch cannot contend with the refresh it belongs to.
+      .then(() => {
+        if (scopeCurrent(ctx)) return pushWatchSet()
+      })
   }
 
   function dispose(): void {
@@ -1115,7 +1163,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  backend diffs), so a dropped socket cannot silently detach the panel
    *  from the change stream. Unsubscribed in dispose() with the binding. */
   const unsubChanged = services.subscribeFilesChanged((p) => onFilesChanged(p))
-  const unsubConnect = services.onConnect(() => pushWatchSet())
+  const unsubConnect = services.onConnect(() => {
+    void pushWatchSet()
+  })
 
   return {
     phase,

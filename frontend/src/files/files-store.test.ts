@@ -101,9 +101,11 @@ function makeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
   }
 }
 
-/** Drain the microtask queue until the store's promise chains settle. */
+/** Drain the microtask queue until the store's longest open/list/watch/reveal
+ *  chain settles. Each reveal level deliberately waits for its watch update
+ *  before issuing the next filesystem operation. */
 async function settle(): Promise<void> {
-  for (let i = 0; i < 5; i++) await Promise.resolve()
+  for (let i = 0; i < 20; i++) await Promise.resolve()
 }
 
 function nodeRows(store: FilesTreeStore, name: string) {
@@ -797,6 +799,54 @@ describe('files tree store', () => {
     expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
   })
 
+  it('waits for the initial root listing before installing its watch', async () => {
+    const rootList = deferred<FilesListResult>()
+    const list = vi.fn().mockReturnValue(rootList.promise)
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const store = createFilesTreeStore(makeServices({ list, watch }))
+
+    store.rescope(LOCAL_A)
+    await settle()
+
+    expect(list).toHaveBeenCalledWith('b1', '/', 0, FILES_PAGE_SIZE)
+    expect(watch).not.toHaveBeenCalled()
+
+    rootList.resolve(listOk('C:/', []))
+    await settle()
+
+    expect(watch).toHaveBeenCalledOnce()
+    expect(watch).toHaveBeenCalledWith('b1', ['/'])
+  })
+
+  it('does not watch a newly expanded directory before its first listing succeeds', async () => {
+    const docsList = deferred<FilesListResult>()
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })]))
+      .mockReturnValueOnce(docsList.promise)
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const store = createFilesTreeStore(makeServices({ list, watch }))
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(watch).toHaveBeenCalledOnce()
+
+    store.toggle(nodeRows(store, 'docs'))
+    await settle()
+
+    expect(list).toHaveBeenLastCalledWith('b1', '/docs', 0, FILES_PAGE_SIZE)
+    expect(watch).toHaveBeenCalledOnce()
+
+    docsList.resolve({
+      state: 'tooLarge',
+      limit: 5000,
+      observedCount: 5001,
+    })
+    await settle()
+
+    expect(watch).toHaveBeenCalledOnce()
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
+  })
+
   it('expanding a directory adds it to the watch set and collapsing removes it', async () => {
     const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
     const list = vi
@@ -830,9 +880,10 @@ describe('files tree store', () => {
     store.rescope({ ...LOCAL_A, cwd: '/home/alice' })
     await settle()
 
-    // The walk expanded /home: the change surface is root + every expanded
-    // directory, so /home joined the watch set.
-    expect(watch.mock.calls.some(([, paths]) => (paths as string[]).includes('/home'))).toBe(true)
+    // One baseline after the initial root and one after the whole reveal —
+    // never one per level, which would make a deep remote cwd quadratic.
+    expect(watch).toHaveBeenCalledTimes(2)
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/', '/home', '/home/alice'])
   })
 
   it('a files.changed for a loaded path triggers exactly one re-list and expansion survives', async () => {
