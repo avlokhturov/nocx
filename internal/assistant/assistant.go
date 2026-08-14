@@ -98,10 +98,27 @@ type ProbeParams struct {
 	// Key is the API key input, empty when the form has none (local models
 	// like Ollama need none). Never persisted, never echoed.
 	Key credential.Secret
-	// Model is the model id the probe asks to speak. The form tests its
-	// first model; the result reports which one was probed.
+	// Model is the model id the probe asks to speak, and EMPTY means the
+	// caller is asking the other question. Two checks live behind one
+	// button (nocx-q27y): with a model, "does this model answer" — a real
+	// streamed completion. Without one, "can I reach this API with this
+	// key" — which needs no model at all, and is the only question that
+	// can be asked of an endpoint nobody has typed a model into yet. The
+	// result names which one ran, so it can never be mistaken for the
+	// other.
 	Model string
 }
+
+// ProbeKind names which of the two checks a ProbeResult reports.
+type ProbeKind string
+
+const (
+	// ProbeModel streamed a real completion from a named model.
+	ProbeModel ProbeKind = "model"
+	// ProbeConnection reached the endpoint and had its credential accepted,
+	// without asking any model to speak.
+	ProbeConnection ProbeKind = "connection"
+)
 
 // ProbeResult is the outcome of one probe. It is the wire shape declared in
 // contracts/endpoints.probe.schema.json ($defs/probeResult) and reused by
@@ -112,10 +129,25 @@ type ProbeResult struct {
 	// agent.status reports the last probe whatever the endpoint list says
 	// now.
 	EndpointName string `json:"name"`
-	// Model is the model id that was probed.
+	// Model is the model id that was probed. Empty for a connection check,
+	// which has none by definition.
 	Model string `json:"model"`
-	// OK is true when the probe streamed at least one content chunk.
+	// Kind names WHICH check produced this result: "model" streamed a real
+	// completion, "connection" only established that the endpoint is
+	// reachable and the credential accepted. They are different facts and a
+	// person acts on them differently, so the result states which it is
+	// rather than leaving it to be inferred from an empty Model.
+	Kind ProbeKind `json:"kind"`
+	// OK is true when the check succeeded: for "model", the endpoint
+	// streamed at least one content chunk; for "connection", the endpoint
+	// was reached and did not reject the credential.
 	OK bool `json:"ok"`
+	// Models are the model ids a connection check found the endpoint
+	// offering. ALWAYS an addition, never a gate: GET /models is not
+	// universally implemented, so an endpoint that does not list them is
+	// reachable, usable, and must stay configurable by hand. Empty for a
+	// model check, and empty for an endpoint that lists nothing.
+	Models []string `json:"models,omitempty"`
 	// Error describes what went wrong when OK is false: the dial failure,
 	// the HTTP status, the refused stream, zero content. Empty when OK.
 	Error string `json:"error,omitempty"`

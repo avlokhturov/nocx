@@ -39,6 +39,7 @@ describe('agentStatusLine', () => {
         lastProbe: {
           name: 'local',
           model: 'qwen',
+          kind: 'model' as const,
           ok: false,
           error: 'connection refused',
           elapsedMs: 12,
@@ -55,6 +56,7 @@ describe('agentStatusLine', () => {
         lastProbe: {
           name: 'local',
           model: 'qwen',
+          kind: 'model' as const,
           ok: true,
           elapsedMs: 42,
           at: '2026-08-14T00:00:00Z',

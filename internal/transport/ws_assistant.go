@@ -14,11 +14,14 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/profile"
 )
 
 // agentStatusResult is the agent.status wire shape, pinned by
@@ -144,8 +147,8 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
-	if params.BaseURL == "" || params.Model == "" {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: baseUrl and model are required"})
+	if msg := validateProbeParams(params); msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 		return
 	}
 
@@ -229,15 +232,120 @@ func (h assistantProbeHandlers) resolveProbeCredential(ctx context.Context, para
 	return secret, nil, nil
 }
 
+// ── endpoints.probe ingress bounds ────────────────────────────────────────
+//
+// Every one of these params is renderer-supplied and reaches something real:
+// the base URL is dialled, the model goes into the request body, and the key
+// goes into an HTTP header. Before nocx-q27y this method checked only that
+// the base URL was non-empty — the thinnest ingress in the assistant surface,
+// and the one that had grown a second reachable shape.
+const (
+	// maxProbeNameRunes bounds the display name, which is only echoed back
+	// in the result and stored as the "last probe" fact.
+	maxProbeNameRunes = 200
+	// maxProbeURLRunes bounds the base URL. Far above any real endpoint;
+	// this is a wire-cost bound, not a naming rule.
+	maxProbeURLRunes = 2_000
+	// maxProbeModelRunes bounds the model id.
+	maxProbeModelRunes = 200
+	// maxProbeKeyRunes bounds the API key. Generous — some providers issue
+	// long JWTs — and still a bound.
+	maxProbeKeyRunes = 8_000
+	// maxProbeIDRunes bounds the renderer-supplied endpoint id, matching the
+	// ask path's maxIDRunes.
+	maxProbeIDRunes = 128
+)
+
+// validateProbeParamsRaw is the registered validator (registration.go): it
+// decodes the params and applies validateProbeParams, so the handler is never
+// entered with anything it would have had to check itself. The exemplar for
+// converting a method off genericObject — decode, then check every reachable
+// field.
+func validateProbeParamsRaw(raw json.RawMessage) string {
+	var p endpointProbeParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	return validateProbeParams(p)
+}
+
+// validateProbeParams checks every reachable endpoints.probe param, returning
+// a non-empty message on the first failure. Returns "" when the params are
+// acceptable.
+//
+// An absent model is NOT a missing parameter: it is the other question — "can
+// I reach this API with this key" — which needs no model and is the only one
+// askable of an endpoint nobody has typed a model into yet (nocx-q27y). The
+// engine routes on it and the result names which check ran.
+func validateProbeParams(p endpointProbeParams) string {
+	if p.BaseURL == "" {
+		return "baseUrl is required"
+	}
+	if n := utf8.RuneCountInString(p.BaseURL); n > maxProbeURLRunes {
+		return fmt.Sprintf("baseUrl exceeds %d characters", maxProbeURLRunes)
+	}
+	// The SAME parse-level rule a stored endpoint is held to
+	// (profile.ValidateBaseURL) — one owner, so a URL refused at save time
+	// cannot be silently dialled at test time. The address policy proper
+	// stays at dial time (internal/assistant/httpguard.go), where it can be
+	// enforced against the address actually connected.
+	if err := profile.ValidateBaseURL(p.BaseURL); err != nil {
+		return err.Error()
+	}
+	if utf8.RuneCountInString(p.Name) > maxProbeNameRunes {
+		return fmt.Sprintf("name exceeds %d characters", maxProbeNameRunes)
+	}
+	if utf8.RuneCountInString(p.Model) > maxProbeModelRunes {
+		return fmt.Sprintf("model exceeds %d characters", maxProbeModelRunes)
+	}
+	if utf8.RuneCountInString(p.Key) > maxProbeKeyRunes {
+		return fmt.Sprintf("key exceeds %d characters", maxProbeKeyRunes)
+	}
+	if utf8.RuneCountInString(p.EndpointID) > maxProbeIDRunes {
+		return fmt.Sprintf("endpointId exceeds %d characters", maxProbeIDRunes)
+	}
+	// The key becomes an Authorization header and the model becomes part of
+	// a request body. A control character in either is never legitimate, and
+	// refusing it here means the header writer never has to be the last line
+	// of defence against a newline in a credential.
+	if hasControlChars(p.Key) {
+		return "key must not contain control characters"
+	}
+	if hasControlChars(p.Model) {
+		return "model must not contain control characters"
+	}
+	return ""
+}
+
+// hasControlChars reports whether s contains any C0/C1 control character or
+// DEL. Tabs and newlines are control characters too, and neither belongs in
+// a credential, a model id or a URL.
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return true
+		}
+	}
+	return false
+}
+
 // refusedProbeResult is the sealed-or-unavailable-vault probe verdict: a
 // probe RESULT naming the state, never a Go error and never a no-key dial
 // (which would 401 and lie about a working endpoint). The sentence matches
 // the ask path's terminalize (ws_agent.go) — one owner of "the vault is
 // unavailable" for a named credential.
 func refusedProbeResult(params endpointProbeParams) *assistant.ProbeResult {
+	kind := assistant.ProbeModel
+	if params.Model == "" {
+		kind = assistant.ProbeConnection
+	}
 	return &assistant.ProbeResult{
 		EndpointName: params.Name,
 		Model:        params.Model,
+		Kind:         kind,
 		OK:           false,
 		Error:        "the endpoint's credential is unavailable — unlock the vault",
 		At:           time.Now(),

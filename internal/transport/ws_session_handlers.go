@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
@@ -718,25 +719,183 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	// with the saturation contract like any admission-backed method.
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
-		reg(openSub, "open", func(w *wsConn, state *connState) handlerFunc {
+		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState) handlerFunc {
 			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, state, req) }
 		}),
-		reg(ordered, "resize", func(w *wsConn, state *connState) handlerFunc {
+		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		}),
-		reg(ordered, "close", func(w *wsConn, state *connState) handlerFunc {
+		reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(sessionSub, "attach", func(w *wsConn, state *connState) handlerFunc {
+		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, state, req) }
 		}),
-		reg(immediate, "ack", func(w *wsConn, state *connState) handlerFunc {
+		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState) handlerFunc {
 			h := ackHandler{machine: s, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }
 		}),
 	}
+}
+
+// ── session-plane ingress bounds ───────────────────────────────────────────
+//
+// open, resize, close, attach and ack take session ids — server-minted, so
+// the 32-hex shape is the honest check (an id that is not one can never
+// resolve, and the shape's owner is session.IDToBytes) — terminal sizes
+// (uint16 by wire type, nonzero where a size of zero is meaningless) and
+// byte offsets (uint64 by wire type). A rejected request is answered
+// -32602 before the handler runs, so a bad session id never crosses into
+// the capability or the ring.
+
+// maxShellPinRunes bounds the open's shell pin. The product pins are
+// bash|zsh|unknown|auto — 7 characters at most — and anything else is
+// deliberately ignored with a warn (detection is the safe degrade, and the
+// launcher refuses unmapped kinds if one slips past), so the validator
+// bounds and does not refuse: refusing would turn the documented degrade
+// into a failed open.
+const maxShellPinRunes = 32
+
+// validateOpenRaw is the registered validator for "open": cols and rows are
+// required and nonzero (a zero-size terminal is meaningless), kind is the
+// two-value enum the handler actually branches on, and the ssh branch needs
+// a target. profileId and host are optional (a local open carries neither);
+// when present they are held to the same bounds the seam methods apply, and
+// host/user reach the ssh subprocess, so control characters are refused.
+func validateOpenRaw(raw json.RawMessage) string {
+	var p openParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Cols == 0 {
+		return "cols is required"
+	}
+	if p.Rows == 0 {
+		return "rows is required"
+	}
+	// kind is a closed set: absent or "local" opens a local PTY, "ssh" opens
+	// an SSH channel. The handler only branches on "ssh", so an unrecognised
+	// kind would silently open a local session — the wrong kind of session
+	// for a caller that believes it is connecting to a host. Refuse it
+	// rather than let a typo'd kind open the wrong one.
+	//
+	// "local" is in the set because callers SEND it: the closed set was
+	// first written as ssh-or-absent, which the container gate refused at
+	// session open for every local session in the product. A closed set has
+	// to be read off what the product sends, never off what the handler
+	// happens to branch on.
+	if p.Kind != "" && p.Kind != "ssh" && p.Kind != "local" {
+		return `kind must be "ssh", "local", or absent`
+	}
+	if p.Kind == "ssh" && p.ProfileID == "" && p.Host == "" {
+		return "profileId or host is required for an ssh session"
+	}
+	if p.ProfileID != "" {
+		if msg := validateStringBound("profileId", p.ProfileID, maxIDRunes); msg != "" {
+			return msg
+		}
+	}
+	if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
+		return msg
+	}
+	if msg := validateStringBound("user", p.User, maxUserRunes); msg != "" {
+		return msg
+	}
+	if utf8.RuneCountInString(p.Shell) > maxShellPinRunes {
+		return fmt.Sprintf("shell exceeds %d characters", maxShellPinRunes)
+	}
+	return ""
+}
+
+// validateResizeRaw is the registered validator for "resize": the sessionId
+// must be a real server-minted id, and cols/rows nonzero.
+func validateResizeRaw(raw json.RawMessage) string {
+	var p resizeParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	if p.Cols == 0 {
+		return "cols is required"
+	}
+	if p.Rows == 0 {
+		return "rows is required"
+	}
+	return ""
+}
+
+// validateCloseRaw is the registered validator for "close": the sessionId
+// must be a real server-minted id.
+func validateCloseRaw(raw json.RawMessage) string {
+	var p closeParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateAttachRaw is the registered validator for "attach": the sessionId
+// must be a real server-minted id. offset is uint64 by wire type and 0 (from
+// the start of the ring) is ordinary — the handler checks the offset against
+// what the ring actually wrote.
+func validateAttachRaw(raw json.RawMessage) string {
+	var p attachParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateAckRaw is the registered validator for the "ack" notification:
+// the sessionId must be a real server-minted id. ack is ingress-critical
+// (registration.go), so this runs inline on the read loop and is deliberately
+// trivial: decode and two string checks, no allocation beyond the struct.
+func validateAckRaw(raw json.RawMessage) string {
+	var p ackParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
 }

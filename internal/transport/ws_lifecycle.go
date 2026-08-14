@@ -25,13 +25,111 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
+
+// ── lifecycle.* ingress bounds and validators (the per-field sweep) ───────
+
+// maxDestinationRunes bounds a renderer-supplied DESTINATION identity: a DNS
+// name, or a
+// user@host:port destination. 512 runes covers the longest destination forms
+// and bounds a display/identity field.
+const maxDestinationRunes = 512
+
+// validateLifecycleSubmitAttemptRaw checks lifecycle.submitAttempt: the
+// domain, the app-owned command text, and the informational cwd/host. The
+// command is the same product class the kernel bounds (decision 5), so the
+// kernel's own ceiling applies here and the refusal moves before the kernel.
+func validateLifecycleSubmitAttemptRaw(raw json.RawMessage) string {
+	var p submitAttemptParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if strings.TrimSpace(p.Domain) == "" {
+		return "domain is required"
+	}
+	if utf8.RuneCountInString(p.Domain) > maxIDRunes {
+		return "domain exceeds the id length bound"
+	}
+	// An empty command is a bare newline, not an execution: it never opens
+	// an attempt (an unstarted attempt would hold the domain and poison the
+	// next attach) — the handler's own rule, moved earlier.
+	if strings.TrimSpace(p.Command) == "" {
+		return "command is required and must not be empty"
+	}
+	if len(p.Command) > lifecycle.MaxCommandBytes {
+		return fmt.Sprintf("command exceeds %d bytes", lifecycle.MaxCommandBytes)
+	}
+	if utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
+		return "cwd exceeds the length bound"
+	}
+	if utf8.RuneCountInString(p.Host) > maxDestinationRunes {
+		return "host exceeds the length bound"
+	}
+	return ""
+}
+
+// validateLifecycleRecoverAckRaw checks lifecycle.recoverAck: the session
+// the ack is for, and the recovery generation — the hex form of the
+// backend-minted one-shot fence nonce (lifecycle.FenceNonce, 32 bytes →
+// 64 hex), the shape the handler's own contract documents ("<64 hex>").
+func validateLifecycleRecoverAckRaw(raw json.RawMessage) string {
+	var p lifecycleRecoverAckParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.SessionID, 32) {
+		return "sessionId is required and must be the 32-hex id the backend minted"
+	}
+	if !isLowerHex(p.Generation, 64) {
+		return "generation must be the 64-hex recovery generation the backend minted"
+	}
+	return ""
+}
+
+// validateLifecycleEstablishAckRaw checks lifecycle.establishAck: the
+// {session, lane, domain, epoch, generation} addressing tuple of decision 9.
+// The generation is compared for equality by the publisher, so its shape is
+// left to that check; presence and bound are enforced here.
+func validateLifecycleEstablishAckRaw(raw json.RawMessage) string {
+	var p lifecycleEstablishAckParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.SessionID, 32) {
+		return "sessionId is required and must be the 32-hex id the backend minted"
+	}
+	if strings.TrimSpace(p.Lane) == "" {
+		return "lane is required"
+	}
+	if utf8.RuneCountInString(p.Lane) > maxIDRunes {
+		return "lane exceeds the id length bound"
+	}
+	if strings.TrimSpace(p.Domain) == "" {
+		return "domain is required"
+	}
+	if utf8.RuneCountInString(p.Domain) > maxIDRunes {
+		return "domain exceeds the id length bound"
+	}
+	if p.Epoch == 0 {
+		return "epoch is required and must be non-zero"
+	}
+	if strings.TrimSpace(p.Generation) == "" {
+		return "generation is required"
+	}
+	if utf8.RuneCountInString(p.Generation) > maxIDRunes {
+		return "generation exceeds the id length bound"
+	}
+	return ""
+}
 
 // lifecycleChangedNotification is the server-initiated lifecycle.changed
 // frame — contracted like the files.changed and git.changed notifications
@@ -319,13 +417,13 @@ func lifecycleSubmitErrorCode(err error) int {
 func (s *WSServer) lifecycleSpecs() []methodSpec {
 	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
 	return []methodSpec{
-		reg(sub, "lifecycle.submitAttempt", func(w *wsConn, state *connState) handlerFunc {
+		reg(sub, "lifecycle.submitAttempt", params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(w, state, req) }
 		}),
-		reg(sub, "lifecycle.recoverAck", func(w *wsConn, state *connState) handlerFunc {
+		reg(sub, "lifecycle.recoverAck", params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(w, state, req) }
 		}),
-		reg(sub, "lifecycle.establishAck", func(w *wsConn, state *connState) handlerFunc {
+		reg(sub, "lifecycle.establishAck", params(validateLifecycleEstablishAckRaw), func(w *wsConn, state *connState) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, state, req) }
 		}),
 	}

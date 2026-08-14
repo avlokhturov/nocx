@@ -27,14 +27,22 @@ const probePrompt = "Reply with the single word: ok"
 // Probe implements Client. The parameters are the form's draft values; a
 // failed dial, a refused stream, a timeout or zero content is a ProbeResult
 // with OK=false — a probe outcome, never a Go error. A Go error means the
-// probe could not run at all (an empty base URL or model), and the caller
-// should not present it as an endpoint verdict.
+// probe could not run at all (an empty base URL), and the caller should not
+// present it as an endpoint verdict.
+//
+// An empty Model routes to the CONNECTION check (connection.go), because
+// "can I reach this API with this key" needs no model and is the only
+// question askable of an endpoint nobody has typed a model into yet. The
+// result's Kind names which check ran.
 func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) {
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return ProbeResult{}, errProbeInvalid("base URL is required")
 	}
 	if strings.TrimSpace(p.Model) == "" {
-		return ProbeResult{}, errProbeInvalid("model is required")
+		// No model is not a missing parameter — it is the other question
+		// (nocx-q27y): "can I reach this API with this key", which needs
+		// none. See connection.go.
+		return c.probeConnection(ctx, p)
 	}
 
 	start := time.Now()
@@ -49,6 +57,7 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	res := ProbeResult{
 		EndpointName: p.Name,
 		Model:        p.Model,
+		Kind:         ProbeModel,
 		ElapsedMS:    time.Since(start).Milliseconds(),
 		At:           time.Now(),
 	}

@@ -22,6 +22,7 @@ func TestAgentStatus_DTOConformsToContract(t *testing.T) {
 	probe := &assistant.ProbeResult{
 		EndpointName: "Local",
 		Model:        "qwen3",
+		Kind:         assistant.ProbeModel,
 		OK:           true,
 		ElapsedMS:    1234,
 		At:           time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC),
@@ -43,6 +44,7 @@ func TestAgentStatus_DTOConformsToContract(t *testing.T) {
 			LastProbe: &assistant.ProbeResult{
 				EndpointName: "Local",
 				Model:        "qwen3",
+				Kind:         assistant.ProbeModel,
 				OK:           false,
 				Error:        "dial tcp: connection refused",
 				ElapsedMS:    5,
@@ -63,6 +65,7 @@ func TestEndpointsProbe_DTOConformsToContract(t *testing.T) {
 		"ok": {
 			EndpointName: "Local",
 			Model:        "qwen3",
+			Kind:         assistant.ProbeModel,
 			OK:           true,
 			ElapsedMS:    1234,
 			At:           time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC),
@@ -70,9 +73,17 @@ func TestEndpointsProbe_DTOConformsToContract(t *testing.T) {
 		"failed": {
 			EndpointName: "Local",
 			Model:        "qwen3",
+			Kind:         assistant.ProbeModel,
 			OK:           false,
 			Error:        "dial tcp: connection refused",
 			ElapsedMS:    5,
+		},
+		"connection": {
+			EndpointName: "Local",
+			Kind:         assistant.ProbeConnection,
+			OK:           true,
+			Models:       []string{"qwen3", "llama3"},
+			ElapsedMS:    12,
 			At:           time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC),
 		},
 	}
@@ -97,6 +108,7 @@ func TestAssistant_OverTheWireConformToContract(t *testing.T) {
 			return assistant.ProbeResult{
 				EndpointName: p.Name,
 				Model:        p.Model,
+				Kind:         probeKindFor(p),
 				OK:           true,
 				ElapsedMS:    42,
 				At:           time.Now(),
