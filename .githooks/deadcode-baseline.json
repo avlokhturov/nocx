@@ -44,6 +44,10 @@
     },
     {
       "file": "internal/importer/tabby.go",
+      "func": "dedupKeySet"
+    },
+    {
+      "file": "internal/importer/tabby.go",
       "func": "ImportGroups"
     },
     {
@@ -53,10 +57,6 @@
     {
       "file": "internal/importer/tabby.go",
       "func": "ImportTabbyWithService"
-    },
-    {
-      "file": "internal/importer/tabby.go",
-      "func": "dedupKeySet"
     },
     {
       "file": "internal/notify/clock.go",
@@ -72,63 +72,15 @@
     },
     {
       "file": "internal/notify/clock.go",
-      "func": "NewManualClock"
-    },
-    {
-      "file": "internal/notify/clock.go",
-      "func": "RealClock.AfterFunc"
-    },
-    {
-      "file": "internal/notify/clock.go",
-      "func": "RealClock.Now"
-    },
-    {
-      "file": "internal/notify/clock.go",
       "func": "manualTimer.Stop"
     },
     {
-      "file": "internal/notify/policy.go",
-      "func": "Disposition.String"
-    },
-    {
-      "file": "internal/notify/policy.go",
-      "func": "NewPolicy"
-    },
-    {
-      "file": "internal/notify/policy.go",
-      "func": "Policy.Submit"
-    },
-    {
-      "file": "internal/notify/policy.go",
-      "func": "Policy.deliverWindow"
-    },
-    {
-      "file": "internal/notify/policy.go",
-      "func": "Policy.flush"
-    },
-    {
-      "file": "internal/notify/policy.go",
-      "func": "Policy.suppressed"
-    },
-    {
-      "file": "internal/notify/policy.go",
-      "func": "WithResultHandler"
+      "file": "internal/notify/clock.go",
+      "func": "NewManualClock"
     },
     {
       "file": "internal/profile/profile.go",
       "func": "BuildGroupTree"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "Ptr"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "ResolveGroupPath"
-    },
-    {
-      "file": "internal/profile/profile.go",
-      "func": "StoredOptionsFromDense"
     },
     {
       "file": "internal/profile/profile.go",
@@ -141,6 +93,18 @@
     {
       "file": "internal/profile/profile.go",
       "func": "parseNamespacedID"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "Ptr"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "ResolveGroupPath"
+    },
+    {
+      "file": "internal/profile/profile.go",
+      "func": "StoredOptionsFromDense"
     },
     {
       "file": "internal/profile/store.go",
@@ -231,6 +195,10 @@
       "func": "Publisher.verifyFile"
     },
     {
+      "file": "internal/ssh/ssh_real.go",
+      "func": "WithKnownHostsFile"
+    },
+    {
       "file": "internal/ssh/ssh.go",
       "func": "NewStub"
     },
@@ -256,6 +224,10 @@
     },
     {
       "file": "internal/ssh/ssh.go",
+      "func": "StubChannel.onceClose"
+    },
+    {
+      "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Read"
     },
     {
@@ -269,10 +241,6 @@
     {
       "file": "internal/ssh/ssh.go",
       "func": "StubChannel.Write"
-    },
-    {
-      "file": "internal/ssh/ssh.go",
-      "func": "StubChannel.onceClose"
     },
     {
       "file": "internal/ssh/ssh.go",
@@ -291,10 +259,6 @@
       "func": "WithTimeout"
     },
     {
-      "file": "internal/ssh/ssh_real.go",
-      "func": "WithKnownHostsFile"
-    },
-    {
       "file": "internal/transport/transport.go",
       "func": "NewStub"
     },
@@ -305,18 +269,6 @@
     {
       "file": "internal/transport/transport.go",
       "func": "Stub.Stop"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithCaptureRegistry"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithFilesRevealer"
-    },
-    {
-      "file": "internal/transport/ws.go",
-      "func": "WithProfileResolver"
     },
     {
       "file": "internal/transport/ws_auth.go",
@@ -373,6 +325,18 @@
     {
       "file": "internal/transport/ws_test_helper.go",
       "func": "wedgedSocket.WriteMessage"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithCaptureRegistry"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithFilesRevealer"
+    },
+    {
+      "file": "internal/transport/ws.go",
+      "func": "WithProfileResolver"
     },
     {
       "file": "internal/vault/inventory.go",

@@ -324,6 +324,13 @@ func WithLogFilePath(path string) Option {
 	return func(o *optionSet) { o.logFilePath = &path }
 }
 
+// notifyDebounceWindow is how long a burst of notifications for one session
+// and kind collapses into a single banner naming the count. Eight seconds is
+// termic's number for the same job (design spec §6.2), long enough to absorb
+// a build's chatter and short enough that a finished command still feels
+// immediate.
+const notifyDebounceWindow = 8 * time.Second
+
 func New(opts ...Option) (*App, error) {
 	var o optionSet
 	for _, opt := range opts {
@@ -801,7 +808,38 @@ func New(opts ...Option) (*App, error) {
 	if routerErr != nil {
 		return nil, fmt.Errorf("notify router: %w", routerErr)
 	}
-	tpOpts = append(tpOpts, transport.WithNotifyRaiser(notifyRouter))
+
+	// The attention policy sits IN FRONT of the router, so notify.raise
+	// reaches the pipeline through it rather than around it. Without this a
+	// loop that writes OSC 9 a hundred times produces a hundred banners; the
+	// policy collapses a burst per (session, kind) into one notification
+	// naming the count, which is the whole point of the debounce window.
+	//
+	// Focus binds late and its unbound answer is "nothing is focused", so
+	// suppression never suppresses until something reports what the user is
+	// looking at (nocx-jiwq.2). That is the safe direction: the cost is a
+	// notification the user did not strictly need, where the other direction
+	// silently swallows one they did. Debounce and coalescing need no focus
+	// and work in full from the first raise.
+	notifyFocus := &notify.FocusHolder{}
+	notifyPolicy, policyErr := notify.NewPolicy(
+		context.Background(), notifyRouter, notifyDebounceWindow, notifyFocus, notify.RealClock{},
+		notify.WithResultHandler(func(out notify.Outcome) {
+			if out.Err != nil {
+				logger.Warn("notification refused", "error", out.Err)
+				return
+			}
+			for _, r := range out.Results {
+				if r.Err != nil {
+					logger.Warn("notification delivery failed", "target", r.Route.Destination.Target, "error", r.Err)
+				}
+			}
+		}),
+	)
+	if policyErr != nil {
+		return nil, fmt.Errorf("notify policy: %w", policyErr)
+	}
+	tpOpts = append(tpOpts, transport.WithNotifyRaiser(notifyPolicy))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the

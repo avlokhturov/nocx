@@ -242,3 +242,26 @@ func (p *Policy) deliverWindow(s *stream) {
 func (p *Policy) suppressed(session string) bool {
 	return session != "" && p.focus.WindowFocused() && p.focus.FocusedSession() == session
 }
+
+// Raise presents the policy as the transport's raiser, so notify.raise
+// reaches the pipeline through the attention policy rather than around it.
+//
+// The answer is deliberately not a delivery result. Submit returns as soon as
+// the event has been accepted — suppressed, or opened into or joined onto a
+// debounce window — and the delivery happens when that window closes, which
+// may be seconds later. A program asking for a notification must not block
+// until then, so the outcome carries no Results by construction and a nil Err
+// means "accepted", never "delivered".
+//
+// Where a failure becomes visible therefore moves: an admission refusal or a
+// sink error arrives at the result handler (WithResultHandler) rather than at
+// the caller. ADR-0029 §2.2 requires a refused delivery to be visible, and the
+// handler is the seam that carries it — today into the log, and into whatever
+// surface reports notification health when one exists (nocx-jiwq.2).
+func (p *Policy) Raise(ctx context.Context, ev Event) Outcome {
+	if err := ctx.Err(); err != nil {
+		return Outcome{Err: err}
+	}
+	p.Submit(ev)
+	return Outcome{}
+}
