@@ -35,6 +35,7 @@ import (
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -92,7 +93,23 @@ type App struct {
 	// logFile is the open append handle, closed at shutdown after the
 	// final line. nil when file logging is unavailable.
 	logFile *os.File
+
+	// attentionHost is the late-bound implementation behind the notify
+	// router's banner route (ADR-0029). The route itself was decided when
+	// the table was built; this is only the surface it reaches, and it stays
+	// UnavailableHost on every host that never calls SetAttentionHost.
+	attentionHost *notify.HostHolder
+
+	// slogger is the same logger Logger wraps, kept so an adapter built
+	// outside this package (main.go's attention host) writes to the log file
+	// rather than to slog.Default(), which nothing here installs.
+	slogger *slog.Logger
 }
+
+// Slog returns the backend's structured logger, for adapters constructed in
+// main.go that take a *slog.Logger directly. Prefer the Logger interface
+// everywhere else.
+func (a *App) Slog() *slog.Logger { return a.slogger }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
 // which an in-progress compaction stops (design §5.4 names hysteresis as
@@ -161,6 +178,20 @@ func (a *App) SetDialogService(ds transport.DialogService) {
 // unset state.
 func (a *App) SetUrlOpener(opener transport.UrlOpener) {
 	a.Transport.SetUrlOpener(opener)
+}
+
+// SetAttentionHost binds the desktop attention surface behind the notify
+// router's banner route (ADR-0029). Like SetDialogService it is wired from
+// main.go's WailsApp.startup — the Wails context the adapter needs exists
+// only there, after the router was built — and must be called before Start,
+// so no raise can observe the unset state.
+//
+// It binds an implementation, never a destination. The route was decided when
+// the routing table was built and is not reachable from here; a host that
+// never calls this keeps UnavailableHost, and its raises are visible failed
+// deliveries rather than silent drops.
+func (a *App) SetAttentionHost(host notify.AttentionHost) {
+	a.attentionHost.Set(host)
 }
 
 // Log logs a message from the frontend.
@@ -744,13 +775,24 @@ func New(opts ...Option) (*App, error) {
 	// notification goes. Before this line the whole notify package was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
 	//
-	// The table is deliberately EMPTY here. Default-deny means notify.raise
-	// resolves to no route and delivers nothing until a sink row exists, and
-	// the rows arrive with their sinks: the attention host (nocx-hg2a) and the
-	// renderer's toast (nocx-c6ef). An empty table is the honest state of a
-	// pipeline whose sinks are not built yet — it is not a disabled feature,
-	// and nothing in the UI offers a destination it cannot honour.
-	notifyRouter, routerErr := notify.NewRouter(notify.Table{}, notify.Limits{
+	// The banner row is the table's first, and it is decided here, once. A
+	// program that asks for a notification (notify.raise, trust
+	// programRequest) reaches the OS banner and nothing else — no network
+	// sink, no subscription route, and no way for the request to name a
+	// destination of its own. The holder behind it binds late (see
+	// notify.HostHolder): the Wails runtime needs a context that exists only
+	// in main.go's startup, so the implementation arrives after this line
+	// while the route does not.
+	//
+	// Hosts that never bind one — cmd/devharness, the dev-web harness, an e2e
+	// run — keep UnavailableHost, and a raise there is a visible failed
+	// delivery rather than a silent drop.
+	attentionHost := &notify.HostHolder{}
+	notifyRouter, routerErr := notify.NewRouter(notify.Table{
+		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
+			{Sink: wailsadapter.HostSink{Host: attentionHost}},
+		},
+	}, notify.Limits{
 		MaxInFlight:     4,
 		MaxQueued:       32,
 		MaxRetained:     1 << 20,
@@ -848,6 +890,8 @@ func New(opts ...Option) (*App, error) {
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,
+		attentionHost:    attentionHost,
+		slogger:          slogger,
 	}
 
 	logger.Info("application initialized")

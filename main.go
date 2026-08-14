@@ -15,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/shady2k/nocx/internal/app"
+	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -149,6 +150,22 @@ func (w *WailsApp) startup(ctx context.Context) {
 	// to back it. Wired before Start; the dev-web harness never runs this,
 	// and the method then reports itself unavailable and the panel toasts.
 	w.backend.SetUrlOpener(&wailsUrlOpener{ctx: ctx})
+
+	// The desktop attention surface, behind the notify router's banner route
+	// (ADR-0029). Same shape as the two above and for the same reason: the
+	// Wails notification runtime locates the frontend through a value on this
+	// context, which exists only here. Wired before Start, so no raise can
+	// observe the unset state; the dev-web harness and cmd/devharness never
+	// run this, and their raises stay visible failed deliveries.
+	//
+	// Lookup and Focus are deliberately absent. Clicking a banner should
+	// bring the originating tab forward, and nothing in the backend can ask
+	// the renderer to focus a tab yet — that capability is nocx-jiwq.1.
+	// Until it lands the adapter refuses the click and says so, which is why
+	// no surface offers click-to-focus.
+	w.backend.SetAttentionHost(wailsadapter.New(ctx, wailsadapter.Deps{
+		Log: w.backend.Slog(),
+	}))
 
 	// Settle any transaction in flight from a previous launch.
 	if err := w.backend.Updater.Reconcile(ctx); err != nil {
