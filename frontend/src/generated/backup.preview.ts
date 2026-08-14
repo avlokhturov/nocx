@@ -16,6 +16,9 @@ export interface BackupRestorePreview {
   settings: SettingsCounts
   connections: ItemCounts
   groups: ItemCounts
+  snippets: {
+    included: number
+  }
   connectionsRequiringCredential: ProfileRef[]
   omissions: {
     credentialBindingsRemoved: number

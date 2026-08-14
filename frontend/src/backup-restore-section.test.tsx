@@ -49,6 +49,7 @@ const CREATED: BackupCreateResult = {
     settings: 2,
     connections: 3,
     groups: 1,
+    snippets: 4,
     credentialBindingsRemoved: 1,
     groupCredentialBindingsRemoved: 0,
     groupDefaultKeysOmitted: 0,
@@ -62,6 +63,7 @@ const PREVIEW: RestorePreview = {
   settings: { included: 2, changed: 1, reset: 0 },
   connections: { included: 3, added: 2, updated: 1, removed: 0 },
   groups: { included: 1, added: 0, updated: 1, removed: 0 },
+  snippets: { included: 4 },
   connectionsRequiringCredential: [{ id: 'p1', name: 'My Server' }],
   omissions: {
     credentialBindingsRemoved: 1,
@@ -222,6 +224,20 @@ describe('restoring a backup', () => {
 
     await waitFor(() => expect(spies.preview).toHaveBeenCalledWith(DOC, 'merge'))
     await waitFor(() => expect(screen.getByText(/My Server/)).toBeTruthy())
+  })
+
+  it('shows the snippet count in the preview table', async () => {
+    // A REPLACE restore wipes the snippet library; the preview table must
+    // say so before the user commits to it. The count lives in the Included
+    // row, next to settings/connections/groups.
+    const { client } = mockClient()
+    render(() => <BackupRestoreSection profileClient={client} />)
+
+    await chooseFile()
+
+    await waitFor(() => expect(screen.getByText('Included')).toBeTruthy())
+    const row = screen.getByText('Included').closest('tr')
+    expect(row?.textContent).toBe('Included2314')
   })
 
   it('re-previews under the other strategy when the user switches it', async () => {

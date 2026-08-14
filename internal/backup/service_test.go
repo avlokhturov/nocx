@@ -5,14 +5,18 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/snippet"
 )
 
 type fakeDocStore struct {
-	data map[string][]byte
+	data        map[string][]byte
+	writes      int
+	failOnWrite int // 1-based: fail when the next write would be the Nth
 }
 
 func (f *fakeDocStore) Read(name string, into any) (bool, error) {
@@ -24,6 +28,10 @@ func (f *fakeDocStore) Read(name string, into any) (bool, error) {
 }
 
 func (f *fakeDocStore) Write(name string, doc any) error {
+	f.writes++
+	if f.failOnWrite > 0 && f.writes == f.failOnWrite {
+		return errors.New("injected journal write failure")
+	}
 	b, err := json.Marshal(doc)
 	if err != nil {
 		return err
@@ -85,7 +93,21 @@ func (f *fakeSettingsStore) ValidateSetting(key string, value any) error {
 	return f.validateErr
 }
 
-func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fakeDocStore) {
+// fakeSnippetStore is an in-memory snippet.Store for the backup tests.
+type fakeSnippetStore struct {
+	list []snippet.Snippet
+}
+
+func (f *fakeSnippetStore) LoadAll() ([]snippet.Snippet, error) {
+	return append([]snippet.Snippet(nil), f.list...), nil
+}
+
+func (f *fakeSnippetStore) SaveAll(s []snippet.Snippet) error {
+	f.list = append([]snippet.Snippet(nil), s...)
+	return nil
+}
+
+func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fakeDocStore, *fakeSnippetStore) {
 	conn := &fakeConnStore{
 		snap: profile.ConnectionSnapshot{
 			Profiles: []profile.SSHProfile{},
@@ -94,8 +116,9 @@ func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fak
 	}
 	sett := &fakeSettingsStore{overrides: map[string]any{}}
 	doc := &fakeDocStore{}
-	svc := backup.NewService(conn, sett, doc)
-	return svc, conn, sett, doc
+	snips := &fakeSnippetStore{}
+	svc := backup.NewService(conn, sett, doc, snips)
+	return svc, conn, sett, doc, snips
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -130,7 +153,7 @@ func mustRestore(t *testing.T, svc *backup.Service, contents string, strategy ba
 // ── Tests ────────────────────────────────────────────────────────────────
 
 func TestCreate_RoundTrip(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
@@ -176,7 +199,7 @@ func TestCreate_RoundTrip(t *testing.T) {
 }
 
 func TestCreate_NoCredentialKeys(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
@@ -212,7 +235,7 @@ func TestCreate_NoCredentialKeys(t *testing.T) {
 }
 
 func TestCreate_SettingsOverridesOnly(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 
 	sett.overrides["tab.placement"] = "vertical"
 	sett.overrides["clipboard.osc52Suppressed"] = true
@@ -230,7 +253,7 @@ func TestCreate_SettingsOverridesOnly(t *testing.T) {
 }
 
 func TestParse_RejectsInvalidFormat(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	_, err := svc.Preview(`{"format":"bad","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[]}}`, backup.RestoreMerge)
 	if err == nil {
 		t.Fatal("expected error for bad format")
@@ -238,7 +261,7 @@ func TestParse_RejectsInvalidFormat(t *testing.T) {
 }
 
 func TestParse_RejectsInvalidVersion(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	_, err := svc.Preview(`{"format":"nocx-backup","version":99,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[]}}`, backup.RestoreMerge)
 	if err == nil {
 		t.Fatal("expected error for bad version")
@@ -246,7 +269,7 @@ func TestParse_RejectsInvalidVersion(t *testing.T) {
 }
 
 func TestParse_RejectsTrailingJSON(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	_, err := svc.Preview(`{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[]}}{}`, backup.RestoreMerge)
 	if err == nil {
 		t.Fatal("expected error for trailing JSON")
@@ -254,7 +277,7 @@ func TestParse_RejectsTrailingJSON(t *testing.T) {
 }
 
 func TestParse_RejectsDuplicateProfileID(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h"}},{"id":"p1","type":"ssh","name":"b","options":{"host":"h"}}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -263,7 +286,7 @@ func TestParse_RejectsDuplicateProfileID(t *testing.T) {
 }
 
 func TestParse_RejectsEmptyProfileName(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"","options":{"host":"h"}}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -272,7 +295,7 @@ func TestParse_RejectsEmptyProfileName(t *testing.T) {
 }
 
 func TestParse_RejectsNonSSHType(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"telnet","name":"a","options":{"host":"h"}}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -281,7 +304,7 @@ func TestParse_RejectsNonSSHType(t *testing.T) {
 }
 
 func TestMerge_PreservesExtraConnections(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	// Existing: two profiles.
 	conn.snap.Profiles = []profile.SSHProfile{
@@ -335,7 +358,7 @@ func TestMerge_PreservesExtraConnections(t *testing.T) {
 }
 
 func TestReplace_RemovesExtraConnections(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "keep"}, Options: profile.StoredSSHProfileOptions{Host: "h1"}},
@@ -370,7 +393,7 @@ func TestReplace_RemovesExtraConnections(t *testing.T) {
 }
 
 func TestMerge_PreservesCredentialBinding_UnchangedHost(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
@@ -399,7 +422,7 @@ func TestMerge_PreservesCredentialBinding_UnchangedHost(t *testing.T) {
 }
 
 func TestMerge_ClearsCredentialBinding_ChangedHost(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{
@@ -440,7 +463,7 @@ func TestMerge_ClearsCredentialBinding_ChangedHost(t *testing.T) {
 }
 
 func TestPreviewToken_StaleAfterMutation(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "p1"}, Options: profile.StoredSSHProfileOptions{Host: "h"}},
@@ -461,7 +484,7 @@ func TestPreviewToken_StaleAfterMutation(t *testing.T) {
 }
 
 func TestRestore_MergeSettings(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 
 	sett.overrides["clipboard.osc52Suppressed"] = true
 
@@ -475,7 +498,7 @@ func TestRestore_MergeSettings(t *testing.T) {
 }
 
 func TestRestore_ReplaceSettings(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 
 	sett.overrides["clipboard.osc52Suppressed"] = true
 	sett.overrides["tab.placement"] = "vertical"
@@ -516,14 +539,14 @@ func TestRestore_ReplaceSettings(t *testing.T) {
 }
 
 func TestRecover_Idle(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	if err := svc.Recover(); err != nil {
 		t.Fatalf("Recover idle: %v", err)
 	}
 }
 
 func TestRecover_Prepared_RollsBack(t *testing.T) {
-	svc, conn, sett, doc := newFakeService()
+	svc, conn, sett, doc, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "original"}, Options: profile.StoredSSHProfileOptions{Host: "h"}},
@@ -565,7 +588,7 @@ func TestRecover_Prepared_RollsBack(t *testing.T) {
 }
 
 func TestRecover_Committed_KeepsState(t *testing.T) {
-	svc, conn, sett, doc := newFakeService()
+	svc, conn, sett, doc, _ := newFakeService()
 
 	conn.snap.Profiles = []profile.SSHProfile{
 		{Base: profile.Base{ID: "p1", Type: "ssh", Name: "committed-state"}, Options: profile.StoredSSHProfileOptions{Host: "h"}},
@@ -592,7 +615,7 @@ func TestRecover_Committed_KeepsState(t *testing.T) {
 }
 
 func TestSizeLimit(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	big := strings.Repeat("x", backup.MaxDocumentBytes+1)
 	_, err := svc.Preview(big, backup.RestoreMerge)
 	if err == nil {
@@ -649,7 +672,7 @@ func readTestJournal(doc *fakeDocStore) (testJournal, error) {
 }
 
 func TestRestore_GroupDefaultsRoundTrip(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 
 	conn.snap.Groups = []profile.ProfileGroup{
 		{
@@ -697,7 +720,7 @@ func TestRestore_GroupDefaultsRoundTrip(t *testing.T) {
 // ── Duplicate key detection ─────────────────────────────────────────────
 
 func TestParse_RejectsDuplicateTopLevelKey(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -706,7 +729,7 @@ func TestParse_RejectsDuplicateTopLevelKey(t *testing.T) {
 }
 
 func TestParse_RejectsDuplicateNestedKey(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","host":"h2"}}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -715,7 +738,7 @@ func TestParse_RejectsDuplicateNestedKey(t *testing.T) {
 }
 
 func TestParse_AcceptsUnicodeEscapedKeys(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	// "\u0061" = "a", "\u0062" = "b" — unique decoded keys in overrides map.
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"\u0061":"val1","\u0062":"val2"}},"connections":{"profiles":[],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
@@ -725,7 +748,7 @@ func TestParse_AcceptsUnicodeEscapedKeys(t *testing.T) {
 }
 
 func TestParse_RejectsDecodedEquivalentDuplicate(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	// "\u006Bey" decodes to "key" — same as the literal "key" in overrides.
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"\u006Bey":"val1","key":"val2"}},"connections":{"profiles":[],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
@@ -735,7 +758,7 @@ func TestParse_RejectsDecodedEquivalentDuplicate(t *testing.T) {
 }
 
 func TestParse_AcceptsDecimalNumberWithoutDuplicateKeys(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"test.number":1.0}},"connections":{"profiles":[],"groups":[]}}`
 	if _, err := svc.Preview(contents, backup.RestoreMerge); err != nil {
 		t.Fatalf("valid decimal number rejected: %v", err)
@@ -743,7 +766,7 @@ func TestParse_AcceptsDecimalNumberWithoutDuplicateKeys(t *testing.T) {
 }
 
 func TestParse_RejectsSettingValidationError(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 	sett.validateErr = errors.New("expected string")
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{"ui.theme":{"mode":"dark"}}},"connections":{"profiles":[],"groups":[]}}`
 	if _, err := svc.Preview(contents, backup.RestoreMerge); !errors.Is(err, backup.ErrInvalidDocument) {
@@ -754,7 +777,7 @@ func TestParse_RejectsSettingValidationError(t *testing.T) {
 // ── valuesEqual safety ──────────────────────────────────────────────────
 
 func TestValuesEqual_NestedMaps(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 	sett.overrides["test.key"] = map[string]any{"nested": "value"}
 
 	r := mustCreate(t, svc)
@@ -772,7 +795,7 @@ func TestValuesEqual_NestedMaps(t *testing.T) {
 }
 
 func TestValuesEqual_NestedArrays(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 	sett.overrides["test.key"] = []any{"a", "b"}
 
 	r := mustCreate(t, svc)
@@ -789,7 +812,7 @@ func TestValuesEqual_NestedArrays(t *testing.T) {
 }
 
 func TestPreview_SettingsValuesEqualDoesNotPanic(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 	// Store complex types that would panic with == comparison.
 	sett.overrides["test.key"] = map[string]any{"deep": map[string]any{"v": float64(1)}}
 
@@ -805,7 +828,7 @@ func TestPreview_SettingsValuesEqualDoesNotPanic(t *testing.T) {
 }
 
 func TestRestore_SettingsValuesEqualDoesNotPanic(t *testing.T) {
-	svc, _, sett, _ := newFakeService()
+	svc, _, sett, _, _ := newFakeService()
 	sett.overrides["test.key"] = []any{map[string]any{"id": float64(1)}, map[string]any{"id": float64(2)}}
 
 	r := mustCreate(t, svc)
@@ -821,7 +844,7 @@ func TestRestore_SettingsValuesEqualDoesNotPanic(t *testing.T) {
 }
 
 func TestParse_RejectsMalformedForwardDirection(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","forwards":[{"direction":"bogus","destination":"localhost:8080"}]}}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -833,7 +856,7 @@ func TestParse_RejectsMalformedForwardDirection(t *testing.T) {
 }
 
 func TestParse_RejectsInvalidForwardDestination(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","forwards":[{"direction":"local","destination":"missing-port"}]}}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -842,7 +865,7 @@ func TestParse_RejectsInvalidForwardDestination(t *testing.T) {
 }
 
 func TestParse_RejectsInvalidForwardPort(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h","forwards":[{"direction":"local","bindPort":99999,"destination":"localhost:8080"}]}}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -851,7 +874,7 @@ func TestParse_RejectsInvalidForwardPort(t *testing.T) {
 }
 
 func TestParse_RejectsOrphanedGroupReference(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"a","options":{"host":"h"},"group":"nonexistent"}],"groups":[]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -863,7 +886,7 @@ func TestParse_RejectsOrphanedGroupReference(t *testing.T) {
 }
 
 func TestParse_RejectsCyclicGroupTree(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[{"id":"g1","name":"G1","parentGroupId":"g2"},{"id":"g2","name":"G2","parentGroupId":"g1"}]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -875,7 +898,7 @@ func TestParse_RejectsCyclicGroupTree(t *testing.T) {
 }
 
 func TestParse_RejectsGroupForwardDefaultsInvalid(t *testing.T) {
-	svc, _, _, _ := newFakeService()
+	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[],"groups":[{"id":"g1","name":"G1","defaults":{"ssh":{"options":{"forwards":[{"direction":"bogus","destination":"host:80"}]}}}}]}}`
 	_, err := svc.Preview(contents, backup.RestoreMerge)
 	if err == nil {
@@ -884,7 +907,7 @@ func TestParse_RejectsGroupForwardDefaultsInvalid(t *testing.T) {
 }
 
 func TestRestoreMergeNormalizesBehaviorOnSessionEnd(t *testing.T) {
-	svc, conn, _, _ := newFakeService()
+	svc, conn, _, _, _ := newFakeService()
 	conn.snap.Profiles = []profile.SSHProfile{{
 		Base: profile.Base{
 			ID:                   "p1",
@@ -918,5 +941,175 @@ func TestRestoreMergeNormalizesBehaviorOnSessionEnd(t *testing.T) {
 	}
 	if got.Options.BehaviorOnSessionEnd == nil || *got.Options.BehaviorOnSessionEnd != profile.BehaviorClose {
 		t.Errorf("options behavior = %v, want %q", got.Options.BehaviorOnSessionEnd, profile.BehaviorClose)
+	}
+}
+
+// ── Snippets section ─────────────────────────────────────────────────────
+
+// legacyBackupContents is a valid backup document written before the
+// snippets section existed: no "snippets" key at all.
+func legacyBackupContents(t *testing.T) string {
+	t.Helper()
+	doc := backup.Document{
+		Format:    backup.Format,
+		Version:   backup.Version,
+		CreatedAt: time.Now().UTC(),
+		Settings:  backup.SettingsSection{Overrides: map[string]any{}},
+		Connections: backup.ConnectionsSection{
+			Profiles: []backup.BackupProfile{},
+			Groups:   []backup.BackupGroup{},
+		},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal legacy document: %v", err)
+	}
+	return string(b)
+}
+
+// A backup that silently omits a section is worse than no backup: the user
+// believes they have one (spec §5.4). The library must survive create then
+// wipe then restore under REPLACE with order intact.
+func TestCreate_RoundTripsSnippetsUnderReplace(t *testing.T) {
+	svc, _, _, _, snips := newFakeService()
+	snips.list = []snippet.Snippet{
+		{ID: "b", Title: "second", Body: "two"},
+		{ID: "a", Title: "first", Body: "one"},
+	}
+
+	r := mustCreate(t, svc)
+	var doc backup.Document
+	if err := json.Unmarshal([]byte(r.Contents), &doc); err != nil {
+		t.Fatalf("unmarshal created backup: %v", err)
+	}
+	if len(doc.Snippets) != 2 || doc.Snippets[0].ID != "b" || doc.Snippets[1].ID != "a" {
+		t.Fatalf("backup snippets wrong or out of order: %+v", doc.Snippets)
+	}
+	if r.Summary.Snippets != 2 {
+		t.Fatalf("summary snippets = %d, want 2", r.Summary.Snippets)
+	}
+
+	// The machine is wiped: the library on disk is empty now.
+	snips.list = nil
+
+	preview := mustPreview(t, svc, r.Contents, backup.RestoreReplace)
+	if preview.Snippets.Included != 2 {
+		t.Fatalf("preview snippets included = %d, want 2", preview.Snippets.Included)
+	}
+	mustRestore(t, svc, r.Contents, backup.RestoreReplace, preview.PreviewToken)
+
+	if len(snips.list) != 2 || snips.list[0].ID != "b" || snips.list[1].ID != "a" {
+		t.Fatalf("restore lost the library or its order: %+v", snips.list)
+	}
+}
+
+// Merge must not erase what the backup does not mention: an unconditional
+// SaveAll would turn "the backup has no snippets" into "the library is now
+// empty".
+func TestRestore_MergeWithNoSnippetsSectionLeavesTheLibraryAlone(t *testing.T) {
+	svc, _, _, _, snips := newFakeService()
+	snips.list = []snippet.Snippet{{ID: "mine", Title: "mine", Body: "keep me"}}
+
+	contents := legacyBackupContents(t)
+
+	preview := mustPreview(t, svc, contents, backup.RestoreMerge)
+	mustRestore(t, svc, contents, backup.RestoreMerge, preview.PreviewToken)
+
+	if len(snips.list) != 1 || snips.list[0].ID != "mine" {
+		t.Fatalf("merge without a snippets section changed the library: %+v", snips.list)
+	}
+}
+
+// A document written before this section existed is still a valid backup.
+func TestRestore_LegacyDocumentWithoutSnippetsSucceeds(t *testing.T) {
+	svc, _, _, _, snips := newFakeService()
+	snips.list = []snippet.Snippet{{ID: "mine", Title: "mine", Body: "keep me"}}
+
+	contents := legacyBackupContents(t)
+
+	preview := mustPreview(t, svc, contents, backup.RestoreReplace)
+	mustRestore(t, svc, contents, backup.RestoreReplace, preview.PreviewToken)
+
+	if len(snips.list) != 1 || snips.list[0].ID != "mine" {
+		t.Fatalf("replace without a snippets section changed the library: %+v", snips.list)
+	}
+}
+
+// The journal is an interval, not a moment: a failure after the snippet
+// write must not leave snippets restored while connections rolled back —
+// that would look like a successful restore of everything else.
+func TestRestore_SnippetWriteIsRolledBackWithEverythingElse(t *testing.T) {
+	svc, conn, sett, doc, snips := newFakeService()
+	snips.list = []snippet.Snippet{{ID: "old", Title: "before", Body: "before"}}
+	conn.snap.Profiles = []profile.SSHProfile{{
+		Base:    profile.Base{ID: "ssh:custom:p1:0001", Type: "ssh", Name: "p1"},
+		Options: profile.StoredSSHProfileOptions{Host: "h.example.com"},
+	}}
+	sett.overrides = map[string]any{"theme": "dark"}
+
+	r := mustCreate(t, svc)
+	preview := mustPreview(t, svc, r.Contents, backup.RestoreReplace)
+
+	// The snippet write happens inside the prepared/committed interval. Make
+	// the COMMITTED journal write fail — the step after snippets were
+	// written — so Recover must take everything back, snippets included.
+	doc.failOnWrite = 2
+	if _, err := svc.Restore(r.Contents, backup.RestoreReplace, preview.PreviewToken); err == nil {
+		t.Fatal("want a restore error")
+	}
+	doc.failOnWrite = 0
+
+	if len(snips.list) != 1 || snips.list[0].ID != "old" {
+		t.Fatalf("snippets not rolled back with everything else: %+v", snips.list)
+	}
+	if len(conn.snap.Profiles) != 1 || conn.snap.Profiles[0].ID != "ssh:custom:p1:0001" {
+		t.Fatalf("connections not rolled back: %+v", conn.snap.Profiles)
+	}
+	if sett.overrides["theme"] != "dark" {
+		t.Fatalf("settings not rolled back: %+v", sett.overrides)
+	}
+}
+
+// backupWithSnippets is a valid backup document with a snippets section.
+func backupWithSnippets(t *testing.T) string {
+	t.Helper()
+	doc := backup.Document{
+		Format:    backup.Format,
+		Version:   backup.Version,
+		CreatedAt: time.Now().UTC(),
+		Settings:  backup.SettingsSection{Overrides: map[string]any{}},
+		Connections: backup.ConnectionsSection{
+			Profiles: []backup.BackupProfile{},
+			Groups:   []backup.BackupGroup{},
+		},
+		Snippets: []backup.BackupSnippet{{ID: "a", Title: "t", Body: "b"}},
+	}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal document: %v", err)
+	}
+	return string(b)
+}
+
+// A service wired without the snippet store (the transport's test servers
+// are) must refuse a backup that carries snippets rather than panic: the
+// document mentions a section this build cannot apply, and applying
+// everything else would half-restore it.
+func TestRestore_WithoutSnippetStoreRefusesASnippetsBackup(t *testing.T) {
+	conn := &fakeConnStore{
+		snap: profile.ConnectionSnapshot{
+			Profiles: []profile.SSHProfile{},
+			Groups:   []profile.ProfileGroup{},
+		},
+	}
+	sett := &fakeSettingsStore{overrides: map[string]any{}}
+	doc := &fakeDocStore{}
+	svc := backup.NewService(conn, sett, doc, nil)
+
+	contents := backupWithSnippets(t)
+
+	preview := mustPreview(t, svc, contents, backup.RestoreReplace)
+	if _, err := svc.Restore(contents, backup.RestoreReplace, preview.PreviewToken); err == nil {
+		t.Fatal("want an error: the backup carries snippets this service cannot apply")
 	}
 }

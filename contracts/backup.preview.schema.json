@@ -11,6 +11,7 @@
     "settings",
     "connections",
     "groups",
+    "snippets",
     "connectionsRequiringCredential",
     "omissions"
   ],
@@ -21,6 +22,12 @@
     "settings": { "$ref": "#/$defs/settingsCounts" },
     "connections": { "$ref": "#/$defs/itemCounts" },
     "groups": { "$ref": "#/$defs/itemCounts" },
+    "snippets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included"],
+      "properties": { "included": { "type": "integer" } }
+    },
     "connectionsRequiringCredential": {
       "type": "array",
       "items": { "$ref": "#/$defs/profileRef" }

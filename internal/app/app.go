@@ -503,7 +503,7 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
-	backupService := backup.NewService(profileStore, settingsRegistry, docStore)
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore)
 	if err := backupService.Recover(); err != nil {
 		return nil, fmt.Errorf("backup recovery: %w", err)
 	}

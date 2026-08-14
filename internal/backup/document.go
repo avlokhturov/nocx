@@ -6,6 +6,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/snippet"
 )
 
 // ── Format constants ────────────────────────────────────────────────────
@@ -56,6 +57,15 @@ type SettingsSnapshotStore interface {
 	ValidateSetting(key string, value any) error
 }
 
+// SnippetStore reads and replaces the snippet library document
+// (internal/snippet's store satisfies it). A backup service wired without
+// one (nil) simply omits the snippets section: the backup still covers
+// everything the service was given.
+type SnippetStore interface {
+	LoadAll() ([]snippet.Snippet, error)
+	SaveAll([]snippet.Snippet) error
+}
+
 // ── Document envelope ────────────────────────────────────────────────────
 
 // Document is the on-disk/wire shape of a nocx backup file.
@@ -65,6 +75,10 @@ type Document struct {
 	CreatedAt   time.Time          `json:"createdAt"`
 	Settings    SettingsSection    `json:"settings"`
 	Connections ConnectionsSection `json:"connections"`
+	// Snippets is the library at backup time, in display order. Absent for
+	// a backup written before this section existed — which restore must
+	// accept and leave the current library alone under merge.
+	Snippets []BackupSnippet `json:"snippets,omitempty"`
 }
 
 // SettingsSection holds only saved non-secret overrides.
@@ -141,4 +155,15 @@ type BackupGroupDefaults struct {
 // BackupSSHDefaults wraps the ten safe SSH option fields.
 type BackupSSHDefaults struct {
 	Options BackupSSHOptions `json:"options"`
+}
+
+// ── Snippet DTO ──────────────────────────────────────────────────────────
+
+// BackupSnippet is the wire shape of one snippet in a backup. It mirrors
+// snippet.Snippet exactly; the library's own type is not used here so the
+// backup document format stays independent of the store's domain type.
+type BackupSnippet struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }
