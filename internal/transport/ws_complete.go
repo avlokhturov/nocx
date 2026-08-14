@@ -108,7 +108,7 @@ func (h sessionShellHandlers) handleComplete(ctx context.Context, req jsonrpcReq
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

@@ -154,7 +154,7 @@ func (h secretsHandlers) handleUsage(ctx context.Context, req jsonrpcRequest) {
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -190,7 +190,7 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 			return nil
 		})
 		if err != nil {
-			answerOperationRefusal(h.r, req.ID, err)
+			answerOperationRefusal(h.r, req, err)
 		}
 
 	case "secrets.saveKeyMaterial":
@@ -235,7 +235,7 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 			return nil
 		})
 		if runErr != nil {
-			answerOperationRefusal(h.r, req.ID, runErr)
+			answerOperationRefusal(h.r, req, runErr)
 		}
 
 	case "secrets.saveKeyPassphrase":
@@ -302,7 +302,7 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 			return nil
 		})
 		if err != nil {
-			answerOperationRefusal(h.r, req.ID, err)
+			answerOperationRefusal(h.r, req, err)
 		}
 	}
 }

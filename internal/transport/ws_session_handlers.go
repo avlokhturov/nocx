@@ -269,7 +269,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		if capability.IsRefused(err) {
 			var rej *capability.RefusedError
 			errors.As(err, &rej)
-			_ = wconn.TryError(req.ID, saturationRPCError(&rej.Rejection))
+			_ = wconn.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 			return
 		}
 		h.log.Error("failed to open session", "error", err)
@@ -477,7 +477,7 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -538,7 +538,7 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -649,7 +649,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(wconn, req.ID, err)
+		answerOperationRefusal(wconn, req, err)
 	}
 }
 
@@ -690,13 +690,13 @@ func (h ackHandler) handleAck(req jsonrpcRequest) {
 // answerOperationRefusal answers a *capability.RefusedError (a gate refusal)
 // with the saturation error; any other error is unexpected and answered as an
 // internal error. A nil error is a no-op.
-func answerOperationRefusal(r Responder, id json.RawMessage, err error) {
+func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 	var rej *capability.RefusedError
 	if errors.As(err, &rej) {
-		_ = r.TryError(id, saturationRPCError(&rej.Rejection))
+		_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 		return
 	}
-	_ = r.TryError(id, RPCError{Code: -32603, Message: err.Error()})
+	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 }
 
 // sessionSpecs declares the session-plane control methods. open and attach

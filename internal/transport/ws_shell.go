@@ -131,7 +131,7 @@ func (h sessionShellHandlers) handleIntegrate(ctx context.Context, req jsonrpcRe
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

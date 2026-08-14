@@ -18,10 +18,12 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/transport/control"
 )
 
 // openLocalSession opens a local session over the wire and returns its id.
@@ -239,7 +241,7 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 
 	startBlockedProbe(t, conn, rec)
 
-	assertDiagnostic := func(secret, disposition string) {
+	assertDiagnostic := func(secret, method, methodClass, scope, disposition string) {
 		t.Helper()
 		logged := buf.String()
 		for _, forbidden := range []string{secret, "capacity exhausted"} {
@@ -248,6 +250,9 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 			}
 		}
 		for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+			if line == "" {
+				continue
+			}
 			var record map[string]any
 			if err := json.Unmarshal([]byte(line), &record); err != nil {
 				t.Fatalf("bad log line %q: %v", line, err)
@@ -255,9 +260,9 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 			if record["msg"] != "control action refused" {
 				continue
 			}
-			if record["method"] != "fs.complete" ||
-				record["methodClass"] != "fs" ||
-				record["scope"] != "control" ||
+			if record["method"] != method ||
+				record["methodClass"] != methodClass ||
+				record["scope"] != scope ||
 				record["disposition"] != disposition ||
 				record["retryAfterMs"] != float64(0) {
 				t.Fatalf("incomplete saturation diagnostic: %v", record)
@@ -276,7 +281,7 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 	if !strings.Contains(string(resp), `"code":-32004`) {
 		t.Fatalf("expected saturation response, got %s", resp)
 	}
-	assertDiagnostic(requestSecret, "request")
+	assertDiagnostic(requestSecret, "fs.complete", "fs", "control", "request")
 
 	buf.Reset()
 	notificationSecret := "notification-secret-must-not-be-logged"
@@ -291,7 +296,31 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 	if _, _, err := conn.ReadMessage(); err != nil {
 		t.Fatalf("read saturation notification: %v", err)
 	}
-	assertDiagnostic(notificationSecret, "notification")
+	assertDiagnostic(notificationSecret, "fs.complete", "fs", "control", "notification")
+
+	buf.Reset()
+	innerRequestValue := "inner-refusal-sensitive-value"
+	srv.methods["test.innerRefusal"] = reg(
+		control.NewBoundedSubmission(control.NewSemaphore("test-dispatch", 1)),
+		"test.innerRefusal",
+		func(w *wsConn, _ *connState) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) {
+				answerOperationRefusal(w, req, &capability.RefusedError{
+					Rejection: control.Rejection{
+						Reason: "inner capacity exhausted: " + innerRequestValue,
+						Scope:  "config",
+					},
+				})
+			}
+		},
+	)
+	innerConn := connectWS(t, srv)
+	defer innerConn.Close() //nolint:errcheck
+	innerResp := jsonrpcCall(t, innerConn, "test.innerRefusal", map[string]string{"sensitive": innerRequestValue})
+	if !strings.Contains(string(innerResp), `"code":-32004`) {
+		t.Fatalf("expected inner saturation response, got %s", innerResp)
+	}
+	assertDiagnostic(innerRequestValue, "test.innerRefusal", "test", "config", "request")
 }
 
 // ── Ordinary saturation returns the structured retryable error immediately

@@ -137,7 +137,7 @@ func (h profileHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -430,7 +430,7 @@ func (h groupHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -482,7 +482,7 @@ func (h groupHandlers) handleGroupImpact(ctx context.Context, req jsonrpcRequest
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -519,7 +519,7 @@ func (h groupHandlers) handleProfileMoveImpact(ctx context.Context, req jsonrpcR
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -556,7 +556,7 @@ func (h groupHandlers) handleGroupApply(ctx context.Context, req jsonrpcRequest)
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -607,7 +607,7 @@ func (h settingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -857,7 +857,7 @@ func (h tabbyHandlers) handleTabbyPreview(ctx context.Context, req jsonrpcReques
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -940,7 +940,7 @@ func (h tabbyHandlers) handleTabbyExecute(ctx context.Context, req jsonrpcReques
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -965,7 +965,7 @@ func (h tabbyHandlers) handleImportTabby(ctx context.Context, req jsonrpcRequest
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

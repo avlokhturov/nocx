@@ -1053,11 +1053,14 @@ type Responder interface {
 }
 
 // RPCError is the payload of a JSON-RPC error response. Data is omitted
-// from the wire when nil (parity with jsonrpcErrorObj's omitempty).
+// from the wire when nil (parity with jsonrpcErrorObj's omitempty). Method is
+// internal-only metadata used by the sole response seam to diagnose an
+// in-handler saturation refusal; it is never serialized.
 type RPCError struct {
 	Code    int
 	Message string
 	Data    any
+	method  string
 }
 
 // wsConn wraps a connection's outbound side (outbound.Conn — the socket,
@@ -1071,6 +1074,7 @@ type RPCError struct {
 // and never reused.
 type wsConn struct {
 	out *outbound.Conn
+	log log.Logger
 	id  uint64
 	// methods is this connection's materialised control-handler set
 	// (registration.go): method → submission + handler closure. The handlers
@@ -1091,7 +1095,8 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 				}
 			},
 		}),
-		id: id,
+		log: s.log,
+		id:  id,
 	}
 }
 
@@ -1100,6 +1105,11 @@ func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
 }
 
 func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
+	if rpcErr.Code == SaturationErrorCode {
+		if data, ok := rpcErr.Data.(saturationData); ok {
+			logSaturationRefusal(w.log, rpcErr.method, "request", data)
+		}
+	}
 	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
@@ -1705,27 +1715,15 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if rej == nil {
 		return
 	}
-	disposition := "request"
-	if req.ID == nil {
-		disposition = "notification"
-	}
 	sat := saturationErrorFor(rej)
-	// The frame may carry secrets, so the diagnostic names only registered
-	// server vocabulary and the normalized retry hint. Never log params,
-	// payload bytes, or Rejection.Reason (nocx-rq9p).
-	s.log.Debug("control action refused",
-		"method", req.Method,
-		"methodClass", methodClassFor(req.Method),
-		"scope", sat.Data.Scope,
-		"disposition", disposition,
-		"retryAfterMs", sat.Data.RetryAfterMs)
 	// Refused. A request (has an id) answers with the saturation error; a
 	// notification (no id) has no response to carry it, so the server emits
 	// the rate-limited control.saturated notification instead.
 	if req.ID != nil {
-		_ = wconn.TryError(req.ID, saturationRPCError(rej))
+		_ = wconn.TryError(req.ID, saturationRPCError(req.Method, rej))
 		return
 	}
+	logSaturationRefusal(s.log, req.Method, "notification", sat.Data)
 	s.emitSaturatedNotification(wconn, req.Method, rej)
 }
 
