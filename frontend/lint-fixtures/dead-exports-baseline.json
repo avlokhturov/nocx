@@ -250,6 +250,11 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/notify.raise.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/profiles.effective.ts",
       "symbol": ""
     },

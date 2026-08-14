@@ -130,6 +130,11 @@ type WSServer struct {
 	// hold the holder and read the current value per call.
 	resolver *resolverHolder
 
+	// notifyRaiser raises program-sourced notifications through the notify
+	// pipeline (ADR-0029). Wired through WithNotifyRaiser; when nil,
+	// notify.raise answers -32601.
+	notifyRaiser NotifyRaiser
+
 	// Profile service provides a single validated write path for profiles
 	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
@@ -843,6 +848,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
