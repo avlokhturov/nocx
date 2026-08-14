@@ -264,7 +264,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const cmdA = `echo ${markerA}`
     const cmdB = `echo ${markerB}`
     const { block: blockA } = await runCommand(page, cmdA, markerA)
-    const { block: blockB } = await runCommand(page, cmdB, markerB)
+    // Block B is run for its OUTPUT, not for a handle: the payload assertion
+    // below proves markerB is absent, which needs the block to exist on
+    // screen and nothing else.
+    await runCommand(page, cmdB, markerB)
 
     // ── The gesture: the block's Ask control ─────────────────────────────
     // Script the fake FIRST: the answer the model gives is decided by the
