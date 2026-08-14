@@ -11,7 +11,7 @@
  * refused submit keeps every call off the wire and announces through the
  * kit gate, and a backend refusal is said on the surface.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach, type Mock } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
@@ -19,6 +19,8 @@ import { AgentClient } from './agent'
 import type { AgentStatusResult } from './generated/agent.status'
 import { Dispatcher, RpcError } from './dispatcher'
 import { clearToasts, toasts } from './ui'
+import { SetupDialog, createVaultState, type VaultController } from './vault'
+import type { VaultClient } from './vault-client'
 
 /** One stored endpoint as the wire declares it. */
 function ep(overrides: Partial<Endpoint> = {}): Endpoint {
@@ -124,10 +126,16 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
   }
 }
 
-function mount(initial: Endpoint[] = [], opts?: { firstListError?: Error }) {
+function mount(
+  initial: Endpoint[] = [],
+  opts?: { firstListError?: Error; vaultController?: VaultController },
+) {
   const harness = createHarness(initial, opts)
   const container = document.body.appendChild(document.createElement('div'))
-  render(() => <EndpointsSection client={harness.client} />, { container })
+  render(
+    () => <EndpointsSection client={harness.client} vaultController={opts?.vaultController} />,
+    { container },
+  )
   return { ...harness, container }
 }
 
@@ -217,6 +225,65 @@ function openEdit(container: HTMLElement, name: string) {
 
 function toastMessages(): string[] {
   return toasts().map((t) => t.message)
+}
+
+/** Flush the microtask chain deterministically — the repo's convention for
+ *  "let a promise rejection propagate" (no real timers, AGENTS.md). */
+const flush = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+}
+
+/** The vault seam harness: a REAL vault controller over a stubbed client.
+ *  `status` and `setup` stay visible so a test can re-mock them. */
+interface VaultHarness {
+  ctrl: VaultController
+  client: VaultClient
+  status: Mock
+  setup: Mock
+}
+
+/** A real controller on a fresh install: the vault is uninitialized with no
+ *  OS key, so any secret mint must raise the vault layer's own setup sheet
+ *  (the nocx-v64o behavior the connections path already has). */
+function vaultHarness(statusOverride: Record<string, unknown> = {}): VaultHarness {
+  const status = vi.fn().mockResolvedValue({
+    state: 'uninitialized' as const,
+    osKeyAvailable: false,
+    osKeyCapable: false,
+    hasPassphrase: false,
+    autoSealMinutes: 0,
+    providers: [],
+    defaultProvider: null,
+    ...statusOverride,
+  })
+  const setup = vi.fn().mockResolvedValue({})
+  const client = { status, setup } as unknown as VaultClient
+  const ctrl = createVaultState(client)
+  return { ctrl, client, status, setup }
+}
+
+/** Mount the section with the vault seam AND the vault layer's own setup
+ *  dialog, wired exactly as main.tsx wires them — so a key-creation save on
+ *  an unprotected install raises the real setup sheet and resumes through
+ *  it, the same journey a person takes. */
+function mountWithVault(initial: Endpoint[] = [], vault: VaultHarness = vaultHarness()) {
+  const harness = createHarness(initial)
+  const container = document.body.appendChild(document.createElement('div'))
+  render(
+    () => (
+      <>
+        <EndpointsSection client={harness.client} vaultController={vault.ctrl} />
+        <SetupDialog
+          open={vault.ctrl.showSetup()}
+          onClose={() => vault.ctrl.closeSetup()}
+          onSetupComplete={() => vault.ctrl.onSetupDone()}
+          vaultClient={vault.client}
+        />
+      </>
+    ),
+    { container },
+  )
+  return { ...harness, ...vault, container }
 }
 
 describe('AI endpoints surface — real surface, real client seam', () => {
@@ -533,5 +600,223 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     clickButton(container, 'Retry')
     await waitForRows(container, 1)
     expect(listEndpoints).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('the vault seam — a key is minted through the vault layer (nocx-8rwj)', () => {
+  /** Fill a valid new-endpoint form (with a key) and return its dialog. */
+  function fillNewWithKey(container: HTMLElement) {
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'provider')
+    fillField(container, 'endpoint-base-url', 'https://api.example.com/v1')
+    fillField(container, 'endpoint-key', 'sk-live-abc')
+    clickButton(dialog, 'Add model')
+    fillField(container, 'endpoint-model-0-name', 'gpt-4o')
+    return dialog
+  }
+
+  it('raises the setup sheet on a first run, then saves the endpoint the person typed', async () => {
+    const { container, createEndpoint, ctrl } = mountWithVault()
+    await waitForRows(container, 0)
+    // The wire refuses: the backend mints the key into the vault BEFORE it
+    // writes the record (capability/config.go CreateEndpoint), so the
+    // refusal is atomic — nothing was stored, and the error carries the
+    // vault reason saveSecretWithVault recognizes.
+    createEndpoint.mockRejectedValueOnce(
+      new RpcError('vault is not initialized', -32603, { reason: 'vault-uninitialized' }),
+    )
+
+    fillNewWithKey(container)
+    clickButton(container, 'Create Endpoint')
+
+    // The first attempt hit the missing vault; the vault layer's own setup
+    // sheet is up (the nocx-v64o behavior), nothing was stored or toasted.
+    await vi.waitFor(() => {
+      expect(ctrl.showSetup()).toBe(true)
+    })
+    expect(createEndpoint).toHaveBeenCalledTimes(1)
+    expect(toastMessages()).not.toContain('Could not save the endpoint:')
+    expect(findDialogByTitle(container, 'New Endpoint')).toBeTruthy()
+
+    // Setup completes (the SetupDialog's Done → onSetupComplete →
+    // onSetupDone): the EXACT save is retried and the endpoint appears.
+    ctrl.onSetupDone()
+    await vi.waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(2)
+    })
+    expect(createEndpoint.mock.calls[1][0].key).toBe('sk-live-abc')
+    await waitForRows(container, 1)
+    expect(rows(container)[0].textContent).toContain('provider')
+    await vi.waitFor(() => {
+      expect(toastMessages()).toContain('Saved "provider"')
+    })
+    // The editor closed (the dialog stays mounted in the DOM, hidden).
+    const closed = findDialogByTitle(container, 'New Endpoint')
+    expect(closed).toBeTruthy()
+    expect((closed as HTMLDialogElement).open).toBe(false)
+  })
+
+  it('a cancelled setup leaves the editor open with the draft intact and nothing stored', async () => {
+    const { container, createEndpoint, setup, ctrl } = mountWithVault()
+    await waitForRows(container, 0)
+    createEndpoint.mockRejectedValueOnce(
+      new RpcError('vault is not initialized', -32603, { reason: 'vault-uninitialized' }),
+    )
+
+    const dialog = fillNewWithKey(container)
+    clickButton(container, 'Create Endpoint')
+
+    await vi.waitFor(() => {
+      expect(ctrl.showSetup()).toBe(true)
+    })
+
+    // The person closes the setup sheet without setting protection up.
+    ctrl.closeSetup()
+    await flush()
+
+    // What is on screen: the editor, still open, with everything they typed.
+    expect(findDialogByTitle(container, 'New Endpoint')).toBeTruthy()
+    expect((dialog.querySelector('#endpoint-name') as HTMLInputElement).value).toBe('provider')
+    expect((dialog.querySelector('#endpoint-base-url') as HTMLInputElement).value).toBe(
+      'https://api.example.com/v1',
+    )
+    expect((dialog.querySelector('#endpoint-key') as HTMLInputElement).value).toBe('sk-live-abc')
+    // What is in the vault: nothing — setup never ran.
+    expect(setup).not.toHaveBeenCalled()
+    // What is on the wire: one refused attempt, no silent retry.
+    expect(createEndpoint).toHaveBeenCalledTimes(1)
+    // Nothing reported saved, and no new failure toast either — a cancelled
+    // setup is not an error the endpoint form must shout about.
+    expect(toastMessages()).not.toContain('Saved "provider"')
+    expect(toastMessages()).not.toContain('Could not save the endpoint:')
+  })
+
+  it('a failed setup stays in the setup sheet; the save resumes only after it succeeds', async () => {
+    const { container, createEndpoint, setup, ctrl } = mountWithVault()
+    await waitForRows(container, 0)
+    createEndpoint.mockRejectedValueOnce(
+      new RpcError('vault is not initialized', -32603, { reason: 'vault-uninitialized' }),
+    )
+
+    fillNewWithKey(container)
+    clickButton(container, 'Create Endpoint')
+    await vi.waitFor(() => {
+      expect(ctrl.showSetup()).toBe(true)
+    })
+
+    // The backend refuses the setup (a dead store, a keychain error): the
+    // setup sheet says so inline and stays up; the endpoint save is not
+    // retried and nothing is toasted by the endpoint form.
+    setup.mockRejectedValueOnce(new Error('Backend refused'))
+    fillField(container, 'vault-setup-passphrase', 'correct horse')
+    fillField(container, 'vault-setup-confirm', 'correct horse')
+    clickButton(container, 'Set Up')
+    await vi.waitFor(() => {
+      const err = container.querySelector('#vault-setup-passphrase__error')
+      expect(err?.textContent).toBe('Backend refused')
+    })
+    expect(createEndpoint).toHaveBeenCalledTimes(1)
+    expect(toastMessages()).not.toContain('Could not save the endpoint:')
+
+    // The person retries and this time the setup completes with a recovery
+    // code; Done dismisses it and the deferred save lands.
+    setup.mockResolvedValueOnce({ recoveryCode: 'ABCD-1234-EFGH-5678' })
+    clickButton(container, 'Set Up')
+    await vi.waitFor(() => {
+      expect(findDialogByTitle(container, 'Recovery Code')).toBeTruthy()
+    })
+    clickButton(container, 'Done')
+    await vi.waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(2)
+    })
+    await waitForRows(container, 1)
+    expect(rows(container)[0].textContent).toContain('provider')
+    expect(createEndpoint.mock.calls[1][0].key).toBe('sk-live-abc')
+  })
+
+  it('a new key on an edit rotates through the same seam, keeping the id', async () => {
+    const { container, updateEndpoint, ctrl } = mountWithVault([
+      ep({ id: 'endpoint:custom:provider:1', name: 'provider' }),
+    ])
+    await waitForRows(container, 1)
+    updateEndpoint.mockRejectedValueOnce(
+      new RpcError('vault is not initialized', -32603, { reason: 'vault-uninitialized' }),
+    )
+
+    const dialog = openEdit(container, 'provider')
+    fillField(container, 'endpoint-key', 'sk-rotated')
+    clickButton(dialog, 'Save Endpoint')
+
+    await vi.waitFor(() => {
+      expect(ctrl.showSetup()).toBe(true)
+    })
+    expect(updateEndpoint).toHaveBeenCalledTimes(1)
+
+    ctrl.onSetupDone()
+    await vi.waitFor(() => {
+      expect(updateEndpoint).toHaveBeenCalledTimes(2)
+    })
+    const [id, input] = updateEndpoint.mock.calls[1]
+    expect(id).toBe('endpoint:custom:provider:1')
+    expect(input.key).toBe('sk-rotated')
+    await vi.waitFor(() => {
+      expect(toastMessages()).toContain('Saved "provider"')
+    })
+  })
+
+  it('a sealed vault raises the unlock sheet naming the operation, and resumes after unseal', async () => {
+    const { container, createEndpoint, status, ctrl } = mountWithVault()
+    status.mockResolvedValue({
+      state: 'sealed' as const,
+      osKeyAvailable: false,
+      osKeyCapable: false,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [],
+      defaultProvider: null,
+    })
+    await waitForRows(container, 0)
+    createEndpoint.mockRejectedValueOnce(
+      new RpcError('vault is sealed', -32603, { reason: 'vault-sealed' }),
+    )
+
+    fillNewWithKey(container)
+    clickButton(container, 'Create Endpoint')
+
+    await vi.waitFor(() => {
+      expect(ctrl.showUnlock()).toBe(true)
+    })
+    // The unlock prompt must say WHICH operation needs the vault open and
+    // why now (nocx-s8jn) — the reason the endpoint save passed along.
+    expect(ctrl.unlockReason()).toBe('save this endpoint key')
+    expect(createEndpoint).toHaveBeenCalledTimes(1)
+
+    ctrl.onUnsealDone()
+    await vi.waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(2)
+    })
+    await waitForRows(container, 1)
+    expect(rows(container)[0].textContent).toContain('provider')
+  })
+
+  it('a save with no key never touches the vault seam', async () => {
+    const { container, createEndpoint, ctrl } = mountWithVault()
+    await waitForRows(container, 0)
+
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'provider')
+    fillField(container, 'endpoint-base-url', 'https://api.example.com/v1')
+    clickButton(dialog, 'Add model')
+    fillField(container, 'endpoint-model-0-name', 'gpt-4o')
+    clickButton(dialog, 'Create Endpoint')
+
+    await vi.waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(1)
+    })
+    // No key on the wire means no secret minted: the vault is not a party,
+    // so no sheet and no deferred save.
+    expect(ctrl.showSetup()).toBe(false)
+    expect(ctrl.showUnlock()).toBe(false)
+    await waitForRows(container, 1)
   })
 })

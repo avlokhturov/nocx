@@ -37,6 +37,7 @@ import { agentStatusLine } from './agent-status-line'
 // export used — the same union trick endpoints.ts documents.
 import type { AgentStatusResult, EndpointsProbeResult } from './generated/agent.status'
 import { EndpointClient, type Endpoint } from './endpoints'
+import { VaultOperationCancelledError, type VaultController } from './vault'
 
 /** The schema's one value today (design §4.5, decision 2). Display label
  *  only; the select appears when the second implementation does. */
@@ -62,12 +63,17 @@ interface EndpointDraft {
 
 const blankDraft = (): EndpointDraft => ({ name: '', baseUrl: '', key: '', models: [] })
 type LoadState = 'loading' | 'ready' | 'failed'
-
 export interface EndpointsSectionProps {
   client: EndpointClient
   /** The assistant's control-plane client (nocx-edio); the status line
    *  renders only when present. Absent in the dev-web harness. */
   agentClient?: AgentClient
+  /** The vault layer's controller. A save that carries a key is minted into
+   *  the vault (design §4.5.3), so it routes through the vault's own
+   *  operation-first seam (saveSecretWithVault) — the same owner the
+   *  connections path uses at the moment a secret is created (nocx-v64o).
+   *  Absent in the dev-web harness and bare embeds. */
+  vaultController?: VaultController
 }
 
 export function EndpointsSection(props: EndpointsSectionProps) {
@@ -245,17 +251,35 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       })),
     }
     const editingId = editing()?.id
-    try {
+    const persist = async (): Promise<void> => {
       if (editingId) {
         await props.client.updateEndpoint(editingId, input)
       } else {
         await props.client.createEndpoint(input)
+      }
+    }
+    try {
+      if (props.vaultController && d.key !== '') {
+        // The key is about to be minted into the vault (design §4.5.3), so
+        // the save goes through the vault layer's own operation-first seam —
+        // the same owner the connections path uses at the moment a secret is
+        // created ("save this key", nocx-v64o). A missing or sealed vault
+        // raises the vault's setup/unlock sheet and retries THIS save when
+        // it completes; cancelling rejects with VaultOperationCancelledError,
+        // nothing ran, and the editor stays open with the draft intact so
+        // the person does not retype it.
+        await props.vaultController.saveSecretWithVault(persist, 'save this endpoint key')
+      } else {
+        await persist()
       }
       closeDialog()
       await load()
       void refreshStatus()
       showToast({ level: 'success', message: `Saved "${input.name}"` })
     } catch (err) {
+      // A cancelled setup/unlock is not an error: the sheet is the surface
+      // while it is up, and the editor behind it still holds the draft.
+      if (err instanceof VaultOperationCancelledError) return
       const message = (err as Error).message
       log.error('Failed to save endpoint', { message })
       showToast({ level: 'danger', message: `Could not save the endpoint: ${message}` })
