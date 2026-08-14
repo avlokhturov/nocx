@@ -60,3 +60,10 @@
   align-items: center;
   gap: var(--space-3);
 }
+
+/* Why the Test button is unavailable, beside it. A disabled control that
+   does not say why is the defect this line exists to close. */
+.ep-test-reason {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}

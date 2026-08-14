@@ -8,7 +8,7 @@
  * - settings.ts: input[type=text] and input[type=number] with change event, min/max
  * - connections.ts: inputField() / textField() / numberField() — label + input with input event
  */
-import { Show, Switch, Match, type JSX } from 'solid-js'
+import { For, Show, Switch, Match, createEffect, type JSX } from 'solid-js'
 import { Field } from './field'
 
 export interface TextFieldProps {
@@ -29,7 +29,23 @@ export interface TextFieldProps {
    * a field answered on blur rather than on input. See `ui/validation.ts`.
    */
   onBlur?: (value: string) => void
+  /**
+   * Fires when the control takes focus. Exists for fields whose suggestions
+   * are DISCOVERED rather than known: focus is the moment a person is about
+   * to need them, and the cheapest honest place to go and look.
+   */
+  onFocus?: () => void
   type?: 'text' | 'number' | 'password'
+  /**
+   * Values to offer as suggestions, through a native `<datalist>`. The field
+   * stays FREE TEXT: a suggestion is an addition, never a gate, so a value
+   * the list does not contain is still typeable and still submitted. Use it
+   * where the set is discovered rather than fixed — the AI endpoint's models
+   * come from the endpoint itself, and an endpoint that lists none must stay
+   * configurable by hand. A field whose set is closed wants a Select, not
+   * this. Requires `id`; without one there is nothing to point `list` at.
+   */
+  suggestions?: readonly string[]
   placeholder?: string
   min?: number
   max?: number
@@ -82,7 +98,6 @@ export function TextField(props: TextFieldProps) {
       class="ui-text-field__input"
       id={inputId() || undefined}
       type={props.type ?? 'text'}
-      value={props.value}
       placeholder={props.placeholder ?? ''}
       min={props.min !== undefined ? String(props.min) : undefined}
       max={props.max !== undefined ? String(props.max) : undefined}
@@ -91,12 +106,48 @@ export function TextField(props: TextFieldProps) {
       aria-invalid={props.error !== undefined ? true : undefined}
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}
+      list={suggestionsId()}
       ref={(element) => {
         if (props.autoFocus === true) queueMicrotask(() => element.focus())
+        mirrorValue(element)
       }}
       onInput={onInput}
       onBlur={onBlur}
+      onFocus={() => props.onFocus?.()}
     />
+  )
+
+  /**
+   * Mirror `props.value` into the element, and ONLY when it differs from what
+   * the element already holds.
+   *
+   * A plain `value={props.value}` writes on every change — including the
+   * change the user's own keystroke just caused, where the element already
+   * holds exactly that string. The redundant write is not free: assigning
+   * `input.value` closes an open `<datalist>` popup, so a suggestion list
+   * shut itself on every letter typed, which is the opposite of what a
+   * suggestion list is for. Guarding the write is also correct on its own
+   * terms — a controlled input should not fight the caret it is not moving.
+   */
+  function mirrorValue(element: HTMLInputElement) {
+    createEffect(() => {
+      const next = String(props.value)
+      if (element.value !== next) element.value = next
+    })
+  }
+
+  /** The datalist's id, or undefined when there is nothing to suggest. */
+  const suggestionsId = () =>
+    props.suggestions !== undefined && props.suggestions.length > 0 && inputId() !== ''
+      ? `${inputId()}-suggestions`
+      : undefined
+
+  const suggestionList = () => (
+    <Show when={suggestionsId()}>
+      <datalist id={suggestionsId()}>
+        <For each={props.suggestions}>{(s) => <option value={s} />}</For>
+      </datalist>
+    </Show>
   )
 
   const textareaElement = () => (
@@ -130,6 +181,7 @@ export function TextField(props: TextFieldProps) {
           <Match when={props.multiline === true}>{textareaElement()}</Match>
           <Match when={true}>{inputElement()}</Match>
         </Switch>
+        {suggestionList()}
         <Show when={!props.multiline && props.trailing}>
           <span class="ui-text-field__trailing">{props.trailing}</span>
         </Show>

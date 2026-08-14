@@ -50,6 +50,18 @@ type methodSpec struct {
 	method     string
 	submission control.Submission
 	build      func(w *wsConn, state *connState) handlerFunc
+	// available reports whether the method can answer at all — the domain
+	// it belongs to is wired. Optional: nil means "always available", which
+	// is true of most methods. Where it is NOT nil it is consulted BEFORE
+	// the validator, because a method that does not exist for this build
+	// has nothing to say about the shape of params sent to it. The owner
+	// decided this explicitly: "метода нет" is the right answer.
+	available func() bool
+	// unavailableMessage is what an unavailable method answers with. Each
+	// domain already had its own sentence ("vault not available", "endpoints
+	// not available") and callers read them, so the gate keeps the domain's
+	// words rather than flattening every domain to one string.
+	unavailableMessage string
 	// validate is the method's params validator, and it is REQUIRED:
 	// buildMethodSpecs refuses a registration without one, so a control
 	// method that nobody validated cannot exist in a built server. See
@@ -250,7 +262,7 @@ func connMethods(specs map[string]methodSpec, w *wsConn, state *connState) map[s
 	for name, spec := range specs {
 		m[name] = controlMethod{
 			submission: spec.submission,
-			handle:     validated(spec.validate, spec.build(w, state), w),
+			handle:     validated(spec, spec.build(w, state), w),
 		}
 	}
 	return m
@@ -264,9 +276,20 @@ func connMethods(specs map[string]methodSpec, w *wsConn, state *connState) map[s
 // A refusal is -32602 with the validator's message, answered before the
 // handler is entered, so a rejected request never touches a store, a vault or
 // a socket.
-func validated(v paramsValidator, next handlerFunc, r Responder) handlerFunc {
+func validated(spec methodSpec, next handlerFunc, r Responder) handlerFunc {
 	return func(ctx context.Context, req jsonrpcRequest) {
-		if msg := validateParams(v, req.Params); msg != "" {
+		// Availability first. A method whose domain is not wired answers
+		// "method not found" whatever it was sent: the caller's next move is
+		// to stop calling it, not to fix its arguments.
+		if spec.available != nil && !spec.available() {
+			msg := spec.unavailableMessage
+			if msg == "" {
+				msg = "Method not found"
+			}
+			_ = r.TryError(req.ID, RPCError{Code: -32601, Message: msg})
+			return
+		}
+		if msg := validateParams(spec.validate, req.Params); msg != "" {
 			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 			return
 		}
@@ -284,6 +307,16 @@ type handlerFunc func(ctx context.Context, req jsonrpcRequest)
 // its capability and Responder, never the server.
 func reg(sub control.Submission, method string, v paramsValidator, build func(w *wsConn, state *connState) handlerFunc) methodSpec {
 	return methodSpec{method: method, submission: sub, build: build, validate: v}
+}
+
+// whenAvailable declares that a method answers only while its domain is
+// wired, and is consulted before the validator. Compose it onto a spec:
+//
+//	whenAvailable(regResponder(sub, "vault.unseal", params(fn), build), wired)
+func whenAvailable(spec methodSpec, available func() bool, unavailable string) methodSpec {
+	spec.available = available
+	spec.unavailableMessage = unavailable
+	return spec
 }
 
 // regResponder declares a method whose handler needs only the connection's

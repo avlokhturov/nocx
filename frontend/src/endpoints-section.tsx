@@ -92,6 +92,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** The Test button's state: idle, running, or the probe result. */
   const [probeResult, setProbeResult] = createSignal<EndpointsProbeResult | null>(null)
   const [probing, setProbing] = createSignal(false)
+  /** Models the endpoint says it offers — filled by an explicit connection
+   *  test OR by the silent discovery on focus. One owner, so the two paths
+   *  cannot disagree about what an endpoint offers. */
+  const [discovered, setDiscovered] = createSignal<string[]>([])
+  /** The (base URL, key, endpoint) the discovered list belongs to, so
+   *  re-focusing does not re-dial and changing the URL does. */
+  const [discoveryKey, setDiscoveryKey] = createSignal('')
 
   // ── Data loading ─────────────────────────────────────────────────────
 
@@ -134,8 +141,11 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *  key back (ADR-0030 §3), so it cannot send a stored one. */
   async function runProbe() {
     const d = draft()
+    // An empty model is not a reason to do nothing — it is the connection
+    // check. There used to be an early return here, left behind when the
+    // button stopped requiring a model, which made an enabled button do
+    // nothing at all: the same defect one layer down.
     const model = d.models[0]?.name.trim() ?? ''
-    if (model === '') return
     setProbing(true)
     setProbeResult(null)
     try {
@@ -147,6 +157,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         ...(editing() ? { endpointId: editing()!.id } : {}),
       })
       setProbeResult(res)
+      if (res.ok && res.kind === 'connection') setDiscovered(res.models ?? [])
     } catch (err) {
       const message = (err as Error).message
       log.error('Endpoint test failed', { message })
@@ -177,6 +188,8 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setEditing(null)
     setDraft(blankDraft())
     setProbeResult(null)
+    setDiscovered([])
+    setDiscoveryKey('')
     validation.reset()
     setDialogOpen(true)
   }
@@ -194,6 +207,8 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     })
     validation.reset()
     setProbeResult(null)
+    setDiscovered([])
+    setDiscoveryKey('')
     setDialogOpen(true)
   }
 
@@ -343,23 +358,96 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *  sentence, and two owners would drift (AD-8, nocx-x8s2.2). */
   const statusLine = () => agentStatusLine(agentStatus())
 
-  /** The Test button's result, from endpoints.probe. */
+  /** The Test button's result, from endpoints.probe. The sentence names
+   *  WHICH check ran: "the endpoint is reachable" and "the model answered"
+   *  are different facts and a person acts on them differently. */
   const probeLine = () => {
     const p = probeResult()
     if (!p) return null
-    if (p.ok) {
+    if (!p.ok) return { tone: 'danger' as const, text: `Test failed: ${p.error}` }
+    if (p.kind === 'model') {
       return {
         tone: 'success' as const,
-        text: `Streamed an answer in ${Math.max(p.elapsedMs, 1)} ms`,
+        text: `${p.model} answered in ${Math.max(p.elapsedMs, 1)} ms`,
       }
     }
-    return { tone: 'danger' as const, text: `Test failed: ${p.error}` }
+    const found = p.models?.length ?? 0
+    return {
+      tone: 'success' as const,
+      // An endpoint that lists nothing is reachable and usable — GET /models
+      // is not universally implemented — so the sentence says what happened
+      // rather than implying something is missing.
+      text: found > 0 ? `Connected — ${found} models offered` : 'Connected — it lists no models',
+    }
   }
 
-  /** The Test button needs a base URL and a first model — the picker's
-   *  default — before it means anything. */
-  const testDisabled = () =>
-    probing() || draft().baseUrl.trim() === '' || (draft().models[0]?.name.trim() ?? '') === ''
+  /** The models a connection check found, for the picker below. Additive:
+   *  an endpoint that lists none is configured by hand exactly as before. */
+  const discoveredModels = () => discovered()
+
+  /**
+   * Ask the endpoint what models it offers, WITHOUT being asked to test.
+   *
+   * A person opening the model field is about to need this list, and making
+   * them press Test first is making them do the lookup by hand. So focus
+   * triggers it — but silently, and that silence is the whole design:
+   *
+   *  - it never writes probeResult, so a background attempt cannot paint a
+   *    red verdict nobody asked for. A failure leaves the suggestions empty
+   *    and the field exactly as usable as it was;
+   *  - it runs once per (base URL, key, endpoint) triple, so re-focusing the
+   *    field does not re-dial, and changing the URL does;
+   *  - it never runs while an explicit test is in flight.
+   *
+   * An explicit connection test fills the same list, so there is one owner of
+   * "what models does this endpoint offer" and the two cannot disagree.
+   */
+  async function discoverModels() {
+    const d = draft()
+    const baseUrl = d.baseUrl.trim()
+    if (baseUrl === '' || probing()) return
+    const ep = editing()
+    const key = `${baseUrl} ${d.key} ${ep?.id ?? ''}`
+    if (discoveryKey() === key) return
+    setDiscoveryKey(key)
+    try {
+      const res = await props.client.probeEndpoint({
+        name: d.name.trim(),
+        baseUrl,
+        key: d.key,
+        model: '',
+        ...(ep ? { endpointId: ep.id } : {}),
+      })
+      if (res.ok && res.kind === 'connection') setDiscovered(res.models ?? [])
+    } catch {
+      // Silent by design: nobody asked for a verdict. The field stays free
+      // text, which is what it would have been anyway.
+    }
+  }
+
+  /** The Test button needs a base URL and NOTHING else. It used to require a
+   *  first model, which made it dead in the one state where a person most
+   *  wants it — a new endpoint whose URL and key are typed and whose models
+   *  are not, because the models are what the test is about to find
+   *  (nocx-q27y). With no model it checks the connection; with one it asks
+   *  that model to answer. */
+  const testDisabled = () => probing() || draft().baseUrl.trim() === ''
+
+  /** Why the Test button is unavailable, rendered beside it. A disabled
+   *  control that does not say why is the half of this defect the owner
+   *  actually hit: a grey button and silence. */
+  const testDisabledReason = () => {
+    if (probing()) return undefined
+    if (draft().baseUrl.trim() === '') return 'Add a base URL to test the connection'
+    return undefined
+  }
+
+  /** What pressing Test will do right now, so the label never promises the
+   *  check it is not about to run. */
+  const testLabel = () => {
+    if (probing()) return 'Testing…'
+    return (draft().models[0]?.name.trim() ?? '') === '' ? 'Test connection' : 'Test endpoint'
+  }
 
   function renderRow(ep: Endpoint) {
     return (
@@ -411,7 +499,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           value={row.name}
           onInput={(v) => updateModel(index, { name: v })}
           onBlur={() => validation.touch('models')}
+          onFocus={() => void discoverModels()}
           placeholder="gpt-4o"
+          // What a successful connection test found the endpoint offering.
+          // Free text still: an endpoint that lists nothing — GET /models is
+          // not universally implemented — is configured by hand exactly as
+          // before, and a model the list omits is still typeable.
+          suggestions={discoveredModels()}
         />
         <TextField
           id={`endpoint-model-${index}-alias`}
@@ -552,10 +646,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
               disabled={testDisabled()}
               onClick={() => void runProbe()}
             >
-              {probing() ? 'Testing…' : 'Test endpoint'}
+              {testLabel()}
             </Button>
             <Show when={probing()}>
               <Spinner size="sm" label="Testing endpoint" />
+            </Show>
+            <Show when={testDisabledReason()}>
+              <span class="ep-test-reason">{testDisabledReason()}</span>
             </Show>
             <Show when={probeLine()}>
               <Badge tone={probeLine()!.tone}>{probeLine()!.text}</Badge>

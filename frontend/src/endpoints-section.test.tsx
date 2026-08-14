@@ -490,12 +490,17 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     await waitForRows(container, 0)
 
     const dialog = openNew(container)
-    // The Test button exists but is inert until the probe means something.
+    // With no base URL there is nothing to reach, so the control is
+    // unavailable AND says why — a disabled button that stays silent is the
+    // defect this pair of assertions exists to hold closed. With no model it
+    // still offers the connection check, so its label says which check it is
+    // about to run.
     const btn = Array.from(dialog.querySelectorAll('.ui-button')).find((b) =>
-      b.textContent?.includes('Test endpoint'),
+      b.textContent?.includes('Test connection'),
     )
-    expect(btn, 'Test endpoint button not found').toBeTruthy()
+    expect(btn, 'Test connection button not found').toBeTruthy()
     expect((btn as HTMLButtonElement).disabled).toBe(true)
+    expect(dialog.textContent).toContain('Add a base URL to test the connection')
 
     fillField(container, 'endpoint-name', 'Local')
     fillField(container, 'endpoint-base-url', 'http://127.0.0.1:11434/v1')
@@ -515,7 +520,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
       model: 'qwen3',
     })
     await vi.waitFor(() => {
-      expect(dialog.textContent).toContain('Streamed an answer in')
+      expect(dialog.textContent).toContain('qwen3 answered in')
     })
   })
 
@@ -554,7 +559,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
       endpointId: 'endpoint:custom:provider:1',
     })
     await vi.waitFor(() => {
-      expect(dialog.textContent).toContain('Streamed an answer in')
+      expect(dialog.textContent).toContain('gpt-4o answered in')
     })
   })
 

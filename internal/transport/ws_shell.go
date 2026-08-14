@@ -9,6 +9,8 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
@@ -147,11 +149,11 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	shellSub := s.operationQueue("shell")
 	return []methodSpec{
-		regResponder(shellSub, "shell.complete", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
+		regResponder(shellSub, "shell.complete", params(validateShellCompleteRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, local: s.localCompleter, remote: s.sshCompleter}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleComplete(ctx, req) }
 		}),
-		regResponder(shellSub, "shell.integrate", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
+		regResponder(shellSub, "shell.integrate", params(validateShellIntegrateRaw), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, inBand: s.inBand}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleIntegrate(ctx, req) }
 		}),
@@ -160,7 +162,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// the marker latch ADR-0024 forbids, and the branch deleted their
 		// handler, contracts and generated types (nocx-292k). The footprint
 		// methods below outlive them — they read the fact store, which stays.
-		regResponder(s.lane, "shell.footprint.status", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.footprint.status", noParams(), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:        r,
 				facts:    s.installedFacts,
@@ -170,7 +172,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
 		}),
-		regResponder(s.lane, "shell.footprint.uninstall", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.footprint.uninstall", params(validateFootprintUninstallRaw), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:           r,
 				uninstaller: s.remoteUninstaller,
@@ -180,4 +182,89 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
 		}),
 	}
+}
+
+// ── shell ingress bounds ───────────────────────────────────────────────────
+
+// validateShellCompleteRaw is the registered validator for shell.complete:
+// sessionId is server-minted (32-hex shape), cwd is a renderer-supplied
+// path held to the agent surface's path bound, and line is the line being
+// completed — bounded at the floor's wire-cost ceiling because the product
+// has no tighter one (a shell line is bounded by the session's own input,
+// not by this method). pos is the caret offset into line, and the completion
+// contract (internal/completion.Request) reads the word at pos and treats a
+// pos outside [0, len(line)] as completing nothing — the same byte
+// semantics as the contract, so it is refused here. limit is left to the
+// handler, which clamps it to 1..200.
+func validateShellCompleteRaw(raw json.RawMessage) string {
+	var p shellCompleteParams
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	if p.Cwd == "" {
+		return "cwd is required"
+	}
+	if msg := validateStringBound("cwd", p.Cwd, maxCwdRunes); msg != "" {
+		return msg
+	}
+	if p.Line == "" {
+		return "line is required"
+	}
+	if utf8.RuneCountInString(p.Line) > maxGenericStringRunes {
+		return fmt.Sprintf("line exceeds %d characters", maxGenericStringRunes)
+	}
+	if p.Pos < 0 || p.Pos > len(p.Line) {
+		return "pos must be an offset within line"
+	}
+	return ""
+}
+
+// validateShellIntegrateRaw is the registered validator for shell.integrate:
+// the sessionId must be a real server-minted id — the plan's payload anchors
+// NOCX_SESSION_ID in a shell, and the handler already refuses ids that are
+// not live in the registry (AD-7); the shape check refuses ones that cannot
+// be, before the capability is touched.
+func validateShellIntegrateRaw(raw json.RawMessage) string {
+	var p struct {
+		SessionID string `json:"sessionId"`
+	}
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateFootprintUninstallRaw is the registered validator for
+// shell.footprint.uninstall: the profileId names the saved connection whose
+// credentials the dial will use — the same id shape every profile-taking
+// method checks.
+func validateFootprintUninstallRaw(raw json.RawMessage) string {
+	var p struct {
+		ProfileID string `json:"profileId"`
+	}
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	return validateProfileID(p.ProfileID)
 }

@@ -51,7 +51,7 @@ func TestValidated_RefusesBeforeTheHandlerRuns(t *testing.T) {
 	entered := false
 	next := func(context.Context, jsonrpcRequest) { entered = true }
 	rec := &recordingResponder{}
-	h := validated(params(func(json.RawMessage) string { return "no" }), next, rec)
+	h := validated(methodSpec{validate: params(func(json.RawMessage) string { return "no" })}, next, rec)
 
 	h(context.Background(), jsonrpcRequest{ID: json.RawMessage(`1`), Params: json.RawMessage(`{"a":1}`)})
 
@@ -68,7 +68,7 @@ func TestValidated_RefusesBeforeTheHandlerRuns(t *testing.T) {
 func TestValidated_AdmitsWhatTheValidatorAccepts(t *testing.T) {
 	entered := false
 	next := func(context.Context, jsonrpcRequest) { entered = true }
-	h := validated(params(func(json.RawMessage) string { return "" }), next, &recordingResponder{})
+	h := validated(methodSpec{validate: params(func(json.RawMessage) string { return "" })}, next, &recordingResponder{})
 
 	h(context.Background(), jsonrpcRequest{ID: json.RawMessage(`1`), Params: json.RawMessage(`{"a":1}`)})
 
@@ -126,7 +126,7 @@ func TestGenericObject_Floor(t *testing.T) {
 // nonetheless weaker than a validator that knows a field is required and what
 // it means, and each conversion is a method that can no longer be reached with
 // a well-shaped payload that means nothing.
-const genericObjectBaseline = 104
+const genericObjectBaseline = 2
 
 func TestGenericObjectRatchet_OnlyShrinks(t *testing.T) {
 	pattern := regexp.MustCompile(`genericObject\(`)
@@ -174,3 +174,33 @@ func (r *recordingResponder) TryError(_ json.RawMessage, e RPCError) error {
 	return nil
 }
 func (r *recordingResponder) TryNotify(string, json.RawMessage) error { return nil }
+
+// TestValidated_UnavailableAnswersMethodNotFound: a method whose domain is not
+// wired says so, whatever it was sent. The caller's next move is to stop
+// calling it, not to fix its arguments — and the validator never runs, so a
+// method that does not exist cannot diagnose the shape of params sent to it.
+func TestValidated_UnavailableAnswersMethodNotFound(t *testing.T) {
+	validatorRan := false
+	spec := methodSpec{
+		available: func() bool { return false },
+		validate: params(func(json.RawMessage) string {
+			validatorRan = true
+			return "params are wrong too"
+		}),
+	}
+	entered := false
+	rec := &recordingResponder{}
+	h := validated(spec, func(context.Context, jsonrpcRequest) { entered = true }, rec)
+
+	h(context.Background(), jsonrpcRequest{ID: json.RawMessage(`1`), Params: json.RawMessage(`{"a":1}`)})
+
+	if entered {
+		t.Fatal("an unavailable method reached its handler")
+	}
+	if validatorRan {
+		t.Fatal("the validator ran for a method that does not exist")
+	}
+	if rec.code != -32601 {
+		t.Fatalf("error code = %d, want -32601", rec.code)
+	}
+}
