@@ -3376,13 +3376,17 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
   ) {
     const client = makeClient()
     const dispatcherCalls: Array<{ method: string; params: unknown }> = []
+    // Each ask is a new run with a new answer entry — two asks in flight
+    // stream concurrently and must never share an identity.
+    let nextRun = 6
     client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
       dispatcherCalls.push({ method, params })
       if (method === 'agent.captureFrame') {
         return Promise.resolve({ frameId: 'frame-1' })
       }
       if (method === 'agent.ask') {
-        return Promise.resolve({ runId: 7, answerEntryId: 'entry-7' })
+        nextRun += 1
+        return Promise.resolve({ runId: nextRun, answerEntryId: `entry-${nextRun}` })
       }
       if (method === 'agent.status') {
         return Promise.resolve({
@@ -3452,6 +3456,24 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     return call.params as Record<string, unknown>
   }
 
+  /** Type and submit through the REAL editor path, exactly as a person
+   *  does — WITHOUT re-showing the editor. submitInEditor's ed.show()
+   *  masks the wmy4 defect: a hidden editor is a no-op for focus, and the
+   *  second ask must work from the true post-submit state. */
+  function submitAsTyped(ed: CommandEditor, text: string): void {
+    ed.insertText(text)
+    viewOf(ed).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+  }
+
+  /** Deliver one server notification through the REAL subscription seam. */
+  function deliverNotification(client: ClientFake, method: string, params: unknown): void {
+    const sub = client.dispatcher.subscribe.mock.calls.find((c: unknown[]) => c[0] === method) as
+      [string, (p: unknown) => void] | undefined
+    if (!sub) throw new Error(`nothing subscribed to ${method}`)
+    sub[1](params)
+  }
   it('activation raises a chip naming the block; a question goes to the model about THAT block and nothing shell runs', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -3501,6 +3523,126 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     }
   })
 
+  it('the editor stays available after a question — a second ask works while the first streams, and each answer lands on its own entry (nocx-wmy4)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      // Model the product state the e2e drives: a person at a prompt with
+      // the editor up (the harness's lifecycle never publishes the
+      // prompt_ready fact that would show it on its own). Shown ONCE —
+      // the assertion below is about the SUBMIT's effect, and a per-submit
+      // re-show is exactly what masked this bug.
+      ed.show()
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
+      askOf(blockA).click()
+
+      // Question one, through the REAL submit path — no per-submit re-show
+      // (the editor was shown once up front; the merged helper's show-
+      // before-every-submit is exactly what masked this bug). The editor
+      // must NOT hand off to the shell: the agent target is active,
+      // nothing is pasted into a pty, and the person is still in a
+      // conversation.
+      submitAsTyped(ed, 'what does docs mean?')
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
+      })
+      expect(ed.isVisible).toBe(true)
+      expect(document.activeElement !== null && ed.root.contains(document.activeElement)).toBe(true)
+
+      // While the first answer streams, activate block B — the block's Ask
+      // button — from the true post-submit state.
+      askOf(blockB).click()
+      expect(ed.isVisible).toBe(true)
+
+      // The chip's primary Ask: the person already chose block B (the chip
+      // names it), and pressing the CHIP's Ask is the path where nothing
+      // changes except focus — the one most likely to stay broken. Exercise
+      // it from a wandered state: focus leaves the editor, and the chip's
+      // Ask must bring it back. With the editor hidden (the bug), focus()
+      // is a no-op and this assertion is red.
+      viewOf(ed).contentDOM.blur()
+      expect(document.activeElement === null || !ed.root.contains(document.activeElement)).toBe(
+        true,
+      )
+      blockB.querySelector<HTMLElement>('.ui-block-receipt__primary')!.click()
+      expect(ed.isVisible).toBe(true)
+      expect(document.activeElement !== null && ed.root.contains(document.activeElement)).toBe(true)
+      submitAsTyped(ed, 'what did it fix?')
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(2)
+      })
+      // The second payload carries block B's output, and no other block's.
+      const frames = dispatcherCalls
+        .filter((c) => c.method === 'agent.captureFrame')
+        .map((c) => {
+          if (typeof c.params !== 'object' || c.params === null) {
+            throw new Error('ask-seam: captureFrame params missing')
+          }
+          return c.params as Record<string, unknown>
+        })
+      expect(frames).toHaveLength(2)
+      expect(frames[1].rows).toEqual([{ kind: 'text', text: 'commit abc' }])
+
+      // Both streams interleave through the REAL subscription seam; each
+      // run's deltas land on its own answer block, never the other's.
+      deliverNotification(client, 'agent.runDelta', {
+        runId: 7,
+        entryId: 'entry-7',
+        seq: 0,
+        text: 'docs: a directory',
+      })
+      deliverNotification(client, 'agent.runDelta', {
+        runId: 8,
+        entryId: 'entry-8',
+        seq: 0,
+        text: 'fix: the bug',
+      })
+      deliverNotification(client, 'agent.runDelta', {
+        runId: 7,
+        entryId: 'entry-7',
+        seq: 1,
+        text: ' of files',
+      })
+      deliverNotification(client, 'agent.runDelta', {
+        runId: 8,
+        entryId: 'entry-8',
+        seq: 1,
+        text: ' now',
+      })
+      const answers = Array.from(
+        scrollback.scrollbackInner.querySelectorAll<HTMLElement>('[data-answer-entry-id]'),
+      )
+      expect(answers).toHaveLength(2)
+      const bodyOf = (entryId: string): string | undefined =>
+        answers.find((a) => a.dataset.answerEntryId === entryId)?.querySelector('.cmd-output')
+          ?.textContent
+      expect(bodyOf('entry-7')).toBe('docs: a directory of files')
+      expect(bodyOf('entry-8')).toBe('fix: the bug now')
+
+      // Both terminalize: the completed chip lands in each answer block's
+      // header, and the editor is still the ordinary prompt for the next
+      // question.
+      deliverNotification(client, 'agent.runState', { runId: 7, state: 'completed' })
+      deliverNotification(client, 'agent.runState', { runId: 8, state: 'completed' })
+      await vi.waitFor(() => {
+        expect(
+          answers.every((a) => a.querySelector('.cmd-header-exit')?.textContent === 'completed'),
+        ).toBe(true)
+      })
+      expect(ed.isVisible).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
   it('dismissing the chip returns the target to shell', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -3522,6 +3664,9 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
       expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       expect(scrollback.blockManager.runningBlock).not.toBeNull()
+      // The return path is the editor's original contract: a shell submit
+      // still performs the atomic handoff — the editor hands itself off.
+      expect(ed.isVisible).toBe(false)
     } finally {
       teardown()
     }

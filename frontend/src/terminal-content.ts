@@ -1038,6 +1038,12 @@ export class TerminalContent extends BaseTabContent {
             }
             return this.promptVault?.saveCandidate() ?? false
           },
+          /** Whether a commit performs the shell handoff (ADR-0004 §2
+           *  step 1: the editor hides itself before anything is sent). The
+           *  TARGET declares what it is (routesToShell); this reads the
+           *  registry — the one authority — so the agent target's question
+           *  keeps the editor on screen for the next one (nocx-wmy4). */
+          handoffToShell: () => this.inputTargets?.active().routesToShell ?? true,
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target

@@ -123,6 +123,18 @@ export interface EditorActions {
    * inside the prompt.
    */
   onSave?: (shift: boolean) => boolean
+  /**
+   * Whether a commit performs the SHELL handoff (ADR-0004 §2 step 1: hide
+   * the DOM editor before anything is sent). The target declares what it
+   * is (routesToShell) and the composition root wires this accessor to
+   * InputTargetRegistry.active() — one authority reads it, never a mode
+   * boolean, never a per-call parameter. Absent (or true): the editor's
+   * original contract, every submit is a shell submit and hides. The
+   * agent target's question is not a handoff — nothing is pasted into a
+   * pty, the grid is not given the keys, and the editor stays on screen
+   * for the next question (nocx-wmy4).
+   */
+  handoffToShell?: () => boolean
 }
 
 export class CommandEditor {
@@ -525,10 +537,17 @@ export class CommandEditor {
    *  observed order from the textarea implementation — value → rows →
    *  hide() → submit() — is preserved. `plan` is present only after a
    *  beforeSubmit planner succeeded: the resolved sendLine goes to the PTY,
-   *  the reference-intact recordLine to the ledger. */
+   *  the reference-intact recordLine to the ledger.
+   *
+   *  The hide is the handoff's step 1 and belongs to it alone: a commit
+   *  whose destination is not the shell (the agent target — routesToShell
+   *  false, read through the handoffToShell seam) hides nothing, because
+   *  there is nothing to hand off — the question stays in the editor for
+   *  the next one (nocx-wmy4). The clear is unconditional: a submitted
+   *  question, like a submitted command, leaves the editor empty. */
   private commit(sendLine: string, plan?: SubmitPlan): void {
     this.clearDoc()
-    this.hide()
+    if (this.actions.handoffToShell?.() ?? true) this.hide()
     // The plan is present only after a beforeSubmit planner succeeded; the
     // plain path keeps the exact one-argument call (no resolution happened,
     // so there is nothing to resolve for the ledger either).
