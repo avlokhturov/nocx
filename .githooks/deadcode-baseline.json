@@ -71,34 +71,6 @@
       "func": "UnavailableHost.Bounce"
     },
     {
-      "file": "internal/notify/notify.go",
-      "func": "NewRouter"
-    },
-    {
-      "file": "internal/notify/notify.go",
-      "func": "RefusedError.Error"
-    },
-    {
-      "file": "internal/notify/notify.go",
-      "func": "Router.deliver"
-    },
-    {
-      "file": "internal/notify/notify.go",
-      "func": "Router.Raise"
-    },
-    {
-      "file": "internal/notify/notify.go",
-      "func": "Router.release"
-    },
-    {
-      "file": "internal/notify/notify.go",
-      "func": "Router.removeQueued"
-    },
-    {
-      "file": "internal/notify/notify.go",
-      "func": "Router.Resolve"
-    },
-    {
       "file": "internal/profile/profile.go",
       "func": "BuildGroupTree"
     },

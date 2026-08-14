@@ -34,6 +34,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -739,6 +740,26 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+	// The notification router (ADR-0029): the only holder of "where" a raised
+	// notification goes. Before this line the whole notify package was
+	// reachable from its own tests and nowhere else (AGENTS.md check 5).
+	//
+	// The table is deliberately EMPTY here. Default-deny means notify.raise
+	// resolves to no route and delivers nothing until a sink row exists, and
+	// the rows arrive with their sinks: the attention host (nocx-hg2a) and the
+	// renderer's toast (nocx-c6ef). An empty table is the honest state of a
+	// pipeline whose sinks are not built yet — it is not a disabled feature,
+	// and nothing in the UI offers a destination it cannot honour.
+	notifyRouter, routerErr := notify.NewRouter(notify.Table{}, notify.Limits{
+		MaxInFlight:     4,
+		MaxQueued:       32,
+		MaxRetained:     1 << 20,
+		DeliveryTimeout: 10 * time.Second,
+	})
+	if routerErr != nil {
+		return nil, fmt.Errorf("notify router: %w", routerErr)
+	}
+	tpOpts = append(tpOpts, transport.WithNotifyRaiser(notifyRouter))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the

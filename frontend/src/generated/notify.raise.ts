@@ -1,0 +1,28 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/notify.raise.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Params of the notify.raise JSON-RPC request: a program asked nocx to present a message (OSC 9 / OSC 777 parsed in the renderer). The record carries exactly the fields the renderer is authorised to originate, plus addressing — sessionId, title and body and NOTHING else (ADR-0029 §2.2: provenance is structural, not validated). kind, trust, level, attribution and at are absent from the wire rather than validated on it: the backend stamps them from the method invoked and its own session registry, and a schema proves a record's shape, never who assigned a field. sessionId is ADDRESSING, not attribution: one WebSocket multiplexes many server-assigned sessions (AD-1), so the record must say which terminal parsed the sequence, and the backend rejects an id not live on that connection. additionalProperties: false is what makes the absence of the protected fields enforceable — a record carrying trust, kind, level or any attribution field is rejected, and there is no argument, header or method variant by which a renderer call produces an attested event. The result of the method is the empty object.
+ */
+export interface NotifyRaise {
+  /**
+   * Which terminal parsed the sequence — a session id the server assigned to a session this connection opened or reattached to. Addressing, not attribution: every attributed field is derived from the backend's registry entry for this id, never from the record. An id not live on this connection is rejected with a JSON-RPC error.
+   */
+  sessionId: string
+  /**
+   * The presentation title, chosen by the source — untrusted presentation data (ADR-0029 §2.3), never control data. The backend stamps it into the event verbatim and it never participates in routing, destination or attribution construction.
+   */
+  title: string
+  /**
+   * The presentation body, chosen by the source — untrusted presentation data like title, with the same noninterference guarantees.
+   */
+  body: string
+}
