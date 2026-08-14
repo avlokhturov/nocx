@@ -42,6 +42,11 @@ export type LiveContentHeightSpy = Mock<() => number>
 export interface RendererMock extends TerminalRenderer {
   /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
   snapshotStore: CommandSnapshotStore
+  /** The mock's paste is a spy: tests program it to refuse the write. */
+  paste: Mock<(text: string) => boolean>
+  /** The mock's bracketed-paste-mode answer is a spy: tests flip mode 2004
+   *  on and off. */
+  bracketedPasteActive: Mock<() => boolean>
   _cbs: {
     onData?: DataCallback
     onResize?: ResizeCallback
@@ -127,7 +132,14 @@ export function createRendererMock(): RendererMock {
     // typed after it until the e2e suite found it (nocx-yb5y).
     paste: vi.fn((text: string) => {
       cbs.onData?.(text)
+      // The write happened: the mock's terminal is always mounted, and the
+      // real renderer returns true whenever a terminal exists. A test
+      // wanting the refusal path overrides this with mockReturnValue(false).
+      return true
     }),
+    // Mode 2004 off by default — a test that wants bracketed paste on
+    // flips it with mockReturnValue(true) on this same vi.fn.
+    bracketedPasteActive: vi.fn(() => false),
     setReadOnly: vi.fn(),
     refreshAtlas: vi.fn(),
     focus: vi.fn(),

@@ -794,7 +794,6 @@ describe('TabManager', () => {
   })
 
   // ── clipboard policy ───────────────────────────────────────────────
-  /* eslint-disable @typescript-eslint/unbound-method */
 
   it('writes selection to the clipboard when non-empty', async () => {
     const cb = makeClipboard()
@@ -1067,7 +1066,6 @@ describe('TabManager', () => {
     expect(cb.writeText).not.toHaveBeenCalled()
     expect(banner.show).not.toHaveBeenCalled()
   })
-  /* eslint-enable @typescript-eslint/unbound-method */
 
   // ── readiness signal ───────────────────────────────────────────────
 

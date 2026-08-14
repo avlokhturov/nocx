@@ -45,7 +45,7 @@ import {
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
 import { CommandLedger } from './command-ledger'
-import { TerminalContent, type TerminalContentHooks } from './terminal-content'
+import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
@@ -830,6 +830,306 @@ describe('inserting a saved secret into the pane in front (nocx-fk32)', () => {
       expect(view.state.doc.toString()).not.toContain('hunter2')
       // ...and nothing was resolved or sent: that waits for submit.
       expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+})
+describe('characterising insertSecret before the input-owner extraction (nocx-xqu5)', () => {
+  // Written BEFORE the extraction and required to pass unchanged after it:
+  // the extraction may change only WHERE the question 'who owns input in
+  // this pane' is answered (into a private inputOwner()), never the
+  // answers. These three branches are the whole current contract.
+
+  /** The reference line insertSecret must ask the vault to resolve. */
+  const REFERENCE = '{{secret:pi@far}}'
+
+  /** A client whose vault.resolveLine answers with a resolved value. */
+  function resolvingClient(value: string) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({ line: value, refs: [{ name: 'pi@far', resolved: true }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  it('with the editor owning the prompt, the REFERENCE enters the draft and nothing resolves or sends', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).show()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('reference')
+      expect(view.state.doc.toString()).toContain(REFERENCE)
+      expect(view.state.doc.toString()).not.toContain('hunter2')
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with the terminal owning input, the value is resolved and sent WITH its newline', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('value')
+      // The vault is asked for exactly the reference line — nothing more.
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', { line: REFERENCE })
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      // The resolved value crosses, with the newline: choosing a secret at
+      // a password prompt IS the answer to that prompt (owner, 2026-08-10).
+      expect(sent).toEqual(['hunter2\n'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with no editor and no session the insert is unavailable and nothing is sent', async () => {
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('hunter2'),
+    )
+    const session = sessionOf(content)
+    const withSession = content as unknown as { session: SessionFake | null }
+    const original = withSession.session
+    withSession.session = null
+    try {
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('unavailable')
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      withSession.session = original
+      teardown()
+    }
+  })
+})
+describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
+  /** The refusal the palette must render when nothing owns input (§9.2). */
+  const NO_OWNER: SnippetFire = { ok: false, reason: 'no-owner' }
+
+  /** A client whose vault.resolveLine answers with a resolved value. */
+  function resolvingClient(value: string) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({ line: value, refs: [{ name: 'pi@far', resolved: true }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  it('into the editor: the text enters the draft, no newline is appended, nothing resolves or sends', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).show()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('git push --force')).resolves.toEqual({
+        ok: true,
+        where: 'editor',
+      })
+      // Exactly the body, nothing appended: the user submits with Enter.
+      expect(view.state.doc.toString()).toBe('git push --force')
+      // The secret policy resolves into the pty only; into the editor a
+      // {{secret:…}} stays a reference for the chip and submit (§11.1), so
+      // nothing touches the vault or the session.
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('into the pty: {{secret:…}} resolves exactly as insertSecret resolves it, and NO newline is sent', async () => {
+    const client = resolvingClient('run hunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('run {{secret:pi@far}}')).resolves.toEqual({
+        ok: true,
+        where: 'pty',
+      })
+      // The vault is asked for exactly the snippet body.
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', {
+        line: 'run {{secret:pi@far}}',
+      })
+      // The paste goes through the engine with the resolved line, and the
+      // engine's onData is what reaches the session — byte for byte. No
+      // newline is appended anywhere on this path (§9.3).
+      expect(renderer.paste).toHaveBeenCalledWith('run hunter2')
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      expect(sent).toEqual(['run hunter2'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('refuses an unresolved {{secret:…}} and names it, pasting nothing', async () => {
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'vault.resolveLine') {
+        let line = ''
+        if (params !== null && typeof params === 'object' && 'line' in params) {
+          const candidate = params.line
+          if (typeof candidate === 'string') line = candidate
+        }
+        return Promise.resolve({ line, refs: [{ name: 'gone', resolved: false }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('fire {{secret:gone}}')).resolves.toEqual({
+        ok: false,
+        reason: 'unresolved-secret',
+        name: 'gone',
+      })
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("'none' is a refusal, never a fallthrough: with no session the fire stops and the pty is untouched", async () => {
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('hunter2'),
+    )
+    const session = sessionOf(content)
+    const renderer = rendererOf(content)
+    const withSession = content as unknown as { session: SessionFake | null }
+    const original = withSession.session
+    withSession.session = null
+    try {
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('echo hi')).resolves.toEqual(NO_OWNER)
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      withSession.session = original
+      teardown()
+    }
+  })
+
+  it('a multi-line body is refused when the destination has no bracketed paste — before any resolution or write', async () => {
+    const client = resolvingClient('line1\nhunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.bracketedPasteActive.mockReturnValue(false)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
+        ok: false,
+        reason: 'multi-line-no-bracketed-paste',
+      })
+      // The refusal is about the destination, so it is decided before the
+      // vault is asked and before the engine is touched (§9.4).
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a multi-line body is delivered WHOLE — resolved and newline intact — when bracketed paste is on', async () => {
+    const client = resolvingClient('line1\nhunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.bracketedPasteActive.mockReturnValue(true)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
+        ok: true,
+        where: 'pty',
+      })
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', {
+        line: 'line1\n{{secret:pi@far}}',
+      })
+      // One document: resolved, newline intact, nothing appended (§9.4).
+      expect(renderer.paste).toHaveBeenCalledWith('line1\nhunter2')
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      expect(sent).toEqual(['line1\nhunter2'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a single-line body is unaffected by the paste mode either way', async () => {
+    for (const active of [false, true]) {
+      const client = resolvingClient('echo hunter2')
+      const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      try {
+        const renderer = rendererOf(content)
+        editorOf(content).hide()
+        renderer.bracketedPasteActive.mockReturnValue(active)
+        await expect(content.insertSnippet('echo {{secret:pi@far}}')).resolves.toEqual({
+          ok: true,
+          where: 'pty',
+        })
+        expect(renderer.paste).toHaveBeenCalledWith('echo hunter2')
+      } finally {
+        teardown()
+      }
+    }
+  })
+
+  it('a multi-line body into the editor is fine: the refusal is about the pty, not the text', async () => {
+    const { content, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('a\nb'),
+    )
+    try {
+      editorOf(content).show()
+      await expect(content.insertSnippet('a\nb')).resolves.toEqual({ ok: true, where: 'editor' })
+      expect(view.state.doc.toString()).toBe('a\nb')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a paste that reports no write is a refusal, not a reported delivery', async () => {
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('echo hunter2'),
+    )
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.paste.mockReturnValue(false)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('echo {{secret:pi@far}}')).resolves.toEqual({
+        ok: false,
+        reason: 'write-failed',
+      })
       expect(session.send.mock.calls.length).toBe(sentBefore)
     } finally {
       teardown()

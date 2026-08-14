@@ -592,11 +592,11 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  paste(text: string): void {
+  paste(text: string): boolean {
     // term.paste() owns bracketed-paste wrapping: when the running program
     // has enabled mode 2004, it wraps the payload in the escape sequences.
     const term = this.term
-    if (!term) return
+    if (!term) return false
     // A submitted command must reach the program while the grid is
     // read-only: disableStdin guards USER input (keystrokes land in the
     // editor instead), and the editor's submit delivers its document
@@ -610,6 +610,13 @@ export class XtermRenderer implements TerminalRenderer {
     } finally {
       term.options.disableStdin = wasDisabled
     }
+    return true
+  }
+
+  /** The running program's bracketed-paste mode (2004), or false when no
+   *  terminal is mounted. */
+  bracketedPasteActive(): boolean {
+    return this.term?.modes.bracketedPasteMode ?? false
   }
 
   refreshAtlas(): void {

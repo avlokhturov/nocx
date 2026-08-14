@@ -68,6 +68,7 @@ import {
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { secretReference } from './secret-reference'
+import { hasSecretReference } from './snippets/resolve'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { DomainEnvironmentProjection } from './lifecycle/domain-environment'
 import {
@@ -250,6 +251,26 @@ function keyLabel(e: KeyboardEvent): string {
     .join('+')
   return mods
 }
+
+/** The outcome of firing a snippet into the pane in front — and, when it
+ *  was refused, why. A refusal is a refusal: the palette renders it in the
+ *  panel and offers what the design names (§9.4, §11.1), rather than
+ *  reporting a delivery that did not happen. */
+export type SnippetFire =
+  | { readonly ok: true; readonly where: 'editor' | 'pty' }
+  | {
+      readonly ok: false
+      readonly reason:
+        'no-owner' | 'multi-line-no-bracketed-paste' | 'unresolved-secret' | 'write-failed'
+      readonly name?: string
+    }
+
+/** Who owns input in a pane right now — the ONE derivation behind every
+ *  fire policy (design §9.2). Dependencies a policy needs beyond the owner
+ *  (vault, renderer) are that policy's own check, not part of this
+ *  question: 'pty' means a session exists, whether or not every policy has
+ *  every tool it wants. */
+type InputOwner = 'editor' | 'pty' | 'none'
 
 /**
  * TerminalContent owns the renderer, session, editor, scrollback, command
@@ -2220,6 +2241,15 @@ export class TerminalContent extends BaseTabContent {
    *  stops the A marker), so a fresh integration — not a presentation
    *  toggle — is what returns to command blocks. The capability chip still
    *  states "Native input" and the popover offers nothing while latched. */
+  /** Who owns input in this pane right now — the ONE derivation behind
+   *  every fire policy. The contract lives on the InputOwner type; a
+   *  caller reads this once and never re-derives the answer (AD-8). */
+  private inputOwner(): InputOwner {
+    if (this.editor?.isVisible === true) return 'editor'
+    if (this.session !== null) return 'pty'
+    return 'none'
+  }
+
   /** Insert a vault secret where the user is actually typing (nocx-fk32).
    *  The target is chosen by who owns input, and the difference is the
    *  point:
@@ -2241,23 +2271,86 @@ export class TerminalContent extends BaseTabContent {
    *    — that the user ruled out the moment they opened the picker.
    *
    *  Nothing here reads the byte stream to decide anything (AD-6): the
-   *  question 'who owns input' is answered by the input presentation, which
-   *  the lifecycle axis owns. Returns what happened, so the caller can say
+   *  question 'who owns input' is answered by inputOwner(), which the
+   *  input presentation feeds. Returns what happened, so the caller can say
    *  so — a password prompt echoes nothing, and an insert the user cannot
    *  see is an insert they will do twice. */
   async insertSecret(name: string): Promise<'reference' | 'value' | 'unavailable'> {
-    if (this.editor?.isVisible === true) {
-      this.editor.insertText(secretReference(name))
+    const owner = this.inputOwner()
+    const editor = this.editor
+    if (owner === 'editor') {
+      // owner === 'editor' means the editor is visible (inputOwner's
+      // contract); the null check exists for the type, and a missing
+      // editor refuses rather than falling through to a different owner
+      // (§9.2).
+      if (editor === null) return 'unavailable'
+      editor.insertText(secretReference(name))
       return 'reference'
     }
-    if (!this.session || !this.vault) return 'unavailable'
-    const resolved = await this.vault.resolveLine(secretReference(name))
+    const session = this.session
+    const vault = this.vault
+    // owner === 'pty' means a session exists (inputOwner's contract); the
+    // vault is the secret policy's dependency, checked here rather than in
+    // the owner question.
+    if (owner !== 'pty' || session === null || vault === null) return 'unavailable'
+    const resolved = await vault.resolveLine(secretReference(name))
     // An unresolved name must never be written as literal text: the far
     // side would receive `{{secret:…}}` as the password. resolveLine reports
     // every reference it could not resolve, and this line has exactly one.
     if (resolved.refs.some((r) => !r.resolved)) return 'unavailable'
-    this.session.send(resolved.line + '\n')
+    session.send(resolved.line + '\n')
     return 'value'
+  }
+
+  /** Fire a snippet body where the user is typing — the second policy over
+   *  the same inputOwner() derivation insertSecret uses (design §9.2). The
+   *  differences are policy, never mode:
+   *
+   *  - The EDITOR owns the prompt: the text goes into the draft as the
+   *    caller resolved it (env/ask at fire time; a {{secret:…}} stays a
+   *    reference — the chip decorates it and submit resolves it, §11.1).
+   *    NO newline: the user submits with Enter.
+   *  - The TERMINAL owns input: {{secret:…}} is resolved through
+   *    vault.resolveLine exactly as insertSecret resolves it, and an
+   *    unresolved name refuses the whole fire (§11.1). The text then goes
+   *    through the engine's paste — bracketed-paste semantics are the
+   *    engine's to decide, never hand-wrapped (§9.2). NO newline, ever
+   *    (§9.3): firing into a shell does not run the command.
+   *  - 'none' is a refusal, never a fallthrough (§9.2): delivering to a
+   *    different owner than the surface the user is looking at is the
+   *    defect, whichever one wins.
+   *
+   *  A multi-line body is refused when the destination has not enabled
+   *  bracketed paste (mode 2004): a plain newline would be read as Return
+   *  and run half the phrase (§9.4). We do not send it and hope, and we do
+   *  not silently join the lines. */
+  async insertSnippet(text: string): Promise<SnippetFire> {
+    const owner = this.inputOwner()
+    const editor = this.editor
+    if (owner === 'editor') {
+      if (editor === null) return { ok: false, reason: 'no-owner' }
+      editor.insertText(text)
+      return { ok: true, where: 'editor' }
+    }
+    if (owner === 'none') return { ok: false, reason: 'no-owner' }
+    const renderer = this.renderer
+    if (text.includes('\n') && !(renderer?.bracketedPasteActive() ?? false)) {
+      return { ok: false, reason: 'multi-line-no-bracketed-paste' }
+    }
+    let line = text
+    if (hasSecretReference(text)) {
+      const vault = this.vault
+      if (vault === null) return { ok: false, reason: 'unresolved-secret' }
+      const resolved = await vault.resolveLine(text)
+      const unresolved = resolved.refs.find((r) => !r.resolved)
+      if (unresolved !== undefined) {
+        return { ok: false, reason: 'unresolved-secret', name: unresolved.name }
+      }
+      line = resolved.line
+    }
+    const delivered = renderer?.paste(line) ?? false
+    if (!delivered) return { ok: false, reason: 'write-failed' }
+    return { ok: true, where: 'pty' }
   }
 
   /** The grid becomes the keyboard's owner: writable AND focused, in one
