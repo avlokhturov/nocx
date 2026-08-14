@@ -28,6 +28,7 @@ import { createSubmitGate } from './ui/submit-gate'
 import { showToast } from './ui/toast'
 import { log } from './log'
 import type { AgentClient } from './agent'
+import { agentStatusLine } from './agent-status-line'
 // The probe result shape is declared once in endpoints.probe.schema.json and
 // INLINED by agent.status.schema.json's cross-file ref, so the generated
 // agent.status.ts exports both AgentStatusResult and its own copy of
@@ -302,25 +303,10 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   // ── Assistant status + probe display ───────────────────────────────
 
   /** The readiness line's tone and text, from agent.status. A soft
-   *  degrade is a visible sentence, never only a log line. */
-  const statusLine = () => {
-    const st = agentStatus()
-    if (!st) return null
-    if (!st.endpointConfigured) {
-      return { tone: 'neutral' as const, text: 'No endpoint configured yet' }
-    }
-    if (!st.credentialResolvable) {
-      return { tone: 'warning' as const, text: 'Credential unavailable — the vault may be locked' }
-    }
-    const p = st.lastProbe
-    if (p && !p.ok) {
-      return { tone: 'danger' as const, text: `Last test failed: ${p.error}` }
-    }
-    if (p && p.ok) {
-      return { tone: 'success' as const, text: `Last test ok (${p.model})` }
-    }
-    return { tone: 'success' as const, text: 'Ready' }
-  }
+   *  degrade is a visible sentence, never only a log line. The mapping is
+   *  the ONE derivation (agentStatusLine) — the ask chip renders the same
+   *  sentence, and two owners would drift (AD-8, nocx-x8s2.2). */
+  const statusLine = () => agentStatusLine(agentStatus())
 
   /** The Test button's result, from endpoints.probe. */
   const probeLine = () => {

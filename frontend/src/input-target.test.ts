@@ -1,9 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createRegistry, type InputTarget, ShellInputTarget } from './input-target'
 
-const fake = (id: string): InputTarget => ({
+const fake = (id: string, routesToShell = false): InputTarget => ({
   id,
   label: id,
+  routesToShell,
   submit: vi.fn(async () => {}),
 })
 
@@ -31,6 +32,7 @@ describe('ShellInputTarget', () => {
     const paste = vi.fn()
     const sendRaw = vi.fn()
     const t = new ShellInputTarget(paste, sendRaw)
+    expect(t.routesToShell).toBe(true)
     await t.submit('echo hi')
 
     expect(paste).toHaveBeenCalledTimes(1)
@@ -42,7 +44,9 @@ describe('ShellInputTarget', () => {
   it('preserves \\n so every line executes as a command separator (nocx-4ff.14)', async () => {
     const paste = vi.fn()
     const sendRaw = vi.fn()
-    await new ShellInputTarget(paste, sendRaw).submit('a\nb')
+    const t = new ShellInputTarget(paste, sendRaw)
+    expect(t.routesToShell).toBe(true)
+    await t.submit('a\nb')
     expect(paste).toHaveBeenCalledWith('a\nb')
     expect(sendRaw).toHaveBeenCalledWith('\r')
   })

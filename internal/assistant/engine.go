@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -56,9 +57,16 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // agent, calling onDelta for every content chunk. It is the explain-mode
 // run: zero tools, terminate after the first completed response.
 //
+// onDelta returns an error to ABORT the stream — the caller's write was
+// refused, and the model must stop rather than keep producing chunks nobody
+// can deliver (the probe's write-only callback cannot express that; the ask
+// transaction needs it so a refused socket write terminalizes the run
+// instead of wedging it). The abort error is returned as-is.
+//
 // Every error this returns is a stream failure the caller maps into a probe
-// outcome; a nil return means a response was received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, msgs []*schema.Message, onDelta func(string)) error {
+// outcome or a terminal run state; a nil return means a response was
+// received in full.
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, msgs []*schema.Message, onDelta func(string) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -98,13 +106,53 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 					return err
 				}
 				if msg != nil && msg.Content != "" {
-					onDelta(msg.Content)
+					if err := onDelta(msg.Content); err != nil {
+						return err
+					}
 				}
 			}
 			continue
 		}
 		if mo.Message != nil && mo.Message.Content != "" {
-			onDelta(mo.Message.Content)
+			if err := onDelta(mo.Message.Content); err != nil {
+				return err
+			}
 		}
 	}
+}
+
+// Ask implements Client. It streams the model's answer through the same adk
+// agent as the probe (streamModelAnswer is the one explain-mode run), over
+// the same guarded HTTP client. Zero content after a completed stream is a
+// StreamError — the endpoint answered; it did not answer.
+func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) error) error {
+	if strings.TrimSpace(p.BaseURL) == "" {
+		return fmt.Errorf("ask: base URL is required")
+	}
+	if strings.TrimSpace(p.Model) == "" {
+		return fmt.Errorf("ask: model is required")
+	}
+	msgs := make([]*schema.Message, 0, len(p.Messages))
+	for _, m := range p.Messages {
+		switch m.Role {
+		case "user":
+			msgs = append(msgs, schema.UserMessage(m.Content))
+		case "assistant":
+			msgs = append(msgs, schema.AssistantMessage(m.Content, nil))
+		default:
+			msgs = append(msgs, schema.SystemMessage(m.Content))
+		}
+	}
+	var text strings.Builder
+	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, msgs, func(delta string) error {
+		text.WriteString(delta)
+		return onDelta(delta)
+	})
+	if err != nil {
+		return err
+	}
+	if text.Len() == 0 {
+		return &StreamError{Message: "the model returned no text"}
+	}
+	return nil
 }

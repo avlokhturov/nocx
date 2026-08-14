@@ -1371,33 +1371,38 @@ func (h tabbyHandlers) planTabbyImport(ctx context.Context, svc capability.Tabby
 	return plan, preview, nil
 }
 
+// buildConfigOp constructs the ONE config-domain operation (AD-8: one owner
+// of endpoint resolution — agent.ask's refusal check shares it with the
+// config handlers; a second construction would be a second wiring). It
+// returns whether the endpoint repository is wired, the "endpoints not
+// available" gate the handlers check first.
+func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) (capability.ConfigOperation, bool) {
+	// Endpoints ride the profile store (ADR-0030): the same JSON document,
+	// so the profile store satisfies the endpoint repository. The nil guard
+	// is real: the type assertion panics on a nil interface, and profiles
+	// may simply not be wired.
+	var endpointsRepo profile.EndpointRepository
+	if s.profiles != nil {
+		if er, ok := s.profiles.(profile.EndpointRepository); ok {
+			endpointsRepo = er
+		}
+	}
+	return capability.NewConfigOperation(
+		configGate, vaultGate, lane,
+		s.profiles, s.groups, endpointsRepo, s.profileSvc, s.settings,
+		s.vaultRowResolver(), s.vaultEndpointSecrets(),
+	), endpointsRepo != nil
+}
+
 // configSpecs declares the config-domain control methods. The ConfigOperation
-// and TabbyImportOperation are built here from the wired stores; the handler
-// families share them.
-func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate control.Admission) []methodSpec {
+// is built ONCE by buildConfigOp (in buildControlPlane) and shared with the
+// agent specs; the handler families receive it.
+func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate control.Admission, configOp capability.ConfigOperation, endpointWired bool) []methodSpec {
 	profilesWired := s.profiles != nil
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
 	executeWired := profilesWired && groupsWired && s.credentials != nil && s.profileSvc != nil
 
-	// Endpoints ride the profile store (ADR-0030): the same JSON document,
-	// so the profile store satisfies the endpoint repository. endpointWired
-	// is the "endpoints not available" gate the handlers check first. The
-	// nil guard is real: the type assertion below panics on a nil
-	// interface, and profiles may simply not be wired.
-	var endpointsRepo profile.EndpointRepository
-	if profilesWired {
-		if er, ok := s.profiles.(profile.EndpointRepository); ok {
-			endpointsRepo = er
-		}
-	}
-	endpointWired := endpointsRepo != nil
-
-	configOp := capability.NewConfigOperation(
-		configGate, vaultGate, lane,
-		s.profiles, s.groups, endpointsRepo, s.profileSvc, s.settings,
-		s.vaultRowResolver(), s.vaultEndpointSecrets(),
-	)
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
 		tabbyOp = capability.NewTabbyImportOperation(
@@ -1456,11 +1461,11 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		// connections.test; agent.status is a fast config read under the
 		// config queue.
 		regResponder(s.agentProbeSub, "endpoints.probe", func(r Responder) handlerFunc {
-			h := assistantHandlers{client: s.assistantClient, probes: s.assistantProbes, wired: s.assistantClient != nil, r: r}
+			h := assistantProbeHandlers{client: s.assistantClient, probes: s.assistantProbes, wired: s.assistantClient != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
 		regResponder(configSub, "agent.status", func(r Responder) handlerFunc {
-			h := agentHandlers{op: configOp, secrets: s.credentials, probes: s.assistantProbes, wired: endpointWired, r: r}
+			h := assistantStatusHandlers{op: configOp, secrets: s.credentials, probes: s.assistantProbes, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
 		}),
 		regResponder(configSub, "groups.list", func(r Responder) handlerFunc {

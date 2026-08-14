@@ -357,7 +357,11 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 
 // FinishExecution closes the run with its termination reason (the five
 // outcomes one status plus exit code cannot separate — ADR-0020 §4) and
-// closes the entry with its final status.
+// closes the entry with its final status. For an agent run (state IS NOT
+// NULL) it also maps the termination to the terminal run state the renderer
+// draws — completed | cancelled | failed | interrupted — in the SAME
+// update, so the run is never reported terminal in one vocabulary and not
+// the other. Executions without a state (a frame capture) are untouched.
 func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -375,8 +379,11 @@ func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE executions SET ended_at = ?, termination_reason = ? WHERE id = ?`,
-			end.EndedAt, string(end.TerminationReason), executionID); err != nil {
+			`UPDATE executions SET ended_at = ?, termination_reason = ?,
+			   state = CASE WHEN state IS NOT NULL THEN ? ELSE state END
+			 WHERE id = ?`,
+			end.EndedAt, string(end.TerminationReason),
+			string(runStateForTermination(end.TerminationReason)), executionID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -384,8 +391,35 @@ func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, 
 			string(end.Status), entryID); err != nil {
 			return err
 		}
+		// An ASK run (an entry with a caused-by answer) closes its answer
+		// entry, seals its artifact and ends its container execution in the
+		// same transaction — any terminalizer keeps the ledger consistent,
+		// not just FinishAgentRun. A non-ask run has no answer entry and
+		// this is a no-op.
+		if err := closeAnswerFor(ctx, tx, entryID, end.Status, end.EndedAt, end.TerminationReason); err != nil {
+			return err
+		}
 		return tx.Commit()
 	})
+}
+
+// runStateForTermination maps an execution's termination reason to the
+// terminal run state on the wire (design §7). The mapping is owned HERE so
+// the model half never invents a second one: the user asked for it
+// (user-killed → cancelled), the backend was interrupted (interrupted),
+// the model finished (completed), and everything else failed — the model,
+// the transport, the timeout or the policy.
+func runStateForTermination(r TerminationReason) RunState {
+	switch r {
+	case TermCompleted:
+		return RunCompleted
+	case TermUserKilled:
+		return RunCancelled
+	case TermInterrupted:
+		return RunInterrupted
+	default:
+		return RunFailed
+	}
 }
 
 // ── artifacts ────────────────────────────────────────────────────────────
@@ -524,11 +558,11 @@ func (s *sqliteContent) artifactByID(ctx context.Context, id string) (*Artifact,
 }
 
 // ── edges ────────────────────────────────────────────────────────────────
-
 func (s *sqliteContent) AddEdge(ctx context.Context, e Edge) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO edges (from_id, to_id, rel) VALUES (?, ?, ?)`, e.From, e.To, string(e.Rel))
+			`INSERT INTO edges (from_id, to_id, rel, payload) VALUES (?, ?, ?, ?)`,
+			e.From, e.To, string(e.Rel), e.Payload)
 		return err
 	})
 }
@@ -536,7 +570,7 @@ func (s *sqliteContent) AddEdge(ctx context.Context, e Edge) error {
 // Edges returns every edge touching entryID, in either direction.
 func (s *sqliteContent) Edges(ctx context.Context, entryID string) ([]Edge, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT from_id, to_id, rel FROM edges WHERE from_id = ? OR to_id = ? ORDER BY rel`,
+		`SELECT from_id, to_id, rel, payload FROM edges WHERE from_id = ? OR to_id = ? ORDER BY rel`,
 		entryID, entryID)
 	if err != nil {
 		return nil, err
@@ -545,7 +579,7 @@ func (s *sqliteContent) Edges(ctx context.Context, entryID string) ([]Edge, erro
 	var out []Edge
 	for rows.Next() {
 		var e Edge
-		if err := rows.Scan(&e.From, &e.To, &e.Rel); err != nil {
+		if err := rows.Scan(&e.From, &e.To, &e.Rel, &e.Payload); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -561,7 +595,7 @@ func (s *sqliteContent) Edges(ctx context.Context, entryID string) ([]Edge, erro
 func (s *sqliteContent) executionsFor(ctx context.Context, entryID string) ([]Execution, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, entry_id, lane, attempt, environment_obs_id,
 		lease_deadline, inactivity_deadline, interactivity, process_group, started_at, ended_at,
-		termination_reason, executor
+		termination_reason, executor, state, payload
 		FROM executions WHERE entry_id = ? ORDER BY id`, entryID)
 	if err != nil {
 		return nil, err
@@ -571,15 +605,19 @@ func (s *sqliteContent) executionsFor(ctx context.Context, entryID string) ([]Ex
 	for rows.Next() {
 		var ex Execution
 		var obsID int64
-		var termination sql.NullString
+		var termination, state sql.NullString
 		if err := rows.Scan(&ex.ID, &ex.EntryID, &ex.Lane, &ex.Attempt, &obsID,
 			&ex.LeaseDeadline, &ex.InactivityDeadline, &ex.Interactivity, &ex.ProcessGroup,
-			&ex.StartedAt, &ex.EndedAt, &termination, &ex.Executor); err != nil {
+			&ex.StartedAt, &ex.EndedAt, &termination, &ex.Executor, &state, &ex.Payload); err != nil {
 			return nil, err
 		}
 		if termination.Valid {
 			v := TerminationReason(termination.String)
 			ex.TerminationReason = &v
+		}
+		if state.Valid {
+			v := RunState(state.String)
+			ex.State = &v
 		}
 		obs, err := s.observationByID(ctx, obsID)
 		if err != nil {

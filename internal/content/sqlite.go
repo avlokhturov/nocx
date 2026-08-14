@@ -296,18 +296,53 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	return s, nil
 }
 
-// closeOpenEntries is the startup sweep of spec §4.3, run once per Open on
-// the creation connection. It is the consumer the entries_open partial index
-// exists for. Entries closed by the sweep read back status='unknown' — the
-// reconstruction UI shows the gap, never a fabricated outcome.
+// closeOpenEntries is the startup sweep of design §5 (one sweep, both
+// lifecycles), run once per Open on the creation connection, ONE
+// transaction so the two tables can never disagree:
+//
+//   - entries: every open entry closes. An agent-kind entry (a question)
+//     whose run was non-terminal says `interrupted` — the block says so and
+//     the user asks again (design §4.2) — every other kind closes as
+//     `unknown`: the reconstruction UI shows the gap, never a fabricated
+//     outcome. Frame entries are already closed at ingest and never reach
+//     this update.
+//   - executions: every non-terminal agent run (state IS NOT NULL and not
+//     in the terminal set) becomes `interrupted`, with the termination
+//     reason and an end time — an interrupted run has an end. Executions
+//     without a state (frame captures, future shell runs) are not runs and
+//     are untouched.
+//
+// Both updates run in one transaction because the interval they guard has
+// one closing event: a restart that interrupted the run also closed the
+// entry that asked. A crash between the two leaves the pair split — one
+// half of "this ask was interrupted" — and the next start repairs it, but
+// a reader between the two would see an inconsistency that never existed
+// in any running process.
 func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
-	res, err := conn.ExecContext(ctx,
-		`UPDATE entries SET phase = 'closed', status = 'unknown' WHERE phase != 'closed'`)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("content: startup sweep: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE entries SET phase = 'closed', status =
+		   CASE WHEN kind = 'agent' THEN 'interrupted' ELSE 'unknown' END
+		 WHERE phase != 'closed'`)
 	if err != nil {
 		return fmt.Errorf("content: startup sweep: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		return fmt.Errorf("content: startup sweep: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE executions SET state = 'interrupted', termination_reason = 'interrupted', ended_at = ?
+		 WHERE state IS NOT NULL AND state NOT IN ('completed','cancelled','failed','interrupted')`,
+		time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("content: startup sweep: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("content: startup sweep: %w", err)
 	}
 	if n > 0 && logger != nil {
@@ -328,7 +363,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -543,13 +578,22 @@ CREATE TABLE IF NOT EXISTS entries (
   duration_ms     INTEGER,
   sensitivity     TEXT NOT NULL DEFAULT 'normal' CHECK (sensitivity IN ('normal','sensitive')),
   reviewed_at     INTEGER,
+  -- capture_key is the renderer's idempotency key for a FRAME capture
+  -- (nocx-f4s5): the backend mints the frame entry's id, so the untrusted
+  -- key gets its own column, unique where present — a replay of the same
+  -- capture returns the original frame id, and two captures can never
+  -- share a key. NULL for every non-frame entry.
+  capture_key     TEXT,
   payload         TEXT NOT NULL DEFAULT '{}' -- kind payload, sparse extension only
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS edges (
   from_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
   to_id   TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
-  rel     TEXT NOT NULL CHECK (rel IN ('rerun-of','supersedes','caused-by','cites','in-span')),
+  rel     TEXT NOT NULL CHECK (rel IN ('rerun-of','supersedes','caused-by','cites','in-span','references')),
+  -- payload is the edge's sparse extension: for a references edge it is
+  -- the region JSON (design §5 — references carry region coordinates).
+  payload TEXT NOT NULL DEFAULT '{}',
   PRIMARY KEY (from_id, to_id, rel)
 ) STRICT;
 
@@ -569,6 +613,13 @@ CREATE TABLE IF NOT EXISTS executions (
   termination_reason  TEXT CHECK (termination_reason IN
                       ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted')),
   executor            TEXT,                -- executor identity
+  -- state is the ASSISTANT RUN state the renderer draws (design §7):
+  -- prepared | streaming | awaiting_approval | completed | cancelled |
+  -- failed | interrupted. NULL on executions that are not agent runs (a
+  -- frame capture), so the startup sweep — every non-terminal run becomes
+  -- interrupted — never touches them.
+  state               TEXT CHECK (state IN
+                      ('prepared','streaming','awaiting_approval','completed','cancelled','failed','interrupted')),
   payload             TEXT NOT NULL DEFAULT '{}'
 ) STRICT;
 
@@ -627,7 +678,6 @@ CREATE TABLE IF NOT EXISTS ledger_sequence (
 INSERT INTO ledger_sequence (id, next) VALUES (1, 0)
   ON CONFLICT(id) DO NOTHING;  -- schemaV1 re-runs on every open; the seed must be idempotent.
                                -- next=0: the first Submit increments to ingest_seq 1.
-
 CREATE INDEX IF NOT EXISTS entries_by_env        ON entries(environment_id, cwd, ingest_seq DESC);
 CREATE INDEX IF NOT EXISTS entries_by_status     ON entries(status, ingest_seq DESC);
 CREATE INDEX IF NOT EXISTS entries_open          ON entries(phase) WHERE phase != 'closed';
@@ -636,6 +686,9 @@ CREATE INDEX IF NOT EXISTS edges_by_to           ON edges(to_id);
 CREATE INDEX IF NOT EXISTS executions_by_entry   ON executions(entry_id, attempt);
 CREATE INDEX IF NOT EXISTS artifacts_by_execution ON artifacts(execution_id);
 CREATE INDEX IF NOT EXISTS observations_by_env   ON environment_observations(environment_id, version DESC);
+-- The frame idempotency replay check is an index lookup, never a scan: one
+-- capture_key per frame (nocx-f4s5).
+CREATE UNIQUE INDEX IF NOT EXISTS entries_capture_key ON entries(capture_key) WHERE capture_key IS NOT NULL;
 `
 
 // keyedURI is the ONE file-creating path (canary rule): every file this

@@ -70,6 +70,32 @@ type FenceTimer = ReturnType<typeof setTimeout>
 export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
 // ── Block model ────────────────────────────────────────────────────────────
 
+/** The handle the ask surface drives one answer block with (nocx-x8s2.2).
+ *  The answer is NOT xterm output — it arrives as plain text over the
+ *  control plane — so the body is rendered as escaped term-lines (the
+ *  flow's one text vocabulary). The handle is the ONLY way the block's
+ *  body and status change; the ask surface never touches the block DOM
+ *  directly. */
+export interface AnswerBlockHandle {
+  readonly id: number
+  readonly el: HTMLElement
+  /** Append one streamed chunk (agent.runDelta text) to the answer body.
+   *  `this: void` — the target holds the handle and calls the method
+   *  detached from any receiver (unbound-method contract). */
+  append(this: void, text: string): void
+  /** Close the block: success, or failure with the renderable reason. */
+  close(this: void, status: 'success' | 'failure', error?: string): void
+}
+
+/** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
+ *  and its DOM element. Deliberately NOT a BlockRecord — no xterm lines,
+ *  no freeze lifecycle; the command paths must never see it. */
+interface AnswerBlockRecord {
+  id: number
+  question: string
+  el: HTMLElement
+}
+
 export interface BlockRecord {
   id: number
   command: string
@@ -348,6 +374,17 @@ export function blockOutputText(outputEl: HTMLElement | null): string {
     .join('\n')
 }
 
+/** The block's command as text, for a human label naming the block (the
+ *  ask chip's value — nocx-x8s2.2). After history.record acks, the header
+ *  renders the MASKED command and data-recorded-command holds the full
+ *  stored text: the label reads the same source the block shows (ADR-0021),
+ *  never a second derivation of the line. */
+export function blockCommandText(blockEl: HTMLElement): string {
+  const recorded = blockEl.getAttribute('data-recorded-command')
+  if (recorded) return recorded
+  return blockEl.querySelector('.cmd-header-text')?.textContent ?? ''
+}
+
 /**
  * Build the "⋮" overflow menu button + dropdown (P2-9, P1-6 fix).
  * The menu is rendered as a child of document.body with position:fixed
@@ -498,7 +535,8 @@ function wireBlockSelection(
   let mouseMoved = false
 
   blockEl.addEventListener('mousedown', (e) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu, .cmd-ask-btn'))
+      return
     mouseMoved = false
   })
 
@@ -507,7 +545,8 @@ function wireBlockSelection(
   })
 
   blockEl.addEventListener('mouseup', (e) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu, .cmd-ask-btn'))
+      return
     if (mouseMoved) return
 
     // Toggle selection: if already selected, deselect; otherwise select
@@ -545,6 +584,11 @@ export function createCommandBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
+  /** The ask affordance (nocx-x8s2.2): when supplied, the frozen block
+   *  carries an Ask control whose one action activates the ask mode for
+   *  THIS block. Absent on answer blocks and every non-frozen builder —
+   *  a question targets a finished command block, never an answer. */
+  onAsk?: (blockEl: HTMLElement) => void,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -575,6 +619,26 @@ export function createCommandBlock(
   const overflow = buildOverflowMenu(command, outputEl)
   const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
+  // The ask affordance: the one deliberate, non-modal action a frozen
+  // block offers beyond copy. Its click must never look like a block
+  // selection (AD-8: selection is copy; activation is this button), so
+  // the selection and dblclick handlers below exclude it. Inserted BEFORE
+  // the overflow — the ⋮ never shifts position.
+  if (onAsk && right) {
+    const ask = document.createElement('button')
+    ask.className = 'ui-button cmd-ask-btn'
+    ask.dataset.variant = 'ghost'
+    ask.dataset.size = 'sm'
+    ask.textContent = 'Ask'
+    ask.setAttribute('aria-label', 'Ask about this block')
+    ask.title = 'Ask about this block'
+    ask.addEventListener('click', (e) => {
+      e.stopPropagation()
+      e.preventDefault()
+      onAsk(wrapper)
+    })
+    right.insertBefore(ask, overflow)
+  }
 
   wrapper.appendChild(header)
   if (outputEl) wrapper.appendChild(outputEl)
@@ -595,7 +659,8 @@ export function createCommandBlock(
   // and there is no race to order. A single mousedown (detail 1) is not
   // intercepted: drag selection and click-to-select keep working.
   wrapper.addEventListener('mousedown', (e: MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu, .cmd-ask-btn'))
+      return
     if (e.detail !== 2) return
     e.preventDefault()
     const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY)
@@ -668,6 +733,9 @@ export function freezeBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   status: 'success' | 'failure' | 'entered' | 'unknown',
+  /** Forwarded to createCommandBlock: the frozen block carries the ask
+   *  affordance exactly when the manager was wired with one. */
+  onAsk?: (blockEl: HTMLElement) => void,
 ): HTMLElement {
   const newEl = createCommandBlock(
     id,
@@ -681,6 +749,7 @@ export function freezeBlock(
     getContainer,
     onSelect,
     store,
+    onAsk,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -742,6 +811,10 @@ export interface BlockManagerOpts {
   /** The tab's command-existence snapshot store (OSC 636), passed through to
    *  every frozen header this manager creates. */
   snapshotStore: CommandSnapshotStore
+  /** The ask affordance (nocx-x8s2.2): every frozen block this manager
+   *  creates carries an Ask control wired to this callback (the surface
+   *  owner raises the chip). Answer blocks never receive it. */
+  onAsk?: (blockEl: HTMLElement) => void
   /** Fired when a DEFERRED freeze lands — the fence arrived, or the
    *  FENCE_DEFER_MS window elapsed and the block settled at the current
    *  output end. The freeze originated inside the manager (sightFence /
@@ -751,6 +824,13 @@ export interface BlockManagerOpts {
 
 export class BlockManager {
   private _blocks: BlockRecord[] = []
+  /** Answer blocks (nocx-x8s2.2): the assistant's streamed replies, kept
+   *  OUT of _blocks because they have no xterm line range — the freeze,
+   *  serialize and reconstruction paths iterate _blocks and must never see
+   *  a record with sentinel lines. They share the id space and the DOM
+   *  selection API; the ask surface drives them through AnswerBlockHandle
+   *  only. */
+  private _answerBlocks: AnswerBlockRecord[] = []
   private _nextId = 1
   private _now: () => number
   private _scrollbackInner: HTMLElement
@@ -761,6 +841,7 @@ export class BlockManager {
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: () => void
+  private _onAsk?: (blockEl: HTMLElement) => void
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
@@ -807,6 +888,7 @@ export class BlockManager {
     this._now = opts.now ?? (() => performance.now())
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
+    this._onAsk = opts.onAsk
   }
 
   get blocks(): readonly BlockRecord[] {
@@ -839,6 +921,19 @@ export class BlockManager {
       if (el) el.classList.remove('cmd-block-selected')
       this._selectedBlockId = null
     }
+  }
+
+  /** Programmatic single-select, NON-toggle (the ask affordance's visual
+   *  anchor — nocx-x8s2.2). The mouse path owns toggling; activation
+   *  selects so the block the chip names reads as selected, but selection
+   *  NEVER activates (AD-8: selection is copy). The single-select
+   *  invariant (P1-8) holds: the id and the DOM class move together. */
+  selectBlock(blockEl: HTMLElement): void {
+    const prev = getSelectedBlock(this._scrollbackInner)
+    if (prev && prev !== blockEl) prev.classList.remove(SELECTED_CLASS)
+    if (!blockEl.classList.contains(SELECTED_CLASS)) blockEl.classList.add(SELECTED_CLASS)
+    const rec = this._blocks.find((b) => b.el === blockEl)
+    this._selectedBlockId = rec?.id ?? null
   }
 
   /**
@@ -1045,6 +1140,7 @@ export class BlockManager {
       },
       this._snapshotStore,
       status,
+      this._onAsk,
     )
 
     rec.el = newEl
@@ -1229,6 +1325,103 @@ export class BlockManager {
     return rec
   }
 
+  /**
+   * Append an assistant answer block to the flow (nocx-x8s2.2): the
+   * question as the header, the streamed answer text as the body. The
+   * answer is plain text, NOT xterm output — it is rendered as escaped
+   * term-lines at this boundary. Returns the handle the ask surface
+   * appends to and closes.
+   */
+  addAnswerBlock(question: string, cwd: string): AnswerBlockHandle {
+    const id = this._nextId++
+    const el = createCommandBlock(
+      id,
+      question,
+      cwd,
+      this._location,
+      '',
+      null,
+      null,
+      'success',
+      this._getContainer,
+      (bid, sel) => {
+        if (sel) this._onBlockSelected(bid)
+        else this._onBlockDeselected(bid)
+      },
+      this._snapshotStore,
+    )
+    const outputEl = document.createElement('div')
+    outputEl.className = 'cmd-output'
+    outputEl.dataset.answerBody = ''
+    el.appendChild(outputEl)
+    this._scrollbackInner.insertBefore(el, this._xtermContainer)
+    this._answerBlocks.push({ id, question, el })
+
+    // The streamed chunks split MID-LINE, so the body keeps one persistent
+    // partial row: a chunk's final segment stays on it and the next chunk
+    // continues it. Every '\n' completes a row — including a chunk ending
+    // in '\n', whose trailing empty segment starts a fresh (possibly
+    // empty) partial, so "a\n" + "b" renders as two rows, never "ab".
+    let partial: HTMLSpanElement | null = null
+    const makeRow = (): HTMLSpanElement => {
+      const span = document.createElement('span')
+      span.className = 'term-line'
+      outputEl.appendChild(span)
+      return span
+    }
+
+    return {
+      id,
+      el,
+      append(text: string): void {
+        if (text === '') return
+        const parts = text.split('\n')
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i]
+          if (i < parts.length - 1) {
+            // A complete line: finish the current partial (or open one) and
+            // close the row.
+            if (!partial) partial = makeRow()
+            partial.textContent += part
+            partial = null
+          } else {
+            // The final segment stays partial — the next chunk continues it.
+            if (!partial) partial = makeRow()
+            partial.textContent += part
+          }
+        }
+      },
+      close(status: 'success' | 'failure', error?: string): void {
+        // Trim trailing empty rows, the serializer's own contract (a stream
+        // that ended with '\n' leaves an empty partial row behind).
+        while (
+          outputEl.lastElementChild?.classList.contains('term-line') &&
+          outputEl.lastElementChild.textContent === ''
+        ) {
+          outputEl.lastElementChild.remove()
+        }
+        partial = null
+        // The header's status chip, in the flow's own chip vocabulary.
+        const right = el.querySelector('.cmd-header-right')
+        if (right) {
+          const chip = document.createElement('span')
+          chip.className =
+            status === 'success'
+              ? 'nocx-chip nocx-chip-ok cmd-header-exit'
+              : 'nocx-chip nocx-chip-fail cmd-header-exit'
+          chip.textContent = status === 'success' ? 'completed' : 'failed'
+          right.appendChild(chip)
+        }
+        if (error) {
+          const note = document.createElement('div')
+          note.className = 'cmd-answer-error'
+          note.textContent = error
+          outputEl.appendChild(note)
+        }
+      },
+    }
+  }
+
   clearAll(): void {
     this._stopTicker()
     this._cancelPendingFence()
@@ -1236,6 +1429,10 @@ export class BlockManager {
       b.el.remove()
     }
     this._blocks = []
+    for (const b of this._answerBlocks) {
+      b.el.remove()
+    }
+    this._answerBlocks = []
     this._runningBlock = null
     this._cmdStartTime = null
     this._selectedBlockId = null

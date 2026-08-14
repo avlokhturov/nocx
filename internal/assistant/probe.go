@@ -44,7 +44,7 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	var sb strings.Builder
 	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model,
 		[]*schema.Message{schema.UserMessage(probePrompt)},
-		func(delta string) { sb.WriteString(delta) })
+		func(delta string) error { sb.WriteString(delta); return nil })
 
 	res := ProbeResult{
 		EndpointName: p.Name,

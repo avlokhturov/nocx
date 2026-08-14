@@ -222,6 +222,14 @@ type WSServer struct {
 	// with the lane, exactly like probeSub: a second test is refused with
 	// the control-saturated error.
 	agentProbeSub control.Submission
+	// askSub admits and runs the ask STREAM tasks (nocx-x8s2.2) off the
+	// read loop: a model stream can take minutes, so it must not freeze
+	// the socket. Bounded at askStreamCapacity — several asks overlap (the
+	// acceptance criterion drives two at once) but a runaway renderer
+	// cannot spawn unbounded model calls. The task context derives from
+	// the connection, so a disconnect cancels the stream and the run
+	// terminalizes.
+	askSub control.Submission
 	// lane is the ordinary control lane: the shared bounded worker pool every
 	// admission-backed control method runs on (registration.go). Capacity
 	// laneCapacity; a full lane refuses new work with the control-saturated
@@ -783,6 +791,14 @@ const DefaultDomainMaxQueue = 8
 // is refused at submit time.
 const DefaultDomainQueueDepth = 8
 
+// askStreamCapacity bounds concurrent model streams (agent.ask, nocx-
+// x8s2.2). Several asks must overlap — the acceptance criterion drives two
+// at once and they stream concurrently — but a runaway renderer cannot
+// spawn unbounded model calls. A stream beyond the capacity refuses at
+// submit time and the run terminalizes failed ("too many answers in
+// flight") rather than queueing behind an unbounded backlog.
+const askStreamCapacity = 4
+
 // WithDomainConflictWaitTimeout sets how long a request waits on a domain
 // conflict gate before the wait is refused. Tests use a short value to
 // exhaust the bound deterministically and a long one to hold a conflict
@@ -859,6 +875,8 @@ func (s *WSServer) buildControlPlane() {
 		control.NewSemaphore("probe", 1), lane))}
 	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("agent-probe", 1), lane))}
+	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
+		control.NewSemaphore("agent-ask", askStreamCapacity), lane))}
 	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("dialog", 1), lane))}
 	// Domain-gated methods do not register on the lane submission: their
@@ -868,16 +886,20 @@ func (s *WSServer) buildControlPlane() {
 	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
 	immediate := control.ImmediateSubmission{}
+	configOp, endpointWired := s.buildConfigOp(lane, gates.config, gates.vault)
+	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
-	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.contentSpecs(lane, gates.content)...)
+	contentSub := s.operationQueue("content")
+	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentials, s.assistantClient, s.askSub)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
@@ -1208,6 +1230,16 @@ func (c *connState) has(id session.ID) bool {
 	defer c.mu.Unlock()
 	_, ok := c.sessions[id]
 	return ok
+}
+
+// get returns the connection's session object for id, if the connection
+// owns it — what a handler needs to derive backend-authoritative facts
+// (the ledger environment) from the session.
+func (c *connState) get(id session.ID) (session.Session, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s, ok := c.sessions[id]
+	return s, ok
 }
 
 // Owns reports whether this connection has opened or reattached to the

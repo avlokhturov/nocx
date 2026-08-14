@@ -7,13 +7,12 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
-func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admission) []methodSpec {
+func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admission, contentSub control.Submission) []methodSpec {
 	var contentOp capability.ContentOperation
 	if s.contentDB != nil {
 		contentOp = capability.NewContentOperation(contentGate, lane, s.contentDB)
 	}
-	contentSub := s.operationQueue("content")
-	return []methodSpec{
+	specs := []methodSpec{
 		regResponder(contentSub, "history.query", func(r Responder) handlerFunc {
 			h := historyQueryHandlers{op: contentOp, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryQuery(ctx, req) }
@@ -25,4 +24,5 @@ func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admi
 			}
 		}),
 	}
+	return specs
 }
