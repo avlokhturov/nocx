@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.status.schema.json",
+  "title": "AgentStatusResult",
+  "description": "Result of the agent.status JSON-RPC method (design §7): endpoint configured, credential resolvable, last probe result. The ask surface reads it before offering an ask; a soft degrade — no endpoint, an unresolvable credential, a failed probe — is visible in the product, never only in a log. The probe result shape is declared ONCE, in endpoints.probe.schema.json, and referenced here cross-file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["endpointConfigured", "credentialResolvable", "lastProbe"],
+  "properties": {
+    "endpointConfigured": {
+      "description": "At least one AI endpoint is stored (design §7: 'endpoint configured').",
+      "type": "boolean"
+    },
+    "credentialResolvable": {
+      "description": "At least one stored endpoint has a credential the vault can currently resolve — the vault is unsealed and the secret exists. A sealed vault answers false, and the ask surface can offer the unlock prompt.",
+      "type": "boolean"
+    },
+    "lastProbe": {
+      "description": "The last endpoints.probe outcome, or null when none has run in this process lifetime. Process-lifetime by design: a probe's meaning expires with the endpoint that produced it.",
+      "anyOf": [{ "$ref": "endpoints.probe.schema.json" }, { "type": "null" }]
+    }
+  }
+}

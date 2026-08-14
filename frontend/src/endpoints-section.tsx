@@ -20,12 +20,21 @@ import { EditableRowList } from './ui/row-list'
 import { EmptyState } from './ui/empty-state'
 import { IconButton } from './ui/icon-button'
 import { PencilIcon, TrashIcon } from './ui/icons'
+import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import { absoluteHttpUrl, combine, createFormValidation, required } from './ui/validation'
 import { createSubmitGate } from './ui/submit-gate'
 import { showToast } from './ui/toast'
 import { log } from './log'
+import type { AgentClient } from './agent'
+// The probe result shape is declared once in endpoints.probe.schema.json and
+// INLINED by agent.status.schema.json's cross-file ref, so the generated
+// agent.status.ts exports both AgentStatusResult and its own copy of
+// EndpointsProbeResult. This module consumes the latter (the type is
+// structurally identical) so the dead-export ratchet sees every generated
+// export used — the same union trick endpoints.ts documents.
+import type { AgentStatusResult, EndpointsProbeResult } from './generated/agent.status'
 import { EndpointClient, type Endpoint } from './endpoints'
 
 /** The schema's one value today (design §4.5, decision 2). Display label
@@ -51,11 +60,13 @@ interface EndpointDraft {
 }
 
 const blankDraft = (): EndpointDraft => ({ name: '', baseUrl: '', key: '', models: [] })
-
 type LoadState = 'loading' | 'ready' | 'failed'
 
 export interface EndpointsSectionProps {
   client: EndpointClient
+  /** The assistant's control-plane client (nocx-edio); the status line
+   *  renders only when present. Absent in the dev-web harness. */
+  agentClient?: AgentClient
 }
 
 export function EndpointsSection(props: EndpointsSectionProps) {
@@ -67,6 +78,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** The endpoint being edited, or null for a new one. */
   const [editing, setEditing] = createSignal<Endpoint | null>(null)
   const [draft, setDraft] = createSignal<EndpointDraft>(blankDraft())
+  /** agent.status facts: endpoint configured, credential resolvable, last
+   *  probe — the ask surface's readiness line, shown here so a soft
+   *  degrade is visible in the product (AGENTS.md). */
+  const [agentStatus, setAgentStatus] = createSignal<AgentStatusResult | null>(null)
+  /** The Test button's state: idle, running, or the probe result. */
+  const [probeResult, setProbeResult] = createSignal<EndpointsProbeResult | null>(null)
+  const [probing, setProbing] = createSignal(false)
 
   // ── Data loading ─────────────────────────────────────────────────────
 
@@ -84,15 +102,63 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     }
   }
 
+  /** Refresh the agent.status readiness line. Best effort: a failed
+   *  status read keeps the previous line (the list itself carries the
+   *  load failure surface). */
+  async function refreshStatus() {
+    const ac = props.agentClient
+    if (!ac) return
+    try {
+      setAgentStatus(await ac.status())
+    } catch (err) {
+      log.error('Failed to read assistant status', { message: (err as Error).message })
+    }
+  }
+
+  /** The Test button: probe the form's DRAFT values with a real streaming
+   *  completion — what will actually be used, not one cheap completion
+   *  (design §4.5). The first model is the one the picker would use. */
+  async function runProbe() {
+    const d = draft()
+    const model = d.models[0]?.name.trim() ?? ''
+    if (model === '') return
+    setProbing(true)
+    setProbeResult(null)
+    try {
+      const res = await props.client.probeEndpoint({
+        name: d.name.trim(),
+        baseUrl: d.baseUrl.trim(),
+        key: d.key,
+        model,
+      })
+      setProbeResult(res)
+    } catch (err) {
+      const message = (err as Error).message
+      log.error('Endpoint test failed', { message })
+      setProbeResult({
+        name: d.name.trim(),
+        model,
+        ok: false,
+        error: message,
+        elapsedMs: 0,
+        at: new Date().toISOString(),
+      })
+    } finally {
+      setProbing(false)
+      void refreshStatus()
+    }
+  }
+
   onMount(() => {
     void load()
+    void refreshStatus()
   })
 
   // ── Draft editing ────────────────────────────────────────────────────
-
   function openNew() {
     setEditing(null)
     setDraft(blankDraft())
+    setProbeResult(null)
     validation.reset()
     setDialogOpen(true)
   }
@@ -109,6 +175,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       models: ep.models.map((m) => ({ name: m.name, alias: m.alias ?? '' })),
     })
     validation.reset()
+    setProbeResult(null)
     setDialogOpen(true)
   }
 
@@ -185,6 +252,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       }
       closeDialog()
       await load()
+      void refreshStatus()
       showToast({ level: 'success', message: `Saved "${input.name}"` })
     } catch (err) {
       const message = (err as Error).message
@@ -198,6 +266,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     try {
       await props.client.deleteEndpoint(ep.id)
       await load()
+      void refreshStatus()
       showToast({ level: 'success', message: `Deleted "${ep.name}"` })
     } catch (err) {
       const message = (err as Error).message
@@ -229,6 +298,47 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   }
 
   // ── Rows ─────────────────────────────────────────────────────────────
+
+  // ── Assistant status + probe display ───────────────────────────────
+
+  /** The readiness line's tone and text, from agent.status. A soft
+   *  degrade is a visible sentence, never only a log line. */
+  const statusLine = () => {
+    const st = agentStatus()
+    if (!st) return null
+    if (!st.endpointConfigured) {
+      return { tone: 'neutral' as const, text: 'No endpoint configured yet' }
+    }
+    if (!st.credentialResolvable) {
+      return { tone: 'warning' as const, text: 'Credential unavailable — the vault may be locked' }
+    }
+    const p = st.lastProbe
+    if (p && !p.ok) {
+      return { tone: 'danger' as const, text: `Last test failed: ${p.error}` }
+    }
+    if (p && p.ok) {
+      return { tone: 'success' as const, text: `Last test ok (${p.model})` }
+    }
+    return { tone: 'success' as const, text: 'Ready' }
+  }
+
+  /** The Test button's result, from endpoints.probe. */
+  const probeLine = () => {
+    const p = probeResult()
+    if (!p) return null
+    if (p.ok) {
+      return {
+        tone: 'success' as const,
+        text: `Streamed an answer in ${Math.max(p.elapsedMs, 1)} ms`,
+      }
+    }
+    return { tone: 'danger' as const, text: `Test failed: ${p.error}` }
+  }
+
+  /** The Test button needs a base URL and a first model — the picker's
+   *  default — before it means anything. */
+  const testDisabled = () =>
+    probing() || draft().baseUrl.trim() === '' || (draft().models[0]?.name.trim() ?? '') === ''
 
   function renderRow(ep: Endpoint) {
     return (
@@ -329,6 +439,11 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   return (
     <div class="ep-root">
+      <Show when={props.agentClient}>
+        <div class="ep-status-row">
+          <Badge tone={statusLine()?.tone ?? 'neutral'}>{statusLine()?.text ?? '…'}</Badge>
+        </div>
+      </Show>
       <CollectionView
         searchValue={searchQuery()}
         onSearch={setSearchQuery}
@@ -401,6 +516,22 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             onInput={(v) => setDraftField('key', v)}
             description={keyHint()}
           />
+          <div class="ep-test-row">
+            <Button
+              variant="default"
+              size="sm"
+              disabled={testDisabled()}
+              onClick={() => void runProbe()}
+            >
+              {probing() ? 'Testing…' : 'Test endpoint'}
+            </Button>
+            <Show when={probing()}>
+              <Spinner size="sm" label="Testing endpoint" />
+            </Show>
+            <Show when={probeLine()}>
+              <Badge tone={probeLine()!.tone}>{probeLine()!.text}</Badge>
+            </Show>
+          </div>
           <EditableRowList
             rows={draft().models}
             ariaLabel="Endpoint models"

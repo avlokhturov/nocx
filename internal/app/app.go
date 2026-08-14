@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/completion"
@@ -384,6 +385,13 @@ func New(opts ...Option) (*App, error) {
 		logger.Info("log level", "level", "debug", "var", logLevelEnvVar)
 	}
 
+	// The logrus containment (design §4.1): logrus arrives compiled-in
+	// through eino's dependency graph (compose → schema → gonja/exec), and
+	// nothing from it reaches stderr around our one slog-backed interface.
+	// The redirect is process-global and idempotent — see
+	// logrus_containment.go, and the receipt test that pins it.
+	installLogrusContainment(logger)
+
 	shint := shellintegration.New(logger)
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
@@ -739,6 +747,18 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+
+	// The assistant engine (nocx-edio): eino behind the guarded HTTP
+	// client, wired at the composition root like every other client —
+	// before this line the whole package was reachable from its own tests
+	// and nowhere else (AGENTS.md check 5). The probe store is
+	// process-lifetime: agent.status's "last probe result" fact, whose
+	// meaning expires with the endpoint that produced it.
+	assistantProbes := assistant.NewProbeStore()
+	tpOpts = append(tpOpts,
+		transport.WithAssistantClient(assistant.NewClient(logger)),
+		transport.WithAssistantProbeStore(assistantProbes),
+	)
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the

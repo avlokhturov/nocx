@@ -19,6 +19,7 @@ import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import type { FootprintClient } from './footprint-client'
+import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
 import type { ProfileClient, SSHProfile } from './profiles'
 import type { DialogClient } from './dialog-client'
@@ -118,6 +119,9 @@ export interface SettingsComponentProps {
    *  the dev-web harness; the section then renders nothing. */
   footprintClient?: FootprintClient
   endpointsClient?: EndpointClient
+  /** The assistant's control-plane client (nocx-edio). Absent in the
+   *  dev-web harness; the endpoints section then shows no status line. */
+  agentClient?: AgentClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -396,7 +400,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </PageSection>
           }
         >
-          <EndpointsSection client={props.endpointsClient!} />
+          <EndpointsSection client={props.endpointsClient!} agentClient={props.agentClient} />
         </Show>
       ),
     }

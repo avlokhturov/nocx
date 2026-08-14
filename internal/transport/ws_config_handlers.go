@@ -1450,6 +1450,19 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
+		// The assistant's methods (nocx-edio): endpoints.probe is the Test
+		// button — a streaming probe that can take tens of seconds, so it
+		// owns a capacity-one admission off the read loop exactly like
+		// connections.test; agent.status is a fast config read under the
+		// config queue.
+		regResponder(s.agentProbeSub, "endpoints.probe", func(r Responder) handlerFunc {
+			h := assistantHandlers{client: s.assistantClient, probes: s.assistantProbes, wired: s.assistantClient != nil, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
+		}),
+		regResponder(configSub, "agent.status", func(r Responder) handlerFunc {
+			h := agentHandlers{op: configOp, secrets: s.credentials, probes: s.assistantProbes, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
+		}),
 		regResponder(configSub, "groups.list", func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }

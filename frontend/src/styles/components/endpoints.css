@@ -42,3 +42,18 @@
   flex: 1 1 0;
   min-width: 0;
 }
+
+/* The assistant readiness line above the list — the kit Badge, placed. */
+.ep-status-row {
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+/* The Test button row in the editor dialog: button + spinner + result
+   badge, placed side by side. The controls are the kit's. */
+.ep-test-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}

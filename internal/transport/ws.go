@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
+
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connectfwd"
@@ -205,6 +207,21 @@ type WSServer struct {
 	// When nil, probe results are not stored (the probe still runs and
 	// returns its outcome to the caller).
 	probeResultStore *ProbeResultStore
+	// assistantClient is the eino-backed engine (nocx-edio) behind
+	// endpoints.probe and agent.status's last-probe fact. When nil, the
+	// endpoints.probe method answers -32601 "agent not available".
+	assistantClient assistant.Client
+	// assistantProbes records the last endpoints.probe outcome — the
+	// process-lifetime "last probe result" agent.status reports. When nil,
+	// probes still run and return their outcome, but agent.status reports
+	// lastProbe null.
+	assistantProbes *assistant.ProbeStore
+	// agentProbeSub admits and runs endpoints.probe probes off the read
+	// loop: a streaming probe can take tens of seconds and must never
+	// freeze the socket that feeds every other tab. Capacity one composed
+	// with the lane, exactly like probeSub: a second test is refused with
+	// the control-saturated error.
+	agentProbeSub control.Submission
 	// lane is the ordinary control lane: the shared bounded worker pool every
 	// admission-backed control method runs on (registration.go). Capacity
 	// laneCapacity; a full lane refuses new work with the control-saturated
@@ -601,6 +618,22 @@ func WithProbeResultStore(s *ProbeResultStore) WSServerOption {
 	return func(ws *WSServer) { ws.probeResultStore = s }
 }
 
+// WithAssistantClient attaches the assistant engine (nocx-edio): the one
+// eino-backed client behind the endpoints.probe probe and the future ask
+// transaction. When nil, endpoints.probe answers -32601 "agent not
+// available".
+func WithAssistantClient(ac assistant.Client) WSServerOption {
+	return func(ws *WSServer) { ws.assistantClient = ac }
+}
+
+// WithAssistantProbeStore attaches the process-lifetime store of the last
+// endpoints.probe outcome — agent.status's "last probe result" fact. When
+// nil, probes still run and return their outcome, but agent.status reports
+// lastProbe null.
+func WithAssistantProbeStore(store *assistant.ProbeStore) WSServerOption {
+	return func(ws *WSServer) { ws.assistantProbes = store }
+}
+
 // WSServerOption configures a WSServer.
 type WSServerOption func(*WSServer)
 
@@ -811,30 +844,28 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 }
 
 // buildControlPlane wires the scheduling contract after every option has
-// been applied: the ordinary lane (the bounded worker pool), the probe and
-// dialog resource admissions composed with it, the waiting domain gates,
-// and the validated method registrations. A validation failure (a duplicate
-// method, an ingress-critical method outside the closed set) is a
-// programming error and panics the server build rather than freezing a
-// socket at runtime.
-//
-// Domain-gated methods do not register on the lane submission: their
-// operation acquires the conflict gates (waiting, bounded) and THEN the
-// lane inside Run, on the task goroutine, so waiting conflict work never
-// occupies a worker permit and the read loop never blocks on a conflict.
-// The per-operation queue submissions bound in-flight tasks per operation.
+// been applied: the lane, the capacity-one resource admissions (probe,
+// agent probe, dialog), the domain gates and the validated registration
+// set. A registration that cannot be validated fails the server build
+// rather than freezing a socket at runtime.
 func (s *WSServer) buildControlPlane() {
 	lane := control.NewSemaphore("control", s.laneCapacity)
 	s.lane = control.NewBoundedSubmission(lane)
-	// Probe and dialog keep their own capacity-one resource admissions
-	// composed with the lane (canonical order: resource before execution
-	// permit): a second probe or dialog is refused even while the lane has
-	// free permits, and every task still occupies one lane permit.
+	// Probe, agent probe and dialog keep their own capacity-one resource
+	// admissions composed with the lane (canonical order: resource before
+	// execution permit): a second probe or dialog is refused even while the
+	// lane has free permits, and every task still occupies one lane permit.
 	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("probe", 1), lane))}
+	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
+		control.NewSemaphore("agent-probe", 1), lane))}
 	s.dialogSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("dialog", 1), lane))}
-
+	// Domain-gated methods do not register on the lane submission: their
+	// operation acquires the conflict gates (waiting, bounded) and THEN the
+	// lane inside Run, on the task goroutine, so waiting conflict work never
+	// occupies a worker permit and the read loop never blocks on a conflict.
+	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
 	immediate := control.ImmediateSubmission{}
 	specs := make([]methodSpec, 0, 96)

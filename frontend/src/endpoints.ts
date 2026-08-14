@@ -22,6 +22,7 @@ import type {
   Endpoint as UpdatedEndpoint,
 } from './generated/endpoints.update'
 import type { EndpointsDeleteResult } from './generated/endpoints.delete'
+import type { EndpointsProbeResult } from './generated/endpoints.probe'
 
 /**
  * The stored endpoint as the wire declares it. The schema declares the
@@ -65,5 +66,21 @@ export class EndpointClient {
   /** Nothing to return; the list is the state (like vault.deleteSecret). */
   deleteEndpoint(id: string): Promise<EndpointsDeleteResult> {
     return this.dispatcher.call<EndpointsDeleteResult>('endpoints.delete', { id })
+  }
+
+  /**
+   * The Test button (nocx-edio, design §4.5): probes the form's DRAFT
+   * values with a real streaming completion — what will actually be used,
+   * not one cheap completion. The key is an input that rides the params
+   * once and never crosses back (ADR-0030). The model tested is the
+   * form's first model.
+   */
+  probeEndpoint(input: {
+    name: string
+    baseUrl: string
+    key: string
+    model: string
+  }): Promise<EndpointsProbeResult> {
+    return this.dispatcher.call<EndpointsProbeResult>('endpoints.probe', input)
   }
 }

@@ -15,6 +15,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
+import { AgentClient } from './agent'
+import type { AgentStatusResult } from './generated/agent.status'
 import { Dispatcher, RpcError } from './dispatcher'
 import { clearToasts, toasts } from './ui'
 
@@ -97,13 +99,52 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
       )
       return {}
     })
-  return { client, listEndpoints, createEndpoint, updateEndpoint, deleteEndpoint, store }
+  const probeEndpoint = vi.spyOn(client, 'probeEndpoint').mockImplementation(
+    // eslint-disable-next-line @typescript-eslint/require-await
+    async (input: { name: string; baseUrl: string; key: string; model: string }) => {
+      // A backend probe answers with a result — the Test button's whole
+      // contract is that a failed probe is a RESULT, not an error.
+      return {
+        name: input.name,
+        model: input.model,
+        ok: true,
+        elapsedMs: 12,
+        at: new Date().toISOString(),
+      }
+    },
+  )
+  return {
+    client,
+    listEndpoints,
+    createEndpoint,
+    updateEndpoint,
+    deleteEndpoint,
+    probeEndpoint,
+    store,
+  }
 }
 
 function mount(initial: Endpoint[] = [], opts?: { firstListError?: Error }) {
   const harness = createHarness(initial, opts)
   const container = document.body.appendChild(document.createElement('div'))
   render(() => <EndpointsSection client={harness.client} />, { container })
+  return { ...harness, container }
+}
+
+/** A status-stubbing agent client: the readiness line renders only when an
+ *  agent client is present, so tests that exercise it pass one. */
+function agentHarness(status: AgentStatusResult) {
+  const agentClient = new AgentClient(new Dispatcher())
+  vi.spyOn(agentClient, 'status').mockResolvedValue(status)
+  return agentClient
+}
+
+function mountWithAgent(status: AgentStatusResult, initial: Endpoint[] = []) {
+  const harness = createHarness(initial)
+  const container = document.body.appendChild(document.createElement('div'))
+  render(() => <EndpointsSection client={harness.client} agentClient={agentHarness(status)} />, {
+    container,
+  })
   return { ...harness, container }
 }
 
@@ -353,7 +394,6 @@ describe('AI endpoints surface — real surface, real client seam', () => {
   it('says a backend refusal on the surface — the vault sealed, the store refused', async () => {
     const { container, createEndpoint } = mount()
     await waitForRows(container, 0)
-
     createEndpoint.mockRejectedValueOnce(
       new RpcError('vault is sealed', -32001, { reason: 'vault-sealed' }),
     )
@@ -370,6 +410,107 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     })
     // The dialog stays open — the user can fix what the backend refused.
     expect(findDialogByTitle(container, 'New Endpoint')).toBeTruthy()
+  })
+  it('tests the draft through the Test button and shows the streaming verdict', async () => {
+    const { container, probeEndpoint } = mount()
+    await waitForRows(container, 0)
+
+    const dialog = openNew(container)
+    // The Test button exists but is inert until the probe means something.
+    const btn = Array.from(dialog.querySelectorAll('.ui-button')).find((b) =>
+      b.textContent?.includes('Test endpoint'),
+    )
+    expect(btn, 'Test endpoint button not found').toBeTruthy()
+    expect((btn as HTMLButtonElement).disabled).toBe(true)
+
+    fillField(container, 'endpoint-name', 'Local')
+    fillField(container, 'endpoint-base-url', 'http://127.0.0.1:11434/v1')
+    clickButton(dialog, 'Add model')
+    fillField(container, 'endpoint-model-0-name', 'qwen3')
+    expect((btn as HTMLButtonElement).disabled).toBe(false)
+
+    clickButton(dialog, 'Test endpoint')
+
+    await vi.waitFor(() => {
+      expect(probeEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(probeEndpoint.mock.calls[0][0]).toEqual({
+      name: 'Local',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      key: '',
+      model: 'qwen3',
+    })
+    await vi.waitFor(() => {
+      expect(dialog.textContent).toContain('Streamed an answer in')
+    })
+  })
+
+  it('shows a failed probe as a result, not a crash', async () => {
+    const { container, probeEndpoint } = mount()
+    await waitForRows(container, 0)
+    // The probe contract: a failed dial is a RESULT with ok:false, never
+    // an RPC error (the engine returns outcomes, not exceptions).
+    probeEndpoint.mockResolvedValueOnce({
+      name: 'Local',
+      model: 'qwen3',
+      ok: false,
+      error: 'dial tcp: connection refused',
+      elapsedMs: 0,
+      at: new Date().toISOString(),
+    })
+
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'Local')
+    fillField(container, 'endpoint-base-url', 'http://127.0.0.1:1/v1')
+    clickButton(dialog, 'Add model')
+    fillField(container, 'endpoint-model-0-name', 'qwen3')
+    clickButton(dialog, 'Test endpoint')
+
+    await vi.waitFor(() => {
+      expect(dialog.textContent).toContain('Test failed: dial tcp: connection refused')
+    })
+  })
+
+  it('shows the assistant readiness line from agent.status', async () => {
+    const { container } = mountWithAgent({
+      endpointConfigured: false,
+      credentialResolvable: false,
+      lastProbe: null,
+    })
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('No endpoint configured yet')
+    })
+  })
+
+  it('shows the last probe outcome in the readiness line', async () => {
+    const { container } = mountWithAgent(
+      {
+        endpointConfigured: true,
+        credentialResolvable: true,
+        lastProbe: {
+          name: 'Local',
+          model: 'qwen3',
+          ok: true,
+          elapsedMs: 42,
+          at: new Date().toISOString(),
+        },
+      },
+      [ep({ name: 'Local', baseUrl: 'http://127.0.0.1:11434/v1' })],
+    )
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Last test ok (qwen3)')
+    })
+  })
+
+  it('names an unresolvable credential in the readiness line', async () => {
+    const { container } = mountWithAgent({
+      endpointConfigured: true,
+      credentialResolvable: false,
+      lastProbe: null,
+    })
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Credential unavailable')
+    })
   })
 
   it('says a failed list load on the surface and retries from there', async () => {
