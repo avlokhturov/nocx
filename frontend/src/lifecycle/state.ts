@@ -322,6 +322,7 @@ export class LifecycleKernel {
         return { kind: 'desynchronized', domain, [authorityBrand]: true }
       }
     }
+    return null
   }
 
   private applyRunning(fact: LifecycleFact): LifecycleState | null {

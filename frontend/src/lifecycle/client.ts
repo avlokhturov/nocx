@@ -24,6 +24,14 @@ import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttemp
  *  The lane then lets that session's projection attach the fact to the right
  *  state machine. */
 export type LifecycleFactHandler = (fact: LifecycleFact) => void
+/** A lifecycle subscription is installed before session.open starts, then
+ *  bound exactly once to the server-authoritative session id from its result.
+ *  Facts can arrive between those two events: keep the latest projection for
+ *  each {session, lane}, then deliver only the bound session. */
+export interface LifecycleChangedSubscription {
+  bindSession: (sessionId: string) => void
+  unsubscribe: () => void
+}
 
 /** The payload of lifecycle.submitAttempt: the app-owned half of a command's
  *  execution, declared before the bytes that can cause the shell's own start
@@ -44,16 +52,42 @@ export interface LifecycleSubmitAttemptParams {
 export class LifecycleClient {
   constructor(private dispatcher: Dispatcher) {}
 
-  /** Subscribe to this session's server-initiated lifecycle.changed facts:
-   *  the per-lane authority axis (Native | PromptReady(domain) |
-   *  Running(attempt) | Desynchronized(domain) | Lost). The WebSocket is
-   *  shared by every tab, so routing by the server-authoritative session id
-   *  happens here before a surface can mutate or acknowledge state. */
-  subscribeLifecycleChanged(sessionId: string, handler: LifecycleFactHandler): () => void {
-    return this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
+  /** Subscribe before session.open so the result and its immediately following
+   *  replay cannot overtake registration. Until bindSession supplies the
+   *  server-authoritative id, retain only the latest projection per
+   *  {session, lane}; this is the same state ReplayLane would publish and keeps
+   *  unrelated shared-socket traffic bounded. Binding filters before any
+   *  surface can mutate or acknowledge state. */
+  subscribeLifecycleChanged(handler: LifecycleFactHandler): LifecycleChangedSubscription {
+    let sessionId: string | null = null
+    let closed = false
+    const pending = new Map<string, LifecycleChanged>()
+    const unsubscribe = this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
       const p = params as LifecycleChanged
-      if (p && p.sessionId === sessionId && typeof p.lane === 'string') handler(p)
+      if (!p || typeof p.sessionId !== 'string' || typeof p.lane !== 'string') return
+      if (sessionId === null) {
+        pending.set(`${p.sessionId}\u0000${p.lane}`, p)
+        return
+      }
+      if (p.sessionId === sessionId) handler(p)
     })
+    return {
+      bindSession: (authoritativeSessionId: string): void => {
+        if (closed) return
+        if (sessionId !== null) throw new Error('lifecycle subscription is already bound')
+        sessionId = authoritativeSessionId
+        for (const fact of pending.values()) {
+          if (fact.sessionId === sessionId) handler(fact)
+        }
+        pending.clear()
+      },
+      unsubscribe: (): void => {
+        if (closed) return
+        closed = true
+        pending.clear()
+        unsubscribe()
+      },
+    }
   }
 
   /** Open an app-originated attempt on the live domain — the ordering seam

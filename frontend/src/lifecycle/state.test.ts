@@ -84,6 +84,16 @@ describe('the lifecycle kernel (ADR-0024 §6)', () => {
     expect(k.domainStack).toEqual([])
   })
 
+  it('rejects an unknown wire lifecycle without corrupting the state', () => {
+    const k = new LifecycleKernel()
+    const before = k.state
+
+    k.applyFact({ lane: LANE, lifecycle: '' } as unknown as LifecycleFact)
+
+    expect(k.state).toBe(before)
+    expect(k.state.kind).toBe('native')
+  })
+
   it('a published prompt_ready fact for a live domain produces PromptReady and the editor owns keys', () => {
     const k = new LifecycleKernel()
     k.applyFact(promptReady())

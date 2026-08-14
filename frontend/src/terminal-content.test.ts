@@ -1103,6 +1103,41 @@ describe('lifecycle kernel transition table (ADR-0024 §6)', () => {
 })
 
 describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
+  it('keeps the prompt fact that arrives while session.open is still resolving', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    client.openSession.mockImplementation(() => {
+      client._sessions.push(session)
+      const call = client.dispatcher.subscribe.mock.calls.find(
+        (candidate: unknown[]) => candidate[0] === 'lifecycle.changed',
+      ) as [string, (params: unknown) => void] | undefined
+      expect(call, 'lifecycle subscription must exist before session.open').toBeDefined()
+      call?.[1]({
+        sessionId: session.sessionId,
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+      return Promise.resolve(session)
+    })
+
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(editorOf(content).isVisible).toBe(true)
+      expect(client.dispatcher.call).toHaveBeenCalledWith('lifecycle.establishAck', {
+        sessionId: session.sessionId,
+        lane: 'lane-1',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+    } finally {
+      teardown()
+    }
+  })
+
   it('a prompt_ready fact shows the editor and a native fact hides it — through the dispatcher seam', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
