@@ -52,7 +52,7 @@ func (s *JSONStore) readLocked() (storeData, bool, error) {
 	var probe struct {
 		SchemaVersion storage.SchemaVersion `json:"schemaVersion"`
 	}
-	if err := json.Unmarshal(raw, &probe); err != nil {
+	if err = json.Unmarshal(raw, &probe); err != nil {
 		return storeData{}, false, fmt.Errorf("read snippet store: %w", err)
 	}
 	migrated, err := Module.Migrate(raw, probe.SchemaVersion)
@@ -60,7 +60,7 @@ func (s *JSONStore) readLocked() (storeData, bool, error) {
 		return storeData{}, false, err
 	}
 	var d storeData
-	if err := json.Unmarshal(migrated, &d); err != nil {
+	if err = json.Unmarshal(migrated, &d); err != nil {
 		return storeData{}, false, fmt.Errorf("read snippet store: %w", err)
 	}
 	return d, true, nil

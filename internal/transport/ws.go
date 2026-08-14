@@ -32,6 +32,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
@@ -136,6 +137,9 @@ type WSServer struct {
 
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
+	// snippets is the snippet library service backing the snippets.* JSON-RPC
+	// methods. When nil, those methods return -32601.
+	snippets *snippet.Service
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
@@ -660,6 +664,12 @@ func WithContentDB(db content.ContentDB) WSServerOption {
 // operations, providing a single validated write path and atomic imports.
 func WithProfileService(svc *profile.ProfileService) WSServerOption {
 	return func(s *WSServer) { s.profileSvc = svc }
+}
+
+// WithSnippets attaches the snippet library service to the server, enabling
+// the snippets.* JSON-RPC methods. When nil, those methods return -32601.
+func WithSnippets(svc *snippet.Service) WSServerOption {
+	return func(s *WSServer) { s.snippets = svc }
 }
 
 // WithCaptureRegistry injects the pending-capture registry. Test seam:

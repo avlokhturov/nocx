@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/completion"
@@ -26,6 +29,7 @@ import (
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/tunnel"
@@ -4081,5 +4085,228 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if timedOut.Shell != "/bin/bash" {
 		t.Errorf("shell = %q, want /bin/bash — a diagnosis that omits the shell is not actionable", timedOut.Shell)
+	}
+}
+
+// ── snippets.* ─────────────────────────────────────────────────────────
+
+// memSnippetStore is an in-memory snippet.Store for the wire tests: a slice
+// plus an existed flag, so "the document exists and is empty" (its seeding
+// already happened) is a state the service can actually be in.
+type memSnippetStore struct {
+	list    []snippet.Snippet
+	existed bool
+}
+
+func (m *memSnippetStore) LoadAll() ([]snippet.Snippet, error) {
+	return append([]snippet.Snippet(nil), m.list...), nil
+}
+
+func (m *memSnippetStore) SaveAll(s []snippet.Snippet) error {
+	m.list = append([]snippet.Snippet(nil), s...)
+	m.existed = true
+	return nil
+}
+
+func (m *memSnippetStore) Exists() (bool, error) { return m.existed, nil }
+
+// newSnippetWSServer builds a server whose snippet service sits over an
+// in-memory store pre-seeded with `seeded`. Passing an EMPTY slice means the
+// document already exists and is empty, so the service's first-creation
+// seeding does not fire: "empty library" is then a real state rather than an
+// unwritten one, which is what the [] assertion below needs.
+func newSnippetWSServer(t *testing.T, seeded []snippet.Snippet) (*WSServer, func()) {
+	t.Helper()
+	store := &memSnippetStore{list: seeded, existed: true}
+	id := 0
+	svc := snippet.NewService(store, func() string { id++; return fmt.Sprintf("id-%d", id) })
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithSnippets(svc))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return ws, func() { _ = ws.Stop(ctx) }
+}
+
+// snippetCall mirrors vaultCall; split out so a failure names its domain.
+func snippetCall(t *testing.T, conn *websocket.Conn, method string, params any, id int) jsonrpcResponse {
+	t.Helper()
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		var msg jsonrpcResponse
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		if string(msg.ID) == strconv.Itoa(id) {
+			return msg
+		}
+	}
+}
+
+func TestSnippetsList_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.list.schema.json")
+	cases := map[string][]snippet.Snippet{
+		"populated": {
+			{ID: "a", Title: "one", Body: "first body"},
+			{ID: "b", Title: "two", Body: "second body"},
+		},
+		// wireSnippetList(nil) is the handler's answer for an empty library;
+		// it must marshal as [] and never null — the renderer's first .map
+		// assumes it.
+		"empty": nil,
+	}
+	for name, snips := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(wireSnippetList(snips))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "snippets.list DTO")
+		})
+	}
+}
+
+func TestSnippetsCreate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.create.schema.json")
+	raw, err := json.Marshal(snippet.Snippet{ID: "id-1", Title: "t", Body: "b"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.create DTO")
+}
+
+func TestSnippetsUpdate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.update.schema.json")
+	raw, err := json.Marshal(snippet.Snippet{ID: "id-1", Title: "new title", Body: "new body"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.update DTO")
+}
+
+func TestSnippetsDelete_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.delete.schema.json")
+	raw, err := json.Marshal(snippetDeleteResponse{ID: "id-1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.delete DTO")
+}
+
+func TestSnippetsReorder_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.reorder.schema.json")
+	raw, err := json.Marshal(wireSnippetList([]snippet.Snippet{
+		{ID: "b", Title: "B", Body: "b"},
+		{ID: "a", Title: "A", Body: "a"},
+	}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.reorder DTO")
+}
+
+func TestSnippetsList_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.list.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{})
+	defer stop()
+
+	resp := snippetCall(t, connectWS(t, ws), "snippets.list", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.list result")
+
+	// The shape this directory exists for: an empty collection is [] and not
+	// null. Its very first run found exactly this on vault.status's providers.
+	var got struct {
+		Snippets []map[string]any `json:"snippets"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Snippets == nil {
+		t.Fatal("snippets marshalled as null; must be []")
+	}
+}
+
+func TestSnippetsCreate_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.create.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.create",
+		map[string]any{"title": "t", "body": "b"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.create result")
+}
+
+func TestSnippetsUpdate_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.update.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{{ID: "a", Title: "A", Body: "a"}})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.update",
+		map[string]any{"id": "a", "title": "B", "body": "b"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.update result")
+}
+
+func TestSnippetsDelete_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.delete.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{{ID: "a", Title: "A", Body: "a"}})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.delete",
+		map[string]any{"id": "a"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.delete result")
+}
+
+func TestSnippetsReorder_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.reorder.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{
+		{ID: "a", Title: "A", Body: "a"},
+		{ID: "b", Title: "B", Body: "b"},
+	})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.reorder",
+		map[string]any{"ids": []string{"b", "a"}}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.reorder result")
+
+	// Validating the payload is not enough: the ORDER is the method's whole
+	// output, and a schema cannot express it.
+	var got struct {
+		Snippets []struct {
+			ID string `json:"id"`
+		} `json:"snippets"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Snippets) != 2 || got.Snippets[0].ID != "b" || got.Snippets[1].ID != "a" {
+		t.Fatalf("reorder did not answer with the order asked for: %+v", got.Snippets)
 	}
 }

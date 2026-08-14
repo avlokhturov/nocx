@@ -1378,6 +1378,7 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	profilesWired := s.profiles != nil
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
+	snippetWired := s.snippets != nil
 	executeWired := profilesWired && groupsWired && s.credentials != nil && s.profileSvc != nil
 
 	configOp := capability.NewConfigOperation(
@@ -1385,6 +1386,7 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		s.profiles, s.groups, s.profileSvc, s.settings,
 		s.vaultRowResolver(),
 	)
+	snippetOp := capability.NewSnippetOperation(configGate, lane, s.snippets)
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
 		tabbyOp = capability.NewTabbyImportOperation(
@@ -1475,6 +1477,26 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		}),
 		regResponder(configSub, "settings.secretExists", func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "snippets.list", func(r Responder) handlerFunc {
+			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "snippets.create", func(r Responder) handlerFunc {
+			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "snippets.update", func(r Responder) handlerFunc {
+			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "snippets.delete", func(r Responder) handlerFunc {
+			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "snippets.reorder", func(r Responder) handlerFunc {
+			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(tabbySub, "profiles.importTabby", func(r Responder) handlerFunc {

@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +42,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
@@ -428,6 +431,20 @@ func New(opts ...Option) (*App, error) {
 	// system (OS keychain) and file (encrypted document).
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
+	// The snippet library is the same document family: one versioned
+	// document under the profile directory, sharing the docStore. The id
+	// source is injected rather than called inline so tests can force
+	// collisions and this composition root is the one place that decides
+	// what a rand failure means; the fallback keeps Create returning a
+	// non-empty id instead of panicking inside a handler (design §5.1).
+	snippetStore := snippet.NewJSONStore(docStore, snippet.DocumentName)
+	snippetSvc := snippet.NewService(snippetStore, func() string {
+		var raw [16]byte
+		if _, rerr := rand.Read(raw[:]); rerr != nil {
+			return fmt.Sprintf("snip-%d", time.Now().UnixNano())
+		}
+		return hex.EncodeToString(raw[:])
+	})
 
 	// The installed fact (nocx-mlm7 P7, design §5.4): backend-owned,
 	// persisted across restarts, keyed by the resolved destination
@@ -598,6 +615,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithContentDB(contentDB),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
+		transport.WithSnippets(snippetSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig

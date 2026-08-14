@@ -141,7 +141,7 @@ func TestSeedsOnFirstCreationOnly(t *testing.T) {
 		t.Fatalf("want 2 seeds on a fresh document, got %d", len(first))
 	}
 	for _, s := range first {
-		if err := svc.Delete(s.ID); err != nil {
+		if err = svc.Delete(s.ID); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
 	}
@@ -160,7 +160,7 @@ func TestCreateUpdateListRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := svc.Update(created.ID, "new title", "new body"); err != nil {
+	if _, err = svc.Update(created.ID, "new title", "new body"); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
 	list, err := svc.List()
