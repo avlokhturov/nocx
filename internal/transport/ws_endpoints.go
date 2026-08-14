@@ -148,11 +148,30 @@ type endpointCreateParams struct {
 	Models  []endpointModelInput   `json:"models"`
 }
 
+// resolveEndpointSchema completes a schema the wire params omitted. The
+// backend owns an endpoint's schema until the form grows a control for it
+// (design §4.5, decision 2): today there is exactly ONE legal dialect, and
+// a renderer that sent "openai-compatible" would be stating a fact it
+// never decided — the form has no control that chose it. The moment a
+// second dialect exists, that constant and the backend's validation would
+// become two owners of one value that must change in lockstep (AD-8),
+// arriving on a schedule. So the value is completed here, at the wire seam
+// that maps params to records, and the renderer-side alternative is
+// rejected because a constant nobody chose is not a fact. When a
+// dialect select lands, the renderer starts sending a value a person
+// actually picked, and this default comes out.
+func resolveEndpointSchema(s profile.EndpointSchema) profile.EndpointSchema {
+	if s == "" {
+		return profile.EndpointSchemaOpenAICompatible
+	}
+	return s
+}
+
 func (p endpointCreateParams) toEndpoint() profile.Endpoint {
 	return profile.Endpoint{
 		Name:    p.Name,
 		BaseURL: p.BaseURL,
-		Schema:  p.Schema,
+		Schema:  resolveEndpointSchema(p.Schema),
 		Models:  wireModelsToStored(p.Models),
 	}
 }
@@ -174,7 +193,7 @@ func (p endpointUpdateParams) toEndpoint() profile.Endpoint {
 		ID:      p.ID,
 		Name:    p.Name,
 		BaseURL: p.BaseURL,
-		Schema:  p.Schema,
+		Schema:  resolveEndpointSchema(p.Schema),
 		Models:  wireModelsToStored(p.Models),
 	}
 }

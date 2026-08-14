@@ -34,7 +34,17 @@ import type { EndpointsProbeResult } from './generated/endpoints.probe'
  */
 export type Endpoint = ListEndpoint | CreatedEndpoint | UpdatedEndpoint
 
-/** The create/update params: the key is an input, never read back. */
+/**
+ * The create/update params: the key is an input, never read back (ADR-0030
+ * §3). There is deliberately NO schema field: the form has no dialect
+ * control while one schema exists (design §4.5, decision 2), so the
+ * backend owns the value and completes it at the wire seam
+ * (internal/transport/ws_endpoints.go resolveEndpointSchema). A renderer
+ * that sent "openai-compatible" would be stating a fact it never decided,
+ * and would become a second owner of the value the moment a second dialect
+ * appears (AD-8). When a dialect select lands, this type grows the field
+ * and the backend default comes out.
+ */
 export interface EndpointWrite {
   name: string
   baseUrl: string
