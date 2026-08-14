@@ -400,7 +400,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </PageSection>
           }
         >
-          <EndpointsSection client={props.endpointsClient!} agentClient={props.agentClient} />
+          <EndpointsSection
+            client={props.endpointsClient!}
+            agentClient={props.agentClient}
+            vaultController={props.vaultController}
+          />
         </Show>
       ),
     }
