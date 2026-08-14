@@ -229,7 +229,7 @@ func TestAgentStatus_LastProbe(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{
 		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
 			ran = true
-			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, At: time.Now()}, nil
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, Kind: probeKindFor(p), OK: true, At: time.Now()}, nil
 		},
 	})
 	h.setupAndUnseal()
@@ -290,7 +290,7 @@ func TestEndpointsProbe_ProbesTheDraft(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{
 		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
 			got = p
-			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, ElapsedMS: 12, At: time.Now()}, nil
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, Kind: probeKindFor(p), OK: true, ElapsedMS: 12, At: time.Now()}, nil
 		},
 	})
 	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
@@ -326,7 +326,7 @@ func TestEndpointsProbe_ProbesTheDraft(t *testing.T) {
 func TestEndpointsProbe_ProbeFailureIsAResult(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{
 		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
-			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: false, Error: "dial tcp: connection refused", At: time.Now()}, nil
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, Kind: probeKindFor(p), OK: false, Error: "dial tcp: connection refused", At: time.Now()}, nil
 		},
 	})
 
@@ -413,7 +413,7 @@ func TestEndpointsProbe_SavedEndpointResolvesStoredCredential(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{
 		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
 			got = p
-			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, At: time.Now()}, nil
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, Kind: probeKindFor(p), OK: true, At: time.Now()}, nil
 		},
 	})
 	h.setupAndUnseal()
@@ -454,7 +454,7 @@ func TestEndpointsProbe_TypedKeyWinsOverStored(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{
 		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
 			got = p
-			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, At: time.Now()}, nil
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, Kind: probeKindFor(p), OK: true, At: time.Now()}, nil
 		},
 	})
 	h.setupAndUnseal()
@@ -541,7 +541,7 @@ func TestEndpointsProbe_KeylessEndpointProbesWithoutAKey(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{
 		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
 			got = p
-			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, OK: true, At: time.Now()}, nil
+			return assistant.ProbeResult{EndpointName: p.Name, Model: p.Model, Kind: probeKindFor(p), OK: true, At: time.Now()}, nil
 		},
 	})
 	h.setupAndUnseal()
@@ -591,4 +591,14 @@ func TestEndpointsProbe_UnknownEndpointIsAnRPCError(t *testing.T) {
 	if called {
 		t.Fatal("the engine was called for an endpoint that does not exist")
 	}
+}
+
+// probeKindFor mirrors the engine's own routing in the fakes: an empty model
+// means the connection check ran, a named model means the model check did.
+// The fakes must not report a kind the params could not have produced.
+func probeKindFor(p assistant.ProbeParams) assistant.ProbeKind {
+	if p.Model == "" {
+		return assistant.ProbeConnection
+	}
+	return assistant.ProbeModel
 }

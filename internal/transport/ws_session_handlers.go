@@ -718,23 +718,23 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	// with the saturation contract like any admission-backed method.
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
-		reg(openSub, "open", func(w *wsConn, state *connState) handlerFunc {
+		reg(openSub, "open", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, state, req) }
 		}),
-		reg(ordered, "resize", func(w *wsConn, state *connState) handlerFunc {
+		reg(ordered, "resize", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		}),
-		reg(ordered, "close", func(w *wsConn, state *connState) handlerFunc {
+		reg(ordered, "close", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(sessionSub, "attach", func(w *wsConn, state *connState) handlerFunc {
+		reg(sessionSub, "attach", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, state, req) }
 		}),
-		reg(immediate, "ack", func(w *wsConn, state *connState) handlerFunc {
+		reg(immediate, "ack", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := ackHandler{machine: s, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }
 		}),

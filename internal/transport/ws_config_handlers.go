@@ -1415,43 +1415,43 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	tabbySub := s.operationQueue("tabby")
 
 	specs := []methodSpec{
-		regResponder(configSub, "profiles.list", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.list", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.create", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.create", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.update", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.update", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.delete", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.delete", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.effective", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.effective", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.patch", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.patch", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := profileHandlers{op: configOp, wired: profilesWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.list", func(r Responder) handlerFunc {
+		regResponder(configSub, "endpoints.list", noParams(), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.create", func(r Responder) handlerFunc {
+		regResponder(configSub, "endpoints.create", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.update", func(r Responder) handlerFunc {
+		regResponder(configSub, "endpoints.update", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "endpoints.delete", func(r Responder) handlerFunc {
+		regResponder(configSub, "endpoints.delete", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
@@ -1460,7 +1460,7 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		// owns a capacity-one admission off the read loop exactly like
 		// connections.test; agent.status is a fast config read under the
 		// config queue.
-		regResponder(s.agentProbeSub, "endpoints.probe", func(r Responder) handlerFunc {
+		regResponder(s.agentProbeSub, "endpoints.probe", params(validateProbeParamsRaw), func(r Responder) handlerFunc {
 			// op + secrets are the credential resolution (nocx-reu5): the
 			// probe names a saved endpoint and the backend resolves the
 			// credential it owns — the same seams agent.status holds.
@@ -1471,75 +1471,75 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
-		regResponder(configSub, "agent.status", func(r Responder) handlerFunc {
+		regResponder(configSub, "agent.status", noParams(), func(r Responder) handlerFunc {
 			h := assistantStatusHandlers{op: configOp, secrets: s.credentials, probes: s.assistantProbes, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
 		}),
-		regResponder(configSub, "groups.list", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.list", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.create", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.create", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.update", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.update", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.delete", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.delete", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "groups.impact", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.impact", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGroupImpact(ctx, req) }
 		}),
-		regResponder(configSub, "profiles.moveImpact", func(r Responder) handlerFunc {
+		regResponder(configSub, "profiles.moveImpact", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileMoveImpact(ctx, req) }
 		}),
-		regResponder(configSub, "groups.apply", func(r Responder) handlerFunc {
+		regResponder(configSub, "groups.apply", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := groupHandlers{op: configOp, wired: groupsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleGroupApply(ctx, req) }
 		}),
-		regResponder(configSub, "settings.describe", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.describe", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.getSnapshot", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.getSnapshot", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.set", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.set", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.reset", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.reset", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretSet", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.secretSet", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretDelete", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.secretDelete", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(configSub, "settings.secretExists", func(r Responder) handlerFunc {
+		regResponder(configSub, "settings.secretExists", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := settingsHandlers{op: configOp, wired: settingsWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.importTabby", func(r Responder) handlerFunc {
+		regResponder(tabbySub, "profiles.importTabby", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleImportTabby(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.tabbyPreview", func(r Responder) handlerFunc {
+		regResponder(tabbySub, "profiles.tabbyPreview", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyPreview(ctx, req) }
 		}),
-		regResponder(tabbySub, "profiles.tabbyExecute", func(r Responder) handlerFunc {
+		regResponder(tabbySub, "profiles.tabbyExecute", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := tabbyHandlers{op: tabbyOp, configWired: profilesWired && groupsWired, executeWired: executeWired, storeWired: s.credentials != nil, plans: s, providerName: s.secretProviderName, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabbyExecute(ctx, req) }
 		}),

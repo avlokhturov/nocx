@@ -1001,51 +1001,51 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 	bindingSub := s.operationQueue("git")
 
 	return []methodSpec{
-		reg(openSub, "git.open", func(w *wsConn, state *connState) handlerFunc {
+		reg(openSub, "git.open", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitOpenHandlers{op: openOp, r: w, bindings: s, log: s.log, wired: gitWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.status", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.status", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.diff", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.diff", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDiff(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.stage", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.stage", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.unstage", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.unstage", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.stageAll", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.stageAll", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStageAll(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.unstageAll", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.unstageAll", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstageAll(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.commit", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.commit", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCommit(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.headMessage", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.headMessage", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHeadMessage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.log", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.log", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleLog(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.remote", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.remote", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRemote(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.close", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "git.close", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),

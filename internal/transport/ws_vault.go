@@ -910,71 +910,71 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 	resetSub := s.operationQueue("vault-reset")
 
 	return []methodSpec{
-		regResponder(vaultSub, "vault.status", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.status", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.setup", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.setup", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetup(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.unseal", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.unseal", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnseal(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.seal", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.seal", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSeal(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.changePassphrase", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.changePassphrase", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleChangePassphrase(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.regenerateRecovery", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.regenerateRecovery", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRegenerateRecovery(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.setDefaultProvider", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.setDefaultProvider", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetDefaultProvider(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.setAutoSeal", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.setAutoSeal", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSetAutoSeal(ctx, req) }
 		}),
-		regResponder(vaultSub, "vault.activity", func(r Responder) handlerFunc {
+		regResponder(vaultSub, "vault.activity", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultLifecycleHandlers{op: vaultOp, r: r, captures: s.captures, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleActivity(ctx, req) }
 		}),
-		regResponder(secretSub, "vault.inventory", func(r Responder) handlerFunc {
+		regResponder(secretSub, "vault.inventory", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.inventory")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleInventory(ctx, req) }
 		}),
-		regResponder(secretSub, "vault.createSecret", func(r Responder) handlerFunc {
+		regResponder(secretSub, "vault.createSecret", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.createSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCreateSecret(ctx, req) }
 		}),
-		regResponder(secretSub, "vault.renameSecret", func(r Responder) handlerFunc {
+		regResponder(secretSub, "vault.renameSecret", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.renameSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRenameSecret(ctx, req) }
 		}),
-		regResponder(secretSub, "vault.replaceSecret", func(r Responder) handlerFunc {
+		regResponder(secretSub, "vault.replaceSecret", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.replaceSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReplaceSecret(ctx, req) }
 		}),
-		regResponder(secretSub, "vault.deleteSecret", func(r Responder) handlerFunc {
+		regResponder(secretSub, "vault.deleteSecret", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.deleteSecret")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDeleteSecret(ctx, req) }
 		}),
-		regResponder(secretSub, "vault.resolveLine", func(r Responder) handlerFunc {
+		regResponder(secretSub, "vault.resolveLine", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.resolveLine")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolveLine(ctx, req) }
 		}),
-		regResponder(resetSub, "vault.resetPreview", func(r Responder) handlerFunc {
+		regResponder(resetSub, "vault.resetPreview", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResetPreview(ctx, req) }
 		}),
-		regResponder(resetSub, "vault.reset", func(r Responder) handlerFunc {
+		regResponder(resetSub, "vault.reset", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := vaultResetHandlers{op: resetOp, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReset(ctx, req) }
 		}),

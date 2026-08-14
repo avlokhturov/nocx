@@ -727,27 +727,27 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 	openSub := s.operationQueue("files-open")
 	bindingSub := s.operationQueue("files")
 	return []methodSpec{
-		reg(openSub, "files.open", func(w *wsConn, state *connState) handlerFunc {
+		reg(openSub, "files.open", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.list", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "files.list", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.read", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "files.read", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.watch", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "files.watch", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.close", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "files.close", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.reveal", func(w *wsConn, state *connState) handlerFunc {
+		reg(bindingSub, "files.reveal", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
 		}),

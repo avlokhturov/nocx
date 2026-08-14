@@ -147,11 +147,11 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	shellSub := s.operationQueue("shell")
 	return []methodSpec{
-		regResponder(shellSub, "shell.complete", func(r Responder) handlerFunc {
+		regResponder(shellSub, "shell.complete", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, local: s.localCompleter, remote: s.sshCompleter}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleComplete(ctx, req) }
 		}),
-		regResponder(shellSub, "shell.integrate", func(r Responder) handlerFunc {
+		regResponder(shellSub, "shell.integrate", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := sessionShellHandlers{ops: sessionOps, r: r, inBand: s.inBand}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleIntegrate(ctx, req) }
 		}),
@@ -160,7 +160,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// the marker latch ADR-0024 forbids, and the branch deleted their
 		// handler, contracts and generated types (nocx-292k). The footprint
 		// methods below outlive them — they read the fact store, which stays.
-		regResponder(s.lane, "shell.footprint.status", func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.footprint.status", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:        r,
 				facts:    s.installedFacts,
@@ -170,7 +170,7 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
 		}),
-		regResponder(s.lane, "shell.footprint.uninstall", func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.footprint.uninstall", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := footprintHandlers{
 				r:           r,
 				uninstaller: s.remoteUninstaller,

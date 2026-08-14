@@ -347,31 +347,31 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 	secretSub := s.operationQueue("secrets")
 	captureSub := s.operationQueue("capture")
 	return []methodSpec{
-		regResponder(secretSub, "secrets.usage", func(r Responder) handlerFunc {
+		regResponder(secretSub, "secrets.usage", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUsage(ctx, req) }
 		}),
-		regResponder(secretSub, "secrets.savePassword", func(r Responder) handlerFunc {
+		regResponder(secretSub, "secrets.savePassword", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}),
-		regResponder(secretSub, "secrets.saveKeyMaterial", func(r Responder) handlerFunc {
+		regResponder(secretSub, "secrets.saveKeyMaterial", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}),
-		regResponder(secretSub, "secrets.saveKeyPassphrase", func(r Responder) handlerFunc {
+		regResponder(secretSub, "secrets.saveKeyPassphrase", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}),
-		regResponder(s.lane, "secrets.detect", func(r Responder) handlerFunc {
+		regResponder(s.lane, "secrets.detect", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := secretsDetectHandlers{log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetect(req) }
 		}),
-		regResponder(captureSub, "secrets.captureSave", func(r Responder) handlerFunc {
+		regResponder(captureSub, "secrets.captureSave", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := captureSaveHandlers{op: captureOp, captures: s.captures, r: r, vaultWired: vaultWired, contentWired: contentWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureSave(ctx, req) }
 		}),
-		regResponder(s.lane, "secrets.captureDismiss", func(r Responder) handlerFunc {
+		regResponder(s.lane, "secrets.captureDismiss", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := captureDismissHandlers{captures: s.captures, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureDismiss(ctx, req) }
 		}),

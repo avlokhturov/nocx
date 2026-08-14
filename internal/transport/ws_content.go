@@ -13,11 +13,11 @@ func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admi
 		contentOp = capability.NewContentOperation(contentGate, lane, s.contentDB)
 	}
 	specs := []methodSpec{
-		regResponder(contentSub, "history.query", func(r Responder) handlerFunc {
+		regResponder(contentSub, "history.query", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := historyQueryHandlers{op: contentOp, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryQuery(ctx, req) }
 		}),
-		reg(contentSub, "history.record", func(w *wsConn, state *connState) handlerFunc {
+		reg(contentSub, "history.record", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := historyRecordHandlers{op: contentOp, captures: s.captures, machine: s, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) {
 				h.handleHistoryRecord(ctx, w, state, req)

@@ -38,7 +38,7 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		// composed with the lane, wrapped in the inflight set) — the
 		// registration IS that submission, so the probe acquires the lane
 		// exactly once.
-		regResponder(s.probeSub, "connections.test", func(r Responder) handlerFunc {
+		regResponder(s.probeSub, "connections.test", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := probeHandlers{
 				resolver:         s.resolver,
 				prober:           s.prober,
@@ -47,60 +47,60 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTest(ctx, req) }
 		}),
-		regResponder(s.lane, "connections.trustHostKey", func(r Responder) handlerFunc {
+		regResponder(s.lane, "connections.trustHostKey", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := trustHostKeyHandlers{truster: s.hostKeyTruster, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTrustHostKey(ctx, req) }
 		}),
 		// dialog.openFile owns its own admission (dialog capacity-one
 		// composed with the lane, wrapped in the inflight set).
-		regResponder(s.dialogSub, "dialog.openFile", func(r Responder) handlerFunc {
+		regResponder(s.dialogSub, "dialog.openFile", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }
 		}),
-		regResponder(s.lane, "sshConfig.aliases", func(r Responder) handlerFunc {
+		regResponder(s.lane, "sshConfig.aliases", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSSHConfigAliases(ctx, req) }
 		}),
-		regResponder(s.lane, "sshConfig.path", func(r Responder) handlerFunc {
+		regResponder(s.lane, "sshConfig.path", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSSHConfigPath(ctx, req) }
 		}),
-		regResponder(statusSub, "sessions.status", func(r Responder) handlerFunc {
+		regResponder(statusSub, "sessions.status", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := sessionsStatusHandlers{op: sessionOp, log: s.log, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionsStatus(ctx, req) }
 		}),
-		regResponder(s.lane, "fs.complete", func(r Responder) handlerFunc {
+		regResponder(s.lane, "fs.complete", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := fsCompleteHandlers{r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFsComplete(req) }
 		}),
 		// tunnel.open needs the connection as the owner-map key (spec §7.3):
 		// the forward's owner is the tab that opened it, so the handler
 		// receives the *wsConn per call.
-		reg(s.lane, "tunnel.open", func(w *wsConn, state *connState) handlerFunc {
+		reg(s.lane, "tunnel.open", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelOpen(ctx, w, req) }
 		}),
-		regResponder(s.lane, "tunnel.stop", func(r Responder) handlerFunc {
+		regResponder(s.lane, "tunnel.stop", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelStop(req) }
 		}),
-		regResponder(s.lane, "ports.status", func(r Responder) handlerFunc {
+		regResponder(s.lane, "ports.status", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "ports.sample", func(r Responder) handlerFunc {
+		regResponder(s.lane, "ports.sample", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "ports.pause", func(r Responder) handlerFunc {
+		regResponder(s.lane, "ports.pause", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "ports.visible", func(r Responder) handlerFunc {
+		regResponder(s.lane, "ports.visible", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := portsHandlers{sched: s.discoverySched, ledger: ledger, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePortsMethod(req) }
 		}),
-		regResponder(s.lane, "shell.openUrl", func(r Responder) handlerFunc {
+		regResponder(s.lane, "shell.openUrl", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			h := openUrlHandlers{opener: opener, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleShellOpenUrl(ctx, req) }
 		}),

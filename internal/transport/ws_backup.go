@@ -22,16 +22,16 @@ func (s *WSServer) backupSpecs(lane control.Admission, configGate control.Admiss
 	}
 	h := backupSpecs{operation: op, saver: s.backupFileSaver}
 	return []methodSpec{
-		regResponder(s.operationQueue("backup"), "backup.create", func(r Responder) handlerFunc {
+		regResponder(s.operationQueue("backup"), "backup.create", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.create(ctx, r, req) }
 		}),
-		regResponder(s.operationQueue("backup"), "backup.preview", func(r Responder) handlerFunc {
+		regResponder(s.operationQueue("backup"), "backup.preview", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.preview(ctx, r, req) }
 		}),
-		regResponder(s.operationQueue("backup"), "backup.restore", func(r Responder) handlerFunc {
+		regResponder(s.operationQueue("backup"), "backup.restore", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.restore(ctx, r, req) }
 		}),
-		regResponder(s.dialogSub, "backup.saveToFile", func(r Responder) handlerFunc {
+		regResponder(s.dialogSub, "backup.saveToFile", genericObject("per-field validation pending nocx-VALID"), func(r Responder) handlerFunc {
 			return func(ctx context.Context, req jsonrpcRequest) { h.saveToFile(ctx, r, req) }
 		}),
 	}

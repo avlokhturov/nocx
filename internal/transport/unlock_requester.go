@@ -208,11 +208,11 @@ func (h askResolverHandlers) handleUnlockResolved(req jsonrpcRequest) {
 // (ImmediateSubmission): a resolution must never wait for a lane permit.
 func (s *WSServer) askResolverSpecs(immediate control.ImmediateSubmission) []methodSpec {
 	return []methodSpec{
-		reg(immediate, "vault.unlockResolved", func(w *wsConn, _ *connState) handlerFunc {
+		reg(immediate, "vault.unlockResolved", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, _ *connState) handlerFunc {
 			h := askResolverHandlers{asks: &s.asks, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnlockResolved(req) }
 		}),
-		reg(immediate, "connections.passwordResolved", func(w *wsConn, _ *connState) handlerFunc {
+		reg(immediate, "connections.passwordResolved", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, _ *connState) handlerFunc {
 			h := askResolverHandlers{asks: &s.asks, r: w}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePasswordResolved(req) }
 		}),

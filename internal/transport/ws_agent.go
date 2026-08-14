@@ -780,11 +780,11 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		}
 	}
 	return []methodSpec{
-		reg(contentSub, "agent.captureFrame", func(w *wsConn, state *connState) handlerFunc {
+		reg(contentSub, "agent.captureFrame", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := build(w, state)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureFrame(ctx, req) }
 		}),
-		reg(contentSub, "agent.ask", func(w *wsConn, state *connState) handlerFunc {
+		reg(contentSub, "agent.ask", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			h := build(w, state)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }
 		}),

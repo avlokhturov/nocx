@@ -153,6 +153,9 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       setProbeResult({
         name: d.name.trim(),
         model,
+        // The check the call WOULD have been: a refusal must not be
+        // reported as a model answer when no model was named.
+        kind: model === '' ? 'connection' : 'model',
         ok: false,
         error: message,
         elapsedMs: 0,

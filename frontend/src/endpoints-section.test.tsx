@@ -109,6 +109,7 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
       return {
         name: input.name,
         model: input.model,
+        kind: 'model' as const,
         ok: true,
         elapsedMs: 12,
         at: new Date().toISOString(),
@@ -565,6 +566,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     probeEndpoint.mockResolvedValueOnce({
       name: 'Local',
       model: 'qwen3',
+      kind: 'model' as const,
       ok: false,
       error: 'dial tcp: connection refused',
       elapsedMs: 0,
@@ -606,6 +608,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
         lastProbe: {
           name: 'Local',
           model: 'qwen3',
+          kind: 'model' as const,
           ok: true,
           elapsedMs: 42,
           at: new Date().toISOString(),

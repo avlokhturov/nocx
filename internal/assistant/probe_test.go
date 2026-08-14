@@ -238,10 +238,21 @@ func TestProbe_InvalidParams(t *testing.T) {
 	if _, err := cl.Probe(context.Background(), p); err == nil {
 		t.Fatal("Probe with an empty base URL succeeded, want a refusal")
 	}
+	// An empty model is NOT a refusal any more (nocx-q27y): it is the other
+	// question — "can I reach this API with this key" — which needs no
+	// model. It must run, and it must say which check it ran, so a caller
+	// can never read a connection result as a model result.
 	p = testProbeParams("http://127.0.0.1:1/v1")
 	p.Model = ""
-	if _, err := cl.Probe(context.Background(), p); err == nil {
-		t.Fatal("Probe with an empty model succeeded, want a refusal")
+	res, err := cl.Probe(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Probe with no model returned a Go error, want a connection check: %v", err)
+	}
+	if res.Kind != ProbeConnection {
+		t.Fatalf("Kind = %q, want %q", res.Kind, ProbeConnection)
+	}
+	if res.OK {
+		t.Fatal("port 1 is not listening; want OK=false with the dial error")
 	}
 }
 

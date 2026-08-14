@@ -319,13 +319,13 @@ func lifecycleSubmitErrorCode(err error) int {
 func (s *WSServer) lifecycleSpecs() []methodSpec {
 	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
 	return []methodSpec{
-		reg(sub, "lifecycle.submitAttempt", func(w *wsConn, state *connState) handlerFunc {
+		reg(sub, "lifecycle.submitAttempt", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(w, state, req) }
 		}),
-		reg(sub, "lifecycle.recoverAck", func(w *wsConn, state *connState) handlerFunc {
+		reg(sub, "lifecycle.recoverAck", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(w, state, req) }
 		}),
-		reg(sub, "lifecycle.establishAck", func(w *wsConn, state *connState) handlerFunc {
+		reg(sub, "lifecycle.establishAck", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, state, req) }
 		}),
 	}

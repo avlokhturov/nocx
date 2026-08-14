@@ -56,6 +56,37 @@ type Endpoint struct {
 	Models        []EndpointModel `json:"models"`
 }
 
+// ValidateBaseURL is the ONE parse-level rule for an endpoint's base URL,
+// used both when a record is stored and when a base URL is probed without
+// being stored (endpoints.probe, nocx-q27y). Two callers, one rule: a
+// second copy would agree everywhere anyone looked and disagree on the URL
+// nobody tried.
+//
+// Shape, not policy. The loopback/private address rule, redirect
+// re-checking and proxy handling live at dial time in
+// internal/assistant/httpguard.go, where they can be enforced against the
+// address actually connected — a rule checked here against a string would
+// be theatre, because a hostname can resolve public at validation and
+// private at dial. What is checked here is what a string must be to be an
+// address at all, plus userinfo, which is rejected because credentials
+// belong in the credential field and never in the address.
+func ValidateBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid base URL %q: %v", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("base URL scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("base URL must name a host")
+	}
+	if u.User != nil {
+		return fmt.Errorf("base URL must not carry credentials; put the API key in the credential field")
+	}
+	return nil
+}
+
 // ValidateEndpoint checks an endpoint record before it is stored.
 //
 // Base-URL validation is parse-level only this pass: any absolute http(s)
@@ -73,18 +104,8 @@ func ValidateEndpoint(e Endpoint) error {
 	if !validEndpointSchema(e.Schema) {
 		return fmt.Errorf("unknown endpoint schema %q", e.Schema)
 	}
-	u, err := url.Parse(e.BaseURL)
-	if err != nil {
-		return fmt.Errorf("invalid base URL %q: %v", e.BaseURL, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("base URL scheme must be http or https, got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("base URL must name a host")
-	}
-	if u.User != nil {
-		return fmt.Errorf("base URL must not carry credentials; put the API key in the credential field")
+	if err := ValidateBaseURL(e.BaseURL); err != nil {
+		return err
 	}
 	if len(e.Models) == 0 {
 		return fmt.Errorf("endpoint requires at least one model")
