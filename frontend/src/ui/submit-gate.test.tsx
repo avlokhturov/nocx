@@ -2,6 +2,7 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import { render, cleanup } from '@solidjs/testing-library'
 import { createFormValidation, required } from './validation'
+import { createSignal } from 'solid-js'
 import { createSubmitGate } from './submit-gate'
 import { ToastHost, clearToasts, toasts } from './toast'
 
@@ -143,6 +144,56 @@ describe('createSubmitGate', () => {
     openPanel()
     expect(await pending).toBe(false)
     expect(document.activeElement?.id).toBe('host')
+  })
+
+  // nocx-74cn.3: the gate's reveal contract allows an async hook, and during
+  // an awaited reveal the world is free to change — a lazily loaded panel can
+  // populate a field, reactive rules can move. The gate must act on the state
+  // it can see AFTER the reveal settles, never on the snapshot it read before
+  // the await. These two tests make that mutation real: the reveal hook
+  // changes the validation itself, so a gate that never re-reads fails them.
+  it('after an async reveal that makes the form valid, allows the submit — no toast, no focus', async () => {
+    const [host, setHost] = createSignal('')
+    const v = createFormValidation({ host: () => required('Host')(host()) })
+    mountForm(true)
+    const gate = createSubmitGate(v, {
+      reveal: async () => {
+        // The panel settles AFTER the gate read the failing field, and
+        // populating it makes the form valid — the exact window the contract
+        // opens.
+        await Promise.resolve()
+        setHost('box')
+        document.querySelector<HTMLElement>('div[hidden]')!.hidden = false
+      },
+    })
+    // Decision (written down in submit-gate.ts): the submit is ALLOWED — the
+    // gate's contract is "true means the values pass", and they pass now.
+    expect(await gate()).toBe(true)
+    expect(toasts()).toHaveLength(0)
+    expect(document.activeElement?.id).not.toBe('host')
+  })
+
+  it('after an async reveal that moves the first error, focuses and announces the new first field', async () => {
+    const [host, setHost] = createSignal('')
+    const v = createFormValidation({
+      host: () => required('Host')(host()),
+      port: () => required('Port')(''),
+    })
+    mountForm(true)
+    const gate = createSubmitGate(v, {
+      reveal: async () => {
+        await Promise.resolve()
+        // Host was first in declaration order; the reveal makes it valid, so
+        // the first error moves to port. A gate that kept its pre-await
+        // snapshot would focus host and announce the stale message.
+        setHost('box')
+        const panel = document.querySelector<HTMLElement>('div[hidden]')
+        if (panel) panel.hidden = false
+      },
+    })
+    expect(await gate()).toBe(false)
+    expect(document.activeElement?.id).toBe('port')
+    expect(toasts()[0].message).toBe('Port is required')
   })
 
   it('reports it could not focus when no reveal hook opens the panel', async () => {

@@ -2303,7 +2303,11 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                       </Field>
                     }
                     publicKeyAction={
-                      <Field for="profile-key" label="Private Key">
+                      <Field
+                        for="profile-key"
+                        label="Private Key"
+                        error={profileValidation.error('key')}
+                      >
                         <KeyMaterialInput
                           id="profile-key"
                           mode={profileKeyMode()}

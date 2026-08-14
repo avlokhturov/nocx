@@ -236,10 +236,116 @@ describe('profile editor submit gate — real surface', () => {
     expect(patchProfile).not.toHaveBeenCalled()
     expect(updateProfile).not.toHaveBeenCalled()
     expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
-    // FINDING (reported, not fixed here): the key rule's message
-    // ('Choose a private key: …') is computed by profileValidation but has no
-    // render site in connections.tsx — only name/host/port/keepalive*/forwards
-    // wire profileValidation.error() into the JSX. In this exact state the
-    // user sees the toast above and nothing under the key field.
+    // nocx-74cn.2: the key rule's message has a home. The Private Key row
+    // carries it through the kit's Field error slot — the key can come from a
+    // file, a path, pasted material, or a stored secret, so no single input
+    // owns the rule; the row does. In stored-secret mode there is no
+    // focusable control, so the row is exactly where a user reading it will
+    // see the message; the gate's "could not focus" caveat above is asserted
+    // deliberate.
+    await vi.waitFor(() => {
+      const keyError = Array.from(container.querySelectorAll('.ui-field-error')).find((e) =>
+        e.textContent?.includes('Choose a private key:'),
+      )
+      expect(keyError).toBeTruthy()
+    })
+  })
+
+  it('a refused save in the default file mode marks the Private Key row with the rule message', async () => {
+    const { container, patchProfile, updateProfile } = mount()
+    await waitForProfiles(container)
+    await openProfileEditor(container, 'prod-web')
+
+    // The bead's reproduction steps exactly: Public Key, and no key at all.
+    // The key input opens in its default mode — 'Choose file'
+    // (DEFAULT_KEY_MODE) — and the user uploads nothing.
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+    await vi.waitFor(() => {
+      expect(container.querySelector('[aria-label="Key input mode"]')).toBeTruthy()
+    })
+
+    clickSave(container)
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some(
+          (t) =>
+            t.message.includes('Choose a private key:') &&
+            t.message.includes('could not focus the first field'),
+        ),
+      ).toBe(true)
+    })
+    // The rule's message is under the row, not only in the toast: the form
+    // itself says which row is wrong.
+    await vi.waitFor(() => {
+      const keyError = Array.from(container.querySelectorAll('.ui-field-error')).find((e) =>
+        e.textContent?.includes('Choose a private key:'),
+      )
+      expect(keyError).toBeTruthy()
+    })
+    expect(patchProfile).not.toHaveBeenCalled()
+    expect(updateProfile).not.toHaveBeenCalled()
+    expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
+  })
+
+  it('a refused save in path mode focuses the path input and marks the row with the rule message', async () => {
+    const { container, patchProfile, updateProfile } = mount()
+    await waitForProfiles(container)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+    await vi.waitFor(() => {
+      expect(container.querySelector('[aria-label="Key input mode"]')).toBeTruthy()
+    })
+    clickSegmentedOption(container, 'Path')
+
+    clickSave(container)
+
+    await vi.waitFor(() => {
+      expect(toasts().some((t) => t.message.includes('Choose a private key:'))).toBe(true)
+    })
+    // The path field is the mode's focusable control: the gate opens the
+    // section, lands the caret in it, and needs no caveat.
+    expect(document.activeElement).toBe(container.querySelector('#profile-key-path'))
+    expect(toasts().some((t) => t.message.includes('could not focus'))).toBe(false)
+    await vi.waitFor(() => {
+      const keyError = Array.from(container.querySelectorAll('.ui-field-error')).find((e) =>
+        e.textContent?.includes('Choose a private key:'),
+      )
+      expect(keyError).toBeTruthy()
+    })
+    expect(patchProfile).not.toHaveBeenCalled()
+    expect(updateProfile).not.toHaveBeenCalled()
+    expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
+  })
+
+  it('a refused save in material mode focuses the key textarea and marks the row with the rule message', async () => {
+    const { container, patchProfile, updateProfile } = mount()
+    await waitForProfiles(container)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Public Key')
+    await vi.waitFor(() => {
+      expect(container.querySelector('[aria-label="Key input mode"]')).toBeTruthy()
+    })
+    clickSegmentedOption(container, 'Paste key')
+
+    clickSave(container)
+
+    await vi.waitFor(() => {
+      expect(toasts().some((t) => t.message.includes('Choose a private key:'))).toBe(true)
+    })
+    expect(document.activeElement).toBe(container.querySelector('#profile-key-text'))
+    expect(toasts().some((t) => t.message.includes('could not focus'))).toBe(false)
+    await vi.waitFor(() => {
+      const keyError = Array.from(container.querySelectorAll('.ui-field-error')).find((e) =>
+        e.textContent?.includes('Choose a private key:'),
+      )
+      expect(keyError).toBeTruthy()
+    })
+    expect(patchProfile).not.toHaveBeenCalled()
+    expect(updateProfile).not.toHaveBeenCalled()
+    expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
   })
 })
