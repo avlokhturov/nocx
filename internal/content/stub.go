@@ -195,3 +195,28 @@ func (s *ledgerStub) Edges(_ context.Context, entryID string) ([]Edge, error) {
 	s.log.Info("content stub: LedgerRepository.Edges", "entry", entryID)
 	return nil, ErrNotImplemented
 }
+
+func (s *ledgerStub) CaptureFrame(_ context.Context, in CaptureFrame) (CaptureFrameResult, error) {
+	s.log.Info("content stub: LedgerRepository.CaptureFrame", "capture", in.CaptureID, "source", string(in.Source))
+	return CaptureFrameResult{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) SubmitAgentAsk(_ context.Context, in AgentAsk) (AgentAskResult, error) {
+	s.log.Info("content stub: LedgerRepository.SubmitAgentAsk", "id", in.ID)
+	return AgentAskResult{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) RunState(_ context.Context, executionID int64) (*RunState, error) {
+	s.log.Info("content stub: LedgerRepository.RunState", "execution", executionID)
+	return nil, ErrNotImplemented
+}
+
+func (s *ledgerStub) TransitionRun(_ context.Context, runID int64, to RunState) error {
+	s.log.Info("content stub: LedgerRepository.TransitionRun", "run", runID, "to", string(to))
+	return ErrNotImplemented
+}
+
+func (s *ledgerStub) FinishAgentRun(_ context.Context, runID int64, in FinishAgentRun) error {
+	s.log.Info("content stub: LedgerRepository.FinishAgentRun", "run", runID, "state", string(in.State))
+	return ErrNotImplemented
+}

@@ -54,19 +54,41 @@ export interface BlockReceiptCallbacks {
   onExitReview(): void
 }
 
+export interface BlockReceiptOpts {
+  /** 'ask' renders the receipt as the ask chip (nocx-x8s2.2): no editable
+   *  name input (a question has nothing to name), the kind badge in the
+   *  info tone, the primary action labelled Ask (proceed — focus the
+   *  editor), the drop labelled Done (dismiss the mode). Everything else —
+   *  block-attached, non-modal, no focus steal, no expiry, one primary
+   *  action — is the receipt's own contract. */
+  readonly variant?: 'capture' | 'ask'
+}
+
 export class BlockReceipt {
   readonly root: HTMLElement
   private readonly callbacks: BlockReceiptCallbacks
-  private readonly rows: Map<string, { rowEl: HTMLElement; input: HTMLInputElement }> = new Map()
+  private readonly variant: 'capture' | 'ask'
+  private readonly rows: Map<string, { rowEl: HTMLElement; input: HTMLInputElement | null }> =
+    new Map()
   private readonly primaryBtn: HTMLButtonElement
   private readonly actionsEl: HTMLElement
+  private statusEl: HTMLElement | null = null
 
-  constructor(captures: ReadonlyArray<BlockReceiptCapture>, callbacks: BlockReceiptCallbacks) {
+  constructor(
+    captures: ReadonlyArray<BlockReceiptCapture>,
+    callbacks: BlockReceiptCallbacks,
+    opts: BlockReceiptOpts = {},
+  ) {
     this.callbacks = callbacks
+    this.variant = opts.variant ?? 'capture'
     this.root = document.createElement('div')
     this.root.className = 'ui-block-receipt'
+    if (this.variant === 'ask') this.root.dataset.variant = 'ask'
     this.root.setAttribute('role', 'group')
-    this.root.setAttribute('aria-label', 'save detected secret')
+    this.root.setAttribute(
+      'aria-label',
+      this.variant === 'ask' ? 'ask about this block' : 'save detected secret',
+    )
 
     const rowEls: HTMLElement[] = []
     for (const capture of captures) {
@@ -123,7 +145,7 @@ export class BlockReceipt {
   saveAll(): void {
     const rows: Array<{ captureId: string; name: string }> = []
     for (const [captureId, row] of this.rows) {
-      rows.push({ captureId, name: row.input.value.trim() })
+      rows.push({ captureId, name: row.input?.value.trim() ?? '' })
     }
     if (rows.length > 0) this.callbacks.onSaveAll(rows)
   }
@@ -162,14 +184,13 @@ export class BlockReceipt {
 
   /** ⇧⌘S: review mode — focus the first row's name field. */
   enterReview(): void {
-    const first = this.rows.values().next().value as { input: HTMLInputElement } | undefined
-    first?.input.focus()
+    const first = this.rows.values().next().value as { input: HTMLInputElement | null } | undefined
+    first?.input?.focus()
   }
 
   destroy(): void {
     this.root.remove()
   }
-
   private buildRow(capture: BlockReceiptCapture): HTMLElement {
     const rowEl = document.createElement('div')
     rowEl.className = 'ui-block-receipt__row'
@@ -177,32 +198,49 @@ export class BlockReceipt {
 
     const badge = document.createElement('span')
     badge.className = 'ui-badge ui-block-receipt__kind'
-    badge.dataset.tone = 'warning'
+    // The ask chip's kind badge is information, not a warning: nothing was
+    // detected, the user is pointing at a block.
+    badge.dataset.tone = this.variant === 'ask' ? 'info' : 'warning'
     badge.textContent = capture.kindLabel
 
     const value = document.createElement('code')
     value.className = 'ui-block-receipt__value'
     value.textContent = capture.maskedValue
 
-    const input = document.createElement('input')
-    input.className = 'ui-text-field__input'
-    input.type = 'text'
-    input.value = capture.suggestedName
-    input.setAttribute('aria-label', `vault name for ${capture.kindLabel}`)
-    input.autocomplete = 'off'
-    input.spellcheck = false
+    // A question has nothing to name — the ask chip's row is badge + value
+    // + controls, with no editable field between them.
+    let input: HTMLInputElement | null = null
+    if (this.variant !== 'ask') {
+      input = document.createElement('input')
+      input.className = 'ui-text-field__input'
+      input.type = 'text'
+      input.value = capture.suggestedName
+      input.setAttribute('aria-label', `vault name for ${capture.kindLabel}`)
+      input.autocomplete = 'off'
+      input.spellcheck = false
+    }
 
     const drop = document.createElement('button')
     drop.className = 'ui-button ui-block-receipt__drop'
     drop.dataset.variant = 'ghost'
-    // Not "Remove": nothing has been stored yet, so there is nothing to
-    // remove, and a destructive word over an offer reads as though
-    // declining will delete something.
-    drop.textContent = 'Dismiss'
-    drop.setAttribute('aria-label', `do not save this ${capture.kindLabel}`)
+    if (this.variant === 'ask') {
+      // "Done" is the ask mode's exit: nothing is stored or destroyed, the
+      // target returns to the shell.
+      drop.textContent = 'Done'
+      drop.setAttribute('aria-label', 'stop asking and return to the shell')
+    } else {
+      // Not "Remove": nothing has been stored yet, so there is nothing to
+      // remove, and a destructive word over an offer reads as though
+      // declining will delete something.
+      drop.textContent = 'Dismiss'
+      drop.setAttribute('aria-label', `do not save this ${capture.kindLabel}`)
+    }
     drop.addEventListener('click', () => this.callbacks.onDismiss(capture.captureId))
 
-    rowEl.append(badge, value, input, drop)
+    const children: Array<Node | string> = [badge, value]
+    if (input) children.push(input)
+    children.push(drop)
+    rowEl.append(...children)
 
     // Hover emphasises this row's chip in the block's command line — and
     // only this one.
@@ -214,8 +252,34 @@ export class BlockReceipt {
   }
 
   private updatePrimaryLabel(): void {
+    if (this.variant === 'ask') {
+      // The ask chip's one primary action names the mode: the editor is the
+      // question box, and this returns focus to it (the chip is non-modal,
+      // but the mouse may have wandered).
+      this.primaryBtn.textContent = 'Ask'
+      return
+    }
     const n = this.rows.size
     this.primaryBtn.textContent = n === 1 ? 'Save' : `Save ${n}`
+  }
+
+  /** The ask variant's readiness line, from agent.status. tone + text are
+   *  the SURFACE's words (the ONE derivation lives with the status
+   *  mapping); this only places them, as the kit's own badge, below the
+   *  row — a degrade the chip contradicts would be a soft degrade the
+   *  product contradicts (AGENTS.md). */
+  setStatus(tone: 'neutral' | 'warning' | 'danger' | 'success', text: string): void {
+    if (!this.statusEl) {
+      this.statusEl = document.createElement('div')
+      this.statusEl.className = 'ui-block-receipt__status'
+      this.root.appendChild(this.statusEl)
+    }
+    this.statusEl.replaceChildren()
+    const badge = document.createElement('span')
+    badge.className = 'ui-badge'
+    badge.dataset.tone = tone
+    badge.textContent = text
+    this.statusEl.appendChild(badge)
   }
 
   // ── Connection-offer variant (nocx-pu4.7) ───────────────────────────
@@ -247,5 +311,49 @@ export class BlockReceipt {
       onHover: () => {},
       onExitReview: () => {},
     })
+  }
+
+  // ── Ask variant (nocx-x8s2.2) ───────────────────────────────────────
+
+  /**
+   * Build the ask chip: the mode indicator a frozen block's Ask affordance
+   * raises. It names the block (the command as its value) and IS the mode —
+   * the agent input target is active exactly while it is mounted. One
+   * primary action (Ask: focus the editor, where the question goes) and one
+   * exit (Done: dismiss — the target returns to the shell).
+   *
+   * One deliberate deviation from the capture receipt's contract: only ONE
+   * ask chip exists at a time. A capture receipt is a stack of independent
+   * offers, each answered separately; the ask chip IS a mode, and a mode
+   * names ONE scope — two chips would split the question routing between
+   * two blocks (AD-8: the mode and its scope are the same decision, made
+   * once, at activation).
+   */
+  static forAsk(
+    command: string,
+    callbacks: {
+      /** The primary action: proceed — focus the editor, the question box. */
+      onAsk(): void
+      /** Done: dismiss the chip and return the target to the shell. */
+      onDismiss(): void
+    },
+  ): BlockReceipt {
+    return new BlockReceipt(
+      [
+        {
+          captureId: 'ask:block',
+          kindLabel: 'Ask',
+          maskedValue: command,
+          suggestedName: '',
+        },
+      ],
+      {
+        onSaveAll: () => callbacks.onAsk(),
+        onDismiss: () => callbacks.onDismiss(),
+        onHover: () => {},
+        onExitReview: () => callbacks.onAsk(),
+      },
+      { variant: 'ask' },
+    )
   }
 }

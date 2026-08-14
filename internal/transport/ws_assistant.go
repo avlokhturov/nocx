@@ -40,10 +40,10 @@ type endpointProbeParams struct {
 	Model   string `json:"model"`
 }
 
-// agentHandlers answers agent.status. wired is true when the endpoint
+// assistantStatusHandlers answers agent.status. wired is true when the endpoint
 // repository is wired; without it the method refuses with -32601, the same
 // shape profiles and groups use.
-type agentHandlers struct {
+type assistantStatusHandlers struct {
 	op      capability.ConfigOperation
 	secrets credential.SecretStore
 	probes  *assistant.ProbeStore
@@ -51,7 +51,7 @@ type agentHandlers struct {
 	r       Responder
 }
 
-func (h agentHandlers) handleAgentStatus(ctx context.Context, req jsonrpcRequest) {
+func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req jsonrpcRequest) {
 	if !h.wired {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "agent not available"})
 		return
@@ -85,7 +85,7 @@ func (h agentHandlers) handleAgentStatus(ctx context.Context, req jsonrpcRequest
 // ref: the secret exists and is readable. A sealed vault, a deleted secret
 // or a missing key all answer false — the product says so instead of
 // offering an ask that cannot authenticate.
-func (h agentHandlers) credentialResolvableFor(ctx context.Context, ref string) bool {
+func (h assistantStatusHandlers) credentialResolvableFor(ctx context.Context, ref string) bool {
 	if ref == "" || h.secrets == nil {
 		return false
 	}
@@ -96,18 +96,18 @@ func (h agentHandlers) credentialResolvableFor(ctx context.Context, ref string) 
 	return !secret.IsEmpty()
 }
 
-// assistantHandlers answers endpoints.probe: probe the form's draft values
+// assistantProbeHandlers answers endpoints.probe: probe the form's draft values
 // with the engine the ask transaction will use, record the outcome, and
 // return it. wired is true when the assistant client is present; without it
 // the method refuses with -32601.
-type assistantHandlers struct {
+type assistantProbeHandlers struct {
 	client assistant.Client
 	probes *assistant.ProbeStore
 	wired  bool
 	r      Responder
 }
 
-func (h assistantHandlers) handleEndpointProbe(ctx context.Context, req jsonrpcRequest) {
+func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jsonrpcRequest) {
 	if !h.wired {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "agent not available"})
 		return

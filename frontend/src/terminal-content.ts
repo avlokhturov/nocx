@@ -20,7 +20,11 @@ import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
 import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
-import { ShellInputTarget } from './input-target'
+import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
+import { AgentInputTarget } from './agent-ask'
+import { AgentClient } from './agent'
+import { agentStatusLine } from './agent-status-line'
+import { blockCommandText } from './scrollback/blocks'
 import {
   submitCommand,
   planSubmit,
@@ -261,6 +265,14 @@ export class TerminalContent extends BaseTabContent {
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
+  /** The input-target registry (ADR-0004 §3): a submitted document routes
+   *  through active().submit — never a branch on "which mode am I in".
+   *  Shell is the default; the assistant target is activated explicitly
+   *  through setAgentMode by the surface owner that makes the ask visible
+   *  (the panel/region gesture — nocx-ckth/7ul8 — is not this slice).
+   *  Registration and routing ARE this slice. */
+  private inputTargets: InputTargetRegistry | null = null
+  private agentTarget: AgentInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -297,6 +309,13 @@ export class TerminalContent extends BaseTabContent {
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
+  /** The ask chip (nocx-x8s2.2): the BlockReceipt forAsk variant mounted
+   *  on the frozen block the ask mode is about. Its presence IS the mode —
+   *  the agent input target is active exactly while this is mounted, and
+   *  the chip's block is the ask's scope (never re-derived from DOM
+   *  selection). */
+  private askReceipt: BlockReceipt | null = null
+  private askBlockEl: HTMLElement | null = null
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
@@ -687,6 +706,14 @@ export class TerminalContent extends BaseTabContent {
         // The renderer owns this tab's OSC 636 store; the scrollback's frozen
         // headers and the editor below must judge against the same instance.
         snapshotStore: renderer.snapshotStore,
+        // The ask affordance's owner: every frozen block's Ask control
+        // raises the chip through the same path a person reaches.
+        onAsk: (blockEl) => this.activateAsk(blockEl),
+        // A `clear` took the chip's block: the mode closes with it — a chip
+        // whose block is gone would be an invisible mode (AGENTS.md: a soft
+        // degrade the UI contradicts is how a feature that does not exist
+        // survives a release).
+        onClear: () => this.dismissAsk(),
       })
 
       log.info('nocx: mounting renderer')
@@ -763,6 +790,32 @@ export class TerminalContent extends BaseTabContent {
       )
       const vault = new VaultClient(this.client)
       this.vault = vault
+
+      // The input-target registry (ADR-0004 §3): both targets registered,
+      // shell active by default. The submit path below routes through
+      // active().submit — the editor stays passive and never branches on
+      // the mode. The agent target is constructed with this tab's seams:
+      // the session id is read per submit (a reconnect mints a new
+      // session — the target must never capture against a stale one).
+      this.inputTargets = createRegistry()
+      this.inputTargets.register(this.shellTarget)
+      this.agentTarget = new AgentInputTarget({
+        dispatcher: this.client.dispatcher,
+        sessionId: () => this.session?.sessionId ?? '',
+        cwd: () => this._cwd,
+        // The ask's scope is the CHIP's block, resolved from the chip —
+        // never re-derived from DOM selection (AD-8: selection is copy;
+        // the chip is the mode). The chip's lifecycle and this seam move
+        // together: non-null exactly while the agent target is active.
+        askBlock: () => this.askBlockEl,
+        openAnswer: (question, cwd) => this.scrollback!.blockManager.addAnswerBlock(question, cwd),
+        // The no-endpoint refusal is visible in the product, never only in
+        // a log (AGENTS.md: a soft degrade the UI contradicts is how a
+        // feature that does not exist survives a release).
+        onRefusal: (message) => showToast({ level: 'warning', message }),
+      })
+      this.inputTargets.register(this.agentTarget)
+
       this.editor = new CommandEditor(
         {
           // The resolve half of ADR-0021, BEFORE the atomic handoff: a line
@@ -799,6 +852,19 @@ export class TerminalContent extends BaseTabContent {
             })
           },
           submit: (doc: string, plan?: SubmitPlan) => {
+            // Routing, ADR-0004 §3: the registry decides where the document
+            // goes. A QUESTION is not a command — the shell orchestration
+            // below (keyboard handoff, ledger record, running block,
+            // lifecycle attempt) belongs to the shell target only. The
+            // agent target owns its whole flow (frame mint, ask, answer
+            // block), so the handoff never runs for it: the grid keeps its
+            // keys, the flow gains no phantom running block, and no
+            // attempt is opened for prose (nocx-x8s2.2).
+            const active = this.inputTargets!.active()
+            if (!active.routesToShell) {
+              void active.submit(doc, { targetId: active.id })
+              return
+            }
             // The atomic handoff transfers input ownership to the grid at
             // the moment the editor gives it up — not when the running fact
             // lands (an RPC round trip later). The editor already hid itself
@@ -844,7 +910,9 @@ export class TerminalContent extends BaseTabContent {
               try {
                 submitCommand(doc, {
                   focusGrid: () => this.takeKeyboardToGrid(),
-                  sendDoc: (d) => void this.shellTarget!.submit(d),
+                  sendDoc: (d) => {
+                    void active.submit(d, { targetId: active.id })
+                  },
                 })
               } finally {
                 // In a `finally`, and fail-open: a write that threw sent
@@ -2362,6 +2430,67 @@ export class TerminalContent extends BaseTabContent {
     }
   }
 
+  /** The explicit agent-mode transition (ADR-0004 §3: mode selection is
+   *  explicit, never inferred from another gesture). The surface owner that
+   *  makes the ask visible — the panel/region gesture (nocx-ckth/7ul8) —
+   *  calls this; nothing in this slice activates the agent target on its
+   *  own. With the agent target active, a submitted document routes to
+   *  agent.ask; anything else routes to the shell. */
+  setAgentMode(active: boolean): void {
+    if (!this.inputTargets) return
+    this.inputTargets.setActive(active ? 'agent' : 'shell')
+  }
+
+  /** The ask affordance's one primary action (the block's Ask button): raise
+   *  the chip naming the block, anchor the block visually (programmatic
+   *  non-toggle select — selection is a consequence of activation, never its
+   *  cause, AD-8), switch the input target to the agent, and put agent.status
+   *  on the surface. The chip's presence IS the mode: activating a second
+   *  block moves the chip — one mode, one scope. */
+  private activateAsk(blockEl: HTMLElement): void {
+    if (this.askReceipt && this.askBlockEl !== blockEl) {
+      this.askReceipt.destroy()
+      this.askReceipt = null
+    }
+    if (this.askReceipt) return // already active on this block
+    this.askBlockEl = blockEl
+    this.scrollback?.blockManager.selectBlock(blockEl)
+    const receipt = BlockReceipt.forAsk(blockCommandText(blockEl), {
+      // The chip is non-modal and the editor usually holds focus; Ask
+      // returns it there after the mouse wandered (copying elsewhere).
+      onAsk: () => this.editor?.focus(),
+      onDismiss: () => this.dismissAsk(),
+    })
+    this.askReceipt = receipt
+    receipt.mount(blockEl)
+    this.setAgentMode(true)
+    this.editor?.focus()
+    void this.refreshAskStatus(receipt)
+  }
+
+  /** Done on the chip (or a `clear` that took its block): unmount the chip
+   *  and return the input target to the shell. */
+  private dismissAsk(): void {
+    this.askReceipt?.destroy()
+    this.askReceipt = null
+    this.askBlockEl = null
+    this.setAgentMode(false)
+  }
+
+  /** agent.status on the ask surface: a degrade is a visible sentence in
+   *  the chip, never only in a log line. The sentence mapping is the ONE
+   *  derivation (agentStatusLine), shared with the endpoints section; a
+   *  healthy state shows nothing (the chip's presence is the indicator). */
+  private async refreshAskStatus(receipt: BlockReceipt): Promise<void> {
+    try {
+      const st = await new AgentClient(this.client.dispatcher).status()
+      const line = agentStatusLine(st)
+      if (line && line.tone !== 'success') receipt.setStatus(line.tone, line.text)
+    } catch {
+      receipt.setStatus('warning', 'Assistant status unavailable')
+    }
+  }
+
   dispose(): void {
     this._disposed = true
     this.mountAbortController?.abort()
@@ -2388,6 +2517,7 @@ export class TerminalContent extends BaseTabContent {
     this.recall = null
     this.scrollback?.dispose()
     this.destroyReceipt()
+    this.dismissAsk()
     this.promptVault?.destroy()
     this.promptVault = null
     this.completion?.destroy()

@@ -261,3 +261,69 @@ describe('forConnection variant (nocx-pu4.7)', () => {
     container.remove()
   })
 })
+
+describe('forAsk variant (nocx-x8s2.2)', () => {
+  it('renders the ask chip: Ask badge, the block command as value, no name field', () => {
+    const receipt = BlockReceipt.forAsk('ls -la', { onAsk: () => {}, onDismiss: () => {} })
+    const root = receipt.root
+    expect(root.dataset.variant).toBe('ask')
+    expect(root.getAttribute('aria-label')).toBe('ask about this block')
+
+    expect(root.querySelector<HTMLElement>('.ui-block-receipt__kind')?.textContent).toBe('Ask')
+    expect(root.querySelector<HTMLElement>('.ui-block-receipt__kind')?.dataset.tone).toBe('info')
+    expect(root.querySelector<HTMLElement>('.ui-block-receipt__value')?.textContent).toBe('ls -la')
+    // A question has nothing to name — no editable field in the row.
+    expect(root.querySelector('.ui-text-field__input')).toBeNull()
+
+    expect(root.querySelector<HTMLButtonElement>('.ui-block-receipt__primary')?.textContent).toBe(
+      'Ask',
+    )
+    const done = root.querySelector<HTMLButtonElement>('.ui-block-receipt__drop')
+    expect(done?.textContent).toBe('Done')
+    expect(done?.getAttribute('aria-label')).toBe('stop asking and return to the shell')
+  })
+
+  it('the primary action proceeds (onAsk); Done dismisses (onDismiss)', () => {
+    const onAsk = vi.fn()
+    const onDismiss = vi.fn()
+    const receipt = BlockReceipt.forAsk('git log', { onAsk, onDismiss })
+    const root = receipt.root
+
+    root.querySelector<HTMLButtonElement>('.ui-block-receipt__primary')?.click()
+    expect(onAsk).toHaveBeenCalledTimes(1)
+    expect(onDismiss).not.toHaveBeenCalled()
+
+    root.querySelector<HTMLButtonElement>('.ui-block-receipt__drop')?.click()
+    expect(onDismiss).toHaveBeenCalledTimes(1)
+  })
+
+  it('setStatus renders the readiness line as the kit badge, and replaces it', () => {
+    const receipt = BlockReceipt.forAsk('ls', { onAsk: () => {}, onDismiss: () => {} })
+    receipt.setStatus('warning', 'Credential unavailable — the vault may be locked')
+    const status = receipt.root.querySelector<HTMLElement>('.ui-block-receipt__status')
+    expect(status).not.toBeNull()
+    const badge = status?.querySelector<HTMLElement>('.ui-badge')
+    expect(badge?.dataset.tone).toBe('warning')
+    expect(badge?.textContent).toBe('Credential unavailable — the vault may be locked')
+
+    receipt.setStatus('neutral', 'No endpoint configured yet')
+    const badge2 = receipt.root.querySelector<HTMLElement>('.ui-block-receipt__status .ui-badge')
+    expect(badge2?.dataset.tone).toBe('neutral')
+    expect(badge2?.textContent).toBe('No endpoint configured yet')
+  })
+
+  it('does not steal focus when mounted', () => {
+    const container = document.createElement('div')
+    const input = document.createElement('input')
+    container.appendChild(input)
+    document.body.appendChild(container)
+    input.focus()
+
+    const receipt = BlockReceipt.forAsk('ls', { onAsk: () => {}, onDismiss: () => {} })
+    receipt.mount(container)
+    expect(document.activeElement).toBe(input)
+
+    receipt.destroy()
+    container.remove()
+  })
+})

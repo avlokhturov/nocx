@@ -26,9 +26,9 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// Client is the app-facing surface of the assistant engine. The only
-// consumer today is the endpoint form's Test button (nocx-edio); the ask
-// transaction (nocx-f4s5) will call the same seam when it lands.
+// Client is the app-facing surface of the assistant engine. Consumers: the
+// endpoint form's Test button (Probe, nocx-edio) and the ask transaction
+// (Ask, nocx-x8s2.2 — the run f4s5 prepares is driven here).
 type Client interface {
 	// Probe streams one real response from the given endpoint configuration
 	// — the Test button's whole meaning: it probes what will actually be
@@ -41,7 +41,50 @@ type Client interface {
 	// error means the probe could not run at all (a parameter the engine
 	// refuses), and no result is produced.
 	Probe(ctx context.Context, p ProbeParams) (ProbeResult, error)
+	// Ask streams the model's answer to the given messages (the ask
+	// transaction's explain-mode run, design §4.2). onDelta is called for
+	// every content chunk, in order; returning an error from onDelta ABORTS
+	// the stream — the caller's write was refused, and the run must
+	// terminalize rather than wedge (the probe's write-only callback cannot
+	// say that, which is why this one can). Ask returns nil when the answer
+	// was received in full, a *StreamError when the model or the transport
+	// failed mid-stream (or the stream produced no text), and any other Go
+	// error when the ask could not run at all.
+	Ask(ctx context.Context, p AskParams, onDelta func(string) error) error
 }
+
+// Message is one turn of the conversation, in this package's own
+// vocabulary — never eino's schema.Message (ADR-0028: the rest of the app
+// depends on Client, never on eino types; the engine maps at the seam).
+type Message struct {
+	Role    string // "user" | "assistant" | "system"
+	Content string
+}
+
+// AskParams is one ask's model call: the resolved endpoint's facts plus the
+// conversation context (question + referenced frames, design §4.2).
+type AskParams struct {
+	// Key is the endpoint's resolved credential. Never persisted, never
+	// echoed; it lives only in the model config for the call's duration.
+	Key credential.Secret
+	// BaseURL is the endpoint's base URL, validated at dial time.
+	BaseURL string
+	// Model is the model id the run resolved to.
+	Model string
+	// Messages is the assembled context: the system rule (frame content is
+	// data, not instructions — design §6.2), the question, and the
+	// referenced frames' text as labelled data.
+	Messages []Message
+}
+
+// StreamError is a model-stream failure the transport terminalizes the run
+// with: Message is a sentence a person reads (design §7's agent.runState
+// error), never a Go error string.
+type StreamError struct {
+	Message string
+}
+
+func (e *StreamError) Error() string { return e.Message }
 
 // ProbeParams is the draft endpoint configuration the Test button probes:
 // what the form shows, not what the store holds.

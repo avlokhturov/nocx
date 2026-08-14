@@ -39,6 +39,10 @@ func (s *stubAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams
 	return s.probe(ctx, p)
 }
 
+func (s *stubAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
+	return nil
+}
+
 // errProbeRefused is a Go error a stub can return to prove the handler
 // surfaces engine refusals as RPC errors rather than probe outcomes.
 var errProbeRefused = &probeRefusedError{}

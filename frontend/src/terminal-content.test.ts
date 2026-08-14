@@ -58,6 +58,8 @@ import { CommandSnapshotStore } from './command-snapshot'
 import type { DesiredMode } from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
+import { _resetThemeState } from './renderers/theme-adapter'
+import { BufferLine } from './scrollback/test-helpers'
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
 // The shared fixture mock implements the full TerminalRenderer surface,
@@ -3346,6 +3348,233 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
       expect(cardIn(second.tab)).toBeNull()
     } finally {
       second.teardown()
+    }
+  })
+})
+// ───────────────────────────────────────────────────────────────────────────
+// The ask activation seam (nocx-x8s2.2): a person reaches the model from a
+// frozen block. Activation is the block's Ask affordance — never selection
+// (AD-8: selection is copy; the chip is the mode). While the chip is mounted
+// the registry's active target is the agent: a submitted question routes to
+// agent.captureFrame + agent.ask about THE CHIP'S block, and nothing shell
+// runs for it (no pty bytes, no ledger record, no running block, no
+// attempt). Dismissing returns the target to shell. With no endpoint
+// configured the chip says so from agent.status — on the surface, never only
+// in a log. These tests drive the REAL chain: real TerminalContent, real
+// controller, real BlockManager freeze (so the block carries the real Ask
+// affordance), real editor submit.
+describe('the ask activation seam (nocx-x8s2.2)', () => {
+  /** A client whose dispatcher answers the agent.* transaction, records
+   *  EVERY dispatcher call (so the test can assert a lifecycle attempt was
+   *  never opened for a question), and keeps the default resolve for
+   *  lifecycle.submitAttempt so a shell submit proceeds normally. */
+  function agentDispatcher(
+    status: {
+      endpointConfigured?: boolean
+      credentialResolvable?: boolean
+    } = {},
+  ) {
+    const client = makeClient()
+    const dispatcherCalls: Array<{ method: string; params: unknown }> = []
+    client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
+      dispatcherCalls.push({ method, params })
+      if (method === 'agent.captureFrame') {
+        return Promise.resolve({ frameId: 'frame-1' })
+      }
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 7, answerEntryId: 'entry-7' })
+      }
+      if (method === 'agent.status') {
+        return Promise.resolve({
+          endpointConfigured: status.endpointConfigured ?? true,
+          credentialResolvable: status.credentialResolvable ?? true,
+          lastProbe: null,
+        })
+      }
+      // lifecycle.submitAttempt and anything else the shell path opens.
+      return Promise.resolve({
+        id: 'att-0',
+        domain: 'd1',
+        state: 'open',
+        command: '',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+    })
+    return { client, dispatcherCalls }
+  }
+
+  /** A frozen command block through the REAL manager chain — the manager's
+   *  Ask wiring (terminal-content → controller → BlockManager) is exactly
+   *  what the affordance carries. */
+  function frozenBlockOf(
+    content: TerminalContent,
+    command = 'ls',
+    output = ['total 12', 'docs'],
+  ): HTMLElement {
+    const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+    const manager = scrollback.blockManager
+    manager.startBlock(command, '~', 0)
+    const lines = output.map((t) => new BufferLine(t))
+    const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
+    expect(frozen).not.toBeNull()
+    return frozen!.el
+  }
+
+  function askOf(block: HTMLElement): HTMLElement {
+    const ask = block.querySelector<HTMLElement>('.cmd-ask-btn')
+    expect(ask).not.toBeNull()
+    return ask!
+  }
+
+  function submitInEditor(ed: CommandEditor, text: string): void {
+    ed.show()
+    ed.insertText(text)
+    viewOf(ed).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+  }
+
+  /** The recorded params of one dispatcher call, narrowed to an object —
+   *  the assertions below read only fields the REAL AgentInputTarget put
+   *  there (this test drives it end to end), so the check is shape-level,
+   *  never a fabricated inline type. */
+  function recordedParams(
+    calls: Array<{ method: string; params: unknown }>,
+    method: string,
+  ): Record<string, unknown> {
+    const call = calls.find((c) => c.method === method)
+    if (!call || typeof call.params !== 'object' || call.params === null) {
+      throw new Error(`ask-seam: expected a recorded ${method} call`)
+    }
+    return call.params as Record<string, unknown>
+  }
+
+  it('activation raises a chip naming the block; a question goes to the model about THAT block and nothing shell runs', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      const block = frozenBlockOf(content)
+      askOf(block).click()
+
+      // The chip names the block, mounted in the block, before any question
+      // is sent — and activation anchored the block visually (selection is
+      // a consequence of activation, never its cause).
+      const chip = block.querySelector('.ui-block-receipt[data-variant="ask"]')
+      expect(chip).not.toBeNull()
+      expect(chip!.querySelector('.ui-block-receipt__value')?.textContent).toBe('ls')
+      expect(block.classList.contains('cmd-block-selected')).toBe(true)
+
+      const sentBefore = sessionOf(content).send.mock.calls.length
+      submitInEditor(ed, 'what does docs mean?')
+
+      // The question crossed the control plane as the ONE transaction:
+      // captureFrame (the frame carrying THIS block's output, source=frozen)
+      // then ask (the question, referencing that frame).
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.some((c) => c.method === 'agent.captureFrame')).toBe(true)
+        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
+      })
+      const frame = recordedParams(dispatcherCalls, 'agent.captureFrame')
+      expect(frame.source).toBe('frozen')
+      expect(frame.rows).toEqual([
+        { kind: 'text', text: 'total 12' },
+        { kind: 'text', text: 'docs' },
+      ])
+      const ask = recordedParams(dispatcherCalls, 'agent.ask')
+      expect(ask.question).toBe('what does docs mean?')
+      expect(ask.references).toMatchObject([{ frameId: 'frame-1' }])
+
+      // Nothing shell ran for the question: no pty bytes, no lifecycle
+      // attempt, no running block, no ledger touch.
+      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore)
+      expect(dispatcherCalls.find((c) => c.method === 'lifecycle.submitAttempt')).toBeUndefined()
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      expect(scrollback.blockManager.runningBlock).toBeNull()
+      expect(scrollback.scrollbackInner.querySelector('.cmd-block-running')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('dismissing the chip returns the target to shell', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      const block = frozenBlockOf(content)
+      askOf(block).click()
+      expect(block.querySelector('.ui-block-receipt[data-variant="ask"]')).not.toBeNull()
+
+      block.querySelector<HTMLElement>('.ui-block-receipt__drop')!.click()
+      expect(block.querySelector('.ui-block-receipt')).toBeNull()
+
+      // The next submit is the ordinary shell flow again: bytes to the pty
+      // (paste + '\r') and a running block — the question path is gone.
+      const sentBefore = sessionOf(content).send.mock.calls.length
+      submitInEditor(ed, 'echo back')
+      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      expect(scrollback.blockManager.runningBlock).not.toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('activating a second block moves the chip — one mode, one scope, and the payload follows it', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      const first = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      const second = frozenBlockOf(content, 'git log', ['commit abc', 'fix thing'])
+      askOf(first).click()
+      expect(first.querySelector('.ui-block-receipt')).not.toBeNull()
+      askOf(second).click()
+
+      // One chip: it moved to the newly activated block.
+      expect(first.querySelector('.ui-block-receipt')).toBeNull()
+      expect(second.querySelector('.ui-block-receipt')).not.toBeNull()
+      expect(second.querySelector('.ui-block-receipt__value')?.textContent).toBe('git log')
+      expect(scrollback.blockManager.selectedBlockId).toBe(
+        scrollback.blockManager.blocks.find((b) => b.el === second)?.id ?? null,
+      )
+
+      submitInEditor(ed, 'what did it fix?')
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.some((c) => c.method === 'agent.captureFrame')).toBe(true)
+      })
+      const frame = dispatcherCalls.find((c) => c.method === 'agent.captureFrame')!.params as {
+        rows: Array<{ text: string }>
+      }
+      expect(frame.rows.map((r) => r.text)).toEqual(['commit abc', 'fix thing'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with no endpoint configured, the chip says so from agent.status — on the surface', async () => {
+    const { client } = agentDispatcher({ endpointConfigured: false })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      const block = frozenBlockOf(content)
+      askOf(block).click()
+      await vi.waitFor(() => {
+        const status = block.querySelector('.ui-block-receipt__status')
+        expect(status?.textContent).toContain('No endpoint configured yet')
+      })
+    } finally {
+      teardown()
     }
   })
 })
