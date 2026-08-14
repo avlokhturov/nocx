@@ -28,14 +28,13 @@ import { createSubmitGate } from './ui/submit-gate'
 import { showToast } from './ui/toast'
 import { log } from './log'
 import type { AgentClient } from './agent'
-import { agentStatusLine } from './agent-status-line'
 // The probe result shape is declared once in endpoints.probe.schema.json and
 // INLINED by agent.status.schema.json's cross-file ref, so the generated
 // agent.status.ts exports both AgentStatusResult and its own copy of
 // EndpointsProbeResult. This module consumes the latter (the type is
 // structurally identical) so the dead-export ratchet sees every generated
 // export used — the same union trick endpoints.ts documents.
-import type { AgentStatusResult, EndpointsProbeResult } from './generated/agent.status'
+import type { EndpointsProbeResult } from './generated/agent.status'
 import { EndpointClient, type Endpoint } from './endpoints'
 import { VaultOperationCancelledError, type VaultController } from './vault'
 
@@ -65,8 +64,11 @@ const blankDraft = (): EndpointDraft => ({ name: '', baseUrl: '', key: '', model
 type LoadState = 'loading' | 'ready' | 'failed'
 export interface EndpointsSectionProps {
   client: EndpointClient
-  /** The assistant's control-plane client (nocx-edio); the status line
-   *  renders only when present. Absent in the dev-web harness. */
+  /** The assistant's control-plane client (nocx-edio). Kept because the
+   *  editor's Test button probes through the same wire the ask uses; the
+   *  page itself shows no assistant status — readiness belongs on the ask
+   *  chip, where a person is actually asking, not as a badge floating above
+   *  this page's frame. */
   agentClient?: AgentClient
   /** The vault layer's controller. A save that carries a key is minted into
    *  the vault (design §4.5.3), so it routes through the vault's own
@@ -85,10 +87,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** The endpoint being edited, or null for a new one. */
   const [editing, setEditing] = createSignal<Endpoint | null>(null)
   const [draft, setDraft] = createSignal<EndpointDraft>(blankDraft())
-  /** agent.status facts: endpoint configured, credential resolvable, last
-   *  probe — the ask surface's readiness line, shown here so a soft
-   *  degrade is visible in the product (AGENTS.md). */
-  const [agentStatus, setAgentStatus] = createSignal<AgentStatusResult | null>(null)
   /** The Test button's state: idle, running, or the probe result. */
   const [probeResult, setProbeResult] = createSignal<EndpointsProbeResult | null>(null)
   const [probing, setProbing] = createSignal(false)
@@ -113,19 +111,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       setEndpoints([])
       setLoadError(message)
       setLoadState('failed')
-    }
-  }
-
-  /** Refresh the agent.status readiness line. Best effort: a failed
-   *  status read keeps the previous line (the list itself carries the
-   *  load failure surface). */
-  async function refreshStatus() {
-    const ac = props.agentClient
-    if (!ac) return
-    try {
-      setAgentStatus(await ac.status())
-    } catch (err) {
-      log.error('Failed to read assistant status', { message: (err as Error).message })
     }
   }
 
@@ -174,13 +159,11 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       })
     } finally {
       setProbing(false)
-      void refreshStatus()
     }
   }
 
   onMount(() => {
     void load()
-    void refreshStatus()
   })
 
   // ── Draft editing ────────────────────────────────────────────────────
@@ -300,7 +283,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       }
       closeDialog()
       await load()
-      void refreshStatus()
       showToast({ level: 'success', message: `Saved "${input.name}"` })
     } catch (err) {
       // A cancelled setup/unlock is not an error: the sheet is the surface
@@ -317,7 +299,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     try {
       await props.client.deleteEndpoint(ep.id)
       await load()
-      void refreshStatus()
       showToast({ level: 'success', message: `Deleted "${ep.name}"` })
     } catch (err) {
       const message = (err as Error).message
@@ -351,12 +332,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   // ── Rows ─────────────────────────────────────────────────────────────
 
   // ── Assistant status + probe display ───────────────────────────────
-
-  /** The readiness line's tone and text, from agent.status. A soft
-   *  degrade is a visible sentence, never only a log line. The mapping is
-   *  the ONE derivation (agentStatusLine) — the ask chip renders the same
-   *  sentence, and two owners would drift (AD-8, nocx-x8s2.2). */
-  const statusLine = () => agentStatusLine(agentStatus())
 
   /** The Test button's result, from endpoints.probe. The sentence names
    *  WHICH check ran: "the endpoint is reachable" and "the model answered"
@@ -554,19 +529,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   return (
     <div class="ep-root">
-      {/* The readiness line earns its place only when it says something the
-          list cannot: a credential that will not resolve, a probe that
-          failed, a configured endpoint that is ready. With NO endpoint the
-          list already says so, in the middle of the page and with the button
-          that fixes it — a badge repeating it above the search row is a
-          second sentence for one fact, and the weaker of the two. The ask
-          chip still carries the no-endpoint sentence, because there the list
-          is not on screen and nothing else would say it. */}
-      <Show when={props.agentClient && agentStatus()?.endpointConfigured}>
-        <div class="ep-status-row">
-          <Badge tone={statusLine()?.tone ?? 'neutral'}>{statusLine()?.text ?? '…'}</Badge>
-        </div>
-      </Show>
       <CollectionView
         searchValue={searchQuery()}
         onSearch={setSearchQuery}

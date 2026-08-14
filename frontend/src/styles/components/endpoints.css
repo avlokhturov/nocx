@@ -43,16 +43,6 @@
   min-width: 0;
 }
 
-/* The assistant readiness line above the list — the kit Badge, placed. */
-/* Top padding is not decoration: with none the badge sat flush against the
-   tab strip and read as a tooltip that had come loose from it, rather than
-   as the first row of the page. */
-.ep-status-row {
-  display: flex;
-  align-items: center;
-  padding: var(--space-3) var(--space-4);
-}
-
 /* The Test button row in the editor dialog: button + spinner + result
    badge, placed side by side. The controls are the kit's. */
 .ep-test-row {

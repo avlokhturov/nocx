@@ -15,8 +15,6 @@ import { describe, it, expect, vi, afterEach, type Mock } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
-import { AgentClient } from './agent'
-import type { AgentStatusResult } from './generated/agent.status'
 import { Dispatcher, RpcError } from './dispatcher'
 import { clearToasts, toasts } from './ui'
 import { SetupDialog, createVaultState, type VaultController } from './vault'
@@ -137,23 +135,6 @@ function mount(
     () => <EndpointsSection client={harness.client} vaultController={opts?.vaultController} />,
     { container },
   )
-  return { ...harness, container }
-}
-
-/** A status-stubbing agent client: the readiness line renders only when an
- *  agent client is present, so tests that exercise it pass one. */
-function agentHarness(status: AgentStatusResult) {
-  const agentClient = new AgentClient(new Dispatcher())
-  vi.spyOn(agentClient, 'status').mockResolvedValue(status)
-  return agentClient
-}
-
-function mountWithAgent(status: AgentStatusResult, initial: Endpoint[] = []) {
-  const harness = createHarness(initial)
-  const container = document.body.appendChild(document.createElement('div'))
-  render(() => <EndpointsSection client={harness.client} agentClient={agentHarness(status)} />, {
-    container,
-  })
   return { ...harness, container }
 }
 
@@ -587,53 +568,6 @@ describe('AI endpoints surface — real surface, real client seam', () => {
 
     await vi.waitFor(() => {
       expect(dialog.textContent).toContain('Test failed: dial tcp: connection refused')
-    })
-  })
-
-  it('leaves the no-endpoint sentence to the empty state, which carries the action', async () => {
-    const { container } = mountWithAgent({
-      endpointConfigured: false,
-      credentialResolvable: false,
-      lastProbe: null,
-    })
-    await vi.waitFor(() => {
-      expect(container.textContent).toContain('No endpoints yet')
-    })
-    // One fact, one sentence: the readiness badge would only repeat what the
-    // empty state says, without the button that fixes it.
-    expect(container.querySelector('.ep-status-row')).toBeNull()
-    expect(container.textContent).not.toContain('No endpoint configured yet')
-  })
-
-  it('shows the last probe outcome in the readiness line', async () => {
-    const { container } = mountWithAgent(
-      {
-        endpointConfigured: true,
-        credentialResolvable: true,
-        lastProbe: {
-          name: 'Local',
-          model: 'qwen3',
-          kind: 'model' as const,
-          ok: true,
-          elapsedMs: 42,
-          at: new Date().toISOString(),
-        },
-      },
-      [ep({ name: 'Local', baseUrl: 'http://127.0.0.1:11434/v1' })],
-    )
-    await vi.waitFor(() => {
-      expect(container.textContent).toContain('Last test ok (qwen3)')
-    })
-  })
-
-  it('names an unresolvable credential in the readiness line', async () => {
-    const { container } = mountWithAgent({
-      endpointConfigured: true,
-      credentialResolvable: false,
-      lastProbe: null,
-    })
-    await vi.waitFor(() => {
-      expect(container.textContent).toContain('Credential unavailable')
     })
   })
 

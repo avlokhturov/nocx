@@ -74,7 +74,6 @@ const devharnessBin = () => readStand().devharness
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-settings-section-nav-item[data-section="AI Endpoints"]'
-const STATUS_ROW = '.ep-status-row'
 /** The ask chip (BlockReceipt ask variant), mounted inside its block. */
 const ASK_CHIP = '.ui-block-receipt[data-variant="ask"]'
 
@@ -227,7 +226,6 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // probe, a ready endpoint), and test 2 asserts it there.
     await openAIEndpoints(page)
     await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
-    await expect(page.locator(STATUS_ROW)).toHaveCount(0)
   })
 
   test("point at a finished block, ask, and the answer streams in naming the block's output", async ({
@@ -264,9 +262,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await dialog.locator('#endpoint-model-0-name').fill('e2e-model')
     await dialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
     await expect(dialog).not.toBeVisible({ timeout: 10_000 })
-    // The record landed; agent.status now reads endpoint configured +
-    // credential resolvable, no probe run yet → "Ready".
-    await expect(page.locator(STATUS_ROW)).toContainText('Ready', { timeout: 10_000 })
+    // The record landed and the row says so. The page deliberately shows no
+    // assistant-readiness badge: readiness belongs on the ask chip, where a
+    // person is actually asking, not floating above this page's frame.
+    await expect(page.locator('.ep-root')).toContainText('Key saved', { timeout: 10_000 })
 
     // ── Two finished blocks with output that cannot be confused ──────────
     await backToTerminal(page)
@@ -449,7 +448,6 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // a key works from here without the setup sheet.
     await openApp(page)
     await openAIEndpoints(page)
-    await expect(page.locator(STATUS_ROW)).toContainText('Ready', { timeout: 10_000 })
 
     const name = `E2E Probe ${nonce}`
     const storedKey = `stored-key-${nonce}`
