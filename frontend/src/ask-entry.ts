@@ -97,32 +97,47 @@ export function chipFingerprint(
   return `${chip.blockEl.dataset.blockId ?? 'block'}:${chip.rowStart}:${chip.rowEnd}`
 }
 
-// ── The caret indicator (ADR-0004 §3's UI chip) ────────────────────────────
+// ── The line-start indicator (ADR-0004 §3's UI chip) ───────────────────────
 
 /** Repaint signal: the registry's active target changed (or the host wants
  *  the chip re-read). */
 const refreshIndicator = StateEffect.define<null>()
 
+/** The indicator's OWN word for a target — what the person does, never the
+ *  target's internal name. InputTarget.label stays the registry's word
+ *  ('Shell'/'Agent' — other consumers may legitimately read it); this map
+ *  is the indicator's vocabulary, keyed by target id. Unknown ids fall
+ *  back to the label (a future target still gets an honest chip). */
+const TARGET_WORD: Record<string, string> = {
+  shell: 'Run',
+  agent: 'Ask',
+}
+
+function targetWord(targetId: string, label: string): string {
+  return TARGET_WORD[targetId] ?? label
+}
+
 class TargetIndicatorWidget extends WidgetType {
   constructor(
-    private readonly label: string,
+    private readonly word: string,
+    private readonly targetId: string,
     private readonly onToggle: () => void,
   ) {
     super()
   }
   /** The plugin hands the widget the indicator's stable toggle — never
-   *  per-render closures (eq() skips re-renders on label equality). */
+   *  per-render closures (eq() skips re-renders on word equality). */
   readonly toggle = (): void => this.onToggle()
   eq(other: TargetIndicatorWidget): boolean {
-    return other.label === this.label
+    return other.word === this.word
   }
   toDOM(): HTMLElement {
     const btn = document.createElement('button')
     btn.type = 'button'
     btn.className = 'nocx-chip nocx-editor-target-indicator'
-    btn.dataset.target = this.label.toLowerCase()
-    btn.setAttribute('aria-label', `Enter goes to ${this.label}. Click to switch.`)
-    btn.textContent = this.label
+    btn.dataset.target = this.targetId
+    btn.setAttribute('aria-label', `Enter goes to ${this.word}. Click to switch.`)
+    btn.textContent = this.word
     btn.addEventListener('click', (e) => {
       // The chip is a control, not a caret placement: never let the click
       // also move the caret into the text at its position.
@@ -134,31 +149,35 @@ class TargetIndicatorWidget extends WidgetType {
   }
 }
 
-function indicatorDecorations(view: EditorView, box: TargetIndicator): DecorationSet {
-  const sel = view.state.selection.main
-  // A real selection in the draft hides the chip: it is a CARET indicator,
-  // and inside a selection there is no single caret to sit beside.
-  if (!sel.empty) return Decoration.none
+function indicatorDecorations(box: TargetIndicator): DecorationSet {
   return Decoration.set([
     Decoration.widget({
-      widget: new TargetIndicatorWidget(box.label, box.toggle),
-      // Immediately LEFT of the cursor: side -1 renders the widget before
-      // the caret at its own position (the ghost text uses the default
-      // side, after the caret — the two never collide).
+      widget: new TargetIndicatorWidget(box.word, box.targetId, box.toggle),
+      // LEFT OF THE LINE, never left of the caret (nocx-4wtlh, owner's
+      // correction after living with it): position 0 with side -1 is a
+      // stable prefix token, the way a prompt sigil sits. A token that
+      // followed sel.head travelled through the text on every keystroke,
+      // pushed the line around, and had to be re-found after each one —
+      // the flicker this design exists to avoid. It stays put.
       side: -1,
-    }).range(sel.head, sel.head),
+    }).range(0, 0),
   ])
 }
 
 /**
- * The caret indicator: renders the active input target's label in the input
- * line, immediately left of the cursor, and toggles the target on click.
- * The host owns the label's truth — it wires the registry's active target
- * and pushes every change through set(). The editor stays passive; this is
- * a decoration, never a second input owner.
+ * The line-start indicator: a stable prefix token in the input line
+ * rendering what the ACTIVE target does — `Run` for the shell, `Ask` for
+ * the assistant — and toggling the target on click. The host wires the
+ * registry's active target and pushes every change through set(); the word
+ * is this module's own mapping (targetWord), never a rename of the target.
+ * The editor stays passive; this is a decoration, never a second input
+ * owner.
  */
 export class TargetIndicator {
-  label = 'Shell'
+  /** The word currently rendered, for the plugin's decorations. */
+  word = targetWord('shell', 'Shell')
+  /** The target id currently rendered (the data-target hook). */
+  targetId = 'shell'
   /** The explicit switch (ADR-0004 §3): wired once by the host; the
    *  widgets and the ⇧⌘Enter seam both end here. Reads the registry live
    *  at call time, so it never goes stale. */
@@ -181,25 +200,33 @@ export class TargetIndicator {
     this.view = view
   }
 
-  /** Repaint with the active target's label — called by the host whenever
-   *  the registry reports a change, never on any other signal. */
-  set(label: string): void {
-    if (this.label === label && this.view) return
-    this.label = label
+  /** Repaint with the registry's active target — called by the host
+   *  whenever the registry reports a change, never on any other signal.
+   *  The WORD is derived here (targetWord); the indicator never shows the
+   *  target's internal label. */
+  set(targetId: string, label: string): void {
+    const word = targetWord(targetId, label)
+    if (this.word === word && this.targetId === targetId && this.view) return
+    this.word = word
+    this.targetId = targetId
     this.view?.dispatch({ effects: refreshIndicator.of(null) })
   }
 }
 
-/** The plugin half of the indicator: a widget at the caret that follows
- *  the selection, repainted on doc/selection changes and on the refresh
- *  effect set() dispatches. */
+/** The plugin half of the indicator: a widget at the START of the line
+ *  (position 0), repainted on doc/selection changes and on the refresh
+ *  effect set() dispatches. The widget never moves with the caret or the
+ *  text — it is a sigil, not a follower. It also stays visible during a
+ *  selection: a person selecting part of their command still wants to
+ *  know where Enter goes, and a line-start token has no reason to hide
+ *  (the old caret-anchored chip hid because it sat inside the selection). */
 function indicatorPlugin(indicator: TargetIndicator): Extension {
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet
       constructor(view: EditorView) {
         indicator.attachView(view)
-        this.decorations = indicatorDecorations(view, indicator)
+        this.decorations = indicatorDecorations(indicator)
       }
       update(update: ViewUpdate): void {
         if (
@@ -207,7 +234,7 @@ function indicatorPlugin(indicator: TargetIndicator): Extension {
           update.selectionSet ||
           update.transactions.some((t) => t.effects.some((e) => e.is(refreshIndicator)))
         ) {
-          this.decorations = indicatorDecorations(update.view, indicator)
+          this.decorations = indicatorDecorations(indicator)
         }
       }
     },
