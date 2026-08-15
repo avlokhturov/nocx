@@ -115,6 +115,14 @@ export interface SettingsComponentHandle {
    * ask surface's repair for "no endpoint configured".
    */
   newEndpoint(): void
+  /**
+   * Show a component page by its registry id, with nothing else asked for —
+   * the general form of the three above, for a surface that only wants the
+   * page ("Manage snippets…", nocx-d346). An id no page carries shows the
+   * generated sections, which is where an unrouted Settings tab already
+   * lands.
+   */
+  openPage(id: string): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -695,6 +703,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setSectionFilter(null)
       setActiveComponentPage('endpoints')
       setNewEndpointRequest((n) => n + 1)
+    },
+    openPage(id: string): void {
+      // Same reason as newConnection: an active search or section filter
+      // hides the page the request is addressed to.
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage(id)
     },
     ready(): Promise<void> {
       return readyPromise

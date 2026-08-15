@@ -162,6 +162,30 @@ export class SnippetPalette {
     this.render()
     void this.deps.store.refresh()
   }
+  /** Fire ONE snippet the caller has already chosen — the toolbar menu's
+   *  path (design §10.3). It runs the palette's OWN accept path: an `ask:`
+   *  body becomes the field form in the panel, a refusal renders there and
+   *  stays, a delivered fire closes it and gives the keyboard back. The
+   *  menu therefore holds no fire logic of its own, which is the point —
+   *  a second copy would be a second owner of the same behaviour (AD-8).
+   *
+   *  No store subscription: the caller listed the library to build its menu
+   *  and the choice is already made, so nothing here re-reads it. And no
+   *  render before the choice — a body with no fields must not flash a
+   *  one-row list on its way to being delivered.
+   *
+   *  Refused while the palette is already open: two surfaces would then own
+   *  the keys, and the one the user is looking at would lose (AD-8's
+   *  working habit, "two surfaces may never own the same input"). */
+  fireChosen(container: HTMLElement, snippet: Snippet): void {
+    if (this.isOpen) return
+    this.container = container
+    this.focusBefore = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    this.panel.mount(container)
+    this.state = { name: 'list', snippets: [snippet], filter: '', selected: 0 }
+    this.choose(0, 'input')
+  }
+
   /** Close and give the keyboard back. A refusal does NOT call this — the
    *  panel stays open with the refusal in it (the acceptance criterion). */
   close(): void {

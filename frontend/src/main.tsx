@@ -67,6 +67,7 @@ import { SnippetsStore } from './snippets/snippets-store'
 import { createSessionFactsProvider } from './snippets/session-facts'
 import { createSnippetFireAdapter } from './snippets/fire'
 import { SnippetPalette } from './snippets/palette'
+import { mountSnippetsMenu } from './snippets/snippets-menu'
 
 async function main() {
   log.info('nocx: main() called')
@@ -860,9 +861,29 @@ async function main() {
   const qc = new QuickConnectController()
   qc.mount(qcContainer, qcProviders)
 
+  // The toolbar menu's two intents. Picking a row runs the PALETTE's accept
+  // path — the ask form, the refusal sentences and the focus return are all
+  // its, so this menu owns no fire logic and cannot drift from the chord's
+  // (AD-8). "Manage snippets…" opens the settings page by id, through the
+  // general opener rather than a fourth bespoke one.
+  const snippetsMenu = mountSnippetsMenu(document.body, {
+    store: snippetsStore,
+    onPick: (snippet) => {
+      const pane = tm.activePane()
+      if (pane === null) return
+      snippetPalette.fireChosen(pane, snippet)
+    },
+    onManage: () => openSettingsTab().openPage('snippets'),
+  })
+
   function wireQuickConnect(strip: typeof tabStrip) {
     strip.onQuickConnect = () => qc.show()
     strip.onInsertSecret = () => qc.showSecrets()
+    // The snippets menu (design §10.3): the library without knowing the
+    // chord. Wired HERE, in the helper every strip construction and
+    // replacement goes through — a callback set only on the first strip
+    // works until the orientation changes and then silently stops.
+    strip.onSnippets = (anchor) => snippetsMenu.openAt(anchor.x, anchor.y)
   }
   wireQuickConnect(tabStrip)
 

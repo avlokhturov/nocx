@@ -90,6 +90,11 @@ export class SettingsContent extends SolidTabContent {
       this.pendingNewEndpoint = false
       this.handle.newEndpoint()
     }
+    if (this.pendingPage !== null) {
+      const id = this.pendingPage
+      this.pendingPage = null
+      this.handle.openPage(id)
+    }
   }
 
   focus(): void {
@@ -150,9 +155,24 @@ export class SettingsContent extends SolidTabContent {
     this.pendingNewEndpoint = true
   }
 
+  /** Open a component page by its registry id — the general form of the
+   *  three starters above, for a caller that wants the page and nothing
+   *  more ("Manage snippets…", nocx-d346). Queued before mount for the same
+   *  reason they are: opening Settings and naming the page is one user
+   *  action, and the mount is a promise the caller does not hold. */
+  openPage(id: string): void {
+    if (this.handle) {
+      this.handle.openPage(id)
+      return
+    }
+    this.pendingPage = id
+  }
+
   private pendingNewConnection = false
   /** The queued request's prefilled name, or null when nothing is queued.
    *  A string (including '') means "asked"; null means "nobody asked". */
   private pendingNewSecret: string | null = null
   private pendingNewEndpoint = false
+  /** The queued page id, or null when nobody asked. */
+  private pendingPage: string | null = null
 }

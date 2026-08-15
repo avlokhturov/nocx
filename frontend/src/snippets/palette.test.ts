@@ -429,3 +429,62 @@ describe('the snippet palette (nocx-jj77)', () => {
     }
   })
 })
+
+describe('fireChosen — the accept path a second surface borrows (nocx-d346)', () => {
+  it('fires a snippet the caller already chose, through the palette, not past it', async () => {
+    const m = mount([])
+    const snippet = SNIP({ id: 'a', title: 'deploy', body: 'kubectl rollout status api' })
+
+    m.palette.fireChosen(m.pane, snippet)
+
+    await vi.waitFor(() => {
+      expect(m.fire).toHaveBeenCalledTimes(1)
+    })
+    expect(m.fire.mock.calls[0][0].snippet).toEqual(snippet)
+    expect(m.fire.mock.calls[0][0].destination).toBe('input')
+    // Delivered: the palette closed behind it. The menu's whole point is
+    // that it owns no fire logic — this is the palette's own path.
+    await vi.waitFor(() => {
+      expect(m.palette.isOpen).toBe(false)
+    })
+  })
+
+  it('a chosen snippet with ask spans opens the SAME field form, not a second one', async () => {
+    const m = mount([])
+    m.palette.fireChosen(m.pane, SNIP({ id: 'a', title: 'ssh', body: 'ssh -p {{ask:port=22}} h' }))
+
+    await vi.waitFor(() => {
+      expect(panelRoot(m).querySelectorAll('.ui-floating-panel__field')).toHaveLength(1)
+    })
+    // Nothing has been fired yet: the question comes first, exactly as it
+    // does when the row was picked in the palette's own list.
+    expect(m.fire).not.toHaveBeenCalled()
+    const input = panelRoot(m).querySelector<HTMLInputElement>('.ui-floating-panel__field input')!
+    expect(input.value).toBe('22')
+  })
+
+  it('a refusal renders in the palette and stays, the same as any other fire', async () => {
+    const fire = vi.fn().mockResolvedValue({
+      kind: 'refused',
+      reason: { kind: 'no-owner' },
+    } satisfies SnippetFireOutcome)
+    const m = mount([], { fire })
+    m.palette.fireChosen(m.pane, SNIP({ id: 'a', title: 'x', body: 'echo hi' }))
+
+    await vi.waitFor(() => {
+      expect(panelRoot(m).textContent).toContain('no terminal or editor here')
+    })
+    expect(m.palette.isOpen).toBe(true)
+  })
+
+  it('does nothing while the palette is already open — one surface owns the keys', async () => {
+    const m = mount([SNIP({ id: 'a', title: 'listed', body: 'ls' })])
+    m.palette.open(m.pane)
+    await waitRows(m.palette, 1)
+
+    m.palette.fireChosen(m.pane, SNIP({ id: 'b', title: 'other', body: 'echo other' }))
+
+    expect(m.fire).not.toHaveBeenCalled()
+    expect(rowTexts(m).join(' ')).toContain('listed')
+  })
+})
