@@ -338,15 +338,32 @@
   padding: 2px 8px 4px;
 }
 
+/* A HANGING INDENT under the target token: the token sits at the start of
+   the FIRST line, and every other line — a second document line, and a
+   wrapped continuation of any of them — starts where that line's text
+   starts, the way a shell prompt indents a continuation. Without it, line
+   two began under the token and the command read as two ragged columns.
+
+   The width is measured, never guessed: `Run` and `Ask` are different
+   widths in a proportional UI font, so the indicator's plugin publishes
+   its own rendered width (plus the buffer gap) as the custom property and
+   the fallback 0 keeps a host that never wires the token unindented. */
 .nocx-editor .cm-line {
-  padding: 0;
+  padding: 0 0 0 var(--nocx-target-token-width, 0px);
+}
+
+/* The first line is the one the token is IN: pull its own first row back
+   out of the indent so the token starts at the left edge, and let its
+   wrapped rows keep it. */
+.nocx-editor .cm-content > .cm-line:first-child {
+  text-indent: calc(-1 * var(--nocx-target-token-width, 0px));
 }
 
 /* ── The ask entry gesture (nocx-4wtlh) ────────────────────────────────
    The caret indicator — ADR-0004 §3's UI chip — is a CM6 widget in the
    input line, immediately LEFT of the cursor: the confirmation that Enter
    goes to the shell, and the person's one explicit switch (click or
-   ⇧⌘Enter). The reference chips a selection raises live in their own strip
+   ⌘/Ctrl+Enter). The reference chips a selection raises live in their own strip
    between the chrome and the input: "if you ask, this comes with you". */
 
 .nocx-editor-target-indicator {
@@ -362,14 +379,30 @@
   color: var(--color-text-muted);
   cursor: pointer;
   border: 1px solid var(--color-surface-raised);
+  /* Centred on the line, not sat on its baseline. The chip's own text is
+     smaller than the command's, so baseline alignment (the inline default)
+     put the chip's box below the line — its padding and border hang under
+     a baseline it shares with text drawn at a larger size. The token is a
+     sigil beside the line, so the line's middle is what it should meet. */
+  vertical-align: middle;
 }
 
 /* The caret's neighbour is the widget buffer, not the chip (see above):
    the gap belongs to the token, on an empty line and on a line with text
    alike. Scoped to THIS widget's trailing buffer, so other CM6 widgets
-   keep their defaults. */
+   keep their defaults.
+
+   WIDTH plus visibility:hidden, and both halves are load-bearing. The
+   buffer is an <img> with no src, so a non-zero width alone makes the
+   engine paint a broken-image placeholder — the empty square the owner
+   saw between `Run` and the command. Hiding it stops the paint and keeps
+   the box. A margin instead of the width looked identical while typing
+   and failed on an EMPTY line: CM6 measures the caret from the buffer's
+   box, and a margin is not in it, so the caret sat against the chip until
+   the first character. */
 .nocx-editor-target-indicator + .cm-widgetBuffer {
   width: 6px;
+  visibility: hidden;
 }
 
 .nocx-editor-target-indicator:hover {
@@ -704,6 +737,64 @@
   min-width: 44px;
 }
 
+/* The ask kind's in-progress chip. The pulse is its NEIGHBOUR, not its
+   content — the same arrangement a running command's header has, where the
+   dot is bare in the chip row and the chip beside it carries the text. The
+   chip never wraps or clips its own word. */
+.cmd-answer-waiting {
+  white-space: nowrap;
+}
+
+/* The answer body's stand-in while the model has not sent anything yet:
+   three dots where the first words will appear. It is the same report as
+   the header chip, in the place the person is already looking — an empty
+   body under a finished question reads as a product that did nothing.
+   Replaced by the text at the first delta. */
+.cmd-answer-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+}
+
+.cmd-answer-typing i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  opacity: 0.4;
+}
+
+/* Staggered, so the three dots read as one travelling wave rather than
+   three things blinking. Motion is opt-out, like the header pulse: with
+   reduced motion the dots stay, still and dim — the report survives, only
+   the animation goes. */
+@media (prefers-reduced-motion: no-preference) {
+  .cmd-answer-typing i {
+    animation: cmd-answer-typing-pulse 1.2s ease-in-out infinite;
+  }
+
+  .cmd-answer-typing i:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+
+  .cmd-answer-typing i:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+}
+
+@keyframes cmd-answer-typing-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
 .cmd-output {
   padding: 2px 0 6px 0;
   font-family: var(--font-family-mono);
@@ -773,6 +864,27 @@
    answer too). The ask kind reaches it through the fence, never by
    accident (nocx-ex636). */
 .cmd-output-code {
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* The SETTING's default for a command block (terminal.wrapOutput, default
+   on): the root carries the decision, applied by output-wrap.ts from the
+   settings snapshot, and every block nobody has touched follows it.
+
+   `:not([data-wrap])` is what keeps the two apart: a block with the ⋮
+   override carries the attribute and is excluded here, so the override and
+   the default never fight over the cascade — they address disjoint sets.
+   Command output only: an answer is prose and wraps whatever the setting
+   says (prose in a horizontal scrollbar is a defect, not a preference), and
+   a fenced code block keeps its alignment (nocx-juau). */
+:root[data-output-wrap='on'] .cmd-block[data-block-kind='command']:not([data-wrap]) .cmd-output {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-x: visible;
+}
+
+:root[data-output-wrap='off'] .cmd-block[data-block-kind='command']:not([data-wrap]) .cmd-output {
   white-space: pre;
   overflow-x: auto;
 }

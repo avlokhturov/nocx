@@ -144,12 +144,16 @@ describe('the Ask token owns its trailing gap (nocx-ex636)', () => {
   it('the gap sits on the caret neighbour, CM6 zero-width widget buffer, not on the chip margin', () => {
     // CM6 draws an <img class="cm-widgetBuffer"> after an uneditable inline
     // widget and the caret sits against THAT; the chip's own margin never
-    // reached the caret. The scoped rule gives the buffer the width.
+    // reached the caret. The scoped rule gives the buffer the WIDTH — the
+    // caret is measured from that box, and a margin left the caret against
+    // the chip on an empty line — and hides the element, because the buffer
+    // has no src and a sized <img> paints a broken-image placeholder.
     const bufferRule = RULES.find((r) =>
       r.selectors.includes('.nocx-editor-target-indicator + .cm-widgetBuffer'),
     )
     expect(bufferRule).toBeDefined()
     expect(bufferRule!.body).toMatch(/width\s*:\s*6px/)
+    expect(bufferRule!.body).toMatch(/visibility\s*:\s*hidden/)
   })
 
   it('the indicator declares no trailing margin of its own, so the gap has one owner', () => {

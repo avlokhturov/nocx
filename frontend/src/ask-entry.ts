@@ -4,7 +4,7 @@
 // The rule the whole gesture stands on: NOTHING but the person changes where
 // Enter goes. The indicator is the ADR-0004 §3 "UI chip" — the active
 // target, rendered in the input line immediately left of the cursor. It is
-// operable (click, and the ⇧⌘Enter chord) because the ADR requires an
+// operable (click, and the ⌘/Ctrl+Enter chord) because the ADR requires an
 // explicit switch, but in ordinary use nobody operates it: it is the
 // confirmation that Enter goes to the shell.
 //
@@ -179,7 +179,7 @@ export class TargetIndicator {
   /** The target id currently rendered (the data-target hook). */
   targetId = 'shell'
   /** The explicit switch (ADR-0004 §3): wired once by the host; the
-   *  widgets and the ⇧⌘Enter seam both end here. Reads the registry live
+   *  widgets and the ⌘/Ctrl+Enter seam both end here. Reads the registry live
    *  at call time, so it never goes stale. */
   readonly toggle: () => void
   private view: EditorView | null = null
@@ -224,9 +224,10 @@ function indicatorPlugin(indicator: TargetIndicator): Extension {
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet
-      constructor(view: EditorView) {
+      constructor(private readonly view: EditorView) {
         indicator.attachView(view)
         this.decorations = indicatorDecorations(indicator)
+        this.publishWidth()
       }
       update(update: ViewUpdate): void {
         if (
@@ -235,7 +236,31 @@ function indicatorPlugin(indicator: TargetIndicator): Extension {
           update.transactions.some((t) => t.effects.some((e) => e.is(refreshIndicator)))
         ) {
           this.decorations = indicatorDecorations(indicator)
+          this.publishWidth()
         }
+      }
+      /** Publish the token's RENDERED width for the hanging indent every
+       *  other line hangs on (style.css, `.cm-line`). It is measured, not
+       *  assumed: the word changes with the target (`Run` / `Ask`) in a
+       *  proportional font, so a constant would misalign the continuation
+       *  lines the moment somebody switched. Through requestMeasure, so
+       *  the read never lands mid-write. */
+      private publishWidth(): void {
+        this.view.requestMeasure({
+          read: (view) => {
+            const btn = view.contentDOM.querySelector<HTMLElement>('.nocx-editor-target-indicator')
+            if (!btn) return 0
+            // The trailing gap belongs to the token as much as the chip
+            // does: the caret sits after the buffer, so the text on every
+            // other line must line up with the caret, not with the chip's
+            // border.
+            const buffer = btn.nextElementSibling as HTMLElement | null
+            return btn.offsetWidth + (buffer?.offsetWidth ?? 0)
+          },
+          write: (width, view) => {
+            view.dom.style.setProperty('--nocx-target-token-width', `${width}px`)
+          },
+        })
       }
     },
     { decorations: (v) => v.decorations },

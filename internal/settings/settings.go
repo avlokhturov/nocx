@@ -659,6 +659,24 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// OutputWrap is the DEFAULT wrap for a command block's output. The per-block
+// ⋮ menu override (nocx-ex636) stays what it always was — the exception the
+// kind cannot know about — and a block somebody has overridden ignores this
+// value entirely; this decides what an untouched block does.
+//
+// It governs command output only, which is the one kind with a genuine
+// choice: an answer is prose and a horizontal scrollbar under prose is a
+// defect rather than a preference, and a fenced code block keeps its
+// alignment (nocx-juau) either way.
+var OutputWrap = MustRegisterBool(BoolSpec{
+	Key:         "terminal.wrapOutput",
+	Section:     "Interface",
+	Label:       "Wrap long output lines",
+	Description: "Wrap a command's output at the width of the block instead of scrolling it sideways. Any block can be switched the other way from its own ⋮ menu; this is what a block does until you do.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
+
 // UITheme controls which colour theme the UI and terminals use.
 // The frontend resolves it to a theme file matching the id; adding a new theme
 // requires a new theme CSS file and an option here.
