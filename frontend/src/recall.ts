@@ -815,8 +815,11 @@ export class RecallOverlay {
     this.announceDocContent(entry.command, entry.redactions ?? [])
     this.editor.focus()
   }
-  /** Esc: restore the draft, the selection and the scroll position exactly. */
-  private dismiss(): void {
+  /** Esc: restore the draft, the selection and the scroll position exactly.
+   *  Public because a host surface that takes over the keys (the snippet
+   *  palette's chord, terminal-content's handleSnippetChord) must be able
+   *  to close recall the same way Esc does — the surfaces never stack. */
+  dismiss(): void {
     const s = this.state
     if (s.name === 'closed') return
     if (s.name === 'loading' || s.name === 'opened' || s.name === 'navigating') {

@@ -59,6 +59,7 @@ import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
+import { isSnippetChord } from './snippets/chord'
 import {
   BaseTabContent,
   type TabHost,
@@ -215,6 +216,11 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+  /** The snippet palette chord (⌥⌘P) was pressed in this pane — from the
+   *  xterm boundary or from the editor's arbiter, both of which close this
+   *  pane's own surfaces and then delegate here. The composition root
+   *  opens the palette (design §10.1); one opener, two boundaries (AD-8). */
+  onSnippetChord?: () => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -540,6 +546,17 @@ export class TerminalContent extends BaseTabContent {
       host: this._host || null,
     }
   }
+
+  /** The active pane's raw env-view facts for the snippet provider (design
+   *  §7.4): cwd, host and user of the ACTIVE domain, with the view's ''
+   *  unknown-marker left intact — session-facts.ts maps that marker to
+   *  null at its own boundary, the last one before a substitution. Null
+   *  when no session owns the pane. Read at FIRE time: the provider is
+   *  handed the pane, never a captured snapshot (bead nocx-jj77). */
+  snippetEnv(): { cwd: string; host: string; user: string } | null {
+    if (this.session === null || this._sessionExited) return null
+    return { cwd: this._cwd, host: this._host, user: this._user }
+  }
   /** Push the composed title to the host: program title, else the cwd label. */
   private pushTitle(): void {
     if (!this.host) return
@@ -699,6 +716,12 @@ export class TerminalContent extends BaseTabContent {
 
       log.info('nocx: creating renderer')
       const renderer = new XtermRenderer()
+
+      // The snippet palette chord (⌥⌘P) at the xterm boundary: the renderer
+      // consumes it before xterm encodes it (zero bytes to the pty) and
+      // delegates here — the same handler the editor's arbiter calls, so
+      // both keyboard paths reach the ONE opener (design §10.1, AD-8).
+      renderer.onSnippetChord?.(() => this.handleSnippetChord())
 
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
@@ -1080,6 +1103,24 @@ export class TerminalContent extends BaseTabContent {
         // evaluation order is the accident that reads as ownership unless
         // the decision is stated. The gate is checked BEFORE any field is
         // built: with tracing off, a keystroke costs nothing but the check.
+        // The snippet palette chord (⌥⌘P, snippets/chord.ts) opens the
+        // palette from anywhere in the editor, exactly like recall's
+        // shortcut: checked BEFORE the surfaces so it cannot be swallowed
+        // by one of them, and opening it closes them — the palette owns
+        // the keys now (the surfaces never stack). Both keyboard paths
+        // (this arbiter and the xterm boundary) land in handleSnippetChord,
+        // which delegates to the composition root's ONE opener.
+        if (isSnippetChord(e)) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'snippet-palette',
+              key: keyLabel(e),
+              why: 'the snippet chord opens the palette',
+            })
+          }
+          this.handleSnippetChord()
+          return true
+        }
         // Recall first: the shortcut opens it from anywhere, and an open
         // recall owns its keys. Opening it closes the other surfaces.
         const recallWasOpen = this.recall!.isOpen
@@ -2213,6 +2254,19 @@ export class TerminalContent extends BaseTabContent {
   switchToTerminalInput(): void {
     if (this.nativeMode) return
     this.enterNativeMode()
+  }
+
+  /** The snippet palette chord fired in this pane — from the xterm
+   *  boundary or the editor's arbiter. Both paths close the pane's own
+   *  floating surfaces first (the palette owns the keys once it opens;
+   *  the surfaces never stack), then delegate to the composition root's
+   *  ONE opener (AD-8 — a second opener would be a second owner of the
+   *  chord). */
+  private handleSnippetChord(): void {
+    this.completion?.dismiss()
+    this.promptVault?.closePicker()
+    this.recall?.dismiss()
+    this.hooks.onSnippetChord?.()
   }
 
   /** Switch back to the nocx command editor (nocx-atyf.5). Only works when

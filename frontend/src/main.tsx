@@ -58,6 +58,11 @@ import {
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
+import { SnippetsClient } from './snippets/snippets-client'
+import { SnippetsStore } from './snippets/snippets-store'
+import { createSessionFactsProvider } from './snippets/session-facts'
+import { createSnippetFireAdapter } from './snippets/fire'
+import { SnippetPalette } from './snippets/palette'
 
 async function main() {
   log.info('nocx: main() called')
@@ -432,6 +437,49 @@ async function main() {
     store: gitStore,
     activeOrigin,
   })
+
+  // ── Snippets: the palette (design §10.1) ─────────────────────────────
+  // One store, every surface reads it (design §6: no change notification —
+  // a writer re-reads). The palette is the keyboard surface that answers
+  // when there is no command editor; the fire adapter is where the
+  // design's fire-time rules live.
+  const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
+  // The pane's facts are read AT FIRE TIME, never when the palette opened
+  // (design §8, bead nocx-jj77): the provider reads the ACTIVE pane on
+  // every call, so a tab switch between choosing a snippet and confirming
+  // targets the pane in front (design §9.5).
+  const snippetFacts = createSessionFactsProvider(
+    {
+      paneFacts: () => {
+        const content = tm.activeTerminalContent()
+        if (content === null) return null
+        const env = content.snippetEnv()
+        if (env === null) return null
+        return {
+          cwd: env.cwd,
+          host: env.host,
+          user: env.user,
+          // The git panel's live binding for the active origin — the only
+          // owner of a binding; the provider never invents an id to ask
+          // with (session-facts.ts).
+          gitBindingId: gitStore.binding()?.bindingId ?? null,
+        }
+      },
+    },
+    { status: (bindingId) => gitServices.status(bindingId) },
+  )
+  const snippetFire = createSnippetFireAdapter({
+    facts: () => snippetFacts.facts(),
+    activeInsert: () => {
+      const content = tm.activeTerminalContent()
+      return content === null ? null : { insertSnippet: (t) => content.insertSnippet(t) }
+    },
+    clipboard: { writeText: (text) => clipboard.writeText(text) },
+  })
+  const snippetPalette = new SnippetPalette({
+    store: snippetsStore,
+    fire: snippetFire,
+  })
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -784,6 +832,17 @@ async function main() {
     strip.onInsertSecret = () => qc.showSecrets()
   }
   wireQuickConnect(tabStrip)
+
+  // The snippet palette chord (⌥⌘P, snippets/chord.ts) — ONE opener, wired
+  // here, reached from both keyboard boundaries (the xterm custom key
+  // handler and the editor's arbiter chain), which both delegate through
+  // the pane's TerminalContent (AD-8). The chord is consumed at the xterm
+  // boundary, so zero bytes reach the pty (design §10.1, bead nocx-jj77).
+  tm.onSnippetChord = () => {
+    const pane = tm.activePane()
+    if (pane === null) return
+    void snippetPalette.open(pane)
+  }
 
   // Cmd/Ctrl+Shift+P opens the PALETTE (nocx-4t37): commands and hosts
   // mixed, each row typed on the right; target-needing commands drill in.

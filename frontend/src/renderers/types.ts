@@ -161,6 +161,14 @@ export interface TerminalRenderer {
    *  decide whether a multi-line body may be pasted (design §9.4). */
   bracketedPasteActive(): boolean
 
+  /** Register the snippet-palette chord (⌥⌘P) handler. The renderer's
+   *  custom key handler sees the chord BEFORE xterm encodes it, calls this
+   *  callback and returns false — the chord is consumed at the xterm
+   *  boundary and zero bytes reach the pty (design §10.1, bead nocx-jj77).
+   *  Optional so a renderer that does not parse chords degrades to the
+   *  editor-arbiter path only. */
+  onSnippetChord?(cb: (() => void) | null): void
+
   // refreshAtlas is called when the renderer becomes visible after being
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
   // while hidden; this gives the renderer a chance to clear and repaint.

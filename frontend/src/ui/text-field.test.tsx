@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
-import { TextField, type TextFieldProps } from './text-field'
+import { TextField, createTextFieldInput, type TextFieldProps } from './text-field'
 
 afterEach(() => cleanup())
 
@@ -279,5 +279,29 @@ describe('composition with Field', () => {
     const label = container.querySelector('label')
     expect(label?.getAttribute('for')).toBe('cred-y')
     expect(label?.textContent?.trim()).toBe('Name')
+  })
+})
+
+describe('createTextFieldInput (the vanilla focusable half, nocx-jj77)', () => {
+  it('emits a focusable input with the kit identity and the given value/placeholder/label', () => {
+    const input = createTextFieldInput({
+      value: '8080',
+      placeholder: 'filter snippets',
+      ariaLabel: 'the port',
+    })
+    expect(input.tagName).toBe('INPUT')
+    expect(input.type).toBe('text')
+    expect(input.className).toBe('ui-text-field__input')
+    expect(input.value).toBe('8080')
+    expect(input.placeholder).toBe('filter snippets')
+    expect(input.getAttribute('aria-label')).toBe('the port')
+  })
+
+  it('fires onInput on every keystroke with the new value', () => {
+    const onInput = vi.fn()
+    const input = createTextFieldInput({ onInput })
+    input.value = 'deploy'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(onInput).toHaveBeenCalledWith('deploy')
   })
 })

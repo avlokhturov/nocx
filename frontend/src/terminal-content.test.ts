@@ -94,6 +94,13 @@ const rendererOf = (content: TerminalContent): RendererMock => {
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
 
+/** The live recall overlay behind TerminalContent's private field — the
+ *  same escape hatch editorOf uses. */
+const recallOf = (content: TerminalContent): { isOpen: boolean } => {
+  const withRecall = content as unknown as { recall: { isOpen: boolean } }
+  return withRecall.recall
+}
+
 /** The editor's internal CM6 view — reached only to seed selections. */
 const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
@@ -1132,6 +1139,96 @@ describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
       })
       expect(session.send.mock.calls.length).toBe(sentBefore)
     } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the snippet palette chord (nocx-jj77)', () => {
+  /** Dispatch a keydown exactly where a user's keystroke lands. */
+  const key = (view: EditorView, init: KeyboardEventInit): void => {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+    )
+  }
+  const CHORD = { key: 'p', code: 'KeyP', altKey: true, metaKey: true }
+
+  it('the editor arbiter delegates the chord to the ONE opener (hooks.onSnippetChord)', async () => {
+    const onSnippetChord = vi.fn()
+    const { view, teardown } = await mountTerminal(makeClipboard(), { hooks: { onSnippetChord } })
+    try {
+      key(view, CHORD)
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+      // The neighbouring chord (⌥⌘O) is NOT the snippet chord: the arbiter
+      // lets it fall through to the editor.
+      key(view, { key: 'o', code: 'KeyO', altKey: true, metaKey: true })
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the xterm boundary (the renderer chord registration) delegates to the SAME opener', async () => {
+    const onSnippetChord = vi.fn()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      hooks: { onSnippetChord },
+    })
+    try {
+      rendererOf(content)._fireSnippetChord()
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("the chord closes the pane's own floating surfaces before opening the palette", async () => {
+    const onSnippetChord = vi.fn()
+    const { content, ed, teardown } = await mountTerminal(makeClipboard(), {
+      hooks: { onSnippetChord },
+      attachToDocument: true,
+    })
+    try {
+      ed.show()
+      // Open recall over the editor, then press the chord: recall must be
+      // dismissed (the surfaces never stack) before the opener runs.
+      const recall = recallOf(content)
+      ed.insertText('ssh')
+      // The recall shortcut opens it.
+      const view = viewOf(ed)
+      key(view, { key: 'r', metaKey: true })
+      expect(recall.isOpen).toBe(true)
+      key(view, CHORD)
+      expect(recall.isOpen).toBe(false)
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the snippet env view (nocx-jj77)', () => {
+  it("exposes the active domain's raw cwd/host/user, or null with no session", async () => {
+    const { content, teardown } = await mountTerminal()
+    try {
+      const env = content.snippetEnv()
+      expect(env).not.toBeNull()
+      expect(env!.cwd).toBe(FIXTURE_CWD)
+      expect(typeof env!.host).toBe('string')
+      expect(typeof env!.user).toBe('string')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('answers null when no session owns the pane', async () => {
+    const { content, teardown } = await mountTerminal()
+    const withSession = content as unknown as { session: SessionFake | null }
+    const original = withSession.session
+    withSession.session = null
+    try {
+      expect(content.snippetEnv()).toBeNull()
+    } finally {
+      withSession.session = original
       teardown()
     }
   })

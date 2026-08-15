@@ -2,7 +2,12 @@ export { Button, type ButtonProps } from './button'
 export { Checkbox, type CheckboxProps } from './checkbox'
 export { IconButton, type IconButtonSize } from './icon-button'
 export { Select, type SelectProps, type SelectOption } from './select'
-export { TextField, type TextFieldProps } from './text-field'
+export {
+  TextField,
+  createTextFieldInput,
+  type TextFieldProps,
+  type CreateTextFieldInputOptions,
+} from './text-field'
 export {
   SearchField,
   createSearchFieldDisplay,

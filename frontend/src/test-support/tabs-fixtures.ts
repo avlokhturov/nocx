@@ -47,6 +47,12 @@ export interface RendererMock extends TerminalRenderer {
   /** The mock's bracketed-paste-mode answer is a spy: tests flip mode 2004
    *  on and off. */
   bracketedPasteActive: Mock<() => boolean>
+  /** The snippet-palette chord handler — stored, so a test can fire it the
+   *  way xterm's custom key handler would. */
+  onSnippetChord: Mock<(cb: (() => void) | null) => void>
+  /** Fire the registered snippet chord handler (the xterm boundary's
+   *  delegation). */
+  _fireSnippetChord(): void
   _cbs: {
     onData?: DataCallback
     onResize?: ResizeCallback
@@ -86,6 +92,7 @@ export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
   const recoverySubs: Array<(hex: string) => void> = []
   const fenceSubs: Array<(ev: RenderFenceEvent) => void> = []
+  let snippetChordCb: (() => void) | null = null
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -140,6 +147,9 @@ export function createRendererMock(): RendererMock {
     // Mode 2004 off by default — a test that wants bracketed paste on
     // flips it with mockReturnValue(true) on this same vi.fn.
     bracketedPasteActive: vi.fn(() => false),
+    onSnippetChord: vi.fn((cb: (() => void) | null) => {
+      snippetChordCb = cb
+    }),
     setReadOnly: vi.fn(),
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
@@ -202,6 +212,11 @@ export function createRendererMock(): RendererMock {
      *  cares asserts on setReadOnly instead. */
     _fireData(data: string) {
       cbs.onData?.(data)
+    },
+    /** Fire the snippet-palette chord the way xterm's custom key handler
+     *  does when ⌥⌘P is pressed in the terminal (nocx-jj77). */
+    _fireSnippetChord() {
+      snippetChordCb?.()
     },
   }
   return mock as unknown as RendererMock
