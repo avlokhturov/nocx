@@ -97,11 +97,11 @@ type openHandlers struct {
 // request id serves as the correlation-id — we do NOT add a second
 // correlationId field, because two correlation identifiers for one exchange
 // is redundant state with two owners.
-func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	var params openParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 
@@ -147,7 +147,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 				// credentials and jump hosts through the profile resolver.
 				if _, ok := h.resolver.get(); !ok {
 					resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
-					_ = respond(wconn, resp)
+					_ = respond(r, resp)
 					return nil
 				}
 
@@ -157,7 +157,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 					h.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
 					// Resolving reads the stored password, so a sealed vault surfaces
 					// here — the renderer needs the reason to offer an unlock.
-					_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
+					_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
 					return nil
 				}
 
@@ -188,7 +188,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 				// the config file — no stored profile involved.
 				if h.sshCfg == nil {
 					resp := newJSONRPCError(req.ID, -32603, "SSH config resolver not available")
-					_ = respond(wconn, resp)
+					_ = respond(r, resp)
 					return nil
 				}
 
@@ -233,7 +233,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 				// does not record it.
 			} else {
 				resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
-				_ = respond(wconn, resp)
+				_ = respond(r, resp)
 				return nil
 			}
 			// Shell pin (nocx-pu4.1): the open may name the far shell the
@@ -267,7 +267,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		if capability.IsRefused(err) {
 			var rej *capability.RefusedError
 			errors.As(err, &rej)
-			_ = wconn.TryError(req.ID, saturationRPCError(&rej.Rejection))
+			_ = r.TryError(req.ID, saturationRPCError(&rej.Rejection))
 			return
 		}
 		h.log.Error("failed to open session", "error", err)
@@ -276,7 +276,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		// so the vault-owned unlock prompt appears instead of an error
 		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
 		if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
-			_ = wconn.TryError(req.ID, rpcErrorFor(-32603, "", err))
+			_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
 			return
 		}
 		// Classify the SSH error through the same taxonomy the probe uses
@@ -296,7 +296,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		if hk := hostKeyInfoFromError(err); hk != nil {
 			resp.Error.Data = hk
 		}
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 	if !opened {
@@ -314,7 +314,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 			return svc.Close(sess.ID())
 		})
 		resp := newJSONRPCError(req.ID, -32603, "Internal error: server shutting down")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 	rx.setSubscriber(wconn, state)
@@ -355,7 +355,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
-	_ = respond(wconn, resp)
+	_ = respond(r, resp)
 
 	// The session's integration axis, AFTER the ack. AD-7: the ack must
 	// precede the session's own traffic in both directions, and the launch
@@ -555,11 +555,11 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 // Unknown sessionId → JSON-RPC error.
 // Offset ahead of written → JSON-RPC error (DEFECT 4).
 // Duplicate attach on the same connection → JSON-RPC error (DEFECT 3).
-func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	var params attachParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId and offset required")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 
@@ -568,14 +568,14 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 	op, err := h.ops.ForSession(sid)
 	if err != nil {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(wconn, resp)
+		_ = respond(r, resp)
 		return
 	}
 	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
@@ -585,14 +585,14 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		// another ringToConn, doubling every output byte for that subscriber.
 		if state.has(sid) {
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: already attached to this session")
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
 		rx := h.machine.getRx(sid)
 		if rx == nil {
 			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
@@ -604,7 +604,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		w := rx.ring.writtenLocked()
 		if params.Offset > w {
 			resp := newJSONRPCError(req.ID, -32602, fmt.Sprintf("Invalid params: offset %d exceeds written %d", params.Offset, w))
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 			return nil
 		}
 
@@ -616,11 +616,11 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		if needsReset {
 			respJSON, _ := json.Marshal(map[string]any{"reset": true, "from": from})
 			resp := newJSONRPCResult(req.ID, respJSON)
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 		} else {
 			respJSON, _ := json.Marshal(map[string]any{"resumed": true, "from": from})
 			resp := newJSONRPCResult(req.ID, respJSON)
-			_ = respond(wconn, resp)
+			_ = respond(r, resp)
 		}
 
 		// Files (fm-w8): deliver the dirty paths the session's bindings
@@ -719,23 +719,23 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	// with the saturation contract like any admission-backed method.
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
-		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState) handlerFunc {
+		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, log: s.log}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, state, req) }
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
-		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
+		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		}),
-		reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
+		reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: w, machine: s}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, state, req) }
+		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
 		}),
-		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState) handlerFunc {
+		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := ackHandler{machine: s, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }
 		}),

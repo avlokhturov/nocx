@@ -3371,7 +3371,7 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
   function agentDispatcher(
     status: {
       endpointConfigured?: boolean
-      credentialResolvable?: boolean
+      credential?: ('resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable') | null
     } = {},
   ) {
     const client = makeClient()
@@ -3391,7 +3391,7 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
       if (method === 'agent.status') {
         return Promise.resolve({
           endpointConfigured: status.endpointConfigured ?? true,
-          credentialResolvable: status.credentialResolvable ?? true,
+          credential: status.credential ?? 'resolvable',
           lastProbe: null,
         })
       }

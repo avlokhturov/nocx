@@ -64,28 +64,71 @@ whoever already has the vault.
 ## Consequences
 
 - The seam is the DISPATCHER, as `nocx-y7fg` named it: a call that fails for
-  want of an unsealed vault raises the prompt and is replayed. That is the same
+  want of an unsealed vault raises the prompt and is replayed. It is the same
   one place every control request already passes through — `connMethods` in
   `internal/transport/registration.go`, where the params middleware landed
-  today (`3b47ae3`). One wrapper decides validation; the same wrapper is where
-  "this call needed the vault" belongs.
-- The vault gains a requester seam at the composition root, wired once, instead
-  of once per consumer. `connection.WithUnlockRequester` comes off the resolver.
-- Cancellation is part of the contract, not an afterthought: a dismissed unlock
-  must reach the caller as a distinct, recognisable refusal — the shape
-  `VaultOperationCancelledError` already has on the renderer side — so a person
-  who chose not to unlock is never shown a failure they did not cause.
-- Re-entrancy has to be answered: several requests may reach a sealed vault at
-  once and must not raise several dialogs. One unlock in flight, and everyone
-  waiting on it resumes from the same resolution.
-- Deadlock has to be answered: the resolution arrives over the same socket the
-  read loop consumes, which is _why_ `vault.unlockResolved` is ingress-critical.
-  A blocking unlock must never be reachable from the read loop itself.
+  (`3b47ae3`). The wrapper normalizes any sealed-vault failure into the
+  canonical shape (code `-32001`, reason `vault-sealed`) — recognized by the
+  canonical shape or by the vault's own words in the message, so a handler
+  never has to remember which one it used. A method written next year that
+  returns a bare sealed error still fires the seam.
+- The REPLAY OWNER is the renderer's dispatcher
+  (`frontend/src/dispatcher.ts`): on seeing the canonical reason it raises
+  the unlock dialog — the vault layer owns the prompt, one dialog coalescing
+  concurrent sealed calls — and re-sends the request verbatim. The re-sent
+  request is a fresh submission, so the operation's gates and lane permit,
+  released when the failed attempt returned, are free for it: the call
+  completes. Two single owners, nothing per call site.
+- **Why the backend cannot be the replay owner.** The first draft put the
+  replay here, in the dispatcher: catch the sealed error, call
+  `RequestUnlock`, block for the resolution, re-run the handler. It cannot
+  work, and the reason is the admission model, not the read loop. A handler
+  emits its sealed error from INSIDE the capability operation's callback
+  (`h.op.Run(ctx, cb)`, where the callback writes `h.r.TryError`) — the error
+  is the callback's answer, not its return. `op.Run` holds the operation's
+  composite admission (the conflict gates and the lane permit) for the whole
+  callback, so a synchronous re-run of the handler inside the unwinding
+  `TryError` re-acquires an admission the first attempt still holds: measured
+  as "Control plane busy" on `vault.inventory`, `vault.resolveLine` and
+  `profiles.importTabby`. Re-submitting the replay through the method's own
+  submission works only for the ordered submissions; a bounded-lane method
+  refuses the second task while the first still holds its permit (the lane is
+  non-waiting by design, ADR-0026). The renderer's re-send has neither
+  problem because it is a genuinely new request with no first attempt holding
+  anything. The decision was made deliberately, not discovered in review:
+  "Stop and ask me if the deadlock constraint and the replay requirement turn
+  out to conflict" — they did not conflict with the read loop, they conflicted
+  with the admission model, and the owner chose the renderer as the replay
+  owner.
+- `connection.WithUnlockRequester` comes off the resolver. A sealed vault is a
+  sealed-vault failure that propagates to the handler that surfaced it; there
+  is no per-consumer prompting left anywhere in the backend.
+- Cancellation is part of the contract, not an afterthought: a dismissed
+  unlock reaches the caller as a distinct, recognisable refusal — the shape
+  `VaultOperationCancelledError` already has on the renderer side — so a
+  person who chose not to unlock is never shown a failure they did not cause.
+  With the renderer as the replay owner this falls out of the existing dialog
+  machinery; nothing on the backend blocks, so the backend never has to
+  describe a cancel.
+- Re-entrancy is answered by the renderer: several requests may reach a
+  sealed vault at once and must not raise several dialogs. One dialog in
+  flight, and everyone waiting resumes from the same resolution — the vault
+  layer coalesces on one promise.
+- Deadlock is answered structurally: the backend never blocks on an unlock —
+  the normalization is a pure rewrite, safe on the read loop — and the closed
+  ingress-critical set is untouched: `vault.unlockResolved` and
+  `connections.passwordResolved` still run inline on the read loop, so a
+  resolution never waits behind the lane. The rule is not weakened; nothing
+  new can block the read loop.
 - "The vault may be locked" stops being a product sentence in most places. It
   survives only where a status is genuinely being _reported_ rather than a
-  secret being _fetched_ — and `agent.status` must then stop saying it for the
-  two other cases it currently covers (no reference at all, secret deleted),
-  which are not about the vault being locked.
+  secret being _fetched_: `agent.status` carries a single `credential` enum —
+  `resolvable` / `none` (no reference at all) / `deleted` (the secret is
+  gone) / `sealed` (the vault cannot answer right now) / `unavailable` — and
+  each fact gets its own sentence in `agentStatusLine`. An endpoint with no
+  key is not told to unlock a vault. A status read on a sealed vault never
+  raises the prompt: `credentialStateFor` swallows the sealed condition to
+  report it, and the no-prompt boundary is asserted by test.
 
 ## Alternatives considered
 

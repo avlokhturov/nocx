@@ -323,9 +323,9 @@ type lifecycleSubmitAttemptResult struct {
 // lane must be registered to a session THIS connection opened or reattached
 // to. This is a mutating call, and it must not be addressable by a domain
 // id guessed from another session.
-func (s *WSServer) handleLifecycleSubmitAttempt(wconn *wsConn, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleLifecycleSubmitAttempt(r Responder, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
+		_ = r.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
 	}
 	var params submitAttemptParams
@@ -333,27 +333,27 @@ func (s *WSServer) handleLifecycleSubmitAttempt(wconn *wsConn, state *connState,
 		// An empty command is a bare newline, not an execution: it never
 		// opens an attempt (an unstarted attempt would hold the domain
 		// and poison the next attach).
-		_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
 		return
 	}
 	dom, ok := s.lifecyclePub.Domain(lifecycle.DomainID(params.Domain))
 	if !ok {
-		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
 	s.lifecycleMu.Lock()
 	sid, registered := s.lifecycleLanes[dom.Lane]
 	s.lifecycleMu.Unlock()
 	if !registered || !state.has(sid) {
-		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
 	att, err := s.lifecyclePub.SubmitAttempt(lifecycle.DomainID(params.Domain), params.Command, params.Cwd, params.Host)
 	if err != nil {
-		_ = wconn.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
+		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
 		return
 	}
-	_ = wconn.TryResult(req.ID, mustMarshal(lifecycleSubmitAttemptResult{
+	_ = r.TryResult(req.ID, mustMarshal(lifecycleSubmitAttemptResult{
 		ID:        string(att.ID),
 		Domain:    string(att.Domain),
 		State:     lifecyclepub.AttemptOpen,
@@ -417,14 +417,14 @@ func lifecycleSubmitErrorCode(err error) int {
 func (s *WSServer) lifecycleSpecs() []methodSpec {
 	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
 	return []methodSpec{
-		reg(sub, "lifecycle.submitAttempt", params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(w, state, req) }
+		reg(sub, "lifecycle.submitAttempt", params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(r, state, req) }
 		}),
-		reg(sub, "lifecycle.recoverAck", params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(w, state, req) }
+		reg(sub, "lifecycle.recoverAck", params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(r, state, req) }
 		}),
-		reg(sub, "lifecycle.establishAck", params(validateLifecycleEstablishAckRaw), func(w *wsConn, state *connState) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, state, req) }
+		reg(sub, "lifecycle.establishAck", params(validateLifecycleEstablishAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleEstablishAck(w, r, state, req) }
 		}),
 	}
 }

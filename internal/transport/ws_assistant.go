@@ -14,6 +14,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 	"unicode/utf8"
@@ -22,16 +23,37 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // agentStatusResult is the agent.status wire shape, pinned by
 // contracts/agent.status.schema.json. lastProbe is required on the wire and
-// null when none has run — a nil pointer marshals to null.
+// null when none has run — a nil pointer marshals to null. credential names
+// which of the credential facts is true (design §7, ADR-0032): one
+// authoritative enum, never a boolean that hides the reason. It is null only
+// when no endpoint is configured (there is nothing to ask about).
+//
+// The three facts the product distinguishes are 'none' (the endpoint has no
+// reference at all), 'deleted' (the referenced secret is gone) and 'sealed'
+// (the vault cannot answer right now) — each gets its own sentence in
+// agentStatusLine instead of all three reading "the vault may be locked".
+// 'unavailable' is the honest fallback for a store failure that is none of
+// those (a provider hiccup): it is never mislabelled as one of the three.
 type agentStatusResult struct {
-	EndpointConfigured   bool                   `json:"endpointConfigured"`
-	CredentialResolvable bool                   `json:"credentialResolvable"`
-	LastProbe            *assistant.ProbeResult `json:"lastProbe"`
+	EndpointConfigured bool                   `json:"endpointConfigured"`
+	Credential         *string                `json:"credential"`
+	LastProbe          *assistant.ProbeResult `json:"lastProbe"`
 }
+
+// The credential enum: the wire's single vocabulary for "can the ask
+// authenticate", and the reason when it cannot.
+const (
+	credResolvable  = "resolvable"
+	credNone        = "none"
+	credDeleted     = "deleted"
+	credSealed      = "sealed"
+	credUnavailable = "unavailable"
+)
 
 // endpointProbeParams are the form's DRAFT values (design §4.5) plus the
 // endpoint id when the form is editing a SAVED endpoint. The key is an
@@ -90,12 +112,39 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 			return err
 		}
 		res.EndpointConfigured = len(eps) > 0
+		if !res.EndpointConfigured {
+			return nil // credential stays null: nothing to ask about
+		}
+		// One resolvable endpoint is enough to ask. When none resolves, the
+		// reason is the most actionable one present: a sealed vault
+		// outranks the rest (the ask surface's whole point is to offer the
+		// unlock), then the first endpoint's own fact.
+		resolved := false
+		sealed := false
+		firstOther := ""
 		for _, ep := range eps {
-			if h.credentialResolvableFor(ctx, ep.CredentialRef) {
-				res.CredentialResolvable = true
-				break
+			st := h.credentialStateFor(ctx, ep.CredentialRef)
+			switch st {
+			case credResolvable:
+				resolved = true
+			case credSealed:
+				sealed = true
+			default:
+				if firstOther == "" {
+					firstOther = st
+				}
 			}
 		}
+		cred := credResolvable
+		if !resolved {
+			switch {
+			case sealed:
+				cred = credSealed
+			case firstOther != "":
+				cred = firstOther
+			}
+		}
+		res.Credential = &cred
 		return nil
 	})
 	if err != nil {
@@ -105,19 +154,35 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 	_ = h.r.TryResult(req.ID, mustMarshal(res))
 }
 
-// credentialResolvableFor answers whether the vault can currently resolve
-// ref: the secret exists and is readable. A sealed vault, a deleted secret
-// or a missing key all answer false — the product says so instead of
-// offering an ask that cannot authenticate.
-func (h assistantStatusHandlers) credentialResolvableFor(ctx context.Context, ref string) bool {
+// credentialStateFor classifies one endpoint's credential reference into the
+// wire's facts: 'resolvable' when the vault answers, 'none' when the
+// endpoint has no reference (or no store is wired), 'deleted' when the
+// referenced secret is gone, 'sealed' when the vault cannot answer right
+// now, and 'unavailable' for a store failure that is none of those — it is
+// never mislabelled as one of the three.
+//
+// This is a read that REPORTS: it swallows the sealed condition instead of
+// surfacing it, so agent.status never raises the unlock prompt while
+// somebody is looking at a settings page (asserted by assertNoPendingAsk).
+func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref string) string {
 	if ref == "" || h.secrets == nil {
-		return false
+		return credNone
 	}
 	secret, err := h.secrets.Get(ctx, credential.SecretID(ref))
 	if err != nil {
-		return false
+		switch {
+		case errors.Is(err, vault.ErrVaultSealed):
+			return credSealed
+		case errors.Is(err, vault.ErrSecretNotFound):
+			return credDeleted
+		default:
+			return credUnavailable
+		}
 	}
-	return !secret.IsEmpty()
+	if secret.IsEmpty() {
+		return credDeleted
+	}
+	return credResolvable
 }
 
 // assistantProbeHandlers answers endpoints.probe: probe the form's draft
@@ -221,12 +286,26 @@ func (h assistantProbeHandlers) resolveProbeCredential(ctx context.Context, para
 		return credential.Secret{}, nil, nil
 	}
 	if h.secrets == nil {
-		// No store to resolve with: the same refused result as a sealed
-		// vault — the probe must not dial without the credential.
+		// No store to resolve with: the probe must not dial without the
+		// credential (a no-key dial would 401 and lie about a working
+		// endpoint). This is a build-configuration state, not the sealed
+		// vault, so it stays a refused result with the honest sentence.
 		return credential.Secret{}, refusedProbeResult(params), nil
 	}
 	secret, err := h.secrets.Get(ctx, credential.SecretID(ref))
-	if err != nil || secret.IsEmpty() {
+	if err != nil {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			// The vault is sealed: this is a sealed-vault failure. The
+			// dispatcher's seam normalizes it to the canonical error, the
+			// renderer raises the unlock and re-sends the probe — the call
+			// completes once the vault answers (ADR-0032). Never a probe
+			// RESULT naming the sealed state: that was the dead end this
+			// bead exists to delete.
+			return credential.Secret{}, nil, vault.ErrVaultSealed
+		}
+		return credential.Secret{}, refusedProbeResult(params), nil
+	}
+	if secret.IsEmpty() {
 		return credential.Secret{}, refusedProbeResult(params), nil
 	}
 	return secret, nil, nil
@@ -332,11 +411,12 @@ func hasControlChars(s string) bool {
 	return false
 }
 
-// refusedProbeResult is the sealed-or-unavailable-vault probe verdict: a
-// probe RESULT naming the state, never a Go error and never a no-key dial
-// (which would 401 and lie about a working endpoint). The sentence matches
-// the ask path's terminalize (ws_agent.go) — one owner of "the vault is
-// unavailable" for a named credential.
+// refusedProbeResult is the unavailable-credential probe verdict: a probe
+// RESULT naming the state, never a Go error and never a no-key dial (which
+// would 401 and lie about a working endpoint). It covers the record whose
+// credential cannot be resolved — deleted, empty, or a store failure —
+// NOT the sealed vault, which is a sealed-vault failure normalized by the
+// dispatcher seam into the canonical error (ADR-0032).
 func refusedProbeResult(params endpointProbeParams) *assistant.ProbeResult {
 	kind := assistant.ProbeModel
 	if params.Model == "" {
@@ -347,7 +427,7 @@ func refusedProbeResult(params endpointProbeParams) *assistant.ProbeResult {
 		Model:        params.Model,
 		Kind:         kind,
 		OK:           false,
-		Error:        "the endpoint's credential is unavailable — unlock the vault",
+		Error:        "the endpoint's credential is unavailable",
 		At:           time.Now(),
 	}
 }

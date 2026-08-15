@@ -61,12 +61,6 @@ type App struct {
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
 
-	// UnlockRequester lets backend code request a vault unlock from the
-	// user (the second direction, nocx-25k9.22). Behind an interface so
-	// app.New() never reaches into the transport directly (AD-8). Set
-	// from the transport after construction.
-	UnlockRequester transport.UnlockRequester
-
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
@@ -768,8 +762,8 @@ func New(opts ...Option) (*App, error) {
 
 	// One resolver, one consumer family: connections.test probes and
 	// ordinary connects resolve identically. Created after tp so the
-	// UnlockRequester (the second direction, nocx-25k9.22) can be wired
-	// into every ConnectConfig the resolver builds.
+	// connection-password ask (the second direction, nocx-v64o) can be
+	// wired into every ConnectConfig the resolver builds.
 	//
 	// The SFTP carrier (nocx-mlm7 P8) is wired here and nowhere else: the
 	// same shellintegration.Impl the in-band bootstrap uses satisfies
@@ -826,7 +820,6 @@ func New(opts ...Option) (*App, error) {
 	resolver := connection.NewResolver(
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
-		connection.WithUnlockRequester(tp.RequestUnlock),
 		connection.WithPasswordAsker(tp.RequestConnectionPassword),
 		connection.WithSecretCreator(v),
 		connection.WithRemoteInstaller(shint),
@@ -843,7 +836,6 @@ func New(opts ...Option) (*App, error) {
 		vaultCloser:      v,
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
-		UnlockRequester:  tp,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,

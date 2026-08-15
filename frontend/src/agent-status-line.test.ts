@@ -9,7 +9,7 @@ import type { AgentStatusResult } from './generated/agent.status'
 
 const ready: AgentStatusResult = {
   endpointConfigured: true,
-  credentialResolvable: true,
+  credential: 'resolvable',
   lastProbe: null,
 }
 
@@ -25,10 +25,31 @@ describe('agentStatusLine', () => {
     })
   })
 
-  it('an unresolvable credential says the vault may be locked', () => {
-    expect(agentStatusLine({ ...ready, credentialResolvable: false })).toEqual({
+  it('a sealed vault is one fact: the unlock offer, not a generic sentence', () => {
+    expect(agentStatusLine({ ...ready, credential: 'sealed' })).toEqual({
       tone: 'warning',
-      text: 'Credential unavailable — the vault may be locked',
+      text: 'The vault is locked — unlock it to use the assistant',
+    })
+  })
+
+  it('a deleted key is another fact: never told to unlock a vault', () => {
+    expect(agentStatusLine({ ...ready, credential: 'deleted' })).toEqual({
+      tone: 'warning',
+      text: "The endpoint's key was deleted — add it again",
+    })
+  })
+
+  it('no reference at all is a third fact', () => {
+    expect(agentStatusLine({ ...ready, credential: 'none' })).toEqual({
+      tone: 'warning',
+      text: 'The endpoint has no key yet',
+    })
+  })
+
+  it('a store failure is its own honest sentence, not one of the three', () => {
+    expect(agentStatusLine({ ...ready, credential: 'unavailable' })).toEqual({
+      tone: 'warning',
+      text: 'The credential is unavailable right now',
     })
   })
 

@@ -31,7 +31,7 @@ func TestBuildMethodSpecs_RefusesAMethodWithNoValidator(t *testing.T) {
 	specs := []methodSpec{{
 		method:     "example.method",
 		submission: control.ImmediateSubmission{},
-		build: func(*wsConn, *connState) handlerFunc {
+		build: func(_ *wsConn, _ *connState, r Responder) handlerFunc {
 			return func(context.Context, jsonrpcRequest) {}
 		},
 		// validate deliberately absent — this is the whole test.

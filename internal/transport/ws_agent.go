@@ -35,6 +35,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // ── ingress bounds (design §7: "this domain validates params and bounds
@@ -426,11 +427,17 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	}
 
 	// The endpoint's credential, resolved at stream time — the vault may
-	// have sealed since the ask was recorded.
+	// have sealed since the ask was recorded. A sealed vault gets its own
+	// sentence (the offer, not a dead end); a missing secret gets the
+	// missing-secret sentence. They are not the same fact, and the
+	// conflation was the thing ADR-0032 deleted everywhere else.
 	secret, err := h.credentials.Get(ctx, credential.SecretID(rc.endpoint.CredentialRef))
 	if err != nil || secret.IsEmpty() {
-		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
-			"the endpoint's credential is unavailable — unlock the vault", r)
+		sentence := "the endpoint's credential is missing"
+		if errors.Is(err, vault.ErrVaultSealed) {
+			sentence = "the vault is locked — unlock it and ask again"
+		}
+		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed, sentence, r)
 		return
 	}
 
@@ -772,20 +779,20 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
 	}
-	build := func(w *wsConn, state *connState) agentHandlers {
+	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
 		return agentHandlers{
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
-			log: s.log, state: state, clientID: tabID(w), r: w,
+			log: s.log, state: state, clientID: tabID(w), r: r,
 		}
 	}
 	return []methodSpec{
-		reg(contentSub, "agent.captureFrame", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
-			h := build(w, state)
+		reg(contentSub, "agent.captureFrame", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureFrame(ctx, req) }
 		}),
-		reg(contentSub, "agent.ask", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState) handlerFunc {
-			h := build(w, state)
+		reg(contentSub, "agent.ask", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }
 		}),
 	}

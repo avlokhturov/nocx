@@ -1,9 +1,14 @@
 // THE derivation of "agent.status → readiness sentence" (AD-8: one owner
-// per behaviour — the owner is whoever already has it). The endpoints
-// section and the ask chip both render this; a second inline mapping would
-// be two derivations that agree everywhere and disagree somewhere they did
-// not check. The sentences are the product's words, unchanged from the
-// endpoints section's original inline version (nocx-x8s2.2 extracted it).
+// per behaviour — the owner is whoever already has it). The ask chip
+// renders this; a second inline mapping would be two derivations that agree
+// everywhere and disagree somewhere they did not check. The sentences are
+// the product's words.
+//
+// The credential fact is an enum, not a boolean (ADR-0032): 'none' (no
+// reference at all), 'deleted' (the secret is gone) and 'sealed' (the vault
+// cannot answer right now) each get their own sentence. An endpoint with no
+// key is not told to unlock a vault — that was the three-facts conflation
+// this mapping exists to prevent.
 import type { AgentStatusResult } from './generated/agent.status'
 
 export interface AgentStatusLine {
@@ -20,8 +25,15 @@ export function agentStatusLine(st: AgentStatusResult | null): AgentStatusLine |
   if (!st.endpointConfigured) {
     return { tone: 'neutral', text: 'No endpoint configured yet' }
   }
-  if (!st.credentialResolvable) {
-    return { tone: 'warning', text: 'Credential unavailable — the vault may be locked' }
+  switch (st.credential) {
+    case 'sealed':
+      return { tone: 'warning', text: 'The vault is locked — unlock it to use the assistant' }
+    case 'deleted':
+      return { tone: 'warning', text: "The endpoint's key was deleted — add it again" }
+    case 'none':
+      return { tone: 'warning', text: 'The endpoint has no key yet' }
+    case 'unavailable':
+      return { tone: 'warning', text: 'The credential is unavailable right now' }
   }
   const p = st.lastProbe
   if (p && !p.ok) {
