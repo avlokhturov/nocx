@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the agent.status JSON-RPC method (design §7): endpoint configured, credential resolvable, last probe result. The ask surface reads it before offering an ask; a soft degrade — no endpoint, an unresolvable credential, a failed probe — is visible in the product, never only in a log. The probe result shape is declared ONCE, in endpoints.probe.schema.json, and referenced here cross-file.
+ * Result of the agent.status JSON-RPC method (design §7): endpoint configured, the credential fact, last probe result. The ask surface reads it before offering an ask; a soft degrade — no endpoint, an unresolvable credential, a failed probe — is visible in the product, never only in a log. The probe result shape is declared ONCE, in endpoints.probe.schema.json, and referenced here cross-file.
  */
 export interface AgentStatusResult {
   /**
@@ -18,9 +18,9 @@ export interface AgentStatusResult {
    */
   endpointConfigured: boolean
   /**
-   * At least one stored endpoint has a credential the vault can currently resolve — the vault is unsealed and the secret exists. A sealed vault answers false, and the ask surface can offer the unlock prompt.
+   * The one credential fact (ADR-0032): which of the distinguishable states is true, so each gets its own sentence instead of all three reading 'the vault may be locked'. Null only when no endpoint is configured — there is nothing to ask about. 'resolvable' means at least one stored endpoint's credential the vault can currently resolve; 'sealed' means the vault cannot answer right now (the unlock offer); 'deleted' means the referenced secret is gone; 'none' means the endpoint has no reference at all; 'unavailable' is the honest fallback for a store failure that is none of those.
    */
-  credentialResolvable: boolean
+  credential: ('resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable') | null
   /**
    * The last endpoints.probe outcome, or null when none has run in this process lifetime. Process-lifetime by design: a probe's meaning expires with the endpoint that produced it.
    */

@@ -887,28 +887,28 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 	openSub := s.operationQueue("files-open")
 	bindingSub := s.operationQueue("files")
 	return []methodSpec{
-		reg(openSub, "files.open", params(validateFilesOpenRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: w}
+		reg(openSub, "files.open", params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.list", params(validateFilesListRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.list", params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.read", params(validateFilesReadRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.read", params(validateFilesReadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.watch", params(validateFilesWatchRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.watch", params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.close", params(validateFilesCloseRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.close", params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
-		reg(bindingSub, "files.reveal", params(validateFilesRevealRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: w}
+		reg(bindingSub, "files.reveal", params(validateFilesRevealRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
 		}),
 	}

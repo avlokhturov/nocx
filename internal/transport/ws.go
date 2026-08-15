@@ -530,7 +530,7 @@ type ProfileResolver interface {
 
 // resolverHolder is the mutable profile-resolver seam. The resolver is set
 // post-construction (SetProfileResolver) because it depends on the transport
-// (the UnlockRequester wiring) and must be created after the transport
+// (the connection-password ask) and must be created after the transport
 // exists. The operations and seam handlers that use it therefore hold the
 // holder and read the current value per call, never a captured nil. It
 // satisfies both transport.ProfileResolver and capability.ProfileResolver
@@ -571,8 +571,8 @@ func WithProfileResolver(r ProfileResolver) WSServerOption {
 }
 
 // SetProfileResolver sets the profile resolver post-construction. Used when
-// the resolver depends on the transport (e.g. for UnlockRequester wiring)
-// and must be created after the transport exists.
+// the resolver depends on the transport (the connection-password ask) and
+// must be created after the transport exists.
 func (s *WSServer) SetProfileResolver(r ProfileResolver) {
 	s.resolver.set(r)
 }

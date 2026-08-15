@@ -27,20 +27,21 @@ func TestAgentStatus_DTOConformsToContract(t *testing.T) {
 		ElapsedMS:    1234,
 		At:           time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC),
 	}
+	cred := func(s string) *string { return &s }
 	cases := map[string]agentStatusResult{
 		"populated": {
-			EndpointConfigured:   true,
-			CredentialResolvable: true,
-			LastProbe:            probe,
+			EndpointConfigured: true,
+			Credential:         cred("resolvable"),
+			LastProbe:          probe,
 		},
 		"nothing configured": {
-			EndpointConfigured:   false,
-			CredentialResolvable: false,
-			LastProbe:            nil,
+			EndpointConfigured: false,
+			Credential:         nil,
+			LastProbe:          nil,
 		},
 		"failed probe": {
-			EndpointConfigured:   true,
-			CredentialResolvable: false,
+			EndpointConfigured: true,
+			Credential:         cred("sealed"),
 			LastProbe: &assistant.ProbeResult{
 				EndpointName: "Local",
 				Model:        "qwen3",

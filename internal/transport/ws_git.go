@@ -1211,52 +1211,52 @@ func (s *WSServer) gitSpecs(lane control.Admission, sessionGate, gitGate control
 	bindingSub := s.operationQueue("git")
 
 	return []methodSpec{
-		reg(openSub, "git.open", params(validateGitOpenRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitOpenHandlers{op: openOp, r: w, bindings: s, log: s.log, wired: gitWired}
+		reg(openSub, "git.open", params(validateGitOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitOpenHandlers{op: openOp, r: r, bindings: s, log: s.log, wired: gitWired}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.status", params(validateGitBindingRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.status", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.diff", params(validateGitDiffRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.diff", params(validateGitDiffRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDiff(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.stage", params(validateGitStageRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.stage", params(validateGitStageRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.unstage", params(validateGitStageRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.unstage", params(validateGitStageRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.stageAll", params(validateGitBindingRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.stageAll", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleStageAll(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.unstageAll", params(validateGitBindingRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.unstageAll", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUnstageAll(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.commit", params(validateGitCommitRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.commit", params(validateGitCommitRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCommit(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.headMessage", params(validateGitBindingRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.headMessage", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHeadMessage(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.log", params(validateGitBindingRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.log", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleLog(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.remote", params(validateGitBindingRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.remote", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRemote(ctx, state, req) }
 		}),
-		reg(bindingSub, "git.close", params(validateGitBindingRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := gitBindingHandlers{op: bindingOp, r: w, bindings: s}
+		reg(bindingSub, "git.close", params(validateGitBindingRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := gitBindingHandlers{op: bindingOp, r: r, bindings: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
 	}

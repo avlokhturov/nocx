@@ -145,6 +145,12 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       setProbeResult(res)
       if (res.ok && res.kind === 'connection') setDiscovered(res.models ?? [])
     } catch (err) {
+      if (err instanceof VaultOperationCancelledError) {
+        // The person chose not to unlock: the test did not run, and nothing
+        // failed — leave the badge exactly as it was rather than painting a
+        // failure they did not cause (ADR-0032).
+        return
+      }
       const message = (err as Error).message
       log.error('Endpoint test failed', { message })
       setProbeResult({

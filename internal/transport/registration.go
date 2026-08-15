@@ -42,14 +42,18 @@ var ingressCriticalMethods = map[string]struct{}{
 
 // methodSpec declares one control method at server construction: the
 // submission that runs it and the per-connection handler builder. The
-// builder receives the connection's own wsConn and connState and returns the
-// handler closure — handlers are constructed types holding their capability
-// and Responder, never the *WSServer, so a handler cannot reach a store it
-// was not constructed with.
+// builder receives the connection's own wsConn, its connState and the
+// Responder the handler is constructed with, and returns the handler
+// closure — handlers are constructed types holding their capability and
+// Responder, never the *WSServer, so a handler cannot reach a store it
+// was not constructed with. The wsConn is identity (subscriber slots,
+// client ids); writes go through the injected r, which connMethods wraps
+// in the sealed-vault normalizer for every method (ADR-0032,
+// vault_sealed.go).
 type methodSpec struct {
 	method     string
 	submission control.Submission
-	build      func(w *wsConn, state *connState) handlerFunc
+	build      func(w *wsConn, state *connState, r Responder) handlerFunc
 	// available reports whether the method can answer at all — the domain
 	// it belongs to is wired. Optional: nil means "always available", which
 	// is true of most methods. Where it is NOT nil it is consulted BEFORE
@@ -257,12 +261,22 @@ func buildMethodSpecs(specs []methodSpec) (map[string]methodSpec, error) {
 // connMethods materialises the per-connection handler set from the server's
 // validated specs. It is called once per connection, after the connState
 // exists; the handlers capture the connection's Responder, never the server.
+//
+// Every handler is constructed with the sealed-vault normalizer (ADR-0032,
+// vault_sealed.go): a failure that is a sealed-vault failure is rewritten to
+// the canonical sealed shape, so the renderer's dispatcher raises the unlock
+// and re-sends the request — one wrapper, every method, including the ones
+// not written yet. The normalizer is a pure rewrite (no blocking, no ask),
+// so the ingress-critical set is untouched: a resolution still never waits
+// behind the lane, and nothing new can block the read loop.
 func connMethods(specs map[string]methodSpec, w *wsConn, state *connState) map[string]controlMethod {
 	m := make(map[string]controlMethod, len(specs))
 	for name, spec := range specs {
+		norm := newSealedNormalizer(w)
+		next := spec.build(w, state, norm)
 		m[name] = controlMethod{
 			submission: spec.submission,
-			handle:     validated(spec, spec.build(w, state), w),
+			handle:     validated(spec, next, w),
 		}
 	}
 	return m
@@ -303,9 +317,9 @@ type handlerFunc func(ctx context.Context, req jsonrpcRequest)
 
 // reg declares one control method: the submission that runs it and the
 // per-connection handler builder. The builder receives the connection's
-// wsConn and connState and returns the handler — a constructed type holding
-// its capability and Responder, never the server.
-func reg(sub control.Submission, method string, v paramsValidator, build func(w *wsConn, state *connState) handlerFunc) methodSpec {
+// wsConn (identity), its state, and the Responder to write through — the
+// sealed-vault normalizer for every method (connMethods decides).
+func reg(sub control.Submission, method string, v paramsValidator, build func(w *wsConn, state *connState, r Responder) handlerFunc) methodSpec {
 	return methodSpec{method: method, submission: sub, build: build, validate: v}
 }
 
@@ -324,7 +338,7 @@ func whenAvailable(spec methodSpec, available func() bool, unavailable string) m
 // (subscriber registration, capture tab id, tunnel ownership) use reg with
 // the *wsConn directly.
 func regResponder(sub control.Submission, method string, v paramsValidator, build func(r Responder) handlerFunc) methodSpec {
-	return reg(sub, method, v, func(w *wsConn, _ *connState) handlerFunc { return build(w) })
+	return reg(sub, method, v, func(_ *wsConn, _ *connState, r Responder) handlerFunc { return build(r) })
 }
 
 // methodClassFor maps a refused method to its coarse server-side class for

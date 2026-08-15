@@ -84,9 +84,9 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		// tunnel.open needs the connection as the owner-map key (spec §7.3):
 		// the forward's owner is the tab that opened it, so the handler
 		// receives the *wsConn per call.
-		reg(s.lane, "tunnel.open", params(validateTunnelOpenRaw), func(w *wsConn, state *connState) handlerFunc {
-			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: w}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelOpen(ctx, w, req) }
+		reg(s.lane, "tunnel.open", params(validateTunnelOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleTunnelOpen(ctx, w, r, req) }
 		}),
 		regResponder(s.lane, "tunnel.stop", params(validateTunnelStopRaw), func(r Responder) handlerFunc {
 			h := tunnelHandlers{resolver: s.resolver, connector: s.tunnelConnector, ledger: ledger, r: r}

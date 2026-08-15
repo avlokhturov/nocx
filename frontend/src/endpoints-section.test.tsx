@@ -17,7 +17,12 @@ import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
 import { Dispatcher, RpcError } from './dispatcher'
 import { clearToasts, toasts } from './ui'
-import { SetupDialog, createVaultState, type VaultController } from './vault'
+import {
+  SetupDialog,
+  VaultOperationCancelledError,
+  createVaultState,
+  type VaultController,
+} from './vault'
 import type { VaultClient } from './vault-client'
 
 /** One stored endpoint as the wire declares it. */
@@ -503,6 +508,36 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     await vi.waitFor(() => {
       expect(dialog.textContent).toContain('qwen3 answered in')
     })
+  })
+
+  it('a cancelled unlock never paints a Test failure (ADR-0032)', async () => {
+    const { container, probeEndpoint } = mount()
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'Local')
+    fillField(container, 'endpoint-base-url', 'http://127.0.0.1:11434/v1')
+    clickButton(dialog, 'Add model')
+    fillField(container, 'endpoint-model-0-name', 'qwen3')
+
+    // A successful verdict first: the cancellation below must not replace
+    // what a working test showed with a failure the person did not cause.
+    clickButton(dialog, 'Test endpoint')
+    await vi.waitFor(() => {
+      expect(dialog.textContent).toContain('qwen3 answered in')
+    })
+
+    probeEndpoint.mockRejectedValueOnce(new VaultOperationCancelledError())
+    clickButton(dialog, 'Test endpoint')
+    await vi.waitFor(() => {
+      expect(probeEndpoint).toHaveBeenCalledTimes(2)
+    })
+    // The person chose not to unlock: the test did not run, and nothing
+    // failed. Pressing Test clears the previous verdict (a new attempt
+    // started), and the dismissal must not paint "Test failed" in its
+    // place — the badge area stays empty, silently.
+    await vi.waitFor(() => {
+      expect(dialog.textContent).not.toContain('Test failed')
+    })
+    expect(dialog.textContent).not.toContain('answered in')
   })
 
   it('tests a SAVED endpoint by naming it — the key stays blank and the backend resolves the stored credential', async () => {
