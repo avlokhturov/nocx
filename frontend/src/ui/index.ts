@@ -16,6 +16,12 @@ export { Page, type PageProps, type PageScrollerHandle } from './page'
 export { PageHeader, type PageHeaderProps } from './page-header'
 export { PageBody, type PageBodyProps } from './page-body'
 export { PageRail, type PageRailProps } from './page-rail'
+export {
+  GroupedRail,
+  type GroupedRailProps,
+  type GroupedRailGroup,
+  type GroupedRailItem,
+} from './grouped-rail'
 export { PageScroller, type PageScrollerProps } from './page-scroller'
 export { PageSection, type PageSectionProps } from './page-section'
 export { SidebarView, type SidebarViewProps } from './sidebar-view'

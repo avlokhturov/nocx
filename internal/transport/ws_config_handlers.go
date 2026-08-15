@@ -1352,7 +1352,9 @@ func (h settingsHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 		switch req.Method {
 		case "settings.describe":
 			_ = h.r.TryResult(req.ID, mustMarshal(map[string]any{
-				"declarations": ss.Declarations(),
+				"declarations":  ss.Declarations(),
+				"groups":        ss.Groups(),
+				"sectionGroups": ss.SectionGroups(),
 			}))
 		case "settings.getSnapshot":
 			snap, err := ss.GetSnapshot()

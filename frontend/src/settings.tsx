@@ -39,6 +39,7 @@ import {
   type RevisionPolicy,
   type SaveOutcome,
   type SettingsMirror,
+  type SettingsGroup,
   type SettingsSnapshot,
 } from './settings-domain'
 import { BackupRestoreSection } from './backup-restore-section'
@@ -55,14 +56,14 @@ import {
   Button,
   Badge,
   Field,
+  GroupedRail,
+  type GroupedRailItem,
   IconButton,
 } from './ui'
 import { ResetIcon } from './ui/icons'
 
-// ── Settings page registry type (Deliverable 2) ────────────────────────
-
 export type SettingsPage =
-  | { kind: 'generated'; id: string; title: string }
+  | { kind: 'generated'; id: string; title: string; groupId?: string }
   // A component page renders itself. It is a thunk rather than a bare
   // Component because such a page needs context the registry does not have —
   // Connections needs the ProfileClient and the connect callback — and binding
@@ -70,10 +71,13 @@ export type SettingsPage =
   // scrollMode (design spec §3.8): 'page' — PageScroller owns vertical scroll;
   // 'contained' — Page provides a bounded content area and the surface assigns
   // its own scroll owners (e.g. Connections' two-column panels).
+  // groupId names a group from the Go-declared catalogue (settings.describe);
+  // undefined means the page renders at top level beside the groups.
   | {
       kind: 'component'
       id: string
       title: string
+      groupId?: string
       description?: string
       actions?: JSX.Element
       scrollMode: 'page' | 'contained'
@@ -148,6 +152,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const [newSecretRequest, setNewSecretRequest] = createSignal(0)
   const [newSecretName, setNewSecretName] = createSignal('')
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
+  // The rail's group catalogue and the section→group mapping, straight from
+  // the settings.describe snapshot. The rail renders from these; there is no
+  // lookup table in the frontend (nocx-dgsp).
+  const [groups, setGroups] = createSignal<SettingsGroup[]>([])
+  const [sectionGroups, setSectionGroups] = createSignal<Record<string, string>>({})
 
   // Promise that resolves when the initial data load finishes.
   let resolveReady: () => void
@@ -182,8 +191,10 @@ export function SettingsComponent(props: SettingsComponentProps) {
         props.profileClient.describeSettings(),
         props.profileClient.getSnapshot(),
       ])
-      const decls = (desc.declarations as Declaration[]) ?? []
+      const decls = desc.declarations ?? []
       setDeclarations(decls)
+      setGroups(desc.groups ?? [])
+      setSectionGroups(desc.sectionGroups ?? {})
 
       const rawSnap: SettingsSnapshot = {
         values: snap.values ?? {},
@@ -313,11 +324,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
       kind: 'generated' as const,
       id: s,
       title: s,
+      groupId: sectionGroups()[s],
     }))
     const backupPage: SettingsPage = {
       kind: 'component',
       id: 'backup',
       title: 'Backup & Restore',
+      groupId: 'application',
       scrollMode: 'page',
       renderContent: () => <BackupRestoreSection profileClient={props.profileClient} />,
     }
@@ -343,6 +356,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       kind: 'component',
       id: 'secrets',
       title: 'Secrets',
+      groupId: 'vault',
       scrollMode: 'contained',
       renderContent: () => (
         <Show
@@ -367,7 +381,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const vaultPage: SettingsPage = {
       kind: 'component',
       id: 'vault',
-      title: 'Vault',
+      title: 'Protection',
+      groupId: 'vault',
       scrollMode: 'page',
       // The section is listed unconditionally — a surface that appears only
       // once some other state exists is how a feature ships unreachable. The
@@ -377,7 +392,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
       renderContent: () => (
         <Show
           when={props.vaultClient && props.vaultController}
-          fallback={<PageSection title="Vault">Vault is not available in this window.</PageSection>}
+          fallback={
+            <PageSection title="Protection">Vault is not available in this window.</PageSection>
+          }
         >
           <VaultSection vaultClient={props.vaultClient!} vaultController={props.vaultController!} />
         </Show>
@@ -386,7 +403,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
     const endpointsPage: SettingsPage = {
       kind: 'component',
       id: 'endpoints',
-      title: 'AI Endpoints',
+      title: 'Endpoints',
+      groupId: 'assistant',
       scrollMode: 'contained',
       // Registered unconditionally for the same reason vaultPage is: a
       // surface that appears only once some other state exists is how a
@@ -395,7 +413,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
         <Show
           when={props.endpointsClient}
           fallback={
-            <PageSection title="AI Endpoints">
+            <PageSection title="Endpoints">
               AI endpoints are not available in this window.
             </PageSection>
           }
@@ -408,8 +426,26 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, backupPage, connectionPage, secretsPage, vaultPage, endpointsPage]
+    return [...generated, backupPage, connectionPage, vaultPage, secretsPage, endpointsPage]
   })
+
+  /** The rail rows the grouped rail renders: every page resolved to a group
+   *  (or top level), its active state and per-section modified count. */
+  const railItems = createMemo<GroupedRailItem[]>(() =>
+    settingsPages().map((page) => ({
+      id: page.id,
+      title: page.title,
+      groupId: page.groupId,
+      // Accessors, not values: the row objects stay stable across navigation
+      // and the rail updates them in place (Solid fine-grained updates).
+      count: () => (page.kind === 'generated' ? modifiedBySection().get(page.id) : undefined),
+      active: () =>
+        page.kind === 'component'
+          ? activeComponentPage() === page.id
+          : activeComponentPage() === null && sectionFilter() === page.title,
+      onSelect: () => handleNavClick(page),
+    })),
+  )
 
   /** The active component page, or null when a generated section is showing. */
   const activePage = createMemo<Extract<SettingsPage, { kind: 'component' }> | null>(() => {
@@ -916,40 +952,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
               </Show>
             </div>
 
-            <nav aria-label="Settings sections">
-              <ul class="ui-settings-section-nav">
-                <For each={settingsPages()}>
-                  {(page) => {
-                    const active = () =>
-                      page.kind === 'component'
-                        ? activeComponentPage() === page.id
-                        : activeComponentPage() === null && sectionFilter() === page.title
-                    const count = () =>
-                      page.kind === 'generated' ? modifiedBySection().get(page.id) : undefined
-                    return (
-                      <li
-                        classList={{
-                          'ui-settings-section-nav-item': true,
-                          'ui-settings-section-nav-active': active(),
-                        }}
-                        data-section={page.title}
-                      >
-                        <Button
-                          variant="ghost"
-                          selected={active()}
-                          onClick={() => handleNavClick(page)}
-                        >
-                          {page.title}
-                          <Show when={count() !== undefined && count()! > 0}>
-                            <Badge tone="warning">{String(count())}</Badge>
-                          </Show>
-                        </Button>
-                      </li>
-                    )
-                  }}
-                </For>
-              </ul>
-            </nav>
+            {/* The grouped rail is kit work (nocx-dgsp): the surface places it
+                and never repaints it. Grouping comes from the Go-declared
+                catalogue in the settings.describe snapshot, resolved per page
+                by railItems. It renders only once the catalogue has arrived —
+                the guard refuses an empty catalogue with named pages. */}
+            <Show when={loadState() === 'ready'}>
+              <GroupedRail label="Settings sections" groups={groups()} items={railItems()} />
+            </Show>
           </div>
         }
         scrollerRef={(h) => {
