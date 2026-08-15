@@ -62,9 +62,18 @@ func main() {
 		Mac: &mac.Options{
 			TitleBar: mac.TitleBarHidden(),
 		},
-		// DevTools/Inspector is off by default in production builds.
-		// Enable locally for debugging: OpenInspectorOnStartup: true.
-		Debug:      options.Debug{},
+		// DevTools/Inspector, opened on startup when NOCX_DEVTOOLS=1.
+		//
+		// There is no other way into a console here, and that is deliberate on
+		// both sides: EnableDefaultContextMenu is false above, and the terminal
+		// surface preventDefaults `contextmenu` to paste — so WebKit's "Inspect
+		// Element" is gone and cannot come back. An env flag rather than an
+		// edit-and-rebuild, because the thing you want to inspect is usually a
+		// state you already have on screen.
+		//
+		// Wails applies Debug options to dev/debug builds only, so this cannot
+		// open an inspector in the shipped app whatever the environment says.
+		Debug:      options.Debug{OpenInspectorOnStartup: os.Getenv("NOCX_DEVTOOLS") == "1"},
 		OnStartup:  wailsApp.startup,
 		OnShutdown: wailsApp.shutdown,
 		Bind: []interface{}{

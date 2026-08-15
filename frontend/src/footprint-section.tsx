@@ -15,14 +15,14 @@
  * path to remove by hand. An action is never offered that would fail at
  * click time (AGENTS.md rule 1).
  *
- * Kit contract: rows are the kit's CollectionRow (info + actions); the name
- * and meta lines reuse the connections page's cm-item-* surface classes;
- * every control is a kit component, never repainted here.
+ * Kit contract: rows are the kit's RecordRow — the composite owns the
+ * title / one kind badge / meta / status grammar, so this surface declares
+ * no name/meta classes of its own (nocx-pp3y.3); every control is a kit
+ * component, never repainted here.
  */
 import { For, Show, createSignal, onMount } from 'solid-js'
-import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import { CollectionRow } from './ui/collection-view'
+import { RecordRow } from './ui/record-row'
 import { EmptyState } from './ui/empty-state'
 import { PageSection } from './ui/page-section'
 import { Spinner } from './ui/spinner'
@@ -138,20 +138,10 @@ export function FootprintSection(props: FootprintSectionProps) {
           <Stack divided dense>
             <For each={destinations()}>
               {(d) => (
-                <CollectionRow
-                  info={
-                    <>
-                      <div class="cm-item-name">{d.identity}</div>
-                      <div class="cm-item-meta">
-                        <Badge tone="info">{d.generation}</Badge>
-                        <span>{d.path}</span>
-                        <span>
-                          protocol {d.protocolVersion} &middot; scripts {d.scriptVersion}
-                        </span>
-                        <span>last seen {formatLastSeen(d.lastObservedAt)}</span>
-                      </div>
-                    </>
-                  }
+                <RecordRow
+                  title={d.identity}
+                  kind={{ label: d.generation, tone: 'info' }}
+                  meta={`${d.path} · protocol ${d.protocolVersion} · scripts ${d.scriptVersion} · last seen ${formatLastSeen(d.lastObservedAt)}`}
                   actions={
                     d.removableProfileId !== null ? (
                       <Button
@@ -165,9 +155,7 @@ export function FootprintSection(props: FootprintSectionProps) {
                         {busy() === d.identity ? 'Removing…' : 'Uninstall'}
                       </Button>
                     ) : (
-                      <span class="cm-item-meta">
-                        Removal needs a saved connection &mdash; remove {d.path} by hand
-                      </span>
+                      <span>Removal needs a saved connection &mdash; remove {d.path} by hand</span>
                     )
                   }
                 />

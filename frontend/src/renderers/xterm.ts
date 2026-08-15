@@ -253,6 +253,33 @@ export class XtermRenderer implements TerminalRenderer {
     this._snippetChordHandler = cb
   }
 
+  /** Frame capture (nocx-3j9b): subscribers to the parse-settle event. */
+  private writeParsedSubs: Array<() => void> = []
+  private writeParsedDisposable?: { dispose(): void }
+  /** Subscribers to the explicit clear/reset operations. */
+  private clearSubs: Array<() => void> = []
+  private resetSubs: Array<() => void> = []
+  /** Writes queued via write() whose bytes have not finished parsing — the
+   *  capture fence's pending count. Settled via the per-write callback, so
+   *  it is exact even when onWriteParsed fires between chunks. */
+  private unsettledWrites = 0
+  /** Subscribers to grid resizes — the frame identity's geometry axis
+   *  (nocx-x8s2.4). Kept pre-mount and attached at mount, exactly like
+   *  onWriteParsed: a tracker built before mount must not lose the resize
+   *  signal (a resize reads `moved`/`same` instead of `notComparable`). */
+  private resizeSubs: Array<(cols: number, rows: number) => void> = []
+  private resizeDisposable?: { dispose(): void }
+  /** Subscribers to active-buffer changes — the frame identity's buffer
+   *  axis. Kept pre-mount and attached at mount: a tracker built before
+   *  mount must not lose the switch (a frame saved on the normal buffer
+   *  then compares as `same` after entering the alternate screen). */
+  private bufferChangeSubs: Array<(type: 'normal' | 'alternate') => void> = []
+  private bufferChangeDisposable?: { dispose(): void }
+  /** Disposal subscribers — the capture fence's closing event (see
+   *  onDispose). */
+  private disposeSubs: Array<() => void> = []
+  private _disposed = false
+
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
 
@@ -304,6 +331,16 @@ export class XtermRenderer implements TerminalRenderer {
     term.unicode.activeVersion = '11'
 
     term.open(container)
+
+    // Attach the frame-identity listeners now: a subscriber registered
+    // before mount (the frame tracker constructs with the renderer) must
+    // not lose the parse-settle, buffer-switch or resize signals — each
+    // keeps pre-mount subscribers and attaches here, when the terminal
+    // exists. The fence state (unsettledWrites) and the renderer-side
+    // clear/reset subscribers were never mount-dependent.
+    this._ensureWriteParsed()
+    this._ensureResize()
+    this._ensureBufferChange()
 
     // Shift+Enter as its own chord (nocx-nt70) — see SHIFT_ENTER_SEQUENCE.
     // xterm's blessed hook runs before any key processing; returning false
@@ -395,7 +432,14 @@ export class XtermRenderer implements TerminalRenderer {
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
       if (typeof mql.addEventListener === 'function') {
-        this._dprChangeHandler = () => this._fireCellDimsChange()
+        this._dprChangeHandler = () => {
+          // The pitch is snapped to whole DEVICE pixels, so a new ratio is a
+          // new pitch even when the grid keeps its rows and columns — and
+          // then no resize fires and this is the only thing that clears the
+          // cache (nocx-rnrl).
+          this._cachedCellHeight = null
+          this._fireCellDimsChange()
+        }
         mql.addEventListener('change', this._dprChangeHandler)
         this._dprMedia = mql
       }
@@ -447,12 +491,33 @@ export class XtermRenderer implements TerminalRenderer {
     const rows = Math.max(1, Math.floor(viewport.height / cell.height))
     if (cols !== t.cols || rows !== t.rows) {
       t.resize(cols, rows)
+      // A resize rebuilds the char atlas; cells xterm does not re-mark dirty
+      // go on drawing from the old one, which on WKWebView is the mangled
+      // overlapping glyphs of nocx-q18. Repaint the viewport so no cell is
+      // left pointing at atlas coordinates that have moved. Only after a real
+      // grid change: the live region delivers a viewport on every layout tick
+      // as output grows, and repainting per tick would be a full redraw per
+      // frame. Nothing outside the renderer can be asked to remember this —
+      // e0d0a490 moved the resize out to the presentation layer and the
+      // repaint stayed behind (nocx-jfgb).
+      t.refresh(0, t.rows - 1)
     }
   }
 
   /**
    * Real cell dimensions from the xterm render service (same source as FitAddon).
    * Accesses internal xterm.js API not present on the public Terminal type.
+   *
+   * This is the ONLY place the grid's geometry is read, and null is the whole
+   * degrade: a cell is what the renderer DRAWS at, and nothing else in the DOM
+   * is that number. A fallback here used to measure
+   * `.xterm-char-measure-element` and hand its box back as a cell, which is
+   * wrong twice over — the span holds 32 characters, so its width is 32 cells,
+   * and xterm styles it `line-height: normal`, so its height is the char box
+   * with no `lineHeight` in it and no snap to whole device pixels. Callers
+   * degrade honestly instead: `cellWidth` reports 0 ("keep the previous
+   * metric"), `fit()` leaves the grid alone, `cellHeight` guesses once and
+   * never keeps the guess (nocx-rnrl).
    */
   private _getCellDims(): { width: number; height: number } | null {
     const t = this.term
@@ -465,12 +530,6 @@ export class XtermRenderer implements TerminalRenderer {
       | undefined
     const cell = core?._renderService?.dimensions?.css?.cell
     if (cell && cell.width > 0 && cell.height > 0) return cell
-    // Fallback: measure the char-measure-element xterm creates for font metrics.
-    const el = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
-    if (el) {
-      const rect = el.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) return { width: rect.width, height: rect.height }
-    }
     return null
   }
 
@@ -530,11 +589,41 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   write(data: string): void {
-    this.term?.write(data)
+    const t = this.term
+    if (!t) return
+    this.unsettledWrites++
+    try {
+      t.write(data, () => {
+        // The per-write callback fires exactly when THIS write's bytes have
+        // been parsed (WriteBuffer's per-chunk callback) — the capture
+        // fence's settle signal. onWriteParsed alone cannot be that signal:
+        // xterm fires it at the end of EVERY parse pass, which can be
+        // BETWEEN chunks of one large write.
+        this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
+      })
+    } catch (err) {
+      // xterm refuses a write once its pending-data watermark is exceeded:
+      // it THROWS before queueing anything, so the caller's bytes never
+      // entered the terminal. The counter is repaired first — a stuck count
+      // would wedge the capture fence forever. Then the refusal is SURFACED
+      // to the caller, not logged (nocx-x8s2.3): the caller believes it
+      // delivered bytes that are gone, and only the caller can decide the
+      // policy (pause, resend, tell the person). A log inside the renderer
+      // would let the caller keep believing delivery — the old silent drop
+      // in a different shape. Pre-flow-control behaviour was to throw; this
+      // restores that while keeping the counter exact.
+      this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
+      throw err
+    }
   }
 
   reset(): void {
-    this.term?.reset()
+    const t = this.term
+    if (!t) return
+    t.reset()
+    // Report the explicit reset AFTER it executed, so a subscriber reading
+    // state (e.g. the frame generation) observes the post-reset terminal.
+    for (const sub of this.resetSubs) sub()
   }
 
   onData(cb: DataCallback): void {
@@ -542,7 +631,19 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onResize(cb: ResizeCallback): void {
-    this.term?.onResize(({ cols, rows }) => cb(cols, rows))
+    this.resizeSubs.push(cb)
+    this._ensureResize()
+  }
+
+  /** Attach the resize fan-out when the terminal exists. Subscribers
+   *  registered before mount (the frame tracker constructs with the
+   *  renderer) must not be lost — the same shape onWriteParsed uses. */
+  private _ensureResize(): void {
+    const t = this.term
+    if (this.resizeDisposable || !t) return
+    this.resizeDisposable = t.onResize(({ cols, rows }) => {
+      for (const sub of this.resizeSubs) sub(cols, rows)
+    })
   }
 
   onTitle(cb: TitleCallback): void {
@@ -550,7 +651,18 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void {
-    this.term?.buffer.onBufferChange((buf) => cb(buf.type))
+    this.bufferChangeSubs.push(cb)
+    this._ensureBufferChange()
+  }
+
+  /** Attach the buffer-change fan-out when the terminal exists — pre-mount
+   *  subscribers (the frame tracker) must not be lost (nocx-x8s2.4). */
+  private _ensureBufferChange(): void {
+    const t = this.term
+    if (this.bufferChangeDisposable || !t) return
+    this.bufferChangeDisposable = t.buffer.onBufferChange((buf) => {
+      for (const sub of this.bufferChangeSubs) sub(buf.type)
+    })
   }
 
   onCwd(cb: CwdCallback): void {
@@ -681,7 +793,30 @@ export class XtermRenderer implements TerminalRenderer {
     this.term?.focus()
   }
 
+  /** Frame capture (nocx-x8s2.4): the dispose notification — the fence's
+   *  closing event. The CaptureIdentityTracker rejects its pending
+   *  awaitSettled() waiters on this, so a capture never hangs across
+   *  disposal. Fired exactly once, at the top of dispose(), before the
+   *  event subscriptions are torn down. */
+  onDispose(cb: () => void): void {
+    if (this._disposed) {
+      // Already disposed: fire immediately — a late subscriber must not
+      // wait forever on a source that is gone.
+      cb()
+      return
+    }
+    this.disposeSubs.push(cb)
+  }
   dispose(): void {
+    if (this._disposed) return
+    this._disposed = true
+    // Tell the frame tracker BEFORE the subscriptions go away: a capture
+    // parked on the parse fence must settle (reject) now, while its waiter
+    // is still registered — tearing the subscriptions down first would
+    // orphan it.
+    const disposeSubs = this.disposeSubs
+    this.disposeSubs = []
+    for (const sub of disposeSubs) sub()
     if (this.refreshTimer !== null) {
       clearInterval(this.refreshTimer)
       this.refreshTimer = null
@@ -703,6 +838,17 @@ export class XtermRenderer implements TerminalRenderer {
     this.renderDisposable?.dispose()
     this.renderDisposable = undefined
     this.renderSubs = []
+    this.resizeDisposable?.dispose()
+    this.resizeDisposable = undefined
+    this.resizeSubs = []
+    this.bufferChangeDisposable?.dispose()
+    this.bufferChangeDisposable = undefined
+    this.bufferChangeSubs = []
+    this.writeParsedDisposable?.dispose()
+    this.writeParsedDisposable = undefined
+    this.writeParsedSubs = []
+    this.clearSubs = []
+    this.resetSubs = []
     if (this._themeUnsub !== null) {
       this._themeUnsub()
       this._themeUnsub = null
@@ -771,22 +917,25 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
+  /** CSS-pixel pitch of one grid ROW — the same measurement `cellWidth` and
+   *  `fit()` take, off the render service. The live region translates the grid
+   *  by whole rows of this to drop the shell's echo (scrollback/controller.ts),
+   *  so anything short of the drawn pitch leaves the remainder of the echoed
+   *  command on screen, cut across the middle — 3px of it on a Retina Mac,
+   *  where the pitch is 20 and this used to answer 17 (nocx-rnrl). */
   get cellHeight(): number {
-    // M1: cache cellHeight — getBoundingClientRect is expensive per paint.
+    // M1: cache the pitch — this is read per paint by the gutter.
     if (this._cachedCellHeight !== null) return this._cachedCellHeight
-    const t = this.term
-    if (!t) return Math.ceil(FONT_SIZE * LINE_HEIGHT)
-    const measureEl = t.element?.querySelector('.xterm-char-measure-element') as HTMLElement | null
-    if (measureEl) {
-      const rect = measureEl.getBoundingClientRect()
-      if (rect.height > 0) {
-        this._cachedCellHeight = rect.height
-        return rect.height
-      }
+    const measured = this._getCellDims()?.height
+    if (measured !== undefined && measured > 0) {
+      this._cachedCellHeight = measured
+      return measured
     }
-    const fallback = Math.ceil(FONT_SIZE * LINE_HEIGHT)
-    this._cachedCellHeight = fallback
-    return fallback
+    // Nothing has been drawn yet, so there is no pitch to report — only the
+    // size the grid was asked for. Deliberately NOT cached: a guess that
+    // outlives the first frame is the defect, and the invalidations below
+    // (grid resize, DPR change) cannot be relied on to arrive at all.
+    return Math.ceil(FONT_SIZE * LINE_HEIGHT)
   }
 
   get viewportTopLine(): number {
@@ -812,6 +961,38 @@ export class XtermRenderer implements TerminalRenderer {
       for (const sub of this.renderSubs) sub(r)
     })
   }
+  /** Subscribe to parse-settles: fires after a written chunk has been
+   *  parsed into the buffer. The frame generation advances here, and the
+   *  capture fence waits on it. Subscribers registered before mount are
+   *  attached when mount creates the terminal. */
+  onWriteParsed(cb: () => void): void {
+    this.writeParsedSubs.push(cb)
+    this._ensureWriteParsed()
+  }
+
+  private _ensureWriteParsed(): void {
+    const t = this.term
+    if (this.writeParsedDisposable || !t) return
+    this.writeParsedDisposable = t.onWriteParsed(() => {
+      for (const sub of this.writeParsedSubs) sub()
+    })
+  }
+
+  /** Subscribe to explicit clears — fired after clearViewport() executed. */
+  onClear(cb: () => void): void {
+    this.clearSubs.push(cb)
+  }
+
+  /** Subscribe to explicit resets — fired after reset() executed. */
+  onReset(cb: () => void): void {
+    this.resetSubs.push(cb)
+  }
+
+  /** True while bytes queued via write() have not finished parsing — the
+   *  capture fence. */
+  hasUnsettledWrite(): boolean {
+    return this.unsettledWrites > 0
+  }
 
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined {
     return this.term?.buffer.active.getLine(line)
@@ -824,14 +1005,23 @@ export class XtermRenderer implements TerminalRenderer {
     return buf.baseY + buf.cursorY
   }
 
+  /** Column of the cursor — the column the next write lands on. */
+  cursorCol(): number {
+    return this.term?.buffer.active.cursorX ?? 0
+  }
+
   /** Clear the whole buffer — "making the prompt line the new first
    *  line" (xterm's own contract). Called at a block freeze so the rows
    *  the DOM block now owns leave the grid; the grid only ever holds the
    *  running command's rows, and the DOM owns the scrollback (nocx-m87n). */
   clearViewport(): void {
-    this.term?.clear()
+    const t = this.term
+    if (!t) return
+    t.clear()
+    // Report the explicit clear AFTER it executed, so a subscriber reading
+    // state (e.g. the frame generation) observes the post-clear buffer.
+    for (const sub of this.clearSubs) sub()
   }
-
   get paneElement(): HTMLElement {
     return this.container ?? document.createElement('div')
   }

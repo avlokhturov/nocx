@@ -102,7 +102,7 @@ func (h snippetHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -151,4 +151,73 @@ type snippetDeleteParams struct {
 
 type snippetReorderParams struct {
 	IDs []string `json:"ids"`
+}
+
+// maxSnippetBodyRunes bounds a snippet body on the wire. The title is a name
+// like every other config name (maxConfigNameRunes); the body is a phrase a
+// person saved, so it is generous — but it is a bound, and it is the only
+// one the library has: snippet.Service stores what it is handed and the
+// document is read whole on every list.
+const maxSnippetBodyRunes = 16_000
+
+// validateSnippetCreateRaw is the registered validator for snippets.create.
+// The id is minted by the backend (nocx-b7b5), so there is none to check.
+func validateSnippetCreateRaw(raw json.RawMessage) string {
+	var p snippetCreateParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	return validateSnippetTextParams(p.Title, p.Body)
+}
+
+// validateSnippetUpdateRaw is the registered validator for snippets.update.
+func validateSnippetUpdateRaw(raw json.RawMessage) string {
+	var p snippetUpdateParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.ID == "" {
+		return "id is required"
+	}
+	if msg := configIDRunes("id", p.ID); msg != "" {
+		return msg
+	}
+	return validateSnippetTextParams(p.Title, p.Body)
+}
+
+// validateSnippetDeleteRaw is the registered validator for snippets.delete.
+func validateSnippetDeleteRaw(raw json.RawMessage) string {
+	var p snippetDeleteParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if p.ID == "" {
+		return "id is required"
+	}
+	return configIDRunes("id", p.ID)
+}
+
+// validateSnippetReorderRaw is the registered validator for snippets.reorder.
+// Whether the ids are a PERMUTATION of the library is the service's rule and
+// stays there (snippet.ErrNotAPermutation) — it needs the stored list, which
+// a wire validator does not have and must not read.
+func validateSnippetReorderRaw(raw json.RawMessage) string {
+	var p snippetReorderParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	for _, id := range p.IDs {
+		if msg := configIDRunes("ids", id); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateSnippetTextParams bounds the two fields a snippet carries.
+func validateSnippetTextParams(title, body string) string {
+	if msg := boundedRunes("title", title, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	return boundedRunes("body", body, maxSnippetBodyRunes)
 }
