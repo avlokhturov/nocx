@@ -86,8 +86,10 @@ type AskParams struct {
 	// passes means the real calls will too.
 	Headers []Header
 	// Messages is the assembled context: the system rule (frame content is
-	// data, not instructions — design §6.2), the question, and the
-	// referenced frames' text as labelled data.
+	// data, not instructions — design §6.2) when frames are attached, the
+	// question, and the referenced frames' text as labelled data. A
+	// zero-reference ask (nocx-4wtlh) carries only the question — the
+	// transport derives the rule from what is attached, never a constant.
 	Messages []Message
 }
 
