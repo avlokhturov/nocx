@@ -206,7 +206,7 @@ describe('the snippets settings page (nocx-gjnr)', () => {
     expect(spies.create).not.toHaveBeenCalled()
   })
 
-  it('a reorder sends the FULL id list, not the pair that moved', async () => {
+  it('dragging a row onto another sends the FULL id list in the new order', async () => {
     const { container, spies } = createHarness([
       snip({ id: 'a', title: 'first' }),
       snip({ id: 'b', title: 'second' }),
@@ -214,7 +214,17 @@ describe('the snippets settings page (nocx-gjnr)', () => {
     ])
     await waitForRows(container, 3)
 
-    fireEvent.click(container.querySelector('[aria-label="Move second up"]')!)
+    // The affordance is the row itself — no arrow buttons, the way no other
+    // list in this product has them (owner review).
+    const dragRows = container.querySelectorAll<HTMLElement>('.sn-row')
+    const data = new Map<string, string>()
+    const dataTransfer = {
+      setData: (k: string, v: string) => data.set(k, v),
+      getData: (k: string) => data.get(k) ?? '',
+    }
+    fireEvent.dragStart(dragRows[1], { dataTransfer })
+    fireEvent.dragOver(dragRows[0], { dataTransfer })
+    fireEvent.drop(dragRows[0], { dataTransfer })
 
     await vi.waitFor(() => {
       expect(spies.reorder).toHaveBeenCalledWith(['b', 'a', 'c'])
@@ -227,14 +237,38 @@ describe('the snippets settings page (nocx-gjnr)', () => {
     })
   })
 
-  it('the first row cannot move up and the last cannot move down', async () => {
-    const { container } = createHarness([snip({ id: 'a', title: 'first' }), snip({ id: 'b' })])
+  it('Alt+ArrowUp moves the focused row, so the order is not mouse-only', async () => {
+    const { container, spies } = createHarness([
+      snip({ id: 'a', title: 'first' }),
+      snip({ id: 'b', title: 'second' }),
+    ])
     await waitForRows(container, 2)
 
-    const up = container.querySelector('[aria-label="Move first up"]') as HTMLButtonElement
-    const down = container.querySelector('[aria-label="Move b down"]') as HTMLButtonElement
-    expect(up.disabled).toBe(true)
-    expect(down.disabled).toBe(true)
+    fireEvent.keyDown(container.querySelectorAll<HTMLElement>('.sn-row')[1], {
+      key: 'ArrowUp',
+      altKey: true,
+    })
+
+    await vi.waitFor(() => {
+      expect(spies.reorder).toHaveBeenCalledWith(['b', 'a'])
+    })
+  })
+
+  it('a filtered list cannot be reordered: "one place" would mean a place nobody can see', async () => {
+    const { container, spies } = createHarness([
+      snip({ id: 'a', title: 'first' }),
+      snip({ id: 'b', title: 'second' }),
+    ])
+    await waitForRows(container, 2)
+    const search = container.querySelector('input[type="search"]') as HTMLInputElement
+    fireEvent.input(search, { target: { value: 'second' } })
+    await waitForRows(container, 1)
+
+    const row = container.querySelector<HTMLElement>('.sn-row')!
+    expect(row.getAttribute('draggable')).toBe('false')
+    fireEvent.keyDown(row, { key: 'ArrowUp', altKey: true })
+
+    expect(spies.reorder).not.toHaveBeenCalled()
   })
 
   it('a delete happens only through the kit confirm, and a cancelled one writes nothing', async () => {

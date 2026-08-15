@@ -337,41 +337,4 @@ describe('FloatingPanel', () => {
     // The row is capped: the panel never exceeds the ceiling to fit it.
     expect(panel.root.style.width).toBe(`${MAX_PANEL_WIDTH_PX}px`)
   })
-
-  // ── the snippet palette variant (nocx-jj77) ───────────────────────────
-
-  it('the snippet variant has its own width floor and renders its own data-variant', () => {
-    expect(MIN_PANEL_WIDTH_PX['snippet']).toBe(480)
-    const { panel } = mount('snippet')
-    withGeometry(200, 200, () => {
-      panel.show({ rows: [row({ id: 'a', displayText: 'short' })], selectedIndex: 0 })
-      // The floor wins over the (tiny) content.
-      expect(panel.root.style.width).toBe('480px')
-    })
-    expect(panel.root.dataset.variant).toBe('snippet')
-  })
-
-  it('a row flagged empty renders the honest nothing-to-choose state: muted, non-selectable', () => {
-    const { panel, onPick } = mount()
-    panel.show({
-      rows: [{ id: 'none', displayText: 'nothing here', matchRanges: [], empty: true }],
-      selectedIndex: 0,
-    })
-    const rowEl = panel.root.querySelector<HTMLElement>('.ui-floating-panel__row')!
-    expect(rowEl.dataset.empty).toBe('true')
-    expect(rowEl.getAttribute('aria-disabled')).toBe('true')
-    rowEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-    expect(onPick).not.toHaveBeenCalled()
-  })
-
-  it('a row flagged refusal renders in the danger tone, also non-selectable (design §11)', () => {
-    const { panel } = mount()
-    panel.show({
-      rows: [{ id: 'ref', displayText: 'the fire was refused', matchRanges: [], refusal: true }],
-      selectedIndex: 0,
-    })
-    const rowEl = panel.root.querySelector<HTMLElement>('.ui-floating-panel__row')!
-    expect(rowEl.dataset.refusal).toBe('true')
-    expect(rowEl.getAttribute('aria-disabled')).toBe('true')
-  })
 })

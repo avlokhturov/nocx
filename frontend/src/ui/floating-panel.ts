@@ -47,19 +47,12 @@ export const MIN_PANEL_WIDTH_PX: Record<FloatingPanelVariant, number> = {
   // footer (wider than the completion's glance) whose rows are short names
   // (narrower than recall's command lines).
   secret: 480,
-  // The snippet palette is a browsing surface like recall (a filter, a
-  // footer, sometimes a form), and its rows are the library's titles —
-  // short names, so the recall floor would leave it a sliver of whitespace.
-  snippet: 480,
 }
 
 /** The surfaces that float over the editor — one shell, one layout per
  *  surface. The secret picker joined the completion dropdown and the recall
- *  overlay as the third variant; the snippet palette (frontend/src/snippets)
- *  is the fourth — and the only one that also answers when the editor is
- *  hidden, which is why its CSS anchors it to the pane rather than to the
- *  editor (floating-panel.css). */
-export type FloatingPanelVariant = 'completion' | 'recall' | 'secret' | 'snippet'
+ *  overlay as the third variant. */
+export type FloatingPanelVariant = 'completion' | 'recall' | 'secret'
 
 /** One row the kit draws. Deliberately a display subset of whatever the
  *  variant's domain object is: the variant maps candidates/entries to rows
@@ -92,15 +85,6 @@ export interface FloatingPanelRow {
    *  different section (the history group in a mixed completion list). The
    *  variant DECIDES sections; the primitive renders the caption. */
   readonly group?: string
-  /** The honest nothing-to-choose row: the same muted non-selectable state
-   *  showEmpty() renders, as one row of a full list (the palette's
-   *  "no snippets yet" and "store unavailable" phases keep their filter
-   *  field and footer — showEmpty cannot hold either). */
-  readonly empty?: boolean
-  /** A fire's refusal (design §11): the same non-selectable row, in the
-   *  danger tone. The snippet palette renders a refusal IN the panel and
-   *  keeps it there — never a toast. */
-  readonly refusal?: boolean
 }
 
 export interface FloatingPanelCallbacks {
@@ -314,14 +298,6 @@ export class FloatingPanel {
     rowEl.setAttribute('role', 'option')
     rowEl.setAttribute('aria-selected', String(selected))
     if (selected) rowEl.dataset.selected = 'true'
-    // The honest states — "nothing to choose" and "the fire was refused" —
-    // are non-selectable rows: muted/italic for the first, the danger tone
-    // for the second (floating-panel.css), neither offering a pick.
-    if (r.empty) rowEl.dataset.empty = 'true'
-    if (r.refusal) rowEl.dataset.refusal = 'true'
-    if (r.empty || r.refusal) {
-      rowEl.setAttribute('aria-disabled', 'true')
-    }
 
     const info = document.createElement('div')
     info.className = 'ui-collection-row__info'
@@ -335,10 +311,7 @@ export class FloatingPanel {
       rowEl.appendChild(actions)
     }
 
-    // A row flagged empty or refused is not selectable: the honest states
-    // ("nothing to choose", "the fire was refused") must not react to hover
-    // or click, whatever callbacks the variant registered.
-    if ((this.callbacks.onHover || this.callbacks.onPick) && !r.empty && !r.refusal) {
+    if (this.callbacks.onHover || this.callbacks.onPick) {
       rowEl.addEventListener('mouseenter', () => this.callbacks.onHover?.(index))
       rowEl.addEventListener('mousedown', (e) => {
         e.preventDefault()

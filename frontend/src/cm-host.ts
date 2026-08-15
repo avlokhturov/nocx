@@ -53,7 +53,12 @@ const editingExtensions: Extension[] = [history(), keymap.of([...defaultKeymap, 
 const themeFor = (editable: boolean) =>
   EditorView.theme({
     '&': {
-      backgroundColor: 'var(--color-canvas)',
+      // A read-only host IS the surface it fills — the file viewer and the
+      // diff are the page. An editable one is a FIELD inside somebody's
+      // layout, and a field that paints itself the canvas colour reads as a
+      // hole cut in the dialog it sits in (owner review). Same token the
+      // kit's text field uses, so the two fields of one form match.
+      backgroundColor: editable ? 'var(--color-surface-raised)' : 'var(--color-canvas)',
       color: 'var(--color-text)',
     },
     '&.cm-focused': { outline: 'none' },
@@ -62,7 +67,7 @@ const themeFor = (editable: boolean) =>
     // moment it is focused.
     '.cm-content': { caretColor: editable ? 'var(--color-text)' : 'transparent' },
     '.cm-gutters': {
-      backgroundColor: 'var(--color-canvas)',
+      backgroundColor: editable ? 'var(--color-surface-raised)' : 'var(--color-canvas)',
       color: 'var(--color-text-dim)',
       border: 'none',
     },

@@ -189,39 +189,3 @@ export function TextField(props: TextFieldProps) {
     </div>
   )
 }
-
-export interface CreateTextFieldInputOptions {
-  /** The input's initial value. */
-  value?: string
-  placeholder?: string
-  ariaLabel?: string
-  /** Fires on every keystroke (input event). */
-  onInput?: (value: string) => void
-}
-
-/**
- * The kit's text field as a vanilla focusable input — the interactive half
- * of TextField, restated for a non-React surface (the snippet palette's
- * filter and ask fields live beside the editor, like the recall overlay,
- * and cannot mount a Solid component). Same identities as the React form
- * (`ui-text-field__input`), so the appearance is one copy in
- * text-field.css; keeping the two in one module is what stops them
- * drifting, exactly as SearchField does with its display form.
- *
- * The recall overlay's search uses the DISPLAY form because its keys are
- * owned by the editor's arbiter; a surface with no such arbiter — the
- * palette answers when the editor is hidden — needs a REAL input to be the
- * keyboard's anchor.
- */
-export function createTextFieldInput(opts: CreateTextFieldInputOptions = {}): HTMLInputElement {
-  const input = document.createElement('input')
-  input.type = 'text'
-  input.className = 'ui-text-field__input'
-  if (opts.value !== undefined) input.value = opts.value
-  if (opts.placeholder !== undefined) input.placeholder = opts.placeholder
-  if (opts.ariaLabel !== undefined) input.setAttribute('aria-label', opts.ariaLabel)
-  if (opts.onInput !== undefined) {
-    input.addEventListener('input', () => opts.onInput?.(input.value))
-  }
-  return input
-}

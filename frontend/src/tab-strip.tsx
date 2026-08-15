@@ -67,11 +67,11 @@ export interface TabStrip {
   onReorder: ((fromId: number, toId: number) => void) | null
   onQuickConnect: (() => void) | null
   onInsertSecret: (() => void) | null
-  /** The snippets action was pressed, with the button's own viewport rect
-   *  as the anchor: the menu is a popover the composition root opens, and a
-   *  caller that had to find the button again would be reading the strip's
-   *  DOM. The strip knows nothing about a library (design §10.3). */
-  onSnippets: ((anchor: { x: number; y: number }) => void) | null
+  /** The snippets action was pressed. Shaped exactly like onQuickConnect
+   *  and onInsertSecret because it opens exactly what they open — the same
+   *  palette, in its snippets variant (design §10.3). The strip knows
+   *  nothing about a library. */
+  onSnippets: (() => void) | null
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -108,16 +108,7 @@ abstract class TabStripBase implements TabStrip {
   onReorder: ((fromId: number, toId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
-  onSnippets: ((anchor: { x: number; y: number }) => void) | null = null
-
-  /** The snippets intent, with the pressed button's bottom-left corner as
-   *  the menu's anchor. ONE implementation for both orientations: the
-   *  measurement is the same question in each, and two copies would be two
-   *  answers the day one strip's chrome moves. */
-  protected reportSnippets(e: MouseEvent): void {
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
-    this.onSnippets?.({ x: rect.left, y: rect.bottom })
-  }
+  onSnippets: (() => void) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -180,7 +171,7 @@ abstract class TabStripBase implements TabStrip {
                 <IconButton
                   ariaLabel="Snippets"
                   title="Snippets"
-                  onClick={(e: MouseEvent) => this.reportSnippets(e)}
+                  onClick={() => this.onSnippets?.()}
                   tabIndex={-1}
                 >
                   <TextQuoteIcon />
@@ -252,7 +243,7 @@ abstract class TabStripBase implements TabStrip {
               <IconButton
                 ariaLabel="Snippets"
                 title="Snippets"
-                onClick={(e: MouseEvent) => this.reportSnippets(e)}
+                onClick={() => this.onSnippets?.()}
                 tabIndex={-1}
               >
                 <TextQuoteIcon />

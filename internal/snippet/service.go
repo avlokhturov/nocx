@@ -29,17 +29,29 @@ func NewService(store Store, newID func() string) *Service {
 // They are not built-ins: no override layer, no restore, no reset. Their only
 // job is to teach the placeholder syntax at the moment the library would
 // otherwise be empty (design §5.3).
+//
+// EVERY SEED MUST FIRE IN AN ORDINARY LOCAL PANE. The first pair did not:
+// one asked for {{env:branch}}, which is null until the pane has a git
+// binding, and the other for {{env:host}}, which is the ssh user's host and
+// is empty on a local shell by definition — so both refused, every time, for
+// anybody whose first act was to try one (owner review). A first example
+// that cannot run teaches the opposite of what a seed is for.
+//
+// The rule that keeps this true: a seed may use {{env:cwd}} — a session
+// always has a working directory — and {{ask:…}}, which the person answers.
+// It may not use an env key that depends on where the pane happens to be
+// pointed.
 func (s *Service) seeds() []Snippet {
 	return []Snippet{
 		{
 			ID:    s.newID(),
-			Title: "Explain this branch",
-			Body:  "Explain what changed in {{env:branch}} under {{env:cwd}}.",
+			Title: "Explain this project",
+			Body:  "Explain what the project in {{env:cwd}} does, and how it is laid out.",
 		},
 		{
 			ID:    s.newID(),
-			Title: "Forward a port",
-			Body:  "ssh -L {{ask:local=8080}}:localhost:{{ask:remote=8080}} {{env:host}}",
+			Title: "Forward a port over ssh",
+			Body:  "ssh -L {{ask:local=8080}}:localhost:{{ask:remote=8080}} {{ask:host}}",
 		},
 	}
 }

@@ -66,8 +66,9 @@ import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { createSessionFactsProvider } from './snippets/session-facts'
 import { createSnippetFireAdapter } from './snippets/fire'
-import { SnippetPalette } from './snippets/palette'
-import { mountSnippetsMenu } from './snippets/snippets-menu'
+import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
+import { mountSnippetAskDialog } from './snippets/snippet-ask-dialog'
+import { askFields } from './snippets/resolve'
 
 async function main() {
   log.info('nocx: main() called')
@@ -506,9 +507,28 @@ async function main() {
     },
     clipboard: { writeText: (text) => clipboard.writeText(text) },
   })
-  const snippetPalette = new SnippetPalette({
+  // Snippets ride the quick-connect palette — the surface the server list,
+  // the command palette and the secret picker already are. The provider is
+  // registered with the others below; this reference is what the chord, the
+  // strip's menu and the completion dropdown all fire through, so there is
+  // ONE accept path (AD-8).
+  const snippetsProvider = new SnippetsQuickConnectProvider({
     store: snippetsStore,
     fire: snippetFire,
+    // A refusal re-opens the list with the reason on it: the surface it is
+    // about is still there, and a toast would take the explanation away
+    // from it (design §11).
+    onRefused: (message) => qc.showSnippets(message),
+    onManage: () => openSettingsTab().openPage('snippets'),
+    // A body with {{ask:…}} fields: the palette closes and the form asks
+    // for all of them at once (owner review — a step that filters a list
+    // cannot also be where a value is typed).
+    onAsk: (snippet) => snippetAsk.ask(snippet),
+  })
+  // The form the fields are answered in. It reports its own refusals, so a
+  // person who mistyped an answer sees why beside what they typed.
+  const snippetAsk = mountSnippetAskDialog(document.body, {
+    fire: (snippet, answers) => snippetsProvider.fireReporting(snippet, answers),
   })
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
@@ -804,6 +824,10 @@ async function main() {
       forwardPortCommand,
     ),
     sshProvider,
+    // Snippets: one kind set of its own (the 'snippets' variant), so its
+    // Enter — which types a saved phrase into the pane in front — can never
+    // sit in the server list or the command palette.
+    snippetsProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
       tm.newSSHTab('', host, user, port),
     ),
@@ -868,9 +892,14 @@ async function main() {
   // the focus return). A second copy of any of that is a second owner of
   // one behaviour (AD-8).
   function fireSnippet(snippet: Snippet): void {
-    const pane = tm.activePane()
-    if (pane === null) return
-    snippetPalette.fireChosen(pane, snippet)
+    // One path for every surface that hands over a chosen snippet (the
+    // completion dropdown today): a body that asks for values opens the
+    // form; a plain one fires.
+    if (askFields(snippet.body).length > 0) {
+      snippetAsk.ask(snippet)
+      return
+    }
+    void snippetsProvider.fire(snippet, new Map())
   }
   function fireSnippetById(id: string): void {
     const state = snippetsStore.state()
@@ -894,23 +923,16 @@ async function main() {
   }
   tm.onSnippetAccepted = (id) => fireSnippetById(id)
 
-  // The toolbar menu's two intents. Picking a row runs the palette's accept
-  // path through fireSnippet above; "Manage snippets…" opens the settings
-  // page by id, through the general opener rather than a fourth bespoke one.
-  const snippetsMenu = mountSnippetsMenu(document.body, {
-    store: snippetsStore,
-    onPick: (snippet) => fireSnippet(snippet),
-    onManage: () => openSettingsTab().openPage('snippets'),
-  })
-
   function wireQuickConnect(strip: typeof tabStrip) {
     strip.onQuickConnect = () => qc.show()
     strip.onInsertSecret = () => qc.showSecrets()
-    // The snippets menu (design §10.3): the library without knowing the
-    // chord. Wired HERE, in the helper every strip construction and
-    // replacement goes through — a callback set only on the first strip
-    // works until the orientation changes and then silently stops.
-    strip.onSnippets = (anchor) => snippetsMenu.openAt(anchor.x, anchor.y)
+    // The snippets action (design §10.3): the library without knowing the
+    // chord — the SAME palette the chord opens, exactly as the key icon
+    // beside it opens the secret list. Wired here, in the helper every
+    // strip construction and replacement goes through: a callback set only
+    // on the first strip works until the orientation changes and then
+    // silently stops.
+    strip.onSnippets = () => qc.showSnippets()
   }
   wireQuickConnect(tabStrip)
 
@@ -919,11 +941,7 @@ async function main() {
   // handler and the editor's arbiter chain), which both delegate through
   // the pane's TerminalContent (AD-8). The chord is consumed at the xterm
   // boundary, so zero bytes reach the pty (design §10.1, bead nocx-jj77).
-  tm.onSnippetChord = () => {
-    const pane = tm.activePane()
-    if (pane === null) return
-    void snippetPalette.open(pane)
-  }
+  tm.onSnippetChord = () => qc.showSnippets()
 
   // Cmd/Ctrl+Shift+P opens the PALETTE (nocx-4t37): commands and hosts
   // mixed, each row typed on the right; target-needing commands drill in.

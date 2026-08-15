@@ -32,7 +32,7 @@ import { EmptyState } from '../ui/empty-state'
 import { Field } from '../ui/field'
 import { StatusCard } from '../ui/status-card'
 import { IconButton } from '../ui/icon-button'
-import { ArrowDownIcon, ArrowUpIcon, PencilIcon, TrashIcon } from '../ui/icons'
+import { PencilIcon, TrashIcon } from '../ui/icons'
 import { Stack } from '../ui/stack'
 import { TextField } from '../ui/text-field'
 import { createFormValidation, required } from '../ui/validation'
@@ -115,6 +115,12 @@ export function SnippetsSection(props: SnippetsSectionProps) {
    *  a toast over a closed editor would take away both the sentence and the
    *  draft it is about. */
   const [saveError, setSaveError] = createSignal('')
+
+  /** The row being dragged, and where it would land — the gesture's own
+   *  state. The drop line is drawn from this rather than from the pointer's
+   *  position, so what is shown is exactly what moveTo will do. */
+  const [draggingId, setDraggingId] = createSignal<string | null>(null)
+  const [dropAt, setDropAt] = createSignal<{ id: string; edge: 'above' | 'below' } | null>(null)
 
   let bodyHost: BodyEditorHost | null = null
   let bodyAbort: AbortController | null = null
@@ -225,16 +231,23 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     }
   }
 
-  /** Move one snippet by one place. The wire takes the WHOLE order (the
-   *  service refuses anything that is not a permutation of the library), so
-   *  the move is computed over the full list and sent as the full list —
-   *  never as the pair that changed. */
-  async function move(s: Snippet, by: -1 | 1): Promise<void> {
+  /** Put `movedId` where `targetId` sits. The wire takes the WHOLE order
+   *  (the service refuses anything that is not a permutation of the
+   *  library), so the move is computed over the full list and sent as the
+   *  full list — never as the pair that changed.
+   *
+   *  Ordering is a DRAG, not a pair of buttons: no other list in this
+   *  product has arrow controls, and a row a person can pick up is the
+   *  thing every list they already use behaves like (owner review, and the
+   *  tab strip's own reorder). Alt+↑/↓ does the same from the keyboard, so
+   *  the order is not mouse-only. */
+  async function moveTo(movedId: string, targetId: string): Promise<void> {
+    if (movedId === targetId) return
     const ids = snippets().map((x) => x.id)
-    const at = ids.indexOf(s.id)
-    const to = at + by
-    if (at < 0 || to < 0 || to >= ids.length) return
-    ids.splice(to, 0, ...ids.splice(at, 1))
+    const from = ids.indexOf(movedId)
+    const to = ids.indexOf(targetId)
+    if (from < 0 || to < 0) return
+    ids.splice(to, 0, ...ids.splice(from, 1))
     try {
       await props.store.reorder(ids)
     } catch (err) {
@@ -244,45 +257,107 @@ export function SnippetsSection(props: SnippetsSectionProps) {
     }
   }
 
+  /** Which side of `targetId` the dragged row lands on. Read from the
+   *  ORDER, not from the pointer: moveTo removes the row and re-inserts it
+   *  at the target's index, so a row coming from above ends up after the
+   *  target and one coming from below ends up before it. A line drawn from
+   *  the cursor's half of the row would be a guess, and half the time it
+   *  would promise the wrong place. */
+  function dropEdge(movedId: string, targetId: string): 'above' | 'below' | null {
+    if (movedId === targetId) return null
+    const ids = snippets().map((x) => x.id)
+    const from = ids.indexOf(movedId)
+    const to = ids.indexOf(targetId)
+    if (from < 0 || to < 0) return null
+    return from < to ? 'below' : 'above'
+  }
+
+  /** The keyboard's reorder: one place up or down from the focused row. */
+  function moveBy(s: Snippet, by: -1 | 1): void {
+    // A filter hides rows, so "one place" would mean a place in the STORED
+    // order that the person cannot see. The stored order is what fires, so
+    // reordering waits until the whole list is on screen.
+    if (filtering()) return
+    const list = snippets()
+    const at = list.findIndex((x) => x.id === s.id)
+    const target = list[at + by]
+    if (target === undefined) return
+    void moveTo(s.id, target.id)
+  }
+
   function renderRow(s: Snippet) {
-    // Position is derived from the list rather than from a render index: the
-    // list is what a move rewrites, and reading it keeps the two arrows
-    // correct after a reorder without a second source of "where is this row".
-    const first = () => filtered()[0]?.id === s.id
-    const last = () => filtered()[filtered().length - 1]?.id === s.id
     return (
-      <RecordRow
-        title={s.title}
-        meta={bodySummary(s.body)}
-        onActivate={() => openEdit(s)}
-        actions={
-          <>
-            {/* Reorder is disabled while a filter hides rows: "up" would
-                mean a different place in the stored order than the one the
-                person can see, and the stored order is what fires. */}
-            <IconButton
-              ariaLabel={`Move ${s.title} up`}
-              disabled={first() || filtering()}
-              onClick={() => void move(s, -1)}
-            >
-              <ArrowUpIcon />
-            </IconButton>
-            <IconButton
-              ariaLabel={`Move ${s.title} down`}
-              disabled={last() || filtering()}
-              onClick={() => void move(s, 1)}
-            >
-              <ArrowDownIcon />
-            </IconButton>
-            <IconButton ariaLabel={`Edit ${s.title}`} onClick={() => openEdit(s)}>
-              <PencilIcon />
-            </IconButton>
-            <IconButton ariaLabel={`Delete ${s.title}`} onClick={() => void remove(s)}>
-              <TrashIcon />
-            </IconButton>
-          </>
-        }
-      />
+      <div
+        class="sn-row"
+        // The whole row is the handle: a person drags the thing they see,
+        // and a list of two rows does not need a grip column to find.
+        draggable={!filtering()}
+        data-dragging={draggingId() === s.id ? 'true' : undefined}
+        // Where this row would land, drawn as a line on that edge. The
+        // dragged id comes from a signal rather than from the dataTransfer:
+        // a dragover event may not READ the payload (the browser hides it
+        // until the drop), and a gesture that cannot say where it lands is
+        // the one thing a drag must not do.
+        data-drop={dropAt()?.id === s.id ? dropAt()?.edge : undefined}
+        onDragStart={(e: DragEvent) => {
+          e.dataTransfer?.setData('text/plain', s.id)
+          if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+          setDraggingId(s.id)
+        }}
+        onDragEnd={() => {
+          setDraggingId(null)
+          setDropAt(null)
+        }}
+        onDragOver={(e: DragEvent) => {
+          // Without this the drop never fires — the default is "no drop
+          // here", and a list that cannot be dropped into looks broken
+          // exactly halfway through the gesture.
+          if (filtering()) return
+          e.preventDefault()
+          if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+          const moved = draggingId()
+          const edge = moved === null ? null : dropEdge(moved, s.id)
+          setDropAt(edge === null ? null : { id: s.id, edge })
+        }}
+        onDragLeave={() => {
+          if (dropAt()?.id === s.id) setDropAt(null)
+        }}
+        onDrop={(e: DragEvent) => {
+          e.preventDefault()
+          const movedId = e.dataTransfer?.getData('text/plain') ?? draggingId()
+          setDraggingId(null)
+          setDropAt(null)
+          if (movedId) void moveTo(movedId, s.id)
+        }}
+        onKeyDown={(e: KeyboardEvent) => {
+          // Alt+arrow rather than a bare arrow: the row list is not a
+          // listbox, and a bare arrow belongs to the page's scroll.
+          if (!e.altKey || e.metaKey || e.ctrlKey) return
+          if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            moveBy(s, -1)
+          } else if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            moveBy(s, 1)
+          }
+        }}
+      >
+        <RecordRow
+          title={s.title}
+          meta={bodySummary(s.body)}
+          onActivate={() => openEdit(s)}
+          actions={
+            <>
+              <IconButton ariaLabel={`Edit ${s.title}`} onClick={() => openEdit(s)}>
+                <PencilIcon />
+              </IconButton>
+              <IconButton ariaLabel={`Delete ${s.title}`} onClick={() => void remove(s)}>
+                <TrashIcon />
+              </IconButton>
+            </>
+          }
+        />
+      </div>
     )
   }
 

@@ -136,27 +136,24 @@ describe('VerticalTabStrip filtering', () => {
 
 describe('the snippets action (nocx-d346)', () => {
   // The strip is a presentation port: it reports that the button was
-  // pressed and where it is, and knows nothing about a library. The anchor
-  // travels with the intent because the menu is a popover, and a caller
-  // that had to find the button again would be reading the strip's DOM.
-  const anchorOf = (strip: { onSnippets: ((a: { x: number; y: number }) => void) | null }) => {
-    const seen: { x: number; y: number }[] = []
-    strip.onSnippets = (a) => seen.push(a)
-    return seen
+  // pressed, nothing more. What opens is the quick-connect palette in its
+  // snippets variant — the same surface the caret and the key icon beside
+  // it open, which is the correction the owner's review made.
+  const pressesOf = (strip: { onSnippets: (() => void) | null }) => {
+    let presses = 0
+    strip.onSnippets = () => (presses += 1)
+    return () => presses
   }
 
-  it('the vertical strip offers it and reports the button as the anchor', () => {
+  it('the vertical strip offers it and reports the press', () => {
     const { strip } = setupVerticalStrip()
-    const seen = anchorOf(strip)
+    const presses = pressesOf(strip)
 
     const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')
     expect(button, 'the vertical strip has no snippets action').not.toBeNull()
     button!.click()
 
-    expect(seen).toHaveLength(1)
-    // jsdom lays nothing out, so the numbers are zeroes — what this asserts
-    // is that the strip measured the BUTTON rather than inventing a point.
-    expect(seen[0]).toEqual({ x: 0, y: 0 })
+    expect(presses()).toBe(1)
   })
 
   it('the horizontal strip offers it too — a strip replacement must not lose it', () => {
@@ -164,13 +161,13 @@ describe('the snippets action (nocx-d346)', () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     strip.mount(container)
-    const seen = anchorOf(strip)
+    const presses = pressesOf(strip)
 
     const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')
     expect(button, 'the horizontal strip has no snippets action').not.toBeNull()
     button!.click()
 
-    expect(seen).toHaveLength(1)
+    expect(presses()).toBe(1)
   })
 
   it('with no callback wired the button is inert rather than broken', () => {

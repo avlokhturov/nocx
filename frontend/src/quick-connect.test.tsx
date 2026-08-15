@@ -276,6 +276,7 @@ describe('QuickConnectController', () => {
       new (class implements QuickConnectProvider {
         readonly id = 'test'
         readonly label = 'Test'
+        readonly kinds = ['host', 'command', 'secret'] as const
         getItems(): QuickConnectItem[] {
           return [
             { id: 'a', kind: 'host', label: 'First', run: vi.fn() },
@@ -329,6 +330,7 @@ describe('QuickConnectController', () => {
       new (class implements QuickConnectProvider {
         readonly id = 'test'
         readonly label = 'Test'
+        readonly kinds = ['host', 'command', 'secret'] as const
         getItems(): QuickConnectItem[] {
           return [
             { id: 'a', kind: 'host', label: 'admin@server1', detail: 'Production', run: vi.fn() },
@@ -404,6 +406,7 @@ describe('QuickConnectController', () => {
     const slowProvider: QuickConnectProvider = {
       id: 'slow',
       label: 'Slow',
+      kinds: ['host', 'command', 'secret'] as const,
       getItems: () =>
         new Promise<QuickConnectItem[]>((resolve) => {
           resolvers.push(resolve)

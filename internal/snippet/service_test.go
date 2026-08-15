@@ -3,6 +3,7 @@ package snippet_test
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/snippet"
@@ -169,5 +170,31 @@ func TestCreateUpdateListRoundTrip(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].Title != "new title" || list[0].Body != "new body" {
 		t.Fatalf("round trip lost the edit: %+v", list)
+	}
+}
+
+// TestSeedsFireInAnOrdinaryLocalPane is the rule the seeds' comment states,
+// as an assertion: a seed may use {{env:cwd}} and {{ask:…}} and nothing
+// else. The first pair used {{env:branch}} and {{env:host}} — null and
+// empty respectively in a plain local shell — so the two examples a new
+// user is handed both refused when they tried them (owner review). Nothing
+// caught it, because a seed's CONTENT had no test at all.
+func TestSeedsFireInAnOrdinaryLocalPane(t *testing.T) {
+	svc := snippet.NewService(&memStore{existed: false}, counter())
+	seeded, err := svc.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(seeded) == 0 {
+		t.Fatal("no seeds to check")
+	}
+	env := regexp.MustCompile(`\{\{env:([^}]*)\}\}`)
+	for _, s := range seeded {
+		for _, m := range env.FindAllStringSubmatch(s.Body, -1) {
+			if m[1] != "cwd" {
+				t.Errorf("seed %q uses {{env:%s}}, which a local pane cannot answer; "+
+					"a seed may use {{env:cwd}} and {{ask:…}} only", s.Title, m[1])
+			}
+		}
 	}
 }
