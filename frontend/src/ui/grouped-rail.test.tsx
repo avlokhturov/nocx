@@ -41,12 +41,19 @@ function subject(overrides?: Partial<GroupedRailProps>) {
 
 describe('GroupedRail', () => {
   it('renders ungrouped items at top level, before the groups', () => {
-    subject({ items: [item({ id: 'connections', title: 'Connections' })] })
+    subject({
+      items: [
+        item({ id: 'connections', title: 'Connections' }),
+        item({ id: 'secrets', title: 'Secrets', groupId: 'assistant' }),
+      ],
+    })
     const list = document.querySelector('.ui-grouped-nav__list')!
     const first = list.querySelector(':scope > li') as HTMLElement
     expect(first.classList.contains('ui-grouped-nav__item')).toBe(true)
     expect(first.textContent).toContain('Connections')
-    expect(list.querySelectorAll('.ui-grouped-nav__group').length).toBe(3)
+    // The assistant group renders (it has a member); the other two groups
+    // have none and render nothing at all.
+    expect(list.querySelectorAll('.ui-grouped-nav__group').length).toBe(1)
   })
 
   it('renders group headings in catalogue order with their items beneath', () => {
@@ -72,6 +79,13 @@ describe('GroupedRail', () => {
     expect(headings).toEqual(['Assistant', 'Application'])
     expect(groups[0].textContent).toContain('Endpoints')
     expect(groups[0].textContent).not.toContain('Backup & Restore')
+  })
+
+  it('renders group headings as the kit Caption identity', () => {
+    subject({ items: [item({ id: 'endpoints', title: 'Endpoints', groupId: 'assistant' })] })
+    const caption = document.querySelector('.ui-grouped-nav__heading .ui-caption') as HTMLElement
+    expect(caption).not.toBeNull()
+    expect(caption.textContent).toBe('Assistant')
   })
 
   it('marks the active item and fires onSelect from the row button', () => {
@@ -117,15 +131,22 @@ describe('GroupedRail', () => {
     ).toThrow(/no-such-group/)
   })
 
-  it('renders a declared group even when it has no members yet', () => {
+  it('a group with no items renders nothing at all — no heading, no sublist, no margin', () => {
     subject({
-      groups: [{ id: 'vault', title: 'Vault', order: 0 }],
-      items: [],
+      groups: [
+        { id: 'vault', title: 'Vault', order: 0 },
+        { id: 'assistant', title: 'Assistant', order: 1 },
+      ],
+      items: [item({ id: 'endpoints', title: 'Endpoints', groupId: 'assistant' })],
     })
+    // The empty vault group contributes no element: no heading, no empty
+    // sublist, and therefore no group margin.
+    expect(document.querySelector('.ui-grouped-nav__group[data-group="vault"]')).toBeNull()
+    expect(document.querySelectorAll('.ui-grouped-nav__group').length).toBe(1)
     const headings = Array.from(document.querySelectorAll('.ui-grouped-nav__heading')).map(
       (h) => h.textContent,
     )
-    expect(headings).toEqual(['Vault'])
+    expect(headings).toEqual(['Assistant'])
   })
 
   it('renders the nav with the given aria-label', () => {

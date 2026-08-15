@@ -25,6 +25,7 @@
    block does not carry meaning — no two of these files address the same element, which
    is the property the split exists to create and gate 3 exists to keep. */
 @import './styles/components/button.css';
+@import './styles/components/caption.css';
 @import './styles/components/text-field.css';
 @import './styles/components/search-field.css';
 @import './styles/components/suggestion-field.css';

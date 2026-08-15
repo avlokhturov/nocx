@@ -90,5 +90,16 @@ test.describe('settings scroll — narrow', () => {
     await expectOverflow(page)
 
     expect(await lastSectionReachable(page)).toBe(true)
+
+    // The stacked rail trims its own chrome (base.css owns the narrow
+    // breakpoint; the surface must not repaint the kit — rule 3). If the
+    // compact padding ever moves back into a surface override, this fails.
+    const railPad = await page.evaluate(() => {
+      const rail = document.querySelector<HTMLElement>('.ui-page__rail')
+      if (!rail) return null
+      const cs = getComputedStyle(rail)
+      return { top: cs.paddingTop, bottom: cs.paddingBottom }
+    })
+    expect(railPad).toEqual({ top: '8px', bottom: '8px' })
   })
 })

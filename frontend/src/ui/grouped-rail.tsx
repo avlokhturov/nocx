@@ -20,7 +20,7 @@
 import { For, Show, untrack } from 'solid-js'
 import { Button } from './button'
 import { Badge } from './badge'
-
+import { Caption } from './caption'
 export interface GroupedRailGroup {
   /** Id from the catalogue; an item's groupId must be one of these. */
   id: string
@@ -89,15 +89,21 @@ export function GroupedRail(props: GroupedRailProps) {
   const orderedGroups = () => [...props.groups].sort((a, b) => a.order - b.order)
   const topLevel = () => props.items.filter((it) => it.groupId === undefined)
   const itemsIn = (groupId: string) => props.items.filter((it) => it.groupId === groupId)
+  // A group whose item list is empty renders nothing at all — no heading, no
+  // empty sublist, no margin. The catalogue may declare a group no page lands
+  // in for this build (the Test section is not declared in every build); a
+  // caption with nothing under it is a row that reads as an item.
 
   return (
     <nav class="ui-grouped-nav" aria-label={props.label}>
       <ul class="ui-grouped-nav__list">
         <For each={topLevel()}>{(item) => renderItem(item)}</For>
-        <For each={orderedGroups()}>
+        <For each={orderedGroups().filter((g) => itemsIn(g.id).length > 0)}>
           {(group) => (
             <li class="ui-grouped-nav__group" data-group={group.id}>
-              <span class="ui-grouped-nav__heading">{group.title}</span>
+              <span class="ui-grouped-nav__heading">
+                <Caption>{group.title}</Caption>
+              </span>
               <ul class="ui-grouped-nav__sublist">
                 <For each={itemsIn(group.id)}>{(item) => renderItem(item)}</For>
               </ul>

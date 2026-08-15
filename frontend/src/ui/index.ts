@@ -1,4 +1,5 @@
 export { Button, type ButtonProps } from './button'
+export { Caption, type CaptionProps } from './caption'
 export { Checkbox, type CheckboxProps } from './checkbox'
 export { IconButton, type IconButtonSize } from './icon-button'
 export { Select, type SelectProps, type SelectOption } from './select'
