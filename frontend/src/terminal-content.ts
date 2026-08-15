@@ -68,6 +68,7 @@ import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
+import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import {
   BaseTabContent,
   type TabHost,
@@ -229,6 +230,15 @@ export interface TerminalContentHooks {
    *  pane's own surfaces and then delegate here. The composition root
    *  opens the palette (design §10.1); one opener, two boundaries (AD-8). */
   onSnippetChord?: () => void
+  /** The library the completion provider reads, and the acceptance the
+   *  dropdown delegates (design §10.2). Both absent where no snippets
+   *  service is wired: the provider is then not registered at all, and a
+   *  snippet row cannot exist to be accepted. */
+  snippets?: SnippetProviderDeps
+  /** A snippet row was accepted in the dropdown — the composition root
+   *  resolves the body NOW and fires it through the same path the palette
+   *  and the toolbar menu use (AD-8: one owner for what a snippet becomes). */
+  onSnippetAccepted?: (snippetId: string) => void
 
   /** A question was refused because no endpoint is configured: open the
    *  endpoint editor so the refusal comes with its repair — wired by
@@ -840,6 +850,9 @@ export class TerminalContent extends BaseTabContent {
           // module); this tab's ProfileClient is handed through, absent when
           // no connection manager is wired.
           profileClient: this.profileClient ?? undefined,
+          // The snippet library (design §10.2) — rows beside command names
+          // in the ONE dropdown, never a second suggestion surface.
+          snippets: this.hooks.snippets,
         }),
         dropdown: new CompletionDropdown({
           onHover: (index) => this.completion?.select(index),
@@ -847,6 +860,10 @@ export class TerminalContent extends BaseTabContent {
         }),
         env: () => ({ isLocal: !this.sshOpts, cwd: this._cwd, host: this._host }),
         recallIsOpen: () => this.recall?.isOpen ?? false,
+        // Accepting a snippet row resolves the body at THAT moment and
+        // delivers it through the fire path; the dropdown never inserts the
+        // row's own text, which is only the title (design §8, §10.2).
+        acceptSnippet: (id) => this.hooks.onSnippetAccepted?.(id),
       })
       // The DOCUMENT-level layer, shared by both targets: the
       // vault-reference chip (a decoration, not a language), the quiet

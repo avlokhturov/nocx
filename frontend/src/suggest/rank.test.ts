@@ -327,3 +327,63 @@ describe('rankCandidates', () => {
     expect(ids(ranked)).toEqual(['old-exact', 'fresh-prefix'])
   })
 })
+
+describe('a snippet against a real command (nocx-nlhe)', () => {
+  // The collision, not the snippet in isolation: a snippet tested alone
+  // ranks first trivially, and the rule this feature has to keep is that a
+  // person typing a prefix of an executable they have still gets the
+  // executable (design §10.2).
+  it('a real executable keeps its row when a snippet has the same prefix', () => {
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'snippet',
+          providerId: 'snippet',
+          source: 'snippet',
+          insertText: 'depcheck',
+          displayText: 'depcheck',
+          eligibleForGhostText: false,
+        }),
+        base({ id: 'command', insertText: 'depcheck', displayText: 'depcheck' }),
+      ],
+      { query: 'dep', now: NOW },
+    )
+    expect(ids(ranked)).toEqual(['command', 'snippet'])
+  })
+
+  it('and keeps it when the snippet is the exact word typed, if the command is too', () => {
+    const ranked = rankCandidates(
+      [
+        base({
+          id: 'snippet',
+          providerId: 'snippet',
+          source: 'snippet',
+          insertText: 'deploy',
+          eligibleForGhostText: false,
+        }),
+        base({ id: 'command', insertText: 'deploy' }),
+      ],
+      { query: 'deploy', now: NOW },
+    )
+    expect(ids(ranked)).toEqual(['command', 'snippet'])
+  })
+
+  it('a snippet whose TITLE is exactly what was typed still beats a mere prefix command', () => {
+    // The other side of the same rule: quality is an absolute rung, and the
+    // person typed this snippet's whole title.
+    const ranked = rankCandidates(
+      [
+        base({ id: 'command', insertText: 'deployment-thing' }),
+        base({
+          id: 'snippet',
+          providerId: 'snippet',
+          source: 'snippet',
+          insertText: 'deploy',
+          eligibleForGhostText: false,
+        }),
+      ],
+      { query: 'deploy', now: NOW },
+    )
+    expect(ids(ranked)).toEqual(['snippet', 'command'])
+  })
+})

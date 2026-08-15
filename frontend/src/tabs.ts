@@ -27,6 +27,7 @@ import type {
   SurfaceType,
 } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
+import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -391,6 +392,11 @@ export class TabManager {
    *  editor arbiter both land here. The composition root opens the
    *  palette (design §10.1). */
   onSnippetChord?: () => void
+  /** The snippet library the completion provider in every pane reads, and
+   *  the acceptance it delegates (design §10.2). Set once by the
+   *  composition root; handed to each TerminalContent as it is built. */
+  snippets?: SnippetProviderDeps
+  onSnippetAccepted?: (snippetId: string) => void
 
   constructor(
     bar: HTMLElement,
@@ -482,6 +488,8 @@ export class TabManager {
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
         onSnippetChord: this.onSnippetChord,
+        snippets: this.snippets,
+        onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
       },
     )
@@ -534,6 +542,8 @@ export class TabManager {
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
         onSnippetChord: this.onSnippetChord,
+        snippets: this.snippets,
+        onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
       },
     )

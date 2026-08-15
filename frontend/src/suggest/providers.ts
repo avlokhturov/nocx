@@ -19,6 +19,7 @@ import type { Candidate } from './candidate'
 import type { CompletionToken, TokenPosition } from './token'
 import { looksLikePath } from './token'
 import { hostProvider } from './host-provider'
+import { snippetProvider, type SnippetProviderDeps } from '../snippets/snippet-provider'
 import type { ProfileClient } from '../profiles'
 
 /** Per-provider cap on the candidates returned to the merge. */
@@ -536,9 +537,16 @@ export function createShellProviders(opts: {
    *  raw-mode contexts where no connection manager exists — a provider that
    *  can never answer is not registered. */
   profileClient?: ProfileClient
+  /** The snippet library seam (design §10.2). Absent where no snippets
+   *  service is wired — a provider that can never answer is not
+   *  registered, the same rule the host provider follows. */
+  snippets?: SnippetProviderDeps
 }): SuggestionProvider[] {
   return [
     commandProvider(opts.store),
+    // Snippets answer in command position beside command names, ranked
+    // below them: a saved phrase never takes an executable's row (§10.2).
+    ...(opts.snippets ? [snippetProvider(opts.snippets)] : []),
     ...(opts.profileClient ? [hostProvider({ profileClient: opts.profileClient })] : []),
     // The adapter (nocx-w7h.15) answers remote paths and command-specific
     // completions — registered ABOVE fsProvider so it outranks the local

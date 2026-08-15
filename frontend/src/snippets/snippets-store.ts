@@ -50,6 +50,7 @@ export class SnippetsStore {
    *  `ready` with an empty list, which would tell the user they have no
    *  snippets when in fact we could not look (design §11.5). */
   async refresh(): Promise<void> {
+    this.started = true
     const gen = ++this.generation
     try {
       const res = await this.client.list()
@@ -59,6 +60,22 @@ export class SnippetsStore {
       if (gen !== this.generation) return
       this.set({ kind: 'unavailable', message: err instanceof Error ? err.message : String(err) })
     }
+  }
+
+  /** True once a read has been asked for — `ensureLoaded` is a no-op after
+   *  that, so a surface that asks on every keystroke (the completion
+   *  provider) cannot turn typing into a wire call per key. */
+  private started = false
+
+  /** Read the library if nobody has yet. A surface that only DISPLAYS the
+   *  list (the dropdown) uses this; a surface the person opened
+   *  deliberately (the palette, the menu, the settings page) calls
+   *  refresh(), because they are looking at it now and it must be current
+   *  (design §6 — a writer re-reads, nothing is pushed). */
+  ensureLoaded(): void {
+    if (this.started) return
+    this.started = true
+    void this.refresh()
   }
 
   async create(title: string, body: string): Promise<void> {

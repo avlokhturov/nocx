@@ -7,7 +7,7 @@
 // provider breaks.
 
 /** Which kind of surface produced the candidate. */
-export type CandidateSource = 'command' | 'history' | 'path' | 'host'
+export type CandidateSource = 'command' | 'history' | 'path' | 'host' | 'snippet'
 
 /** Which rung of the recall ladder (§10.6) the candidate came from. */
 export type CandidateScope = 'directory' | 'host' | 'everywhere'
@@ -80,6 +80,14 @@ export interface Candidate {
    * remote session, where the backend's filesystem is not the session's).
    */
   stalePath?: boolean
+  /**
+   * The library record a `snippet` candidate stands for (design §10.2). The
+   * row is a REFERENCE, not the text: accepting it resolves the body at
+   * that moment (env and ask at fire time, §8), so the id is what the
+   * acceptance path needs and `insertText` is only the title. Absent on
+   * every other source.
+   */
+  snippetId?: string
   /** Sensitivity, expressed in the type: false candidates never become ghost
    *  text and never accept via Right/End (design §8.7, §9). */
   readonly eligibleForGhostText: boolean

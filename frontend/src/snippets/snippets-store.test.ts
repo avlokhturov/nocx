@@ -225,3 +225,30 @@ describe('SnippetsClient', () => {
     await expect(client.list()).rejects.toThrow('ws closed')
   })
 })
+
+describe('ensureLoaded — the read a display surface asks for (nocx-nlhe)', () => {
+  it('reads the library once, however many times it is asked', async () => {
+    const list = vi.fn().mockResolvedValue({ snippets: [] })
+    const store = new SnippetsStore(fakeClient({ list }))
+
+    store.ensureLoaded()
+    store.ensureLoaded()
+    store.ensureLoaded()
+    await vi.waitFor(() => {
+      expect(store.state().kind).toBe('ready')
+    })
+    store.ensureLoaded()
+
+    // The completion provider calls this on every keystroke: one read for
+    // an unread library, and never a wire call per key.
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-read after a refresh has already asked', async () => {
+    const list = vi.fn().mockResolvedValue({ snippets: [] })
+    const store = new SnippetsStore(fakeClient({ list }))
+    await store.refresh()
+    store.ensureLoaded()
+    expect(list).toHaveBeenCalledTimes(1)
+  })
+})

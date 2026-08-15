@@ -63,7 +63,7 @@ import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
 import { SnippetsClient } from './snippets/snippets-client'
-import { SnippetsStore } from './snippets/snippets-store'
+import { SnippetsStore, type Snippet } from './snippets/snippets-store'
 import { createSessionFactsProvider } from './snippets/session-facts'
 import { createSnippetFireAdapter } from './snippets/fire'
 import { SnippetPalette } from './snippets/palette'
@@ -861,18 +861,45 @@ async function main() {
   const qc = new QuickConnectController()
   qc.mount(qcContainer, qcProviders)
 
-  // The toolbar menu's two intents. Picking a row runs the PALETTE's accept
-  // path — the ask form, the refusal sentences and the focus return are all
-  // its, so this menu owns no fire logic and cannot drift from the chord's
-  // (AD-8). "Manage snippets…" opens the settings page by id, through the
-  // general opener rather than a fourth bespoke one.
+  // Firing a snippet somebody already chose — the ONE path every surface
+  // that is not the palette's own list goes through: the toolbar menu's
+  // rows and the completion dropdown's acceptance both land here, and the
+  // palette owns what happens next (the ask form, the refusal sentences,
+  // the focus return). A second copy of any of that is a second owner of
+  // one behaviour (AD-8).
+  function fireSnippet(snippet: Snippet): void {
+    const pane = tm.activePane()
+    if (pane === null) return
+    snippetPalette.fireChosen(pane, snippet)
+  }
+  function fireSnippetById(id: string): void {
+    const state = snippetsStore.state()
+    if (state.kind !== 'ready') return
+    const snippet = state.snippets.find((s) => s.id === id)
+    if (snippet === undefined) return
+    fireSnippet(snippet)
+  }
+
+  // The completion dropdown's snippet rows (design §10.2): the library the
+  // provider reads and the acceptance it delegates. Set on the TabManager,
+  // so every pane built afterwards carries them.
+  tm.snippets = {
+    snippets: () => {
+      const state = snippetsStore.state()
+      return state.kind === 'ready' ? state.snippets : []
+    },
+    // Asked on a keystroke, so it must not BE a wire call per keystroke —
+    // the store fires one read for an unread library and no more.
+    ensureLoaded: () => snippetsStore.ensureLoaded(),
+  }
+  tm.onSnippetAccepted = (id) => fireSnippetById(id)
+
+  // The toolbar menu's two intents. Picking a row runs the palette's accept
+  // path through fireSnippet above; "Manage snippets…" opens the settings
+  // page by id, through the general opener rather than a fourth bespoke one.
   const snippetsMenu = mountSnippetsMenu(document.body, {
     store: snippetsStore,
-    onPick: (snippet) => {
-      const pane = tm.activePane()
-      if (pane === null) return
-      snippetPalette.fireChosen(pane, snippet)
-    },
+    onPick: (snippet) => fireSnippet(snippet),
     onManage: () => openSettingsTab().openPage('snippets'),
   })
 
