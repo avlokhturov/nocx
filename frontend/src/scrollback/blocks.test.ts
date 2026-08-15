@@ -1919,6 +1919,46 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     clickItem(openMenu(), 'Copy all')
     expect(copied[1]).toBe('question?\nanswer prose\n```\ncode\n```')
   })
+
+  // The wrap override lives in the ⋮ menu because it is the exception: the
+  // kind is right nearly always, and this is for the one wide table or the
+  // one answer somebody wants exactly as it arrived. It is a state on the
+  // BLOCK, so the kind's own rule stays the default underneath it.
+  it('the overflow menu toggles wrap per block, and the label says what the click will do', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('question?', '/')
+    h.append('answer prose')
+    h.close('success')
+
+    const openMenu = () => {
+      h.el
+        .querySelector<HTMLElement>('.cmd-overflow-btn')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
+    }
+    const item = (menu: HTMLElement, label: string) =>
+      Array.from(menu.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item')).find(
+        (b) => b.textContent === label,
+      )
+
+    // No override until somebody asks for one: the kind decides.
+    expect(h.el.hasAttribute('data-wrap')).toBe(false)
+
+    const menu = openMenu()
+    const on = item(menu, 'Wrap lines')
+    expect(on, 'the menu offers wrapping').toBeTruthy()
+    on!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(h.el.getAttribute('data-wrap')).toBe('on')
+
+    // Re-opened, the item names the OTHER direction — a toggle whose label
+    // does not change is a control you have to try to understand.
+    const menu2 = openMenu()
+    expect(item(menu2, 'Wrap lines')).toBeUndefined()
+    const off = item(menu2, 'Do not wrap')
+    expect(off).toBeTruthy()
+    off!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(h.el.getAttribute('data-wrap')).toBe('off')
+  })
 })
 
 // ── No per-block ask control (nocx-4wtlh) ─────────────────────────────────

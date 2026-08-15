@@ -556,7 +556,25 @@ function buildOverflowMenu(blockEl: HTMLElement, command: string): HTMLElement {
       closeMenu()
     })
 
-    menu.append(copyCmd, copyOut, copyAll)
+    // Wrap is a per-block override of the kind's default, and it lives here
+    // rather than as a control on the block because it is rare: the kind is
+    // right nearly always (a command's grid must not re-wrap — nocx-juau —
+    // and an answer's prose must). What it is for is the exception the kind
+    // cannot know about: one wide table in otherwise ordinary output, or one
+    // answer a person wants to read as it came. The override is the DOM
+    // state `data-wrap` on the block, so the CSS reads one attribute and the
+    // kind's own rule stays the default underneath it.
+    const wrapOn = () => blockEl.getAttribute('data-wrap') === 'on'
+    const wrapItem = document.createElement('button')
+    wrapItem.className = 'cmd-overflow-menu-item'
+    wrapItem.textContent = wrapOn() ? 'Do not wrap' : 'Wrap lines'
+    wrapItem.addEventListener('click', (ev) => {
+      ev.stopPropagation()
+      blockEl.setAttribute('data-wrap', wrapOn() ? 'off' : 'on')
+      closeMenu()
+    })
+
+    menu.append(copyCmd, copyOut, copyAll, wrapItem)
 
     // Render at body level so it floats above all scroll containers (P1-6).
     document.body.appendChild(menu)

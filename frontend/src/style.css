@@ -777,6 +777,29 @@
   overflow-x: auto;
 }
 
+/* The per-block wrap override from the block's ⋮ menu. The KIND decides the
+   default and is right nearly always; this is for the exception the kind
+   cannot know about — one wide table in ordinary output, one answer a person
+   wants to read exactly as it arrived. It is a state on the BLOCK, not a
+   second body class, so a body reads one attribute and the kind's own rule
+   stays underneath it as the default. Last in the file so it wins the
+   cascade over both kinds, which is the point of an override.
+
+   `data-wrap="on"` deliberately does not reach `.cmd-output-code`: a fenced
+   block inside an answer keeps the nocx-juau contract even when the answer
+   around it is being wrapped, because re-wrapping code is how alignment is
+   lost, and that is what the reader asked to keep by scrolling it. */
+.cmd-block[data-wrap='on'] .cmd-output:not(.cmd-output-code) {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-x: visible;
+}
+
+.cmd-block[data-wrap='off'] .cmd-output {
+  white-space: pre;
+  overflow-x: auto;
+}
+
 /* Hidden probe the cell-metric publisher measures the DOM's natural
    advance from. Inherits the block's font by living inside the scrollback
    container; positioned out of the way and never visible or interactive. */
