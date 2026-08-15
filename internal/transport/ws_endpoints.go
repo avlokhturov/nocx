@@ -70,7 +70,14 @@ func (h endpointHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 			}
 			created, err := svc.CreateEndpoint(ctx, e, key)
 			if err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: endpointMethodErrorCode(err), Message: err.Error()})
+				// rpcErrorFor keeps the endpoint conflict codes (-32602) and
+				// attaches the vault's reason when the mint failed because the
+				// vault needs setup or is sealed: without data.reason the
+				// renderer's operation-first wrapper (saveSecretWithVault) and
+				// the dispatcher's sealed interception cannot tell the vault
+				// from a disk error, so the setup/unlock sheet never opens and
+				// the save dies in a toast (nocx-4egm, the shape of nocx-25k9.7).
+				_ = h.r.TryError(req.ID, rpcErrorFor(endpointMethodErrorCode(err), "", err))
 				return nil
 			}
 			_ = h.r.TryResult(req.ID, mustMarshal(endpointResultResponse{Endpoint: wireEndpoint(created)}))
@@ -94,7 +101,7 @@ func (h endpointHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 			}
 			updated, err := svc.UpdateEndpoint(ctx, e, key)
 			if err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: endpointMethodErrorCode(err), Message: err.Error()})
+				_ = h.r.TryError(req.ID, rpcErrorFor(endpointMethodErrorCode(err), "", err))
 				return nil
 			}
 			_ = h.r.TryResult(req.ID, mustMarshal(endpointResultResponse{Endpoint: wireEndpoint(updated)}))
@@ -107,7 +114,7 @@ func (h endpointHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 				return nil
 			}
 			if err := svc.DeleteEndpoint(ctx, params.ID); err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "", err))
 				return nil
 			}
 			// Nothing to return; the list is the state (like
