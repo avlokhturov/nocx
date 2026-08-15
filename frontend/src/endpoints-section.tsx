@@ -11,15 +11,16 @@
  * button and the address restriction belong to nocx-edio. Validation goes
  * through the kit's createFormValidation + createSubmitGate.
  */
-import { For, Show, createMemo, createSignal, onMount } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, onMount } from 'solid-js'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
-import { CollectionRow, CollectionView } from './ui/collection-view'
+import { CollectionView } from './ui/collection-view'
+import { RecordRow } from './ui/record-row'
 import { Dialog, showConfirm } from './ui/dialog'
 import { EditableRowList } from './ui/row-list'
 import { EmptyState } from './ui/empty-state'
 import { IconButton } from './ui/icon-button'
-import { PencilIcon, TrashIcon } from './ui/icons'
+import { CheckCircleIcon, PencilIcon, TrashIcon } from './ui/icons'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
@@ -27,7 +28,9 @@ import { SuggestionField } from './ui/suggestion-field'
 import { absoluteHttpUrl, combine, createFormValidation, required } from './ui/validation'
 import { createSubmitGate } from './ui/submit-gate'
 import { showToast } from './ui/toast'
+import { credentialLine } from './agent-status-line'
 import { log } from './log'
+import type { StatusDotTone } from './ui/status-dot'
 import type { AgentClient } from './agent'
 // INLINED by agent.status.schema.json's cross-file ref, so the generated
 // agent.status.ts exports both AgentStatusResult and its own copy of
@@ -43,6 +46,73 @@ import { VaultOperationCancelledError, type VaultController } from './vault'
  *  only; the select appears when the second implementation does. */
 const SCHEMA_LABEL: Record<Endpoint['schema'], string> = {
   'openai-compatible': 'OpenAI-compatible',
+}
+
+/** The Test outcome sentence — the vocabulary nocx-q27y decided. Names
+ *  WHICH check ran ("the endpoint is reachable" and "the model answered"
+ *  are different facts) and what it found. ONE mapping, shared by the
+ *  editor's Test and the row's Test, so the two surfaces cannot drift. */
+function probeOutcomeLine(
+  p: EndpointsProbeResult | null,
+): { tone: 'danger' | 'success'; text: string } | null {
+  if (!p) return null
+  if (!p.ok) return { tone: 'danger', text: `Test failed: ${p.error}` }
+  if (p.kind === 'model') {
+    return { tone: 'success', text: `${p.model} answered in ${Math.max(p.elapsedMs, 1)} ms` }
+  }
+  const found = p.models?.length ?? 0
+  return {
+    tone: 'success' as const,
+    // An endpoint that lists nothing is reachable and usable — GET /models
+    // is not universally implemented — so the sentence says what happened
+    // rather than implying something is missing.
+    text: found > 0 ? `Connected — ${found} models offered` : 'Connected — it lists no models',
+  }
+}
+
+/** The row's credential state, in the agent.status vocabulary (nocx-y7fg):
+ *  what the frontend can know without a vault read that raises the unlock
+ *  prompt.
+ *
+ *  - none — the endpoint has no reference at all.
+ *  - sealed — the vault is locked right now (its own status); the check
+ *    cannot pass, and the list is not the place to raise the unlock prompt.
+ *  - deleted — the referenced secret is gone: no vault exists (never set
+ *    up, or reset), or the unsealed vault's own inventory no longer lists
+ *    the row the endpoint references. The deleted secret case is read from
+ *    the SAME inventory the editor's secret pickers read (vault.inventory),
+ *    loaded at list time and only while the vault is unsealed — a sealed
+ *    vault is never asked, so the list cannot raise the prompt.
+ *  - unavailable — the inventory read failed (a store failure that is none
+ *    of the above): the honest sentence, and the check cannot pass.
+ *  - resolvable — the vault is unsealed and the inventory lists the row, or
+ *    the inventory has not been asked (no controller — the dev-web harness
+ *    — or still loading): the backend resolves the stored credential at
+ *    probe time, and the probe's own refusal is the truth if it does not. */
+type RowCredentialState = 'resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable'
+
+/** The inventory fact the row derivation reads: whether the unsealed vault
+ *  has answered, and which rows it lists. 'idle'/'loading' mean not asked
+ *  or in flight — treated optimistically, because the probe is the
+ *  truth-teller when the credential really cannot resolve. */
+interface RowInventoryFact {
+  state: 'idle' | 'loading' | 'loaded' | 'failed'
+  entries: InventoryEntry[]
+}
+
+function rowCredentialState(
+  ref: string | null,
+  vaultState: 'uninitialized' | 'sealed' | 'unsealed' | undefined,
+  inventory: RowInventoryFact,
+): RowCredentialState {
+  if (ref === null) return 'none'
+  if (vaultState === 'sealed') return 'sealed'
+  if (vaultState === 'uninitialized') return 'deleted'
+  if (inventory.state === 'loaded') {
+    return inventory.entries.some((e) => e.id === ref) ? 'resolvable' : 'deleted'
+  }
+  if (inventory.state === 'failed') return 'unavailable'
+  return 'resolvable'
 }
 
 /** One model row in the editor draft. Alias is '' while typing and becomes
@@ -132,6 +202,29 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   const passwordRows = createMemo(() =>
     vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : [],
   )
+  /** Whether the unsealed vault's inventory has answered, for the row
+   *  credential state (nocx-9bx0m). Loaded at list time ONLY while the
+   *  vault is unsealed: a sealed vault is never asked, so the list cannot
+   *  raise the unlock prompt it would otherwise (ADR-0032). 'failed' means
+   *  the store did not answer — the honest 'unavailable' sentence, never a
+   *  fabricated 'deleted'. */
+  const [inventoryState, setInventoryState] = createSignal<
+    'idle' | 'loading' | 'loaded' | 'failed'
+  >('idle')
+  const inventoryFact = (): RowInventoryFact => ({
+    state: inventoryState(),
+    entries: secretRows(),
+  })
+  // Ask the vault for its rows the moment it is (or becomes) unsealed. The
+  // row renders a per-endpoint credential fact, so the list now needs the
+  // inventory — the same read the editor's pickers already make, through
+  // the same loader. A failed read stays 'failed' ('unavailable' on the
+  // row): retrying here would loop on a store that keeps refusing, and the
+  // next editor open already retries through the shared loader.
+  createEffect(() => {
+    const state = props.vaultController?.status()?.state
+    if (state === 'unsealed' && inventoryState() === 'idle') void loadInventory()
+  })
   const [discovered, setDiscovered] = createSignal<string[]>([])
   /** The endpoint being edited, or null for a new one. */
   const [editing, setEditing] = createSignal<Endpoint | null>(null)
@@ -145,6 +238,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** The (base URL, key, endpoint) the discovered list belongs to, so
    *  re-focusing does not re-dial and changing the URL does. */
   const [discoveryKey, setDiscoveryKey] = createSignal('')
+  /** One probe outcome per saved endpoint, rendered on its row
+   *  (nocx-9bx0m). The editor's Test verdict stays in probeResult; the
+   *  row's Test verdicts live here, keyed by endpoint id. */
+  const [rowProbes, setRowProbes] = createSignal<Record<string, EndpointsProbeResult>>({})
+  /** Rows whose probe is in flight — the row's Test is disabled while it
+   *  runs, exactly like the editor's. */
+  const [rowProbing, setRowProbing] = createSignal<Set<string>>(new Set())
 
   // ── Data loading ─────────────────────────────────────────────────────
 
@@ -222,24 +322,40 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   })
 
   // ── Draft editing ────────────────────────────────────────────────────
-  /** Load the vault inventory for the pickers. Called when an editor opens
-   *  (the vault is accessed for data at that moment, not when the list is
-   *  shown). A sealed or uninitialized vault is SKIPPED, not probed: the
-   *  pickers offer nothing while the vault cannot answer, and opening the
-   *  editor must not raise the unlock prompt — the vault-backed operation
-   *  (the Test button's credential resolution) is what raises it, never the
-   *  door (ADR-0032). */
-  async function loadSecretRows() {
+  /** Load the vault inventory — the ONE owner of the inventory fetch and
+   *  the secretRows state (AD-8). Two consumers share it: the pickers
+   *  (called when an editor opens) and the row credential state (called
+   *  at list time once the vault is unsealed — the rows render a
+   *  per-endpoint credential fact, so the list now needs the same read
+   *  the pickers already make). The failure state ('failed') is what keeps
+   *  a failed read from being misread as an empty vault — the rows say
+   *  'unavailable', never a fabricated 'deleted'.
+   *
+   *  A sealed or uninitialized vault is SKIPPED, not probed (nocx-q27y's
+   *  headers fix): the pickers offer nothing while the vault cannot answer,
+   *  and neither the editor door nor the list may raise the unlock prompt —
+   *  the vault-backed OPERATION (the Test button resolving a credential)
+   *  is what raises it (ADR-0032). The skip resets the state to 'idle', so
+   *  the list's unseal-triggered effect still loads once the vault can
+   *  answer — a stale 'loaded' from before a seal would otherwise be
+   *  misread after it. */
+  async function loadInventory() {
+    if (!props.vaultClient) return
+    if (inventoryState() === 'loading') return // one fetch owner, one in flight
     const state = props.vaultController?.status()?.state
     if (state === 'sealed' || state === 'uninitialized') {
       setSecretRows([])
+      setInventoryState('idle')
       return
     }
+    setInventoryState('loading')
     try {
-      const inv = await props.vaultClient?.inventory()
+      const inv = await props.vaultClient.inventory()
       setSecretRows(inv?.entries ?? [])
+      setInventoryState('loaded')
     } catch {
       setSecretRows([])
+      setInventoryState('failed')
     }
   }
 
@@ -250,7 +366,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setDiscovered([])
     setDiscoveryKey('')
     validation.reset()
-    void loadSecretRows()
+    void loadInventory()
     setDialogOpen(true)
   }
 
@@ -278,7 +394,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setProbeResult(null)
     setDiscovered([])
     setDiscoveryKey('')
-    void loadSecretRows()
+    void loadInventory()
     setDialogOpen(true)
   }
 
@@ -474,28 +590,10 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   // ── Assistant status + probe display ───────────────────────────────
 
-  /** The Test button's result, from endpoints.probe. The sentence names
-   *  WHICH check ran: "the endpoint is reachable" and "the model answered"
-   *  are different facts and a person acts on them differently. */
-  const probeLine = () => {
-    const p = probeResult()
-    if (!p) return null
-    if (!p.ok) return { tone: 'danger' as const, text: `Test failed: ${p.error}` }
-    if (p.kind === 'model') {
-      return {
-        tone: 'success' as const,
-        text: `${p.model} answered in ${Math.max(p.elapsedMs, 1)} ms`,
-      }
-    }
-    const found = p.models?.length ?? 0
-    return {
-      tone: 'success' as const,
-      // An endpoint that lists nothing is reachable and usable — GET /models
-      // is not universally implemented — so the sentence says what happened
-      // rather than implying something is missing.
-      text: found > 0 ? `Connected — ${found} models offered` : 'Connected — it lists no models',
-    }
-  }
+  /** The editor's Test verdict — the shared sentence mapping, so the
+   *  editor and the row's Test cannot drift (probeOutcomeLine is the ONE
+   *  owner of the words nocx-q27y decided). */
+  const probeLine = () => probeOutcomeLine(probeResult())
 
   /** The models a connection check found, for the picker below. Additive:
    *  an endpoint that lists none is configured by hand exactly as before. */
@@ -566,22 +664,100 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     return (draft().models[0]?.name.trim() ?? '') === '' ? 'Test connection' : 'Test endpoint'
   }
 
+  /** The row's Test: the SAME probe the editor runs on a saved endpoint
+   *  (nocx-9bx0m) — the record is named, the key stays blank so the
+   *  backend resolves the stored credential (nocx-reu5), and the model
+   *  stays blank because this is the connection check, which needs no
+   *  model (nocx-q27y). One call path, watched through the client method
+   *  the editor already uses. */
+  async function runRowProbe(ep: Endpoint) {
+    if (rowTestDisabled(ep)) return // the disabled state says why — never a doomed dial
+    setRowProbing((prev) => new Set(prev).add(ep.id))
+    // A new attempt clears the previous verdict, exactly like the editor's.
+    setRowProbes((prev) => {
+      const rest = { ...prev }
+      delete rest[ep.id]
+      return rest
+    })
+    try {
+      const res = await props.client.probeEndpoint({
+        name: ep.name,
+        baseUrl: ep.baseUrl,
+        key: '',
+        model: '',
+        endpointId: ep.id,
+        headers: ep.headers,
+      })
+      setRowProbes((prev) => ({ ...prev, [ep.id]: res }))
+    } catch (err) {
+      if (err instanceof VaultOperationCancelledError) {
+        // The person chose not to unlock: the test did not run, and nothing
+        // failed — the row keeps the sentence it had (ADR-0032).
+        return
+      }
+      const message = (err as Error).message
+      log.error('Endpoint test failed', { endpointId: ep.id, message })
+      setRowProbes((prev) => ({
+        ...prev,
+        [ep.id]: {
+          name: ep.name,
+          model: '',
+          kind: 'connection' as const,
+          ok: false,
+          error: message,
+          elapsedMs: 0,
+          at: new Date().toISOString(),
+        },
+      }))
+    } finally {
+      setRowProbing((prev) => {
+        const next = new Set(prev)
+        next.delete(ep.id)
+        return next
+      })
+    }
+  }
+
+  /** The row's Test is refused exactly when the credential cannot resolve:
+   *  the vault is sealed, the referenced secret is gone (no vault, or the
+   *  unsealed vault's inventory no longer lists it), or the store did not
+   *  answer. A no-key endpoint stays testable — the connection check can
+   *  still pass against a public endpoint. */
+  function rowTestDisabled(ep: Endpoint): boolean {
+    const state = rowCredentialState(
+      ep.credential,
+      props.vaultController?.status()?.state,
+      inventoryFact(),
+    )
+    return state === 'sealed' || state === 'deleted' || state === 'unavailable'
+  }
+  function rowStatus(ep: Endpoint): { tone: StatusDotTone; text: string } {
+    const probe = rowProbes()[ep.id]
+    if (probe) {
+      const line = probeOutcomeLine(probe)!
+      return { tone: line.tone === 'danger' ? 'error' : 'ok', text: line.text }
+    }
+    const state = rowCredentialState(
+      ep.credential,
+      props.vaultController?.status()?.state,
+      inventoryFact(),
+    )
+    if (state === 'none') return { tone: 'neutral', text: 'No key' }
+    if (state === 'resolvable') return { tone: 'ok', text: 'Key saved' }
+    // sealed / deleted / unavailable: the sentences agent-status-line owns,
+    // always in the StatusDot's warning — the Badge tone that mapping
+    // speaks (warning) is the same meaning, spelled for the dot.
+    return { tone: 'warning', text: credentialLine(state)!.text }
+  }
+
   function renderRow(ep: Endpoint) {
     return (
-      <CollectionRow
+      <RecordRow
+        title={ep.name}
+        kind={{ label: SCHEMA_LABEL[ep.schema] }}
+        meta={modelSummary(ep.models)}
+        status={rowStatus(ep)}
         onActivate={() => openEdit(ep)}
-        info={
-          <>
-            <div class="ep-item-name">{ep.name}</div>
-            <div class="ep-item-meta">
-              <Badge tone="neutral">{SCHEMA_LABEL[ep.schema]}</Badge>
-              <span class="ep-item-models">{modelSummary(ep.models)}</span>
-              <Show when={ep.credential !== null} fallback={<Badge tone="neutral">No key</Badge>}>
-                <Badge tone="info">Key saved</Badge>
-              </Show>
-            </div>
-          </>
-        }
         actions={
           <>
             <IconButton
@@ -591,6 +767,15 @@ export function EndpointsSection(props: EndpointsSectionProps) {
               onClick={() => openEdit(ep)}
             >
               <PencilIcon />
+            </IconButton>
+            <IconButton
+              size="sm"
+              title="Test connection"
+              ariaLabel={`Test ${ep.name}`}
+              disabled={rowTestDisabled(ep) || rowProbing().has(ep.id)}
+              onClick={() => void runRowProbe(ep)}
+            >
+              <CheckCircleIcon />
             </IconButton>
             <IconButton
               size="sm"

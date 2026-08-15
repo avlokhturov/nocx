@@ -23,7 +23,7 @@ import {
   createVaultState,
   type VaultController,
 } from './vault'
-import type { VaultClient } from './vault-client'
+import type { InventoryEntry, VaultClient } from './vault-client'
 
 /** One stored endpoint as the wire declares it. */
 function ep(overrides: Partial<Endpoint> = {}): Endpoint {
@@ -229,6 +229,9 @@ interface VaultHarness {
   client: VaultClient
   status: Mock
   setup: Mock
+  /** The vault's rows mock — a test supplies the entries (or rejection) per
+   *  case before the effect's unsealed-triggered load reads it. */
+  inventory: Mock
 }
 
 /** A real controller on a fresh install: the vault is uninitialized with no
@@ -246,11 +249,14 @@ function vaultHarness(statusOverride: Record<string, unknown> = {}): VaultHarnes
     ...statusOverride,
   })
   const setup = vi.fn().mockResolvedValue({})
-  const client = { status, setup } as unknown as VaultClient
+  /** The vault's rows, for the row credential state (nocx-9bx0m): a
+   *  referenced row absent from the inventory is a deleted credential. The
+   *  test supplies the entries per case. */
+  const inventory = vi.fn().mockResolvedValue({ entries: [] as InventoryEntry[] })
+  const client = { status, setup, inventory } as unknown as VaultClient
   const ctrl = createVaultState(client)
-  return { ctrl, client, status, setup }
+  return { ctrl, client, status, setup, inventory }
 }
-
 /** Mount the section with the vault seam AND the vault layer's own setup
  *  dialog, wired exactly as main.tsx wires them — so a key-creation save on
  *  an unprotected install raises the real setup sheet and resumes through
@@ -261,7 +267,11 @@ function mountWithVault(initial: Endpoint[] = [], vault: VaultHarness = vaultHar
   render(
     () => (
       <>
-        <EndpointsSection client={harness.client} vaultController={vault.ctrl} />
+        <EndpointsSection
+          client={harness.client}
+          vaultController={vault.ctrl}
+          vaultClient={vault.client}
+        />
         <SetupDialog
           open={vault.ctrl.showSetup()}
           onClose={() => vault.ctrl.closeSetup()}
@@ -961,5 +971,260 @@ describe('the vault seam — a key is minted through the vault layer (nocx-8rwj)
     expect(ctrl.showSetup()).toBe(false)
     expect(ctrl.showUnlock()).toBe(false)
     await waitForRows(container, 1)
+  })
+})
+
+describe('the saved endpoint row (nocx-9bx0m)', () => {
+  function clickRowTest(container: HTMLElement, name: string): HTMLButtonElement {
+    const btn = container.querySelector<HTMLButtonElement>(
+      `.ui-collection-row [aria-label="Test ${name}"]`,
+    )
+    expect(btn, `Test button for "${name}" not found`).toBeTruthy()
+    fireEvent.click(btn!)
+    return btn!
+  }
+
+  it('renders the row through the composite: one kind badge, meta text, and the status dot', async () => {
+    const { container } = mount([
+      ep({
+        id: 'endpoint:custom:provider:1',
+        name: 'provider',
+        baseUrl: 'https://api.example.com/v1',
+        credential: 'secrow:0123456789abcdef',
+        models: [{ name: 'gpt-4o', alias: null }],
+      }),
+    ])
+    await waitForRows(container, 1)
+
+    const row = rows(container)[0]
+    expect(row.querySelector('.ui-record-row__title')?.textContent).toBe('provider')
+    // Exactly one badge: the schema kind. The old "Key saved" BADGE is gone —
+    // the credential state is now the kit's status dot + text.
+    const badges = row.querySelectorAll('.ui-badge')
+    expect(badges.length).toBe(1)
+    expect(badges[0].textContent).toBe('OpenAI-compatible')
+    expect(row.querySelector('.ui-record-row__meta-text')?.textContent).toBe('1 model')
+    expect(row.querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe('ok')
+    expect(row.textContent).toContain('Key saved')
+  })
+
+  it('a keyless endpoint renders "No key" as the neutral dot + text, and the Test stays enabled', async () => {
+    const { container } = mount([ep({ id: 'endpoint:custom:provider:1', name: 'provider' })])
+    await waitForRows(container, 1)
+
+    const row = rows(container)[0]
+    expect(row.querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe('neutral')
+    expect(row.textContent).toContain('No key')
+    // A no-key dial can still pass against a public endpoint — the check is
+    // not doomed, so the row does not refuse it (nocx-q27y's connection
+    // check needs no model and no key).
+    const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
+    expect(test.disabled).toBe(false)
+  })
+
+  it('a saved endpoint row is tested by naming the record — the SAME client method the editor uses', async () => {
+    const { container, probeEndpoint } = mount([
+      ep({
+        id: 'endpoint:custom:provider:1',
+        name: 'provider',
+        baseUrl: 'https://api.example.com/v1',
+        credential: 'secrow:0123456789abcdef',
+        models: [{ name: 'gpt-4o', alias: null }],
+        headers: [{ name: 'X-Custom', value: 'abc', secret: null }],
+      }),
+    ])
+    await waitForRows(container, 1)
+
+    clickRowTest(container, 'provider')
+
+    await vi.waitFor(() => {
+      expect(probeEndpoint).toHaveBeenCalledTimes(1)
+    })
+    // The row's Test is the editor's Test on a saved endpoint: the key stays
+    // blank so the backend resolves the stored credential (nocx-reu5), the
+    // record is NAMED, and the stored custom headers ride — one call path,
+    // watched through the client method the editor already uses.
+    expect(probeEndpoint.mock.calls[0][0]).toEqual({
+      name: 'provider',
+      baseUrl: 'https://api.example.com/v1',
+      key: '',
+      model: '',
+      endpointId: 'endpoint:custom:provider:1',
+      headers: [{ name: 'X-Custom', value: 'abc', secret: null }],
+    })
+  })
+
+  it('a connection outcome renders on the row in the editor vocabulary', async () => {
+    const { container, probeEndpoint } = mount([
+      ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' }),
+    ])
+    await waitForRows(container, 1)
+    probeEndpoint.mockResolvedValueOnce({
+      name: 'provider',
+      model: '',
+      kind: 'connection' as const,
+      ok: true,
+      models: ['gpt-4o', 'qwen3'],
+      elapsedMs: 41,
+      at: new Date().toISOString(),
+    })
+
+    clickRowTest(container, 'provider')
+    await vi.waitFor(() => {
+      expect(rows(container)[0].textContent).toContain('Connected — 2 models offered')
+    })
+    expect(rows(container)[0].querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe('ok')
+  })
+
+  it('a refused outcome renders on the row with the editor sentence', async () => {
+    const { container, probeEndpoint } = mount([
+      ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' }),
+    ])
+    await waitForRows(container, 1)
+    probeEndpoint.mockResolvedValueOnce({
+      name: 'provider',
+      model: '',
+      kind: 'connection' as const,
+      ok: false,
+      error: 'dial tcp: connection refused',
+      elapsedMs: 0,
+      at: new Date().toISOString(),
+    })
+
+    clickRowTest(container, 'provider')
+    await vi.waitFor(() => {
+      expect(rows(container)[0].textContent).toContain('Test failed: dial tcp: connection refused')
+    })
+    expect(rows(container)[0].querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe(
+      'error',
+    )
+  })
+
+  it('a sealed vault says so on the row and does not run the check (credential cannot resolve)', async () => {
+    const { container, probeEndpoint, ctrl } = mountWithVault(
+      [ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' })],
+      vaultHarness({ state: 'sealed' as const, hasPassphrase: true }),
+    )
+    // The controller's status is null until it has fetched — the row reads
+    // the live accessor, so let the fetch land before asserting the state.
+    await ctrl.refresh()
+    await waitForRows(container, 1)
+
+    const row = rows(container)[0]
+    // The agent.status vocabulary, verbatim: the vault cannot answer right
+    // now, and the row is not the place to raise the unlock prompt.
+    expect(row.textContent).toContain('The vault is locked — unlock it to use the assistant')
+    const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
+    expect(test.disabled).toBe(true)
+    fireEvent.click(test)
+    expect(probeEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('a vanished vault says the key was deleted on the row and does not run the check', async () => {
+    const { container, probeEndpoint, ctrl } = mountWithVault(
+      [ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' })],
+      vaultHarness({ state: 'uninitialized' as const }),
+    )
+    await ctrl.refresh()
+    await waitForRows(container, 1)
+
+    const row = rows(container)[0]
+    // No vault exists, so no secret can — the reference dangles: the
+    // "deleted" sentence, never a doomed dial.
+    expect(row.textContent).toContain("The endpoint's key was deleted — add it again")
+    const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
+    expect(test.disabled).toBe(true)
+    fireEvent.click(test)
+    expect(probeEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('a credential whose secret was deleted (the unsealed vault no longer lists the row) says so and does not run the check', async () => {
+    const vault = vaultHarness({ state: 'unsealed' as const })
+    // The endpoint references secrow:abc; the vault holds only secrow:xyz —
+    // the referenced secret was deleted on the Secrets page. This is the
+    // case the bead's criterion 9 exists for: a usable vault, a gone key.
+    vault.inventory.mockResolvedValue({
+      entries: [
+        {
+          id: 'secrow:xyz',
+          name: 'other-key',
+          kind: 'password',
+          provider: 'system-keychain',
+          ownerId: '',
+          usedBy: 0,
+          reachable: true,
+        },
+      ],
+    })
+    const { container, probeEndpoint, ctrl } = mountWithVault(
+      [ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' })],
+      vault,
+    )
+    await ctrl.refresh()
+    await waitForRows(container, 1)
+
+    const row = rows(container)[0]
+    await vi.waitFor(() => {
+      expect(row.textContent).toContain("The endpoint's key was deleted — add it again")
+    })
+    const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
+    expect(test.disabled).toBe(true)
+    fireEvent.click(test)
+    expect(probeEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('an unsealed vault whose inventory read fails says unavailable and does not run the check', async () => {
+    const vault = vaultHarness({ state: 'unsealed' as const })
+    vault.inventory.mockRejectedValueOnce(new Error('store is full'))
+    const { container, probeEndpoint, ctrl } = mountWithVault(
+      [ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' })],
+      vault,
+    )
+    await ctrl.refresh()
+    await waitForRows(container, 1)
+
+    const row = rows(container)[0]
+    await vi.waitFor(() => {
+      expect(row.textContent).toContain('The credential is unavailable right now')
+    })
+    const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
+    expect(test.disabled).toBe(true)
+    fireEvent.click(test)
+    expect(probeEndpoint).not.toHaveBeenCalled()
+  })
+
+  it('a resolvable credential (the unsealed vault lists the row) keeps the Test enabled', async () => {
+    const vault = vaultHarness({ state: 'unsealed' as const })
+    vault.inventory.mockResolvedValue({
+      entries: [
+        {
+          id: 'secrow:abc',
+          name: 'provider-key',
+          kind: 'password',
+          provider: 'system-keychain',
+          ownerId: '',
+          usedBy: 0,
+          reachable: true,
+        },
+      ],
+    })
+    const { container, probeEndpoint, ctrl } = mountWithVault(
+      [ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' })],
+      vault,
+    )
+    await ctrl.refresh()
+    await waitForRows(container, 1)
+
+    const row = rows(container)[0]
+    await vi.waitFor(() => {
+      expect(row.textContent).toContain('Key saved')
+    })
+    const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
+    expect(test.disabled).toBe(false)
+
+    clickRowTest(container, 'provider')
+    await vi.waitFor(() => {
+      expect(probeEndpoint).toHaveBeenCalledTimes(1)
+    })
   })
 })

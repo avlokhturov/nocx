@@ -8,28 +8,11 @@
   flex: 1 1 auto;
   min-height: 0;
 }
-
-.ep-item-name {
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ep-item-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
-.ep-item-models {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* The row itself is the kit's RecordRow (nocx-pp3y.3): the title / kind
+   badge / meta / status grammar the composite owns. The name/meta families
+   this surface used to declare (.ep-item-name / .ep-item-meta /
+   .ep-item-models) are gone — a surface declaring its own row-grammar
+   class now fails lint-fixtures/check-row-grammar.mjs. */
 
 /* One model row in the editor: the id and its optional picker label side
    by side. The fields are the kit's; this wrapper only places them. */

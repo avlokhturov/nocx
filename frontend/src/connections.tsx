@@ -25,7 +25,8 @@ import { Field } from './ui/field'
 import { FileInput } from './ui/file-input'
 import { Badge } from './ui/badge'
 import { IconButton } from './ui/icon-button'
-import { CollectionRow, CollectionView } from './ui/collection-view'
+import { CollectionView } from './ui/collection-view'
+import { RecordRow } from './ui/record-row'
 import {
   DEFAULT_KEY_MODE,
   KeyMaterialInput,
@@ -1879,47 +1880,30 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   }
 
   // ── Row render helpers ───────────────────────────────────────────────
-
   function renderRow(p: SSHProfile) {
     const status = () => sessionStatuses()[p.id]
     const isTesting = () => probeBusy().has(p.id)
+    // The row's status: the kit's dot + text, the connections idiom. A live
+    // session is the ok tone; a disconnected one is neutral — a state that
+    // has nothing to say in colour. The last-used date rides the same
+    // sentence, one row, one status.
+    const statusLine = () => {
+      const st = status()
+      if (!st) return undefined
+      const lastUsed = st.lastUsed
+        ? ` · last used ${new Date(st.lastUsed).toLocaleDateString()}`
+        : ''
+      return {
+        tone: st.live ? ('ok' as const) : ('neutral' as const),
+        text: `${st.live ? 'Connected' : 'Disconnected'}${lastUsed}`,
+      }
+    }
     return (
-      <CollectionRow
-        info={
-          <>
-            <div class="cm-item-name">{p.name}</div>
-            <div class="cm-item-meta">
-              <Badge tone="neutral">{p.type.toUpperCase()}</Badge>
-              <span class="cm-item-address">
-                {p.options.user ? `${p.options.user}@` : ''}
-                {p.options.host}:{p.options.port || 22}
-              </span>
-              {/* Session state — Show with keyed narrows the type */}
-              <Show when={status()} keyed>
-                {(st) => (
-                  <span
-                    class="cm-session-state"
-                    classList={{ 'cm-session-live': st.live }}
-                    role="status"
-                    aria-label={st.live ? 'Connected' : 'Disconnected'}
-                  >
-                    <span class="cm-session-dot" aria-hidden="true" />
-                    {st.live ? 'Connected' : 'Disconnected'}
-                    <Show when={st.lastUsed} keyed>
-                      {(lastUsed) => (
-                        <span class="cm-session-last-used">
-                          &middot; last used {new Date(lastUsed).toLocaleDateString()}
-                        </span>
-                      )}
-                    </Show>
-                  </span>
-                )}
-              </Show>
-            </div>
-            {/* Secret bindings are shown in the editor; the Secrets page is
-                where they are managed (ADR-0017). */}
-          </>
-        }
+      <RecordRow
+        title={p.name}
+        kind={{ label: p.type.toUpperCase() }}
+        meta={`${p.options.user ? `${p.options.user}@` : ''}${p.options.host}:${p.options.port || 22}`}
+        status={statusLine()}
         actions={
           <>
             <IconButton

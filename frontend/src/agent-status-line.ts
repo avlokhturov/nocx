@@ -16,16 +16,15 @@ export interface AgentStatusLine {
   text: string
 }
 
-/** Map agent.status facts to the readiness sentence a surface shows. A
- *  soft degrade — no endpoint, an unresolvable credential, a failed probe —
- *  is a visible sentence, never only a log line. null means no status has
- *  been read yet (a surface shows its placeholder, not a lie). */
-export function agentStatusLine(st: AgentStatusResult | null): AgentStatusLine | null {
-  if (!st) return null
-  if (!st.endpointConfigured) {
-    return { tone: 'neutral', text: 'No endpoint configured yet' }
-  }
-  switch (st.credential) {
+/** The credential fact → its sentence, one owner (AD-8). The endpoints
+ *  row reuses this for a row whose credential cannot resolve — the row
+ *  must say the same words the ask chip says, or the two surfaces drift.
+ *  'resolvable' has no sentence here: it is the absence of a problem, and
+ *  the caller falls through to its own next fact (lastProbe, Ready). */
+export function credentialLine(
+  credential: AgentStatusResult['credential'],
+): AgentStatusLine | null {
+  switch (credential) {
     case 'sealed':
       return { tone: 'warning', text: 'The vault is locked — unlock it to use the assistant' }
     case 'deleted':
@@ -35,6 +34,20 @@ export function agentStatusLine(st: AgentStatusResult | null): AgentStatusLine |
     case 'unavailable':
       return { tone: 'warning', text: 'The credential is unavailable right now' }
   }
+  return null
+}
+
+/** Map agent.status facts to the readiness sentence a surface shows. A
+ *  soft degrade — no endpoint, an unresolvable credential, a failed probe —
+ *  is a visible sentence, never only a log line. null means no status has
+ *  been read yet (a surface shows its placeholder, not a lie). */
+export function agentStatusLine(st: AgentStatusResult | null): AgentStatusLine | null {
+  if (!st) return null
+  if (!st.endpointConfigured) {
+    return { tone: 'neutral', text: 'No endpoint configured yet' }
+  }
+  const line = credentialLine(st.credential)
+  if (line) return line
   const p = st.lastProbe
   if (p && !p.ok) {
     return { tone: 'danger', text: `Last test failed: ${p.error}` }
