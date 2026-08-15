@@ -15,8 +15,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
@@ -72,6 +74,39 @@ func decodeNotifyRaiseParams(raw []byte) (notifyRaiseParams, error) {
 
 // errTrailingJSON reports a params object followed by a second JSON value.
 var errTrailingJSON = errors.New("notify: trailing JSON after params")
+
+// maxNotifyTextRunes bounds title and body. Both are untrusted presentation
+// data written by whatever the user ran (ADR-0029 §2.3), and a banner shows a
+// line or two — generous for anything a program legitimately announces, and
+// far below a payload that costs anything to carry through the pipeline.
+const maxNotifyTextRunes = 4096
+
+// validateNotifyRaiseRaw is notify.raise's declared params validator
+// (registration.go: a control method without one does not build). It delegates
+// the shape rule to decodeNotifyRaiseParams rather than restating it — the
+// absence of the protected fields is ADR-0029's structural provenance and has
+// exactly one owner. What it adds is what the decode cannot say: sessionId is
+// required, and the two untrusted strings are bounded before anything carries
+// them.
+func validateNotifyRaiseRaw(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	p, err := decodeNotifyRaiseParams(raw)
+	if err != nil {
+		return "exactly sessionId, title and body"
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if utf8.RuneCountInString(p.Title) > maxNotifyTextRunes {
+		return fmt.Sprintf("title exceeds %d characters", maxNotifyTextRunes)
+	}
+	if utf8.RuneCountInString(p.Body) > maxNotifyTextRunes {
+		return fmt.Sprintf("body exceeds %d characters", maxNotifyTextRunes)
+	}
+	return ""
+}
 
 // notifyRaiseHandlers answers notify.raise. It is a constructed type holding
 // its capability (the raiser), its registries (the session registry for
@@ -134,13 +169,13 @@ func (h notifyRaiseHandlers) handleNotifyRaise(ctx context.Context, req jsonrpcR
 // it must never run on the read loop.
 func (s *WSServer) notifySpecs() []methodSpec {
 	return []methodSpec{
-		reg(s.lane, "notify.raise", func(w *wsConn, state *connState) handlerFunc {
+		reg(s.lane, "notify.raise", params(validateNotifyRaiseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return notifyRaiseHandlers{
 				raiser:   s.notifyRaiser,
 				registry: s.registry,
 				state:    state,
 				tab:      strconv.FormatUint(w.id, 10),
-				r:        w,
+				r:        r,
 			}.handleNotifyRaise
 		}),
 	}

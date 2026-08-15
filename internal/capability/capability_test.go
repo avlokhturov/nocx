@@ -446,11 +446,16 @@ func (f *fakeSessionRegistry) List() []session.Session {
 }
 
 // fakeSession is a minimal session.Session.
-type fakeSession struct{ id session.ID }
+type fakeSession struct {
+	id      session.ID
+	kind    session.Kind
+	host    string
+	sshOpts []ssh.ConnectOption
+}
 
 func (f *fakeSession) ID() session.ID            { return f.id }
-func (f *fakeSession) Kind() session.Kind        { return session.KindLocal }
-func (f *fakeSession) Host() string              { return "" }
+func (f *fakeSession) Kind() session.Kind        { return f.kind }
+func (f *fakeSession) Host() string              { return f.host }
 func (f *fakeSession) Cwd() string               { return "/home/test" }
 func (f *fakeSession) ProfileID() string         { return "" }
 func (f *fakeSession) CredentialID() string      { return "" }
@@ -465,7 +470,7 @@ func (f *fakeSession) StartOutput(context.Context, session.OutputHandler) error 
 	return nil
 }
 func (f *fakeSession) ShellIntegrationReason() ssh.RefusalReason { return "" }
-func (f *fakeSession) SSHOptions() []ssh.ConnectOption           { return nil }
+func (f *fakeSession) SSHOptions() []ssh.ConnectOption           { return f.sshOpts }
 
 // fakeHistoryRepo is a minimal content.CommandHistoryRepository.
 type fakeHistoryRepo struct {
@@ -520,6 +525,7 @@ func (f *fakeContentDB) Close() error                         { return nil }
 func (f *fakeContentDB) RestorePrivate(context.Context, []content.Conversation, []content.CommandRecord) error {
 	return nil
 }
+func (f *fakeContentDB) Ledger() content.LedgerRepository { return nil }
 
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {
@@ -607,7 +613,7 @@ func TestConfigOperationCannotReachVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	vaultSeam := newFakeVault()
 
-	cfgOp := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
+	cfgOp := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, newProfileService(t), nil, nil, nil)
 
 	// The handler-shaped consumer: it takes the operation and nothing else.
 	runConsumer := func(op capability.ConfigOperation) error {
@@ -661,7 +667,7 @@ func TestServiceCannotEscapeCallback(t *testing.T) {
 	configGate, vaultGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
+	op := capability.NewConfigOperation(configGate, vaultGate, testLane(), profiles, groups, nil, newProfileService(t), nil, nil, nil)
 
 	var leaked capability.ConfigService
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
@@ -806,7 +812,7 @@ func TestSameDomainExclusion(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, newProfileService(t), nil, nil, nil)
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -933,6 +939,57 @@ func TestForSessionKnownIDSucceeds(t *testing.T) {
 	}
 }
 
+// TestSessionTargetOperationReleasesSessionGateBeforeWork pins the read
+// interval: immutable routing facts are copied while the session gate is
+// held, then remote work keeps only the ordinary lane. A slow completion
+// therefore cannot refuse resize or close on the session domain.
+func TestSessionTargetOperationReleasesSessionGateBeforeWork(t *testing.T) {
+	sessionGate := control.NewSemaphore(capability.GateSession, 1)
+	lane := control.NewSemaphore("control", 1)
+	reg := newFakeSessionRegistry()
+	reg.sessions["s1"] = &fakeSession{
+		id:   "s1",
+		kind: session.KindRemote,
+		host: "target.example",
+		sshOpts: []ssh.ConnectOption{
+			ssh.WithUser("alice"),
+			ssh.WithJumpHost("bastion.example", 2200, "jumper", "password"),
+		},
+	}
+	factory := capability.NewSessionOperations(sessionGate, lane, reg, nil)
+
+	op, err := factory.ForSessionTarget("s1")
+	if err != nil {
+		t.Fatalf("ForSessionTarget: %v", err)
+	}
+	err = op.Run(context.Background(), func(_ context.Context, target capability.SessionTarget) error {
+		if target.Kind != session.KindRemote || target.Host != "target.example" {
+			t.Fatalf("target = %+v", target)
+		}
+		cfg := &ssh.ConnectConfig{}
+		for _, opt := range target.SSHOptions {
+			opt(cfg)
+		}
+		if cfg.User != "alice" || cfg.JumpHost != "bastion.example" || cfg.JumpPort != 2200 {
+			t.Fatalf("SSH options lost from snapshot: %+v", cfg)
+		}
+
+		sessionPermit, sessionRej := sessionGate.TryAcquire(context.Background())
+		if sessionRej != nil {
+			t.Fatalf("session gate remained held during work: %+v", sessionRej)
+		}
+		sessionPermit.Release()
+		if lanePermit, laneRej := lane.TryAcquire(context.Background()); laneRej == nil {
+			lanePermit.Release()
+			t.Fatal("ordinary lane was released before work completed")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("target operation: %v", err)
+	}
+}
+
 // TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds pairs the failure path
 // (an unknown row is an error) with the success path (a real row clears the
 // profile references and deletes the stored value).
@@ -1011,7 +1068,7 @@ func TestVaultResetAndConfigRunTogether(t *testing.T) {
 	resetOp := capability.NewVaultResetOperation(cfgGate, vltGate, testLane(), reset)
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
+	cfgOp := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, newProfileService(t), nil, nil, nil)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -1070,7 +1127,7 @@ func TestSettingsSurfaceSucceeds(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, newFakeSecretStore())
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), reg, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, newProfileService(t), reg, nil, nil)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		snap, err := svc.Settings().GetSnapshot()
@@ -1093,7 +1150,7 @@ func TestConfigWriteWithRowButNoVaultFails(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	profiles := &fakeProfileRepo{}
 	groups := &fakeGroupRepo{}
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, nil)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, newProfileService(t), nil, nil, nil)
 
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{
@@ -1123,7 +1180,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 	groups := &fakeGroupRepo{}
 	seam := newFakeVault()
 	seam.rows["secrow:1"] = "sec:v1:file:fakea"
-	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, newProfileService(t), nil, seam)
+	op := capability.NewConfigOperation(cfgGate, vltGate, testLane(), profiles, groups, nil, newProfileService(t), nil, seam, nil)
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.ConfigService) error {
 		return svc.CreateProfile(profile.SSHProfile{

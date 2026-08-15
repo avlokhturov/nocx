@@ -11,6 +11,8 @@ import { WORD_SEPARATORS } from '../word-selection'
 import type { CommandMarkerEvent } from './types'
 import { CommandSnapshotStore } from '../command-snapshot'
 import type { OscNotification } from '../osc-notification'
+import { CaptureAbortedError, CaptureIdentityTracker } from '../frame/capture-identity'
+import { getCurrentTheme } from './theme-adapter'
 
 const stubBrowser = () => {
   window.matchMedia = (query: string) => ({
@@ -791,6 +793,122 @@ describe('XtermRenderer cell metric (nocx-yy9g)', () => {
   })
 })
 
+// The live region hides the shell's echo of the command by translating the
+// grid up by one row (scrollback/controller.ts `_echoShiftPx`), so `cellHeight`
+// has to be the pitch the grid is DRAWN at. It was a second derivation
+// instead: the `.xterm-char-measure-element` box, which xterm styles
+// `line-height: normal`, with `ceil(FONT_SIZE * LINE_HEIGHT)` behind it. On a
+// Retina Mac xterm picks its OffscreenCanvas measure strategy and never
+// creates that element, so the constant 17 was what the shift used against a
+// real pitch of 20 — and 3px of the echoed command stayed on screen, cut
+// across the middle (nocx-rnrl, measured in the app: dpr 2, cell 8.5 × 20).
+describe('XtermRenderer cellHeight is the grid row pitch (nocx-rnrl)', () => {
+  async function mountRenderer() {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return r
+  }
+
+  function publishDims(r: XtermRenderer, cell: { width: number; height: number }): void {
+    const term = (r as unknown as Record<string, unknown>).term as
+      { _core: Record<string, unknown> } | undefined
+    term!._core._renderService = { dimensions: { css: { cell } } }
+  }
+
+  it('reports the pitch the grid is fitted to, not the char box', async () => {
+    const r = await mountRenderer()
+    publishDims(r, { width: 8.5, height: 20 })
+    // The same source cellWidth, fit() and liveContentHeight() already read:
+    // one owner for the grid's geometry, both halves off it.
+    expect(r.cellHeight).toBe(20)
+    expect(r.cellWidth).toBe(8.5)
+    r.dispose()
+  })
+
+  it('does not settle on the pre-measurement guess once the grid can measure', async () => {
+    const r = await mountRenderer()
+    // Before the render service has dimensions there is nothing to report but
+    // a guess; the defect is keeping it. A cached guess outlives every frame
+    // until a grid resize happens to clear it, and a DPR change need not
+    // resize the grid at all.
+    expect(r.cellHeight).toBe(17)
+    publishDims(r, { width: 8.5, height: 20 })
+    expect(r.cellHeight).toBe(20)
+    r.dispose()
+  })
+
+  it('re-reads the pitch when the device pixel ratio changes', async () => {
+    const changeListeners: Array<() => void> = []
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: (type: string, l: EventListenerOrEventListenerObject) => {
+        if (type === 'change') changeListeners.push(l as () => void)
+      },
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    publishDims(r, { width: 8.5, height: 20 })
+    expect(r.cellHeight).toBe(20)
+
+    // Dragged to a display with a different ratio: xterm re-snaps its cell to
+    // whole device pixels, and the grid keeps its rows and columns — so no
+    // resize fires and nothing else would clear the cache.
+    publishDims(r, { width: 8.4, height: 19 })
+    for (const l of changeListeners) l()
+    expect(r.cellHeight).toBe(19)
+    r.dispose()
+  })
+
+  it('never reports a char measurement as a cell', async () => {
+    const r = await mountRenderer()
+    const term = (r as unknown as Record<string, unknown>).term as
+      { element?: HTMLElement; _core: Record<string, unknown> } | undefined
+    term!._core._renderService = undefined
+    // xterm's DOM measure strategy leaves a span of 32 'W's behind when it is
+    // the one selected. Its box is neither a cell width (it is 32 of them) nor
+    // a row pitch (it carries no lineHeight), and reading it was how both lies
+    // got in. Given layout, it must still change nothing.
+    const el = term!.element
+    expect(el).toBeDefined()
+    // jsdom measures nothing, so xterm's own spans report 0 and would be
+    // skipped whatever the code did. Clear them and leave exactly one span
+    // that DOES measure — otherwise this test passes without asserting.
+    for (const stale of Array.from(el!.querySelectorAll('.xterm-char-measure-element'))) {
+      stale.remove()
+    }
+    const span = document.createElement('span')
+    span.className = 'xterm-char-measure-element'
+    span.textContent = 'W'.repeat(32)
+    Object.defineProperty(span, 'getBoundingClientRect', {
+      value: () => ({ width: 272, height: 16.7 }) as DOMRect,
+    })
+    el!.appendChild(span)
+
+    expect(r.cellWidth).toBe(0)
+    expect(r.cellHeight).toBe(17)
+    r.dispose()
+  })
+})
+
 describe('XtermRenderer contrast floor', () => {
   // nocx-3lrm. xterm.js renders the palette literally, and mc's default skin
   // paints its panels with an ANSI colour as the BACKGROUND
@@ -816,6 +934,304 @@ describe('XtermRenderer contrast floor', () => {
     // 4.5 is the WCAG AA floor — the threshold the theme audit measured
     // against. Anything at or below 1 is xterm's "do nothing".
     expect(term!.options.minimumContrastRatio).toBe(4.5)
+  })
+})
+
+describe('XtermRenderer frame capture surface (nocx-3j9b)', () => {
+  // The renderer reports the frame facts: parse-settles, explicit clear/
+  // reset, the pending-write fence, the cursor column. The identity semantics
+  // (generation, comparability, alt-session minting) live in frame/ and are
+  // tested there; this surface is the wire into xterm.
+  it('fires onWriteParsed after a write parses into the buffer', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const fired = vi.fn()
+    r.onWriteParsed(fired)
+    r.write('hello')
+    // Wait on the observable state (the event), never on a duration.
+    await vi.waitFor(() => expect(fired).toHaveBeenCalled())
+    r.dispose()
+  })
+
+  it('hasUnsettledWrite is true right after write() and false once the parse settles — the capture fence', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    r.write('x')
+    expect(r.hasUnsettledWrite()).toBe(true)
+    await vi.waitFor(() => expect(r.hasUnsettledWrite()).toBe(false))
+    r.dispose()
+  })
+
+  it('attaches a subscriber registered BEFORE mount — the generation signal is not lost', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+
+    const fired = vi.fn()
+    r.onWriteParsed(fired)
+    await r.mount(container)
+    r.write('x')
+    await vi.waitFor(() => expect(fired).toHaveBeenCalled())
+    r.dispose()
+  })
+
+  it('fires onClear after clearViewport and onReset after reset — the explicit mutations', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const cleared = vi.fn()
+    const reset = vi.fn()
+    r.onClear(cleared)
+    r.onReset(reset)
+    r.clearViewport()
+    expect(cleared).toHaveBeenCalledTimes(1)
+    r.reset()
+    expect(reset).toHaveBeenCalledTimes(1)
+    r.dispose()
+  })
+  it('reports the cursor column after a write', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    r.write('ab')
+    await vi.waitFor(() => expect(r.cursorCol()).toBe(2))
+    r.dispose()
+  })
+
+  it('a repaint does NOT advance the frame generation — refreshAtlas and applyTheme leave the identity untouched (ADR-0005)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const tracker = new CaptureIdentityTracker(r)
+    const before = tracker.identity()
+    // Both of these force a full viewport refresh — the same class of
+    // repaint ADR-0005's pump performs every 42ms on Linux/WebKitGTK. If the
+    // generation moved on paint, a motionless screen would go stale forever
+    // on one platform only.
+    r.refreshAtlas()
+    r.applyTheme(getCurrentTheme())
+    expect(tracker.identity()).toEqual(before)
+    r.dispose()
+  })
+
+  it('a write advances the generation through the real renderer, and awaitSettled opens the fence', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const tracker = new CaptureIdentityTracker(r)
+    const before = tracker.identity()
+    r.write('hello')
+    await vi.waitFor(() => expect(tracker.identity().generation).toBe(before.generation + 1))
+    // The fence on the real renderer: after the write settles there is
+    // nothing pending, so awaitSettled resolves immediately.
+    await tracker.awaitSettled()
+    expect(r.hasUnsettledWrite()).toBe(false)
+    r.dispose()
+  })
+})
+
+describe('XtermRenderer write refusal under flow control (nocx-x8s2.3)', () => {
+  async function mountRenderer(): Promise<XtermRenderer> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    return r
+  }
+
+  it('a refused write reaches the caller AND leaves the fence counter exact', async () => {
+    const r = await mountRenderer()
+
+    const term = (r as unknown as Record<string, unknown>).term as {
+      write: (data: string, cb?: () => void) => void
+    }
+    const spy = vi.spyOn(term, 'write').mockImplementation(() => {
+      // xterm's real refusal: WriteBuffer throws before queueing anything
+      // once the pending-data watermark is exceeded.
+      throw new Error('write data discarded, use flow control to avoid losing data')
+    })
+    try {
+      expect(r.hasUnsettledWrite()).toBe(false)
+      // The refusal is surfaced, never swallowed — before the fix the catch
+      // repaired the counter and returned success, so dropped output was
+      // indistinguishable from a program that printed nothing.
+      expect(() => r.write('overflow')).toThrow('write data discarded')
+      // The counter was repaired: the refusal did not wedge the fence.
+      expect(r.hasUnsettledWrite()).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+    r.dispose()
+  })
+
+  it('a normal write still succeeds and still settles — the paired positive', async () => {
+    const r = await mountRenderer()
+    expect(() => r.write('hello')).not.toThrow()
+    expect(r.hasUnsettledWrite()).toBe(true)
+    await vi.waitFor(() => expect(r.hasUnsettledWrite()).toBe(false))
+    r.dispose()
+  })
+})
+
+describe('XtermRenderer pre-mount subscriptions (nocx-x8s2.4)', () => {
+  it('delivers a resize and a buffer switch to subscribers registered BEFORE mount', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const resizes: Array<[number, number]> = []
+    const buffers: Array<'normal' | 'alternate'> = []
+    r.onResize((cols, rows) => resizes.push([cols, rows]))
+    r.onBufferChange((t) => buffers.push(t))
+
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // Resize through the real terminal (xterm fires onResize synchronously).
+    const term = (r as unknown as Record<string, unknown>).term as {
+      resize: (cols: number, rows: number) => void
+    }
+    term.resize(100, 30)
+    expect(resizes).toContainEqual([100, 30])
+
+    // Buffer switch through the real parser: enter the alternate screen.
+    r.write('\x1b[?1049h')
+    await vi.waitFor(() => expect(buffers).toContain('alternate'))
+    r.dispose()
+  })
+
+  it('a tracker built before mount reports notComparable across a buffer switch and a resize', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const tracker = new CaptureIdentityTracker(r) // BEFORE mount — the defect
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // Buffer switch: incomparability, never "moved" (ADR-0029 rule 2). A
+    // pre-mount subscription that was silently dropped would leave the
+    // tracker believing the normal buffer still owns the screen.
+    const normal = tracker.identity()
+    r.write('\x1b[?1049h')
+    await vi.waitFor(() => expect(tracker.identity().buffer.kind).toBe('alternate'))
+    expect(tracker.compareIdentity(normal)).toEqual({ status: 'notComparable' })
+
+    // Leave the alternate screen, then resize: also not comparable.
+    r.write('\x1b[?1049l')
+    await vi.waitFor(() => expect(tracker.identity().buffer.kind).toBe('normal'))
+    const preResize = tracker.identity()
+    const term = (r as unknown as Record<string, unknown>).term as {
+      resize: (cols: number, rows: number) => void
+    }
+    term.resize(90, 25)
+    expect(tracker.compareIdentity(preResize)).toEqual({ status: 'notComparable' })
+    r.dispose()
+  })
+})
+
+describe('XtermRenderer disposal mid-capture (nocx-x8s2.4)', () => {
+  it('a pending awaitSettled settles (rejects) when the renderer is disposed mid-write — this test hung before the fix', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    const tracker = new CaptureIdentityTracker(r)
+    r.write('x') // queued; the fence is up — proven in this environment by
+    // the capture-surface test above (hasUnsettledWrite() is true right
+    // after write; parsing is async)
+    const pending = tracker.awaitSettled() // waiter registered synchronously
+    r.dispose() // the subscriptions go away — the waiter must settle, not
+    // hang forever
+    await expect(pending).rejects.toThrow(CaptureAbortedError)
+  })
+})
+
+// ── The repaint that has to follow a grid resize (nocx-q18, nocx-jfgb) ────
+//
+// A resize rebuilds xterm's char atlas, and on the real WKWebView the cells
+// that are not re-marked dirty go on drawing from the old one — mangled,
+// overlapping glyphs. nocx-q18 shipped a viewport-wide repaint after every
+// fit; e0d0a490 replaced the renderer's own ResizeObserver with fitViewport
+// and did not carry the repaint across, so the corruption came back.
+//
+// It lives inside fitViewport rather than in the caller: the atlas belongs
+// to the renderer, and a caller that has to remember to repaint after a
+// resize is the caller that stopped remembering.
+describe('XtermRenderer repaints after a grid resize (nocx-jfgb)', () => {
+  /** Mount with a stubbed cell metric — jsdom has no layout, so the real
+   *  measurement returns null and fitViewport would bail before resizing. */
+  const mountWithCell = async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    ;(r as unknown as Record<string, unknown>)._getCellDims = () => ({ width: 10, height: 20 })
+    const term = (r as unknown as Record<string, unknown>).term as {
+      rows: number
+      cols: number
+      resize: (cols: number, rows: number) => void
+      refresh: (start: number, end: number) => void
+    }
+    return { r, term }
+  }
+
+  it('repaints every row after the grid changes size', async () => {
+    const { r, term } = await mountWithCell()
+    const resize = vi.spyOn(term, 'resize')
+    const refresh = vi.spyOn(term, 'refresh')
+
+    r.fitViewport({ width: 800, height: 400 })
+
+    expect(resize).toHaveBeenCalledWith(80, 20)
+    expect(refresh).toHaveBeenCalledWith(0, term.rows - 1)
+  })
+
+  it('does not repaint when the grid is unchanged, so a growing live region does not repaint per frame', async () => {
+    const { r, term } = await mountWithCell()
+    r.fitViewport({ width: 800, height: 400 })
+    const refresh = vi.spyOn(term, 'refresh')
+
+    // Same grid, a viewport a few pixels taller: the live region delivers
+    // this on every layout tick as output grows.
+    r.fitViewport({ width: 800, height: 405 })
+
+    expect(refresh).not.toHaveBeenCalled()
   })
 })
 

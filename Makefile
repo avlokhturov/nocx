@@ -7,6 +7,14 @@ GO ?= go
 GOFUMPT ?= gofumpt
 GOLANGCI_LINT ?= golangci-lint
 WAILS ?= wails
+PKG_CONFIG ?= pkg-config
+
+# Wails owns the WebKitGTK API split through the webkit2_41 build tag. Prefer
+# the supported 4.1 surface when this Linux host provides it; otherwise retain
+# Wails' 4.0 default. This avoids linking an orphaned 4.0 package against a
+# libjxl SONAME that the current distribution no longer ships (nocx-v3yw).
+HOST_GOOS ?= $(shell $(GO) env GOOS)
+WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf webkit2_41; fi)
 
 all: lint test build
 
@@ -15,16 +23,16 @@ all: lint test build
 # (internal/storage/appdir.go). Use build-release to produce the shipped
 # artefact; CI does that from a tag.
 build:
-	$(WAILS) build
+	$(WAILS) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)")
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
 # without it costs a developer an empty profile, never a user their data.
 build-release:
-	$(WAILS) build -tags release
+	$(WAILS) build -tags "$(strip release $(WAILS_PLATFORM_TAGS))"
 
 dev:
-	$(WAILS) dev
+	$(WAILS) dev $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)")
 
 # The same app in an ordinary browser instead of the Wails webview: backend
 # (cmd/devharness, real PTY) plus vite with the Wails bindings shimmed. Needs no
@@ -80,8 +88,16 @@ init: hooks
 	@echo ""
 	@echo "Ready. Run 'wails dev' to start the app, 'bd ready' for the backlog."
 
+# Per-clone git configuration. Both lines are the same kind of thing: git
+# behaviour this repo needs that a clone cannot carry by itself.
+#
+# The merge driver resolves `.beads/issues.jsonl` by regenerating it from the
+# issue database instead of asking which side to keep — see .gitattributes for
+# why neither side is ever the answer.
 hooks:
 	git config core.hooksPath .githooks
+	git config merge.beads-export.name "regenerate the beads export from the issue database"
+	git config merge.beads-export.driver "bd export -o %A"
 	@echo "git hooks installed from .githooks/"
 
 # `ci` is the HOST-SIDE half of CI: the `backend` job (macos-latest) plus the
@@ -347,7 +363,8 @@ ci-frontend:
 	./scripts/ci-frontend.sh
 
 ci-e2e:
-	@echo "=== ci-e2e: ci.yml's e2e job, the same image and command ==="
+	@echo "=== ci-e2e: ci.yml's e2e jobs, the same image and command ==="
+	@echo "    (CI runs one job per browser in parallel; this runs both in sequence)"
 	./e2e/run-in-container.sh
 
 lint-ci:
