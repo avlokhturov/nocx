@@ -319,11 +319,13 @@ func WithLogFilePath(path string) Option {
 	return func(o *optionSet) { o.logFilePath = &path }
 }
 
-// notifyDebounceWindow is how long a burst of notifications for one session
-// and kind collapses into a single banner naming the count. Eight seconds is
-// termic's number for the same job (design spec §6.2), long enough to absorb
-// a build's chatter and short enough that a finished command still feels
-// immediate.
+// notifyDebounceWindow is how long one session and kind is held quiet AFTER a
+// notification has gone out. The debounce is leading-edge (notify.Policy):
+// the first event is delivered at once, and the window suppresses what follows
+// it, closing with one summary naming how many were held. So this number is
+// not a delay on anything — it is how much of a burst collapses into that one
+// summary. Eight seconds is termic's number for the same job (design §6.2),
+// long enough to absorb a build's chatter.
 const notifyDebounceWindow = 8 * time.Second
 
 func New(opts ...Option) (*App, error) {

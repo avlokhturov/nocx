@@ -147,22 +147,34 @@ func TestPolicy_Suppression_FocusedTabSuppressed(t *testing.T) {
 	})
 }
 
-// TestPolicy_Suppression_RecheckedAtDelivery: focusing the tab while its
-// window is open suppresses the pending delivery too — suppression applies
-// to the delivery itself, not only to submit, so nothing is delivered about
-// the tab the user is looking at in a focused window even when the window
-// opened before the focus landed.
+// TestPolicy_Suppression_RecheckedAtDelivery: focus landing on the tab while
+// its window is open suppresses the window's closing summary — suppression
+// applies to the delivery itself, not only to submit, so nothing is delivered
+// about the tab the user is looking at even when the window opened before the
+// focus landed.
+//
+// The leading delivery is NOT retracted, and must not be: at the moment it
+// went out the user was looking elsewhere, so telling them was right. Only
+// what the window still owes is suppressed.
 func TestPolicy_Suppression_RecheckedAtDelivery(t *testing.T) {
 	pt := newPolicyTest(t)
 	pt.focus.focused = false
 	if d := pt.policy.Submit(pt.mk("s1", kindA, "done")); d != notify.DispositionOpened {
 		t.Fatalf("Submit = %v, want opened", d)
 	}
+	if d := pt.policy.Submit(pt.mk("s1", kindA, "and again")); d != notify.DispositionCoalesced {
+		t.Fatalf("second Submit = %v, want coalesced", d)
+	}
+	if got := pt.sink.count(); got != 1 {
+		t.Fatalf("%d deliveries on the leading edge, want 1", got)
+	}
+
+	// The user looks at the tab before the window closes.
 	pt.focus.focused = true
 	pt.focus.session = "s1"
 	pt.advanceWindow()
-	if got := pt.sink.count(); got != 0 {
-		t.Fatalf("%d deliveries after focus landed, want 0", got)
+	if got := pt.sink.count(); got != 1 {
+		t.Fatalf("%d deliveries after focus landed, want 1 — the summary must be suppressed", got)
 	}
 }
 
@@ -194,10 +206,11 @@ func TestPolicy_SuppressedEvents_NotCounted(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Debounce and coalescing (design §6.2)
 
-// TestPolicy_Debounce_OneNotificationPerWindow: a tight loop of events is
-// one notification per window, naming the count — never one per iteration.
-// A second burst after the window closes opens a second window, and time
-// passing with no events delivers nothing further (a stale timer cannot
+// TestPolicy_Debounce_OneNotificationPerWindow: a tight loop of events is one
+// notification at the leading edge plus one summary per window naming what was
+// held back — never one per iteration, and never silence for the length of the
+// window. A second burst after the window closes opens a second window, and
+// time passing with no events delivers nothing further (a stale timer cannot
 // double-deliver).
 func TestPolicy_Debounce_OneNotificationPerWindow(t *testing.T) {
 	pt := newPolicyTest(t)
@@ -212,39 +225,45 @@ func TestPolicy_Debounce_OneNotificationPerWindow(t *testing.T) {
 			t.Fatalf("submit %d = %v, want %v", i, d, want)
 		}
 	}
-	if got := pt.sink.count(); got != 0 {
-		t.Fatalf("%d deliveries before the window closed, want 0", got)
+	// The leading edge: the first event is out already, carrying its own
+	// body — the burst does not make the user wait for the window.
+	leading := pt.sink.received()
+	if len(leading) != 1 {
+		t.Fatalf("%d deliveries before the window closed, want 1 (the leading edge)", len(leading))
+	}
+	if body := leading[0].Event.Body; body != "iteration 0" {
+		t.Fatalf("leading body = %q, want the first event's own body verbatim", body)
 	}
 
 	pt.advanceWindow()
 	got := pt.sink.received()
-	if len(got) != 1 {
-		t.Fatalf("%d deliveries for one window, want 1", len(got))
+	if len(got) != 2 {
+		t.Fatalf("%d deliveries for one window, want 2 (leading + summary)", len(got))
 	}
-	delivered := got[0].Event
-	if delivered.Title != "title" {
-		t.Fatalf("coalesced title = %q, want the window-opening event's", delivered.Title)
+	summary := got[1].Event
+	if summary.Title != "title" {
+		t.Fatalf("summary title = %q, want the window-opening event's", summary.Title)
 	}
-	if delivered.Body != "5 notifications" {
-		t.Fatalf("coalesced body = %q, want %q naming the count", delivered.Body, "5 notifications")
+	if summary.Body != "4 more notifications" {
+		t.Fatalf("summary body = %q, want %q naming the suppressed count", summary.Body, "4 more notifications")
 	}
-	if delivered.Attribution != (notify.Attribution{Tab: "tab-s1", Host: "host", Session: "s1"}) {
-		t.Fatalf("coalesced attribution = %+v, want the keyed session's", delivered.Attribution)
+	if summary.Attribution != (notify.Attribution{Tab: "tab-s1", Host: "host", Session: "s1"}) {
+		t.Fatalf("summary attribution = %+v, want the keyed session's", summary.Attribution)
 	}
 
-	// A second burst after the window closed: a second window, a second
-	// notification — one per window, not one per iteration.
+	// A second burst after the window closed: a second window, so a second
+	// leading delivery and a second summary — never one per iteration.
 	pt.policy.Submit(pt.mk("s1", kindA, "again"))
 	pt.policy.Submit(pt.mk("s1", kindA, "again"))
 	pt.advanceWindow()
-	if got := pt.sink.count(); got != 2 {
-		t.Fatalf("%d deliveries after two windows, want 2", got)
+	if got := pt.sink.count(); got != 4 {
+		t.Fatalf("%d deliveries after two windows, want 4", got)
 	}
 
 	// Time passing with no events delivers nothing further.
 	pt.advanceWindow()
-	if got := pt.sink.count(); got != 2 {
-		t.Fatalf("%d deliveries after an empty window, want 2", got)
+	if got := pt.sink.count(); got != 4 {
+		t.Fatalf("%d deliveries after an empty window, want 4", got)
 	}
 }
 
@@ -262,35 +281,38 @@ func TestPolicy_Debounce_WindowIsAnInterval(t *testing.T) {
 		t.Fatalf("first Submit = %v, want opened", d)
 	}
 
-	// Half the window: still inside it, a repeat joins the window and
-	// nothing is delivered.
+	// Half the window: still inside it, a repeat is held back and nothing
+	// further is delivered — the leading edge already went out at submit.
 	pt.clock.Advance(pt.window / 2)
 	if d := pt.policy.Submit(pt.mk("s1", kindA, "second")); d != notify.DispositionCoalesced {
 		t.Fatalf("repeat inside the window = %v, want coalesced", d)
 	}
-	if got := pt.sink.count(); got != 0 {
-		t.Fatalf("%d deliveries inside the window, want 0", got)
+	if got := pt.sink.count(); got != 1 {
+		t.Fatalf("%d deliveries inside the window, want 1 (the leading edge only)", got)
 	}
 
-	// The rest of the window: the deadline passes and the window is
-	// delivered exactly once, naming both events.
+	// The rest of the window: the deadline passes and the summary for the
+	// one held-back event is delivered, exactly once.
 	pt.clock.Advance(pt.window / 2)
 	got := pt.sink.received()
-	if len(got) != 1 {
-		t.Fatalf("%d deliveries at window close, want 1", len(got))
+	if len(got) != 2 {
+		t.Fatalf("%d deliveries at window close, want 2", len(got))
 	}
-	if body := got[0].Event.Body; body != "2 notifications" {
-		t.Fatalf("delivered body = %q, want %q naming the count", body, "2 notifications")
+	if body := got[1].Event.Body; body != "1 more notification" {
+		t.Fatalf("summary body = %q, want %q naming the suppressed count", body, "1 more notification")
 	}
 
-	// After the window: the next repeat opens a fresh window — a debounce
-	// is an interval, not a mute.
+	// After the window: the next repeat opens a fresh window and is
+	// delivered at once — a debounce is an interval, not a mute.
 	if d := pt.policy.Submit(pt.mk("s1", kindA, "third")); d != notify.DispositionOpened {
 		t.Fatalf("Submit after the window closed = %v, want opened", d)
 	}
+	if got := pt.sink.count(); got != 3 {
+		t.Fatalf("%d deliveries after the fresh window opened, want 3", got)
+	}
 	pt.advanceWindow()
-	if got := pt.sink.count(); got != 2 {
-		t.Fatalf("%d deliveries after two windows, want 2", got)
+	if got := pt.sink.count(); got != 3 {
+		t.Fatalf("%d deliveries after an empty window closed, want 3", got)
 	}
 }
 
@@ -316,11 +338,11 @@ func TestPolicy_Coalescing_PayloadIndependent(t *testing.T) {
 	}
 	pt.advanceWindow()
 	got := pt.sink.received()
-	if len(got) != 1 {
-		t.Fatalf("%d deliveries, want 1 coalesced window", len(got))
+	if len(got) != 2 {
+		t.Fatalf("%d deliveries, want 2 (leading + one summary)", len(got))
 	}
-	if body := got[0].Event.Body; body != "3 notifications" {
-		t.Fatalf("coalesced body = %q, want %q (count from events, not content)", body, "3 notifications")
+	if body := got[1].Event.Body; body != "2 more notifications" {
+		t.Fatalf("summary body = %q, want %q (count from events, not content)", body, "2 more notifications")
 	}
 
 	// The key: same {session, kind} regardless of title/body. A fresh
@@ -332,9 +354,14 @@ func TestPolicy_Coalescing_PayloadIndependent(t *testing.T) {
 	if d := pt.policy.Submit(pt.mk("s1", kindB, "other kind")); d != notify.DispositionOpened {
 		t.Fatalf("different kind = %v, want opened (never merged)", d)
 	}
+	// Each opened its own window and delivered its own leading edge; neither
+	// held anything back, so their windows close silently.
+	if got := pt.sink.count(); got != 4 {
+		t.Fatalf("%d deliveries after two fresh windows opened, want 4", got)
+	}
 	pt.advanceWindow()
-	if got := pt.sink.count(); got != 3 {
-		t.Fatalf("%d deliveries after three windows, want 3", got)
+	if got := pt.sink.count(); got != 4 {
+		t.Fatalf("%d deliveries after those windows closed, want 4", got)
 	}
 }
 
@@ -361,45 +388,63 @@ func TestPolicy_Debounce_TwoSessionsTwoNotifications(t *testing.T) {
 	pt.advanceWindow()
 
 	got := pt.sink.received()
-	if len(got) != 2 {
-		t.Fatalf("%d deliveries, want 2 — one per session, never merged", len(got))
+	if len(got) != 4 {
+		t.Fatalf("%d deliveries, want 4 — a leading edge and a summary per session, never merged", len(got))
 	}
-	bySession := map[string]notify.Delivery{}
+	// Each session's own window: its leading delivery, then its own summary.
+	// Nothing merges across sessions and no summary borrows another's count.
+	summaries := map[string]notify.Delivery{}
 	for _, d := range got {
-		bySession[d.Event.SessionID] = d
+		if d.Event.Body == "1 more notification" {
+			summaries[d.Event.SessionID] = d
+		}
 	}
 	for _, session := range []string{"s1", "s2"} {
-		d, ok := bySession[session]
+		d, ok := summaries[session]
 		if !ok {
-			t.Fatalf("no delivery for session %s", session)
+			t.Fatalf("no window summary for session %s", session)
 		}
 		if d.Event.Attribution.Session != session {
-			t.Fatalf("session %s: delivery attribution = %q, want its own", session, d.Event.Attribution.Session)
-		}
-		if d.Event.Body != "2 notifications" {
-			t.Fatalf("session %s: body = %q, want %q (each window names its own count)", session, d.Event.Body, "2 notifications")
+			t.Fatalf("session %s: summary attribution = %q, want its own", session, d.Event.Attribution.Session)
 		}
 	}
 }
 
-// TestPolicy_SingleEvent_DeliveredAtWindowClose: one event is delivered
-// exactly once, at the window's close, with its own content — a window of
-// one is not a count notification.
-func TestPolicy_SingleEvent_DeliveredAtWindowClose(t *testing.T) {
+// TestPolicy_SingleEvent_DeliveredImmediately: one event is delivered at
+// once, with its own content, and the debounce window does not delay it. The
+// window exists to suppress what FOLLOWS, not to hold the first one back —
+// a build that finishes announces itself now, not a window later.
+//
+// The clock never advances in this test, which is the whole point: every
+// other test in this file advances it before asserting, and that is how a
+// uniformly late notification stayed invisible (nocx-jiwq.4).
+func TestPolicy_SingleEvent_DeliveredImmediately(t *testing.T) {
 	pt := newPolicyTest(t)
 	if d := pt.policy.Submit(pt.mk("s1", kindA, "build finished")); d != notify.DispositionOpened {
 		t.Fatalf("Submit = %v, want opened", d)
 	}
-	if got := pt.sink.count(); got != 0 {
-		t.Fatalf("%d deliveries before the window closed, want 0", got)
-	}
-	pt.advanceWindow()
 	got := pt.sink.received()
 	if len(got) != 1 {
-		t.Fatalf("%d deliveries, want 1", len(got))
+		t.Fatalf("%d deliveries with the clock untouched, want 1", len(got))
 	}
 	if d := got[0].Event; d.Title != "title" || d.Body != "build finished" {
 		t.Fatalf("single event altered: title %q body %q", d.Title, d.Body)
+	}
+}
+
+// TestPolicy_LoneEvent_NoSummaryAtWindowClose: the window of a lone event
+// closes with nothing suppressed, so it delivers nothing. Without this the
+// leading-edge delivery would be followed by a redundant "1 notification"
+// and every notification would arrive twice.
+func TestPolicy_LoneEvent_NoSummaryAtWindowClose(t *testing.T) {
+	pt := newPolicyTest(t)
+	pt.policy.Submit(pt.mk("s1", kindA, "build finished"))
+	if got := pt.sink.count(); got != 1 {
+		t.Fatalf("%d deliveries before the window closed, want 1", got)
+	}
+	pt.advanceWindow()
+	if got := pt.sink.count(); got != 1 {
+		t.Fatalf("%d deliveries after the window closed, want 1 — nothing was suppressed", got)
 	}
 }
 
@@ -858,14 +903,15 @@ func TestNoninterference_ResolutionIndependentOfPresentation(t *testing.T) {
 	}
 }
 
-// TestPolicy_CoalescedDelivery_ResolvesSameAsSource: the policy rewrites the
-// body of a coalesced window to name the count — that rewrite must not
-// change route resolution, which is the invariant the policy itself could
+// TestPolicy_CoalescedDelivery_ResolvesSameAsSource: the policy writes the
+// body of a window's closing summary to name the count — that rewrite must
+// not change route resolution, which is the invariant the policy itself could
 // otherwise break (ADR-0029 §2.2). The delivered event must also keep the
 // keyed session's attribution.
 func TestPolicy_CoalescedDelivery_ResolvesSameAsSource(t *testing.T) {
 	// Capture the outcome of the policy's own delivery — the real path,
-	// not a second Resolve call.
+	// not a second Resolve call. The summary is the last one delivered, so
+	// this holds its outcome once the window has closed.
 	var deliveredOut notify.Outcome
 	pt := newPolicyTest(t, notify.WithResultHandler(func(out notify.Outcome) { deliveredOut = out }))
 
@@ -875,12 +921,12 @@ func TestPolicy_CoalescedDelivery_ResolvesSameAsSource(t *testing.T) {
 	}
 	pt.advanceWindow()
 	got := pt.sink.received()
-	if len(got) != 1 {
-		t.Fatalf("%d deliveries, want 1 coalesced window", len(got))
+	if len(got) != 2 {
+		t.Fatalf("%d deliveries, want 2 (leading + summary)", len(got))
 	}
-	delivered := got[0].Event
-	if delivered.Body != "4 notifications" {
-		t.Fatalf("coalesced body = %q, want %q naming the count", delivered.Body, "4 notifications")
+	delivered := got[1].Event
+	if delivered.Body != "3 more notifications" {
+		t.Fatalf("summary body = %q, want %q naming the suppressed count", delivered.Body, "3 more notifications")
 	}
 
 	// The rewrite must not change resolution: raise each source event

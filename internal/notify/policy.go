@@ -28,12 +28,13 @@ const (
 	// nothing was delivered and the event was not counted.
 	DispositionSuppressed Disposition = iota
 
-	// DispositionOpened: the event began a new debounce window and will be
-	// delivered, once, when the window closes.
+	// DispositionOpened: the event was delivered immediately and opened a
+	// debounce window, which suppresses what follows it for the window's
+	// length.
 	DispositionOpened
 
-	// DispositionCoalesced: the event joined an open debounce window; the
-	// window's single notification names the total count.
+	// DispositionCoalesced: the event arrived inside an open window and was
+	// held back; the window's closing summary names how many were.
 	DispositionCoalesced
 )
 
@@ -102,16 +103,20 @@ type Policy struct {
 	streams map[DebounceKey]*stream
 }
 
-// stream is one open debounce window: the events accepted for its key since
-// the window opened, to be delivered as ONE notification when it closes.
-// It retains at most the window-opening event, so memory is bounded by the
-// number of open windows and the deadline of each (design §6.2).
+// stream is one open debounce window. The event that OPENED it has already
+// been delivered (Submit delivers on the leading edge); the window exists to
+// hold back what follows, and suppressed counts how many it held. It retains
+// at most the opening event, so memory is bounded by the number of open
+// windows and the deadline of each (design §6.2).
 type stream struct {
-	key      DebounceKey
-	count    int
-	first    Event // the event that opened the window; carries its attribution
-	deadline time.Time
-	timer    Timer
+	key DebounceKey
+	// suppressed is how many events arrived inside the window after the one
+	// that opened it. Zero means the window closes silently: the leading
+	// delivery already said everything there was to say.
+	suppressed int
+	opening    Event // the delivered event; carries the attribution the summary reuses
+	deadline   time.Time
+	timer      Timer
 }
 
 // NewPolicy builds the attention policy around a router. ctx is the policy's
@@ -150,10 +155,17 @@ func NewPolicy(ctx context.Context, router *Router, window time.Duration, focus 
 }
 
 // Submit applies the attention policy to one event and reports what the
-// policy did with it. A suppressed event is dropped outright; every other
-// event enters (or joins) its debounce window and is delivered exactly once,
-// when the window closes, as one notification naming the count of the events
-// in the window.
+// policy did with it. A suppressed event is dropped outright. Otherwise the
+// debounce is LEADING-edge: an event that finds no open window for its key is
+// delivered immediately and opens one; an event that arrives inside an open
+// window is held back and counted, and the window's close delivers one
+// summary naming how many were held.
+//
+// Leading rather than trailing, because the common case is a lone event and a
+// trailing window makes every one of them late by the whole window — a build
+// that finished announcing itself eight seconds afterwards (nocx-jiwq.4). The
+// protection is unchanged: a loop printing OSC 9 still produces one
+// notification plus one summary per window, never one per iteration.
 func (p *Policy) Submit(ev Event) Disposition {
 	if p.suppressed(ev.SessionID) {
 		return DispositionSuppressed
@@ -166,12 +178,12 @@ func (p *Policy) Submit(ev Event) Disposition {
 	p.mu.Lock()
 	if s, ok := p.streams[key]; ok {
 		if now.Before(s.deadline) {
-			s.count++
+			s.suppressed++
 			p.mu.Unlock()
 			return DispositionCoalesced
 		}
 		// The deadline passed but the window's timer has not fired yet (or
-		// it fired and lost the race with this submit): flush it now and
+		// it fired and lost the race with this submit): close it now and
 		// open a fresh window. The stale timer later finds no stream for
 		// the key and does nothing.
 		delete(p.streams, key)
@@ -179,17 +191,19 @@ func (p *Policy) Submit(ev Event) Disposition {
 	}
 	s := &stream{
 		key:      key,
-		count:    1,
-		first:    ev,
+		opening:  ev,
 		deadline: now.Add(p.window),
 	}
 	s.timer = p.clock.AfterFunc(p.window, func() { p.flush(key) })
 	p.streams[key] = s
 	p.mu.Unlock()
 
+	// Both deliveries happen outside the lock. The expired window's summary
+	// goes first: it describes events that arrived before this one.
 	if expired != nil {
-		p.deliverWindow(expired)
+		p.deliverSummary(expired)
 	}
+	p.deliver(ev)
 	return DispositionOpened
 }
 
@@ -212,22 +226,35 @@ func (p *Policy) flush(key DebounceKey) {
 	delete(p.streams, key)
 	p.mu.Unlock()
 
-	p.deliverWindow(s)
+	p.deliverSummary(s)
 }
 
-// deliverWindow delivers the coalesced notification of one closed window: a
-// single event naming the count, carrying the attribution of the session it
-// was keyed on. A window of one is the event itself. Suppression is
-// re-checked at delivery, not only at submit: nothing is delivered about the
-// tab the user is looking at in a focused window, even if it was not focused
-// when the window opened (design §6.1).
-func (p *Policy) deliverWindow(s *stream) {
-	if p.suppressed(s.key.Session) {
+// deliverSummary delivers the closing notification of one window: how many
+// events it held back, carrying the attribution of the session it was keyed
+// on. A window that held back nothing delivers NOTHING — the leading-edge
+// delivery already said what there was to say, and a "1 notification" behind
+// every notification would double every one of them.
+func (p *Policy) deliverSummary(s *stream) {
+	if s.suppressed == 0 {
 		return
 	}
-	ev := s.first
-	if s.count > 1 {
-		ev.Body = fmt.Sprintf("%d notifications", s.count)
+	noun := "notifications"
+	if s.suppressed == 1 {
+		noun = "notification"
+	}
+	ev := s.opening
+	ev.Body = fmt.Sprintf("%d more %s", s.suppressed, noun)
+	p.deliver(ev)
+}
+
+// deliver raises one event through the router and reports the outcome.
+// Suppression is re-checked HERE rather than only at submit, so it governs
+// the window-closing summary as well as the leading edge: nothing is
+// delivered about the tab the user is looking at in a focused window, even if
+// it was not focused when the window opened (design §6.1).
+func (p *Policy) deliver(ev Event) {
+	if p.suppressed(ev.SessionID) {
+		return
 	}
 	out := p.router.Raise(p.ctx, ev)
 	if p.onResult != nil {
