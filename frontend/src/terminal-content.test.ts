@@ -185,6 +185,50 @@ async function mountTerminal(
   }
 }
 
+describe('sandboxed session launch failure', () => {
+  it('shows the typed failure and removes the unconfirmed tab', async () => {
+    const failure = new RpcError('sandbox setup failed', -32012, { reason: 'setup-failed' })
+    const client = makeClient({
+      openSandboxedSession: vi.fn().mockRejectedValue(failure),
+    })
+    const content = new TerminalContent(
+      client as unknown as WSClient,
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+      undefined,
+      { sandboxWorkspace: '/workspace' },
+    )
+    const tab = new Tab(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: null,
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      100,
+    )
+    const requestClose = vi.fn()
+    tab.onCloseRequested = requestClose
+
+    await tab.start()
+
+    await expect(content.ready).resolves.toBe(false)
+    expect(client.openSandboxedSession).toHaveBeenCalledWith(80, 24, '/workspace')
+    expect(client.openSession).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith({
+      level: 'danger',
+      message: 'Sandboxed shell failed to start: sandbox setup failed',
+    })
+    expect(requestClose).toHaveBeenCalledOnce()
+    tab.close()
+  })
+})
+
 describe('SSH open host-key recovery', () => {
   const routeEvidence = {
     host: 'db.example.com:22',

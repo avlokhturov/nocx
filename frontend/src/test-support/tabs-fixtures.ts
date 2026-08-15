@@ -296,6 +296,7 @@ interface DispatcherFake {
 export interface ClientFake {
   connect: ReturnType<typeof vi.fn>
   openSession: ReturnType<typeof vi.fn>
+  openSandboxedSession: ReturnType<typeof vi.fn>
   openSSHSession: ReturnType<typeof vi.fn>
   openSSHSessionByHost: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -370,6 +371,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const client: ClientFake = {
     connect: vi.fn().mockResolvedValue(undefined),
     openSession: vi.fn(() => Promise.resolve(newSession())),
+    openSandboxedSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
     close: vi.fn(),

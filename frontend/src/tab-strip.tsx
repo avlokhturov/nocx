@@ -34,6 +34,9 @@ export interface TabView {
   readonly warningLabel?: string
   readonly paneId: string
   onDisplayChange: (() => void) | null
+  /** True once the session confirmed a sandboxed local tab (lock/shield
+   *  marker renders; ADR-0030 §3.3). */
+  readonly sandboxed?: boolean
 }
 
 /**
@@ -51,6 +54,8 @@ interface TabDisplayRecord {
   warningLabel: string
   hasActivity: boolean
   agentStatus: AgentStatus | null
+  /** True once the session confirmed a sandboxed local tab. */
+  sandboxed: boolean
 }
 
 /** Presentation port for tab chrome. */
@@ -192,6 +197,7 @@ abstract class TabStripBase implements TabStrip {
                   adoptable={display.records[tab.id]?.adoptable === true}
                   warning={display.records[tab.id]?.warning === true}
                   warningLabel={display.records[tab.id]?.warningLabel || undefined}
+                  sandboxed={display.records[tab.id]?.sandboxed === true}
                   onAdopt={tab.onAdopt ?? undefined}
                   title={display.records[tab.id]?.title ?? ''}
                   tooltip={display.records[tab.id]?.tooltip ?? ''}
@@ -270,6 +276,7 @@ abstract class TabStripBase implements TabStrip {
         warningLabel: tab.warningLabel ?? '',
         hasActivity: tab.hasActivity,
         agentStatus: tab.agentStatus,
+        sandboxed: tab.sandboxed,
       })
     }
 
@@ -285,6 +292,7 @@ abstract class TabStripBase implements TabStrip {
       warningLabel: tab.warningLabel ?? '',
       hasActivity: tab.hasActivity,
       agentStatus: tab.agentStatus,
+      sandboxed: tab.sandboxed,
     })
 
     // Link pane to button (aria-labelledby)

@@ -33,4 +33,12 @@ export interface Open {
    * The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. script (the default — N3) wraps and installs automatically, raw adds nothing, relay is consent-gated (inert until the relay lands). The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.
    */
   desiredMode: 'raw' | 'script' | 'relay'
+  /**
+   * Immutable sandbox metadata for a sandboxed local session (ADR-0030). Absent for ordinary and SSH sessions.
+   */
+  sandbox?: {
+    backend: 'landlock' | 'seatbelt'
+    workspace: string
+    writableRoots: string[]
+  }
 }

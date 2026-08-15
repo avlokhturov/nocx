@@ -16,6 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/ssh"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -149,6 +150,9 @@ type Config struct {
 	// Used by revocation to find sessions running that credential.
 	// Empty for sessions with no linked credential (inline auth).
 	CredentialID string
+	// Sandbox is the wire opt-in for a filesystem-isolated local tab
+	// (ADR-0030). nil for ordinary local and all SSH sessions.
+	Sandbox *sandbox.Request
 }
 
 type PTYFactory interface {
@@ -182,6 +186,9 @@ type Session interface {
 	// Empty for sessions with no linked credential (inline auth) and for
 	// local/ad-hoc sessions.
 	CredentialID() string
+	// SandboxInfo returns the immutable sandbox metadata for a sandboxed
+	// local tab, or nil for ordinary/SSH sessions (design spec §3.3).
+	SandboxInfo() *sandbox.SessionInfo
 	// Write sends p to the session's channel and returns the number of
 	// bytes written and any error. It blocks until the write completes
 	// (or the session dies); callers that must not block — the
@@ -357,6 +364,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	// moment the session exists.
 	epoch := r.epochCounter.Add(1)
 
+	var pt pty.Pty
 	var ch Channel
 	var err error
 	var opts []ssh.ConnectOption
@@ -378,7 +386,8 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			return nil, fmt.Errorf("ssh connect: %w", err)
 		}
 	} else {
-		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
+		var perr error
+		pt, perr = r.ptf.NewPTY(ctx, pty.Config{
 			Cwd:       cfg.Cwd,
 			Cols:      cfg.Cols,
 			Rows:      cfg.Rows,
@@ -386,6 +395,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			YPixel:    cfg.YPixel,
 			Enhanced:  cfg.Enhanced,
 			SessionID: string(id),
+			Sandbox:   cfg.Sandbox,
 		})
 		if perr != nil {
 			return nil, fmt.Errorf("open session: %w", perr)
@@ -406,6 +416,14 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		log:          r.log.With("session_id", string(id)),
 		writeCh:      make(chan writeJob, writeQueueDepth),
 		writeDone:    make(chan struct{}),
+	}
+	// Sandbox metadata rides up from the PTY so the open result can carry
+	// {backend, workspace, writableRoots} without the transport owning any
+	// policy (design spec §4.5). Only local PTYs can be sandboxed.
+	if pt != nil {
+		if pi, ok := pt.(pty.SandboxInfoProvider); ok {
+			s.sandboxInfo = pi.SandboxInfo()
+		}
 	}
 	s.startWriteLoop()
 
@@ -611,7 +629,9 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
-
+	// sandboxInfo is the immutable sandbox metadata for a sandboxed local
+	// tab, nil otherwise (design spec §3.3).
+	sandboxInfo *sandbox.SessionInfo
 	// writeCh feeds a single write goroutine that serialises every write in
 	// arrival order. The readLoop hands frames over without waiting, so
 	// ordering has to be the queue's job: two frames for one session —
@@ -641,14 +661,15 @@ type writeResult struct {
 	err error
 }
 
-func (s *realSession) ID() ID                          { return s.id }
-func (s *realSession) Identity() Identity              { return s.identity }
-func (s *realSession) Kind() Kind                      { return s.kind }
-func (s *realSession) Host() string                    { return s.host }
-func (s *realSession) Cwd() string                     { return s.cwd }
-func (s *realSession) ProfileID() string               { return s.profileID }
-func (s *realSession) CredentialID() string            { return s.credentialID }
-func (s *realSession) SSHOptions() []ssh.ConnectOption { return s.sshOpts }
+func (s *realSession) ID() ID                            { return s.id }
+func (s *realSession) Identity() Identity                { return s.identity }
+func (s *realSession) Kind() Kind                        { return s.kind }
+func (s *realSession) Host() string                      { return s.host }
+func (s *realSession) Cwd() string                       { return s.cwd }
+func (s *realSession) ProfileID() string                 { return s.profileID }
+func (s *realSession) CredentialID() string              { return s.credentialID }
+func (s *realSession) SandboxInfo() *sandbox.SessionInfo { return s.sandboxInfo }
+func (s *realSession) SSHOptions() []ssh.ConnectOption   { return s.sshOpts }
 
 func (s *realSession) Write(p []byte) (int, error) {
 	res := make(chan writeResult, 1)

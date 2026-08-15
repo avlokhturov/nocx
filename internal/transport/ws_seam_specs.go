@@ -61,9 +61,17 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		}),
 		// dialog.openFile owns its own admission (dialog capacity-one
 		// composed with the lane, wrapped in the inflight set).
+		regResponder(s.lane, "sandbox.status", noParams(), func(r Responder) handlerFunc {
+			h := sandboxHandlers{svc: s.sandboxSvc, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, req) }
+		}),
 		regResponder(s.dialogSub, "dialog.openFile", noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }
+		}),
+		regResponder(s.dialogSub, "dialog.openDirectory", noParams(), func(r Responder) handlerFunc {
+			h := dialogHandlers{dialog: dialog, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenDirectory(ctx, req) }
 		}),
 		regResponder(s.lane, "sshConfig.aliases", noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}

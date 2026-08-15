@@ -64,7 +64,7 @@ import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle } from './ipc'
+import type { WSClient, SessionHandle, SessionSandboxInfo } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
@@ -245,6 +245,10 @@ export interface TerminalContentHooks {
    *  endpoint editor so the refusal comes with its repair — wired by
    *  main.tsx to the Settings tab's Endpoints page. */
   onCreateEndpoint?: () => void
+  /** Filesystem-isolated local-session request (ADR-0030 §3.2). */
+  sandboxWorkspace?: string
+  /** Reports sandbox confirmation from the open response to the owning tab. */
+  onSandboxedChange?: (sandboxed: boolean) => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -731,6 +735,9 @@ export class TerminalContent extends BaseTabContent {
 
   private openRequestedSession(): Promise<SessionHandle> {
     if (!this.sshOpts) {
+      if (this.hooks.sandboxWorkspace) {
+        return this.client.openSandboxedSession(this.cols, this.rows, this.hooks.sandboxWorkspace)
+      }
       return this.client.openSession(this.cols, this.rows)
     }
     if (this.sshOpts.profileId) {
@@ -1963,6 +1970,18 @@ export class TerminalContent extends BaseTabContent {
         if (fact.sessionId !== session.sessionId) return
         this._applyIntegration(fact)
       })
+      // Sandboxed session: flip the tab's lock/shield marker (immutable for
+      // the tab's lifetime) and name backend + writable roots in the tooltip
+      // (ADR-0030 §3.3).
+      const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
+      this.hooks.onSandboxedChange?.(sandboxInfo != null)
+      if (sandboxInfo) {
+        const writable = sandboxInfo.writableRoots.join(', ')
+        this.host.setTitle(sandboxInfo.workspace || session.cwd || '')
+        this.host.updateTooltip(
+          `${session.cwd ? session.cwd + ' (initial cwd)\n' : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable}`,
+        )
+      }
       // The statement is OBSERVED: until the first marker arrives, an auto
       // session honestly reads "Native input" — the launcher may be
       // mid-start, and the first prompt flips it to command blocks.
@@ -2203,6 +2222,17 @@ export class TerminalContent extends BaseTabContent {
           this._readyResolve(false)
           return
         }
+      }
+      if (this.hooks.sandboxWorkspace) {
+        const message = err instanceof Error ? err.message : String(err)
+        showToast({
+          level: 'danger',
+          message: `Sandboxed shell failed to start: ${message}`,
+        })
+        this._readyResolve(false)
+        log.error('nocx: sandboxed terminal failed', { error: message })
+        host.requestClose()
+        return
       }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'

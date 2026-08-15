@@ -3,6 +3,18 @@ import { Dispatcher } from './dispatcher'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
 import type { TabClose } from './generated/tab.close'
+import type { SandboxStatus } from './generated/sandbox.status'
+
+// ── Sandbox wire types (ADR-0030 §3.3, §4.2) ────────────────────────────
+
+export type { SandboxStatus }
+
+/** Immutable sandbox metadata for a sandboxed session (ADR-0030 §3.3). */
+export interface SessionSandboxInfo {
+  readonly backend: 'landlock' | 'seatbelt'
+  readonly workspace: string
+  readonly writableRoots: string[]
+}
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -21,6 +33,7 @@ type OpenResult = {
   sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
+  sandbox?: Open['sandbox']
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -207,6 +220,9 @@ export class SessionHandle {
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
     readonly desiredMode: Open['desiredMode'] = 'script',
+    /** Immutable sandbox metadata for a sandboxed session; undefined for
+     *  ordinary/SSH sessions (ADR-0030 §3.3). */
+    readonly sandbox?: SessionSandboxInfo,
   ) {}
 
   send(data: string): void {
@@ -487,6 +503,35 @@ export class WSClient {
       .then((result) => this._registerHandle(result))
   }
 
+  // openSandboxedSession opens a filesystem-isolated LOCAL session in the
+  // given workspace (ADR-0030). The backend canonicalizes the workspace,
+  // constructs the policy, and enforces it before the session is registered.
+  // Fails closed: any enforcement error rejects with the typed wire error.
+  openSandboxedSession(cols: number, rows: number, workspace: string): Promise<SessionHandle> {
+    return this.dispatcher
+      .call<OpenResult>('open', {
+        cols,
+        rows,
+        xpixel: 0,
+        ypixel: 0,
+        enhanced: true,
+        sandbox: { workspace },
+      })
+      .then((result) => this._registerHandle(result))
+  }
+
+  // sandboxStatus queries the backend's sandbox availability (ADR-0030 §4.2).
+  // Returns {available, backend, reason} or null when no sandbox service is
+  // wired (dev-web harness without a native backend).
+  sandboxStatus(): Promise<SandboxStatus | null> {
+    return this.dispatcher.call<SandboxStatus | null>('sandbox.status', {})
+  }
+
+  // openDirectory opens the native folder picker and returns the chosen
+  // absolute path, or '' when cancelled (ADR-0030 §4.3).
+  openDirectory(): Promise<string> {
+    return this.dispatcher.call<string>('dialog.openDirectory', {})
+  }
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
@@ -550,7 +595,13 @@ export class WSClient {
       instanceId,
       sessionEpoch,
     })
-    return new SessionHandle(this, sid, result?.cwd ?? '', result?.desiredMode ?? 'script')
+    return new SessionHandle(
+      this,
+      sid,
+      result?.cwd ?? '',
+      result?.desiredMode ?? 'script',
+      result?.sandbox,
+    )
   }
 
   // --- reattach -----------------------------------------------------------

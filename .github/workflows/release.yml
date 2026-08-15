@@ -153,6 +153,14 @@ jobs:
           #    round trip (§9) asserts is preserved through packaging.
           codesign --verify --deep --strict "$APP"
 
+      # The source-level profile tests do not prove the packaged executable
+      # reaches its early smoke dispatch. Invoke the binary inside the .app;
+      # it constructs the real Seatbelt service and runs the probe in-cage.
+      - name: Sandbox enforcement smoke (packaged macOS app)
+        env:
+          NOCX_SANDBOX_ARTIFACT: build/bin/nocx.app/Contents/MacOS/nocx
+        run: make sandbox-smoke-macos-artifact
+
       - name: Package .dmg and .zip
         run: |
           set -euo pipefail
@@ -236,6 +244,13 @@ jobs:
           reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
+
+      # Exercise the exact release-tagged Wails binary before it is copied into
+      # the AppDir. The binary re-execs itself as the Landlock helper.
+      - name: Sandbox enforcement smoke (release Linux binary)
+        env:
+          NOCX_SANDBOX_ARTIFACT: build/bin/nocx
+        run: make sandbox-smoke-linux-artifact
 
       - name: Package AppImage
         run: |

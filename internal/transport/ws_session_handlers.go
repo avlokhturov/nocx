@@ -18,6 +18,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -90,8 +91,9 @@ type openHandlers struct {
 	// hands it to the far side so the shell can hand its lifecycle back
 	// over a channel that is not the terminal. An explicit seam, not the
 	// whole server.
-	lifecycle ssh.RemoteLifecycle
-	log       log.Logger
+	lifecycle      ssh.RemoteLifecycle
+	sandboxEnabled func() bool
+	log            log.Logger
 }
 
 // openResult is the open ack payload, declared once (contracts/open.schema
@@ -106,6 +108,7 @@ type openResult struct {
 	SessionEpoch uint64 `json:"sessionEpoch"`
 	Cwd          string `json:"cwd"`
 	DesiredMode  string `json:"desiredMode"`
+	Sandbox      *sandbox.SessionInfo `json:"sandbox,omitempty"`
 }
 
 // handleOpen creates a new session and output ring.
@@ -122,12 +125,34 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		return
 	}
 
+	// Presence of sandbox is the sole wire opt-in. The backend validates the
+	// local-only boundary, gates the experimental action, and canonicalizes
+	// the workspace once for cmd.Dir, policy input, and response metadata.
+	var sandboxReq *sandbox.Request
+	if params.Sandbox != nil {
+		if params.Kind == "ssh" || params.ProfileID != "" || params.Host != "" {
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sandbox is only valid for local sessions"})
+			return
+		}
+		if h.sandboxEnabled == nil || !h.sandboxEnabled() {
+			_ = wconn.TryError(req.ID, RPCError{Code: -32010, Message: "Filesystem sandbox is disabled", Data: map[string]any{"reason": "feature-disabled"}})
+			return
+		}
+		workspace, err := sandbox.CanonicalizeWorkspace(params.Sandbox.Workspace)
+		if err != nil {
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + err.Error()})
+			return
+		}
+		sandboxReq = &sandbox.Request{Workspace: workspace}
+	}
+
 	cfg := session.Config{
-		Kind:   session.KindLocal,
-		Cols:   params.Cols,
-		Rows:   params.Rows,
-		XPixel: params.XPixel,
-		YPixel: params.YPixel,
+		Kind:    session.KindLocal,
+		Sandbox: sandboxReq,
+		Cols:    params.Cols,
+		Rows:    params.Rows,
+		XPixel:  params.XPixel,
+		YPixel:  params.YPixel,
 		// Every session asks to be integrated, and the ones that cannot be
 		// fall back to an ordinary terminal (nocx-tr2n). This is not a
 		// policy the renderer may express: it arrived as an `enhanced` open
@@ -291,6 +316,30 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 			return
 		}
+		// Sandbox errors are classified before logging: policy/setup errors may
+		// carry host paths for diagnosis inside the module, but AD-11/I12 forbids
+		// those paths from crossing into the backend log or wire response.
+		var statusErr *sandbox.StatusError
+		if errors.As(err, &statusErr) {
+			h.log.Warn("sandbox backend unavailable",
+				"backend", statusErr.Status.Backend,
+				"reason", statusErr.Status.Reason,
+				"abi", statusErr.Status.ABI,
+			)
+			_ = wconn.TryError(req.ID, RPCError{Code: -32011, Message: statusErr.Status.Reason, Data: map[string]any{"reason": statusErr.Status.Reason}})
+			return
+		}
+		var setupErr *sandbox.SetupError
+		if errors.As(err, &setupErr) {
+			h.log.Error("sandbox setup failed", "reason", "setup-failed")
+			_ = wconn.TryError(req.ID, RPCError{Code: -32012, Message: "sandbox setup failed", Data: map[string]any{"reason": "setup-failed"}})
+			return
+		}
+		if errors.Is(err, sandbox.ErrInvalidWorkspace) {
+			h.log.Warn("sandbox workspace became invalid before launch")
+			_ = wconn.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: sandbox workspace is unavailable"})
+			return
+		}
 		h.log.Error("failed to open session", "error", err)
 		// A sealed vault surfaces here for EVERY connection that needs it —
 		// this is still a vault access, and the renderer must get the reason
@@ -379,6 +428,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		SessionEpoch: ident.Epoch,
 		Cwd:          sess.Cwd(),
 		DesiredMode:  desiredModeForAck(cfg.Remote),
+		Sandbox:      sess.SandboxInfo(),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
@@ -749,7 +799,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, sandboxEnabled: s.sandboxEnabled, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

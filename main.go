@@ -16,6 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -29,6 +30,20 @@ func main() {
 	// build metadata and exit, never opening a terminal.
 	if versionRequested() {
 		fmt.Printf("nocx %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
+		return
+	}
+
+	// Sandboxed shells are launched by re-exec'ing this binary as the
+	// __sandbox-landlock-exec helper (ADR-0030 §8.2). The helper path must
+	// run before any backend or window exists: it never returns.
+	if sandbox.MaybeHelper() {
+		return
+	}
+
+	// The release gate invokes the built executable itself, which then takes
+	// the same platform service path as a real tab. This must also precede all
+	// application startup so the smoke command creates no window or documents.
+	if sandbox.MaybeArtifactSmoke() {
 		return
 	}
 
@@ -222,6 +237,14 @@ type wailsUrlOpener struct {
 func (o *wailsUrlOpener) OpenURL(_ context.Context, url string) error {
 	runtime.BrowserOpenURL(o.ctx, url)
 	return nil
+}
+
+// OpenDirectory opens the native folder picker for the sandboxed-shell
+// workspace (ADR-0030 §3.2). Directories have no filters.
+func (d *wailsDialogService) OpenDirectory(_ context.Context) (string, error) {
+	return runtime.OpenDirectoryDialog(d.ctx, runtime.OpenDialogOptions{
+		Title: "Choose a workspace",
+	})
 }
 
 // upgradeInstallPath derives the path to the installed bundle from the

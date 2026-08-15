@@ -4,7 +4,7 @@ import { render } from 'solid-js/web'
 import { Show, createSignal } from 'solid-js'
 import App from './App'
 import { log } from './log'
-import { WSClient } from './ipc'
+import { WSClient, type SandboxStatus } from './ipc'
 import { TabManager } from './tabs'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
@@ -860,6 +860,36 @@ async function main() {
       () => tm.newTab(),
       () => openSettingsTab().startNewConnection(),
       forwardPortCommand,
+      // Sandboxed shell… action (ADR-0030 §3.2): live flag + backend status
+      // on every open; picker → new sandboxed tab. Cancellation is a no-op.
+      {
+        state: async () => {
+          const snap = await profileClient.getSnapshot()
+          const enabled = snap.values['sandbox.enabled'] === true
+          let status: SandboxStatus | null = null
+          if (enabled) {
+            try {
+              status = await client.sandboxStatus()
+            } catch {
+              status = null
+            }
+          }
+          return { enabled, status }
+        },
+        open: () => {
+          void (async () => {
+            const picked = await dialogClient.openDirectoryDialog()
+            if (!picked.path) return // cancelled: no-op
+            tm.newSandboxedTab(picked.path)
+          })().catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err)
+            showToast({
+              level: 'danger',
+              message: `Could not open the directory picker: ${message}`,
+            })
+          })
+        },
+      },
     ),
     sshProvider,
     // Snippets: one kind set of its own (the 'snippets' variant), so its
