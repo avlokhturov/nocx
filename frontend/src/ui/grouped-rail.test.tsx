@@ -81,11 +81,17 @@ describe('GroupedRail', () => {
     expect(groups[0].textContent).not.toContain('Backup & Restore')
   })
 
-  it('renders group headings as the kit Caption identity', () => {
+  it('renders group headings as the kit Caption identity, sized to the column', () => {
     subject({ items: [item({ id: 'endpoints', title: 'Endpoints', groupId: 'assistant' })] })
     const caption = document.querySelector('.ui-grouped-nav__heading .ui-caption') as HTMLElement
     expect(caption).not.toBeNull()
     expect(caption.textContent).toBe('Assistant')
+    // The rail opts into column tracking: the caption inherits the column's
+    // type size (md wide, sm narrow) instead of being pinned to the
+    // caption's own 2xs — the rows are ghost Buttons and read at the column
+    // size, and a caption a third smaller than its rows is the defect this
+    // variance exists to prevent.
+    expect(caption.getAttribute('data-size')).toBe('context')
   })
 
   it('marks the active item and fires onSelect from the row button', () => {

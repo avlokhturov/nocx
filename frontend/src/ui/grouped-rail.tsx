@@ -102,7 +102,7 @@ export function GroupedRail(props: GroupedRailProps) {
           {(group) => (
             <li class="ui-grouped-nav__group" data-group={group.id}>
               <span class="ui-grouped-nav__heading">
-                <Caption>{group.title}</Caption>
+                <Caption size="context">{group.title}</Caption>
               </span>
               <ul class="ui-grouped-nav__sublist">
                 <For each={itemsIn(group.id)}>{(item) => renderItem(item)}</For>
