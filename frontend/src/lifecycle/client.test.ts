@@ -156,23 +156,30 @@ describe('LifecycleClient', () => {
     expect(second).toHaveBeenCalledOnce()
     expect(second).toHaveBeenCalledWith(f)
   })
-  it('keeps only the owning session projections that arrive before open binds its id', async () => {
+  // The subscription is installed before session.open, so it is live while
+  // another tab's session is still publishing. An unbound subscription owns no
+  // session id yet and must therefore deliver nothing at all — and it must not
+  // buffer either: the backend installs a session's subscriber only after its
+  // open result and replays the projection there, so catch-up has one owner
+  // and it is not this one.
+  it('delivers nothing until the open result binds its session id', async () => {
     const dispatcher = new Dispatcher()
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
     const subscription = client.subscribeLifecycleChanged(handler)
-    const stale = fact({ sessionId: 'sid-2', lifecycle: 'native' })
-    const ready = fact({ sessionId: 'sid-2' })
 
     lastSocket().deliver({ method: 'lifecycle.changed', params: fact({ sessionId: 'sid-1' }) })
-    lastSocket().deliver({ method: 'lifecycle.changed', params: stale })
-    lastSocket().deliver({ method: 'lifecycle.changed', params: ready })
+    lastSocket().deliver({ method: 'lifecycle.changed', params: fact({ sessionId: 'sid-2' }) })
     expect(handler).not.toHaveBeenCalled()
 
     subscription.bindSession('sid-2')
+    expect(handler).not.toHaveBeenCalled()
+
+    const replayed = fact({ sessionId: 'sid-2' })
+    lastSocket().deliver({ method: 'lifecycle.changed', params: replayed })
     expect(handler).toHaveBeenCalledOnce()
-    expect(handler).toHaveBeenCalledWith(ready)
+    expect(handler).toHaveBeenCalledWith(replayed)
   })
 
   it('does not deliver a payload without a lane (not a fact)', async () => {

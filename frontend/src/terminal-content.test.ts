@@ -1103,28 +1103,36 @@ describe('lifecycle kernel transition table (ADR-0024 §6)', () => {
 })
 
 describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
-  it('keeps the prompt fact that arrives while session.open is still resolving', async () => {
+  // The registration seam, which is the half of nocx-upqz the renderer owns:
+  // the shell can authenticate while session.open is still dialing, and the
+  // backend replays that projection the instant it installs the subscriber —
+  // immediately after the open result. A subscription registered after the
+  // await would therefore miss the replay, so it must already exist when
+  // openSession is called, and the fact that follows must reach the tab.
+  it('subscribes before session.open so the replay that follows the result is heard', async () => {
     const client = makeClient()
     const session = makeSession()
+    let subscribedBeforeOpen = false
     client.openSession.mockImplementation(() => {
       client._sessions.push(session)
-      const call = client.dispatcher.subscribe.mock.calls.find(
+      subscribedBeforeOpen = client.dispatcher.subscribe.mock.calls.some(
         (candidate: unknown[]) => candidate[0] === 'lifecycle.changed',
-      ) as [string, (params: unknown) => void] | undefined
-      expect(call, 'lifecycle subscription must exist before session.open').toBeDefined()
-      call?.[1]({
-        sessionId: session.sessionId,
+      )
+      return Promise.resolve(session)
+    })
+
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(subscribedBeforeOpen, 'lifecycle subscription must exist before session.open').toBe(
+        true,
+      )
+      lifecycleHandler(client)({
         lane: 'lane-1',
         lifecycle: 'prompt_ready',
         domain: 'd1',
         epoch: 1,
         generation: 'est-0000000000000000',
       })
-      return Promise.resolve(session)
-    })
-
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
       expect(editorOf(content).isVisible).toBe(true)
       expect(client.dispatcher.call).toHaveBeenCalledWith('lifecycle.establishAck', {
         sessionId: session.sessionId,

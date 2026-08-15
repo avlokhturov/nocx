@@ -320,10 +320,14 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		return
 	}
 
-	// Port discovery (nocx-wzc4.2): only now, once the session is fully
-	// established (ring created, subscriber attached) is the target "up" —
-	// a session that failed its ring setup must not leave a discovery
-	// target behind with nobody to tear it down.
+	// Port discovery (nocx-wzc4.2): only now, once the session's ring
+	// exists, is the target "up" — a session that failed its ring setup
+	// must not leave a discovery target behind with nobody to tear it down.
+	// The subscriber is NOT attached yet; it lands after the open result
+	// below, because a session-scoped notification may not precede the id
+	// that addresses it (AD-7). This call only schedules — whatever the
+	// scheduler later publishes does its own subscriber lookup — so the
+	// ring alone is the condition the target's liveness waits on.
 	switch {
 	case cfg.ProfileID != "":
 		h.sess.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)

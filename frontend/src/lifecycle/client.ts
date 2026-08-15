@@ -26,8 +26,9 @@ import type { LifecycleSubmitAttempt } from '../generated/lifecycle.submitAttemp
 export type LifecycleFactHandler = (fact: LifecycleFact) => void
 /** A lifecycle subscription is installed before session.open starts, then
  *  bound exactly once to the server-authoritative session id from its result.
- *  Facts can arrive between those two events: keep the latest projection for
- *  each {session, lane}, then deliver only the bound session. */
+ *  Before that binding it delivers nothing: the backend installs the session's
+ *  subscriber only after the open result, so a fact for this session cannot
+ *  exist yet, and a fact for another session is not ours to deliver. */
 export interface LifecycleChangedSubscription {
   bindSession: (sessionId: string) => void
   unsubscribe: () => void
@@ -52,23 +53,26 @@ export interface LifecycleSubmitAttemptParams {
 export class LifecycleClient {
   constructor(private dispatcher: Dispatcher) {}
 
-  /** Subscribe before session.open so the result and its immediately following
-   *  replay cannot overtake registration. Until bindSession supplies the
-   *  server-authoritative id, retain only the latest projection per
-   *  {session, lane}; this is the same state ReplayLane would publish and keeps
-   *  unrelated shared-socket traffic bounded. Binding filters before any
-   *  surface can mutate or acknowledge state. */
+  /** Subscribe before session.open so the open result and the replay that
+   *  immediately follows it cannot overtake registration, then bind the
+   *  server-authoritative id the result carries. Binding filters before any
+   *  surface can mutate or acknowledge state.
+   *
+   *  There is deliberately no pre-bind buffer. Catching up on a fact
+   *  published while open was still dialing has ONE owner and it is the
+   *  backend: handleOpen installs the session's subscriber only after the
+   *  open result, PublishLifecycle drops a fact that has no subscriber, and
+   *  replayLifecycleFacts re-emits the current projection the instant that
+   *  subscriber lands. A fact for this session therefore cannot arrive
+   *  before bindSession, and one for another session belongs to that
+   *  session's own subscription — so a buffer here could only ever hold
+   *  facts it must then discard. */
   subscribeLifecycleChanged(handler: LifecycleFactHandler): LifecycleChangedSubscription {
     let sessionId: string | null = null
     let closed = false
-    const pending = new Map<string, LifecycleChanged>()
     const unsubscribe = this.dispatcher.subscribe('lifecycle.changed', (params: unknown) => {
       const p = params as LifecycleChanged
       if (!p || typeof p.sessionId !== 'string' || typeof p.lane !== 'string') return
-      if (sessionId === null) {
-        pending.set(`${p.sessionId}\u0000${p.lane}`, p)
-        return
-      }
       if (p.sessionId === sessionId) handler(p)
     })
     return {
@@ -76,15 +80,10 @@ export class LifecycleClient {
         if (closed) return
         if (sessionId !== null) throw new Error('lifecycle subscription is already bound')
         sessionId = authoritativeSessionId
-        for (const fact of pending.values()) {
-          if (fact.sessionId === sessionId) handler(fact)
-        }
-        pending.clear()
       },
       unsubscribe: (): void => {
         if (closed) return
         closed = true
-        pending.clear()
         unsubscribe()
       },
     }
