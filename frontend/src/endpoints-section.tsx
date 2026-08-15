@@ -331,12 +331,23 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *  a failed read from being misread as an empty vault — the rows say
    *  'unavailable', never a fabricated 'deleted'.
    *
-   *  The editor path may raise the unlock prompt it always raised (a
-   *  sealed vault + a call that needs the secret); the LIST path never
-   *  calls while sealed — the effect gates on unsealed — so the list
-   *  cannot raise it. */
+   *  A sealed or uninitialized vault is SKIPPED, not probed (nocx-q27y's
+   *  headers fix): the pickers offer nothing while the vault cannot answer,
+   *  and neither the editor door nor the list may raise the unlock prompt —
+   *  the vault-backed OPERATION (the Test button resolving a credential)
+   *  is what raises it (ADR-0032). The skip resets the state to 'idle', so
+   *  the list's unseal-triggered effect still loads once the vault can
+   *  answer — a stale 'loaded' from before a seal would otherwise be
+   *  misread after it. */
   async function loadInventory() {
     if (!props.vaultClient) return
+    if (inventoryState() === 'loading') return // one fetch owner, one in flight
+    const state = props.vaultController?.status()?.state
+    if (state === 'sealed' || state === 'uninitialized') {
+      setSecretRows([])
+      setInventoryState('idle')
+      return
+    }
     setInventoryState('loading')
     try {
       const inv = await props.vaultClient.inventory()

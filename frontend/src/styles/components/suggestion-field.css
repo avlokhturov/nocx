@@ -8,11 +8,12 @@
    splits it per primitive. Repeating token references is not duplication
    of values (search-field.css says the same).
 
-   The list is absolutely positioned under the control and scrolls inside
-   its own box (a long model list never grows the dialog). It sits within
-   the dialog's stacking context, above sibling fields; it scrolls WITH the
-   field if the dialog scrolls, which is the same trade a native select
-   makes inside a dialog. */
+   The list is portalled out of the field's flow (no ancestor's overflow
+   can clip it — nocx-0plm6) and anchored to the input's viewport rect by
+   the component, which sets left/top/width inline and flips it above the
+   input when there is no room below. It scrolls inside its own box (a
+   long model list never grows the dialog), and it CLOSES rather than
+   follows when the page scrolls under it. */
 
 .ui-suggestion-field {
   min-width: 0;
@@ -50,16 +51,17 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
-
 /* The popup: a raised surface with a hairline border and a soft shadow —
    the same surface vocabulary as the context menu, so a list floating over
-   a form reads as chrome of the app, not of the page. */
+   a form reads as chrome of the app, not of the page. Position is the
+   component's (inline left/top/width, flipped above when there is no room
+   below); this file owns the surface and the scroll. `--wails-draggable`
+   is the context menu's too: the list is portalled to the body or the
+   owning dialog, so without it a drag that starts on the list would move
+   the window. */
 .ui-suggestion-field__list {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 10;
+  position: fixed;
+  z-index: 30;
   margin: 0;
   padding: var(--space-1);
   list-style: none;
@@ -69,6 +71,7 @@
   box-shadow: 0 12px 40px color-mix(in srgb, black, transparent 22%);
   max-height: 240px;
   overflow-y: auto;
+  --wails-draggable: no-drag;
 }
 
 /* One offer per row. The active option is the keyboard's position —
