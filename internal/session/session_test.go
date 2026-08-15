@@ -536,3 +536,140 @@ func TestDeletedProfileSessionContinues(t *testing.T) {
 		t.Errorf("closed[0] = %q, want %q", tracker.closed[0], "ssh:deleted-profile:1")
 	}
 }
+
+// The acceptance test of the task (nocx-3oupk): a record naming a session
+// from a previous backend instance does not resolve to a current session
+// of the same id, and neither does a record naming an earlier epoch of
+// this instance. The refusal compares id + instance + epoch together, so
+// each field carries part of the rule.
+func TestRecordFromPreviousInstanceDoesNotResolveToCurrentSession(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+
+	ctx := context.Background()
+	sess, err := reg.Open(ctx, Config{Kind: KindLocal, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	ident := sess.Identity()
+	if ident.InstanceID != reg.instanceID {
+		t.Fatalf("session instance = %q, want the registry's %q", ident.InstanceID, reg.instanceID)
+	}
+
+	// The positive: a record carrying this session's own identity resolves.
+	if !ident.SameIncarnation(sess.ID(), sess) {
+		t.Fatal("a record carrying the session's own identity must resolve to it")
+	}
+
+	// A record from a previous backend instance: same id, same epoch, a
+	// different instance — the case the task names. Minted through the
+	// same reader seam the registry uses, so it is a real instance id,
+	// never the registry's own. Must NOT resolve.
+	prevID, err := mintInstanceID(rand.Reader)
+	if err != nil {
+		t.Fatalf("mint previous instance id: %v", err)
+	}
+	previousInstance := Identity{InstanceID: prevID, Epoch: ident.Epoch}
+	if previousInstance.SameIncarnation(sess.ID(), sess) {
+		t.Fatal("a record from a previous backend instance resolved to a current session of the same id")
+	}
+
+	// An earlier epoch of THIS instance: same id, same instance, an earlier
+	// incarnation — a restore reusing the id at a later epoch is a
+	// different session. Must NOT resolve.
+	earlierEpoch := Identity{InstanceID: ident.InstanceID, Epoch: ident.Epoch - 1}
+	if earlierEpoch.SameIncarnation(sess.ID(), sess) {
+		t.Fatal("a record from an earlier epoch of this instance resolved to the current session")
+	}
+
+	// A record that named the wrong session: same instance and epoch are
+	// per-session facts, so this is a fabricated identity — the id is what
+	// the record names, and it must agree too. Must NOT resolve.
+	wrongID := Identity{InstanceID: ident.InstanceID, Epoch: ident.Epoch}
+	if wrongID.SameIncarnation(ID("0123456789abcdef0123456789abcdef"), sess) {
+		t.Fatal("a record naming a different session id resolved to this session")
+	}
+}
+
+// Two registries are two backend instances: their identities are never
+// equal, and each session carries its own registry's instance. This is the
+// paired positive to the mint failure path — on an ordinary machine the
+// mint succeeds and distinguishes.
+func TestInstanceIdentity_DistinctAcrossRegistries(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	a := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+	b := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+
+	if a.instanceID == "" || len(string(a.instanceID)) != 32 {
+		t.Fatalf("instance id = %q, want 32 hex chars", a.instanceID)
+	}
+	if a.instanceID == b.instanceID {
+		t.Fatal("two backend instances must never be equal")
+	}
+
+	ctx := context.Background()
+	sessA, err := a.Open(ctx, Config{Kind: KindLocal, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if sessA.Identity().InstanceID != a.instanceID {
+		t.Errorf("session instance = %q, want its registry's %q", sessA.Identity().InstanceID, a.instanceID)
+	}
+}
+
+// The epoch is a per-session counter: fresh, monotonic, never reused — the
+// rule internal/lifecycle states for its own epochs. A record's epoch is
+// what distinguishes a later session that reuses an id from the
+// incarnation the record names.
+func TestEpochs_FreshMonotonicPerSession(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+
+	ctx := context.Background()
+	for want := uint64(1); want <= 3; want++ {
+		sess, err := reg.Open(ctx, Config{Kind: KindLocal, Cols: 80, Rows: 24})
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if got := sess.Identity().Epoch; got != want {
+			t.Fatalf("epoch = %d, want %d", got, want)
+		}
+	}
+}
+
+// errorReader fails every read — the representative of a crypto/rand
+// failure at registry construction.
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// Rule 3: the mint's external call (reading entropy) can fail, and a
+// registry must not start with an instance identity that could equal
+// another's. The failure is observable through the constructor New
+// actually uses.
+func TestNewReg_EntropyFailureRefusesRegistry(t *testing.T) {
+	reg, err := newReg(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))}, errorReader{})
+	if err == nil {
+		t.Fatal("a registry with a failing entropy source must not be constructed")
+	}
+	if reg != nil {
+		t.Fatalf("refused registry must be nil, got %+v", reg)
+	}
+}
+
+// And on an ordinary machine it succeeds: the reader seam's positive half,
+// driven with the same reader New uses.
+func TestMintInstanceID_OrdinaryMachineSucceeds(t *testing.T) {
+	id, err := mintInstanceID(rand.Reader)
+	if err != nil {
+		t.Fatalf("mint on crypto/rand must succeed: %v", err)
+	}
+	if len(string(id)) != 32 {
+		t.Fatalf("instance id = %q, want 32 hex chars", id)
+	}
+	for _, c := range string(id) {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("non-hex character in instance id: %c in %s", c, id)
+		}
+	}
+}

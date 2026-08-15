@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -20,6 +21,57 @@ import (
 )
 
 type ID string
+
+// InstanceID names one backend instance: minted once per registry (one per
+// backend start), so two instances are never equal and a record from a
+// previous instance can never be mistaken for one from the current. Same
+// shape as ID — 32 hex chars from crypto/rand — and deliberately a
+// different type: a session id and an instance id are not interchangeable,
+// and assigning one where the other is expected should not compile.
+type InstanceID string
+
+// Identity names one session incarnation: the backend instance that minted
+// it and the session's epoch within that instance. This is the pair that
+// tells a restored record from a current incarnation — the whole reason
+// the fields exist (nocx-3oupk).
+//
+// Within one instance two LIVE sessions can never share an id: the
+// registry keys its map on ID, so a second insert would collide. The
+// epoch's work is therefore not between two live sessions; it is across
+// time. A restore path that reuses an id — re-opening the tab a record
+// names — creates a different incarnation at a fresh epoch, and a record
+// from a previous backend instance is a different incarnation at a
+// different instance. (instance, epoch) says so even where the id does
+// not, which is what makes the refusal total rather than probabilistic.
+//
+// The epoch follows the rule internal/lifecycle states for its own epochs
+// (decision 8): monotonic per registry, fresh per session, never reused,
+// never resumed. It is NOT the lifecycle kernel's epoch: that one is
+// per-domain and minted by the kernel for envelope authentication, while
+// this one is per-session-record and minted by the session registry, so a
+// conventional session that never integrated still has one, and a session
+// that spawns several lifecycle domains (nested ssh) does not change its
+// own. internal/content/ledger.go's Session is the ledger's restore key
+// (id + workspace, keyed by the bare id — exactly the ambiguity this
+// identity resolves) and has no instance/epoch vocabulary of its own; the
+// ledger will record this identity when the restore path lands, rather
+// than spelling a second one now.
+type Identity struct {
+	InstanceID InstanceID
+	Epoch      uint64
+}
+
+// SameIncarnation reports whether a record naming session id with this
+// identity refers to the same session incarnation as sess: the id, the
+// instance and the epoch must all agree. Each field carries part of the
+// refusal — the id says which session the record names, the instance says
+// which backend minted it (a record out of a previous instance never
+// resolves to a current session of the same id), and the epoch says which
+// incarnation of that id within the instance (a later session reusing the
+// id is a different incarnation even when the id matches).
+func (i Identity) SameIncarnation(id ID, sess Session) bool {
+	return sess.ID() == id && sess.Identity() == i
+}
 
 // ErrSessionClosed is returned by Write once Close has been called: the
 // write loop has stopped and nothing further will reach the channel.
@@ -108,6 +160,14 @@ type OutputHandler func(data []byte) error
 type Session interface {
 	ID() ID
 	Kind() Kind
+	// Identity returns the session's incarnation identity: the backend
+	// instance that minted it and the session's epoch within that instance
+	// (nocx-3oupk). Immutable for the session's lifetime. This is what a
+	// restored record carries and what a late observation is compared
+	// against — a record or message naming this sessionId from a previous
+	// instance, or an earlier epoch of this one, is a different
+	// incarnation and must not resolve to this session.
+	Identity() Identity
 	// Host returns the session's remote hostname. Empty for a local session.
 	Host() string
 	// Cwd is where the session's shell was started. It is the tab's name
@@ -203,6 +263,20 @@ func IDToBytes(id ID) ([16]byte, error) {
 	return b, nil
 }
 
+// mintInstanceID is the reader-taking mint the failure-path test drives:
+// a reader that fails yields a refused identity rather than one that could
+// equal another instance's. Reg.New's entropy source is crypto/rand; the
+// reader seam exists so the error is observable where it happens.
+func mintInstanceID(r io.Reader) (InstanceID, error) {
+	var b [16]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return "", fmt.Errorf("mint instance id: %w", err)
+	}
+	buf := make([]byte, 32)
+	hex.Encode(buf, b[:])
+	return InstanceID(buf), nil
+}
+
 type Reg struct {
 	log          log.Logger
 	ptf          PTYFactory
@@ -210,6 +284,16 @@ type Reg struct {
 	mu           sync.Mutex
 	sessions     map[ID]*realSession
 	usageTracker ProfileUsageTracker
+	// instanceID is this registry's backend-instance identity: minted once
+	// at construction, never equal to any other registry's, and stamped on
+	// every session it opens. A record from a previous backend instance
+	// carries a different one, which is what the refusal compares.
+	instanceID InstanceID
+	// epochCounter mints the per-session epoch: atomic because Open is
+	// called concurrently (one per tab) and the counter has no other lock
+	// of its own — the sessions-map insert takes r.mu, but the mint must be
+	// safe whether or not the open later fails.
+	epochCounter atomic.Uint64
 }
 
 // SSHFactory creates SSH connections (AD-4). Injected at the composition
@@ -218,12 +302,34 @@ type SSHFactory interface {
 	Connect(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.Channel, error)
 }
 
+// New builds a registry with crypto/rand as its entropy source. It cannot
+// fail for the same reason NewID cannot: a rand failure at construction is
+// a process-level catastrophe, and the panic exists so a registry never
+// starts with an instance identity that could equal another's. The
+// failure itself is real and proven through newReg, which is what this
+// wraps.
 func New(logger log.Logger, ptf PTYFactory) *Reg {
-	return &Reg{
-		log:      logger,
-		ptf:      ptf,
-		sessions: make(map[ID]*realSession),
+	r, err := newReg(logger, ptf, rand.Reader)
+	if err != nil {
+		panic("session: " + err.Error())
 	}
+	return r
+}
+
+// newReg is the constructor with the entropy source made explicit — the
+// seam the failure-path test drives, so the mint error is observable where
+// it happens instead of being swallowed at the public boundary.
+func newReg(logger log.Logger, ptf PTYFactory, entropy io.Reader) (*Reg, error) {
+	instanceID, err := mintInstanceID(entropy)
+	if err != nil {
+		return nil, err
+	}
+	return &Reg{
+		log:        logger,
+		ptf:        ptf,
+		sessions:   make(map[ID]*realSession),
+		instanceID: instanceID,
+	}, nil
 }
 
 // WithSSHFactory injects an SSH factory, enabling KindRemote sessions.
@@ -246,6 +352,10 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	// session is later registered under must already exist while Connect
 	// runs. A failed connect registers nothing — the ID is simply unused.
 	id := NewID()
+	// Mint the session's epoch up front, like the id: the record the id
+	// names is (instance, epoch), and the identity is immutable from the
+	// moment the session exists.
+	epoch := r.epochCounter.Add(1)
 
 	var ch Channel
 	var err error
@@ -285,6 +395,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 
 	s := &realSession{
 		id:           id,
+		identity:     Identity{InstanceID: r.instanceID, Epoch: epoch},
 		kind:         cfg.Kind,
 		host:         cfg.Host,
 		cwd:          resolveSessionCwd(cfg.Cwd),
@@ -302,7 +413,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	r.sessions[id] = s
 	r.mu.Unlock()
 
-	r.log.Info("session opened", "id", string(id), "kind", kindName(cfg.Kind), "profile_id", cfg.ProfileID)
+	r.log.Info("session opened", "id", string(id), "instance_id", string(r.instanceID), "epoch", epoch, "kind", kindName(cfg.Kind), "profile_id", cfg.ProfileID)
 	if r.usageTracker != nil && cfg.ProfileID != "" {
 		r.usageTracker.SessionOpened(cfg.ProfileID)
 	}
@@ -487,6 +598,7 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 // (SSH connection or PTY) and does not reference the profile store at
 type realSession struct {
 	id           ID
+	identity     Identity // the incarnation identity: instance + epoch, immutable
 	kind         Kind
 	host         string // empty for local sessions; the remote hostname for SSH
 	cwd          string
@@ -530,6 +642,7 @@ type writeResult struct {
 }
 
 func (s *realSession) ID() ID                          { return s.id }
+func (s *realSession) Identity() Identity              { return s.identity }
 func (s *realSession) Kind() Kind                      { return s.kind }
 func (s *realSession) Host() string                    { return s.host }
 func (s *realSession) Cwd() string                     { return s.cwd }

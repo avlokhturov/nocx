@@ -117,6 +117,8 @@ async function connectAndAccept(d: Dispatcher): Promise<void> {
 function fact(over: Partial<LifecycleChanged> = {}): LifecycleChanged {
   return {
     sessionId: 'sid-2',
+    instanceId: '0123456789abcdef0123456789abcdef',
+    sessionEpoch: 1,
     lane: 'lane-1',
     lifecycle: 'prompt_ready',
     domain: 'dom-1',

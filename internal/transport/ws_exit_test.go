@@ -112,9 +112,11 @@ func (f *exitFakePTYFactory) NewPTY(context.Context, pty.Config) (pty.Pty, error
 // exitWire is the renderer-facing shape of the notification, decoded from
 // the real socket.
 type exitWire struct {
-	SessionID string `json:"sessionId"`
-	Cause     string `json:"cause"`
-	Status    *int   `json:"status"`
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
+	Cause        string `json:"cause"`
+	Status       *int   `json:"status"`
 }
 
 func newExitServer(t *testing.T, fake *exitFakePTY) *WSServer {
@@ -314,4 +316,75 @@ func TestExit_OverTheWireConformsToContract(t *testing.T) {
 	fake2.recordWait(errors.New("ssh: connection lost"))
 	raw2 := readNotification(t, conn2, "exit", wantWithin)
 	validateJSON(t, schema, raw2, "exit params, loss (real socket)")
+}
+
+// The identity crosses the wire intact (nocx-3oupk): the exit carries the
+// same instance + epoch the session record holds, so a renderer that stored
+// the open ack's pair can refuse a late exit from a previous incarnation.
+// The schema validation in the test above proves presence; this asserts the
+// VALUES are the session's own, not fabricated at emit time.
+func TestExit_IdentityCrossesTheWire(t *testing.T) {
+	fake := newExitFakePTY()
+	ws := newExitServer(t, fake)
+	sid, conn := openExitSession(t, ws)
+
+	sess, err := ws.registry.Get(session.ID(sid))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	want := sess.Identity()
+
+	fake.recordWait(realExitStatus(0))
+	got := awaitExit(t, conn)
+	if got.SessionID != sid {
+		t.Errorf("sessionId = %q, want %q", got.SessionID, sid)
+	}
+	if got.InstanceID != string(want.InstanceID) {
+		t.Errorf("instanceId = %q, want %q", got.InstanceID, want.InstanceID)
+	}
+	if got.SessionEpoch != want.Epoch {
+		t.Errorf("sessionEpoch = %d, want %d", got.SessionEpoch, want.Epoch)
+	}
+}
+
+// The open ack carries the identity too, so the renderer has somewhere to
+// learn it from (AD-7: the backend mints, the renderer stores). Same value
+// the exit and every observation will later carry.
+func TestOpen_IdentityCrossesTheWire(t *testing.T) {
+	fake := newExitFakePTY()
+	ws := newExitServer(t, fake)
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{"cols": 80, "rows": 24}, 1)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("open: unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	var env struct {
+		Result openResult
+	}
+	if err := json.Unmarshal(envelope.Result, &env.Result); err != nil {
+		t.Fatalf("open result: unmarshal: %v", err)
+	}
+	sess, err := ws.registry.Get(session.ID(env.Result.SessionID))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	want := sess.Identity()
+	if env.Result.InstanceID != string(want.InstanceID) {
+		t.Errorf("instanceId = %q, want %q", env.Result.InstanceID, want.InstanceID)
+	}
+	if env.Result.SessionEpoch != want.Epoch {
+		t.Errorf("sessionEpoch = %d, want %d", env.Result.SessionEpoch, want.Epoch)
+	}
+	// The REAL result off the real socket satisfies the contract — the
+	// rule-5 check, on the bytes the server sent, not a re-marshal.
+	validateJSON(t, loadSchema(t, "open.schema.json"), envelope.Result, "open result (real socket)")
 }

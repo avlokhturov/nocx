@@ -14,6 +14,8 @@ import type { SessionIntegrationChanged } from '../generated/session.integration
 
 const TIMED_OUT: SessionIntegrationChanged = {
   sessionId: 's1',
+  instanceId: '0123456789abcdef0123456789abcdef',
+  sessionEpoch: 1,
   status: 'conventional',
   reason: 'handshake-timeout',
   shell: '/opt/homebrew/bin/bash',

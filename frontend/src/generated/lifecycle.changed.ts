@@ -18,6 +18,14 @@ export interface LifecycleChanged {
    */
   sessionId: string
   /**
+   * The backend instance that minted the session owning this lane (AD-7 — server-authoritative, never minted by the renderer): minted once per backend start, so two instances are never equal. The renderer compares it against the pair the open ack carried, so a fact for this sessionId out of a previous backend instance is refused instead of applied to the current projection. Distinct from the domain epoch this fact carries, which is the lifecycle kernel's per-domain counter.
+   */
+  instanceId: string
+  /**
+   * The session's epoch within its backend instance, as minted at open: distinguishes a later session that reuses a sessionId from the incarnation this fact is about. Named sessionEpoch to stand apart from the domain epoch above. Same vocabulary as the open ack's sessionEpoch.
+   */
+  sessionEpoch: number
+  /**
    * The input-routing lane the fact is about. The backend resolves it to sessionId; the renderer then attaches it only to that session's state machine.
    */
   lane: string

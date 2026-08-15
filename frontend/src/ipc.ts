@@ -16,6 +16,8 @@ import type { Open } from './generated/open'
  *  names. */
 type OpenResult = {
   sessionId?: string
+  instanceId?: string
+  sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
 }
@@ -146,6 +148,15 @@ interface AttachResult {
 interface SessionState {
   decoder: UTF8StreamDecoder
 
+  // The session's incarnation identity (nocx-3oupk), as minted by the
+  // backend at open (AD-7): instanceId + sessionEpoch. Every observation
+  // of this session — exit, integrationChanged, lifecycle.changed — is
+  // compared against the pair, so a message out of a previous backend
+  // instance is refused instead of applied. Always present: the open
+  // contract requires the pair, and _registerHandle refuses an ack
+  // without it.
+  instanceId: string
+  sessionEpoch: number
   // Monotonic byte offset — the total count of payload bytes received for
   // this session. Counted as frame.payload.byteLength, NOT decoded string
   // length, because a multi-byte rune is several bytes and one character.
@@ -300,7 +311,15 @@ export class WSClient {
             // as the backend's exit notification, with the same closed-set
             // cause, so a fix that only touches the notification's sender
             // leaves this path uncaused and the tab still dies on it.
-            state.exitCallback?.({ sessionId: sid, cause: 'interrupted' })
+            state.exitCallback?.({
+              sessionId: sid,
+              cause: 'interrupted',
+              // The identity this session was opened with (nocx-3oupk):
+              // echoed, never minted (AD-7) — the backend's pair is the
+              // only one that exists.
+              instanceId: state.instanceId,
+              sessionEpoch: state.sessionEpoch,
+            })
             this.sessions.delete(sid)
             return 'lost' as const
           }),
@@ -329,15 +348,33 @@ export class WSClient {
       const raw = params as Record<string, unknown>
       const sid = raw.sessionId
       if (typeof sid !== 'string') return
+      // The session's own identity (nocx-3oupk): the wire's pair is the
+      // backend's word (AD-7), and the identity learned at open is the
+      // fallback for a notification that predates the fields — the renderer
+      // never mints one. With neither, the notification cannot be told from
+      // a previous incarnation and is dropped rather than applied.
+      const state = this.sessions.get(sid)
+      const instanceId = typeof raw.instanceId === 'string' ? raw.instanceId : state?.instanceId
+      const sessionEpoch =
+        typeof raw.sessionEpoch === 'number' ? raw.sessionEpoch : state?.sessionEpoch
+      if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
+        return
+      }
       const isExited = raw.cause === 'exited' && Number.isInteger(raw.status)
       // A loss never carries a status; an exited event missing its status is
       // malformed and reads as a loss too (the schema's exited branch
       // requires it).
       const exit: Exit = isExited
-        ? { sessionId: sid, cause: 'exited', status: raw.status as number }
-        : { sessionId: sid, cause: 'interrupted' }
+        ? {
+            sessionId: sid,
+            cause: 'exited',
+            status: raw.status as number,
+            instanceId,
+            sessionEpoch,
+          }
+        : { sessionId: sid, cause: 'interrupted', instanceId, sessionEpoch }
       this._flushAck(sid)
-      this.sessions.get(sid)?.exitCallback?.(exit)
+      state?.exitCallback?.(exit)
       this.sessions.delete(sid)
     })
 
@@ -483,6 +520,13 @@ export class WSClient {
     if (!sid || !isSessionID(sid)) {
       throw new Error(`nocx: invalid session-id from server: ${sid}`)
     }
+    // The identity is required by the contract and never minted here
+    // (AD-7): an ack without it cannot tell this session from a restored
+    // record, so it is refused like an invalid id (nocx-3oupk).
+    const { instanceId, sessionEpoch } = result
+    if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
+      throw new Error(`nocx: invalid session identity from server: ${sid}`)
+    }
     this.sessions.set(sid, {
       decoder: new UTF8StreamDecoder(),
       offset: 0,
@@ -491,6 +535,8 @@ export class WSClient {
       exitCallback: null,
       resetCallback: null,
       inputStalledCallback: null,
+      instanceId,
+      sessionEpoch,
     })
     return new SessionHandle(this, sid, result?.cwd ?? '', result?.desiredMode ?? 'script')
   }

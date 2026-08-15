@@ -2154,10 +2154,13 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	if cause == session.ExitExited {
 		statusPtr = &status
 	}
+	ident := sess.Identity()
 	if err := wconn.TryNotify("exit", mustMarshal(exitNotificationParams{
-		SessionID: string(sess.ID()),
-		Cause:     string(cause),
-		Status:    statusPtr,
+		SessionID:    string(sess.ID()),
+		InstanceID:   string(ident.InstanceID),
+		SessionEpoch: ident.Epoch,
+		Cause:        string(cause),
+		Status:       statusPtr,
 	})); err != nil {
 		s.log.Debug("write exit notification", "error", err)
 	}
@@ -2170,9 +2173,11 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 // is false on the schema, so a field added here but not declared there fails
 // the DTO contract check (AD-8).
 type exitNotificationParams struct {
-	SessionID string `json:"sessionId"`
-	Cause     string `json:"cause"`
-	Status    *int   `json:"status,omitempty"`
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
+	Cause        string `json:"cause"`
+	Status       *int   `json:"status,omitempty"`
 }
 
 // notifyInputStalled tells the tab that its keystrokes are being dropped:

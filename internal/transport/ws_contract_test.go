@@ -1569,7 +1569,7 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 
 // ── open ─────────────────────────────────────────────────────────────────
 
-// The DTO's own conformance: the three fields the open ack always carries.
+// The DTO's own conformance: the five fields the open ack always carries.
 // shellIntegrationReason is deliberately NOT among them any more (nocx-dvql):
 // it answered "is this session integrated" once, at open, and the two
 // failures that matter most arrive after it. session.integrationChanged owns
@@ -1579,7 +1579,9 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 // present for every session, including local ones — a renderer that
 // defaulted a missing field to "script" would show a raw tab as silently
 // integrated. Each of the three mode values must marshal; the schema pins
-// the enum.
+// the enum. instanceId + sessionEpoch (nocx-3oupk) name the incarnation
+// and are present on every ack, so the renderer always learns the identity
+// the backend minted.
 func TestOpen_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "open.schema.json")
 
@@ -1588,10 +1590,12 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"raw":    "raw",
 		"relay":  "relay",
 	} {
-		raw, err := json.Marshal(map[string]string{
-			"sessionId":   "0123456789abcdef0123456789abcdef",
-			"cwd":         "~/work",
-			"desiredMode": mode,
+		raw, err := json.Marshal(openResult{
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 1,
+			Cwd:          "~/work",
+			DesiredMode:  mode,
 		})
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
@@ -1602,8 +1606,10 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 	// The removed field is removed, not merely unset: an ack that still
 	// carried it must fail the contract, or "removed" is a claim nothing
 	// checks.
-	stale, err := json.Marshal(map[string]string{
+	stale, err := json.Marshal(map[string]any{
 		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"instanceId":             "fedcba9876543210fedcba9876543210",
+		"sessionEpoch":           1,
 		"cwd":                    "~/work",
 		"desiredMode":            "script",
 		"shellIntegrationReason": "no-secure-temp",
@@ -3555,7 +3561,12 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 			n := lifecycleChangedNotification{
 				JSONRPC: "2.0",
 				Method:  "lifecycle.changed",
-				Params:  lifecycleChangedParams{SessionID: "sid-1", Fact: params},
+				Params: lifecycleChangedParams{
+					SessionID:    "sid-1",
+					InstanceID:   "0123456789abcdef0123456789abcdef",
+					SessionEpoch: 3,
+					Fact:         params,
+				},
 			}
 			raw, err := json.Marshal(n)
 			if err != nil {
@@ -3599,8 +3610,8 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	validateJSON(t, schema, raw, "lifecycle.changed params (real socket)")
 	var params lifecycleChangedParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		t.Fatalf("decode: %v", err)
+	if derr := json.Unmarshal(raw, &params); derr != nil {
+		t.Fatalf("decode: %v", derr)
 	}
 	if params.SessionID != sid {
 		t.Errorf("sessionId = %q, want %q", params.SessionID, sid)
@@ -3610,6 +3621,19 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if params.Domain != string(h.Domain) || params.Epoch != h.Epoch {
 		t.Errorf("domain/epoch = %q/%d, want %q/%d", params.Domain, params.Epoch, h.Domain, h.Epoch)
+	}
+	// The session identity rides the fact (nocx-3oupk), distinct from the
+	// domain epoch asserted above: the renderer compares it against the
+	// open ack's pair, so a fact out of a previous incarnation is refused.
+	sess, err := e.ws.registry.Get(session.ID(sid))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	if params.InstanceID != string(sess.Identity().InstanceID) {
+		t.Errorf("instanceId = %q, want %q", params.InstanceID, sess.Identity().InstanceID)
+	}
+	if params.SessionEpoch != sess.Identity().Epoch {
+		t.Errorf("sessionEpoch = %d, want %d", params.SessionEpoch, sess.Identity().Epoch)
 	}
 }
 
@@ -4017,6 +4041,10 @@ func TestSessionIntegrationChanged_DTOConformsToContract(t *testing.T) {
 	}
 	for name, params := range cases {
 		t.Run(name, func(t *testing.T) {
+			// Every fact carries the session identity the open ack minted
+			// (nocx-3oupk); the loop stamps it so no case can omit it.
+			params.InstanceID = "0123456789abcdef0123456789abcdef"
+			params.SessionEpoch = 1
 			raw, err := json.Marshal(params)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
@@ -4243,13 +4271,17 @@ func TestExit_DTOConformsToContract(t *testing.T) {
 	status := 42
 	cases := map[string]exitNotificationParams{
 		"exited with status": {
-			SessionID: "0123456789abcdef0123456789abcdef",
-			Cause:     string(session.ExitExited),
-			Status:    &status,
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitExited),
+			Status:       &status,
 		},
 		"interrupted, no status": {
-			SessionID: "0123456789abcdef0123456789abcdef",
-			Cause:     string(session.ExitInterrupted),
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitInterrupted),
 		},
 	}
 	for name, params := range cases {
@@ -4275,17 +4307,23 @@ func TestExit_DTOStatusRulesAreExact(t *testing.T) {
 		params exitNotificationParams
 	}{
 		{"interrupted carries a status", exitNotificationParams{
-			SessionID: "0123456789abcdef0123456789abcdef",
-			Cause:     string(session.ExitInterrupted),
-			Status:    &status,
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitInterrupted),
+			Status:       &status,
 		}},
 		{"exited carries no status", exitNotificationParams{
-			SessionID: "0123456789abcdef0123456789abcdef",
-			Cause:     string(session.ExitExited),
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitExited),
 		}},
 		{"unknown cause", exitNotificationParams{
-			SessionID: "0123456789abcdef0123456789abcdef",
-			Cause:     "the-wind",
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        "the-wind",
 		}},
 	}
 	for _, c := range bad {

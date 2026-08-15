@@ -8,6 +8,7 @@ const ACK_INTERVAL_MS = 100
 
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
+const OPEN_IDENTITY = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
 
 class MockWebSocket {
   static readonly CONNECTING = 0
@@ -127,7 +128,7 @@ async function connectedSession(): Promise<{
 
   const opening = client.openSession(80, 24)
   const openID = socket().requests()[0].id
-  socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
+  socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID, ...OPEN_IDENTITY } })
   const session = await opening
 
   return { client, session, ws: socket() }
@@ -147,13 +148,17 @@ async function twoSessions(): Promise<{
   const openingA = client.openSession(80, 24)
   const reqsAfterA = socket().requests()
   const idA = reqsAfterA[reqsAfterA.length - 1].id
-  socket().deliverText({ jsonrpc: '2.0', id: idA, result: { sessionId: SID } })
+  socket().deliverText({ jsonrpc: '2.0', id: idA, result: { sessionId: SID, ...OPEN_IDENTITY } })
   const sessionA = await openingA
 
   const openingB = client.openSession(80, 24)
   const reqsAfterB = socket().requests()
   const idB = reqsAfterB.find((r) => r.method === 'open' && r.id !== idA)!.id
-  socket().deliverText({ jsonrpc: '2.0', id: idB, result: { sessionId: OTHER_SID } })
+  socket().deliverText({
+    jsonrpc: '2.0',
+    id: idB,
+    result: { sessionId: OTHER_SID, ...OPEN_IDENTITY },
+  })
   const sessionB = await openingB
 
   return { client, sessionA, sessionB, ws: socket() }
@@ -320,12 +325,16 @@ describe('openSession', () => {
     let settled = false
     const opening = client.openSession(80, 24).finally(() => (settled = true))
     const id = socket().requests()[0].id ?? 0
-    socket().deliverText({ jsonrpc: '2.0', id: id + 999, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: id + 999,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     await Promise.resolve()
 
     expect(settled).toBe(false)
 
-    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
+    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
     await opening
   })
 
@@ -339,7 +348,7 @@ describe('openSession', () => {
     expect(() => socket().deliverText('}{ not json')).not.toThrow()
 
     const id = socket().requests()[0].id
-    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
+    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
     await opening
   })
 })
@@ -432,7 +441,7 @@ describe('inbound data', () => {
     socket().deliverText({
       jsonrpc: '2.0',
       id: socket().requests()[0].id,
-      result: { sessionId: SID },
+      result: { sessionId: SID, ...OPEN_IDENTITY },
     })
     await opening
 
@@ -444,7 +453,7 @@ describe('inbound data', () => {
     const reopening = client.openSession(80, 24)
     const reqs = socket().requests()
     const id = reqs[reqs.length - 1]?.id
-    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
+    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
     const second = await reopening
 
     const seen: string[] = []
@@ -813,7 +822,11 @@ describe('reconnect and reattach', () => {
 
     const opening = client.openSession(80, 24)
     const openID = socket().requests()[0].id
-    socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openID,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     const session = await opening
     return { session, firstWS: socket() }
   }
@@ -1062,13 +1075,21 @@ describe('reconnect and reattach', () => {
     const openIdA = socket()
       .requests()
       .find((r) => r.method === 'open')!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdA, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdA,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     await openingA
 
     const openingB = client.openSession(80, 24)
     const reqsAfterB = socket().requests()
     const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdB, result: { sessionId: OTHER_SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdB,
+      result: { sessionId: OTHER_SID, ...OPEN_IDENTITY },
+    })
     await openingB
 
     const firstWS = socket()
@@ -1099,13 +1120,21 @@ describe('reconnect and reattach', () => {
     const openIdA = socket()
       .requests()
       .find((r) => r.method === 'open')!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdA, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdA,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     await openingA
 
     const openingB = client.openSession(80, 24)
     const reqsAfterB = socket().requests()
     const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdB, result: { sessionId: OTHER_SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdB,
+      result: { sessionId: OTHER_SID, ...OPEN_IDENTITY },
+    })
     await openingB
 
     const reports: { resumed: number; lost: number }[] = []

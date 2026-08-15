@@ -18,6 +18,14 @@ export interface SessionIntegrationChanged {
    */
   sessionId: string
   /**
+   * The backend instance that minted the session (AD-7 — server-authoritative, never minted by the renderer): minted once per backend start, so two instances are never equal. The renderer compares it against the pair the open ack carried, so a status for this sessionId out of a previous backend instance is refused instead of applied to the current tab.
+   */
+  instanceId: string
+  /**
+   * The session's epoch within its backend instance, as minted at open: distinguishes a later session that reuses a sessionId from the incarnation this status is about. Same vocabulary as the open ack's sessionEpoch.
+   */
+  sessionEpoch: number
+  /**
    * The integration axis, as the backend currently knows it. 'starting' is the honest interval before the shell has proved itself: a session begins here and stays until it either integrates or gives up, so the product never claims either outcome early. 'integrated' means an authenticated domain is live. 'conventional' means integration was attempted and did not happen — the session is a working terminal with a native prompt, and reason says why. 'lost' means it was integrated and is not any more. A session that never requested integration emits nothing at all: absence is how 'conventional by design' is expressed, so the surface has nothing to nag about.
    */
   status: 'starting' | 'integrated' | 'conventional' | 'lost'
