@@ -50,6 +50,7 @@ const CREATED: BackupCreateResult = {
     connections: 3,
     groups: 1,
     snippets: 4,
+    notes: 3,
     credentialBindingsRemoved: 1,
     groupCredentialBindingsRemoved: 0,
     groupDefaultKeysOmitted: 0,
@@ -64,6 +65,7 @@ const PREVIEW: RestorePreview = {
   connections: { included: 3, added: 2, updated: 1, removed: 0 },
   groups: { included: 1, added: 0, updated: 1, removed: 0 },
   snippets: { included: 4 },
+  notes: { included: 3 },
   connectionsRequiringCredential: [{ id: 'p1', name: 'My Server' }],
   omissions: {
     credentialBindingsRemoved: 1,
@@ -226,10 +228,11 @@ describe('restoring a backup', () => {
     await waitFor(() => expect(screen.getByText(/My Server/)).toBeTruthy())
   })
 
-  it('shows the snippet count in the preview table', async () => {
-    // A REPLACE restore wipes the snippet library; the preview table must
-    // say so before the user commits to it. The count lives in the Included
-    // row, next to settings/connections/groups.
+  it('shows the snippet and note counts in the preview table', async () => {
+    // A REPLACE restore wipes both libraries; the preview must say so
+    // before the person commits to it. Notes matter most here — a snippet
+    // can be retyped from the thing it automates, and a note cannot be
+    // retyped from anything.
     const { client } = mockClient()
     render(() => <BackupRestoreSection profileClient={client} />)
 
@@ -237,7 +240,7 @@ describe('restoring a backup', () => {
 
     await waitFor(() => expect(screen.getByText('Included')).toBeTruthy())
     const row = screen.getByText('Included').closest('tr')
-    expect(row?.textContent).toBe('Included2314')
+    expect(row?.textContent).toBe('Included23143')
   })
 
   it('re-previews under the other strategy when the user switches it', async () => {

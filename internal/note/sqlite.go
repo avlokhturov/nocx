@@ -199,6 +199,53 @@ func (s *store) List(ctx context.Context) ([]Row, error) {
 	return out, nil
 }
 
+// LoadAll is the backup's read: bodies and timestamps included.
+func (s *store) LoadAll(ctx context.Context) ([]Note, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, body, created_at, updated_at FROM notes ORDER BY created_at, id`)
+	if err != nil {
+		return nil, fmt.Errorf("note: load all: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+	out := []Note{}
+	for rows.Next() {
+		var n Note
+		if err := rows.Scan(&n.ID, &n.Body, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("note: load all: %w", err)
+		}
+		out = append(out, n)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("note: load all: %w", err)
+	}
+	return out, nil
+}
+
+// ReplaceAll makes the library exactly `notes`, in ONE transaction: a
+// restore that half-applied would leave somebody's notes in a state neither
+// the backup nor the machine ever had.
+func (s *store) ReplaceAll(ctx context.Context, notes []Note) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("note: replace all: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM notes`); err != nil {
+		return fmt.Errorf("note: replace all: %w", err)
+	}
+	for _, n := range notes {
+		if _, err = tx.ExecContext(ctx,
+			`INSERT INTO notes (id, body, created_at, updated_at) VALUES (?, ?, ?, ?)`,
+			n.ID, n.Body, n.CreatedAt, n.UpdatedAt); err != nil {
+			return fmt.Errorf("note: replace all: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("note: replace all: %w", err)
+	}
+	return nil
+}
+
 func (s *store) Get(ctx context.Context, id string) (Note, error) {
 	var n Note
 	err := s.db.QueryRowContext(ctx,

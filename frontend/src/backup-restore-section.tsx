@@ -297,6 +297,7 @@ export function BackupRestoreSection(props: Props) {
                     <th>Connections</th>
                     <th>Groups</th>
                     <th>Snippets</th>
+                    <th>Notes</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -306,12 +307,14 @@ export function BackupRestoreSection(props: Props) {
                     <td>{p().connections.included}</td>
                     <td>{p().groups.included}</td>
                     <td>{p().snippets.included}</td>
+                    <td>{p().notes.included}</td>
                   </tr>
                   <tr>
                     <td>Added</td>
                     <td>—</td>
                     <td>{p().connections.added}</td>
                     <td>{p().groups.added}</td>
+                    <td>—</td>
                     <td>—</td>
                   </tr>
                   <tr>
@@ -320,12 +323,14 @@ export function BackupRestoreSection(props: Props) {
                     <td>{p().connections.updated}</td>
                     <td>{p().groups.updated}</td>
                     <td>—</td>
+                    <td>—</td>
                   </tr>
                   <tr>
                     <td>Removed/Reset</td>
                     <td>{p().settings.reset}</td>
                     <td>{p().connections.removed}</td>
                     <td>{p().groups.removed}</td>
+                    <td>—</td>
                     <td>—</td>
                   </tr>
                 </tbody>

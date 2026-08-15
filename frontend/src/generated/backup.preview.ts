@@ -25,6 +25,12 @@ export interface BackupRestorePreview {
     groupCredentialBindingsRemoved: number
     groupDefaultKeysOmitted: number
   }
+  /**
+   * The note count the preview reports — what a person reads before deciding to restore over what they have.
+   */
+  notes: {
+    included: number
+  }
 }
 export interface SettingsCounts {
   included: number

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/backup"
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -107,6 +108,45 @@ func (f *fakeSnippetStore) SaveAll(s []snippet.Snippet) error {
 	return nil
 }
 
+// fakeNoteStore is an in-memory notes library for the backup tests. The
+// error switches are what the "every external call has a failing test" rule
+// needs: a backup that quietly omitted the notes it could not read would be
+// a backup somebody trusted.
+type fakeNoteStore struct {
+	list     []note.Note
+	loadErr  error
+	writeErr error
+}
+
+func (f *fakeNoteStore) LoadAllNotes() ([]note.Note, error) {
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
+	return append([]note.Note(nil), f.list...), nil
+}
+
+func (f *fakeNoteStore) ReplaceNotes(notes []note.Note) error {
+	if f.writeErr != nil {
+		return f.writeErr
+	}
+	f.list = append([]note.Note(nil), notes...)
+	return nil
+}
+
+func newFakeServiceWithNotes() (*backup.Service, *fakeSnippetStore, *fakeNoteStore) {
+	conn := &fakeConnStore{
+		snap: profile.ConnectionSnapshot{
+			Profiles: []profile.SSHProfile{},
+			Groups:   []profile.ProfileGroup{},
+		},
+	}
+	sett := &fakeSettingsStore{overrides: map[string]any{}}
+	doc := &fakeDocStore{}
+	snips := &fakeSnippetStore{}
+	notes := &fakeNoteStore{}
+	return backup.NewService(conn, sett, doc, snips, notes), snips, notes
+}
+
 func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fakeDocStore, *fakeSnippetStore) {
 	conn := &fakeConnStore{
 		snap: profile.ConnectionSnapshot{
@@ -117,7 +157,7 @@ func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fak
 	sett := &fakeSettingsStore{overrides: map[string]any{}}
 	doc := &fakeDocStore{}
 	snips := &fakeSnippetStore{}
-	svc := backup.NewService(conn, sett, doc, snips)
+	svc := backup.NewService(conn, sett, doc, snips, nil)
 	return svc, conn, sett, doc, snips
 }
 
@@ -1104,12 +1144,143 @@ func TestRestore_WithoutSnippetStoreRefusesASnippetsBackup(t *testing.T) {
 	}
 	sett := &fakeSettingsStore{overrides: map[string]any{}}
 	doc := &fakeDocStore{}
-	svc := backup.NewService(conn, sett, doc, nil)
+	svc := backup.NewService(conn, sett, doc, nil, nil)
 
 	contents := backupWithSnippets(t)
 
 	preview := mustPreview(t, svc, contents, backup.RestoreReplace)
 	if _, err := svc.Restore(contents, backup.RestoreReplace, preview.PreviewToken); err == nil {
 		t.Fatal("want an error: the backup carries snippets this service cannot apply")
+	}
+}
+
+// ── Notes (nocx-z56hq.6) ─────────────────────────────────────────────────
+
+func TestCreate_RoundTripsNotesUnderReplace(t *testing.T) {
+	svc, _, notes := newFakeServiceWithNotes()
+	notes.list = []note.Note{
+		{ID: "n1", Body: "# Deploy\n\nkubectl rollout\n", CreatedAt: 10, UpdatedAt: 11},
+		{ID: "n2", Body: "второй\n", CreatedAt: 20, UpdatedAt: 21},
+	}
+
+	r := mustCreate(t, svc)
+	var doc backup.Document
+	if err := json.Unmarshal([]byte(r.Contents), &doc); err != nil {
+		t.Fatalf("unmarshal created backup: %v", err)
+	}
+	if len(doc.Notes) != 2 {
+		t.Fatalf("backup carries %d notes, want 2", len(doc.Notes))
+	}
+	if r.Summary.Notes != 2 {
+		t.Fatalf("summary notes = %d, want 2", r.Summary.Notes)
+	}
+
+	// The machine is wiped.
+	notes.list = nil
+
+	preview := mustPreview(t, svc, r.Contents, backup.RestoreReplace)
+	if preview.Notes.Included != 2 {
+		t.Fatalf("preview notes included = %d, want 2", preview.Notes.Included)
+	}
+	mustRestore(t, svc, r.Contents, backup.RestoreReplace, preview.PreviewToken)
+
+	if len(notes.list) != 2 {
+		t.Fatalf("restore lost the library: %+v", notes.list)
+	}
+	// Bodies and timestamps, exactly: a note that came back with a different
+	// body is a note somebody lost, and one that came back with a new
+	// createdAt has lost when it was written.
+	if notes.list[0].Body != "# Deploy\n\nkubectl rollout\n" || notes.list[1].Body != "второй\n" {
+		t.Fatalf("bodies did not survive: %+v", notes.list)
+	}
+	if notes.list[0].CreatedAt != 10 || notes.list[0].UpdatedAt != 11 {
+		t.Fatalf("timestamps did not survive: %+v", notes.list[0])
+	}
+}
+
+func TestRestore_MergeWithNoNotesSectionLeavesTheLibraryAlone(t *testing.T) {
+	// A backup written before this section existed says NOTHING about
+	// notes. An unconditional write would turn that into "your notes are
+	// gone", which is the one outcome this feature cannot have.
+	svc, _, notes := newFakeServiceWithNotes()
+	r := mustCreate(t, svc) // no notes at backup time → no section
+
+	notes.list = []note.Note{{ID: "kept", Body: "written since", CreatedAt: 1, UpdatedAt: 1}}
+	preview := mustPreview(t, svc, r.Contents, backup.RestoreMerge)
+	mustRestore(t, svc, r.Contents, backup.RestoreMerge, preview.PreviewToken)
+
+	if len(notes.list) != 1 || notes.list[0].ID != "kept" {
+		t.Fatalf("merge erased a note the backup never mentioned: %+v", notes.list)
+	}
+}
+
+func TestRestore_MergeAddsWhatIsMissingAndKeepsWhatIsHere(t *testing.T) {
+	svc, _, notes := newFakeServiceWithNotes()
+	notes.list = []note.Note{{ID: "shared", Body: "from the backup", CreatedAt: 1, UpdatedAt: 1}}
+	r := mustCreate(t, svc)
+
+	// Since the backup: one note edited here, one written here.
+	notes.list = []note.Note{
+		{ID: "shared", Body: "edited here", CreatedAt: 1, UpdatedAt: 5},
+		{ID: "local", Body: "written here", CreatedAt: 2, UpdatedAt: 2},
+	}
+	preview := mustPreview(t, svc, r.Contents, backup.RestoreMerge)
+	mustRestore(t, svc, r.Contents, backup.RestoreMerge, preview.PreviewToken)
+
+	if len(notes.list) != 2 {
+		t.Fatalf("merge changed the count: %+v", notes.list)
+	}
+	byID := map[string]note.Note{}
+	for _, n := range notes.list {
+		byID[n.ID] = n
+	}
+	// A merge is not a way to lose what only exists here, and not a way to
+	// have an old copy overwrite a newer edit.
+	if byID["local"].Body != "written here" {
+		t.Fatalf("merge lost the note that only existed here: %+v", notes.list)
+	}
+	if byID["shared"].Body != "edited here" {
+		t.Fatalf("merge overwrote a local edit with the backup's older copy: %+v", byID["shared"])
+	}
+}
+
+func TestRestore_NoteWriteIsRolledBackWithEverythingElse(t *testing.T) {
+	svc, _, notes := newFakeServiceWithNotes()
+	notes.list = []note.Note{{ID: "before", Body: "before the restore", CreatedAt: 1, UpdatedAt: 1}}
+	r := mustCreate(t, svc)
+
+	notes.writeErr = errors.New("disk is gone")
+	preview := mustPreview(t, svc, r.Contents, backup.RestoreReplace)
+	if _, err := svc.Restore(r.Contents, backup.RestoreReplace, preview.PreviewToken); err == nil {
+		t.Fatal("a failing notes write must fail the restore")
+	}
+	notes.writeErr = nil
+
+	// The rollback ran inside the same interval as connections and settings:
+	// the library is what it was before the restore started.
+	if len(notes.list) != 1 || notes.list[0].ID != "before" {
+		t.Fatalf("the library was left in a state nobody asked for: %+v", notes.list)
+	}
+}
+
+func TestCreate_ReportsANotesReadItCouldNotDo(t *testing.T) {
+	svc, _, notes := newFakeServiceWithNotes()
+	notes.loadErr = errors.New("database is locked")
+	if _, err := svc.Create(); err == nil {
+		t.Fatal("a backup that cannot read the notes must fail, not omit them silently")
+	}
+}
+
+func TestRestore_WithoutANoteStoreRefusesANotesBackup(t *testing.T) {
+	// The refusal happens BEFORE the journal is written, so nothing is
+	// half-applied by a build that cannot finish the job.
+	withNotes, _, notes := newFakeServiceWithNotes()
+	notes.list = []note.Note{{ID: "n1", Body: "text", CreatedAt: 1, UpdatedAt: 1}}
+	r := mustCreate(t, withNotes)
+
+	svc, _, _, _, _ := newFakeService() // wired without a notes store
+	preview := mustPreview(t, svc, r.Contents, backup.RestoreReplace)
+	if _, err := svc.Restore(r.Contents, backup.RestoreReplace, preview.PreviewToken); err == nil {
+		t.Fatal("a service with no notes store must refuse a backup that carries notes")
 	}
 }

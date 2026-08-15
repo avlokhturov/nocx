@@ -23,5 +23,9 @@ export interface BackupCreateResult {
     credentialBindingsRemoved: number
     groupCredentialBindingsRemoved: number
     groupDefaultKeysOmitted: number
+    /**
+     * The number of notes in the backup. 0 when the service has no notes store or the library is empty.
+     */
+    notes: number
   }
 }

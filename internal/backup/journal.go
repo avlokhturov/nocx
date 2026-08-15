@@ -25,6 +25,7 @@ type restoreJournal struct {
 	// journal written before this field existed carries none; recovery then
 	// rolls back connections and settings only.
 	Snippets *[]BackupSnippet `json:"snippets,omitempty"`
+	Notes    *[]BackupNote    `json:"notes,omitempty"`
 }
 
 // journalState is the in-memory representation.
@@ -33,6 +34,7 @@ type journalState struct {
 	connections *profile.ConnectionSnapshot
 	settings    *map[string]any
 	snippets    *[]BackupSnippet
+	notes       *[]BackupNote
 }
 
 // readJournal loads the journal document. Missing → idle.
@@ -62,6 +64,7 @@ func readJournal(doc storage.DocumentStore) (journalState, error) {
 		js.connections = j.Connections
 		js.settings = j.Settings
 		js.snippets = j.Snippets
+		js.notes = j.Notes
 	default:
 		return journalState{}, fmt.Errorf("%w: unknown journal state %q", ErrRecoveryRequired, j.State)
 	}
@@ -72,7 +75,7 @@ func readJournal(doc storage.DocumentStore) (journalState, error) {
 // writeJournal persists the journal. Passing nil writes "idle" without payload.
 // snippets may be nil even in prepared/committed — a service wired without a
 // snippet store has no library state to roll back.
-func writeJournal(doc storage.DocumentStore, state string, conn *profile.ConnectionSnapshot, settings *map[string]any, snippets *[]BackupSnippet) error {
+func writeJournal(doc storage.DocumentStore, state string, conn *profile.ConnectionSnapshot, settings *map[string]any, snippets *[]BackupSnippet, notes *[]BackupNote) error {
 	var j restoreJournal
 	j.Version = journalVersion
 	j.State = state
@@ -83,6 +86,7 @@ func writeJournal(doc storage.DocumentStore, state string, conn *profile.Connect
 		j.Connections = conn
 		j.Settings = settings
 		j.Snippets = snippets
+		j.Notes = notes
 	}
 	b, err := json.Marshal(j)
 	if err != nil {
@@ -93,5 +97,5 @@ func writeJournal(doc storage.DocumentStore, state string, conn *profile.Connect
 
 // cleanupJournal attempts to write idle. Failure is logged but not fatal.
 func cleanupJournal(doc storage.DocumentStore) {
-	_ = writeJournal(doc, "idle", nil, nil, nil)
+	_ = writeJournal(doc, "idle", nil, nil, nil, nil)
 }

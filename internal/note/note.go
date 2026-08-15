@@ -57,6 +57,15 @@ type Row struct {
 // reaching into the database.
 type Store interface {
 	List(ctx context.Context) ([]Row, error)
+	// LoadAll is the BACKUP's read: every note WITH its body and its
+	// timestamps. List is deliberately not this — a list is a list, and the
+	// difference is the whole reason both exist.
+	LoadAll(ctx context.Context) ([]Note, error)
+	// ReplaceAll is the RESTORE's write: the library becomes exactly this,
+	// in one transaction. A restore that could half-apply would leave
+	// somebody's notes in a state neither the backup nor the machine ever
+	// had.
+	ReplaceAll(ctx context.Context, notes []Note) error
 	Get(ctx context.Context, id string) (Note, error)
 	Create(ctx context.Context, n Note) (Note, error)
 	Update(ctx context.Context, n Note) (Note, error)

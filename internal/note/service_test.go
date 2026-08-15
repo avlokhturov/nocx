@@ -80,6 +80,24 @@ func (m *memStore) Search(_ context.Context, query string) ([]note.Row, error) {
 	return []note.Row{}, nil
 }
 
+// LoadAll and ReplaceAll are the BACKUP's pair (spec §10). The fake carries
+// them so the seam is one interface rather than two, and so a backup test
+// that reaches for this store gets the same failure switches.
+func (m *memStore) LoadAll(context.Context) ([]note.Note, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return append([]note.Note(nil), m.notes...), nil
+}
+
+func (m *memStore) ReplaceAll(_ context.Context, notes []note.Note) error {
+	if m.saveErr != nil {
+		return m.saveErr
+	}
+	m.notes = append([]note.Note(nil), notes...)
+	return nil
+}
+
 func (m *memStore) Close() error { return nil }
 
 func counter() func() string {

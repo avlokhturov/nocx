@@ -55,6 +55,22 @@ import (
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
 
+// noteBackupAdapter is the backup's view of the notes store. The store takes
+// a context (it is a database); the backup's interfaces do not, because they
+// are the shape ADR-0027 settled on. The adapter supplies the background
+// context and nothing else — no policy lives here.
+type noteBackupAdapter struct {
+	store note.Store
+}
+
+func (a *noteBackupAdapter) LoadAllNotes() ([]note.Note, error) {
+	return a.store.LoadAll(context.Background())
+}
+
+func (a *noteBackupAdapter) ReplaceNotes(notes []note.Note) error {
+	return a.store.ReplaceAll(context.Background(), notes)
+}
+
 type App struct {
 	Logger           log.Logger
 	Pty              session.PTYFactory
@@ -509,22 +525,7 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
-	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore)
-	if err := backupService.Recover(); err != nil {
-		return nil, fmt.Errorf("backup recovery: %w", err)
-	}
 
-	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
-	// nocx-rtg0.14): the OS keystore's derived slot when one exists, else
-	// DERIVED at startup from a per-machine salt — the vault and its seal
-	// are irrelevant to it, and no passphrase is ever requested for history.
-	// The key is held here for the life of the process, so a vault
-	// auto-seal can never make history unreadable. The History settings
-	// (keep on/off, age, the two-number budget, output) wire into the store
-	// the same way: read here, live-updated below. On every failure path
-	// the app starts WITHOUT durable history (the stub) and says so: a
-	// terminal that refuses to start because its history database could not
-	// open a key is worse than one that starts and admits the gap.
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
 	// their UPGRADE rule, not in their secrecy. History rebuilds its file
@@ -548,6 +549,54 @@ func New(opts ...Option) (*App, error) {
 		contentKey = key
 	}
 
+	// The notes library. A store that cannot be opened leaves noteSvc nil,
+	// the notes.* methods answer -32601, and the panel says the library is
+	// unavailable — never an empty list, which would tell somebody their
+	// notes are gone (spec §8).
+	var noteSvc *note.Service
+	// The notes database is closed on the way out, after the transport has
+	// stopped: an open file handle outliving the process is how a database
+	// gets left in a state its next open has to recover from.
+	var noteCloser interface{ Close() error }
+	// The backup's view of the same store. nil when notes are unavailable,
+	// and the backup then carries no notes section — which restore reads as
+	// "this backup says nothing about notes" rather than "you had none".
+	var noteBackup backup.NoteStore
+	if contentKey != nil {
+		if noteStore, noteErr := note.Open(ctx, note.Config{
+			Path: filepath.Join(paths.DataDir(), "notes.db"),
+			Key:  contentKey,
+		}); noteErr != nil {
+			slogger.Warn("notes unavailable; starting without them", "reason", noteErr)
+		} else {
+			noteSvc = note.NewService(noteStore, func() string {
+				var raw [16]byte
+				if _, rerr := rand.Read(raw[:]); rerr != nil {
+					return fmt.Sprintf("note-%d", time.Now().UnixNano())
+				}
+				return hex.EncodeToString(raw[:])
+			}, time.Now)
+			noteCloser = noteStore
+			noteBackup = &noteBackupAdapter{store: noteStore}
+		}
+	}
+
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup)
+	if err := backupService.Recover(); err != nil {
+		return nil, fmt.Errorf("backup recovery: %w", err)
+	}
+
+	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
+	// nocx-rtg0.14): the OS keystore's derived slot when one exists, else
+	// DERIVED at startup from a per-machine salt — the vault and its seal
+	// are irrelevant to it, and no passphrase is ever requested for history.
+	// The key is held here for the life of the process, so a vault
+	// auto-seal can never make history unreadable. The History settings
+	// (keep on/off, age, the two-number budget, output) wire into the store
+	// the same way: read here, live-updated below. On every failure path
+	// the app starts WITHOUT durable history (the stub) and says so: a
+	// terminal that refuses to start because its history database could not
+	// open a key is worse than one that starts and admits the gap.
 	historyPolicy := policyFromSettings(settingsRegistry)
 	budget, budgetErr := budgetFromSettings(settingsRegistry)
 	if budgetErr != nil {
@@ -565,33 +614,6 @@ func New(opts ...Option) (*App, error) {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
 	} else {
 		contentDB = db
-	}
-
-	// The notes library. A store that cannot be opened leaves noteSvc nil,
-	// the notes.* methods answer -32601, and the panel says the library is
-	// unavailable — never an empty list, which would tell somebody their
-	// notes are gone (spec §8).
-	var noteSvc *note.Service
-	// The notes database is closed on the way out, after the transport has
-	// stopped: an open file handle outliving the process is how a database
-	// gets left in a state its next open has to recover from.
-	var noteCloser interface{ Close() error }
-	if contentKey != nil {
-		if noteStore, noteErr := note.Open(ctx, note.Config{
-			Path: filepath.Join(paths.DataDir(), "notes.db"),
-			Key:  contentKey,
-		}); noteErr != nil {
-			slogger.Warn("notes unavailable; starting without them", "reason", noteErr)
-		} else {
-			noteSvc = note.NewService(noteStore, func() string {
-				var raw [16]byte
-				if _, rerr := rand.Read(raw[:]); rerr != nil {
-					return fmt.Sprintf("note-%d", time.Now().UnixNano())
-				}
-				return hex.EncodeToString(raw[:])
-			}, time.Now)
-			noteCloser = noteStore
-		}
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
