@@ -195,3 +195,26 @@ describe('EditableHost — the editable mode of the same host', () => {
     expect(host.doc()).toBe('')
   })
 })
+
+describe('EditableHost — what an editable field must already have', () => {
+  it('binds Enter, undo and redo: a field where Return does nothing is not a field', () => {
+    // The read-only modes need no keymap at all, so the editable one has to
+    // bring the editing essentials itself. Enter is the one that bites: with
+    // no binding, a Return inside a dialog falls through to the dialog's own
+    // submit and the person's newline saves the form instead.
+    const host = new EditableHost()
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const controller = new AbortController()
+    host.mount(parent, controller.signal)
+
+    const bound = (key: string): boolean => {
+      const contentEl = parent.querySelector('.cm-content') as HTMLElement
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+      contentEl.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    expect(bound('Enter')).toBe(true)
+    host.dispose()
+  })
+})

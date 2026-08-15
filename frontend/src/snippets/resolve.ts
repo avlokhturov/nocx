@@ -61,7 +61,10 @@ export function hasSecretReference(text: string): boolean {
 export const ENV_KEYS = {
   cwd: "the pane's working directory",
   host: "the pane's host",
-  user: "the session's user",
+  // The SSH user, which a local shell does not have — so {{env:user}} in a
+  // local pane refuses rather than substituting nothing (§11.2), and the
+  // preview says which key it is before the first fire finds out.
+  user: 'the ssh user (a local shell has none)',
   branch: 'the checked-out git branch',
 } as const
 

@@ -1308,3 +1308,54 @@ describe('XtermRenderer repaints after a grid resize (nocx-jfgb)', () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 })
+
+describe('bracketed paste, read from the real parser', () => {
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  // The paired "and on a normal machine it succeeds" for the multi-line
+  // policy (AGENTS.md rule 2). Every other test of that policy MOCKS
+  // bracketedPasteActive, so all of them would keep passing if the real read
+  // never answered true — and a snippet with two lines would then be refused
+  // for everybody, always.
+  it('reports the mode a program turned on, and reports it off again', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    expect(r.bracketedPasteActive()).toBe(false)
+
+    // write() is fire-and-forget; onWriteParsed is the renderer's own
+    // "the bytes have been parsed" signal, and it is what a caller reading
+    // parser state has to wait for.
+    const parsed = (data: string) =>
+      new Promise<void>((resolve) => {
+        r.onWriteParsed(resolve)
+        r.write(data)
+      })
+    await parsed('\x1b[?2004h')
+    expect(r.bracketedPasteActive()).toBe(true)
+
+    await parsed('\x1b[?2004l')
+    expect(r.bracketedPasteActive()).toBe(false)
+    r.dispose()
+  })
+})

@@ -30,8 +30,21 @@
 // view when its tab dies.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { EditorState, type Extension } from '@codemirror/state'
-import { EditorView } from '@codemirror/view'
+import { EditorView, keymap } from '@codemirror/view'
+
+/** What an EDITABLE field needs before it is a field at all: the standard
+ *  editing bindings and an undo history. The read-only modes take none of
+ *  it — nothing they bind could change a document that cannot change.
+ *
+ *  Enter is the one that bites. With no binding it is not handled here, so
+ *  it reaches the surface around the editor: a Return inside a dialog then
+ *  submits the form instead of breaking the line the person was typing. The
+ *  editor's own module learned the same lesson about history() — the
+ *  package was a dependency and the extension was installed nowhere, so
+ *  Ctrl+Z did nothing in a field that looked like every other one. */
+const editingExtensions: Extension[] = [history(), keymap.of([...defaultKeymap, ...historyKeymap])]
 
 /** CM6 look: colours only, resolved through the app's --color-* tokens so a
  *  theme switch recolours every host surface (ADR-0013). Layout lives in
@@ -104,6 +117,7 @@ class CMHost {
           EditorState.readOnly.of(!this.editable),
           EditorView.editable.of(this.editable),
           themeFor(this.editable),
+          ...(this.editable ? editingExtensions : []),
           ...(onDocChange
             ? [
                 EditorView.updateListener.of((u) => {

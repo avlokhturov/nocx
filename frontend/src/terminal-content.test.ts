@@ -1022,6 +1022,34 @@ describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
     }
   })
 
+  it('a vault that FAILS the call refuses the fire — it does not escape as a rejection', async () => {
+    // The paired case for the test above: "unresolved" is an answer, and
+    // this is no answer at all (the vault is sealed, the socket is gone,
+    // the method is not wired). Nothing was written either way, and the
+    // palette must get a refusal it can render — an exception here would
+    // leave its panel waiting on a promise that never settles.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') return Promise.reject(new Error('vault is sealed'))
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('fire {{secret:pi@far}}')).resolves.toEqual({
+        ok: false,
+        reason: 'unresolved-secret',
+      })
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
   it("'none' is a refusal, never a fallthrough: with no session the fire stops and the pty is untouched", async () => {
     const { content, teardown } = await mountTerminal(
       makeClipboard(),

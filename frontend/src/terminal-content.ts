@@ -2645,7 +2645,21 @@ export class TerminalContent extends BaseTabContent {
     if (hasSecretReference(text)) {
       const vault = this.vault
       if (vault === null) return { ok: false, reason: 'unresolved-secret' }
-      const resolved = await vault.resolveLine(text)
+      // A vault that cannot answer at all — sealed, not wired, the socket
+      // gone — is the same outcome for this fire as a name that does not
+      // resolve: nothing is written, and the caller is told so. It is
+      // caught rather than allowed to propagate because the palette awaits
+      // this promise to decide what to render; an exception would leave its
+      // panel waiting on one that never settles.
+      let resolved
+      try {
+        resolved = await vault.resolveLine(text)
+      } catch (err) {
+        log.warn('nocx: snippet fire could not reach the vault', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+        return { ok: false, reason: 'unresolved-secret' }
+      }
       const unresolved = resolved.refs.find((r) => !r.resolved)
       if (unresolved !== undefined) {
         return { ok: false, reason: 'unresolved-secret', name: unresolved.name }
