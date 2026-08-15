@@ -535,8 +535,7 @@ function wireBlockSelection(
   let mouseMoved = false
 
   blockEl.addEventListener('mousedown', (e) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu, .cmd-ask-btn'))
-      return
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
     mouseMoved = false
   })
 
@@ -545,8 +544,7 @@ function wireBlockSelection(
   })
 
   blockEl.addEventListener('mouseup', (e) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu, .cmd-ask-btn'))
-      return
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
     if (mouseMoved) return
 
     // Toggle selection: if already selected, deselect; otherwise select
@@ -584,11 +582,6 @@ export function createCommandBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
-  /** The ask affordance (nocx-x8s2.2): when supplied, the frozen block
-   *  carries an Ask control whose one action activates the ask mode for
-   *  THIS block. Absent on answer blocks and every non-frozen builder —
-   *  a question targets a finished command block, never an answer. */
-  onAsk?: (blockEl: HTMLElement) => void,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -619,27 +612,6 @@ export function createCommandBlock(
   const overflow = buildOverflowMenu(command, outputEl)
   const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
-  // The ask affordance: the one deliberate, non-modal action a frozen
-  // block offers beyond copy. Its click must never look like a block
-  // selection (AD-8: selection is copy; activation is this button), so
-  // the selection and dblclick handlers below exclude it. Inserted BEFORE
-  // the overflow — the ⋮ never shifts position.
-  if (onAsk && right) {
-    const ask = document.createElement('button')
-    ask.className = 'ui-button cmd-ask-btn'
-    ask.dataset.variant = 'ghost'
-    ask.dataset.size = 'sm'
-    ask.textContent = 'Ask'
-    ask.setAttribute('aria-label', 'Ask about this block')
-    ask.title = 'Ask about this block'
-    ask.addEventListener('click', (e) => {
-      e.stopPropagation()
-      e.preventDefault()
-      onAsk(wrapper)
-    })
-    right.insertBefore(ask, overflow)
-  }
-
   wrapper.appendChild(header)
   if (outputEl) wrapper.appendChild(outputEl)
 
@@ -659,8 +631,7 @@ export function createCommandBlock(
   // and there is no race to order. A single mousedown (detail 1) is not
   // intercepted: drag selection and click-to-select keep working.
   wrapper.addEventListener('mousedown', (e: MouseEvent) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu, .cmd-ask-btn'))
-      return
+    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
     if (e.detail !== 2) return
     e.preventDefault()
     const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY)
@@ -733,9 +704,6 @@ export function freezeBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   status: 'success' | 'failure' | 'entered' | 'unknown',
-  /** Forwarded to createCommandBlock: the frozen block carries the ask
-   *  affordance exactly when the manager was wired with one. */
-  onAsk?: (blockEl: HTMLElement) => void,
 ): HTMLElement {
   const newEl = createCommandBlock(
     id,
@@ -749,7 +717,6 @@ export function freezeBlock(
     getContainer,
     onSelect,
     store,
-    onAsk,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -811,10 +778,6 @@ export interface BlockManagerOpts {
   /** The tab's command-existence snapshot store (OSC 636), passed through to
    *  every frozen header this manager creates. */
   snapshotStore: CommandSnapshotStore
-  /** The ask affordance (nocx-x8s2.2): every frozen block this manager
-   *  creates carries an Ask control wired to this callback (the surface
-   *  owner raises the chip). Answer blocks never receive it. */
-  onAsk?: (blockEl: HTMLElement) => void
   /** Fired when a DEFERRED freeze lands — the fence arrived, or the
    *  FENCE_DEFER_MS window elapsed and the block settled at the current
    *  output end. The freeze originated inside the manager (sightFence /
@@ -841,7 +804,6 @@ export class BlockManager {
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: () => void
-  private _onAsk?: (blockEl: HTMLElement) => void
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
@@ -888,7 +850,6 @@ export class BlockManager {
     this._now = opts.now ?? (() => performance.now())
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
-    this._onAsk = opts.onAsk
   }
 
   get blocks(): readonly BlockRecord[] {
@@ -1140,7 +1101,6 @@ export class BlockManager {
       },
       this._snapshotStore,
       status,
-      this._onAsk,
     )
 
     rec.el = newEl

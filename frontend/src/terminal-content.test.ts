@@ -59,6 +59,7 @@ import type { DesiredMode } from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
+import { showToast } from './ui/toast'
 import { BufferLine } from './scrollback/test-helpers'
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
@@ -3352,18 +3353,17 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
   })
 })
 // ───────────────────────────────────────────────────────────────────────────
-// The ask activation seam (nocx-x8s2.2): a person reaches the model from a
-// frozen block. Activation is the block's Ask affordance — never selection
-// (AD-8: selection is copy; the chip is the mode). While the chip is mounted
-// the registry's active target is the agent: a submitted question routes to
-// agent.captureFrame + agent.ask about THE CHIP'S block, and nothing shell
-// runs for it (no pty bytes, no ledger record, no running block, no
-// attempt). Dismissing returns the target to shell. With no endpoint
-// configured the chip says so from agent.status — on the surface, never only
-// in a log. These tests drive the REAL chain: real TerminalContent, real
-// controller, real BlockManager freeze (so the block carries the real Ask
-// affordance), real editor submit.
-describe('the ask activation seam (nocx-x8s2.2)', () => {
+// The ask entry gesture (nocx-4wtlh): nothing but the person changes where
+// Enter goes. Plain Enter submits to the registry's active target (the
+// shell, always, unless the person switched it); ⌘Enter is a ONE-SHOT
+// question that never touches the active target. Selecting a region of a
+// finished block's output FREEZES it into a reference chip in the input
+// line — and changes nothing else: the target does not move, and a plain
+// Enter after a selection still reaches the shell. A ⌘Enter question
+// carries exactly the chips in the line and no others. These tests drive
+// the REAL chain: real TerminalContent, real controller, real BlockManager
+// freeze, real editor submit, real registry.
+describe('the ask entry gesture (nocx-4wtlh)', () => {
   /** A client whose dispatcher answers the agent.* transaction, records
    *  EVERY dispatcher call (so the test can assert a lifecycle attempt was
    *  never opened for a question), and keeps the default resolve for
@@ -3377,12 +3377,15 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     const client = makeClient()
     const dispatcherCalls: Array<{ method: string; params: unknown }> = []
     // Each ask is a new run with a new answer entry — two asks in flight
-    // stream concurrently and must never share an identity.
+    // stream concurrently and must never share an identity. Frames get
+    // distinct ids too: two chips must carry two references.
     let nextRun = 6
+    let nextFrame = 0
     client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
       dispatcherCalls.push({ method, params })
       if (method === 'agent.captureFrame') {
-        return Promise.resolve({ frameId: 'frame-1' })
+        nextFrame += 1
+        return Promise.resolve({ frameId: `frame-${nextFrame}` })
       }
       if (method === 'agent.ask') {
         nextRun += 1
@@ -3410,9 +3413,7 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     return { client, dispatcherCalls }
   }
 
-  /** A frozen command block through the REAL manager chain — the manager's
-   *  Ask wiring (terminal-content → controller → BlockManager) is exactly
-   *  what the affordance carries. */
+  /** A frozen command block through the REAL manager chain. */
   function frozenBlockOf(
     content: TerminalContent,
     command = 'ls',
@@ -3427,24 +3428,54 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     return frozen!.el
   }
 
-  function askOf(block: HTMLElement): HTMLElement {
-    const ask = block.querySelector<HTMLElement>('.cmd-ask-btn')
-    expect(ask).not.toBeNull()
-    return ask!
+  /** The registry's active label — the truth the indicator must render. */
+  function activeLabel(content: TerminalContent): string {
+    const registry = (
+      content as unknown as {
+        inputTargets: { active(): { label: string } }
+      }
+    ).inputTargets
+    return registry.active().label
   }
 
-  function submitInEditor(ed: CommandEditor, text: string): void {
-    ed.show()
-    ed.insertText(text)
+  /** The indicator as rendered in the editor's input line. */
+  function indicatorOf(ed: CommandEditor): HTMLElement | null {
+    return viewOf(ed).contentDOM.querySelector<HTMLElement>('.nocx-editor-target-indicator')
+  }
+
+  /** The reference chip strip inside the editor. */
+  function chipStripOf(ed: CommandEditor): HTMLElement {
+    return ed.root.querySelector<HTMLElement>('.nocx-editor-references')!
+  }
+
+  function chipsIn(ed: CommandEditor): HTMLElement[] {
+    return Array.from(chipStripOf(ed).querySelectorAll<HTMLElement>('.nocx-editor-reference-chip'))
+  }
+
+  /** Dispatch a submit key exactly where a person's keystroke lands. */
+  function submitKey(ed: CommandEditor, init: KeyboardEventInit = {}): void {
     viewOf(ed).contentDOM.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true, ...init }),
     )
   }
 
-  /** The recorded params of one dispatcher call, narrowed to an object —
-   *  the assertions below read only fields the REAL AgentInputTarget put
-   *  there (this test drives it end to end), so the check is shape-level,
-   *  never a fabricated inline type. */
+  /** Select rows [start, end) of a frozen block's output and fire the
+   *  selectionchange event the product listens for. */
+  function selectRows(block: HTMLElement, start: number, end: number): void {
+    const lines = Array.from(block.querySelectorAll<HTMLElement>('.term-line'))
+    expect(lines.length).toBeGreaterThanOrEqual(end)
+    const first = lines[start]
+    const last = lines[end - 1]
+    const range = document.createRange()
+    range.setStart(first.firstChild ?? first, 0)
+    range.setEnd(last.lastChild ?? last, (last.textContent ?? '').length)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+  }
+
+  /** The recorded params of one dispatcher call, narrowed to an object. */
   function recordedParams(
     calls: Array<{ method: string; params: unknown }>,
     method: string,
@@ -3456,17 +3487,6 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     return call.params as Record<string, unknown>
   }
 
-  /** Type and submit through the REAL editor path, exactly as a person
-   *  does — WITHOUT re-showing the editor. submitInEditor's ed.show()
-   *  masks the wmy4 defect: a hidden editor is a no-op for focus, and the
-   *  second ask must work from the true post-submit state. */
-  function submitAsTyped(ed: CommandEditor, text: string): void {
-    ed.insertText(text)
-    viewOf(ed).contentDOM.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
-    )
-  }
-
   /** Deliver one server notification through the REAL subscription seam. */
   function deliverNotification(client: ClientFake, method: string, params: unknown): void {
     const sub = client.dispatcher.subscribe.mock.calls.find((c: unknown[]) => c[0] === method) as
@@ -3474,56 +3494,68 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     if (!sub) throw new Error(`nothing subscribed to ${method}`)
     sub[1](params)
   }
-  it('activation raises a chip naming the block; a question goes to the model about THAT block and nothing shell runs', async () => {
+
+  it('plain Enter goes to the shell, ⌘Enter goes to the assistant — one walk, and the indicator matches the registry after each (nocx-4wtlh)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       content.setVisible(true)
       _resetThemeState()
-      const block = frozenBlockOf(content)
-      askOf(block).click()
+      ed.show()
 
-      // The chip names the block, mounted in the block, before any question
-      // is sent — and activation anchored the block visually (selection is
-      // a consequence of activation, never its cause).
-      const chip = block.querySelector('.ui-block-receipt[data-variant="ask"]')
-      expect(chip).not.toBeNull()
-      expect(chip!.querySelector('.ui-block-receipt__value')?.textContent).toBe('ls')
-      expect(block.classList.contains('cmd-block-selected')).toBe(true)
+      // The indicator is the registry's own word, rendered at the caret:
+      // shell by default, and it says so before anything is submitted.
+      expect(activeLabel(content)).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Shell')
 
+      // ── Plain Enter: the shell receives the line ─────────────────────
       const sentBefore = sessionOf(content).send.mock.calls.length
-      submitInEditor(ed, 'what does docs mean?')
+      ed.insertText('echo hi')
+      submitKey(ed)
+      // The shell got the command and its CR — the ordinary handoff — and
+      // no question ever crossed the control plane.
+      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+      // The handoff hid the editor; the registry never moved.
+      expect(ed.isVisible).toBe(false)
+      expect(activeLabel(content)).toBe('Shell')
 
-      // The question crossed the control plane as the ONE transaction:
-      // captureFrame (the frame carrying THIS block's output, source=frozen)
-      // then ask (the question, referencing that frame).
+      // ── ⌘Enter: the assistant receives the line, ONE-SHOT ─────────────
+      // The editor is re-shown (the next prompt, as the lifecycle would);
+      // the indicator still renders what the registry reports.
+      ed.show()
+      expect(indicatorOf(ed)?.textContent).toBe(activeLabel(content))
+      const sentAfterShell = sessionOf(content).send.mock.calls.length
+      ed.insertText('what does docs mean?')
+      submitKey(ed, { metaKey: true })
       await vi.waitFor(() => {
-        expect(dispatcherCalls.some((c) => c.method === 'agent.captureFrame')).toBe(true)
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
-      const frame = recordedParams(dispatcherCalls, 'agent.captureFrame')
-      expect(frame.source).toBe('frozen')
-      expect(frame.rows).toEqual([
-        { kind: 'text', text: 'total 12' },
-        { kind: 'text', text: 'docs' },
-      ])
       const ask = recordedParams(dispatcherCalls, 'agent.ask')
       expect(ask.question).toBe('what does docs mean?')
-      expect(ask.references).toMatchObject([{ frameId: 'frame-1' }])
-
-      // Nothing shell ran for the question: no pty bytes, no lifecycle
-      // attempt, no running block, no ledger touch.
-      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore)
+      // A general question: no chips, no references.
+      expect(ask.references).toEqual([])
+      // Nothing shell ran FOR THE QUESTION: no pty bytes, no attempt, no
+      // ledger record — the shell's history is unchanged by a question.
+      // (The running block from the earlier `echo hi` is untouched — the
+      // ask neither opened one of its own nor disturbed the shell's.)
+      expect(sessionOf(content).send.mock.calls.length).toBe(sentAfterShell)
       expect(dispatcherCalls.find((c) => c.method === 'lifecycle.submitAttempt')).toBeUndefined()
+      expect(dispatcherCalls.find((c) => c.method === 'history.record')).toBeUndefined()
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      expect(scrollback.blockManager.runningBlock).toBeNull()
-      expect(scrollback.scrollbackInner.querySelector('.cmd-block-running')).toBeNull()
+      expect(scrollback.blockManager.runningBlock?.command).toBe('echo hi')
+      // The one-shot ask did NOT change where Enter goes: the editor stays
+      // on screen (no handoff) and the indicator still matches the
+      // registry — still the shell.
+      expect(ed.isVisible).toBe(true)
+      expect(activeLabel(content)).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Shell')
     } finally {
       teardown()
     }
   })
 
-  it('the editor stays available after a question — a second ask works while the first streams, and each answer lands on its own entry (nocx-wmy4)', async () => {
+  it('selecting output puts a reference chip in the input line and changes nothing else — plain Enter after the selection still reaches the SHELL (nocx-4wtlh)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -3533,63 +3565,159 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     try {
       content.setVisible(true)
       _resetThemeState()
-      // Model the product state the e2e drives: a person at a prompt with
-      // the editor up (the harness's lifecycle never publishes the
-      // prompt_ready fact that would show it on its own). Shown ONCE —
-      // the assertion below is about the SUBMIT's effect, and a per-submit
-      // re-show is exactly what masked this bug.
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+
+      selectRows(block, 0, 2)
+      const chips = chipsIn(ed)
+      expect(chips).toHaveLength(1)
+      expect(chips[0].textContent).toContain('ls')
+      expect(chips[0].textContent).toContain('rows 1–2')
+
+      // The selection created the chip and NOTHING else: the active target
+      // is untouched and the indicator still says shell.
+      expect(activeLabel(content)).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Shell')
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+
+      // Submit with plain Enter: the SHELL receives the command — the chip
+      // never armed ask, the registry never moved.
+      const sentBefore = sessionOf(content).send.mock.calls.length
+      ed.insertText('echo back')
+      submitKey(ed)
+      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+      expect(activeLabel(content)).toBe('Shell')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a ⌘Enter question carries the chips that are in the line and no others — two selections, one unrelated block (nocx-4wtlh)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
+      const unrelated = frozenBlockOf(content, 'sleep 1', ['zzz'])
+
+      selectRows(blockA, 0, 2)
+      selectRows(blockB, 0, 1)
+      expect(chipsIn(ed)).toHaveLength(2)
+
+      const sentBefore = sessionOf(content).send.mock.calls.length
+      ed.insertText('how are these related?')
+      submitKey(ed, { metaKey: true })
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
+      })
+
+      // Exactly the two chip blocks were captured — the unrelated block's
+      // rows never left the DOM.
+      const frames = dispatcherCalls
+        .filter((c) => c.method === 'agent.captureFrame')
+        .map((c) => (c.params as { rows: { text: string }[] }).rows.map((r) => r.text))
+      expect(frames).toHaveLength(2)
+      expect(frames).toContainEqual(['total 12', 'docs'])
+      expect(frames).toContainEqual(['commit abc'])
+      // The unrelated block's rows exist in the flow and never left it.
+      expect(
+        Array.from(unrelated.querySelectorAll('.term-line')).map((l) => l.textContent),
+      ).toEqual(['zzz'])
+      expect(frames.some((f) => f.includes('zzz'))).toBe(false)
+
+      // The references are exactly the chips — each with its own region and
+      // its own frame.
+      const ask = recordedParams(dispatcherCalls, 'agent.ask')
+      expect(ask.references).toEqual([
+        { frameId: 'frame-1', region: { rowStart: 0, rowEnd: 2 } },
+        { frameId: 'frame-2', region: { rowStart: 0, rowEnd: 1 } },
+      ])
+      // Nothing shell ran; the chips were consumed by the question.
+      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore)
+      expect(chipsIn(ed)).toHaveLength(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a chip can be dismissed from the line, and the next question carries what remains', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
+
+      selectRows(blockA, 0, 2)
+      selectRows(blockB, 0, 1)
+      const [chipA] = chipsIn(ed)
+      chipA.querySelector<HTMLButtonElement>('.nocx-editor-reference-chip__drop')?.click()
+      expect(chipsIn(ed)).toHaveLength(1)
+
+      ed.insertText('what is left?')
+      submitKey(ed, { metaKey: true })
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
+      })
+      const ask = recordedParams(dispatcherCalls, 'agent.ask')
+      expect(ask.references).toEqual([{ frameId: 'frame-1', region: { rowStart: 0, rowEnd: 1 } }])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the editor stays available after a question — a second ⌘Enter works while the first streams, and each answer lands on its own entry (nocx-wmy4)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
       ed.show()
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
-      askOf(blockA).click()
 
-      // Question one, through the REAL submit path — no per-submit re-show
-      // (the editor was shown once up front; the merged helper's show-
-      // before-every-submit is exactly what masked this bug). The editor
-      // must NOT hand off to the shell: the agent target is active,
-      // nothing is pasted into a pty, and the person is still in a
-      // conversation.
-      submitAsTyped(ed, 'what does docs mean?')
+      // Question one, through the REAL ⌘Enter path.
+      selectRows(blockA, 0, 2)
+      ed.insertText('what does docs mean?')
+      submitKey(ed, { metaKey: true })
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
       })
-      expect(ed.isVisible).toBe(true)
-      expect(document.activeElement !== null && ed.root.contains(document.activeElement)).toBe(true)
-
-      // While the first answer streams, activate block B — the block's Ask
-      // button — from the true post-submit state.
-      askOf(blockB).click()
+      // The one-shot ask left the editor up — no handoff.
       expect(ed.isVisible).toBe(true)
 
-      // The chip's primary Ask: the person already chose block B (the chip
-      // names it), and pressing the CHIP's Ask is the path where nothing
-      // changes except focus — the one most likely to stay broken. Exercise
-      // it from a wandered state: focus leaves the editor, and the chip's
-      // Ask must bring it back. With the editor hidden (the bug), focus()
-      // is a no-op and this assertion is red.
-      viewOf(ed).contentDOM.blur()
-      expect(document.activeElement === null || !ed.root.contains(document.activeElement)).toBe(
-        true,
-      )
-      blockB.querySelector<HTMLElement>('.ui-block-receipt__primary')!.click()
-      expect(ed.isVisible).toBe(true)
-      expect(document.activeElement !== null && ed.root.contains(document.activeElement)).toBe(true)
-      submitAsTyped(ed, 'what did it fix?')
+      // While the first answer streams, point at block B and ask again.
+      selectRows(blockB, 0, 1)
+      ed.insertText('what did it fix?')
+      submitKey(ed, { metaKey: true })
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(2)
       })
-      // The second payload carries block B's output, and no other block's.
+      // The second payload carries block B's rows.
       const frames = dispatcherCalls
         .filter((c) => c.method === 'agent.captureFrame')
-        .map((c) => {
-          if (typeof c.params !== 'object' || c.params === null) {
-            throw new Error('ask-seam: captureFrame params missing')
-          }
-          return c.params as Record<string, unknown>
-        })
+        .map((c) => (c.params as { rows: { text: string }[] }).rows.map((r) => r.text))
       expect(frames).toHaveLength(2)
-      expect(frames[1].rows).toEqual([{ kind: 'text', text: 'commit abc' }])
+      expect(frames[1]).toEqual([{ kind: 'text', text: 'commit abc' }].map((r) => r.text))
 
       // Both streams interleave through the REAL subscription seam; each
       // run's deltas land on its own answer block, never the other's.
@@ -3627,9 +3755,6 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
       expect(bodyOf('entry-7')).toBe('docs: a directory of files')
       expect(bodyOf('entry-8')).toBe('fix: the bug now')
 
-      // Both terminalize: the completed chip lands in each answer block's
-      // header, and the editor is still the ordinary prompt for the next
-      // question.
       deliverNotification(client, 'agent.runState', { runId: 7, state: 'completed' })
       deliverNotification(client, 'agent.runState', { runId: 8, state: 'completed' })
       await vi.waitFor(() => {
@@ -3643,81 +3768,43 @@ describe('the ask activation seam (nocx-x8s2.2)', () => {
     }
   })
 
-  it('dismissing the chip returns the target to shell', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      const block = frozenBlockOf(content)
-      askOf(block).click()
-      expect(block.querySelector('.ui-block-receipt[data-variant="ask"]')).not.toBeNull()
-
-      block.querySelector<HTMLElement>('.ui-block-receipt__drop')!.click()
-      expect(block.querySelector('.ui-block-receipt')).toBeNull()
-
-      // The next submit is the ordinary shell flow again: bytes to the pty
-      // (paste + '\r') and a running block — the question path is gone.
-      const sentBefore = sessionOf(content).send.mock.calls.length
-      submitInEditor(ed, 'echo back')
-      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
-      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      expect(scrollback.blockManager.runningBlock).not.toBeNull()
-      // The return path is the editor's original contract: a shell submit
-      // still performs the atomic handoff — the editor hands itself off.
-      expect(ed.isVisible).toBe(false)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('activating a second block moves the chip — one mode, one scope, and the payload follows it', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      const first = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      const second = frozenBlockOf(content, 'git log', ['commit abc', 'fix thing'])
-      askOf(first).click()
-      expect(first.querySelector('.ui-block-receipt')).not.toBeNull()
-      askOf(second).click()
-
-      // One chip: it moved to the newly activated block.
-      expect(first.querySelector('.ui-block-receipt')).toBeNull()
-      expect(second.querySelector('.ui-block-receipt')).not.toBeNull()
-      expect(second.querySelector('.ui-block-receipt__value')?.textContent).toBe('git log')
-      expect(scrollback.blockManager.selectedBlockId).toBe(
-        scrollback.blockManager.blocks.find((b) => b.el === second)?.id ?? null,
-      )
-
-      submitInEditor(ed, 'what did it fix?')
-      await vi.waitFor(() => {
-        expect(dispatcherCalls.some((c) => c.method === 'agent.captureFrame')).toBe(true)
-      })
-      const frame = dispatcherCalls.find((c) => c.method === 'agent.captureFrame')!.params as {
-        rows: Array<{ text: string }>
+  it('with no endpoint configured, a ⌘Enter question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
+    const client = makeClient()
+    const dispatcherCalls: Array<{ method: string; params: unknown }> = []
+    client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
+      dispatcherCalls.push({ method, params })
+      if (method === 'agent.ask') {
+        const err = new Error('no endpoint configured') as Error & { code?: number }
+        err.code = -32603
+        return Promise.reject(err)
       }
-      expect(frame.rows.map((r) => r.text)).toEqual(['commit abc', 'fix thing'])
-    } finally {
-      teardown()
-    }
-  })
-
-  it('with no endpoint configured, the chip says so from agent.status — on the surface', async () => {
-    const { client } = agentDispatcher({ endpointConfigured: false })
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      return Promise.resolve({ frameId: 'frame-1' })
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
-      const block = frozenBlockOf(content)
-      askOf(block).click()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      selectRows(block, 0, 2)
+
+      ed.insertText('why did it fail?')
+      submitKey(ed, { metaKey: true })
       await vi.waitFor(() => {
-        const status = block.querySelector('.ui-block-receipt__status')
-        expect(status?.textContent).toContain('No endpoint configured yet')
+        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
+      await vi.waitFor(() => {
+        expect(showToast).toHaveBeenCalledWith(
+          expect.objectContaining({ level: 'warning', message: 'no endpoint configured' }),
+        )
+      })
+      // The editor stays up for the next attempt — a refusal is not a
+      // handoff and not a dead end.
+      expect(ed.isVisible).toBe(true)
     } finally {
       teardown()
     }

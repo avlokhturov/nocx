@@ -500,3 +500,149 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 		t.Errorf("run payload = %q, want the renderable reason", q.Executions[0].Payload)
 	}
 }
+
+// ── the general question (nocx-4wtlh): ⌘Enter with no chips is a question
+//    about nothing pointed at — zero references, and the ask still streams ──
+
+func TestAgentAsk_GeneralQuestionWithNoReferencesStreams(t *testing.T) {
+	client := &scriptedAssistantClient{deltas: []string{"sure"}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+
+	// No captureFrame at all: the gesture for a general question is type +
+	// ⌘Enter, and the payload carries the chips that are in the line — none.
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId":      "ask-general-1",
+		"sessionId":  sid,
+		"question":   "what is the capital of France?",
+		"cwd":        "/repo",
+		"references": []any{},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("general ask refused: %+v", errObj)
+	}
+	if res.State != "prepared" {
+		t.Fatalf("ask state = %q, want prepared", res.State)
+	}
+
+	for range client.deltaCount() {
+		raw := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
+		_ = raw
+	}
+
+	// The engine received the question and NO frame text — nothing was
+	// pointed at, so nothing may ride the prompt.
+	messages := client.messages()
+	var full string
+	for _, m := range messages {
+		full += m.Content + "\n"
+	}
+	if !strings.Contains(full, "what is the capital of France?") {
+		t.Errorf("engine messages lack the question: %q", full)
+	}
+	if strings.Contains(full, "Referenced frame") {
+		t.Errorf("general ask carried frame text the person never pointed at: %q", full)
+	}
+
+	raw := readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	var st struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("runState unmarshal: %v", err)
+	}
+	if st.State != "completed" {
+		t.Fatalf("runState = %q, want completed", st.State)
+	}
+}
+
+// ── the region is real: the model gets the pointed-at rows and no others ──
+
+func TestAgentAsk_RegionSelectsRowsForTheModel(t *testing.T) {
+	client := &scriptedAssistantClient{deltas: []string{"row two and three"}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+
+	frameID, errObj := captureFrameOverWire(t, h.conn, map[string]any{
+		"captureId":         "frame-region-1",
+		"sessionId":         sid,
+		"source":            "frozen",
+		"rows":              []any{map[string]any{"kind": "text", "text": "row one"}, map[string]any{"kind": "text", "text": "row two"}, map[string]any{"kind": "text", "text": "row three"}},
+		"serializerVersion": 1,
+		"cwd":               "/repo",
+	}, 1)
+	if errObj != nil {
+		t.Fatalf("captureFrame: %+v", errObj)
+	}
+
+	// The chip named rows 2–3: the region rides the reference, and the
+	// context assembly hands the model exactly those rows.
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId":     "ask-region-1",
+		"sessionId": sid,
+		"question":  "what do rows two and three say?",
+		"cwd":       "/repo",
+		"references": []any{
+			map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 1, "rowEnd": 3}},
+		},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	_ = res
+
+	for range client.deltaCount() {
+		raw := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
+		_ = raw
+	}
+
+	messages := client.messages()
+	var full string
+	for _, m := range messages {
+		full += m.Content + "\n"
+	}
+	if !strings.Contains(full, "row two") || !strings.Contains(full, "row three") {
+		t.Errorf("engine messages lack the pointed-at rows: %q", full)
+	}
+	if strings.Contains(full, "row one") {
+		t.Errorf("engine messages contain a row OUTSIDE the pointed-at region: %q", full)
+	}
+
+	raw := readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	var st struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("runState unmarshal: %v", err)
+	}
+	if st.State != "completed" {
+		t.Fatalf("runState = %q, want completed", st.State)
+	}
+}
+
+// ── sliceFrameText: row-scoped, clamped, never out of bounds ─────────────
+
+func TestSliceFrameText(t *testing.T) {
+	const text = "a\nb\nc\nd"
+	cases := []struct {
+		name string
+		r    content.FrameRegion
+		want string
+	}{
+		{"whole frame", content.FrameRegion{RowStart: 0, RowEnd: 4}, text},
+		{"middle rows", content.FrameRegion{RowStart: 1, RowEnd: 3}, "b\nc"},
+		{"single row", content.FrameRegion{RowStart: 2, RowEnd: 3}, "c"},
+		{"start past end clamps to empty", content.FrameRegion{RowStart: 2, RowEnd: 2}, ""},
+		{"negative start clamps", content.FrameRegion{RowStart: -3, RowEnd: 2}, "a\nb"},
+		{"end past frame clamps", content.FrameRegion{RowStart: 2, RowEnd: 99}, "c\nd"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := sliceFrameText(text, c.r); got != c.want {
+				t.Errorf("sliceFrameText(%q, %+v) = %q, want %q", text, c.r, got, c.want)
+			}
+		})
+	}
+}

@@ -2,6 +2,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { AgentInputTarget } from './agent-ask'
+import type { ReferenceChip } from './ask-entry'
 import type { AnswerBlockHandle } from './scrollback/blocks'
 
 /** A fake dispatcher: records agent.* calls and delivers subscriptions on
@@ -44,11 +45,17 @@ class FakeDispatcher {
   }
 }
 
-/** A fake selected block whose output text is "line one\nline two" — the
+/** A fake finished block whose output text is "line one\nline two" — the
  *  text the frozen mint will derive. */
-function blockEl(): HTMLElement {
+function blockEl(command = 'ls'): HTMLElement {
   const el = document.createElement('div')
-  el.className = 'cmd-block cmd-block-selected'
+  el.className = 'cmd-block'
+  el.dataset.blockId = command
+  const header = document.createElement('div')
+  const headerText = document.createElement('span')
+  headerText.className = 'cmd-header-text'
+  headerText.textContent = command
+  header.appendChild(headerText)
   const output = document.createElement('div')
   output.className = 'cmd-output'
   const l1 = document.createElement('span')
@@ -58,13 +65,23 @@ function blockEl(): HTMLElement {
   l2.className = 'term-line'
   l2.textContent = 'line two'
   output.append(l1, l2)
-  el.appendChild(output)
+  el.append(header, output)
   return el
 }
 
-function makeTarget() {
+let chipSeq = 0
+function chipOf(block: HTMLElement, rowStart: number, rowEnd: number): ReferenceChip {
+  return {
+    id: `chip-${++chipSeq}`,
+    blockEl: block,
+    label: `ls · rows ${rowStart + 1}–${rowEnd}`,
+    rowStart,
+    rowEnd,
+  }
+}
+
+function makeTarget(chips: ReferenceChip[] = []) {
   const dispatcher = new FakeDispatcher()
-  const block = blockEl()
   const handle: AnswerBlockHandle = {
     id: 1,
     el: document.createElement('div'),
@@ -76,21 +93,22 @@ function makeTarget() {
     dispatcher: dispatcher as never,
     sessionId: () => 'session-a',
     cwd: () => '/repo',
-    askBlock: () => block,
+    chips: () => chips,
     openAnswer: vi.fn(() => handle),
     onRefusal,
   })
-  return { dispatcher, block, handle, onRefusal, target }
+  return { dispatcher, handle, onRefusal, target }
 }
 
 describe('AgentInputTarget', () => {
-  it('mints the frozen frame from the selected block and asks (source=frozen, text rows, the ONE derivation)', async () => {
-    const { dispatcher, handle, target } = makeTarget()
+  it('mints one frozen frame PER CHIP BLOCK and references the chip’s region (the ONE derivation)', async () => {
+    const block = blockEl()
+    const { dispatcher, handle, target } = makeTarget([chipOf(block, 0, 2)])
     await target.submit('what does this screen mean?')
 
-    const capture = dispatcher.calls.find((c) => c.method === 'agent.captureFrame')
-    expect(capture).toBeDefined()
-    const p = capture!.params as {
+    const captures = dispatcher.calls.filter((c) => c.method === 'agent.captureFrame')
+    expect(captures).toHaveLength(1)
+    const p = captures[0].params as {
       captureId: string
       sessionId: string
       source: string
@@ -118,12 +136,75 @@ describe('AgentInputTarget', () => {
       references: { frameId: string; region: { rowStart: number; rowEnd: number } }[]
     }
     expect(a.question).toBe('what does this screen mean?')
+    // The reference carries the CHIP's region — a sub-row selection is a
+    // sub-row reference, never a silent whole-block reference.
     expect(a.references).toEqual([{ frameId: 'frame-1', region: { rowStart: 0, rowEnd: 2 } }])
 
     // The answer block opened, associated with the run AND the answer entry
     // id BEFORE the first delta (a no-delta failure still closes the right
     // block).
     expect(handle.el.dataset.answerEntryId).toBe('answer-1')
+  })
+
+  it('a question carries the chips that are in the line and NO others — two blocks selected, one unrelated block absent', async () => {
+    const blockA = blockEl('ls')
+    const blockB = blockEl('git log')
+    const unrelated = blockEl('sleep 1')
+    const { dispatcher, target } = makeTarget([chipOf(blockA, 0, 1), chipOf(blockB, 1, 2)])
+    await target.submit('how are these related?')
+
+    const captures = dispatcher.calls.filter((c) => c.method === 'agent.captureFrame')
+    // Exactly the two chip blocks were captured — the unrelated block's
+    // rows never left the DOM.
+    expect(captures).toHaveLength(2)
+    const frames = captures.map((c) =>
+      (c.params as { rows: { text: string }[] }).rows.map((r) => r.text),
+    )
+    expect(frames).toContainEqual(['line one', 'line two'])
+    // The unrelated block's rows never left the DOM.
+    expect(Array.from(unrelated.querySelectorAll('.term-line')).map((l) => l.textContent)).toEqual([
+      'line one',
+      'line two',
+    ])
+    expect(frames.some((f) => f.includes('line one') && f.length === 1)).toBe(false)
+
+    const ask = dispatcher.calls.find((c) => c.method === 'agent.ask')
+    const a = ask!.params as {
+      references: { frameId: string; region: { rowStart: number; rowEnd: number } }[]
+    }
+    expect(a.references).toHaveLength(2)
+    expect(a.references).toEqual([
+      { frameId: 'frame-1', region: { rowStart: 0, rowEnd: 1 } },
+      { frameId: 'frame-1', region: { rowStart: 1, rowEnd: 2 } },
+    ])
+  })
+
+  it('two chips into the SAME block share one frame and carry two regions', async () => {
+    const block = blockEl()
+    const { dispatcher, target } = makeTarget([chipOf(block, 0, 1), chipOf(block, 1, 2)])
+    await target.submit('q')
+
+    const captures = dispatcher.calls.filter((c) => c.method === 'agent.captureFrame')
+    expect(captures).toHaveLength(1)
+    const ask = dispatcher.calls.find((c) => c.method === 'agent.ask')
+    const a = ask!.params as {
+      references: { frameId: string; region: { rowStart: number; rowEnd: number } }[]
+    }
+    expect(a.references).toEqual([
+      { frameId: 'frame-1', region: { rowStart: 0, rowEnd: 1 } },
+      { frameId: 'frame-1', region: { rowStart: 1, rowEnd: 2 } },
+    ])
+  })
+
+  it('a GENERAL question — no chips — is just the ask with zero references', async () => {
+    const { dispatcher, target } = makeTarget([])
+    await target.submit('what is the capital of France?')
+
+    expect(dispatcher.calls.some((c) => c.method === 'agent.captureFrame')).toBe(false)
+    const ask = dispatcher.calls.find((c) => c.method === 'agent.ask')
+    const a = ask!.params as { question: string; references: unknown[] }
+    expect(a.question).toBe('what is the capital of France?')
+    expect(a.references).toEqual([])
   })
 
   it('routes runDelta to the run’s block by runId and entryId', async () => {
@@ -191,17 +272,6 @@ describe('AgentInputTarget', () => {
 
 describe('AgentInputTarget refusal', () => {
   it('surfaces a no-endpoint refusal through onRefusal — the renderable condition, not a silent throw', async () => {
-    const dispatcher = new FakeDispatcher()
-    const block = blockEl()
-    const handle: AnswerBlockHandle = {
-      id: 1,
-      el: document.createElement('div'),
-      append: vi.fn(),
-      close: vi.fn(),
-    }
-    const onRefusal = vi.fn()
-    // The backend refuses the ask with the fixed message.
-    dispatcher.calls = []
     const failDispatcher = {
       calls: [] as { method: string; params: unknown }[],
       call<T = unknown>(method: string): Promise<T> {
@@ -214,11 +284,19 @@ describe('AgentInputTarget refusal', () => {
       },
       subscribe: () => () => {},
     }
+    const block = blockEl()
+    const handle: AnswerBlockHandle = {
+      id: 1,
+      el: document.createElement('div'),
+      append: vi.fn(),
+      close: vi.fn(),
+    }
+    const onRefusal = vi.fn()
     const target = new AgentInputTarget({
       dispatcher: failDispatcher as never,
       sessionId: () => 's',
       cwd: () => '/',
-      askBlock: () => block,
+      chips: () => [chipOf(block, 0, 2)],
       openAnswer: () => handle,
       onRefusal,
     })

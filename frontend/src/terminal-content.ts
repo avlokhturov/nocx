@@ -22,9 +22,12 @@ import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
 import { AgentInputTarget } from './agent-ask'
-import { AgentClient } from './agent'
-import { agentStatusLine } from './agent-status-line'
-import { blockCommandText } from './scrollback/blocks'
+import {
+  TargetIndicator,
+  chipFromSelection,
+  chipFingerprint,
+  type ReferenceChip,
+} from './ask-entry'
 import {
   submitCommand,
   planSubmit,
@@ -267,10 +270,10 @@ export class TerminalContent extends BaseTabContent {
   private shellTarget: ShellInputTarget | null = null
   /** The input-target registry (ADR-0004 §3): a submitted document routes
    *  through active().submit — never a branch on "which mode am I in".
-   *  Shell is the default; the assistant target is activated explicitly
-   *  through setAgentMode by the surface owner that makes the ask visible
-   *  (the panel/region gesture — nocx-ckth/7ul8 — is not this slice).
-   *  Registration and routing ARE this slice. */
+   *  Shell is the default; the person switches it explicitly through the
+   *  caret indicator (click or ⇧⌘Enter), and ⌘Enter is a one-shot ask
+   *  that never touches the active target (nocx-4wtlh). Registration and
+   *  routing ARE this slice. */
   private inputTargets: InputTargetRegistry | null = null
   private agentTarget: AgentInputTarget | null = null
   private scrollback: ScrollbackController | null = null
@@ -309,13 +312,23 @@ export class TerminalContent extends BaseTabContent {
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
-  /** The ask chip (nocx-x8s2.2): the BlockReceipt forAsk variant mounted
-   *  on the frozen block the ask mode is about. Its presence IS the mode —
-   *  the agent input target is active exactly while this is mounted, and
-   *  the chip's block is the ask's scope (never re-derived from DOM
-   *  selection). */
-  private askReceipt: BlockReceipt | null = null
-  private askBlockEl: HTMLElement | null = null
+  /** The reference chips in the input line (nocx-4wtlh): the frozen
+   *  regions a question carries. A selection raises one; a ⌘Enter question
+   *  consumes them all; a cleared scrollback takes their blocks. The
+   *  chips ARE the ask's payload — never re-derived from DOM selection at
+   *  submit time (AD-8: selection is copy; the chip is the record). */
+  private referenceChips: ReferenceChip[] = []
+  /** Monotonic chip id source — ids are for dismissal and dedupe, never
+   *  for anything the backend sees. */
+  private _chipSeq = 0
+  /** The caret indicator (ADR-0004 §3's UI chip): renders the active
+   *  input target beside the caret and is the person's one explicit
+   *  switch. Its label is pushed from the registry's change
+   *  notification — nothing else may repaint it. */
+  private indicator: TargetIndicator | null = null
+  /** The document selectionchange listener: a selection inside a finished
+   *  block's output raises a reference chip. Removed on dispose. */
+  private readonly onSelectionChange = (): void => this.raiseChipFromSelection()
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
@@ -706,14 +719,11 @@ export class TerminalContent extends BaseTabContent {
         // The renderer owns this tab's OSC 636 store; the scrollback's frozen
         // headers and the editor below must judge against the same instance.
         snapshotStore: renderer.snapshotStore,
-        // The ask affordance's owner: every frozen block's Ask control
-        // raises the chip through the same path a person reaches.
-        onAsk: (blockEl) => this.activateAsk(blockEl),
-        // A `clear` took the chip's block: the mode closes with it — a chip
-        // whose block is gone would be an invisible mode (AGENTS.md: a soft
-        // degrade the UI contradicts is how a feature that does not exist
-        // survives a release).
-        onClear: () => this.dismissAsk(),
+        // A `clear` took every block: the reference chips die with their
+        // blocks — a chip whose block is gone would point at nothing
+        // (AGENTS.md: a soft degrade the UI contradicts is how a feature
+        // that does not exist survives a release).
+        onClear: () => this.clearReferenceChips(),
       })
 
       log.info('nocx: mounting renderer')
@@ -797,17 +807,21 @@ export class TerminalContent extends BaseTabContent {
       // the mode. The agent target is constructed with this tab's seams:
       // the session id is read per submit (a reconnect mints a new
       // session — the target must never capture against a stale one).
-      this.inputTargets = createRegistry()
+      this.inputTargets = createRegistry((target) => {
+        // The caret indicator renders the registry's active target and
+        // nothing else repaints it: this notification IS its refresh
+        // signal (ask-entry.ts).
+        this.indicator?.set(target.label)
+      })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
         dispatcher: this.client.dispatcher,
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
-        // The ask's scope is the CHIP's block, resolved from the chip —
-        // never re-derived from DOM selection (AD-8: selection is copy;
-        // the chip is the mode). The chip's lifecycle and this seam move
-        // together: non-null exactly while the agent target is active.
-        askBlock: () => this.askBlockEl,
+        // The ask's payload is the reference chips in the input line —
+        // never re-derived from DOM selection at submit time (AD-8:
+        // selection is copy; the chip is the record).
+        chips: () => this.referenceChips,
         openAnswer: (question, cwd) => this.scrollback!.blockManager.addAnswerBlock(question, cwd),
         // The no-endpoint refusal is visible in the product, never only in
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
@@ -815,6 +829,16 @@ export class TerminalContent extends BaseTabContent {
         onRefusal: (message) => showToast({ level: 'warning', message }),
       })
       this.inputTargets.register(this.agentTarget)
+      // The caret indicator + its toggle: the person's one explicit
+      // switch. Clicking the chip (or ⇧⌘Enter) flips the active target;
+      // the registry's notification repaints the label. Ordinary use
+      // never touches it — it is the confirmation that Enter goes to the
+      // shell (nocx-4wtlh).
+      this.indicator = new TargetIndicator(() => {
+        const current = this.inputTargets?.active().id
+        if (!this.inputTargets || !current) return
+        this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
+      })
 
       this.editor = new CommandEditor(
         {
@@ -862,7 +886,10 @@ export class TerminalContent extends BaseTabContent {
             // attempt is opened for prose (nocx-x8s2.2).
             const active = this.inputTargets!.active()
             if (!active.routesToShell) {
-              void active.submit(doc, { targetId: active.id })
+              // The target surfaces its own refusal (onRefusal → the
+              // toast); the rethrow is for programmatic callers, so the
+              // fire-and-forget path swallows it.
+              void active.submit(doc, { targetId: active.id }).catch(() => {})
               return
             }
             // The atomic handoff transfers input ownership to the grid at
@@ -1044,6 +1071,30 @@ export class TerminalContent extends BaseTabContent {
            *  registry — the one authority — so the agent target's question
            *  keeps the editor on screen for the next one (nocx-wmy4). */
           handoffToShell: () => this.inputTargets?.active().routesToShell ?? true,
+          // ⌘Enter: the one-shot ask (nocx-4wtlh). The ACTIVE target is
+          // untouched — the agent target gets this question directly, and
+          // plain Enter keeps going wherever it went. The chips in the
+          // line are consumed: they rode this question. The target reads
+          // the chips SYNCHRONOUSLY at the top of submit (before its
+          // first await), so the clear after the call can never eat them.
+          submitToAgent: (doc) => {
+            // The refusal (no endpoint, vault locked) already reached the
+            // surface through onRefusal; the rethrow is for programmatic
+            // callers, so the fire-and-forget path swallows it.
+            void this.agentTarget!.submit(doc).catch(() => {})
+            this.clearReferenceChips()
+          },
+          // ⇧⌘Enter: the explicit switch (ADR-0004 §3) — same flip as
+          // clicking the caret indicator.
+          onToggleTarget: () => {
+            const current = this.inputTargets?.active().id
+            if (!this.inputTargets || !current) return
+            this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
+          },
+          onDismissChip: (id) => {
+            this.referenceChips = this.referenceChips.filter((c) => c.id !== id)
+            this.editor?.setReferenceChips(this.referenceChips)
+          },
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -1052,7 +1103,14 @@ export class TerminalContent extends BaseTabContent {
         // what ADR-0004 §3 exists to prevent. The seam (design §8.8) carries
         // the shell layer: the target supplies its extensions, the editor
         // never hard-codes them.
-        this.shellTarget.editorExtensions?.() ?? [],
+        [
+          ...(this.shellTarget.editorExtensions?.() ?? []),
+          // The caret indicator (nocx-4wtlh): composed at the root with the
+          // target's extensions — it renders the registry's ACTIVE target,
+          // so it belongs to neither target alone. The editor stays passive;
+          // this is decoration, fed by the same constructor seam.
+          this.indicator.extension(),
+        ],
       )
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
@@ -1876,6 +1934,11 @@ export class TerminalContent extends BaseTabContent {
       })
 
       this._mounted = true
+      // The reference-chip seam: a document selection inside a finished
+      // block's output raises a chip (nocx-4wtlh). Registered at the end
+      // of mount so the editor and the scrollback exist; removed on
+      // dispose.
+      document.addEventListener('selectionchange', this.onSelectionChange)
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
         renderer: 'xterm',
@@ -2436,65 +2499,59 @@ export class TerminalContent extends BaseTabContent {
     }
   }
 
-  /** The explicit agent-mode transition (ADR-0004 §3: mode selection is
-   *  explicit, never inferred from another gesture). The surface owner that
-   *  makes the ask visible — the panel/region gesture (nocx-ckth/7ul8) —
-   *  calls this; nothing in this slice activates the agent target on its
-   *  own. With the agent target active, a submitted document routes to
-   *  agent.ask; anything else routes to the shell. */
-  setAgentMode(active: boolean): void {
-    if (!this.inputTargets) return
-    this.inputTargets.setActive(active ? 'agent' : 'shell')
+  /** A document selection landed (or moved): if it is a real selection
+   *  inside one FINISHED block's output, freeze it into a reference chip.
+   *  Nothing else happens — the active target does not move, the shell is
+   *  not armed, the selection itself is untouched (copy keeps working).
+   *  Reselecting the identical region (same block, same rows) is a no-op;
+   *  a selection inside the editor's own draft is never a reference.
+   *  selectionchange fires on every caret move, so the guard is the
+   *  fingerprint, not the event. */
+  private raiseChipFromSelection(): void {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed) return
+    const anchor = sel.anchorNode
+    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return
+    const chip = chipFromSelection(sel)
+    if (!chip) return
+    const existing = this.referenceChips.find((c) => chipFingerprint(c) === chipFingerprint(chip))
+    if (existing) return
+    const label = this.referenceChipLabel(chip)
+    this.referenceChips = [
+      ...this.referenceChips,
+      {
+        id: `ref-${(this._chipSeq = (this._chipSeq ?? 0) + 1)}`,
+        label,
+        blockEl: chip.blockEl,
+        rowStart: chip.rowStart,
+        rowEnd: chip.rowEnd,
+      },
+    ]
+    this.editor?.setReferenceChips(this.referenceChips)
   }
 
-  /** The ask affordance's one primary action (the block's Ask button): raise
-   *  the chip naming the block, anchor the block visually (programmatic
-   *  non-toggle select — selection is a consequence of activation, never its
-   *  cause, AD-8), switch the input target to the agent, and put agent.status
-   *  on the surface. The chip's presence IS the mode: activating a second
-   *  block moves the chip — one mode, one scope. */
-  private activateAsk(blockEl: HTMLElement): void {
-    if (this.askReceipt && this.askBlockEl !== blockEl) {
-      this.askReceipt.destroy()
-      this.askReceipt = null
-    }
-    if (this.askReceipt) return // already active on this block
-    this.askBlockEl = blockEl
-    this.scrollback?.blockManager.selectBlock(blockEl)
-    const receipt = BlockReceipt.forAsk(blockCommandText(blockEl), {
-      // The chip is non-modal and the editor usually holds focus; Ask
-      // returns it there after the mouse wandered (copying elsewhere).
-      onAsk: () => this.editor?.focus(),
-      onDismiss: () => this.dismissAsk(),
-    })
-    this.askReceipt = receipt
-    receipt.mount(blockEl)
-    this.setAgentMode(true)
-    this.editor?.focus()
-    void this.refreshAskStatus(receipt)
+  /** The chip's name: the block's command and the covered row range —
+   *  the block names itself, the rows say what part is frozen. */
+  private referenceChipLabel(chip: {
+    blockEl: HTMLElement
+    rowStart: number
+    rowEnd: number
+  }): string {
+    const header = chip.blockEl.querySelector<HTMLElement>('.cmd-header-text')
+    const name = header?.textContent?.trim() || 'block'
+    const rows =
+      chip.rowEnd - chip.rowStart === 1
+        ? `row ${chip.rowStart + 1}`
+        : `rows ${chip.rowStart + 1}–${chip.rowEnd}`
+    return `${name} · ${rows}`
   }
 
-  /** Done on the chip (or a `clear` that took its block): unmount the chip
-   *  and return the input target to the shell. */
-  private dismissAsk(): void {
-    this.askReceipt?.destroy()
-    this.askReceipt = null
-    this.askBlockEl = null
-    this.setAgentMode(false)
-  }
-
-  /** agent.status on the ask surface: a degrade is a visible sentence in
-   *  the chip, never only in a log line. The sentence mapping is the ONE
-   *  derivation (agentStatusLine), shared with the endpoints section; a
-   *  healthy state shows nothing (the chip's presence is the indicator). */
-  private async refreshAskStatus(receipt: BlockReceipt): Promise<void> {
-    try {
-      const st = await new AgentClient(this.client.dispatcher).status()
-      const line = agentStatusLine(st)
-      if (line && line.tone !== 'success') receipt.setStatus(line.tone, line.text)
-    } catch {
-      receipt.setStatus('warning', 'Assistant status unavailable')
-    }
+  /** Drop every reference chip: a ⌘Enter question consumed them, or a
+   *  `clear` took their blocks. The editor's strip follows. */
+  private clearReferenceChips(): void {
+    if (this.referenceChips.length === 0) return
+    this.referenceChips = []
+    this.editor?.clearReferenceChips()
   }
 
   dispose(): void {
@@ -2523,7 +2580,9 @@ export class TerminalContent extends BaseTabContent {
     this.recall = null
     this.scrollback?.dispose()
     this.destroyReceipt()
-    this.dismissAsk()
+    this.clearReferenceChips()
+    document.removeEventListener('selectionchange', this.onSelectionChange)
+    this.indicator = null
     this.promptVault?.destroy()
     this.promptVault = null
     this.completion?.destroy()

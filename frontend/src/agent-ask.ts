@@ -17,6 +17,7 @@ import type { AgentCaptureFrame } from './generated/agent.captureFrame'
 import type { AgentRunDelta } from './generated/agent.runDelta'
 import type { AgentRunState } from './generated/agent.runState'
 import type { InputTarget } from './input-target'
+import type { ReferenceChip } from './ask-entry'
 import type { AnswerBlockHandle } from './scrollback/blocks'
 import { SERIALIZER_VERSION } from './scrollback/serializer'
 
@@ -25,12 +26,13 @@ export interface AgentAskSeams {
   dispatcher: Dispatcher
   /** The tab's session id — backend-authoritative, never the renderer's own. */
   sessionId: () => string
-  /** The block the ask is about — the ask chip's block, resolved from the
-   *  chip (the mode's scope), never re-derived from DOM selection (AD-8:
-   *  selection is copy; the chip is the mode). The surface keeps this in
-   *  lockstep with the chip's lifecycle: non-null exactly while the agent
-   *  target is active. */
-  askBlock: () => HTMLElement | null
+  /** The reference chips currently in the input line (nocx-4wtlh): the
+   *  frozen regions a question carries, resolved from the CHIPS — never
+   *  re-derived from DOM selection at submit time (AD-8: selection is
+   *  copy; the chip is what the person pointed at). A question carries
+   *  exactly these and no others; an empty list is a general question
+   *  with no pointed-at context. */
+  chips: () => ReadonlyArray<ReferenceChip>
   cwd: () => string
   /** Render the answer block for one ask; the returned handle is the ONLY
    *  way the block's body and status change. */
@@ -83,52 +85,73 @@ export class AgentInputTarget implements InputTarget {
 
   constructor(private readonly seams: AgentAskSeams) {}
 
-  /** Submit a question about the selected block: ingest the frozen frame
-   *  FIRST (the backend mints the frame id), then ask, then stream. */
+  /** Submit a question: ingest one frozen frame PER REFERENCED BLOCK (the
+   *  backend mints the frame ids), then ask with one reference per chip —
+   *  the chip's region into its block's frame. A general question (no
+   *  chips) is just the ask with zero references.
+   *
+   *  CONTRACT: the chips are read from the seam SYNCHRONOUSLY — the
+   *  grouping loop below runs before this async body's first await. The
+   *  surface relies on that: it consumes the chips (clears the line) the
+   *  moment submit returns, and an ask that deferred the read would find
+   *  its payload already gone. Keep the read ahead of the first await. */
   async submit(doc: string): Promise<void> {
-    const block = this.seams.askBlock()
-    if (!block) return // no block selected — the ask has nothing to point at
     this.ensureSubscribed()
-
-    const frame = mintFrozenFrame(frozenFrameSourceFromBlock(block))
-    // A frozen frame's rows are text BY CONSTRUCTION (the frozen mint never
-    // emits cells — design §2.2). A cells row here means the minting
-    // invariant broke; that is a loud failure, never silently-empty text.
-    const rows = frame.rows.map((r): { kind: 'text'; text: string } => {
-      if (r.kind !== 'text') {
-        throw new Error('agent-ask: a frozen frame minted a non-text row')
-      }
-      return { kind: 'text', text: r.text }
-    })
-    const captureId = crypto.randomUUID()
     const sessionId = this.seams.sessionId()
     const cwd = this.seams.cwd()
 
-    const captureParams: FrozenCaptureParams = {
-      captureId,
-      sessionId,
-      source: 'frozen',
-      rows,
-      serializerVersion: SERIALIZER_VERSION,
-      cwd,
+    // The chips in the line ARE the payload: group them by block so one
+    // frame per block is captured (design §2.2: reference = frame +
+    // region; two chips into one block are two references into one
+    // frame). The surface clears the chips when a `clear` takes their
+    // blocks, so the captured frames always exist.
+    const byBlock = new Map<HTMLElement, ReferenceChip[]>()
+    for (const chip of this.seams.chips()) {
+      const list = byBlock.get(chip.blockEl)
+      if (list) list.push(chip)
+      else byBlock.set(chip.blockEl, [chip])
     }
-    const capture = await this.seams.dispatcher.call<AgentCaptureFrame>(
-      'agent.captureFrame',
-      captureParams,
-    )
-    const frameId = capture.frameId
+
+    const references: AskParams['references'] = []
+    for (const [block, chips] of byBlock) {
+      const frame = mintFrozenFrame(frozenFrameSourceFromBlock(block))
+      // A frozen frame's rows are text BY CONSTRUCTION (the frozen mint
+      // never emits cells — design §2.2). A cells row here means the
+      // minting invariant broke; that is a loud failure, never
+      // silently-empty text.
+      const rows = frame.rows.map((r): { kind: 'text'; text: string } => {
+        if (r.kind !== 'text') {
+          throw new Error('agent-ask: a frozen frame minted a non-text row')
+        }
+        return { kind: 'text', text: r.text }
+      })
+      const capture = await this.seams.dispatcher.call<AgentCaptureFrame>('agent.captureFrame', {
+        captureId: crypto.randomUUID(),
+        sessionId,
+        source: 'frozen',
+        rows,
+        serializerVersion: SERIALIZER_VERSION,
+        cwd,
+      } satisfies FrozenCaptureParams)
+      for (const chip of chips) {
+        // Clamped defensively: the block was frozen when the chip was
+        // raised, but a re-freeze must never mint an out-of-bounds region
+        // (the backend refuses it wholesale). A clamp that collapses to an
+        // empty region (the block shrank past the chip) drops the chip
+        // rather than failing the whole ask.
+        const rowStart = Math.max(0, Math.min(chip.rowStart, rows.length))
+        const rowEnd = Math.max(0, Math.min(chip.rowEnd, rows.length))
+        if (rowEnd <= rowStart) continue
+        references.push({ frameId: capture.frameId, region: { rowStart, rowEnd } })
+      }
+    }
 
     const askParams: AskParams = {
       askId: crypto.randomUUID(),
       sessionId,
       question: doc,
       cwd,
-      references: [
-        {
-          frameId,
-          region: { rowStart: 0, rowEnd: frame.rows.length },
-        },
-      ],
+      references,
     }
     const ask = await this.seams.dispatcher
       .call<AgentAsk>('agent.ask', askParams)

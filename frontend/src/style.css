@@ -340,6 +340,63 @@
   padding: 0;
 }
 
+/* ── The ask entry gesture (nocx-4wtlh) ────────────────────────────────
+   The caret indicator — ADR-0004 §3's UI chip — is a CM6 widget in the
+   input line, immediately LEFT of the cursor: the confirmation that Enter
+   goes to the shell, and the person's one explicit switch (click or
+   ⇧⌘Enter). The reference chips a selection raises live in their own strip
+   between the chrome and the input: "if you ask, this comes with you". */
+
+.nocx-editor-target-indicator {
+  /* A control, never text: it must not read as part of the command. */
+  margin-right: 6px;
+  padding: 1px 7px;
+  font-size: var(--font-size-2xs);
+  line-height: 1.4;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  border: 1px solid var(--color-surface-raised);
+}
+
+.nocx-editor-target-indicator:hover {
+  color: var(--color-text);
+}
+
+/* The switched state is information, not alarm: the person chose it. */
+.nocx-editor-target-indicator[data-target='agent'] {
+  color: var(--color-accent-secondary);
+  border-color: var(--color-accent-secondary);
+}
+
+.nocx-editor-references {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.nocx-editor-reference-chip {
+  padding: 1px 6px;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+}
+
+.nocx-editor-reference-chip__drop {
+  background: none;
+  border: none;
+  margin: 0;
+  padding: 0 0 0 5px;
+  font: inherit;
+  line-height: 1;
+  color: var(--color-text-dim);
+  cursor: pointer;
+}
+
+.nocx-editor-reference-chip__drop:hover {
+  color: var(--color-danger);
+}
+
 /* ── The composition-time secret candidate mark (ADR-0021) ─────────────
 
    A detected credential while the user is still typing: a quiet dotted

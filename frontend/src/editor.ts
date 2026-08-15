@@ -135,12 +135,32 @@ export interface EditorActions {
    * for the next question (nocx-wmy4).
    */
   handoffToShell?: () => boolean
+  /** ⌘Enter / Ctrl+Enter (the ask entry gesture, nocx-4wtlh): submit the
+   *  document to the ASSISTANT target as a ONE-SHOT question. The active
+   *  target is NOT changed — nothing but the person changes where Enter
+   *  goes (the registry stays whatever it was). The question clears the
+   *  document like a command does, but the editor does not hide: there is
+   *  no handoff to a shell to hand off to (the grid keeps its keys and
+   *  the editor stays for the next question). An empty document is
+   *  ignored — there is nothing to ask. */
+  submitToAgent?: (doc: string) => void
+  /** ⇧⌘Enter / ⇧Ctrl+Enter: the explicit target switch ADR-0004 §3
+   *  requires — the indicator's keyboard twin. The host flips the
+   *  registry's active target; the editor stays passive. */
+  onToggleTarget?: () => void
+  /** A reference chip's drop control: the host removes that chip (the
+   *  chip is data the host owns; this only reports the dismissal). */
+  onDismissChip?: (id: string) => void
 }
 
 export class CommandEditor {
   readonly root: HTMLElement
   private view: EditorView
   private chrome: HTMLElement
+  /** The reference chip strip (nocx-4wtlh): the chips a selection raises,
+   *  rendered between the chrome row and the input. The chips are DATA the
+   *  host owns; this container is their surface. Hidden while empty. */
+  private referencesEl: HTMLElement
   /** Left chip group: the location + cwd chips sit together, the clock
    *  keeps the right edge of the chrome row. */
   private chromeLeft: HTMLElement
@@ -290,6 +310,16 @@ export class CommandEditor {
     this.chromeLeft.append(this.recoveryChip, this.locationChip, this.cwdChip)
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
+
+    // ── Reference chip strip (nocx-4wtlh) ─────────────────────────────
+    // Between the chrome and the input: part of the input surface, never
+    // floating over it. Rendered by setReferenceChips; the host owns the
+    // chips' lifecycle (selection raises them, a question consumes them,
+    // a cleared scrollback takes their blocks).
+    this.referencesEl = document.createElement('div')
+    this.referencesEl.className = 'nocx-editor-references'
+    this.referencesEl.style.display = 'none'
+    this.root.appendChild(this.referencesEl)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -631,6 +661,36 @@ export class CommandEditor {
       return
     }
 
+    // The ask entry gesture (nocx-4wtlh): ⌘/Ctrl+Enter asks ONCE — it
+    // routes to the assistant target WITHOUT changing the active target,
+    // so plain Enter in the same moment still runs the line as a command
+    // (a missed modifier degrades to the familiar behaviour, never to a
+    // surprise). ⇧⌘/⇧Ctrl+Enter is the explicit switch the ADR requires:
+    // it flips the active target itself, exactly as clicking the caret
+    // indicator does. An empty ⌘Enter has nothing to ask: it is ignored,
+    // draft intact. Unwired (no submitToAgent/onToggleTarget), the chord
+    // falls through untouched.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.altKey) {
+      // The switch and the one-shot ask are different seams wired by
+      // different hosts: each branch guards on ITS action, so a host that
+      // wires only the switch never has ⌘Enter clear its document.
+      if (e.shiftKey) {
+        if (!this.actions.onToggleTarget) return
+        e.preventDefault()
+        e.stopPropagation()
+        this.actions.onToggleTarget()
+        return
+      }
+      if (!this.actions.submitToAgent) return
+      e.preventDefault()
+      e.stopPropagation()
+      const askDoc = this.view.state.doc.toString()
+      if (askDoc.trim() === '') return
+      this.clearDoc()
+      this.actions.submitToAgent(askDoc)
+      return
+    }
+
     // Standard editor keys.
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -888,6 +948,42 @@ export class CommandEditor {
    *  the focus-bounce tests against holds unchanged. */
   rootContains(el: Node | null): boolean {
     return this.root.contains(el)
+  }
+
+  /** Render the reference chips the host owns (nocx-4wtlh). Each chip is
+   *  the kit's nocx-chip identity with a drop control; the strip hides
+   *  itself when empty. The host re-renders on every add/remove — the
+   *  chips are a short list and the strip is their only surface. */
+  setReferenceChips(chips: ReadonlyArray<{ id: string; label: string }>): void {
+    this.referencesEl.replaceChildren()
+    if (chips.length === 0) {
+      this.referencesEl.style.display = 'none'
+      return
+    }
+    this.referencesEl.style.display = ''
+    for (const chip of chips) {
+      const el = document.createElement('span')
+      el.className = 'nocx-chip nocx-editor-reference-chip'
+      el.dataset.chipId = chip.id
+      el.title = chip.label
+      const name = document.createElement('span')
+      name.className = 'nocx-editor-reference-chip__name'
+      name.textContent = chip.label
+      const drop = document.createElement('button')
+      drop.type = 'button'
+      drop.className = 'nocx-editor-reference-chip__drop'
+      drop.textContent = '×'
+      drop.setAttribute('aria-label', `remove reference ${chip.label}`)
+      drop.addEventListener('click', () => this.actions.onDismissChip?.(chip.id))
+      el.append(name, drop)
+      this.referencesEl.appendChild(el)
+    }
+  }
+
+  /** Drop every reference chip (the host consumed them — a question
+   *  carried them, or a cleared scrollback took their blocks). */
+  clearReferenceChips(): void {
+    this.setReferenceChips([])
   }
 
   dispose(): void {
