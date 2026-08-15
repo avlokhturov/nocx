@@ -185,9 +185,10 @@ type WSServer struct {
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
 	localCompleter completion.Completer
-	// sshCompleter answers shell.complete for KindRemote sessions.
-	// When nil, the method returns a stated empty reason for SSH sessions.
-	sshCompleter completion.Completer
+	// sshCompleter answers shell.complete for KindRemote sessions with the
+	// exact SSH options captured from the live terminal session. When nil,
+	// the method returns a stated empty reason for SSH sessions.
+	sshCompleter RemoteCompleter
 
 	// Pending-capture registry: the backend-side holder of submitted
 	// credentials awaiting a save decision (internal/credential). Created
@@ -608,15 +609,22 @@ func WithRemoteLifecycle(l ssh.RemoteLifecycle) WSServerOption {
 	return func(s *WSServer) { s.remoteLifecycle = l }
 }
 
+// RemoteCompleter runs one completion against the immutable SSH route copied
+// from the live session. The options are part of the contract: omitting them
+// silently replaces a jump-routed pooled connection with a direct dial.
+type RemoteCompleter interface {
+	Complete(context.Context, completion.Request, ...ssh.ConnectOption) (*completion.Response, error)
+}
+
 // WithCompleters attaches the completion sources for shell.complete
-// (nocx-w7h.15). local answers KindLocal sessions; ssh answers KindRemote
-// sessions through the DiscoveryConn lane. Either may be nil — the handler
-// then returns a stated empty reason for that session kind rather than
-// a JSON-RPC error.
-func WithCompleters(local, ssh completion.Completer) WSServerOption {
+// (nocx-w7h.15). local answers KindLocal sessions; remote answers
+// KindRemote sessions through a DiscoveryConn acquired with that session's
+// exact SSH options. Either may be nil — the handler then returns a stated
+// empty reason for that session kind rather than a JSON-RPC error.
+func WithCompleters(local completion.Completer, remote RemoteCompleter) WSServerOption {
 	return func(s *WSServer) {
 		s.localCompleter = local
-		s.sshCompleter = ssh
+		s.sshCompleter = remote
 	}
 }
 
@@ -1126,11 +1134,14 @@ type Responder interface {
 }
 
 // RPCError is the payload of a JSON-RPC error response. Data is omitted
-// from the wire when nil (parity with jsonrpcErrorObj's omitempty).
+// from the wire when nil (parity with jsonrpcErrorObj's omitempty). Method is
+// internal-only metadata used by the sole response seam to diagnose an
+// in-handler saturation refusal; it is never serialized.
 type RPCError struct {
 	Code    int
 	Message string
 	Data    any
+	method  string
 }
 
 // wsConn wraps a connection's outbound side (outbound.Conn — the socket,
@@ -1144,6 +1155,7 @@ type RPCError struct {
 // and never reused.
 type wsConn struct {
 	out *outbound.Conn
+	log log.Logger
 	id  uint64
 	// methods is this connection's materialised control-handler set
 	// (registration.go): method → submission + handler closure. The handlers
@@ -1164,7 +1176,8 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 				}
 			},
 		}),
-		id: id,
+		log: s.log,
+		id:  id,
 	}
 }
 
@@ -1173,6 +1186,11 @@ func (w *wsConn) TryResult(id json.RawMessage, result json.RawMessage) error {
 }
 
 func (w *wsConn) TryError(id json.RawMessage, rpcErr RPCError) error {
+	if rpcErr.Code == SaturationErrorCode {
+		if data, ok := rpcErr.Data.(saturationData); ok {
+			logSaturationRefusal(w.log, rpcErr.method, "request", data)
+		}
+	}
 	obj := &jsonrpcErrorObj{Code: rpcErr.Code, Message: rpcErr.Message}
 	if rpcErr.Data != nil {
 		obj.Data = rpcErr.Data
@@ -1788,13 +1806,15 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	if rej == nil {
 		return
 	}
+	sat := saturationErrorFor(rej)
 	// Refused. A request (has an id) answers with the saturation error; a
 	// notification (no id) has no response to carry it, so the server emits
 	// the rate-limited control.saturated notification instead.
 	if req.ID != nil {
-		_ = wconn.TryError(req.ID, saturationRPCError(rej))
+		_ = wconn.TryError(req.ID, saturationRPCError(req.Method, rej))
 		return
 	}
+	logSaturationRefusal(s.log, req.Method, "notification", sat.Data)
 	s.emitSaturatedNotification(wconn, req.Method, rej)
 }
 

@@ -124,7 +124,7 @@ func (h endpointHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

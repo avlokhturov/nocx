@@ -162,7 +162,14 @@ make init
 
 # Run in development mode
 wails dev
+
+# …with the web inspector open, when you need a console
+NOCX_DEVTOOLS=1 wails dev
 ```
+
+> The inspector needs the flag because right-click cannot reach it: the window
+> disables the default context menu, and the terminal surface uses the right
+> button to paste. The flag applies to dev/debug builds only.
 
 > `make init` assumes the [Prerequisites](#prerequisites) and [Agent tooling](#agent-tooling)
 > are already installed — it sets up the repo (hooks, backlog, dependencies), not

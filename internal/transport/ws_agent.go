@@ -272,7 +272,7 @@ func (h agentHandlers) handleCaptureFrame(ctx context.Context, req jsonrpcReques
 		return err
 	})
 	if err != nil {
-		h.answerError(req.ID, err)
+		h.answerError(req, err)
 	}
 }
 
@@ -340,7 +340,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: errNoEndpoint.Error()})
 			return
 		}
-		h.answerError(req.ID, err)
+		h.answerError(req, err)
 		return
 	}
 	in.Facts = facts
@@ -393,7 +393,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		return submitErr
 	})
 	if err != nil {
-		h.answerError(req.ID, err)
+		h.answerError(req, err)
 		return
 	}
 
@@ -649,7 +649,7 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 // out-of-bounds region) and refused, never server faults. A gate refusal
 // keeps its control.saturated shape (answerOperationRefusal); anything else
 // is an internal error.
-func (h agentHandlers) answerError(id json.RawMessage, err error) {
+func (h agentHandlers) answerError(req jsonrpcRequest, err error) {
 	switch {
 	case errors.Is(err, content.ErrFrameNotFound),
 		errors.Is(err, content.ErrNotAFrame),
@@ -657,9 +657,9 @@ func (h agentHandlers) answerError(id json.RawMessage, err error) {
 		errors.Is(err, content.ErrRegionOutOfBounds),
 		errors.Is(err, content.ErrIDConflict),
 		errors.Is(err, capability.ErrOperationInactive):
-		_ = h.r.TryError(id, RPCError{Code: -32602, Message: "Invalid params: " + err.Error()})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + err.Error()})
 	default:
-		answerOperationRefusal(h.r, id, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

@@ -227,7 +227,7 @@ func (h backupSpecs) saveToFile(_ context.Context, r Responder, req jsonrpcReque
 func (h backupSpecs) error(r Responder, id json.RawMessage, method string, err error) {
 	var refused *capability.RefusedError
 	if errors.As(err, &refused) {
-		_ = r.TryError(id, saturationRPCError(&refused.Rejection))
+		_ = r.TryError(id, saturationRPCError(method, &refused.Rejection))
 		return
 	}
 	code := -32603

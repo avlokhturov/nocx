@@ -640,14 +640,14 @@ func New(opts ...Option) (*App, error) {
 		// signatures are identical. Before this line the in-band plan was
 		// reachable from its own tests and nowhere else (AGENTS.md check 5).
 		transport.WithInBandBootstrapper(shint),
-		// The completion adapter (nocx-w7h.15): two completers wired at the
-		// composition root — the handler routes by session kind. The local
-		// completer answers from the backend's filesystem; the SSH completer
-		// runs a second shell on the remote host through DiscoveryConn, the
-		// same owned pooled lease the discovery ladder uses.
+		// The completion adapter (nocx-w7h.15): the handler routes by
+		// session kind. Local completion reads the backend filesystem;
+		// remote completion uses the live session's exact SSH options, so
+		// a jump route reuses the same pooled connection instead of
+		// silently dialing the target directly.
 		transport.WithCompleters(
 			completion.NewLocal(),
-			completion.NewSSH(sshExecConnProvider(sshClient)),
+			&routedSSHCompleter{client: sshClient},
 		),
 
 		transport.WithProbeResultStore(probeResultStore),

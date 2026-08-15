@@ -240,7 +240,7 @@ func (h vaultLifecycleHandlers) handleStatus(ctx context.Context, req jsonrpcReq
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -287,7 +287,7 @@ func (h vaultLifecycleHandlers) handleSetup(ctx context.Context, req jsonrpcRequ
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -337,7 +337,7 @@ func (h vaultLifecycleHandlers) handleUnseal(ctx context.Context, req jsonrpcReq
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -360,7 +360,7 @@ func (h vaultLifecycleHandlers) handleSeal(ctx context.Context, req jsonrpcReque
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -408,7 +408,7 @@ func (h vaultLifecycleHandlers) handleChangePassphrase(ctx context.Context, req 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -442,7 +442,7 @@ func (h vaultLifecycleHandlers) handleRegenerateRecovery(ctx context.Context, re
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -472,7 +472,7 @@ func (h vaultLifecycleHandlers) handleSetDefaultProvider(ctx context.Context, re
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -509,7 +509,7 @@ func (h vaultLifecycleHandlers) handleSetAutoSeal(ctx context.Context, req jsonr
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -524,7 +524,7 @@ func (h vaultLifecycleHandlers) handleActivity(ctx context.Context, req jsonrpcR
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -546,7 +546,7 @@ func (h vaultSecretHandlers) handleInventory(ctx context.Context, req jsonrpcReq
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -626,7 +626,7 @@ func (h vaultSecretHandlers) handleCreateSecret(ctx context.Context, req jsonrpc
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -711,7 +711,7 @@ func (h vaultSecretHandlers) handleRenameSecret(ctx context.Context, req jsonrpc
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -770,7 +770,7 @@ func (h vaultSecretHandlers) handleReplaceSecret(ctx context.Context, req jsonrp
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -819,7 +819,7 @@ func (h vaultSecretHandlers) handleDeleteSecret(ctx context.Context, req jsonrpc
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

@@ -214,8 +214,10 @@ export interface TerminalRenderer {
    */
   registerMarker(): MarkerAdapter | undefined
 
-  /** Measured cell height in pixels, from the actual rendered char element.
-   *  Falls back to fontSize * lineHeight only if measurement is unavailable. */
+  /** CSS-pixel pitch of one grid row — what the renderer DRAWS at, the same
+   *  source as `cellWidth`. Falls back to fontSize * lineHeight, uncached,
+   *  while nothing has been drawn yet: the caller gets the size the grid was
+   *  asked for rather than a stale answer to a question with no answer. */
   readonly cellHeight: number
 
   /** CSS-pixel width of one grid cell — xterm's real cell advance, snapped

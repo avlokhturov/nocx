@@ -446,11 +446,16 @@ func (f *fakeSessionRegistry) List() []session.Session {
 }
 
 // fakeSession is a minimal session.Session.
-type fakeSession struct{ id session.ID }
+type fakeSession struct {
+	id      session.ID
+	kind    session.Kind
+	host    string
+	sshOpts []ssh.ConnectOption
+}
 
 func (f *fakeSession) ID() session.ID            { return f.id }
-func (f *fakeSession) Kind() session.Kind        { return session.KindLocal }
-func (f *fakeSession) Host() string              { return "" }
+func (f *fakeSession) Kind() session.Kind        { return f.kind }
+func (f *fakeSession) Host() string              { return f.host }
 func (f *fakeSession) Cwd() string               { return "/home/test" }
 func (f *fakeSession) ProfileID() string         { return "" }
 func (f *fakeSession) CredentialID() string      { return "" }
@@ -465,7 +470,7 @@ func (f *fakeSession) StartOutput(context.Context, session.OutputHandler) error 
 	return nil
 }
 func (f *fakeSession) ShellIntegrationReason() ssh.RefusalReason { return "" }
-func (f *fakeSession) SSHOptions() []ssh.ConnectOption           { return nil }
+func (f *fakeSession) SSHOptions() []ssh.ConnectOption           { return f.sshOpts }
 
 // fakeHistoryRepo is a minimal content.CommandHistoryRepository.
 type fakeHistoryRepo struct {
@@ -931,6 +936,57 @@ func TestForSessionKnownIDSucceeds(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("session op run failed: %v", err)
+	}
+}
+
+// TestSessionTargetOperationReleasesSessionGateBeforeWork pins the read
+// interval: immutable routing facts are copied while the session gate is
+// held, then remote work keeps only the ordinary lane. A slow completion
+// therefore cannot refuse resize or close on the session domain.
+func TestSessionTargetOperationReleasesSessionGateBeforeWork(t *testing.T) {
+	sessionGate := control.NewSemaphore(capability.GateSession, 1)
+	lane := control.NewSemaphore("control", 1)
+	reg := newFakeSessionRegistry()
+	reg.sessions["s1"] = &fakeSession{
+		id:   "s1",
+		kind: session.KindRemote,
+		host: "target.example",
+		sshOpts: []ssh.ConnectOption{
+			ssh.WithUser("alice"),
+			ssh.WithJumpHost("bastion.example", 2200, "jumper", "password"),
+		},
+	}
+	factory := capability.NewSessionOperations(sessionGate, lane, reg, nil)
+
+	op, err := factory.ForSessionTarget("s1")
+	if err != nil {
+		t.Fatalf("ForSessionTarget: %v", err)
+	}
+	err = op.Run(context.Background(), func(_ context.Context, target capability.SessionTarget) error {
+		if target.Kind != session.KindRemote || target.Host != "target.example" {
+			t.Fatalf("target = %+v", target)
+		}
+		cfg := &ssh.ConnectConfig{}
+		for _, opt := range target.SSHOptions {
+			opt(cfg)
+		}
+		if cfg.User != "alice" || cfg.JumpHost != "bastion.example" || cfg.JumpPort != 2200 {
+			t.Fatalf("SSH options lost from snapshot: %+v", cfg)
+		}
+
+		sessionPermit, sessionRej := sessionGate.TryAcquire(context.Background())
+		if sessionRej != nil {
+			t.Fatalf("session gate remained held during work: %+v", sessionRej)
+		}
+		sessionPermit.Release()
+		if lanePermit, laneRej := lane.TryAcquire(context.Background()); laneRej == nil {
+			lanePermit.Release()
+			t.Fatal("ordinary lane was released before work completed")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("target operation: %v", err)
 	}
 }
 
