@@ -241,11 +241,11 @@ func TestPolicy_Debounce_OneNotificationPerWindow(t *testing.T) {
 		t.Fatalf("%d deliveries for one window, want 2 (leading + summary)", len(got))
 	}
 	summary := got[1].Event
-	if summary.Title != "title" {
-		t.Fatalf("summary title = %q, want the window-opening event's", summary.Title)
+	if summary.Title != "4 more notifications" {
+		t.Fatalf("summary title = %q, want %q naming the suppressed count", summary.Title, "4 more notifications")
 	}
-	if summary.Body != "4 more notifications" {
-		t.Fatalf("summary body = %q, want %q naming the suppressed count", summary.Body, "4 more notifications")
+	if summary.Body != "title — iteration 4" {
+		t.Fatalf("summary body = %q, want the newest held-back event's content in full (title and body)", summary.Body)
 	}
 	if summary.Attribution != (notify.Attribution{Tab: "tab-s1", Host: "host", Session: "s1"}) {
 		t.Fatalf("summary attribution = %+v, want the keyed session's", summary.Attribution)
@@ -298,8 +298,8 @@ func TestPolicy_Debounce_WindowIsAnInterval(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("%d deliveries at window close, want 2", len(got))
 	}
-	if body := got[1].Event.Body; body != "1 more notification" {
-		t.Fatalf("summary body = %q, want %q naming the suppressed count", body, "1 more notification")
+	if summary := got[1].Event; summary.Title != "1 more notification" || summary.Body != "title — second" {
+		t.Fatalf("summary = %q / %q, want the count in the title and the held-back content in the body", summary.Title, summary.Body)
 	}
 
 	// After the window: the next repeat opens a fresh window and is
@@ -341,8 +341,12 @@ func TestPolicy_Coalescing_PayloadIndependent(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("%d deliveries, want 2 (leading + one summary)", len(got))
 	}
-	if body := got[1].Event.Body; body != "2 more notifications" {
-		t.Fatalf("summary body = %q, want %q (count from events, not content)", body, "2 more notifications")
+	summary := got[1].Event
+	if summary.Title != "2 more notifications" {
+		t.Fatalf("summary title = %q, want %q (count from events, not content)", summary.Title, "2 more notifications")
+	}
+	if summary.Body != "title — "+bodies[len(bodies)-1] {
+		t.Fatalf("summary body = %q, want the newest held-back content (title and body), count still from events", summary.Body)
 	}
 
 	// The key: same {session, kind} regardless of title/body. A fresh
@@ -362,6 +366,78 @@ func TestPolicy_Coalescing_PayloadIndependent(t *testing.T) {
 	pt.advanceWindow()
 	if got := pt.sink.count(); got != 4 {
 		t.Fatalf("%d deliveries after those windows closed, want 4", got)
+	}
+}
+
+// TestPolicy_Coalescing_SummaryCarriesTheNewestMessage: a window that held
+// several events back closes with one summary that names the count in its
+// TITLE and carries the newest held-back event's content in its BODY — both
+// its title and its body when both exist, never half of it (nocx-jiwq.5). A
+// bodyless message falls back to its title, so a banner never says only the
+// count.
+func TestPolicy_Coalescing_SummaryCarriesTheNewestMessage(t *testing.T) {
+	pt := newPolicyTest(t)
+	// Per-event titles so the summary's content can be told apart from the
+	// leading delivery's, and a bodyless event to exercise the fallback.
+	evs := []notify.Event{
+		pt.mk("s1", kindA, "compiled in 4.2s"),
+		pt.mk("s1", kindA, "3 tests failed in api_test.go"),
+		pt.mk("s1", kindA, "deploy exited 1"),
+	}
+	evs[0].Title = "build finished"
+	evs[1].Title = "tests failed"
+	evs[2].Title = "deploy crashed"
+	for i, ev := range evs {
+		want := notify.DispositionOpened
+		if i > 0 {
+			want = notify.DispositionCoalesced
+		}
+		if d := pt.policy.Submit(ev); d != want {
+			t.Fatalf("submit %d = %v, want %v", i, d, want)
+		}
+	}
+	pt.advanceWindow()
+	got := pt.sink.received()
+	if len(got) != 2 {
+		t.Fatalf("%d deliveries, want 2 (leading + summary)", len(got))
+	}
+	// The leading edge went out with the FIRST event's own content, unaltered.
+	leading := got[0].Event
+	if leading.Title != "build finished" || leading.Body != "compiled in 4.2s" {
+		t.Fatalf("leading edge altered: title %q body %q", leading.Title, leading.Body)
+	}
+	// The summary names the count in the title and carries the NEWEST
+	// held-back event's content in the body — its title AND its body joined,
+	// the case this test exists for — keeping the keyed session's attribution.
+	summary := got[1].Event
+	if summary.Title != "2 more notifications" {
+		t.Fatalf("summary title = %q, want %q", summary.Title, "2 more notifications")
+	}
+	if summary.Body != "deploy crashed — deploy exited 1" {
+		t.Fatalf("summary body = %q, want the newest held-back title and body both", summary.Body)
+	}
+	if summary.SessionID != "s1" || summary.Attribution.Session != "s1" {
+		t.Fatalf("summary lost its session attribution: %+v", summary.Attribution)
+	}
+
+	// A bodyless held-back message still says something: the count in the
+	// title and the newest message even when it lived only in a title.
+	pt2 := newPolicyTest(t)
+	if d := pt2.policy.Submit(pt2.mk("s1", kindA, "warm start")); d != notify.DispositionOpened {
+		t.Fatalf("Submit = %v, want opened", d)
+	}
+	bare := pt2.mk("s1", kindA, "")
+	bare.Title = "remote build done"
+	if d := pt2.policy.Submit(bare); d != notify.DispositionCoalesced {
+		t.Fatalf("bodyless Submit = %v, want coalesced", d)
+	}
+	pt2.advanceWindow()
+	got2 := pt2.sink.received()
+	if len(got2) != 2 {
+		t.Fatalf("%d deliveries, want 2", len(got2))
+	}
+	if s := got2[1].Event; s.Title != "1 more notification" || s.Body != "remote build done" {
+		t.Fatalf("bodyless summary = %q / %q, want the count title and the title as the message", s.Title, s.Body)
 	}
 }
 
@@ -395,7 +471,9 @@ func TestPolicy_Debounce_TwoSessionsTwoNotifications(t *testing.T) {
 	// Nothing merges across sessions and no summary borrows another's count.
 	summaries := map[string]notify.Delivery{}
 	for _, d := range got {
-		if d.Event.Body == "1 more notification" {
+		// The summary carries the count in its TITLE and the held-back body
+		// ("spam" in both sessions), so the count title is what identifies it.
+		if d.Event.Title == "1 more notification" {
 			summaries[d.Event.SessionID] = d
 		}
 	}
@@ -904,10 +982,11 @@ func TestNoninterference_ResolutionIndependentOfPresentation(t *testing.T) {
 }
 
 // TestPolicy_CoalescedDelivery_ResolvesSameAsSource: the policy writes the
-// body of a window's closing summary to name the count — that rewrite must
-// not change route resolution, which is the invariant the policy itself could
-// otherwise break (ADR-0029 §2.2). The delivered event must also keep the
-// keyed session's attribution.
+// title of a window's closing summary to name the count and puts the newest
+// held-back message in its body — that rewrite must not change route
+// resolution, which is the invariant the policy itself could otherwise break
+// (ADR-0029 §2.2). The delivered event must also keep the keyed session's
+// attribution.
 func TestPolicy_CoalescedDelivery_ResolvesSameAsSource(t *testing.T) {
 	// Capture the outcome of the policy's own delivery — the real path,
 	// not a second Resolve call. The summary is the last one delivered, so
@@ -925,8 +1004,11 @@ func TestPolicy_CoalescedDelivery_ResolvesSameAsSource(t *testing.T) {
 		t.Fatalf("%d deliveries, want 2 (leading + summary)", len(got))
 	}
 	delivered := got[1].Event
-	if delivered.Body != "3 more notifications" {
-		t.Fatalf("summary body = %q, want %q naming the suppressed count", delivered.Body, "3 more notifications")
+	if delivered.Title != "3 more notifications" {
+		t.Fatalf("summary title = %q, want %q naming the suppressed count", delivered.Title, "3 more notifications")
+	}
+	if delivered.Body != "title — "+source[len(source)-1] {
+		t.Fatalf("summary body = %q, want the newest held-back content (title and body)", delivered.Body)
 	}
 
 	// The rewrite must not change resolution: raise each source event

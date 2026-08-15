@@ -106,8 +106,9 @@ type Policy struct {
 // stream is one open debounce window. The event that OPENED it has already
 // been delivered (Submit delivers on the leading edge); the window exists to
 // hold back what follows, and suppressed counts how many it held. It retains
-// at most the opening event, so memory is bounded by the number of open
-// windows and the deadline of each (design §6.2).
+// at most the opening event and the most recent held-back event — memory is
+// bounded by the number of open windows and a constant per window (design
+// §6.2).
 type stream struct {
 	key DebounceKey
 	// suppressed is how many events arrived inside the window after the one
@@ -115,8 +116,12 @@ type stream struct {
 	// delivery already said everything there was to say.
 	suppressed int
 	opening    Event // the delivered event; carries the attribution the summary reuses
-	deadline   time.Time
-	timer      Timer
+	// last is the most recent held-back event. The window's closing summary
+	// carries ITS message, so a banner still says what happened instead of
+	// only how many times something happened (nocx-jiwq.5).
+	last     Event
+	deadline time.Time
+	timer    Timer
 }
 
 // NewPolicy builds the attention policy around a router. ctx is the policy's
@@ -179,6 +184,7 @@ func (p *Policy) Submit(ev Event) Disposition {
 	if s, ok := p.streams[key]; ok {
 		if now.Before(s.deadline) {
 			s.suppressed++
+			s.last = ev
 			p.mu.Unlock()
 			return DispositionCoalesced
 		}
@@ -230,10 +236,19 @@ func (p *Policy) flush(key DebounceKey) {
 }
 
 // deliverSummary delivers the closing notification of one window: how many
-// events it held back, carrying the attribution of the session it was keyed
-// on. A window that held back nothing delivers NOTHING — the leading-edge
-// delivery already said what there was to say, and a "1 notification" behind
-// every notification would double every one of them.
+// events it held back, carrying the content of the most recent one. A window
+// that held back nothing delivers NOTHING — the leading-edge delivery already
+// said what there was to say, and a "1 notification" behind every
+// notification would double every one of them.
+//
+// The count goes in the TITLE and the newest held-back event's content in the
+// BODY, and that division is the point. The leading edge already delivered
+// the window-opening event with its own title and body, so this delivery says
+// that more happened and what the newest of it was — the count beside the
+// message, the way OS notification surfaces group a burst. Replacing the
+// body with a bare count would tell the user that two things happened and
+// none of what they were: the first message was already out, and every
+// message held back would go unnamed (nocx-jiwq.5).
 func (p *Policy) deliverSummary(s *stream) {
 	if s.suppressed == 0 {
 		return
@@ -243,7 +258,20 @@ func (p *Policy) deliverSummary(s *stream) {
 		noun = "notification"
 	}
 	ev := s.opening
-	ev.Body = fmt.Sprintf("%d more %s", s.suppressed, noun)
+	ev.Title = fmt.Sprintf("%d more %s", s.suppressed, noun)
+	// The body carries the newest held-back event's content IN FULL — its
+	// title and its body, joined — never half of it. Dropping the title when
+	// a body exists loses exactly the kind of message this delivery exists
+	// to save: an OSC 777 event with title "tests failed" and body "3
+	// suites" must not become a summary whose body says only "3 suites".
+	// A bodyless message falls back to its title, so a banner never says
+	// only the count.
+	ev.Body = s.last.Body
+	if ev.Body == "" {
+		ev.Body = s.last.Title
+	} else if s.last.Title != "" {
+		ev.Body = s.last.Title + " — " + ev.Body
+	}
 	p.deliver(ev)
 }
 
