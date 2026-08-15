@@ -563,6 +563,12 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       }
       closeDialog()
       await load()
+      // A save that carried a key MINTED one: the row's credential fact is
+      // derived from the vault inventory this page holds, so an inventory
+      // loaded before the mint says the row's brand-new key is deleted —
+      // which is what a person saw one second after saving it. Reload it
+      // beside the endpoints, from the same success.
+      await loadInventory()
       showToast({ level: 'success', message: `Saved "${input.name}"` })
     } catch (err) {
       // A cancelled setup/unlock is not an error: the sheet is the surface

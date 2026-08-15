@@ -107,8 +107,11 @@ const devharnessBin = () => readStand().devharness
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-/** The ask chip (BlockReceipt ask variant), mounted inside its block. */
-const ASK_CHIP = '.ui-block-receipt[data-variant="ask"]'
+/** The reference chip a selection raises, in the INPUT LINE — not in the
+ *  block. The ask entry is a gesture at the prompt now (nocx-4wtlh): the
+ *  per-block Ask control is gone, and with it the receipt that used to
+ *  carry the chip inside its block. */
+const REF_CHIP = '.nocx-editor-reference-chip'
 
 const test = base
 
@@ -180,16 +183,60 @@ async function runCommand(
   const input = page.locator(INPUT)
   await input.fill(command)
   await page.keyboard.press('Enter')
-  const block = page.locator('.cmd-block', { hasText: marker }).first()
+  // The FROZEN block, and its rows: a chip may only point into a finished
+  // block's output (a running block's rows still move), so waiting on the
+  // block alone would hand back the running one — visible, with no output
+  // element at all — and the gesture would have nothing to select.
+  const block = page.locator('.cmd-block:not(.cmd-block-running)', { hasText: marker }).first()
   await expect(block).toBeVisible({ timeout: 15_000 })
+  await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
   return { block }
 }
 
-/** The gesture (the shipped surface): the Ask control every finished
- *  command block carries — it raises the chip and activates the agent
- *  target. */
-async function clickAsk(block: Locator): Promise<void> {
-  await block.getByRole('button', { name: 'Ask about this block' }).click()
+/** THE GESTURE, as shipped (nocx-4wtlh): select a region of a finished
+ *  block's output and it freezes into a reference chip in the input line —
+ *  "if you ask, this comes with you". Nothing else moves: the active target
+ *  is untouched, so plain Enter still runs the line as a command.
+ *
+ *  The selection is made through a real DOM Range over the block's rows and
+ *  announced with the `selectionchange` event the product listens for,
+ *  because a synthetic drag across rows is a geometry test in disguise —
+ *  what this spec is about is what a selection MEANS, and the range is the
+ *  same object a mouse would leave behind. */
+async function pointAt(block: Locator): Promise<void> {
+  await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
+  await block.evaluate((el) => {
+    const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-line'))
+    if (lines.length === 0) throw new Error('block has no output rows to point at')
+    const first = lines[0]
+    const last = lines[lines.length - 1]
+    const range = document.createRange()
+    range.setStart(first.firstChild ?? first, 0)
+    range.setEnd(last.lastChild ?? last, (last.textContent ?? '').length)
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+  })
+}
+
+/** Send the drafted line to the ASSISTANT: ⌘/Ctrl+Enter flips where Enter
+ *  goes (it sends nothing — the indicator is the confirmation), then Enter
+ *  is the one send key. Idempotent on the flip, exactly as a person
+ *  experiences it: with Ask already active, the target stays. */
+async function askFromPrompt(page: Page, question: string): Promise<void> {
+  const input = page.locator(INPUT)
+  await input.click()
+  // `:visible` on purpose: CM6 keeps a hidden measurement spacer beside the
+  // real marker, carrying an identical button. The visible one is the
+  // person's.
+  const indicator = page.locator('.pane.active .nocx-editor-target-indicator:visible')
+  if ((await indicator.getAttribute('data-target')) !== 'agent') {
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
+  }
+  await input.fill(question)
+  await page.keyboard.press('Enter')
 }
 
 /** The answer block for one question: the .cmd-block whose header IS the
@@ -203,32 +250,33 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
 
   test('with no endpoint configured, the surfaces say so (agent.status)', async ({ page }) => {
     // The first state a dev stand is in — no endpoint — and it needs no fake
-    // server at all. agent.status is rendered on BOTH product surfaces, and
-    // each is asserted on the surface, never on a log line.
-    //
-    // The ASK surface: raise the chip on a finished block; the chip carries
-    // the readiness sentence in its status line (refreshAskStatus →
-    // agentStatusLine, the one derivation shared with Settings).
+    // server at all. What the product owes a person here is not a status
+    // line: it is the way out. Asking without an endpoint says what is
+    // wrong AND opens where it is fixed (nocx-jh2rv), and that is what this
+    // asserts, on the surface, never on a log line.
     await openApp(page)
     const marker = `ask-status-${nonce}`
     const { block } = await runCommand(page, `echo ${marker}`, marker)
-    await clickAsk(block)
-    const chip = block.locator(ASK_CHIP)
-    await expect(chip).toBeVisible({ timeout: 10_000 })
-    // The chip names the block by its command, before any question is sent.
-    await expect(chip.locator('.ui-block-receipt__value')).toHaveText(`echo ${marker}`)
-    await expect(chip.locator('.ui-block-receipt__status')).toContainText(
-      'No endpoint configured yet',
-      { timeout: 10_000 },
-    )
 
-    // The Settings surface says it too, through its empty state — which owns
-    // this fact because it also carries the button that fixes it. The
-    // readiness badge deliberately does NOT repeat it here; it appears only
-    // for what the list cannot say (an unresolvable credential, a failed
-    // probe, a ready endpoint), and test 2 asserts it there.
-    await openAIEndpoints(page)
-    await expect(page.locator('.ep-root')).toContainText('No endpoints yet')
+    // The gesture still works with nothing configured: the selection
+    // freezes into a chip in the input line, naming the block it came from.
+    await pointAt(block)
+    const chip = page.locator(REF_CHIP).first()
+    await expect(chip).toBeVisible({ timeout: 10_000 })
+    await expect(chip).toContainText(`echo ${marker}`)
+
+    // The ask is refused, and the refusal carries its repair: the toast
+    // names the problem and the Endpoints page opens with the editor up on
+    // a blank endpoint. A sentence with nowhere to go is how a person
+    // concludes the feature is broken rather than unconfigured.
+    await askFromPrompt(page, 'What did this print?')
+    await expect(page.locator('.ui-toast')).toContainText('no endpoint configured', {
+      timeout: 15_000,
+    })
+    await expect(page.locator('.ep-root')).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('dialog').filter({ hasText: 'New Endpoint' })).toBeVisible({
+      timeout: 15_000,
+    })
   })
 
   test("point at a finished block, ask, and the answer streams in naming the block's output", async ({
@@ -306,7 +354,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // screen and nothing else.
     await runCommand(page, cmdB, markerB)
 
-    // ── The gesture: the block's Ask control ─────────────────────────────
+    // ── The gesture: point at the block's output ─────────────────────────
     // Script the fake FIRST: the answer the model gives is decided by the
     // test, streamed in several chunks and HELD after the first so the spec
     // can observe partial text while the stream is genuinely open. The
@@ -314,19 +362,18 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // across the file's tests, and every index below is relative to it.
     const base = fake.requests().length
     fake.setScript({ chunks: ['The first block printed ', markerA, '.'], holdAfter: 1 })
-    await clickAsk(blockA)
+    await pointAt(blockA)
 
-    // The chip names the block BEFORE the question is sent.
-    const chip = blockA.locator(ASK_CHIP)
+    // The chip is in the INPUT LINE and names the block BEFORE the question
+    // is sent — the payload is what the person pointed at, and they can see
+    // it while they type.
+    const chip = page.locator(REF_CHIP).first()
     await expect(chip).toBeVisible({ timeout: 10_000 })
-    await expect(chip.locator('.ui-block-receipt__value')).toHaveText(cmdA)
+    await expect(chip).toContainText(cmdA)
 
     // ── The question, in the ordinary editor ─────────────────────────────
     const question = 'What did the first block print?'
-    const input = page.locator(INPUT)
-    await expect(input).toBeFocused({ timeout: 10_000 })
-    await input.fill(question)
-    await page.keyboard.press('Enter')
+    await askFromPrompt(page, question)
 
     // The request reached the fake — the whole ask round trip through the
     // real backend. The payload carries the chosen block's output and no
@@ -420,17 +467,12 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const { block } = await runCommand(page, `echo ${marker}`, marker)
     const base = fake.requests().length
     fake.setScript({ chunks: ['ok ', marker] })
-    await clickAsk(block)
+    await pointAt(block)
     // The chip names the block before the question is sent; then the
     // question goes out and the completion lands — the ask must actually be
     // SENT for there to be a completion to inspect.
-    await expect(block.locator(ASK_CHIP).locator('.ui-block-receipt__value')).toHaveText(
-      `echo ${marker}`,
-    )
-    const input = page.locator(INPUT)
-    await expect(input).toBeFocused({ timeout: 10_000 })
-    await input.fill('What did it print?')
-    await page.keyboard.press('Enter')
+    await expect(page.locator(REF_CHIP).first()).toContainText(`echo ${marker}`)
+    await askFromPrompt(page, 'What did it print?')
     const req = await fake.waitForRequests(base + 1)
     expect(req[base].path.endsWith('/chat/completions')).toBe(true)
     expect(req[base].headers['http-referer']).toBe('https://nocx.dev')
@@ -463,13 +505,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     fake.setScript({ chunks: ['Answer two: ', markerB] })
 
     // Ask about A; the stream opens and is held.
-    await clickAsk(blockA)
-    await expect(blockA.locator(ASK_CHIP).locator('.ui-block-receipt__value')).toHaveText(cmdA)
+    await pointAt(blockA)
+    await expect(page.locator(REF_CHIP).first()).toContainText(cmdA)
     const q1 = 'Question one about the first block?'
-    const input = page.locator(INPUT)
-    await expect(input).toBeFocused({ timeout: 10_000 })
-    await input.fill(q1)
-    await page.keyboard.press('Enter')
+    await askFromPrompt(page, q1)
     const reqs1 = await fake.waitForRequests(base + 1)
     const req1 = reqs1[base]
     await expect.poll(() => fake.requests()[base]?.state).toBe('streaming')
@@ -478,27 +517,24 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
       timeout: 15_000,
     })
 
-    // WHILE the first answer is still streaming, ask about B: the chip
-    // MOVES to B (one chip, one mode), the question targets B, and B's
-    // payload carries B's output alone.
-    await clickAsk(blockB)
-    await expect(blockA.locator(ASK_CHIP)).toHaveCount(0, { timeout: 10_000 })
-    await expect(blockB.locator(ASK_CHIP).locator('.ui-block-receipt__value')).toHaveText(cmdB)
+    // WHILE the first answer is still streaming, point at B: the previous
+    // chip was CONSUMED by the question that carried it, so the line now
+    // holds exactly one chip and it names B. (Under the shipped gesture a
+    // question can carry several chips at once — that is the point of a
+    // strip — but each question takes the ones it rode with it.)
+    await pointAt(blockB)
+    await expect(page.locator(REF_CHIP)).toHaveCount(1, { timeout: 10_000 })
+    await expect(page.locator(REF_CHIP).first()).toContainText(cmdB)
     const q2 = 'Question two about the second block?'
-    // DEFECT (reported): the first submit hid the editor (CommandEditor
-    // commit() clears+hides unconditionally), and nothing on the agent
-    // path ever re-shows it — activateAsk and the chip's Ask primary only
-    // call editor.focus(), which is a no-op while hidden
-    // (editor.ts: `if (this.isVisible) this.view.focus()`), and
-    // _syncLifecycleOwnership only runs on lifecycle facts, of which the
-    // agent path produces none. So the second ask — the acceptance's
-    // exact scenario — is not reachable through the shipped surface. The
-    // merged unit test masks this with an explicit ed.show() in its
-    // submitInEditor helper. This assertion stays red until the product
-    // re-shows the editor while the agent target is active.
-    await expect(input).toBeFocused({ timeout: 10_000 })
-    await input.fill(q2)
-    await page.keyboard.press('Enter')
+    // The editor is still up: a question is not a handoff, so the agent
+    // path never hides it and the next one can be typed straight away
+    // (nocx-wmy4). This used to be the file's known defect — the first
+    // submit hid the editor and nothing on the agent path re-showed it,
+    // making the acceptance's own scenario unreachable through the shipped
+    // surface. It is asserted here rather than assumed, because that is the
+    // half a unit test with an explicit show() cannot see.
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
+    await askFromPrompt(page, q2)
 
     const reqs2 = await fake.waitForRequests(base + 2)
     const req2 = reqs2[base + 1]

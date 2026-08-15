@@ -3539,9 +3539,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     return registry.active().label
   }
 
-  /** The indicator as rendered in the editor's input line. */
+  /** The indicator as rendered in the editor's gutter — the editor's DOM,
+   *  deliberately NOT its contentDOM: the token is beside the document and
+   *  never in it (see the gutter test below for what that buys). */
   function indicatorOf(ed: CommandEditor): HTMLElement | null {
-    return viewOf(ed).contentDOM.querySelector<HTMLElement>('.nocx-editor-target-indicator')
+    return viewOf(ed).dom.querySelector<HTMLElement>('.nocx-editor-target-indicator')
   }
 
   /** The reference chip strip inside the editor. */
@@ -3923,7 +3925,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('the indicator is a stable line-start prefix: typing moves the caret, never the token (nocx-4wtlh)', async () => {
+  it('the token is a gutter beside the input, never text inside it — the textbox holds exactly what was typed (nocx-4wtlh)', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
@@ -3931,22 +3933,56 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
 
-      // Type: the caret travels to the END of the line — and the token
-      // stays at position 0, the FIRST child of the line, exactly where a
-      // prompt sigil sits. It never sits beside the caret mid-text.
+      // WHERE it renders is the contract. `.cm-content` carries
+      // role="textbox", so a control inside it becomes part of the line's
+      // text: a screen reader read the chip's word as content, and every
+      // check that reads the prompt got `Run` glued to the command. The
+      // gutter is outside the document, so the text is the text.
+      const view = viewOf(ed)
+      expect(view.dom.querySelector('.nocx-editor-target-indicator')).not.toBeNull()
+      expect(view.contentDOM.querySelector('.nocx-editor-target-indicator')).toBeNull()
+      expect(view.contentDOM.textContent).toBe('')
+
       ed.insertText('ls -la')
-      const line = viewOf(ed).contentDOM.querySelector('.cm-line')
-      expect(line?.firstElementChild?.classList.contains('nocx-editor-target-indicator')).toBe(true)
-      expect(line?.firstElementChild?.textContent).toBe('Run')
-      expect(viewOf(ed).state.selection.main.head).toBe('ls -la'.length)
+      expect(view.contentDOM.textContent).toBe('ls -la')
+      expect(view.state.selection.main.head).toBe('ls -la'.length)
+      // Still there while typing, and still outside the text.
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      expect(view.contentDOM.querySelector('.nocx-editor-target-indicator')).toBeNull()
 
       // A real selection in the draft does not hide it: a person selecting
-      // part of their command still wants to know where Enter goes, and a
-      // line-start token has no reason to disappear (the old caret chip
-      // hid because it sat inside the selection).
-      viewOf(ed).dispatch({ selection: { anchor: 0, head: 2 } })
-      expect(indicatorOf(ed)).not.toBeNull()
+      // part of their command still wants to know where Enter goes.
+      view.dispatch({ selection: { anchor: 0, head: 2 } })
       expect(indicatorOf(ed)?.textContent).toBe('Run')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the gutter reserves its column for EVERY line, so a second line starts where the first one does (nocx-ex636)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // The widget this replaced sat on line one only, so line two began
+      // underneath the token and the command read as two ragged columns.
+      // A gutter has one element per line by construction: the marker on
+      // the first, an empty cell on the rest, both the same width.
+      ed.insertText('one\ntwo')
+      const view = viewOf(ed)
+      const cells = Array.from(
+        view.dom.querySelectorAll('.nocx-editor-target-gutter .cm-gutterElement'),
+      )
+      // The spacer element CM6 keeps for measurement is in this list too;
+      // what matters is that the lines have their cells and only the first
+      // carries the token.
+      expect(cells.length).toBeGreaterThanOrEqual(2)
+      const withToken = cells.filter((c) => c.querySelector('.nocx-editor-target-indicator'))
+      expect(withToken.length).toBeGreaterThanOrEqual(1)
+      expect(view.contentDOM.textContent).toBe('onetwo')
     } finally {
       teardown()
     }
@@ -3973,42 +4009,6 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       submitKey(ed, { metaKey: true })
       expect(activeLabel(content)).toBe('Shell')
       expect(indicatorOf(ed)?.textContent).toBe('Run')
-    } finally {
-      teardown()
-    }
-  })
-
-  it('the token owns its trailing gap: the caret neighbour is the widget buffer, on an empty line and on a text line (nocx-ex636)', async () => {
-    const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-
-      // EMPTY LINE: the token is the line's first child, and the element
-      // between it and the caret is CM6's zero-width widget buffer — the
-      // element the gap must live on. The chip's own margin sits INSIDE
-      // the widget tile, before the buffer, so it never reaches the caret.
-      const emptyLine = viewOf(ed).contentDOM.querySelector('.cm-line')
-      expect(emptyLine?.firstElementChild?.classList.contains('nocx-editor-target-indicator')).toBe(
-        true,
-      )
-      expect(
-        emptyLine?.firstElementChild?.nextElementSibling?.classList.contains('cm-widgetBuffer'),
-      ).toBe(true)
-
-      // A LINE WITH TEXT: the same structure — the gap does not appear
-      // only once there is text; it belongs to the token, always.
-      ed.insertText('ls -la')
-      const textLine = viewOf(ed).contentDOM.querySelector('.cm-line')
-      expect(textLine?.firstElementChild?.classList.contains('nocx-editor-target-indicator')).toBe(
-        true,
-      )
-      expect(
-        textLine?.firstElementChild?.nextElementSibling?.classList.contains('cm-widgetBuffer'),
-      ).toBe(true)
-      expect(textLine?.textContent).toContain('ls -la')
     } finally {
       teardown()
     }

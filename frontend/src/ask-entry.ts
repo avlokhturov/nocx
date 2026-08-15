@@ -15,14 +15,7 @@
 // to the model).
 
 import { StateEffect, type Extension } from '@codemirror/state'
-import {
-  Decoration,
-  EditorView,
-  ViewPlugin,
-  WidgetType,
-  type DecorationSet,
-  type ViewUpdate,
-} from '@codemirror/view'
+import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
 
 // ── Reference chips ────────────────────────────────────────────────────────
 
@@ -117,7 +110,7 @@ function targetWord(targetId: string, label: string): string {
   return TARGET_WORD[targetId] ?? label
 }
 
-class TargetIndicatorWidget extends WidgetType {
+class TargetMarker extends GutterMarker {
   constructor(
     private readonly word: string,
     private readonly targetId: string,
@@ -125,11 +118,8 @@ class TargetIndicatorWidget extends WidgetType {
   ) {
     super()
   }
-  /** The plugin hands the widget the indicator's stable toggle — never
-   *  per-render closures (eq() skips re-renders on word equality). */
-  readonly toggle = (): void => this.onToggle()
-  eq(other: TargetIndicatorWidget): boolean {
-    return other.word === this.word
+  eq(other: TargetMarker): boolean {
+    return other.word === this.word && other.targetId === this.targetId
   }
   toDOM(): HTMLElement {
     const btn = document.createElement('button')
@@ -138,9 +128,9 @@ class TargetIndicatorWidget extends WidgetType {
     btn.dataset.target = this.targetId
     btn.setAttribute('aria-label', `Enter goes to ${this.word}. Click to switch.`)
     btn.textContent = this.word
-    btn.addEventListener('click', (e) => {
-      // The chip is a control, not a caret placement: never let the click
-      // also move the caret into the text at its position.
+    btn.addEventListener('mousedown', (e) => {
+      // The chip is a control, not a caret placement: never let the press
+      // also move the caret or steal the editor's focus.
       e.preventDefault()
       e.stopPropagation()
       this.onToggle()
@@ -149,38 +139,40 @@ class TargetIndicatorWidget extends WidgetType {
   }
 }
 
-function indicatorDecorations(box: TargetIndicator): DecorationSet {
-  return Decoration.set([
-    Decoration.widget({
-      widget: new TargetIndicatorWidget(box.word, box.targetId, box.toggle),
-      // LEFT OF THE LINE, never left of the caret (nocx-4wtlh, owner's
-      // correction after living with it): position 0 with side -1 is a
-      // stable prefix token, the way a prompt sigil sits. A token that
-      // followed sel.head travelled through the text on every keystroke,
-      // pushed the line around, and had to be re-found after each one —
-      // the flicker this design exists to avoid. It stays put.
-      side: -1,
-    }).range(0, 0),
-  ])
-}
-
 /**
- * The line-start indicator: a stable prefix token in the input line
- * rendering what the ACTIVE target does — `Run` for the shell, `Ask` for
- * the assistant — and toggling the target on click. The host wires the
- * registry's active target and pushes every change through set(); the word
- * is this module's own mapping (targetWord), never a rename of the target.
- * The editor stays passive; this is a decoration, never a second input
- * owner.
+ * The line-start indicator: the token in the prompt rendering what the
+ * ACTIVE target does — `Run` for the shell, `Ask` for the assistant — and
+ * toggling the target on click. The host wires the registry's active target
+ * and pushes every change through set(); the word is this module's own
+ * mapping (targetWord), never a rename of the target. The editor stays
+ * passive; this is a decoration, never a second input owner.
+ *
+ * IT IS A GUTTER, NOT A WIDGET IN THE DOCUMENT, and that is the whole point
+ * (nocx-4wtlh, after the widget shipped and was lived with). A widget at
+ * position 0 sits INSIDE `.cm-content` — the element carrying
+ * `role="textbox"` — so the control's label became part of the textbox's
+ * text: a screen reader read "Run printf ..." as the line's content, and
+ * every e2e assertion that reads the prompt got `Runprintf ...` back. The
+ * same placement also cost three separate repairs, each a symptom of a
+ * control pretending to be text: CM6's zero-width widget buffer painting a
+ * broken-image square when it was given the trailing gap, a chip sitting
+ * below a baseline it shares with larger text, and a second line that began
+ * underneath the token because only the first line had one.
+ *
+ * A gutter answers all of it structurally. It lives beside the content, not
+ * in it, so the textbox contains exactly what the person typed; it reserves
+ * its width on EVERY line, so continuation lines and wrapped rows align
+ * where the caret starts with no measurement and no hanging indent; and it
+ * is where an editor is expected to put a prompt sigil.
  */
 export class TargetIndicator {
-  /** The word currently rendered, for the plugin's decorations. */
+  /** The word currently rendered, for the gutter's marker. */
   word = targetWord('shell', 'Shell')
   /** The target id currently rendered (the data-target hook). */
   targetId = 'shell'
-  /** The explicit switch (ADR-0004 §3): wired once by the host; the
-   *  widgets and the ⌘/Ctrl+Enter seam both end here. Reads the registry live
-   *  at call time, so it never goes stale. */
+  /** The explicit switch (ADR-0004 §3): wired once by the host; the marker
+   *  and the ⌘/Ctrl+Enter seam both end here. Reads the registry live at
+   *  call time, so it never goes stale. */
   readonly toggle: () => void
   private view: EditorView | null = null
 
@@ -188,14 +180,12 @@ export class TargetIndicator {
     this.toggle = toggle
   }
 
-  /** The CM6 extension the host feeds to the CommandEditor. The plugin
-   *  reads the indicator through the module's factory — a function
-   *  parameter, never an aliased `this`. */
+  /** The CM6 extension the host feeds to the CommandEditor. */
   extension(): Extension {
-    return indicatorPlugin(this)
+    return indicatorGutter(this)
   }
 
-  /** The plugin registers the live view so set() can repaint it. */
+  /** The gutter registers the live view so set() can repaint it. */
   attachView(view: EditorView): void {
     this.view = view
   }
@@ -213,56 +203,40 @@ export class TargetIndicator {
   }
 }
 
-/** The plugin half of the indicator: a widget at the START of the line
- *  (position 0), repainted on doc/selection changes and on the refresh
- *  effect set() dispatches. The widget never moves with the caret or the
- *  text — it is a sigil, not a follower. It also stays visible during a
- *  selection: a person selecting part of their command still wants to
- *  know where Enter goes, and a line-start token has no reason to hide
- *  (the old caret-anchored chip hid because it sat inside the selection). */
-function indicatorPlugin(indicator: TargetIndicator): Extension {
-  return ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet
-      constructor(private readonly view: EditorView) {
-        indicator.attachView(view)
-        this.decorations = indicatorDecorations(indicator)
-        this.publishWidth()
-      }
-      update(update: ViewUpdate): void {
-        if (
-          update.docChanged ||
-          update.selectionSet ||
-          update.transactions.some((t) => t.effects.some((e) => e.is(refreshIndicator)))
-        ) {
-          this.decorations = indicatorDecorations(indicator)
-          this.publishWidth()
-        }
-      }
-      /** Publish the token's RENDERED width for the hanging indent every
-       *  other line hangs on (style.css, `.cm-line`). It is measured, not
-       *  assumed: the word changes with the target (`Run` / `Ask`) in a
-       *  proportional font, so a constant would misalign the continuation
-       *  lines the moment somebody switched. Through requestMeasure, so
-       *  the read never lands mid-write. */
-      private publishWidth(): void {
-        this.view.requestMeasure({
-          read: (view) => {
-            const btn = view.contentDOM.querySelector<HTMLElement>('.nocx-editor-target-indicator')
-            if (!btn) return 0
-            // The trailing gap belongs to the token as much as the chip
-            // does: the caret sits after the buffer, so the text on every
-            // other line must line up with the caret, not with the chip's
-            // border.
-            const buffer = btn.nextElementSibling as HTMLElement | null
-            return btn.offsetWidth + (buffer?.offsetWidth ?? 0)
-          },
-          write: (width, view) => {
-            view.dom.style.setProperty('--nocx-target-token-width', `${width}px`)
-          },
-        })
-      }
-    },
-    { decorations: (v) => v.decorations },
-  )
+/** The gutter half of the indicator: one marker, on the FIRST line only,
+ *  repainted when set() dispatches its effect. Later lines get the gutter's
+ *  reserved width and no marker — the token is the prompt's sigil, not a
+ *  per-line ornament — and `initialSpacer` keeps that width stable from the
+ *  first frame instead of letting the text jump left before the marker
+ *  renders. */
+function indicatorGutter(indicator: TargetIndicator): Extension {
+  const marker = (): TargetMarker =>
+    new TargetMarker(indicator.word, indicator.targetId, indicator.toggle)
+  return [
+    ViewPlugin.define((view) => {
+      indicator.attachView(view)
+      // CM6 marks its gutter container aria-hidden, which is right for the
+      // thing gutters usually hold — line numbers are decoration, and a
+      // screen reader gains nothing from them. Ours holds an operable
+      // control: the one explicit switch ADR-0004 §3 requires. A focusable
+      // button inside an aria-hidden subtree is exposed to nobody, so the
+      // attribute is removed for THIS editor's gutters and no other's. The
+      // measurement spacer CM6 keeps beside the real marker is
+      // visibility:hidden, which assistive technology already ignores, so
+      // removing the attribute exposes one control and not two.
+      view.requestMeasure({
+        read: () => null,
+        write: (_, v) => v.dom.querySelector('.cm-gutters')?.removeAttribute('aria-hidden'),
+      })
+      return {}
+    }),
+    gutter({
+      class: 'nocx-editor-target-gutter',
+      lineMarker: (view, line) => (line.from === 0 ? marker() : null),
+      initialSpacer: () => marker(),
+      updateSpacer: () => marker(),
+      lineMarkerChange: (update) =>
+        update.transactions.some((t) => t.effects.some((e) => e.is(refreshIndicator))),
+    }),
+  ]
 }

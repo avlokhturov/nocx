@@ -140,28 +140,39 @@ describe('the ask kind body wraps prose but keeps frozen output frozen (nocx-ex6
   })
 })
 
-describe('the Ask token owns its trailing gap (nocx-ex636)', () => {
-  it('the gap sits on the caret neighbour, CM6 zero-width widget buffer, not on the chip margin', () => {
-    // CM6 draws an <img class="cm-widgetBuffer"> after an uneditable inline
-    // widget and the caret sits against THAT; the chip's own margin never
-    // reached the caret. The scoped rule gives the buffer the WIDTH — the
-    // caret is measured from that box, and a margin left the caret against
-    // the chip on an empty line — and hides the element, because the buffer
-    // has no src and a sized <img> paints a broken-image placeholder.
-    const bufferRule = RULES.find((r) =>
-      r.selectors.includes('.nocx-editor-target-indicator + .cm-widgetBuffer'),
-    )
-    expect(bufferRule).toBeDefined()
-    expect(bufferRule!.body).toMatch(/width\s*:\s*6px/)
-    expect(bufferRule!.body).toMatch(/visibility\s*:\s*hidden/)
+describe('the Ask token is a gutter, not text in the input (nocx-ex636)', () => {
+  it('the gutter clears CM6 chrome: no panel, no divider — a sigil, not a line-number rail', () => {
+    // The token moved out of `.cm-content` because a control inside the
+    // element carrying role="textbox" becomes part of the line's text. What
+    // it moved INTO is a gutter, and CM6's default gutter is dressed as a
+    // rail: a filled column with a divider down the side.
+    const gutters = RULES.find((r) => r.selectors.includes('.nocx-editor .cm-gutters'))
+    expect(gutters).toBeDefined()
+    expect(gutters!.body).toMatch(/background\s*:\s*transparent/)
+    expect(gutters!.body).toMatch(/border-right\s*:\s*none/)
   })
 
-  it('the indicator declares no trailing margin of its own, so the gap has one owner', () => {
-    // A margin on the chip would stack with the buffer width in engines
-    // that apply it and do nothing in engines that do not — the gap is the
-    // buffer's, deterministically.
+  it('the chip declares no trailing margin of its own, so the gap has one owner', () => {
+    // The gap between the token and the text belongs to the gutter cell.
     const indicator = RULES.find((r) => r.selectors.includes('.nocx-editor-target-indicator'))
     expect(indicator).toBeDefined()
     expect(indicator!.body).not.toMatch(/margin-right/)
+    const cell = RULES.find((r) =>
+      r.selectors.includes('.nocx-editor .nocx-editor-target-gutter .cm-gutterElement'),
+    )
+    expect(cell).toBeDefined()
+    expect(cell!.body).toMatch(/padding\s*:\s*0 6px 0 0/)
+  })
+
+  it('no line carries a hanging indent any more: the gutter aligns every line by construction', () => {
+    // The widget needed `padding-left` + a negative `text-indent` computed
+    // from a measured token width. A gutter reserves the column on every
+    // line, so those rules are gone and must not creep back.
+    const line = RULES.find((r) => r.selectors.includes('.nocx-editor .cm-line'))
+    expect(line).toBeDefined()
+    expect(line!.body).not.toMatch(/nocx-target-token-width/)
+    expect(RULES.some((r) => r.selectors.some((sel) => sel.includes('cm-widgetBuffer')))).toBe(
+      false,
+    )
   })
 })

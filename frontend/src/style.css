@@ -338,71 +338,47 @@
   padding: 2px 8px 4px;
 }
 
-/* A HANGING INDENT under the target token: the token sits at the start of
-   the FIRST line, and every other line — a second document line, and a
-   wrapped continuation of any of them — starts where that line's text
-   starts, the way a shell prompt indents a continuation. Without it, line
-   two began under the token and the command read as two ragged columns.
-
-   The width is measured, never guessed: `Run` and `Ask` are different
-   widths in a proportional UI font, so the indicator's plugin publishes
-   its own rendered width (plus the buffer gap) as the custom property and
-   the fallback 0 keeps a host that never wires the token unindented. */
+/* No hanging indent, and no measured token width: the token is a GUTTER
+   now (ask-entry.ts), so every line — a second document line, a wrapped
+   row — begins after the same reserved column by construction. The rules
+   that computed that alignment are gone with the widget that needed them. */
 .nocx-editor .cm-line {
-  padding: 0 0 0 var(--nocx-target-token-width, 0px);
-}
-
-/* The first line is the one the token is IN: pull its own first row back
-   out of the indent so the token starts at the left edge, and let its
-   wrapped rows keep it. */
-.nocx-editor .cm-content > .cm-line:first-child {
-  text-indent: calc(-1 * var(--nocx-target-token-width, 0px));
+  padding: 0;
 }
 
 /* ── The ask entry gesture (nocx-4wtlh) ────────────────────────────────
-   The caret indicator — ADR-0004 §3's UI chip — is a CM6 widget in the
-   input line, immediately LEFT of the cursor: the confirmation that Enter
-   goes to the shell, and the person's one explicit switch (click or
-   ⌘/Ctrl+Enter). The reference chips a selection raises live in their own strip
-   between the chrome and the input: "if you ask, this comes with you". */
+   The target indicator — ADR-0004 §3's UI chip — is the prompt's sigil: it
+   says where Enter goes and it is the person's one explicit switch (click,
+   or ⌘/Ctrl+Enter). It renders in a CM6 GUTTER, beside the content and
+   never inside it, so the textbox holds exactly what the person typed. The
+   reference chips a selection raises live in their own strip between the
+   chrome and the input: "if you ask, this comes with you". */
 
 .nocx-editor-target-indicator {
-  /* A control, never text: it must not read as part of the command. The
-     trailing gap is NOT this chip's margin: CM6 draws a zero-width
-     <img class="cm-widgetBuffer"> after an uneditable inline widget, and
-     the caret sits against THAT — a margin here sat inside the widget
-     tile and never reached the caret. The gap is the buffer's width, in
-     the scoped rule below (nocx-ex636). */
+  /* A control, never text — and now structurally so: it is not in the
+     document at all. */
   padding: 1px 7px;
   font-size: var(--font-size-2xs);
   line-height: 1.4;
   color: var(--color-text-muted);
   cursor: pointer;
   border: 1px solid var(--color-surface-raised);
-  /* Centred on the line, not sat on its baseline. The chip's own text is
-     smaller than the command's, so baseline alignment (the inline default)
-     put the chip's box below the line — its padding and border hang under
-     a baseline it shares with text drawn at a larger size. The token is a
-     sigil beside the line, so the line's middle is what it should meet. */
-  vertical-align: middle;
 }
 
-/* The caret's neighbour is the widget buffer, not the chip (see above):
-   the gap belongs to the token, on an empty line and on a line with text
-   alike. Scoped to THIS widget's trailing buffer, so other CM6 widgets
-   keep their defaults.
+/* The gutter the token lives in: a column beside the content, never inside
+   it. CM6's default gutter paints a panel and a divider — the chrome of a
+   line-number rail — and this one is a sigil in the prompt, so all of it is
+   cleared and only the trailing gap remains. */
+.nocx-editor .cm-gutters {
+  background: transparent;
+  border-right: none;
+  color: inherit;
+}
 
-   WIDTH plus visibility:hidden, and both halves are load-bearing. The
-   buffer is an <img> with no src, so a non-zero width alone makes the
-   engine paint a broken-image placeholder — the empty square the owner
-   saw between `Run` and the command. Hiding it stops the paint and keeps
-   the box. A margin instead of the width looked identical while typing
-   and failed on an EMPTY line: CM6 measures the caret from the buffer's
-   box, and a margin is not in it, so the caret sat against the chip until
-   the first character. */
-.nocx-editor-target-indicator + .cm-widgetBuffer {
-  width: 6px;
-  visibility: hidden;
+.nocx-editor .nocx-editor-target-gutter .cm-gutterElement {
+  display: flex;
+  align-items: center;
+  padding: 0 6px 0 0;
 }
 
 .nocx-editor-target-indicator:hover {
