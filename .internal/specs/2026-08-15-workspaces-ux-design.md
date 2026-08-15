@@ -216,8 +216,19 @@ The state of the tree makes this urgent rather than theoretical, and it is filed
 `nocx-wyp3p`: the backend's only notion of a tab is `tabID(wconn)` in
 `ws_history_record.go:339`, which returns the **WebSocket connection id** — while
 `ws_lifecycle.go:147` says "one WebSocket owns several terminal tabs" and `sessionIDsOf` in
-the same file says "a tab can hold several sessions". And `internal/session` has no restore
-path at all: tabs survive a restart through `internal/settings`, re-opened by the frontend.
+the same file says "a tab can hold several sessions".
+
+**The backend must not gain a tab id, and this is the resolution of that bug rather than an
+aside.** AD-7 makes the _session_ the identity the backend legitimately owns, a tab can hold
+several sessions, and the renderer already knows which tab a session is in. So every
+backend→renderer address is a `sessionId`, and the renderer resolves it. That settles
+`nocx-jiwq.1` (a notification banner's click has to land on a tab) the same way, and it
+means `nocx-wyp3p`'s capture scope is either renamed to the connection it is or re-keyed on
+the session — never given a third, invented identity.
+
+> The first draft of this section argued the opposite — that three consumers were about to
+> invent a backend tab id and one of them should own it. That framing was wrong: with
+> session addressing, none of them needs one.
 
 ### 5.3 What the fence is not, and must never be called
 
@@ -293,19 +304,41 @@ the owner chose the workspace _over_ the project deliberately.
 None / Status / PR / Project` over a flat list, with hosts and projects as independent
    scopes. Deliberately **not** in this cut: one axis (workspace) plus lineage nesting. The
    model does not obstruct it later.
-5. **`nocx-wyp3p`'s resolution** — whether the capture scope is renamed to the connection it
-   actually is, or a real per-tab identity crosses the wire.
-6. **Restart.** `internal/session` has no restore path; tabs come back through
-   `internal/settings`. Which side owns restoring workspace membership is not designed here,
-   and it interacts with the prior design's §4.2 prepared→active interval (epic E).
+5. **`nocx-wyp3p`'s resolution** — renamed to the connection it is, or re-keyed on the
+   session. §5.2 rules out the third option.
+6. **Whether a workspace survives a restart at all** — see §8.1. Not answered here, because
+   answering it decides how large epic B is.
+
+### 8.1 Nothing survives a restart today, and the prior design says otherwise
+
+**`restoreDescriptor` is written in four places, typed `unknown`, and read nowhere.**
+`frontend/src/file-viewer/index.ts:85` says so in as many words: "nothing serialises the tab
+list and nothing reconstructs a tab from a descriptor". `internal/settings` carries only
+`TabPlacement`. `internal/session` has no restore path. On start you get one fresh local
+tab, whatever you had open before.
+
+The prior design's §4.2 states the opposite — "tabs survive a restart through
+`internal/settings` — the frontend re-opens sessions from persisted tab descriptors and the
+backend restores nothing" — and uses it to argue that the prepared→active interval belongs
+to epic E rather than A. **The conclusion survives and is in fact stronger** (there is even
+less to preserve than it thought); the supporting fact is false and must be corrected in
+that document. Found by the worker on `feat/notificcations` and confirmed here.
+
+**What it costs this design:** §9's criterion below says "restarts the app, and finds the
+workspace intact". That silently assumes a restore path that does not exist, so as written
+it makes epic B build tab persistence from scratch — a different and much larger epic than
+"pure grouping". Either B builds it deliberately, or the criterion drops the restart. **This
+is the one open question that changes the size of the work**, and it is the owner's call.
 
 ## 9. The acceptance criterion this replaces
 
 > A user opens four tabs, drags one onto another to form a workspace, names it, opens a
 > third tab inside it from the group header, switches to the default workspace and back via
-> the chip, restarts the app, and finds the workspace, its name and its three tabs intact —
-> while the other two tabs are still at top level with no header. Closing the workspace asks
-> first and names the three tabs it will close.
+> the chip, and finds the other two tabs still at top level with no header. Closing the
+> workspace asks first and names the three tabs it will close.
+
+**The restart is deliberately absent** — see §8.1. Add it back only together with a decision
+that epic B owns tab persistence.
 
 Out of scope for that criterion, and for epic B: any authority behaviour, any settings
 inheritance, the agent, the worktree list, and any change to the tree's grouping axis.
