@@ -24,9 +24,6 @@ export interface ScrollbackControllerOpts {
   snapshotStore: CommandSnapshotStore
   /** Injectable clock. */
   now?: () => number
-  /** The ask affordance's owner (nocx-x8s2.2): forwarded to the block
-   *  manager so every frozen block carries the Ask control. */
-  onAsk?: (blockEl: HTMLElement) => void
   /** Fired after the scrollback is cleared (a `clear` command): the ask
    *  chip's block went with the blocks, so the mode must close — a chip
    *  whose block no longer exists would be an invisible mode. */
@@ -110,7 +107,6 @@ export class ScrollbackController {
     this._blockManager = new BlockManager(this.scrollbackInner, this.xtermLiveContainer, {
       now,
       snapshotStore: opts.snapshotStore,
-      onAsk: opts.onAsk,
       // A DEFERRED freeze landed inside the manager (the fence arrived, or
       // the FENCE_DEFER_MS window elapsed): hand the block's rows to the
       // DOM and settle the live region exactly like a direct freeze, since

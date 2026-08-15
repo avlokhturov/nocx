@@ -366,7 +366,6 @@ func TestAgentAsk_RejectsBadParams(t *testing.T) {
 	}{
 		{"unknown session", func(p map[string]any) { p["sessionId"] = "deadbeef" }},
 		{"empty question", func(p map[string]any) { p["question"] = "" }},
-		{"no references", func(p map[string]any) { p["references"] = []any{} }},
 		{"empty askId", func(p map[string]any) { p["askId"] = "" }},
 		{"empty cwd", func(p map[string]any) { p["cwd"] = "" }},
 		{"region rows out of bounds", func(p map[string]any) {

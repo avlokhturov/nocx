@@ -67,7 +67,9 @@ export class ShellInputTarget implements InputTarget {
   }
 }
 
-export function createRegistry(): InputTargetRegistry {
+export function createRegistry(
+  onActiveChange?: (target: InputTarget) => void,
+): InputTargetRegistry {
   const targets = new Map<string, InputTarget>()
   let activeId: string | undefined
   return {
@@ -78,6 +80,11 @@ export function createRegistry(): InputTargetRegistry {
     setActive(id) {
       if (!targets.has(id)) throw new Error(`input-target: unknown id ${id}`)
       activeId = id
+      // The caret indicator renders the active target (ADR-0004 §3's UI
+      // chip). The registry has no other listeners, so the notification
+      // IS the indicator's refresh signal — the surface that wired it
+      // re-reads active() and repaints (nocx-4wtlh).
+      onActiveChange?.(targets.get(activeId)!)
     },
     active() {
       if (activeId === undefined) throw new Error('input-target: no target registered')

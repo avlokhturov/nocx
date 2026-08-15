@@ -843,3 +843,43 @@ func reopenStore(t *testing.T, path string) (content.ContentDB, error) {
 	}
 	return db, nil
 }
+
+// ── the general question (nocx-4wtlh): zero references is a legal ask ────
+
+// ⌘Enter is the whole gesture for a question that is not about a block: the
+// transaction records the question, its pending run and the answer entry in
+// ONE commit with NO references edges — the model is asked the question and
+// nothing else.
+func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
+	_, led := newLedger(t)
+	res := askOne(t, led, "session-a")
+
+	ctx := context.Background()
+	edges, err := led.Edges(ctx, res.QuestionID)
+	if err != nil {
+		t.Fatalf("Edges: %v", err)
+	}
+	for _, e := range edges {
+		if e.Rel == content.RelReferences {
+			t.Fatalf("general question recorded a references edge: %+v", edges)
+		}
+	}
+	// The run still exists (the question is recorded and answerable): the
+	// question carries a prepared run, and the ANSWER entry carries the
+	// artifact the streamed deltas will land in — the same shape as a
+	// referenced ask, minus the edges.
+	q, err := led.Entry(ctx, res.QuestionID)
+	if err != nil || q == nil {
+		t.Fatalf("question entry: %v (err %v)", q, err)
+	}
+	if len(q.Executions) != 1 || q.Executions[0].State == nil || *q.Executions[0].State != content.RunPrepared {
+		t.Fatalf("question run = %+v, want one prepared execution", q.Executions)
+	}
+	ans, err := led.Entry(ctx, res.AnswerEntryID)
+	if err != nil || ans == nil {
+		t.Fatalf("answer entry: %v (err %v)", ans, err)
+	}
+	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
+		t.Fatalf("answer executions = %+v, want one artifact", ans.Executions)
+	}
+}

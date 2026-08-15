@@ -489,7 +489,16 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				"a referenced frame could not be read", r)
 			return
 		}
-		msgs = append(msgs, assistant.Message{Role: "user", Content: "Referenced frame:\n" + text})
+		// The reference is a REGION: the model gets the pointed-at rows and
+		// no others (design §2.2 — a frozen block frame is the whole block,
+		// and the chip's rows are what the question carries). The durable
+		// frame text is rows joined by '\n' (frameText), and a frozen row
+		// never contains a newline — it was split at mint time — so the
+		// split is exact. A live frame's region is row-scoped the same way;
+		// column sub-ranges are not applied to text.
+		msgs = append(msgs, assistant.Message{
+			Role: "user", Content: "Referenced frame:\n" + sliceFrameText(text, ref.Region),
+		})
 	}
 
 	seq := 0
@@ -743,8 +752,11 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, string) {
 	if strings.TrimSpace(p.Cwd) == "" || utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
 		return content.AgentAsk{}, "cwd is required and bounded"
 	}
-	if len(p.References) == 0 || len(p.References) > maxReferences {
-		return content.AgentAsk{}, "references must carry between 1 and " + strconv.Itoa(maxReferences) + " frame regions"
+	// Zero references is a GENERAL question (nocx-4wtlh): ⌘Enter is the
+	// whole gesture for a question that is not about a block — the ask
+	// transaction and the stream are the same with an empty reference list.
+	if len(p.References) > maxReferences {
+		return content.AgentAsk{}, "references must carry at most " + strconv.Itoa(maxReferences) + " frame regions"
 	}
 	in := content.AgentAsk{
 		ID:         p.AskID,
@@ -775,6 +787,21 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, string) {
 		})
 	}
 	return in, ""
+}
+
+// sliceFrameText narrows a frame's durable text to the rows a reference
+// names: [RowStart, RowEnd), 1-based like the wire's own bounds, clamped to
+// the frame. The durable text is rows joined by '\n' (content.frameText), so
+// the slice is the row span re-joined; an out-of-range region (a frame that
+// shrank) clamps rather than failing the whole ask.
+func sliceFrameText(text string, r content.FrameRegion) string {
+	rows := strings.Split(text, "\n")
+	start := min(max(r.RowStart, 0), len(rows))
+	end := min(max(r.RowEnd, 0), len(rows))
+	if end <= start {
+		return ""
+	}
+	return strings.Join(rows[start:end], "\n")
 }
 
 func wireCursor(c *frameCursorWire) *content.FrameCursor {

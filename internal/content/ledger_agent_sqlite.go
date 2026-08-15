@@ -411,9 +411,6 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 	if strings.TrimSpace(in.Question) == "" {
 		return AgentAskResult{}, errors.New("content: submit agent ask: question is required")
 	}
-	if len(in.References) == 0 {
-		return AgentAskResult{}, errors.New("content: submit agent ask: at least one reference is required")
-	}
 	digest := askDigest(in)
 	var out AgentAskResult
 	err := s.run(ctx, func(ctx context.Context) error {

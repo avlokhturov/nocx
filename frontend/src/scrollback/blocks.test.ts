@@ -1702,16 +1702,14 @@ describe('BlockManager.addAnswerBlock', () => {
   })
 })
 
-// ── The ask affordance (nocx-x8s2.2) ─────────────────────────────────────
-// A frozen command block carries an Ask control with exactly one action:
-// raise the ask mode for THAT block. It is never on running blocks or
-// answer blocks, its click never reads as a block-selection gesture (AD-8:
-// selection is copy; activation is this button), and the manager's frozen
-// blocks carry it only when the manager was wired with the callback.
-describe('the ask affordance (nocx-x8s2.2)', () => {
-  it('a frozen block with onAsk carries the Ask control; clicking it reports the block', () => {
+// ── No per-block ask control (nocx-4wtlh) ─────────────────────────────────
+// The ask entry is the gesture at the prompt (⌘Enter + the caret
+// indicator), not a button on every finished block. A finished block — the
+// exact construction that used to carry `.cmd-ask-btn` — renders no ask
+// control; running blocks and answer blocks never had one either.
+describe('no finished block renders an ask control (nocx-4wtlh)', () => {
+  it('a frozen block carries no ask control', () => {
     const container = document.createElement('div')
-    const onAsk = vi.fn()
     const el = createCommandBlock(
       1,
       'ls',
@@ -1724,126 +1722,70 @@ describe('the ask affordance (nocx-x8s2.2)', () => {
       () => container,
       noopSelect,
       freshStore(),
-      onAsk,
     )
-    const btn = el.querySelector<HTMLButtonElement>('.cmd-ask-btn')
-    expect(btn).not.toBeNull()
-    expect(btn?.getAttribute('aria-label')).toBe('Ask about this block')
-    btn?.click()
-    expect(onAsk).toHaveBeenCalledTimes(1)
-    expect(onAsk).toHaveBeenCalledWith(el)
+    expect(el.querySelector('.cmd-ask-btn')).toBeNull()
+    expect(el.querySelector('[aria-label="Ask about this block"]')).toBeNull()
   })
 
-  it('no onAsk, no control — running blocks and answer blocks never offer it', () => {
+  it('running blocks and answer blocks carry no ask control either', () => {
     const container = document.createElement('div')
-    const frozen = createCommandBlock(
-      1,
-      'ls',
-      '~',
-      '',
-      '',
-      10,
-      0,
-      'success',
-      () => container,
-      noopSelect,
-      freshStore(),
-    )
-    expect(frozen.querySelector('.cmd-ask-btn')).toBeNull()
-
     const running = createRunningBlock(2, 'ls', '~', '', () => container, noopSelect, freshStore())
     expect(running.querySelector('.cmd-ask-btn')).toBeNull()
-  })
 
-  it('the manager wires its frozen blocks with the affordance, and answer blocks never get it', () => {
-    const inner = document.createElement('div')
-    const xtermContainer = document.createElement('div')
-    inner.appendChild(xtermContainer)
-    const onAsk = vi.fn()
-    const manager = new BlockManager(inner, xtermContainer, {
-      snapshotStore: freshStore(),
-      onAsk,
-    })
-    manager.startBlock('ls', '~', 0)
-    const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
-    expect(frozen).not.toBeNull()
-    const btn = frozen!.el.querySelector<HTMLButtonElement>('.cmd-ask-btn')
-    expect(btn).not.toBeNull()
-    btn?.click()
-    expect(onAsk).toHaveBeenCalledWith(frozen!.el)
-
-    const answer = manager.addAnswerBlock('a question', '/')
-    expect(answer.el.querySelector('.cmd-ask-btn')).toBeNull()
-  })
-
-  it("clicking the Ask control never toggles the block's selection", () => {
-    const container = document.createElement('div')
-    const onSelect = vi.fn()
-    const el = createCommandBlock(
-      1,
-      'ls',
-      '~',
-      '',
-      '',
-      10,
-      0,
-      'success',
-      () => container,
-      onSelect,
-      freshStore(),
-      () => {},
-    )
-    const btn = el.querySelector<HTMLButtonElement>('.cmd-ask-btn')!
-    // A full press on the control: mousedown + mouseup + click.
-    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
-    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
-    btn.click()
-    expect(el.classList.contains('cmd-block-selected')).toBe(false)
-    expect(onSelect).not.toHaveBeenCalled()
-  })
-
-  it('blockCommandText reads the header, and the recorded command when the ack landed', () => {
-    const container = document.createElement('div')
-    const el = createCommandBlock(
-      1,
-      'ssh pi@host',
-      '~',
-      '',
-      '',
-      10,
-      0,
-      'success',
-      () => container,
-      noopSelect,
-      freshStore(),
-    )
-    expect(blockCommandText(el)).toBe('ssh pi@host')
-    el.dataset.recordedCommand = 'ssh pi@***'
-    expect(blockCommandText(el)).toBe('ssh pi@***')
-  })
-
-  it('selectBlock is a non-toggle single-select: the id and the class move together', () => {
     const inner = document.createElement('div')
     const xtermContainer = document.createElement('div')
     inner.appendChild(xtermContainer)
     const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
-    manager.startBlock('a', '~', 0)
-    const a = manager.freezeBlock((y) => (y === 0 ? new BufferLine('a') : undefined), 0, 0)!.el
-    manager.startBlock('b', '~', 0)
-    const b = manager.freezeBlock((y) => (y === 0 ? new BufferLine('b') : undefined), 0, 0)!.el
-
-    manager.selectBlock(a)
-    expect(a.classList.contains('cmd-block-selected')).toBe(true)
-    expect(manager.selectedBlockId).toBe(manager.blocks.find((r) => r.el === a)?.id ?? null)
-
-    // Selecting the SAME block again does not toggle it off.
-    manager.selectBlock(a)
-    expect(a.classList.contains('cmd-block-selected')).toBe(true)
-
-    // Selecting another moves the selection.
-    manager.selectBlock(b)
-    expect(a.classList.contains('cmd-block-selected')).toBe(false)
-    expect(b.classList.contains('cmd-block-selected')).toBe(true)
-    expect(manager.selectedBlockId).toBe(manager.blocks.find((r) => r.el === b)?.id ?? null)
+    manager.startBlock('ls', '~', 0)
+    const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    expect(frozen).not.toBeNull()
+    expect(frozen!.el.querySelector('.cmd-ask-btn')).toBeNull()
+    const answer = manager.addAnswerBlock('a question', '/')
+    expect(answer.el.querySelector('.cmd-ask-btn')).toBeNull()
   })
+})
+
+it('blockCommandText reads the header, and the recorded command when the ack landed', () => {
+  const container = document.createElement('div')
+  const el = createCommandBlock(
+    1,
+    'ssh pi@host',
+    '~',
+    '',
+    '',
+    10,
+    0,
+    'success',
+    () => container,
+    noopSelect,
+    freshStore(),
+  )
+  expect(blockCommandText(el)).toBe('ssh pi@host')
+  el.dataset.recordedCommand = 'ssh pi@***'
+  expect(blockCommandText(el)).toBe('ssh pi@***')
+})
+
+it('selectBlock is a non-toggle single-select: the id and the class move together', () => {
+  const inner = document.createElement('div')
+  const xtermContainer = document.createElement('div')
+  inner.appendChild(xtermContainer)
+  const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
+  manager.startBlock('a', '~', 0)
+  const a = manager.freezeBlock((y) => (y === 0 ? new BufferLine('a') : undefined), 0, 0)!.el
+  manager.startBlock('b', '~', 0)
+  const b = manager.freezeBlock((y) => (y === 0 ? new BufferLine('b') : undefined), 0, 0)!.el
+
+  manager.selectBlock(a)
+  expect(a.classList.contains('cmd-block-selected')).toBe(true)
+  expect(manager.selectedBlockId).toBe(manager.blocks.find((r) => r.el === a)?.id ?? null)
+
+  // Selecting the SAME block again does not toggle it off.
+  manager.selectBlock(a)
+  expect(a.classList.contains('cmd-block-selected')).toBe(true)
+
+  // Selecting another moves the selection.
+  manager.selectBlock(b)
+  expect(a.classList.contains('cmd-block-selected')).toBe(false)
+  expect(b.classList.contains('cmd-block-selected')).toBe(true)
+  expect(manager.selectedBlockId).toBe(manager.blocks.find((r) => r.el === b)?.id ?? null)
 })
