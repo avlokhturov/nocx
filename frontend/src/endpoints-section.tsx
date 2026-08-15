@@ -22,6 +22,7 @@ import { IconButton } from './ui/icon-button'
 import { PencilIcon, TrashIcon } from './ui/icons'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
+import { SuggestionField } from './ui/suggestion-field'
 import { TextField } from './ui/text-field'
 import { absoluteHttpUrl, combine, createFormValidation, required } from './ui/validation'
 import { createSubmitGate } from './ui/submit-gate'
@@ -464,14 +465,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     )
   }
 
-  function renderModelRow(row: ModelDraft, index: number) {
+  function renderModelRow(row: () => ModelDraft, index: number) {
     return (
       <div class="ep-model-row">
-        <TextField
+        <SuggestionField
           id={`endpoint-model-${index}-name`}
           label="Model id"
           required
-          value={row.name}
+          value={row().name}
           onInput={(v) => updateModel(index, { name: v })}
           onBlur={() => validation.touch('models')}
           onFocus={() => void discoverModels()}
@@ -485,7 +486,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         <TextField
           id={`endpoint-model-${index}-alias`}
           label="Picker label"
-          value={row.alias}
+          value={row().alias}
           onInput={(v) => updateModel(index, { alias: v })}
           placeholder="Optional"
         />

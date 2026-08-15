@@ -27,6 +27,7 @@
 @import './styles/components/button.css';
 @import './styles/components/text-field.css';
 @import './styles/components/search-field.css';
+@import './styles/components/suggestion-field.css';
 @import './styles/components/select.css';
 @import './styles/components/floating-panel.css';
 @import './styles/components/checkbox.css';

@@ -2083,12 +2083,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       ])
     }
 
-    function renderForwardRow(row: ForwardSpec, index: number): JSX.Element {
+    function renderForwardRow(row: () => ForwardSpec, index: number): JSX.Element {
       return (
         <div class="cm-forward-row">
           <Field for={`forward-${index}-direction`} label="Direction">
             <Select
-              value={row.direction}
+              value={row().direction}
               onChange={(v) => updateForward(index, { direction: v as ForwardDirection })}
               options={FORWARD_DIRECTIONS.map((d) => ({ value: d, label: d }))}
             />
@@ -2096,7 +2096,7 @@ export function ConnectionsView(props: ConnectionsViewProps) {
           <TextField
             id={`forward-${index}-bindhost`}
             label="Bind host"
-            value={row.bindHost ?? ''}
+            value={row().bindHost ?? ''}
             placeholder="127.0.0.1"
             onInput={(v) => updateForward(index, { bindHost: v || undefined })}
           />
@@ -2105,17 +2105,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             label="Bind port"
             type="number"
             min={0}
-            value={row.bindPort != null ? String(row.bindPort) : '0'}
+            value={row().bindPort != null ? String(row().bindPort) : '0'}
             onInput={(v) => {
               const n = parseInt(v, 10)
               updateForward(index, { bindPort: isNaN(n) ? 0 : n })
             }}
           />
-          <Show when={row.direction !== 'dynamic'}>
+          <Show when={row().direction !== 'dynamic'}>
             <TextField
               id={`forward-${index}-destination`}
               label="Destination"
-              value={row.destination ?? ''}
+              value={row().destination ?? ''}
               placeholder="host:port"
               onInput={(v) => updateForward(index, { destination: v })}
             />

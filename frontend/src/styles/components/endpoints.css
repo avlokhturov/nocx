@@ -38,7 +38,8 @@
   gap: var(--space-4);
 }
 
-.ep-model-row .ui-text-field {
+.ep-model-row .ui-text-field,
+.ep-model-row .ui-suggestion-field {
   flex: 1 1 0;
   min-width: 0;
 }
