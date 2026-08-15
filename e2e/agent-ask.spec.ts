@@ -421,6 +421,16 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const base = fake.requests().length
     fake.setScript({ chunks: ['ok ', marker] })
     await clickAsk(block)
+    // The chip names the block before the question is sent; then the
+    // question goes out and the completion lands — the ask must actually be
+    // SENT for there to be a completion to inspect.
+    await expect(block.locator(ASK_CHIP).locator('.ui-block-receipt__value')).toHaveText(
+      `echo ${marker}`,
+    )
+    const input = page.locator(INPUT)
+    await expect(input).toBeFocused({ timeout: 10_000 })
+    await input.fill('What did it print?')
+    await page.keyboard.press('Enter')
     const req = await fake.waitForRequests(base + 1)
     expect(req[base].path.endsWith('/chat/completions')).toBe(true)
     expect(req[base].headers['http-referer']).toBe('https://nocx.dev')
@@ -543,16 +553,18 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await newDialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
     await expect(newDialog).not.toBeVisible({ timeout: 10_000 })
 
-    // ── Stored credential, blank key field ──────────────────────────────
-    // Open the saved endpoint for editing. The key field is BLANK by
-    // design (ADR-0030 §3 — the material never crosses back), and the
-    // probe must still authenticate with the credential the endpoint
-    // OWNS, resolved by the backend from the vault.
+    // ── Stored credential: the key SOURCE is the bound row ──────────────
+    // Open the saved endpoint for editing. The key material never crosses
+    // back (ADR-0030 §3): the source control (nocx-rzjw) opens on "Use
+    // existing secret" with the bound row — there is no key input at all,
+    // and the probe must still authenticate with the credential the
+    // endpoint OWNS, resolved by the backend from the vault.
     await page.getByRole('button', { name: `Edit ${name}` }).click()
     const editDialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
     await expect(editDialog).toBeVisible()
-    const keyInput = editDialog.locator('#endpoint-key')
-    await expect(keyInput).toHaveValue('')
+    const picker = editDialog.locator('select')
+    await expect(picker).toBeVisible()
+    await expect(picker).toHaveValue(/^secrow:/)
     // The button must be ENABLED before the click: it is disabled while a
     // probe is in flight (testDisabled = probing()), and a click on a
     // disabled button is silently swallowed — leaving the dialog without a
@@ -570,12 +582,17 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // The probe succeeded end to end — a streamed answer through the real
     // backend, not merely a request that arrived.
     await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
-    // The key was never sent back to the renderer: the field is still
-    // blank after a probe that resolved the stored material.
-    await expect(keyInput).toHaveValue('')
+    // The material was never sent back to the renderer: the source is still
+    // the bound row after a probe that resolved the stored material.
+    await expect(picker).toHaveValue(/^secrow:/)
 
     // ── A key typed into the form WINS over the stored one ──────────────
     const typedKey = `typed-key-${nonce}`
+    // Switching the source to "Type a new one" reveals the EMPTY password
+    // field — an input, never a stored value.
+    await editDialog.getByRole('radio', { name: 'Type a new one' }).click()
+    const keyInput = editDialog.locator('#endpoint-key')
+    await expect(keyInput).toHaveValue('')
     await keyInput.fill(typedKey)
     await expect(testButton).toBeEnabled()
     const typedBase = fake.requests().length

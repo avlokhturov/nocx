@@ -33,8 +33,10 @@ const devharnessBin = () => readStand().devharness
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-settings-section-nav-item[data-section="AI Endpoints"]'
-const SETTINGS_VAULT_NAV = '.ui-settings-section-nav-item[data-section="Vault"]'
+// The settings rail rework (grouped-rail) replaced the section-nav classes;
+// the rail rows are .ui-grouped-nav__item keyed by the page id.
+const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
+const SETTINGS_VAULT_NAV = '.ui-grouped-nav__item[data-item="vault"]'
 
 const test = base
 const nonce = Date.now().toString(36)
