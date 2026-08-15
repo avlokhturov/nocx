@@ -1146,6 +1146,60 @@ describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
     }
   })
 
+  // ADR-0024 decision 9 across an AD-9 reconnect. The acknowledgement is what
+  // flushes the backend's pending ACCEPT; nothing else does. An ack that was
+  // in flight when the socket dropped is rejected by the dispatcher
+  // (rejectAllPending) and the backend never saw it, so its accept is still
+  // pending — and the reattach replay carries the SAME generation, because
+  // only a fresh shell hello mints a new one. The renderer must therefore
+  // treat "sent" and "landed" as different states: claiming the generation
+  // optimistically suppressed the one retry that could still complete the
+  // handshake, and the tab stayed conventional until the accept expired.
+  it('re-acknowledges the replayed generation when the first acknowledgement never landed', async () => {
+    const client = makeClient()
+    const acks: unknown[] = []
+    let failNext = true
+    client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
+      if (method !== 'lifecycle.establishAck') return Promise.resolve({})
+      acks.push(params)
+      if (failNext) {
+        failNext = false
+        return Promise.reject(new Error('ws closed'))
+      }
+      return Promise.resolve({ accepted: true })
+    })
+    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = lifecycleHandler(client)
+      const fact = {
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      }
+      handler(fact)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(acks).toHaveLength(1)
+
+      // The reattach replay: same lane, same domain, same generation.
+      handler(fact)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(acks).toHaveLength(2)
+
+      // And once it HAS landed, a further replay is not acknowledged again —
+      // the accept is flushed and a second ack would only be refused.
+      handler(fact)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(acks).toHaveLength(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('a prompt_ready fact shows the editor and a native fact hides it — through the dispatcher seam', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)

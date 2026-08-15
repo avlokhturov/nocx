@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -339,6 +340,25 @@ func TestSFTPFSRename_WithoutPosixExtensionKeepsPriorActivation(t *testing.T) {
 	}
 	if !verified.Installed || verified.Version != "1" || verified.Generation != "v1" {
 		t.Fatalf("verified activation = %+v, want prior installed v1", verified)
+	}
+
+	// The refusal must CONVERGE, not merely preserve. cleanupOrphans — the
+	// sweep that bounds tmp/ — runs only on the success path, and the nonce
+	// is fresh per attempt, so an unsupported server that is reconnected to
+	// every day would otherwise gain one dead manifest per connect forever.
+	for i := 0; i < 3; i++ {
+		if _, perr := pub.Publish(testBundle("2")); perr == nil {
+			t.Fatalf("upgrade attempt %d unexpectedly succeeded", i)
+		}
+	}
+	leftovers, rerr := os.ReadDir(filepath.Join(root, tmpName))
+	if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+		t.Fatalf("read tmp dir: %v", rerr)
+	}
+	for _, e := range leftovers {
+		if strings.HasPrefix(e.Name(), "manifest-") {
+			t.Fatalf("a refused upgrade left %d tmp entries behind, first %q", len(leftovers), e.Name())
+		}
 	}
 }
 

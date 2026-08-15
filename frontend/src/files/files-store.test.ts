@@ -284,7 +284,10 @@ describe('files tree store', () => {
     // The chain / → home → alice is expanded, INCLUDING the target: a cd
     // says what the user is now looking at, so answering with a closed
     // folder they must click makes them do the work twice.
+    // The superseded walk's own answer is kept: the row is not left spinning.
     expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(nodeRows(store, 'home').busy).toBe(false)
+    expect(nodeRows(store, 'home').state).toBe('ok')
     expect(nodeRows(store, 'alice').expanded).toBe(true)
     // The walk listed the levels it had to descend through: / (to find
     // home — once more than the openScope listing, because the root's
@@ -303,7 +306,10 @@ describe('files tree store', () => {
 
     expect(store.phase()).toBe('ready')
     expect(store.revealTarget()).toBe('/home/alice')
+    // The superseded walk's own answer is kept: the row is not left spinning.
     expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(nodeRows(store, 'home').busy).toBe(false)
+    expect(nodeRows(store, 'home').state).toBe('ok')
   })
 
   it('reveal never collapses a directory the user expanded', async () => {
@@ -427,7 +433,10 @@ describe('files tree store', () => {
 
     expect(store.revealTarget()).toBeNull()
     // /home is expanded (the walk descended it), nothing deeper.
+    // The superseded walk's own answer is kept: the row is not left spinning.
     expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(nodeRows(store, 'home').busy).toBe(false)
+    expect(nodeRows(store, 'home').state).toBe('ok')
     expect(store.rows().some((r) => r.kind === 'entry' && r.node.name === 'nobody')).toBe(false)
   })
 
@@ -884,6 +893,52 @@ describe('files tree store', () => {
     // never one per level, which would make a deep remote cwd quadratic.
     expect(watch).toHaveBeenCalledTimes(2)
     expect(watch).toHaveBeenLastCalledWith('b1', ['/', '/home', '/home/alice'])
+  })
+
+  // The set changes when a listing SUCCEEDS, not when a walk decides to
+  // expand — and those are different moments with an await between them. A
+  // walk superseded in that gap never reaches its own end, so nothing at the
+  // walk level can publish what it opened: reveal /home/alice expands /home
+  // and starts listing it, `cd /` supersedes the walk and lands instantly
+  // with nothing of its own to add, and /home is left rendered and outside
+  // the backend's watch set — a directory the user is looking at that never
+  // reports a change again.
+  it('a superseded reveal still watches the level it opened, once its listing lands', async () => {
+    const homeList = deferred<FilesListResult>()
+    const watch = vi.fn().mockResolvedValue({ mode: 'watching' })
+    const list = vi.fn().mockImplementation((bindingId: string, path: string) => {
+      if (path === '/')
+        return Promise.resolve(
+          listOk('C:/', [
+            entry({ name: 'home', path: '/home', kind: 'dir' }),
+            entry({ name: 'a.txt', path: '/a.txt' }),
+          ]),
+        )
+      if (path === '/home') return homeList.promise
+      return Promise.resolve(listOk('C:/home/alice', []))
+    })
+    const store = createFilesTreeStore(makeServices({ watch, list }))
+    store.rescope(LOCAL_A)
+    await settle()
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
+
+    // Walk 1 expands /home and blocks on its listing.
+    store.revealPath('/home/alice')
+    await settle()
+    // Walk 2 lands immediately: a file opens nothing and ends the walk.
+    store.revealPath('/a.txt')
+    await settle()
+
+    homeList.resolve(
+      listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })]),
+    )
+    await settle()
+
+    // The superseded walk's own answer is kept: the row is not left spinning.
+    expect(nodeRows(store, 'home').expanded).toBe(true)
+    expect(nodeRows(store, 'home').busy).toBe(false)
+    expect(nodeRows(store, 'home').state).toBe('ok')
+    expect(watch).toHaveBeenLastCalledWith('b1', ['/', '/home'])
   })
 
   it('a files.changed for a loaded path triggers exactly one re-list and expansion survives', async () => {

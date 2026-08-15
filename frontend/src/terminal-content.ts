@@ -311,11 +311,22 @@ export class TerminalContent extends BaseTabContent {
    *  be sighted more than once before the await resolves, and only the
    *  first sighting may claim the episode. */
   private _recoveryAcking = false
-  /** Last establishment generation acknowledged by this tab. Replays are
-   *  intentionally idempotent; the same published projection may arrive from
-   *  a live transition and the post-open/reconnect replay, but only one
-   *  acknowledgement may claim a generation. */
-  private _establishmentAckedGeneration: string | null = null
+  /** The establishment generation whose acknowledgement is in flight, and the
+   *  one whose acknowledgement the backend accepted. Replays are intentionally
+   *  idempotent — the same projection may arrive from a live transition and
+   *  again from the post-open or post-reattach replay — so a generation is
+   *  claimed once while its ack is outstanding and permanently once it lands.
+   *
+   *  The two are kept apart because a FAILED ack must not count as one. An
+   *  ack in flight when the socket drops is rejected by the dispatcher
+   *  (rejectAllPending), and the backend never saw it: its pending ACCEPT is
+   *  still unflushed, and the reattach replay carries that same generation
+   *  because only a fresh shell hello mints a new one. Collapsing both states
+   *  into "acknowledged" made the renderer suppress the one retry that could
+   *  have completed the handshake, leaving the tab conventional until the
+   *  accept expired. */
+  private _establishmentAckInFlight: string | null = null
+  private _establishmentAcked: string | null = null
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -1553,23 +1564,40 @@ export class TerminalContent extends BaseTabContent {
         if (
           fact.lifecycle === 'prompt_ready' &&
           fact.generation &&
-          fact.generation !== this._establishmentAckedGeneration &&
+          fact.generation !== this._establishmentAckInFlight &&
+          fact.generation !== this._establishmentAcked &&
           this.session
         ) {
-          this._establishmentAckedGeneration = fact.generation
+          const generation = fact.generation
+          this._establishmentAckInFlight = generation
           new LifecycleClient(this.client.dispatcher)
             .establishAck(
               this.session.sessionId,
               fact.lane,
               fact.domain ?? '',
               fact.epoch ?? 0,
-              fact.generation,
+              generation,
             )
+            .then(() => {
+              // Only a landed acknowledgement retires the generation. The
+              // backend has flushed the accept, so a later replay of the
+              // same projection needs no second ack.
+              this._establishmentAcked = generation
+              if (this._establishmentAckInFlight === generation) {
+                this._establishmentAckInFlight = null
+              }
+            })
             .catch((e: unknown) => {
-              // A refusal is the backend's own bookkeeping (stale
-              // generation, superseded establishment, replaced
-              // subscriber). The accept stays unflushed and the session
-              // stays conventional — safe, and nothing to retry here.
+              // Release the claim: this generation was NOT acknowledged, and
+              // a replay carrying it again — the reattach case, where only a
+              // fresh shell hello would have minted a new one — is the retry
+              // that can still complete the handshake.
+              //
+              // A refusal is usually the backend's own bookkeeping (stale
+              // generation, superseded establishment, replaced subscriber),
+              // and then the replay simply does not come. Retrying costs one
+              // refused call in that case and recovers the session in the
+              // case that matters, so releasing is the safe direction.
               //
               // The MESSAGE, not just the error object: five distinct
               // backend rules all refuse with -32603, and logging the
@@ -1580,9 +1608,12 @@ export class TerminalContent extends BaseTabContent {
               // "unknown" across three triage rounds (nocx-cbtc). The
               // backend names the rule in its own log; this is the half a
               // trace carries.
+              if (this._establishmentAckInFlight === generation) {
+                this._establishmentAckInFlight = null
+              }
               log.warn('nocx: establishment acknowledgement refused', {
                 reason: e instanceof Error ? e.message : String(e),
-                generation: fact.generation,
+                generation,
                 lane: fact.lane,
                 domain: fact.domain ?? '',
                 epoch: fact.epoch ?? 0,
