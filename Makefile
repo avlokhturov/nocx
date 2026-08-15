@@ -363,7 +363,8 @@ ci-frontend:
 	./scripts/ci-frontend.sh
 
 ci-e2e:
-	@echo "=== ci-e2e: ci.yml's e2e job, the same image and command ==="
+	@echo "=== ci-e2e: ci.yml's e2e jobs, the same image and command ==="
+	@echo "    (CI runs one job per browser in parallel; this runs both in sequence)"
 	./e2e/run-in-container.sh
 
 lint-ci:

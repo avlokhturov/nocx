@@ -303,9 +303,17 @@ func TestSaturationRefusalEmitsSafeDebugDiagnostic(t *testing.T) {
 	srv.methods["test.innerRefusal"] = reg(
 		control.NewBoundedSubmission(control.NewSemaphore("test-dispatch", 1)),
 		"test.innerRefusal",
-		func(w *wsConn, _ *connState) handlerFunc {
+		// The merge: every method now declares a params validator (a method
+		// without one stopped building, nocx-q27y) and writes through the
+		// Responder, which is what the sealed normalizer wraps (nocx-k41yv).
+		// This one accepts what the call sends — the payload IS the fixture
+		// here (the diagnostic must not echo it back), so validating it away
+		// would delete the thing under test.
+		params(func(json.RawMessage) string { return "" }),
+		func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			_ = w
 			return func(_ context.Context, req jsonrpcRequest) {
-				answerOperationRefusal(w, req, &capability.RefusedError{
+				answerOperationRefusal(r, req, &capability.RefusedError{
 					Rejection: control.Rejection{
 						Reason: "inner capacity exhausted: " + innerRequestValue,
 						Scope:  "config",

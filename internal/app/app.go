@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/completion"
@@ -59,12 +60,6 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
-
-	// UnlockRequester lets backend code request a vault unlock from the
-	// user (the second direction, nocx-25k9.22). Behind an interface so
-	// app.New() never reaches into the transport directly (AD-8). Set
-	// from the transport after construction.
-	UnlockRequester transport.UnlockRequester
 
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
@@ -383,6 +378,13 @@ func New(opts ...Option) (*App, error) {
 	if logLevel == slog.LevelDebug {
 		logger.Info("log level", "level", "debug", "var", logLevelEnvVar)
 	}
+
+	// The logrus containment (design §4.1): logrus arrives compiled-in
+	// through eino's dependency graph (compose → schema → gonja/exec), and
+	// nothing from it reaches stderr around our one slog-backed interface.
+	// The redirect is process-global and idempotent — see
+	// logrus_containment.go, and the receipt test that pins it.
+	installLogrusContainment(logger)
 
 	shint := shellintegration.New(logger)
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
@@ -739,6 +741,18 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+
+	// The assistant engine (nocx-edio): eino behind the guarded HTTP
+	// client, wired at the composition root like every other client —
+	// before this line the whole package was reachable from its own tests
+	// and nowhere else (AGENTS.md check 5). The probe store is
+	// process-lifetime: agent.status's "last probe result" fact, whose
+	// meaning expires with the endpoint that produced it.
+	assistantProbes := assistant.NewProbeStore()
+	tpOpts = append(tpOpts,
+		transport.WithAssistantClient(assistant.NewClient(logger)),
+		transport.WithAssistantProbeStore(assistantProbes),
+	)
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the
@@ -748,8 +762,8 @@ func New(opts ...Option) (*App, error) {
 
 	// One resolver, one consumer family: connections.test probes and
 	// ordinary connects resolve identically. Created after tp so the
-	// UnlockRequester (the second direction, nocx-25k9.22) can be wired
-	// into every ConnectConfig the resolver builds.
+	// connection-password ask (the second direction, nocx-v64o) can be
+	// wired into every ConnectConfig the resolver builds.
 	//
 	// The SFTP carrier (nocx-mlm7 P8) is wired here and nowhere else: the
 	// same shellintegration.Impl the in-band bootstrap uses satisfies
@@ -806,7 +820,6 @@ func New(opts ...Option) (*App, error) {
 	resolver := connection.NewResolver(
 		profileStore, profileStore, v,
 		connection.WithConfigResolver(sshCfgResolver),
-		connection.WithUnlockRequester(tp.RequestUnlock),
 		connection.WithPasswordAsker(tp.RequestConnectionPassword),
 		connection.WithSecretCreator(v),
 		connection.WithRemoteInstaller(shint),
@@ -823,7 +836,6 @@ func New(opts ...Option) (*App, error) {
 		vaultCloser:      v,
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
-		UnlockRequester:  tp,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,
