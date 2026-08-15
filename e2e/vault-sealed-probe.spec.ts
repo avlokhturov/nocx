@@ -32,7 +32,6 @@ import { FakeOpenAI } from './fake-openai'
 const devharnessBin = () => readStand().devharness
 
 const TITLE = '.nocx-tab-title'
-const INPUT = '.pane.active .nocx-editor-input'
 // The rail is selected by PAGE ID, not by display title (nocx-dgsp): the
 // pages here are titled Endpoints (under the Assistant group) and Protection
 // (under Vault), and neither rename touches these selectors.
