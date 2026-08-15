@@ -2145,11 +2145,34 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		return
 	}
 
-	if err := wconn.TryNotify("exit", mustMarshal(map[string]string{
-		"sessionId": string(sess.ID()),
+	// The cause discriminates an authoritative shell exit (with its status)
+	// from a loss, so a tab whose ssh connection dropped is marked instead
+	// of destroyed (nocx-ictcq). The classification is the session layer's
+	// single owner; here the outcome is only mapped onto the wire fields.
+	cause, status := sess.ExitOutcome()
+	var statusPtr *int
+	if cause == session.ExitExited {
+		statusPtr = &status
+	}
+	if err := wconn.TryNotify("exit", mustMarshal(exitNotificationParams{
+		SessionID: string(sess.ID()),
+		Cause:     string(cause),
+		Status:    statusPtr,
 	})); err != nil {
 		s.log.Debug("write exit notification", "error", err)
 	}
+}
+
+// exitNotificationParams is the exit notification payload, declared once
+// (contracts/exit.schema.json) and pinned by the contract tests: a closed-set
+// cause discriminating an authoritative shell exit from a loss, with the
+// exit status present exactly when the cause is "exited". additionalProperties
+// is false on the schema, so a field added here but not declared there fails
+// the DTO contract check (AD-8).
+type exitNotificationParams struct {
+	SessionID string `json:"sessionId"`
+	Cause     string `json:"cause"`
+	Status    *int   `json:"status,omitempty"`
 }
 
 // notifyInputStalled tells the tab that its keystrokes are being dropped:

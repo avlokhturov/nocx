@@ -470,7 +470,10 @@ func (f *fakeSession) StartOutput(context.Context, session.OutputHandler) error 
 	return nil
 }
 func (f *fakeSession) ShellIntegrationReason() ssh.RefusalReason { return "" }
-func (f *fakeSession) SSHOptions() []ssh.ConnectOption           { return f.sshOpts }
+func (f *fakeSession) ExitOutcome() (session.ExitCause, int) {
+	return session.ExitInterrupted, 0
+}
+func (f *fakeSession) SSHOptions() []ssh.ConnectOption { return f.sshOpts }
 
 // fakeHistoryRepo is a minimal content.CommandHistoryRepository.
 type fakeHistoryRepo struct {

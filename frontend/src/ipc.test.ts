@@ -456,21 +456,74 @@ describe('inbound data', () => {
 })
 
 describe('exit notification', () => {
-  it('fires onExit for this session', async () => {
+  it('delivers an interrupted exit for a session the backend lost', async () => {
     const { session, ws } = await connectedSession()
     const exited: string[] = []
-    session.onExit((sid) => exited.push(sid))
+    session.onExit((exit) => exited.push(`${exit.sessionId}:${exit.cause}`))
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'interrupted' },
+    })
+    expect(exited).toEqual([`${SID}:interrupted`])
+  })
+
+  it('delivers a clean exit with its status', async () => {
+    const { session, ws } = await connectedSession()
+    const exited: Array<{ sid: string; status?: number }> = []
+    session.onExit((exit) =>
+      exited.push(
+        exit.cause === 'exited'
+          ? { sid: exit.sessionId, status: exit.status }
+          : { sid: exit.sessionId },
+      ),
+    )
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'exited', status: 42 },
+    })
+    expect(exited).toEqual([{ sid: SID, status: 42 }])
+  })
+
+  // An exit whose cause is missing or unknown reads as a loss, never as a
+  // clean exit: a wrongly-marked tab is recoverable, a wrongly destroyed
+  // tab is lost work (nocx-ictcq). One delivery per session — the exit
+  // handler removes the session, so a second notification cannot reach it.
+  it('treats an absent cause as a loss', async () => {
+    const { session, ws } = await connectedSession()
+    const exited: string[] = []
+    session.onExit((exit) => exited.push(exit.cause))
 
     ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
-    expect(exited).toEqual([SID])
+    expect(exited).toEqual(['interrupted'])
+  })
+
+  it('treats an unknown cause as a loss', async () => {
+    const { session, ws } = await connectedSession()
+    const exited: string[] = []
+    session.onExit((exit) => exited.push(exit.cause))
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'the-wind' },
+    })
+    expect(exited).toEqual(['interrupted'])
   })
 
   it('ignores an exit for another session', async () => {
     const { session, ws } = await connectedSession()
     const exited: string[] = []
-    session.onExit((sid) => exited.push(sid))
+    session.onExit((exit) => exited.push(exit.sessionId))
 
-    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: OTHER_SID } })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: OTHER_SID, cause: 'interrupted' },
+    })
     expect(exited).toEqual([])
   })
 
@@ -478,7 +531,11 @@ describe('exit notification', () => {
     const { session, ws } = await connectedSession()
     session.onExit(() => {})
 
-    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'interrupted' },
+    })
 
     session.send('echo leak\n')
     expect(ws.binaryFrames()).toHaveLength(0)
@@ -617,10 +674,14 @@ describe('multi-session', () => {
     const { sessionA, sessionB, ws } = await twoSessions()
     const exitedA: string[] = []
     const exitedB: string[] = []
-    sessionA.onExit((sid) => exitedA.push(sid))
-    sessionB.onExit((sid) => exitedB.push(sid))
+    sessionA.onExit((exit) => exitedA.push(exit.sessionId))
+    sessionB.onExit((exit) => exitedB.push(exit.sessionId))
 
-    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'interrupted' },
+    })
     expect(exitedA).toEqual([SID])
     expect(exitedB).toEqual([])
   })
@@ -954,12 +1015,12 @@ describe('reconnect and reattach', () => {
     expect(state.get(SID)?.offset).toBe(99)
   })
 
-  it('drops session locally on attach error', async () => {
+  it('a failed reattach delivers a loss, never a clean exit', async () => {
     const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
-    const exited: string[] = []
-    session.onExit((sid) => exited.push(sid))
+    const exits: Array<{ sid: string; cause: string }> = []
+    session.onExit((exit) => exits.push({ sid: exit.sessionId, cause: exit.cause }))
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
@@ -984,7 +1045,11 @@ describe('reconnect and reattach', () => {
 
     await Promise.resolve() // P1 rejection → P2 rejection
     await Promise.resolve() // P2 rejection → catch handler fires
-    expect(exited).toEqual([SID])
+    // The reattach-failure path is a LOSS: the tab consumes this as
+    // "mark, never destroy" (nocx-ictcq). Delivering a clean exit here
+    // would close the tab exactly when its session went away — the bug
+    // this bead was reopened for.
+    expect(exits).toEqual([{ sid: SID, cause: 'interrupted' }])
   })
 
   it('sends attach for multiple sessions on reconnect', async () => {

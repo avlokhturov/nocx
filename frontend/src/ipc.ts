@@ -1,5 +1,6 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
+import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
@@ -161,8 +162,12 @@ interface SessionState {
   // response, so the initial shell prompt can race the caller's
   // session.onData() — without this buffer the prompt is silently lost.
   pendingData: string
-
-  exitCallback: ((sessionId: string) => void) | null
+  // exitCallback receives the wire Exit (contracts/exit.schema.json): the
+  // closed-set cause separating an authoritative shell exit (with its
+  // status) from a loss. The failed-reattach path delivers a loss with the
+  // same object, so a tab that lost its backend session is treated exactly
+  // like a tab whose channel died — marked, never destroyed (nocx-ictcq).
+  exitCallback: ((exit: Exit) => void) | null
   resetCallback: (() => void) | null
 
   // Fires when the backend reports that this session's write queue refused
@@ -208,7 +213,7 @@ export class SessionHandle {
     this.client.onSessionData(this.sessionId, cb)
   }
 
-  onExit(cb: (sessionId: string) => void): void {
+  onExit(cb: (exit: Exit) => void): void {
     this.client.onSessionExit(this.sessionId, cb)
   }
 
@@ -289,7 +294,13 @@ export class WSClient {
             return 'resumed' as const
           })
           .catch(() => {
-            state.exitCallback?.(sid)
+            // A reattach that failed is a loss, not an exit: the backend no
+            // longer holds the session, and the tab must be marked, never
+            // destroyed (nocx-ictcq). Delivered through the SAME callback
+            // as the backend's exit notification, with the same closed-set
+            // cause, so a fix that only touches the notification's sender
+            // leaves this path uncaused and the tab still dies on it.
+            state.exitCallback?.({ sessionId: sid, cause: 'interrupted' })
             this.sessions.delete(sid)
             return 'lost' as const
           }),
@@ -306,13 +317,27 @@ export class WSClient {
       })
     })
 
-    // Handle server-initiated exit notifications.
+    // Handle server-initiated exit notifications. The cause is the closed
+    // set of contracts/exit.schema.json: "exited" (the shell exited, with
+    // its status) or "interrupted" (a loss). A cause that is neither — or
+    // absent, from a peer that predates the contract — is treated as a
+    // loss, deliberately: a wrongly-marked tab is recoverable, a wrongly
+    // destroyed tab is lost work, so the safe direction is to never close
+    // on ambiguous data.
     this.dispatcher.subscribe('exit', (params: unknown) => {
       if (!params || typeof params !== 'object') return
-      const sid = (params as Record<string, unknown>).sessionId
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
       if (typeof sid !== 'string') return
+      const isExited = raw.cause === 'exited' && Number.isInteger(raw.status)
+      // A loss never carries a status; an exited event missing its status is
+      // malformed and reads as a loss too (the schema's exited branch
+      // requires it).
+      const exit: Exit = isExited
+        ? { sessionId: sid, cause: 'exited', status: raw.status as number }
+        : { sessionId: sid, cause: 'interrupted' }
       this._flushAck(sid)
-      this.sessions.get(sid)?.exitCallback?.(sid)
+      this.sessions.get(sid)?.exitCallback?.(exit)
       this.sessions.delete(sid)
     })
 
@@ -526,7 +551,7 @@ export class WSClient {
     }
   }
 
-  onSessionExit(sessionId: string, cb: (sessionId: string) => void): void {
+  onSessionExit(sessionId: string, cb: (exit: Exit) => void): void {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.exitCallback = cb

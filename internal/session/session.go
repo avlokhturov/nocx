@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/ssh"
+	gossh "golang.org/x/crypto/ssh"
 )
 
 type ID string
@@ -36,6 +38,43 @@ type Kind int
 const (
 	KindLocal Kind = iota
 	KindRemote
+)
+
+// ExitCause discriminates how a session ended (nocx-ictcq). It is a closed
+// set — the wire enum — never a free string.
+type ExitCause string
+
+const (
+	// ExitExited is an authoritative terminal event: the shell process
+	// itself exited, and ExitOutcome's status carries its exit status.
+	// "exited" is a new word because no existing vocabulary names a shell's
+	// own exit: the content ledger's terminal states are about agent runs,
+	// and the lifecycle's lost/closed words describe the transport, not the
+	// process. The plain verb is the honest one.
+	ExitExited ExitCause = "exited"
+	// ExitInterrupted is a loss: the channel is gone, the host is
+	// unreachable, a handshake expired, a reattach failed, or the session
+	// was torn down without an authoritative status. The word is the
+	// content ledger's (internal/content/ledger.go) — a state chosen after
+	// a restart rather than an assertion of liveness — reused here because
+	// it is the same statement: the backend cannot assert how the session
+	// ended, so it does not invent an exit.
+	//
+	// The granular loss detail is deliberately NOT part of this vocabulary.
+	// internal/lifecyclechannel.LossCause (hello-timeout, end-of-stream,
+	// read-error, closed) names losses of the AUTHENTICATED LIFECYCLE
+	// CHANNEL — the shell-integration descriptor — and nocx-viil.1 makes it
+	// the single owner of that set. This cause rides the exit notification,
+	// which fires for every session, including plain non-integrated ssh and
+	// local shells where no lifecycle channel ever existed; their losses
+	// cannot be spelled in LossCause's words, and extending that set here
+	// would be a second one (the exact thing viil.1 forbids). The
+	// integration axis (session.integrationChanged) already carries the
+	// reason vocabulary (ssh.RefusalReason, including handshake-timeout and
+	// channel-lost) for the sessions that have one, so the detail the
+	// backend knows is reported on the axis that knows it. The exit cause
+	// stays the two-value discriminator: authoritative exit versus loss.
+	ExitInterrupted ExitCause = "interrupted"
 )
 
 type Config struct {
@@ -104,6 +143,13 @@ type Session interface {
 	// reason decided when the shell started; local sessions always return
 	// ReasonNone. The transport carries this value to the UI.
 	ShellIntegrationReason() ssh.RefusalReason
+	// ExitOutcome reports how the session ended, once Done is closed
+	// (nocx-ictcq): an authoritative shell exit with its status, or a loss.
+	// The status is meaningful only for ExitExited. Before Done closes the
+	// answer is undefined; after a forced teardown (an explicit Close that
+	// beat the watcher) it is ExitInterrupted — a teardown is never dressed
+	// up as a shell's own exit.
+	ExitOutcome() (ExitCause, int)
 	// SSHOptions returns the connect options this session's SSH connection
 	// was opened with: exactly what Reg.Open handed to the SSH factory, in
 	// order. Nil for local sessions. The file manager's SFTP lease
@@ -605,6 +651,36 @@ func (s *realSession) ShellIntegrationReason() ssh.RefusalReason {
 		return rc.ShellIntegrationReason()
 	}
 	return ssh.ReasonNone
+}
+
+// ExitOutcome maps the channel's captured wait result to the wire cause
+// (nocx-ictcq). The mapping is owned here, never by the transport, so no
+// second owner can decide what an *exec.ExitError means. Only an exit the
+// process itself reported — nil status 0, *exec.ExitError for a local shell,
+// *gossh.ExitError for a remote one — is authoritative; everything else,
+// including a channel that was closed before its watcher recorded, is a
+// loss, and a loss never carries a fabricated status.
+func (s *realSession) ExitOutcome() (ExitCause, int) {
+	provider, ok := s.ch.(interface{ WaitErr() (error, bool) })
+	if !ok {
+		return ExitInterrupted, 0
+	}
+	waitErr, recorded := provider.WaitErr()
+	if !recorded {
+		return ExitInterrupted, 0
+	}
+	if waitErr == nil {
+		return ExitExited, 0
+	}
+	var ee *exec.ExitError
+	if errors.As(waitErr, &ee) {
+		return ExitExited, ee.ExitCode()
+	}
+	var se *gossh.ExitError
+	if errors.As(waitErr, &se) {
+		return ExitExited, se.ExitStatus()
+	}
+	return ExitInterrupted, 0
 }
 
 func (s *realSession) StartOutput(ctx context.Context, onOutput OutputHandler) error {

@@ -103,6 +103,17 @@ func validateJSON(t *testing.T, s *jsonschema.Schema, raw []byte, what string) {
 	}
 }
 
+// validateJSONErr is the negative of validateJSON: it returns the schema
+// validation error instead of failing the test, so a test can assert that a
+// payload the DTO could marshal is REFUSED by the contract.
+func validateJSONErr(s *jsonschema.Schema, raw []byte) error {
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	return s.Validate(doc)
+}
+
 // ── vault.status ───────────────────────────────────────────────────────
 
 // The DTO's own conformance: field tags, omitempty behaviour, how a pointer
@@ -4218,4 +4229,74 @@ func TestAgentRunNotifications_OverTheWireConformToContract(t *testing.T) {
 	}
 	raw := readNotification(t, conn, "agent.runState", 5*time.Second)
 	validateJSON(t, stateSchema, raw, "agent.runState params (real socket)")
+}
+
+// ── exit notification (nocx-ictcq) ────────────────────────────────────────
+
+// The exit notification carries the discriminator that separates an
+// authoritative shell exit from a loss, so a tab whose ssh connection
+// dropped is marked instead of destroyed. The DTO's conformance: the field
+// tags, the enum spelling, and the "status present exactly when exited"
+// rule — marshalled, because that is where omitempty does its work.
+func TestExit_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "exit.schema.json")
+	status := 42
+	cases := map[string]exitNotificationParams{
+		"exited with status": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Cause:     string(session.ExitExited),
+			Status:    &status,
+		},
+		"interrupted, no status": {
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Cause:     string(session.ExitInterrupted),
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "exit DTO")
+		})
+	}
+}
+
+// A status must never ride an interrupted exit, and an exited exit must
+// never lose its status — the oneOf branches make both a schema error, and
+// the marshalled DTO is where the field tags would hide either.
+func TestExit_DTOStatusRulesAreExact(t *testing.T) {
+	schema := loadSchema(t, "exit.schema.json")
+
+	status := 0
+	bad := []struct {
+		name   string
+		params exitNotificationParams
+	}{
+		{"interrupted carries a status", exitNotificationParams{
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Cause:     string(session.ExitInterrupted),
+			Status:    &status,
+		}},
+		{"exited carries no status", exitNotificationParams{
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Cause:     string(session.ExitExited),
+		}},
+		{"unknown cause", exitNotificationParams{
+			SessionID: "0123456789abcdef0123456789abcdef",
+			Cause:     "the-wind",
+		}},
+	}
+	for _, c := range bad {
+		t.Run(c.name, func(t *testing.T) {
+			raw, err := json.Marshal(c.params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("schema accepted %s: %s", c.name, raw)
+			}
+		})
+	}
 }

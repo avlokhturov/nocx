@@ -1620,9 +1620,12 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       expect(content.activeOrigin()).not.toBeNull()
-      const exitCb = session.onExit.mock.calls[0]?.[0] as (sid: string) => void
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (exit: {
+        sessionId: string
+        cause: 'exited' | 'interrupted'
+      }) => void
       expect(exitCb).toBeTypeOf('function')
-      exitCb(session.sessionId)
+      exitCb({ sessionId: session.sessionId, cause: 'exited' })
       expect(content.activeOrigin()).toBeNull()
     } finally {
       teardown()
@@ -1671,10 +1674,104 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       expect(content.activeOrigin()?.cwd).toBe('/srv/new/path')
 
       // The session dying changes it back to null.
-      const exitCb = session.onExit.mock.calls[0]?.[0] as (sid: string) => void
-      exitCb(session.sessionId)
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (exit: {
+        sessionId: string
+        cause: 'exited' | 'interrupted'
+      }) => void
+      exitCb({ sessionId: session.sessionId, cause: 'exited' })
       expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
       expect(content.activeOrigin()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('an interrupted session is marked, never destroyed (nocx-ictcq)', () => {
+  type ExitCb = (exit: {
+    sessionId: string
+    cause: 'exited' | 'interrupted'
+    status?: number
+  }) => void
+
+  const exitCbOf = (session: SessionFake): ExitCb => session.onExit.mock.calls[0]?.[0] as ExitCb
+
+  // The heart of the bead: a session whose connection dropped must not
+  // vanish. The tab stays in the strip with its pane and scrollback, and the
+  // warning mark says what the state is — the same mark the integration
+  // axis already owns, with the loss's own wording.
+  it('a loss keeps the tab present, marked with its own label', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onWarningChange: (w, l) => warnings.push([w, l]) } },
+      client,
+    )
+    const closeRequested = vi.fn()
+    tab.onCloseRequested = closeRequested
+    try {
+      exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
+
+      // Not closed: the tab and its scrollback survive.
+      expect(closeRequested).not.toHaveBeenCalled()
+      expect(tab.pane.isConnected).toBe(true)
+      // The session is gone, so the origin names nothing — the same cleanup
+      // a clean exit performs.
+      expect(content.activeOrigin()).toBeNull()
+      // Marked, with a label that says what happened.
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Connection lost'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // A clean exit is unchanged: the tab closes exactly as it always did.
+  it('a clean exit closes the tab as before', async () => {
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const closeRequested = vi.fn()
+    tab.onCloseRequested = closeRequested
+    try {
+      exitCbOf(session)({ sessionId: session.sessionId, cause: 'exited', status: 0 })
+      expect(closeRequested).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  // The backend may emit its last integration status in the same instant the
+  // session dies; once the tab is marked lost, no later fact may clear it —
+  // the lost state is terminal for this tab (the strip mark is what the user
+  // looks at an hour later).
+  it('a late integration fact does not clear the loss mark', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onWarningChange: (w, l) => warnings.push([w, l]) } },
+      client,
+    )
+    try {
+      exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
+      const markedAt = warnings.length
+
+      // A recovered-looking fact ("integrated", no reason) arriving late:
+      // before the guard this cleared the mark and the tab read healthy.
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'integrated',
+        shell: '/bin/bash',
+      })
+
+      expect(warnings.length).toBe(markedAt)
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Connection lost'])
     } finally {
       teardown()
     }

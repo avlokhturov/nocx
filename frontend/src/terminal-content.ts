@@ -384,6 +384,13 @@ export class TerminalContent extends BaseTabContent {
   /** True once the session's exit was observed — the tab is closing, and an
    *  origin that names this session would name a machine that is gone. */
   private _sessionExited = false
+  /** True once the session ended in a loss (an interrupted exit: the channel
+   *  is gone, the host unreachable, a handshake expired, a reattach failed).
+   *  The tab stays open and marked, and this flag owns the warning state for
+   *  the rest of the tab's life: a late integration fact — the last status
+   *  the backend emitted before the session died — must not clear it
+   *  (nocx-ictcq). */
+  private _sessionLost = false
   private _host = ''
   /** The ssh user of `_host` ('' for local shells) — the location line's
    *  `user@host`, from the same projection view. */
@@ -1899,14 +1906,32 @@ export class TerminalContent extends BaseTabContent {
         }
         this.session?.send(data)
       })
-      session.onExit((sid: string) => {
-        log.info('nocx: session exited', { sid })
+      session.onExit((exit) => {
+        log.info('nocx: session exited', {
+          sid: exit.sessionId,
+          cause: exit.cause,
+          ...(exit.cause === 'exited' ? { status: exit.status } : {}),
+        })
         // The session is gone: an origin naming it would name a machine
-        // that no longer exists (B.9).
+        // that no longer exists (B.9). True for a clean exit AND a loss.
         this._sessionExited = true
         this.hooks.onActiveOriginChange?.()
         this.lifecycle.reset()
         this._disposeAllMarkers()
+        if (exit.cause === 'interrupted') {
+          // A loss is not a close (nocx-ictcq): the channel is gone, the
+          // host unreachable, a handshake expired, or a reattach failed —
+          // the work in the tab and the evidence of what happened must
+          // survive. The tab stays in both strips with the scrollback
+          // readable and a warning mark that says what the state is; the
+          // user closes it themselves. `_sessionLost` owns the mark for the
+          // rest of the tab's life, so a late integration fact cannot clear
+          // it (the lost state is terminal for this tab).
+          this._sessionLost = true
+          this.hooks.onWarningChange?.(true, 'Connection lost')
+          return
+        }
+        // A clean exit closes the tab exactly as it always did.
         host.requestClose()
       })
       session.onInputStalled(() => {
@@ -2252,6 +2277,10 @@ export class TerminalContent extends BaseTabContent {
    *  presentation fact — what the user sees. Nothing stream-derived reaches
    *  either axis. */
   private _updateCapability(): void {
+    // The lost state owns the warning mark: a loss is terminal for this tab,
+    // and nothing the integration axis reports afterwards may clear it
+    // (nocx-ictcq). The mark was set by the exit path with its own wording.
+    if (this._sessionLost) return
     const shellState: ShellState = shellStateFromLifecycle(
       this.lifecycle.state,
       this.lifecycle.domainStack,
@@ -2299,6 +2328,11 @@ export class TerminalContent extends BaseTabContent {
    *  needs to special-case it. */
   private _applyIntegration(fact: SessionIntegrationChanged): void {
     if (this._disposed) return
+    // The session has exited (clean or lost): the tab is closing or marked
+    // lost, and a fact that was already in flight when the session died —
+    // the last status the backend emitted — must not re-open the capability
+    // logic or clear the loss mark (nocx-ictcq).
+    if (this._sessionExited) return
     this._integration = fact
     this._updateCapability()
     if (!isDegraded(fact)) {
