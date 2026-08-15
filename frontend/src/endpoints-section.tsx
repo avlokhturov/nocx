@@ -224,9 +224,17 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   // ── Draft editing ────────────────────────────────────────────────────
   /** Load the vault inventory for the pickers. Called when an editor opens
    *  (the vault is accessed for data at that moment, not when the list is
-   *  shown). A sealed vault leaves the pickers empty, exactly like the
-   *  connections editor. */
+   *  shown). A sealed or uninitialized vault is SKIPPED, not probed: the
+   *  pickers offer nothing while the vault cannot answer, and opening the
+   *  editor must not raise the unlock prompt — the vault-backed operation
+   *  (the Test button's credential resolution) is what raises it, never the
+   *  door (ADR-0032). */
   async function loadSecretRows() {
+    const state = props.vaultController?.status()?.state
+    if (state === 'sealed' || state === 'uninitialized') {
+      setSecretRows([])
+      return
+    }
     try {
       const inv = await props.vaultClient?.inventory()
       setSecretRows(inv?.entries ?? [])
