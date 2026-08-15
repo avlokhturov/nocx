@@ -15,6 +15,7 @@ import { SolidTabContent, type TabHost } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import type { AgentClient } from './agent'
+import type { SnippetsStore } from './snippets/snippets-store'
 import type { EndpointClient } from './endpoints'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
@@ -39,6 +40,7 @@ export class SettingsContent extends SolidTabContent {
     private readonly footprintClient?: import('./footprint-client').FootprintClient,
     private readonly endpointsClient?: EndpointClient,
     private readonly agentClient?: AgentClient,
+    private readonly snippetsStore?: SnippetsStore,
   ) {
     super()
   }
@@ -54,6 +56,7 @@ export class SettingsContent extends SolidTabContent {
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
           endpointsClient: this.endpointsClient,
+          snippetsStore: this.snippetsStore,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

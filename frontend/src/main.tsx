@@ -128,6 +128,11 @@ async function main() {
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
+  // The snippet library: ONE store, read by the palette, the settings page
+  // and every later surface (design §6 — no change notification on the
+  // wire, a writer re-reads). Constructed with the other clients because
+  // the Settings tab's factory below closes over it.
+  const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -288,6 +293,7 @@ async function main() {
         footprintClient,
         endpointsClient,
         agentClient,
+        snippetsStore,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -464,11 +470,9 @@ async function main() {
   })
 
   // ── Snippets: the palette (design §10.1) ─────────────────────────────
-  // One store, every surface reads it (design §6: no change notification —
-  // a writer re-reads). The palette is the keyboard surface that answers
-  // when there is no command editor; the fire adapter is where the
-  // design's fire-time rules live.
-  const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
+  // The palette is the keyboard surface that answers when there is no
+  // command editor; the fire adapter is where the design's fire-time rules
+  // live. Both read the one store built above.
   // The pane's facts are read AT FIRE TIME, never when the palette opened
   // (design §8, bead nocx-jj77): the provider reads the ACTIVE pane on
   // every call, so a tab switch between choosing a snippet and confirming

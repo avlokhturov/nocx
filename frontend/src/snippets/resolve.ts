@@ -19,8 +19,10 @@ export type ResolveOutcome =
   | { kind: 'refused'; reason: 'env-unavailable'; keys: string[] }
 
 /** `port=8080` → name `port`, default `8080`. `port` → default ''. Only the
- *  FIRST `=` separates, so a default may contain one. */
-function splitAsk(arg: string): AskField {
+ *  FIRST `=` separates, so a default may contain one. Exported because the
+ *  settings page's preview reports the same field the fire will ask for,
+ *  and a second split is a second grammar (AD-8). */
+export function splitAsk(arg: string): AskField {
   const at = arg.indexOf('=')
   if (at < 0) return { name: arg, defaultValue: '' }
   return { name: arg.slice(0, at), defaultValue: arg.slice(at + 1) }
@@ -49,20 +51,24 @@ export function hasSecretReference(text: string): boolean {
 
 /** The closed env table (design §7.4) — extended by adding a row, never by a
  *  parameter or a mode flag (AD-8). A key that is not a row cannot be
- *  answered, exactly like a null fact. */
+ *  answered, exactly like a null fact.
+ *
+ *  The value of each row is what the settings page's preview line says the
+ *  key will become. It is a phrase rather than a live value on purpose: the
+ *  facts are the ACTIVE PANE's and are read at fire time, and while the
+ *  settings tab is in front there is no pane to read — a preview showing
+ *  "unavailable" there would be a statement about the wrong moment. */
+export const ENV_KEYS = {
+  cwd: "the pane's working directory",
+  host: "the pane's host",
+  user: "the session's user",
+  branch: 'the checked-out git branch',
+} as const
+
+export type EnvKey = keyof typeof ENV_KEYS
+
 function envValue(key: string, facts: SessionFacts): string | null {
-  switch (key) {
-    case 'cwd':
-      return facts.cwd
-    case 'host':
-      return facts.host
-    case 'user':
-      return facts.user
-    case 'branch':
-      return facts.branch
-    default:
-      return null
-  }
+  return key in ENV_KEYS ? facts[key as EnvKey] : null
 }
 
 export function resolveBody(

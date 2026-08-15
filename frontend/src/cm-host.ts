@@ -1,12 +1,22 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// ReadOnlyHost — the reusable read-only CodeMirror 6 host (git-manager §5.4).
+// CMHost — the reusable CodeMirror 6 host (git-manager §5.4), in its two
+// modes: ReadOnlyHost for a surface that only paints (the file viewer, the
+// git diff) and EditableHost for one a person types into (the snippet body,
+// design §10.4).
 //
-// One owner for everything a read-only surface needs from CM6: EditorView
-// construction, read-only enforcement, and the base theme. A caller brings
+// One owner for everything such a surface needs from CM6: EditorView
+// construction, the editability facets, and the base theme. A caller brings
 // its own extensions — language selection, highlighting, decorations — and
 // the host appends them AFTER its own. The host's facets come first in the
 // extension array, and CM6 resolves facets by precedence with the first
-// value winning, so a caller extension can never re-enable editing.
+// value winning, so a caller extension can never re-enable editing on the
+// read-only mode.
+//
+// The two modes are one module rather than two files because they differ in
+// exactly two facets and one theme rule. A sibling built beside this one
+// would have been a second construction of the same view — free to drift on
+// the theme, the disposal contract and the facet order, which is the drift
+// the read-only guarantee is made of.
 //
 // The host renders no chrome: the caller creates the parent element and owns
 // everything around it (notices, banners, diff decoration). The file viewer
@@ -27,31 +37,41 @@ import { EditorView } from '@codemirror/view'
  *  theme switch recolours every host surface (ADR-0013). Layout lives in
  *  CSS. The diff surface inherits this by construction — it is the host's
  *  base theme, not a per-surface choice. */
-const baseTheme = EditorView.theme({
-  '&': {
-    backgroundColor: 'var(--color-canvas)',
-    color: 'var(--color-text)',
-  },
-  '&.cm-focused': { outline: 'none' },
-  '.cm-content': { caretColor: 'transparent' },
-  '.cm-gutters': {
-    backgroundColor: 'var(--color-canvas)',
-    color: 'var(--color-text-dim)',
-    border: 'none',
-  },
-  '.cm-activeLine': { backgroundColor: 'var(--color-surface-hover)' },
-  '.cm-activeLineGutter': { backgroundColor: 'var(--color-surface-hover)' },
-  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
-    backgroundColor: 'var(--color-surface-active)',
-  },
-})
+const themeFor = (editable: boolean) =>
+  EditorView.theme({
+    '&': {
+      backgroundColor: 'var(--color-canvas)',
+      color: 'var(--color-text)',
+    },
+    '&.cm-focused': { outline: 'none' },
+    // A caret is a promise that typing does something. The read-only modes
+    // hide it; the editable one must not, or the field looks inert at the
+    // moment it is focused.
+    '.cm-content': { caretColor: editable ? 'var(--color-text)' : 'transparent' },
+    '.cm-gutters': {
+      backgroundColor: 'var(--color-canvas)',
+      color: 'var(--color-text-dim)',
+      border: 'none',
+    },
+    '.cm-activeLine': { backgroundColor: 'var(--color-surface-hover)' },
+    '.cm-activeLineGutter': { backgroundColor: 'var(--color-surface-hover)' },
+    '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+      backgroundColor: 'var(--color-surface-active)',
+    },
+  })
 
-export class ReadOnlyHost {
+/** What a document change reports back — the seam an editable surface's
+ *  draft follows. Called for every change, including setDoc's. */
+type DocChangeCallback = (text: string) => void
+
+class CMHost {
   private view: EditorView | null = null
   private disposed = false
   private abortSignal: AbortSignal | null = null
   /** Bound once so dispose() can detach it; a late abort is then a no-op. */
   private readonly onAbort = (): void => this.dispose()
+
+  protected constructor(private readonly editable: boolean) {}
 
   /**
    * Construct and mount the view into `parent`, with the caller's extensions
@@ -62,7 +82,12 @@ export class ReadOnlyHost {
    * aborted before this call mounts nothing. Call at most once per host —
    * a second mount throws.
    */
-  mount(parent: HTMLElement, signal: AbortSignal, extensions: Extension[] = []): void {
+  mount(
+    parent: HTMLElement,
+    signal: AbortSignal,
+    extensions: Extension[] = [],
+    onDocChange?: DocChangeCallback,
+  ): void {
     if (this.disposed) return
     if (this.view) {
       throw new Error('nocx: ReadOnlyHost.mount called twice on one host')
@@ -76,9 +101,16 @@ export class ReadOnlyHost {
       state: EditorState.create({
         doc: '',
         extensions: [
-          EditorState.readOnly.of(true),
-          EditorView.editable.of(false),
-          baseTheme,
+          EditorState.readOnly.of(!this.editable),
+          EditorView.editable.of(this.editable),
+          themeFor(this.editable),
+          ...(onDocChange
+            ? [
+                EditorView.updateListener.of((u) => {
+                  if (u.docChanged) onDocChange(u.state.doc.toString())
+                }),
+              ]
+            : []),
           ...extensions,
         ],
       }),
@@ -95,6 +127,13 @@ export class ReadOnlyHost {
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } })
   }
 
+  /** The current document — '' before mount and after dispose, never a
+   *  stale one: a surface that saved from a disposed host would write the
+   *  contents of a field the person has already closed. */
+  doc(): string {
+    return this.view?.state.doc.toString() ?? ''
+  }
+
   /** Focus the content. Inert before mount or after dispose. */
   focus(): void {
     this.view?.focus()
@@ -109,5 +148,22 @@ export class ReadOnlyHost {
     this.abortSignal = null
     this.view?.destroy()
     this.view = null
+  }
+}
+
+/** The mode for a surface that only paints: no keystroke can reach the
+ *  document, and no caller extension can re-enable editing. */
+export class ReadOnlyHost extends CMHost {
+  constructor() {
+    super(false)
+  }
+}
+
+/** The mode for a surface a person types into (the snippet body editor).
+ *  The caller reads `doc()` when it saves and follows `onDocChange` while
+ *  the person types. */
+export class EditableHost extends CMHost {
+  constructor() {
+    super(true)
   }
 }

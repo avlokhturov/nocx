@@ -265,6 +265,7 @@ describe('SettingsContent', () => {
       'Terminal',
       'Application',
       'Backup & Restore',
+      'Snippets',
       'AI',
     ])
 

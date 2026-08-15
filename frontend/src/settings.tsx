@@ -18,6 +18,8 @@ import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
+import { SnippetsSection } from './snippets/snippets-settings'
+import type { SnippetsStore } from './snippets/snippets-store'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -131,6 +133,10 @@ export interface SettingsComponentProps {
   /** The assistant's control-plane client (nocx-edio). Absent in the
    *  dev-web harness; the endpoints section then shows no status line. */
   agentClient?: AgentClient
+  /** The snippet library (nocx-gjnr) — the SAME store the palette reads, so
+   *  a snippet saved here is in the next fire without a notification on the
+   *  wire (design §6). Absent in an embedding with no snippets service. */
+  snippetsStore?: SnippetsStore
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -434,7 +440,36 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, backupPage, connectionPage, vaultPage, secretsPage, endpointsPage]
+    const snippetsPage: SettingsPage = {
+      kind: 'component',
+      id: 'snippets',
+      title: 'Snippets',
+      groupId: 'application',
+      scrollMode: 'contained',
+      // Registered unconditionally for the same reason vaultPage is: a
+      // surface that appears only once some other state exists is how a
+      // feature ships unreachable — and until this page existed, the
+      // library's create/update/delete/reorder had no caller at all.
+      renderContent: () => (
+        <Show
+          when={props.snippetsStore}
+          fallback={
+            <PageSection title="Snippets">Snippets are not available in this window.</PageSection>
+          }
+        >
+          <SnippetsSection store={props.snippetsStore!} />
+        </Show>
+      ),
+    }
+    return [
+      ...generated,
+      backupPage,
+      connectionPage,
+      vaultPage,
+      secretsPage,
+      endpointsPage,
+      snippetsPage,
+    ]
   })
 
   /** The rail rows the grouped rail renders: every page resolved to a group
