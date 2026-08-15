@@ -16,3 +16,12 @@
   text-transform: uppercase;
   color: var(--color-text-dim);
 }
+
+/* `size="context"` — the caption tracks its column: it takes the surrounding
+   type size (the same mechanism the ghost Button's rows use, `font:
+   inherit`), so a caption over a row group reads at the rows' size in every
+   layout of that column — the hierarchy stays in the case, weight, spacing
+   and colour, never in being smaller (floating-panel's answer). */
+.ui-caption[data-size='context'] {
+  font-size: inherit;
+}
