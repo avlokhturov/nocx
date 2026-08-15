@@ -70,7 +70,7 @@ afterEach(() => {
 
 async function waitForProfiles(container: HTMLElement) {
   await vi.waitFor(() => {
-    expect(container.querySelectorAll('.cm-item-name').length).toBe(1)
+    expect(container.querySelectorAll('.ui-record-row__title').length).toBe(1)
   })
 }
 
