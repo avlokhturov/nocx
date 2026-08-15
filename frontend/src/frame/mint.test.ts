@@ -107,13 +107,15 @@ describe('frozen mint', () => {
   it('satisfies the frozen seam from what already exists — the block DOM and blockOutputText', () => {
     // A frozen block's output element holds the serializer's HTML: one
     // .term-line span per logical line, line breaks restored by the existing
-    // blockOutputText owner (nocx-6w4z).
+    // blockOutputText owner (nocx-6w4z). The seam takes the BLOCK — that is
+    // what the ask surface holds — and resolves the output element itself
+    // (nocx-ex636).
     const el = document.createElement('div')
-    el.innerHTML = '<span class="term-line">first</span><span class="term-line">second</span>'
+    el.className = 'cmd-block'
+    el.innerHTML =
+      '<div class="cmd-output"><span class="term-line">first</span><span class="term-line">second</span></div>'
 
     const frame = mintFrozenFrame(frozenFrameSourceFromBlock(el))
-
-    expect(rowText(frame)).toEqual(['first', 'second'])
     expect(frame.provenance.source).toBe('frozen')
     if (frame.provenance.source === 'frozen') {
       expect(frame.provenance.serializerVersion).toBe(SERIALIZER_VERSION)

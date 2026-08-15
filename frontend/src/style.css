@@ -349,14 +349,26 @@
    between the chrome and the input: "if you ask, this comes with you". */
 
 .nocx-editor-target-indicator {
-  /* A control, never text: it must not read as part of the command. */
-  margin-right: 6px;
+  /* A control, never text: it must not read as part of the command. The
+     trailing gap is NOT this chip's margin: CM6 draws a zero-width
+     <img class="cm-widgetBuffer"> after an uneditable inline widget, and
+     the caret sits against THAT — a margin here sat inside the widget
+     tile and never reached the caret. The gap is the buffer's width, in
+     the scoped rule below (nocx-ex636). */
   padding: 1px 7px;
   font-size: var(--font-size-2xs);
   line-height: 1.4;
   color: var(--color-text-muted);
   cursor: pointer;
   border: 1px solid var(--color-surface-raised);
+}
+
+/* The caret's neighbour is the widget buffer, not the chip (see above):
+   the gap belongs to the token, on an empty line and on a line with text
+   alike. Scoped to THIS widget's trailing buffer, so other CM6 widgets
+   keep their defaults. */
+.nocx-editor-target-indicator + .cm-widgetBuffer {
+  width: 6px;
 }
 
 .nocx-editor-target-indicator:hover {
@@ -741,6 +753,27 @@
      block — old or new — adopts the current geometry, deliberately (see
      cell-metric.ts). */
   letter-spacing: var(--term-cell-delta, 0px);
+}
+
+/* The ask kind's body (nocx-ex636): prose from a model wraps at the
+   block's width. The `.cmd-output` rule above — white-space: pre,
+   overflow-x: auto — is the FROZEN contract (nocx-juau) and stays for
+   command blocks; this modifier is the same frame with the prose grammar,
+   and it must come after the base rule for the cascade. */
+.cmd-output-ask {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-x: visible;
+}
+
+/* Terminal output INSIDE an answer (a fenced block the model returns):
+   here the old rules are the right rules — monospace, never re-wrapped,
+   reached by horizontal scrolling (the nocx-juau contract holds inside an
+   answer too). The ask kind reaches it through the fence, never by
+   accident (nocx-ex636). */
+.cmd-output-code {
+  white-space: pre;
+  overflow-x: auto;
 }
 
 /* Hidden probe the cell-metric publisher measures the DOM's natural

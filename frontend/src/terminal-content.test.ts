@@ -720,6 +720,7 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
         _onBlockDeselected(id: number): void
       }
       const block = createCommandBlock(
+        'command',
         1,
         'ls',
         '~',
@@ -1322,6 +1323,7 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
 
   it('orders an SSH block header location, cwd, then the right group', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'deploy',
       '/srv/www',
@@ -1354,6 +1356,7 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
 
   it('keeps cwd before the right group on a local block too', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'ls',
       '~',
@@ -3862,6 +3865,42 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       submitKey(ed, { metaKey: true, shiftKey: true })
       expect(activeLabel(content)).toBe('Shell')
       expect(indicatorOf(ed)?.textContent).toBe('Run')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the token owns its trailing gap: the caret neighbour is the widget buffer, on an empty line and on a text line (nocx-ex636)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // EMPTY LINE: the token is the line's first child, and the element
+      // between it and the caret is CM6's zero-width widget buffer — the
+      // element the gap must live on. The chip's own margin sits INSIDE
+      // the widget tile, before the buffer, so it never reaches the caret.
+      const emptyLine = viewOf(ed).contentDOM.querySelector('.cm-line')
+      expect(emptyLine?.firstElementChild?.classList.contains('nocx-editor-target-indicator')).toBe(
+        true,
+      )
+      expect(
+        emptyLine?.firstElementChild?.nextElementSibling?.classList.contains('cm-widgetBuffer'),
+      ).toBe(true)
+
+      // A LINE WITH TEXT: the same structure — the gap does not appear
+      // only once there is text; it belongs to the token, always.
+      ed.insertText('ls -la')
+      const textLine = viewOf(ed).contentDOM.querySelector('.cm-line')
+      expect(textLine?.firstElementChild?.classList.contains('nocx-editor-target-indicator')).toBe(
+        true,
+      )
+      expect(
+        textLine?.firstElementChild?.nextElementSibling?.classList.contains('cm-widgetBuffer'),
+      ).toBe(true)
+      expect(textLine?.textContent).toContain('ls -la')
     } finally {
       teardown()
     }

@@ -153,9 +153,20 @@ export class AgentInputTarget implements InputTarget {
       cwd,
       references,
     }
+
+    // The block opens BEFORE the ask resolves: the waiting state must
+    // cover the whole submit → first-delta interval, including the RPC
+    // that starts the run — a slow or hung ask is exactly the silence a
+    // hung command had, and the block says what it is waiting for
+    // (nocx-ex636). A refusal removes it: no run, no ledger entry, no
+    // block — the refusal itself is the visible surface. The captures
+    // above stay ahead of the block: a question whose payload cannot be
+    // ingested is refused before any block exists.
+    const handle = this.seams.openAnswer(doc, cwd)
     const ask = await this.seams.dispatcher
       .call<AgentAsk>('agent.ask', askParams)
       .catch((err: unknown) => {
+        handle.el.remove()
         // A refusal (no endpoint configured) is a renderable condition, not a
         // server fault: the surface says so instead of leaving the editor
         // accepting questions nothing answers.
@@ -164,10 +175,10 @@ export class AgentInputTarget implements InputTarget {
         throw err
       })
 
-    const handle = this.seams.openAnswer(doc, cwd)
-    // The answer entry id is KNOWN here, before the first delta — a run
-    // that fails before any text still has its block associated, and the
-    // terminal state closes the right one.
+    // The answer entry id is known once the ask resolves; the run's first
+    // delta cannot arrive before it (the run starts inside agent.ask and
+    // the response is on the wire before the first notification), so the
+    // routing check below never sees a stale undefined id.
     handle.el.dataset.answerEntryId = ask.answerEntryId
     this.runs.set(ask.runId, handle)
   }

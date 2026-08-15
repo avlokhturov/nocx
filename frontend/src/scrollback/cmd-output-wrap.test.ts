@@ -111,3 +111,53 @@ describe('frozen output lays out on the terminal cell metric (nocx-yy9g)', () =>
     expect(probe!.body).toMatch(/visibility\s*:\s*hidden/)
   })
 })
+
+describe('the ask kind body wraps prose but keeps frozen output frozen (nocx-ex636)', () => {
+  it('wraps prose: .cmd-output-ask resolves white-space pre-wrap, not the base pre', () => {
+    // The base .cmd-output rule is pre (frozen rows, nocx-juau); the ask
+    // modifier must come later in the cascade and override for the ask
+    // kind only.
+    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'white-space')).toBe('pre-wrap')
+  })
+
+  it('never runs off the right edge: .cmd-output-ask breaks unbroken runs and scrolls nowhere', () => {
+    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'overflow-wrap')).toBe('break-word')
+    expect(shippedValue(['cmd-output', 'cmd-output-ask'], 'overflow-x')).toBe('visible')
+  })
+
+  it('the frozen contract survives untouched: bare .cmd-output is still pre + auto', () => {
+    // The modifier must not leak onto command blocks.
+    expect(shippedValue(['cmd-output'], 'white-space')).toBe('pre')
+    expect(shippedValue(['cmd-output'], 'overflow-x')).toBe('auto')
+  })
+
+  it('terminal output inside an answer keeps the old grammar: .cmd-output-code is pre + auto', () => {
+    // A fenced block the model returns is the one case where the command
+    // rules are the right rules — reached through the kind, never by
+    // accident.
+    expect(shippedValue(['cmd-output-code'], 'white-space')).toBe('pre')
+    expect(shippedValue(['cmd-output-code'], 'overflow-x')).toBe('auto')
+  })
+})
+
+describe('the Ask token owns its trailing gap (nocx-ex636)', () => {
+  it('the gap sits on the caret neighbour, CM6 zero-width widget buffer, not on the chip margin', () => {
+    // CM6 draws an <img class="cm-widgetBuffer"> after an uneditable inline
+    // widget and the caret sits against THAT; the chip's own margin never
+    // reached the caret. The scoped rule gives the buffer the width.
+    const bufferRule = RULES.find((r) =>
+      r.selectors.includes('.nocx-editor-target-indicator + .cm-widgetBuffer'),
+    )
+    expect(bufferRule).toBeDefined()
+    expect(bufferRule!.body).toMatch(/width\s*:\s*6px/)
+  })
+
+  it('the indicator declares no trailing margin of its own, so the gap has one owner', () => {
+    // A margin on the chip would stack with the buffer width in engines
+    // that apply it and do nothing in engines that do not — the gap is the
+    // buffer's, deterministically.
+    const indicator = RULES.find((r) => r.selectors.includes('.nocx-editor-target-indicator'))
+    expect(indicator).toBeDefined()
+    expect(indicator!.body).not.toMatch(/margin-right/)
+  })
+})

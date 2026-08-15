@@ -13,7 +13,9 @@ import {
   getSelectedBlock,
   blockOutputText,
   blockCommandText,
+  blockKindRules,
   FENCE_DEFER_MS,
+  type BlockKind,
 } from './blocks'
 import { shellHighlightReady } from '../shell-highlight'
 import { BufferLine } from './test-helpers'
@@ -92,6 +94,7 @@ describe('createCommandBlock', () => {
 
   it('creates a frozen block with success status', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'echo hello',
       '~',
@@ -111,6 +114,7 @@ describe('createCommandBlock', () => {
 
   it('creates a frozen block with failure status', () => {
     const el = createCommandBlock(
+      'command',
       2,
       'false',
       '~',
@@ -129,6 +133,7 @@ describe('createCommandBlock', () => {
 
   it('includes serialized output', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'ls',
       '~',
@@ -147,6 +152,7 @@ describe('createCommandBlock', () => {
 
   it('a double-click applies the whole-token selection ONCE, at the second mousedown', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'ls',
       '~',
@@ -209,6 +215,7 @@ describe('createCommandBlock', () => {
 
   it('a single mousedown is not intercepted — native selection and click-to-select keep working', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'ls',
       '~',
@@ -237,6 +244,7 @@ describe('createCommandBlock', () => {
 
   it('includes duration', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'sleep 1',
       '~',
@@ -255,6 +263,7 @@ describe('createCommandBlock', () => {
 
   it('omits exit badge when exitCode is null', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '~',
@@ -272,6 +281,7 @@ describe('createCommandBlock', () => {
 
   it('omits .cmd-output when outputHtml is empty (P0-3)', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'cd repos',
       '~',
@@ -289,6 +299,7 @@ describe('createCommandBlock', () => {
 
   it('omits .cmd-output when outputHtml is only empty term-lines (P0-3)', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '~',
@@ -306,6 +317,7 @@ describe('createCommandBlock', () => {
 
   it('includes overflow menu button (P2-9)', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'ls',
       '~',
@@ -324,6 +336,7 @@ describe('createCommandBlock', () => {
 
   it('cwd label uses plain text, no emoji (P0-1 flat pivot)', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '/home/user/repos',
@@ -405,6 +418,7 @@ describe('block selection model (P1-7, P1-8)', () => {
     const parent = document.createElement('div')
     document.body.appendChild(parent)
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '~',
@@ -433,6 +447,7 @@ describe('block selection model (P1-7, P1-8)', () => {
     document.body.appendChild(parent)
 
     const el1 = createCommandBlock(
+      'command',
       1,
       'cmd1',
       '~',
@@ -446,6 +461,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       freshStore(),
     )
     const el2 = createCommandBlock(
+      'command',
       2,
       'cmd2',
       '~',
@@ -479,6 +495,7 @@ describe('block selection model (P1-7, P1-8)', () => {
     document.body.appendChild(parent)
 
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '~',
@@ -511,6 +528,7 @@ describe('block selection model (P1-7, P1-8)', () => {
     document.body.appendChild(parent)
 
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '~',
@@ -539,6 +557,7 @@ describe('block selection model (P1-7, P1-8)', () => {
     document.body.appendChild(parent)
 
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '~',
@@ -569,6 +588,7 @@ describe('block selection model (P1-7, P1-8)', () => {
     document.body.appendChild(parent)
 
     const el = createCommandBlock(
+      'command',
       1,
       'cmd',
       '~',
@@ -772,6 +792,7 @@ describe('overflow menu (P1-6)', () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const el = createCommandBlock(
+      'command',
       1,
       'echo hello',
       '~',
@@ -805,6 +826,7 @@ describe('overflow menu (P1-6)', () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const el = createCommandBlock(
+      'command',
       1,
       'echo hello',
       '~',
@@ -841,6 +863,7 @@ describe('overflow menu (P1-6)', () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const el = createCommandBlock(
+      'command',
       1,
       'echo hello',
       '~',
@@ -872,6 +895,7 @@ describe('overflow menu (P1-6)', () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const el = createCommandBlock(
+      'command',
       1,
       'echo hello',
       '~',
@@ -910,6 +934,7 @@ describe('frozen block header highlighting', () => {
   it('highlights the frozen header with the same token classes as the live editor', () => {
     const container = document.createElement('div')
     const el = createCommandBlock(
+      'command',
       1,
       'ls -la | grep foo > out.txt',
       '~',
@@ -977,6 +1002,7 @@ describe('frozen headers and the command snapshot', () => {
 
   it('a frozen header of an unknown command carries the underline class', () => {
     const el = createCommandBlock(
+      'command',
       1,
       'sdfsdf',
       '~',
@@ -995,6 +1021,7 @@ describe('frozen headers and the command snapshot', () => {
 
   it('a frozen header of a known builtin keeps the plain command class', () => {
     const el = createCommandBlock(
+      'command',
       2,
       'pwd',
       '~',
@@ -1013,6 +1040,7 @@ describe('frozen headers and the command snapshot', () => {
 
   it('with no snapshot a frozen header carries no verdict', () => {
     const el = createCommandBlock(
+      'command',
       3,
       'sdfsdf',
       '~',
@@ -1035,6 +1063,7 @@ describe('frozen headers and the command snapshot', () => {
     expect(other.has('kubectl')).toBe(true)
     expect(mine.has('kubectl')).toBe(false)
     const el = createCommandBlock(
+      'command',
       4,
       'kubectl',
       '~',
@@ -1413,7 +1442,7 @@ describe('the render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8)
     manager.sightFence(FENCE_A, 2)
     expect(manager.runningBlock).toBeNull()
     expect(block!.endLine).toBe(2)
-    const text = blockOutputText(block!.el.querySelector('.cmd-output'))
+    const text = blockOutputText(block!.el)
     expect(text).toContain('first')
     expect(text).toContain('second')
     expect(text).toContain('the tail')
@@ -1611,7 +1640,7 @@ describe('the serialized output range vs the block creation line (nocx-4yhi)', (
     const getLine = (y: number) => lines[y - 5]
     const frozen = manager.freezeBlock(getLine, 8, 0)
     expect(frozen).not.toBeNull()
-    const text = blockOutputText(frozen!.el.querySelector('.cmd-output'))
+    const text = blockOutputText(frozen!.el)
     expect(text).toContain('file1')
     expect(text).toContain('file2')
     expect(text).not.toContain('$ ls')
@@ -1626,7 +1655,7 @@ describe('the serialized output range vs the block creation line (nocx-4yhi)', (
     const getLine = (y: number) => (y === 7 ? new BufferLine('out1') : undefined)
     const frozen = manager.freezeBlock(getLine, 7, 0)
     expect(frozen).not.toBeNull()
-    const text = blockOutputText(frozen!.el.querySelector('.cmd-output'))
+    const text = blockOutputText(frozen!.el)
     expect(text).toContain('out1')
   })
 })
@@ -1702,6 +1731,196 @@ describe('BlockManager.addAnswerBlock', () => {
   })
 })
 
+// ── The block kind (nocx-ex636) ────────────────────────────────────────────
+// A block declares its kind once; highlighting, wrapping and the status
+// vocabulary are read from it — a fourth kind must declare itself or fail,
+// never inherit the command rules by accident.
+describe('the block kind owns the grammar (nocx-ex636)', () => {
+  beforeAll(async () => {
+    await shellHighlightReady
+  })
+
+  function newManager() {
+    const inner = document.createElement('div')
+    const xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
+    return { inner, manager }
+  }
+
+  it('declares the kind on the block: ask vs command, distinguishable without reading the text', () => {
+    const { manager } = newManager()
+    const answer = manager.addAnswerBlock('question?', '/')
+    manager.startBlock('ls', '~', 0)
+    const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    expect(answer.el.dataset.blockKind).toBe('ask')
+    expect(frozen!.el.dataset.blockKind).toBe('command')
+    // The visible difference in the flow: the ask block's header names its
+    // in-progress state; a command block's never does.
+    expect(answer.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
+    expect(frozen!.el.querySelector('.cmd-answer-waiting')).toBeNull()
+  })
+
+  it('the kind rules are read from one table; a kind that declares nothing fails loudly', () => {
+    const command = blockKindRules('command')
+    const ask = blockKindRules('ask')
+    expect(command.highlightHeader).toBe(true)
+    expect(command.outputClass).toBe('cmd-output')
+    expect(command.statusChips).toBeNull()
+    expect(ask.highlightHeader).toBe(false)
+    expect(ask.outputClass).toBe('cmd-output cmd-output-ask')
+    expect(ask.statusChips).toEqual({
+      inProgress: 'waiting for the model…',
+      done: 'completed',
+      failed: 'failed',
+    })
+    expect(() => blockKindRules('diary' as BlockKind)).toThrow(/unknown block kind/)
+  })
+
+  it('a question renders as prose, never through the shell lexer (non-ASCII question)', () => {
+    const { inner, manager } = newManager()
+    // A highlighter that only knows shell tokens must not pass by accident:
+    // «нужен какой-то индикатор?» would colour «нужен» as a command.
+    const question = 'нужен какой-то индикатор? Подсветка — странное решение'
+    manager.addAnswerBlock(question, '/')
+    const text = inner.querySelector<HTMLElement>('.cmd-header-text')!
+    expect(text.textContent).toBe(question)
+    // The shell pass emits tok-* spans; prose must contain none.
+    expect(text.querySelector('.tok-command, .tok-string, [class*="tok-"]')).toBeNull()
+    expect(text.querySelector('span')).toBeNull()
+  })
+
+  it('a command header still runs through the shell lexer', () => {
+    const container = document.createElement('div')
+    const el = createCommandBlock(
+      'command',
+      1,
+      'git push',
+      '~',
+      '',
+      '<span class="term-line">ok</span>',
+      10,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+    )
+    expect(el.querySelector('.cmd-header-text')?.querySelector('.tok-command')).not.toBeNull()
+  })
+
+  it('the answer body carries the ask kind wrapping class', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    const body = h.el.querySelector('.cmd-output')
+    expect(body?.className).toBe('cmd-output cmd-output-ask')
+  })
+
+  it('says it is waiting for the model between submit and the first delta, and stops on the first delta', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    const waiting = h.el.querySelector('.cmd-answer-waiting')
+    expect(waiting?.textContent).toBe('waiting for the model…')
+    h.append('first')
+    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
+  })
+
+  it('a run that fails before any delta stops waiting and says failed', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    expect(h.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
+    h.close('failure', 'the model did not answer in time')
+    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(h.el.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
+    expect(h.el.querySelector('.cmd-answer-error')?.textContent).toBe(
+      'the model did not answer in time',
+    )
+  })
+
+  it('terminal output inside an answer lands in a fenced, unwrapped container; prose stays outside', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('before\n```\nprintf "hi"\n```\nafter')
+    h.close('success')
+    const code = h.el.querySelector('.cmd-output-code')
+    expect(code).not.toBeNull()
+    // Both delimiters belong to the code region.
+    expect(Array.from(code!.querySelectorAll('.term-line')).map((r) => r.textContent)).toEqual([
+      '```',
+      'printf "hi"',
+      '```',
+    ])
+    // Prose rows are the body's own children, never inside the code block.
+    const prose = Array.from(h.el.querySelectorAll('.cmd-output > .term-line')).map(
+      (r) => r.textContent,
+    )
+    expect(prose).toEqual(['before', 'after'])
+    // Copying the block returns the whole answer, fence markers included.
+    expect(blockOutputText(h.el)).toBe('before\n```\nprintf "hi"\n```\nafter')
+  })
+
+  it('fence → prose → fence keeps each fence in its own container, after the prose', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('```\ncode1\n```\nbetween\n```\ncode2\n```')
+    h.close('success')
+    const codeBlocks = h.el.querySelectorAll('.cmd-output-code')
+    expect(codeBlocks.length).toBe(2)
+    expect(
+      Array.from(codeBlocks[0].querySelectorAll('.term-line')).map((r) => r.textContent),
+    ).toEqual(['```', 'code1', '```'])
+    expect(
+      Array.from(codeBlocks[1].querySelectorAll('.term-line')).map((r) => r.textContent),
+    ).toEqual(['```', 'code2', '```'])
+    expect(blockOutputText(h.el)).toBe('```\ncode1\n```\nbetween\n```\ncode2\n```')
+  })
+
+  it('a fence marker split across chunks still toggles', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('``')
+    h.append('`\ncode')
+    h.close('success')
+    expect(h.el.querySelector('.cmd-output-code')).not.toBeNull()
+    expect(blockOutputText(h.el)).toBe('```\ncode')
+  })
+
+  it('Copy output and Copy all read the answer through the block, fence included', () => {
+    const copied: string[] = []
+    Object.defineProperty(navigator, 'clipboard', {
+      value: {
+        writeText: vi.fn((t: string) => {
+          copied.push(t)
+          return Promise.resolve()
+        }),
+      },
+      configurable: true,
+    })
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('question?', '/')
+    h.append('answer prose\n```\ncode\n```')
+    h.close('success')
+
+    const openMenu = () => {
+      h.el
+        .querySelector<HTMLElement>('.cmd-overflow-btn')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+      return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
+    }
+    const clickItem = (menu: HTMLElement, label: string) => {
+      Array.from(menu.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+        .find((b) => b.textContent === label)!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    }
+
+    clickItem(openMenu(), 'Copy output')
+    expect(copied[0]).toBe('answer prose\n```\ncode\n```')
+
+    clickItem(openMenu(), 'Copy all')
+    expect(copied[1]).toBe('question?\nanswer prose\n```\ncode\n```')
+  })
+})
+
 // ── No per-block ask control (nocx-4wtlh) ─────────────────────────────────
 // The ask entry is the gesture at the prompt (⌘Enter + the caret
 // indicator), not a button on every finished block. A finished block — the
@@ -1711,6 +1930,7 @@ describe('no finished block renders an ask control (nocx-4wtlh)', () => {
   it('a frozen block carries no ask control', () => {
     const container = document.createElement('div')
     const el = createCommandBlock(
+      'command',
       1,
       'ls',
       '~',
@@ -1748,6 +1968,7 @@ describe('no finished block renders an ask control (nocx-4wtlh)', () => {
 it('blockCommandText reads the header, and the recorded command when the ack landed', () => {
   const container = document.createElement('div')
   const el = createCommandBlock(
+    'command',
     1,
     'ssh pi@host',
     '~',
