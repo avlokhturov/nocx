@@ -26,7 +26,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -68,6 +68,11 @@ import { createSessionFactsProvider } from './snippets/session-facts'
 import { createSnippetFireAdapter } from './snippets/fire'
 import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
 import { mountSnippetAskDialog } from './snippets/snippet-ask-dialog'
+import { NotesClient } from './notes/notes-client'
+import { NotesStore } from './notes/notes-store'
+import { NotesPanel } from './notes/notes-panel'
+import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
+import { isNoteChord } from './notes/chord'
 import { askFields } from './snippets/resolve'
 
 async function main() {
@@ -647,7 +652,30 @@ async function main() {
     ),
     order: 0,
   }
-  const sidebarViews = [filesView, PORTS_VIEW, gitView].sort((a, b) => a.order - b.order)
+  // ── Notes (nocx-z56hq) ───────────────────────────────────────────────
+  // One store, every notes surface reads it. The panel FINDS a note and the
+  // tab writes it; the chord skips the panel entirely, which is the whole
+  // point of the feature (design §6.3).
+  const notesStore = new NotesStore(new NotesClient(dispatcher))
+  registerNotesSurface(tm, notesStore)
+  const NOTES_VIEW: SidebarViewDescriptor = {
+    id: 'notes',
+    title: 'Notes',
+    icon: TextQuoteIcon,
+    view: (props) => (
+      <NotesPanel
+        store={notesStore}
+        visible={props.visible()}
+        onOpen={(id) => openNote(id, '')}
+        onCreate={() => void createAndOpenNote()}
+      />
+    ),
+    order: 1,
+  }
+
+  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW].sort(
+    (a, b) => a.order - b.order,
+  )
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
     throw new Error('nocx: Files must be the first activity-bar view')
   }
@@ -942,6 +970,17 @@ async function main() {
   // the pane's TerminalContent (AD-8). The chord is consumed at the xterm
   // boundary, so zero bytes reach the pty (design §10.1, bead nocx-jj77).
   tm.onSnippetChord = () => qc.showSnippets()
+
+  // ⌥⌘N: one keystroke from the impulse to the first character (design
+  // §6.3). Document-level, like the palette's chord: a note is not the
+  // pane's business, and the pane's own boundaries have nothing to add to
+  // this one.
+  document.addEventListener('keydown', (e) => {
+    if (isNoteChord(e)) {
+      e.preventDefault()
+      void createAndOpenNote()
+    }
+  })
 
   // Cmd/Ctrl+Shift+P opens the PALETTE (nocx-4t37): commands and hosts
   // mixed, each row typed on the right; target-needing commands drill in.

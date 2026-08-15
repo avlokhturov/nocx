@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notes.get.schema.json",
+  "title": "NotesGet",
+  "description": "Result of the notes.get JSON-RPC method: one note, whole. This is what the editor opens with.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "body", "createdAt", "updatedAt"],
+  "properties": {
+    "id": {
+      "description": "Opaque, backend-minted.",
+      "type": "string"
+    },
+    "body": {
+      "description": "The note, markdown, exactly as it was written.",
+      "type": "string"
+    },
+    "createdAt": {
+      "description": "Epoch milliseconds. An edit never moves it.",
+      "type": "integer"
+    },
+    "updatedAt": {
+      "description": "Epoch milliseconds of the last edit.",
+      "type": "integer"
+    },
+    "title": {
+      "description": "DERIVED from the body's first non-empty line, every time it is read \u2014 never stored (design \u00a77). Empty when the body has nothing to name it by; the surface names that one with its creation date, which needs a locale the backend does not have. It travels with the note so the tab's title has ONE owner: a renderer deriving its own would be the second.",
+      "type": "string"
+    }
+  }
+}

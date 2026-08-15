@@ -25,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -4311,6 +4312,194 @@ func TestSnippetsReorder_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if len(got.Snippets) != 2 || got.Snippets[0].ID != "b" || got.Snippets[1].ID != "a" {
 		t.Fatalf("reorder did not answer with the order asked for: %+v", got.Snippets)
+	}
+}
+
+// ── notes.* ────────────────────────────────────────────────────────────
+
+// newNoteWSServer builds a server whose notes service sits over a real
+// encrypted store in a temp directory — the store IS the thing under test
+// here, and a fake one would prove the DTO and nothing about the wire.
+func newNoteWSServer(t *testing.T) (*WSServer, *note.Service, func()) {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 7)
+	}
+	st, err := note.Open(context.Background(), note.Config{
+		Path: filepath.Join(t.TempDir(), "notes.db"),
+		Key:  key,
+	})
+	if err != nil {
+		t.Fatalf("open notes store: %v", err)
+	}
+	id := 0
+	svc := note.NewService(st, func() string { id++; return fmt.Sprintf("note-%d", id) }, time.Now)
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithNotes(svc))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return ws, svc, func() { _ = ws.Stop(ctx); _ = st.Close() }
+}
+
+func TestNotesList_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notes.list.schema.json")
+	ws, svc, stop := newNoteWSServer(t)
+	defer stop()
+	if _, err := svc.Create(context.Background(), "# Deploy\n\nkubectl rollout status api\n"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	resp := snippetCall(t, connectWS(t, ws), "notes.list", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "notes.list result")
+
+	var got struct {
+		Notes []map[string]any `json:"notes"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Notes == nil {
+		t.Fatal("notes marshalled as null; must be []")
+	}
+	// The list is a LIST: a row carries a derived title and an excerpt, and
+	// never the body (design §5). A row with a body would be a payload
+	// nobody asked for on every open of the panel.
+	if _, hasBody := got.Notes[0]["body"]; hasBody {
+		t.Fatal("a list row carries the body")
+	}
+	if got.Notes[0]["title"] != "Deploy" {
+		t.Fatalf("title is derived from the first line: %+v", got.Notes[0])
+	}
+}
+
+func TestNotesListOnAnEmptyLibraryIsAnEmptyArray(t *testing.T) {
+	schema := loadSchema(t, "notes.list.schema.json")
+	ws, _, stop := newNoteWSServer(t)
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "notes.list", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "notes.list result")
+	if !strings.Contains(string(resp.Result), `"notes":[]`) {
+		t.Fatalf("an empty library must be [], got %s", resp.Result)
+	}
+}
+
+func TestNotesCreateGetUpdateDelete_OverTheWireConformToContract(t *testing.T) {
+	ws, _, stop := newNoteWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	created := snippetCall(t, conn, "notes.create", map[string]any{"body": "first line\nsecond"}, 1)
+	if created.Error != nil {
+		t.Fatalf("create: %+v", created.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.create.schema.json"), created.Result, "notes.create result")
+	var note1 struct {
+		ID        string `json:"id"`
+		Body      string `json:"body"`
+		CreatedAt int64  `json:"createdAt"`
+	}
+	if err := json.Unmarshal(created.Result, &note1); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got := snippetCall(t, conn, "notes.get", map[string]any{"id": note1.ID}, 2)
+	if got.Error != nil {
+		t.Fatalf("get: %+v", got.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.get.schema.json"), got.Result, "notes.get result")
+
+	updated := snippetCall(t, conn, "notes.update",
+		map[string]any{"id": note1.ID, "body": "edited\nsecond"}, 3)
+	if updated.Error != nil {
+		t.Fatalf("update: %+v", updated.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.update.schema.json"), updated.Result, "notes.update result")
+	var note2 struct {
+		Body      string `json:"body"`
+		CreatedAt int64  `json:"createdAt"`
+	}
+	if err := json.Unmarshal(updated.Result, &note2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if note2.Body != "edited\nsecond" {
+		t.Fatalf("update did not land: %q", note2.Body)
+	}
+	if note2.CreatedAt != note1.CreatedAt {
+		t.Fatal("an edit moved createdAt; an edit is not a new note")
+	}
+
+	deleted := snippetCall(t, conn, "notes.delete", map[string]any{"id": note1.ID}, 4)
+	if deleted.Error != nil {
+		t.Fatalf("delete: %+v", deleted.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.delete.schema.json"), deleted.Result, "notes.delete result")
+
+	gone := snippetCall(t, conn, "notes.get", map[string]any{"id": note1.ID}, 5)
+	if gone.Error == nil {
+		t.Fatal("get of a deleted note must be an error, not an empty note")
+	}
+	if gone.Error.Code != -32602 {
+		t.Fatalf("a missing note is the caller's error: code %d", gone.Error.Code)
+	}
+}
+
+func TestNotesSearch_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notes.search.schema.json")
+	ws, svc, stop := newNoteWSServer(t)
+	defer stop()
+	ctx := context.Background()
+	if _, err := svc.Create(ctx, "Deploy notes\n\nkubectl rollout status api\n"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := svc.Create(ctx, "Something else\n"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	resp := snippetCall(t, connectWS(t, ws), "notes.search", map[string]any{"query": "rollout"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "notes.search result")
+
+	var got struct {
+		Matches []struct {
+			Title   string `json:"title"`
+			Excerpt string `json:"excerpt"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("want the one note whose BODY carries the word, got %d", len(got.Matches))
+	}
+	if !strings.Contains(strings.ToLower(got.Matches[0].Excerpt), "rollout") {
+		t.Fatalf("the excerpt does not carry the match: %q", got.Matches[0].Excerpt)
+	}
+}
+
+func TestNotesWithoutAServiceRefuseRatherThanAnswerEmpty(t *testing.T) {
+	// The soft degrade, stated on the wire: a build with no notes service
+	// says the method is not there. An empty list would tell somebody their
+	// notes are gone (design §8, §11.5).
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	resp := snippetCall(t, connectWS(t, ws), "notes.list", map[string]any{}, 1)
+	if resp.Error == nil {
+		t.Fatal("an unwired notes domain must refuse, not answer with an empty library")
 	}
 }
 

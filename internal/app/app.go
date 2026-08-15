@@ -37,6 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -68,6 +69,9 @@ type App struct {
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
 	vaultCloser interface{ Close() }
+	// noteCloser closes the notes database on shutdown; nil when the store
+	// never opened.
+	noteCloser interface{ Close() error }
 
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
@@ -521,11 +525,14 @@ func New(opts ...Option) (*App, error) {
 	// the app starts WITHOUT durable history (the stub) and says so: a
 	// terminal that refuses to start because its history database could not
 	// open a key is worse than one that starts and admits the gap.
-	historyPolicy := policyFromSettings(settingsRegistry)
-	budget, budgetErr := budgetFromSettings(settingsRegistry)
-	if budgetErr != nil {
-		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
-	} else if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
+	// The content key opens BOTH encrypted stores — the history database
+	// and the notes one. One key, one lifecycle, two files: they differ in
+	// their UPGRADE rule, not in their secrecy. History rebuilds its file
+	// when the schema moves (a log can be re-made by living); notes migrate
+	// theirs and never discard, because text somebody wrote cannot
+	// (.internal/specs/2026-08-16-notes-design.md §4.2).
+	var contentKey []byte
+	if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
 		Registry:    reg,
 		KeyID:       vault.ContentKeyID,
 		SystemReady: systemReady,
@@ -536,10 +543,21 @@ func New(opts ...Option) (*App, error) {
 		SaltPath: filepath.Join(paths.ConfigDir(), "contentkey.salt"),
 		Logger:   logger,
 	}); keyErr != nil {
-		slogger.Warn("durable command history unavailable; starting without it", "reason", keyErr)
+		slogger.Warn("encrypted local stores unavailable; starting without them", "reason", keyErr)
+	} else {
+		contentKey = key
+	}
+
+	historyPolicy := policyFromSettings(settingsRegistry)
+	budget, budgetErr := budgetFromSettings(settingsRegistry)
+	if budgetErr != nil {
+		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
+	} else if contentKey == nil {
+		// The key already said why, once, above.
+		slogger.Warn("durable command history unavailable; starting without it", "reason", "no content key")
 	} else if db, openErr := content.Open(ctx, content.Config{
 		Path:   filepath.Join(paths.DataDir(), "content.db"),
-		Key:    key,
+		Key:    contentKey,
 		Budget: budget,
 		Policy: historyPolicy,
 		Logger: logger,
@@ -547,6 +565,33 @@ func New(opts ...Option) (*App, error) {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
 	} else {
 		contentDB = db
+	}
+
+	// The notes library. A store that cannot be opened leaves noteSvc nil,
+	// the notes.* methods answer -32601, and the panel says the library is
+	// unavailable — never an empty list, which would tell somebody their
+	// notes are gone (spec §8).
+	var noteSvc *note.Service
+	// The notes database is closed on the way out, after the transport has
+	// stopped: an open file handle outliving the process is how a database
+	// gets left in a state its next open has to recover from.
+	var noteCloser interface{ Close() error }
+	if contentKey != nil {
+		if noteStore, noteErr := note.Open(ctx, note.Config{
+			Path: filepath.Join(paths.DataDir(), "notes.db"),
+			Key:  contentKey,
+		}); noteErr != nil {
+			slogger.Warn("notes unavailable; starting without them", "reason", noteErr)
+		} else {
+			noteSvc = note.NewService(noteStore, func() string {
+				var raw [16]byte
+				if _, rerr := rand.Read(raw[:]); rerr != nil {
+					return fmt.Sprintf("note-%d", time.Now().UnixNano())
+				}
+				return hex.EncodeToString(raw[:])
+			}, time.Now)
+			noteCloser = noteStore
+		}
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
@@ -618,6 +663,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),
+		transport.WithNotes(noteSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
@@ -852,6 +898,7 @@ func New(opts ...Option) (*App, error) {
 		Profiles:         profileStore,
 		Credentials:      v,
 		vaultCloser:      v,
+		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
 		logFilePath:      logFilePath,
@@ -1378,6 +1425,12 @@ func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	// After the transport, so nothing is still writing a note.
+	if a.noteCloser != nil {
+		if err := a.noteCloser.Close(); err != nil {
+			a.Logger.Error("notes database shutdown error", "error", err)
+		}
 	}
 	// After the transport, so nothing is still asking the vault for secrets.
 	// This seals it as well as stopping its timer: leaving the root key in a

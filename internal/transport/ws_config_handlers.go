@@ -2240,6 +2240,8 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	executeWired := profilesWired && groupsWired && s.credentials != nil && s.profileSvc != nil
 
 	snippetOp := capability.NewSnippetOperation(configGate, lane, s.snippets)
+	noteWired := s.notes != nil
+	noteOp := capability.NewNoteOperation(configGate, lane, s.notes)
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
 		tabbyOp = capability.NewTabbyImportOperation(
@@ -2386,6 +2388,30 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		}),
 		regResponder(configSub, "snippets.reorder", params(validateSnippetReorderRaw), func(r Responder) handlerFunc {
 			h := snippetHandlers{op: snippetOp, wired: snippetWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "notes.list", noParams(), func(r Responder) handlerFunc {
+			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "notes.get", params(validateNoteIDRaw), func(r Responder) handlerFunc {
+			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "notes.create", params(validateNoteCreateRaw), func(r Responder) handlerFunc {
+			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "notes.update", params(validateNoteUpdateRaw), func(r Responder) handlerFunc {
+			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "notes.delete", params(validateNoteIDRaw), func(r Responder) handlerFunc {
+			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "notes.search", params(validateNoteSearchRaw), func(r Responder) handlerFunc {
+			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(tabbySub, "profiles.importTabby", params(validateTabbyImportRaw), func(r Responder) handlerFunc {

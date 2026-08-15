@@ -31,6 +31,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -143,6 +144,9 @@ type WSServer struct {
 	// snippets is the snippet library service backing the snippets.* JSON-RPC
 	// methods. When nil, those methods return -32601.
 	snippets *snippet.Service
+	// notes is the notes library service backing the notes.* JSON-RPC
+	// methods. When nil, those methods return -32601.
+	notes *note.Service
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
@@ -739,6 +743,13 @@ func WithProfileService(svc *profile.ProfileService) WSServerOption {
 // the snippets.* JSON-RPC methods. When nil, those methods return -32601.
 func WithSnippets(svc *snippet.Service) WSServerOption {
 	return func(s *WSServer) { s.snippets = svc }
+}
+
+// WithNotes attaches the notes library service, enabling the notes.*
+// JSON-RPC methods. When nil, those methods return -32601 and the panel
+// says the library is unavailable — never an empty list.
+func WithNotes(svc *note.Service) WSServerOption {
+	return func(s *WSServer) { s.notes = svc }
 }
 
 // WithCaptureRegistry injects the pending-capture registry. Test seam:
