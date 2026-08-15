@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -84,6 +85,11 @@ type endpointProbeParams struct {
 	Key        string `json:"key"`
 	Model      string `json:"model"`
 	EndpointID string `json:"endpointId"`
+	// Headers are the form's DRAFT custom headers (nocx-lyyk) — the same
+	// wire rows the create/update params carry, because the probe tests
+	// what will actually be used. A secret-valued row is a row handle the
+	// backend resolves to material before the probe dials.
+	Headers []endpointHeaderInput `json:"headers"`
 }
 
 // assistantStatusHandlers answers agent.status. wired is true when the endpoint
@@ -212,11 +218,6 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 		return
 	}
-	if msg := validateProbeParams(params); msg != "" {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
-		return
-	}
-
 	key, refused, resolveErr := h.resolveProbeCredential(ctx, params)
 	if resolveErr != nil {
 		// The renderer named a record that does not exist (deleted
@@ -237,11 +238,27 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		return
 	}
 
+	headers, refusedHeaders, headerErr := h.resolveProbeHeaders(ctx, params)
+	if headerErr != nil {
+		// An unknown row is a caller error, the same shape as the record
+		// above; the sealed vault keeps its dispatcher seam (ADR-0032).
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: headerErr.Error()})
+		return
+	}
+	if refusedHeaders != nil {
+		if h.probes != nil {
+			h.probes.Record(*refusedHeaders)
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(*refusedHeaders))
+		return
+	}
+
 	res, err := h.client.Probe(ctx, assistant.ProbeParams{
 		Name:    params.Name,
 		BaseURL: params.BaseURL,
 		Key:     key,
 		Model:   params.Model,
+		Headers: headers,
 	})
 	if err != nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
@@ -251,6 +268,114 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		h.probes.Record(res)
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(res))
+}
+
+// resolveProbeHeaders applies the credential resolution's rule to the
+// form's DRAFT custom headers (nocx-lyyk): a literal rides as-is; a
+// secret-valued row resolves to material at probe time. Anything
+// unresolvable is a refused probe RESULT naming the header — never a
+// no-header dial, which would 401 and lie about a working endpoint. The
+// sealed vault keeps its dispatcher seam, exactly like the credential.
+func (h assistantProbeHandlers) resolveProbeHeaders(ctx context.Context, params endpointProbeParams) ([]assistant.Header, *assistant.ProbeResult, error) {
+	if len(params.Headers) == 0 {
+		return nil, nil, nil
+	}
+
+	// Resolve every row handle to material in one service pass, keyed by
+	// the row so the final list preserves the DRAFT's order. Literals need
+	// no vault at all, so a literal-only draft resolves even without the
+	// vault seams (the dev-web harness).
+	rows := make([]string, 0, len(params.Headers))
+	rowIndex := make(map[string]int, len(params.Headers))
+	for _, hd := range params.Headers {
+		if hd.Secret == nil {
+			continue
+		}
+		if _, seen := rowIndex[*hd.Secret]; !seen {
+			rowIndex[*hd.Secret] = len(rows)
+			rows = append(rows, *hd.Secret)
+		}
+	}
+	if len(rows) == 0 {
+		out := make([]assistant.Header, 0, len(params.Headers))
+		for _, hd := range params.Headers {
+			out = append(out, assistant.Header{Name: hd.Name, Value: derefOrEmpty(hd.Value)})
+		}
+		return out, nil, nil
+	}
+	if h.op == nil || h.secrets == nil {
+		return nil, refusedProbeHeadersResult(params, params.Headers), nil
+	}
+
+	refs := make([]string, len(rows))
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
+		for i, row := range rows {
+			ref, resolveErr := svc.ResolveSecretRow(row)
+			if resolveErr != nil {
+				return resolveErr
+			}
+			refs[i] = ref
+		}
+		return nil
+	})
+	if err != nil {
+		// An unresolvable row is the header's analogue of the credential
+		// that cannot be resolved (deleted meanwhile, or a stale handle):
+		// a refused probe RESULT naming the header, never a Go error and
+		// never a no-header dial.
+		return nil, refusedProbeHeadersResult(params, params.Headers), nil
+	}
+
+	material := make(map[string]string, len(rows))
+	for i, ref := range refs {
+		secret, getErr := h.secrets.Get(ctx, credential.SecretID(ref))
+		if getErr != nil {
+			if errors.Is(getErr, vault.ErrVaultSealed) {
+				return nil, nil, vault.ErrVaultSealed
+			}
+			return nil, refusedProbeHeadersResult(params, params.Headers), nil
+		}
+		if secret.IsEmpty() {
+			return nil, refusedProbeHeadersResult(params, params.Headers), nil
+		}
+		_ = secret.Use(func(b []byte) error {
+			material[rows[i]] = string(b)
+			return nil
+		})
+	}
+
+	out := make([]assistant.Header, 0, len(params.Headers))
+	for _, hd := range params.Headers {
+		if hd.Secret == nil {
+			out = append(out, assistant.Header{Name: hd.Name, Value: derefOrEmpty(hd.Value)})
+			continue
+		}
+		out = append(out, assistant.Header{Name: hd.Name, Value: material[*hd.Secret]})
+	}
+	return out, nil, nil
+}
+
+// refusedProbeHeadersResult is the unavailable-header probe verdict: a probe
+// RESULT naming the header, never a Go error and never a no-header dial.
+func refusedProbeHeadersResult(params endpointProbeParams, headers []endpointHeaderInput) *assistant.ProbeResult {
+	kind := assistant.ProbeModel
+	if params.Model == "" {
+		kind = assistant.ProbeConnection
+	}
+	names := make([]string, 0, len(headers))
+	for _, hd := range headers {
+		if hd.Secret != nil {
+			names = append(names, hd.Name)
+		}
+	}
+	return &assistant.ProbeResult{
+		EndpointName: params.Name,
+		Model:        params.Model,
+		Kind:         kind,
+		OK:           false,
+		Error:        fmt.Sprintf("the header %q references an unavailable secret", strings.Join(names, ", ")),
+		At:           time.Now(),
+	}
 }
 
 // resolveProbeCredential applies the endpoints.probe resolution rule (the
@@ -354,11 +479,6 @@ func validateProbeParamsRaw(raw json.RawMessage) string {
 // validateProbeParams checks every reachable endpoints.probe param, returning
 // a non-empty message on the first failure. Returns "" when the params are
 // acceptable.
-//
-// An absent model is NOT a missing parameter: it is the other question — "can
-// I reach this API with this key" — which needs no model and is the only one
-// askable of an endpoint nobody has typed a model into yet (nocx-q27y). The
-// engine routes on it and the result names which check ran.
 func validateProbeParams(p endpointProbeParams) string {
 	if p.BaseURL == "" {
 		return "baseUrl is required"
@@ -396,19 +516,23 @@ func validateProbeParams(p endpointProbeParams) string {
 	if hasControlChars(p.Model) {
 		return "model must not contain control characters"
 	}
+	// The draft headers ride the probe's requests verbatim — the same rows
+	// the create/update params validate, via the SAME validator, so a header
+	// refused at save time is refused at test time.
+	if msg := validateEndpointHeaderRows(p.Headers); msg != "" {
+		return msg
+	}
 	return ""
 }
 
 // hasControlChars reports whether s contains any C0/C1 control character or
 // DEL. Tabs and newlines are control characters too, and neither belongs in
-// a credential, a model id or a URL.
+// a credential, a model id or a URL. One predicate for the whole wire: the
+// implementation lives in internal/profile (the same owner the stored-record
+// header validation uses) so a control character cannot be refused in one
+// place and dialled in another.
 func hasControlChars(s string) bool {
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return true
-		}
-	}
-	return false
+	return profile.HasControlChars(s)
 }
 
 // refusedProbeResult is the unavailable-credential probe verdict: a probe

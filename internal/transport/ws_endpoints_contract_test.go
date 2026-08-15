@@ -26,6 +26,9 @@ func endpointDTO(credential *string) profile.EndpointDTO {
 			{Name: "gpt-4o-mini"},
 			{Name: "gpt-4o", Alias: ptrStr("gpt-4o (fast)")},
 		},
+		// Headers is never null on the wire (the contract declares an
+		// array); a direct-built DTO must say so explicitly.
+		Headers: []profile.EndpointHeaderDTO{},
 	}
 }
 
@@ -37,10 +40,15 @@ func ptrStr(s string) *string { return &s }
 func TestEndpointsList_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "endpoints.list.schema.json")
 	row := "secrow:0123456789abcdef"
+	withHeaders := endpointDTO(&row)
+	withHeaders.Headers = []profile.EndpointHeaderDTO{
+		{Name: "HTTP-Referer", Value: ptrStr("nocx")},
+		{Name: "api-key", Secret: &row},
+	}
 	cases := map[string]endpointsListResponse{
 		"with credential": {Endpoints: []profile.EndpointDTO{endpointDTO(&row)}},
 		"keyless":         {Endpoints: []profile.EndpointDTO{endpointDTO(nil)}},
-		"empty":           {Endpoints: []profile.EndpointDTO{}},
+		"with headers":    {Endpoints: []profile.EndpointDTO{withHeaders}},
 	}
 	for name, dto := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -77,7 +85,11 @@ func TestEndpoints_OverTheWireConformToContract(t *testing.T) {
 	h := newEndpointHarness(t)
 	h.setupAndUnseal()
 
-	createRaw := jsonrpcCall(t, h.conn, "endpoints.create", endpointParams("OpenAI", "https://api.openai.com/v1", "sk-test-123"))
+	createParams := endpointParams("OpenAI", "https://api.openai.com/v1", "sk-test-123")
+	createParams["headers"] = []map[string]any{
+		{"name": "HTTP-Referer", "value": "nocx", "secret": nil},
+	}
+	createRaw := jsonrpcCall(t, h.conn, "endpoints.create", createParams)
 	var createEnv struct {
 		Error  *struct{ Code int } `json:"error"`
 		Result json.RawMessage     `json:"result"`
@@ -113,9 +125,14 @@ func TestEndpoints_OverTheWireConformToContract(t *testing.T) {
 	}
 	validateJSON(t, listSchema, listEnv.Result, "endpoints.list result (real socket)")
 
-	// Update with no key: the credential must survive as a row handle.
+	// Update with no key: the credential must survive as a row handle, and
+	// the custom headers survive the full-replace update (the literal row
+	// is re-sent).
 	updateParams := endpointParams("OpenAI EU", "https://api.eu.openai.com/v1", "")
 	updateParams["id"] = epID
+	updateParams["headers"] = []map[string]any{
+		{"name": "HTTP-Referer", "value": "nocx", "secret": nil},
+	}
 	updateRaw := jsonrpcCall(t, h.conn, "endpoints.update", updateParams)
 	var updateEnv struct {
 		Error  *struct{ Code int } `json:"error"`

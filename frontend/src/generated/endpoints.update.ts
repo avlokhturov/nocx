@@ -49,4 +49,21 @@ export interface Endpoint {
      */
     alias: string | null
   }[]
+  /**
+   * The endpoint's custom HTTP headers (nocx-lyyk), sent on every request it makes. Never null: an endpoint with no custom headers sends []. Each row names a header and carries EXACTLY ONE value source: a literal value, or the row handle (secrow:...) of a vault secret — never the material, and never the reference itself (ADR-0017 §1).
+   */
+  headers: {
+    /**
+     * The header name. Refused names (Authorization, Host, Content-Length, Content-Type, the hop-by-hop set) are rejected at write time with the reason.
+     */
+    name: string
+    /**
+     * The literal header value, or null when the value is a vault secret. An empty literal is legal HTTP and stays "".
+     */
+    value: string | null
+    /**
+     * Row handle of the vault secret the value resolves to at request time, or null for a literal value. A reference never crosses the wire.
+     */
+    secret: string | null
+  }[]
 }

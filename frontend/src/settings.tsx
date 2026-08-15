@@ -422,6 +422,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             client={props.endpointsClient!}
             agentClient={props.agentClient}
             vaultController={props.vaultController}
+            vaultClient={props.vaultClient}
           />
         </Show>
       ),

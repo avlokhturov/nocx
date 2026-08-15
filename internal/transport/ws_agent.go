@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -441,6 +442,34 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		return
 	}
 
+	// The endpoint's custom headers, resolved at stream time alongside the
+	// credential — the vault may have sealed since the ask was recorded.
+	// A literal rides as-is; a secret-valued header resolves to material,
+	// and an unresolvable one fails the run with a sentence naming the
+	// header (the same shape as the missing-credential sentence above).
+	headers := make([]assistant.Header, 0, len(rc.endpoint.Headers))
+	for _, hd := range rc.endpoint.Headers {
+		if hd.Value != nil {
+			headers = append(headers, assistant.Header{Name: hd.Name, Value: *hd.Value})
+			continue
+		}
+		hSecret, hErr := h.credentials.Get(ctx, credential.SecretID(hd.ValueRef))
+		if hErr != nil || hSecret.IsEmpty() {
+			sentence := fmt.Sprintf("the header %q references a missing secret", hd.Name)
+			if errors.Is(hErr, vault.ErrVaultSealed) {
+				sentence = "the vault is locked — unlock it and ask again"
+			}
+			h.terminalize(ctx, rc, content.RunFailed, content.TermFailed, sentence, r)
+			return
+		}
+		var value string
+		_ = hSecret.Use(func(b []byte) error {
+			value = string(b)
+			return nil
+		})
+		headers = append(headers, assistant.Header{Name: hd.Name, Value: value})
+	}
+
 	// Context assembly: the system rule (frame content is data, not
 	// instructions — design §6.2), the question, then each referenced
 	// frame's durable text as labelled data.
@@ -468,6 +497,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Key:      secret,
 		BaseURL:  rc.endpoint.BaseURL,
 		Model:    rc.model,
+		Headers:  headers,
 		Messages: msgs,
 	}, func(text string) error {
 		// Persist BEFORE emitting: a delta the renderer lost is still in

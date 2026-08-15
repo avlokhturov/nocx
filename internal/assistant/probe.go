@@ -50,7 +50,7 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	defer cancel()
 
 	var sb strings.Builder
-	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model,
+	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers,
 		[]*schema.Message{schema.UserMessage(probePrompt)},
 		func(delta string) error { sb.WriteString(delta); return nil })
 

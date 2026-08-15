@@ -22,6 +22,7 @@ import (
 
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
+	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
 	"github.com/shady2k/nocx/internal/credential"
@@ -66,7 +67,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, msgs []*schema.Message, onDelta func(string) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, onDelta func(string) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -76,10 +77,20 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		return fmt.Errorf("build agent: %w", err)
 	}
 
+	// The endpoint's custom headers ride the model call as per-request extra
+	// headers (eino's WithExtraHeader, applied when the adapter builds the
+	// HTTP request), and their canonical names tag the context so the
+	// guarded client's redirect rule drops exactly them on an origin change.
+	var runOpts []adk.AgentRunOption
+	if m, names := headerMap(headers); m != nil {
+		runOpts = append(runOpts, adk.WithChatModelOptions([]einoModel.Option{openai.WithExtraHeader(m)}))
+		ctx = withCustomHeaderNames(ctx, names)
+	}
+
 	it := agent.Run(ctx, &adk.AgentInput{
 		Messages:        msgs,
 		EnableStreaming: true,
-	})
+	}, runOpts...)
 	for {
 		ev, ok := it.Next()
 		if !ok {
@@ -144,7 +155,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 		}
 	}
 	var text strings.Builder
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, msgs, func(delta string) error {
+	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, func(delta string) error {
 		text.WriteString(delta)
 		return onDelta(delta)
 	})

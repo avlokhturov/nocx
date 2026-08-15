@@ -147,12 +147,30 @@ type endpointModelInput struct {
 	Alias *string `json:"alias"`
 }
 
+// endpointHeaderInput is the wire form of one custom header in create/update
+// params and in endpoints.probe params (the probe tests the form's DRAFT
+// values, so it carries the same rows). The value's SOURCE is chosen with
+// the same control the endpoint's key uses: a literal Value, or the row
+// handle of a vault secret the backend resolves (never material, and never
+// the reference itself — ADR-0017 §1). Exactly one of Value and Secret is
+// set; nil means the other.
+type endpointHeaderInput struct {
+	Name   string  `json:"name"`
+	Value  *string `json:"value"`
+	Secret *string `json:"secret"`
+}
+
 type endpointCreateParams struct {
 	Name    string                 `json:"name"`
 	BaseURL string                 `json:"baseUrl"`
 	Schema  profile.EndpointSchema `json:"schema"`
 	Key     string                 `json:"key"`
 	Models  []endpointModelInput   `json:"models"`
+	// Credential is the renderer's row handle when the form chose "use an
+	// existing vault secret" (nocx-rzjw) — the reference instead of a mint.
+	Credential string `json:"credential"`
+	// Headers are the endpoint's custom HTTP headers (nocx-lyyk).
+	Headers []endpointHeaderInput `json:"headers"`
 }
 
 // resolveEndpointSchema completes a schema the wire params omitted. The
@@ -176,32 +194,52 @@ func resolveEndpointSchema(s profile.EndpointSchema) profile.EndpointSchema {
 
 func (p endpointCreateParams) toEndpoint() profile.Endpoint {
 	return profile.Endpoint{
-		Name:    p.Name,
-		BaseURL: p.BaseURL,
-		Schema:  resolveEndpointSchema(p.Schema),
-		Models:  wireModelsToStored(p.Models),
+		Name:          p.Name,
+		BaseURL:       p.BaseURL,
+		Schema:        resolveEndpointSchema(p.Schema),
+		CredentialRef: p.Credential,
+		Models:        wireModelsToStored(p.Models),
+		Headers:       wireHeadersToStored(p.Headers),
 	}
+}
+
+// wireHeadersToStored maps the wire header rows to the record form. A
+// literal stays a literal; a secret row handle rides in ValueRef for the
+// service to resolve (the same wire form the profile options use).
+func wireHeadersToStored(in []endpointHeaderInput) []profile.EndpointHeader {
+	if in == nil {
+		return nil
+	}
+	out := make([]profile.EndpointHeader, len(in))
+	for i, h := range in {
+		out[i] = profile.EndpointHeader{Name: h.Name, Value: h.Value, ValueRef: derefOrEmpty(h.Secret)}
+	}
+	return out
 }
 
 // endpointUpdateParams is the full-replace update: same fields as create,
 // plus the id. key is optional and empty means "keep the existing
 // material" (design §4.5.4).
 type endpointUpdateParams struct {
-	ID      string                 `json:"id"`
-	Name    string                 `json:"name"`
-	BaseURL string                 `json:"baseUrl"`
-	Schema  profile.EndpointSchema `json:"schema"`
-	Key     string                 `json:"key"`
-	Models  []endpointModelInput   `json:"models"`
+	ID         string                 `json:"id"`
+	Name       string                 `json:"name"`
+	BaseURL    string                 `json:"baseUrl"`
+	Schema     profile.EndpointSchema `json:"schema"`
+	Key        string                 `json:"key"`
+	Credential string                 `json:"credential"`
+	Models     []endpointModelInput   `json:"models"`
+	Headers    []endpointHeaderInput  `json:"headers"`
 }
 
 func (p endpointUpdateParams) toEndpoint() profile.Endpoint {
 	return profile.Endpoint{
-		ID:      p.ID,
-		Name:    p.Name,
-		BaseURL: p.BaseURL,
-		Schema:  resolveEndpointSchema(p.Schema),
-		Models:  wireModelsToStored(p.Models),
+		ID:            p.ID,
+		Name:          p.Name,
+		BaseURL:       p.BaseURL,
+		Schema:        resolveEndpointSchema(p.Schema),
+		CredentialRef: p.Credential,
+		Models:        wireModelsToStored(p.Models),
+		Headers:       wireHeadersToStored(p.Headers),
 	}
 }
 
@@ -237,16 +275,33 @@ func wireEndpoint(e profile.Endpoint) profile.EndpointDTO {
 		Name:    e.Name,
 		BaseURL: e.BaseURL,
 		Schema:  e.Schema,
-		Models:  make([]profile.EndpointModelDTO, 0, len(e.Models)),
-	}
-	for _, m := range e.Models {
-		dto.Models = append(dto.Models, profile.EndpointModelDTO(m))
+		Models:  wireModelsToDTO(e.Models),
+		Headers: make([]profile.EndpointHeaderDTO, 0, len(e.Headers)),
 	}
 	if e.CredentialRef != "" {
 		row := vault.RowFor(credential.SecretID(e.CredentialRef))
 		dto.Credential = &row
 	}
+	for _, h := range e.Headers {
+		row := profile.EndpointHeaderDTO{Name: h.Name, Value: h.Value}
+		if h.ValueRef != "" {
+			rowHandle := vault.RowFor(credential.SecretID(h.ValueRef))
+			row.Secret = &rowHandle
+		}
+		dto.Headers = append(dto.Headers, row)
+	}
 	return dto
+}
+
+func wireModelsToDTO(in []profile.EndpointModel) []profile.EndpointModelDTO {
+	if in == nil {
+		return nil
+	}
+	out := make([]profile.EndpointModelDTO, len(in))
+	for i, m := range in {
+		out[i] = profile.EndpointModelDTO(m)
+	}
+	return out
 }
 
 // wireEndpoints maps a stored list to its wire form. Never null: an empty

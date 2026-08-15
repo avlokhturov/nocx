@@ -79,11 +79,13 @@ type ConfigService interface {
 	// deletion (ADR-0011 §4).
 	ClearSecretRefs(ref string) error
 
-	// Endpoints (ADR-0030). The write methods take the endpoint record in
-	// its STORED form — CredentialRef is a backend reference, never
-	// something the renderer sends — plus the API key as an input: a
-	// credential.Secret that is minted (create), rotated (update with a
-	// new key) or left alone (update without one). The key never survives
+	// Endpoints (ADR-0030, nocx-rzjw). The write methods take the endpoint
+	// record in WIRE form — CredentialRef and header ValueRefs are renderer
+	// row handles (secrow:...) the service resolves to stored references
+	// before anything is written, exactly like profile options — plus the
+	// API key as an input: a credential.Secret that is minted (create),
+	// rotated (update with a new key) or left alone (update without one).
+	// A key and a key row are mutually exclusive. The key never survives
 	// the call, never crosses back, and never appears in a result. The ctx
 	// bounds the vault calls (mint, rotate, material delete), exactly as
 	// TabbyImportService.CreateSecret's does.
@@ -94,15 +96,22 @@ type ConfigService interface {
 	// the credential it owns, exactly as connections.test resolves a
 	// profile by its id. profile.ErrEndpointNotFound when none exists.
 	GetEndpoint(id string) (profile.Endpoint, error)
+	// ResolveSecretRow maps a renderer row handle to its stored reference —
+	// the endpoints.probe draft headers are wire form (row handles) and
+	// must resolve before the probe dials, so the probe handler can resolve
+	// them without ever holding the vault.
+	ResolveSecretRow(row string) (string, error)
 	// CreateEndpoint stores the endpoint, minting key into the vault first
 	// when it is non-empty: the material must exist before the record
-	// references it (ADR-0011 §4's order, ADR-0030).
+	// references it (ADR-0011 §4's order, ADR-0030). A row handle in
+	// e.CredentialRef references an existing secret instead of minting.
 	CreateEndpoint(ctx context.Context, e profile.Endpoint, key credential.Secret) (profile.Endpoint, error)
 	// UpdateEndpoint replaces the record. A nil or empty key keeps the
 	// existing credential — "absent or empty" means "keep the existing
 	// material", never "erase it" (design §4.5.4); a non-empty one rotates
 	// the material behind the endpoint's OWN secret (same id, same name)
-	// or mints when the endpoint had none.
+	// or mints when the endpoint had none; a row handle in e.CredentialRef
+	// references an existing secret instead.
 	UpdateEndpoint(ctx context.Context, e profile.Endpoint, key *credential.Secret) (profile.Endpoint, error)
 	// DeleteEndpoint removes the record (clearing its reference from every
 	// remaining record in the same write) and then deletes the material,
@@ -376,12 +385,30 @@ func (s *configService) GetEndpoint(id string) (profile.Endpoint, error) {
 	return *ep, nil
 }
 
+// ResolveSecretRow maps a renderer row handle to its stored reference — the
+// probe's draft header rows (nocx-lyyk). A read that REPORTS: the resolution
+// needs the same inventory inputs the write paths use, so it lives on the
+// service, and the probe handler calls it without ever holding the vault.
+func (s *configService) ResolveSecretRow(row string) (string, error) {
+	if err := s.guard.check(); err != nil {
+		return "", err
+	}
+	return s.rowToRef(row)
+}
+
 // CreateEndpoint stores the endpoint, minting the key into the vault FIRST
 // when one is given: the material must exist before the record references
 // it, so a crash between the two leaves an ownerless secret the vault's
 // journal retires rather than a record pointing at a secret that cannot
 // exist (ADR-0011 §4's order, ADR-0030). The record is validated BEFORE
 // the mint — a bad record must not orphan a freshly-minted key.
+//
+// The endpoint may instead REFERENCE a secret the vault already holds: the
+// renderer's row handle in e.CredentialRef (and in header ValueRefs) is
+// resolved to the stored reference before anything is written, exactly as
+// profile options resolve today. A typed key and a key row are mutually
+// exclusive — one source per credential, checked here as the backstop to the
+// wire's own check (nocx-rzjw).
 func (s *configService) CreateEndpoint(ctx context.Context, e profile.Endpoint, key credential.Secret) (profile.Endpoint, error) {
 	if err := s.guard.check(); err != nil {
 		return profile.Endpoint{}, err
@@ -389,7 +416,23 @@ func (s *configService) CreateEndpoint(ctx context.Context, e profile.Endpoint, 
 	if err := profile.ValidateEndpoint(e); err != nil {
 		return profile.Endpoint{}, err
 	}
-	if !key.IsEmpty() {
+	// Row handles resolve BEFORE the mint or the write: a bad row must not
+	// orphan a freshly-minted key (the same ordering as validation).
+	headers, err := s.resolveEndpointHeaders(e.Headers)
+	if err != nil {
+		return profile.Endpoint{}, err
+	}
+	e.Headers = headers
+	if e.CredentialRef != "" {
+		if !key.IsEmpty() {
+			return profile.Endpoint{}, errors.New("endpoint credential has two sources: a typed key and a key row are mutually exclusive")
+		}
+		ref, rowErr := s.rowToRef(e.CredentialRef)
+		if rowErr != nil {
+			return profile.Endpoint{}, rowErr
+		}
+		e.CredentialRef = ref
+	} else if !key.IsEmpty() {
 		if s.secrets == nil {
 			return profile.Endpoint{}, errors.New("endpoint credentials unavailable: vault not wired")
 		}
@@ -408,11 +451,42 @@ func (s *configService) CreateEndpoint(ctx context.Context, e profile.Endpoint, 
 	return e, nil
 }
 
-// UpdateEndpoint replaces the record. A nil or empty key keeps the existing
-// credential; a non-empty one rotates the material behind the endpoint's
-// OWN secret — same id, same name (ADR-0017 §2's rotate, which is why an
-// update never orphans a key and never dangles another record that happens
-// to share the secret) — or mints when the endpoint had no credential.
+// resolveEndpointHeaders converts every renderer row handle in the
+// wire-form header list to its stored reference — the header-value half of
+// the row-resolution contract, exactly like resolveOptions for profile
+// options. Literal values pass through untouched.
+func (s *configService) resolveEndpointHeaders(headers []profile.EndpointHeader) ([]profile.EndpointHeader, error) {
+	if len(headers) == 0 {
+		return headers, nil
+	}
+	out := make([]profile.EndpointHeader, len(headers))
+	for i, h := range headers {
+		if h.ValueRef == "" {
+			out[i] = h
+			continue
+		}
+		ref, err := s.rowToRef(h.ValueRef)
+		if err != nil {
+			return nil, fmt.Errorf("header %q: %w", h.Name, err)
+		}
+		out[i] = profile.EndpointHeader{Name: h.Name, Value: h.Value, ValueRef: ref}
+	}
+	return out, nil
+}
+
+// UpdateEndpoint replaces the record. Three credential sources, one per
+// update:
+//
+//   - e.CredentialRef names a row handle (the form's "use an existing
+//     secret" choice, nocx-rzjw): it is resolved and referenced. The swap
+//     touches no material — nothing is minted, rotated or deleted — and an
+//     abandoned owned key simply stops being referenced, staying visible on
+//     the Secrets page where ADR-0016 makes ownerless secrets first-class.
+//   - A nil or empty key keeps the existing credential (design §4.5.4).
+//   - A non-empty key rotates the material behind the endpoint's OWN secret —
+//     same id, same name (ADR-0017 §2's rotate, which is why an update never
+//     orphans a key and never dangles another record that happens to share
+//     the secret) — or mints when the endpoint had no credential.
 //
 // Vault-first for the key paths: the rotation's reference never changes, so
 // a record write that fails afterwards leaves the endpoint with its old
@@ -433,7 +507,23 @@ func (s *configService) UpdateEndpoint(ctx context.Context, e profile.Endpoint, 
 		return profile.Endpoint{}, fmt.Errorf("%s: %w", e.ID, profile.ErrEndpointNotFound)
 	}
 
-	if key != nil && !key.IsEmpty() {
+	headers, err := s.resolveEndpointHeaders(e.Headers)
+	if err != nil {
+		return profile.Endpoint{}, err
+	}
+	e.Headers = headers
+
+	switch {
+	case e.CredentialRef != "":
+		if key != nil && !key.IsEmpty() {
+			return profile.Endpoint{}, errors.New("endpoint credential has two sources: a typed key and a key row are mutually exclusive")
+		}
+		ref, rowErr := s.rowToRef(e.CredentialRef)
+		if rowErr != nil {
+			return profile.Endpoint{}, rowErr
+		}
+		e.CredentialRef = ref
+	case key != nil && !key.IsEmpty():
 		if s.secrets == nil {
 			return profile.Endpoint{}, errors.New("endpoint credentials unavailable: vault not wired")
 		}
@@ -457,7 +547,7 @@ func (s *configService) UpdateEndpoint(ctx context.Context, e profile.Endpoint, 
 			}
 			e.CredentialRef = existing.CredentialRef
 		}
-	} else {
+	default:
 		// Keep the existing credential, whatever it is.
 		e.CredentialRef = existing.CredentialRef
 	}

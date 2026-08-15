@@ -375,6 +375,60 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(answerBody).not.toContainText('command not found')
   })
 
+  test('custom headers ride the completion AND the connection check (nocx-lyyk)', async ({
+    page,
+  }) => {
+    // The endpoint from test 2 exists with a key. Give it a custom header
+    // through the same form a user uses: the header list is the kit's
+    // EditableRowList, and the value's source is the same control the key
+    // uses (acceptance 7's shape).
+    await openApp(page)
+    await openAIEndpoints(page)
+    const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
+    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
+    const dialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Add header' }).click()
+    await dialog.locator('#endpoint-header-0-name').fill('HTTP-Referer')
+    await dialog.locator('#endpoint-header-0-value').fill('https://nocx.dev')
+    await dialog.getByRole('button', { name: 'Save Endpoint', exact: true }).click()
+    await expect(dialog).not.toBeVisible({ timeout: 10_000 })
+
+    // ── The connection check carries the header (acceptance 1, half 2) ──
+    // The model field's silent discovery probes GET /models with the draft's
+    // headers — the same request the no-model Test button makes.
+    await savedRow.getByRole('button', { name: `Edit E2E Fake ${nonce}` }).click()
+    const dialog2 = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
+    await expect(dialog2).toBeVisible()
+    const before = fake.requests().length
+    await dialog2.locator('#endpoint-model-0-name').focus()
+    await expect
+      .poll(
+        () => {
+          const reqs = fake.requests()
+          const check = reqs.slice(before).find((r) => r.path.endsWith('/models'))
+          return check ? (check.headers['http-referer'] as string | undefined) : undefined
+        },
+        { timeout: 15_000 },
+      )
+      .toBe('https://nocx.dev')
+    await dialog2.getByRole('button', { name: 'Cancel', exact: true }).click()
+
+    // ── The completion carries the header (acceptance 1, half 1) ────────
+    await backToTerminal(page)
+    const marker = `hdr-${nonce}`
+    const { block } = await runCommand(page, `echo ${marker}`, marker)
+    const base = fake.requests().length
+    fake.setScript({ chunks: ['ok ', marker] })
+    await clickAsk(block)
+    const req = await fake.waitForRequests(base + 1)
+    expect(req[base].path.endsWith('/chat/completions')).toBe(true)
+    expect(req[base].headers['http-referer']).toBe('https://nocx.dev')
+    // The credential still rides as the stored Bearer, and the custom header
+    // does not replace it.
+    expect(req[base].authorization).toBe(`Bearer e2e-key-${nonce}`)
+  })
+
   test('a second ask while the first streams lands its deltas on the right entry', async ({
     page,
   }) => {

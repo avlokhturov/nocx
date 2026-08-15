@@ -34,6 +34,7 @@ function ep(overrides: Partial<Endpoint> = {}): Endpoint {
     schema: 'openai-compatible',
     credential: null,
     models: [{ name: 'gpt-4o', alias: null }],
+    headers: [],
     ...overrides,
   }
 }
@@ -74,6 +75,7 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
         // handle — the value never crosses back.
         credential: input.key !== '' ? `secrow:${next++}` : null,
         models: input.models.map((m) => ({ name: m.name, alias: m.alias })),
+        headers: input.headers.map((h) => ({ name: h.name, value: h.value, secret: h.secret })),
       }
       store.push(created)
       return created
@@ -300,6 +302,14 @@ describe('AI endpoints surface — real surface, real client seam', () => {
       name: 'My provider',
       baseUrl: 'https://api.example.com/v1',
       key: 'sk-live-abc',
+      // No schema on the wire: the form has no dialect control while one
+      // schema exists (design §4.5, decision 2), so the backend owns the
+      // value and completes it at the wire seam (ws_endpoints.go
+      // resolveEndpointSchema) — this exact absence is what that default
+      // fills, and it is pinned on the other side by the transport's
+      // renderer-shape over-socket test (nocx-qtim).
+      credential: '',
+      headers: [],
       models: [{ name: 'gpt-4o', alias: 'Flagship' }],
     })
 
@@ -313,20 +323,33 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(toastMessages()).toContain('Saved "My provider"')
   })
 
-  it('never reads a key back: the form opens empty on an endpoint that has one', async () => {
+  it('opens on the key SOURCE, never the key material: a saved credential is the bound row', async () => {
     const { container } = mount([
       ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:9' }),
     ])
     await waitForRows(container, 1)
 
     const dialog = openEdit(container, 'provider')
+    // The source control is the key field's owner (nocx-rzjw): a saved
+    // credential opens on "Use existing secret" with the bound row — the
+    // material never crosses back, and keeping the key is a visible choice.
+    const existing = dialog.querySelector('select') as HTMLSelectElement
+    expect(existing).toBeTruthy()
+    expect(existing.value).toBe('secrow:9')
+    // No password input is drawn in this mode: there is no key to type.
+    expect(dialog.querySelector('#endpoint-key')).toBeNull()
+
+    // Switching to "Type a new one" reveals the EMPTY password field — an
+    // input, never a stored value. The segmented control is the dialog's
+    // first (the key source; header rows come below), and its first segment
+    // is "Type a new one".
+    const newSegment = dialog.querySelector('.ui-segmented-control [role="radio"]')
+    expect(newSegment).toBeTruthy()
+    fireEvent.click(newSegment!)
     const keyInput = dialog.querySelector('#endpoint-key') as HTMLInputElement
     expect(keyInput).toBeTruthy()
     expect(keyInput.type).toBe('password')
-    // The key is an input, never a stored field: an endpoint that HAS a key
-    // opens with an empty key field, and the hint says blank keeps it.
     expect(keyInput.value).toBe('')
-    expect(dialog.textContent).toContain('Leave blank to keep the saved key')
   })
 
   it('edits an endpoint through endpoints.update with the unchanged id', async () => {
@@ -345,9 +368,12 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     const [id, input] = updateEndpoint.mock.calls[0]
     expect(id).toBe('endpoint:custom:provider:1')
     expect(input.name).toBe('Renamed provider')
-    // An empty key on update means "keep the existing material" (design
-    // §4.5.4) — the surface sends '', never a fabricated value.
+    // A blank "Type a new one" key on update means "keep the existing
+    // material" (design §4.5.4) — the surface sends '', never a fabricated
+    // value.
     expect(input.key).toBe('')
+    expect(input.credential).toBe('')
+    expect(input.headers).toEqual([])
 
     await vi.waitFor(() => {
       expect(rows(container)[0].textContent).toContain('Renamed provider')
@@ -504,6 +530,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
       baseUrl: 'http://127.0.0.1:11434/v1',
       key: '',
       model: 'qwen3',
+      headers: [],
     })
     await vi.waitFor(() => {
       expect(dialog.textContent).toContain('qwen3 answered in')
@@ -553,10 +580,11 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     await waitForRows(container, 1)
 
     const dialog = openEdit(container, 'provider')
-    // The key field is never pre-filled (ADR-0030 §3) — the record cannot
-    // be read back, and an empty key means "keep the existing material".
-    const keyInput = dialog.querySelector('#endpoint-key') as HTMLInputElement
-    expect(keyInput.value).toBe('')
+    // The key SOURCE is pre-selected to the bound row (the material never
+    // crosses back, ADR-0030 §3); the empty "Type a new one" field exists
+    // only after switching, so the source is what the wire sees.
+    const existing = dialog.querySelector('select') as HTMLSelectElement
+    expect(existing.value).toBe('secrow:0123456789abcdef')
 
     clickButton(dialog, 'Test endpoint')
 
@@ -573,6 +601,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
       key: '',
       model: 'gpt-4o',
       endpointId: 'endpoint:custom:provider:1',
+      headers: [],
     })
     await vi.waitFor(() => {
       expect(dialog.textContent).toContain('gpt-4o answered in')
