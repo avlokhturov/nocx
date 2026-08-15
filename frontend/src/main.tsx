@@ -24,6 +24,7 @@ import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
+import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
 import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
@@ -108,6 +109,12 @@ async function main() {
   }
   const dispatcher = new Dispatcher()
   const client = new WSClient(dispatcher)
+  // Connection notice — the transport's condition, stated where a person is
+  // already looking (the tab bar). A dropped connection is a persistent
+  // condition: not a toast that fades if it has not come back. This is the
+  // ONE subscriber to the dispatcher's disconnect lifecycle (nocx-gbhwh);
+  // the return value is for tests, the wiring here ignores it.
+  mountConnectionNotice(bar, dispatcher, client)
   await client.connect(port, host, token)
   const profileClient = new ProfileClient(dispatcher)
   const vaultClient = new VaultClient(dispatcher)
