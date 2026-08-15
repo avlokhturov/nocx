@@ -356,7 +356,7 @@ func (h filesOpenHandlers) handleOpen(ctx context.Context, state *connState, req
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -443,7 +443,7 @@ func (h filesBindingHandlers) handleList(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -486,7 +486,7 @@ func (h filesBindingHandlers) handleRead(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -614,7 +614,7 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -652,7 +652,7 @@ func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState,
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -700,7 +700,7 @@ func (h filesBindingHandlers) handleReveal(ctx context.Context, state *connState
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

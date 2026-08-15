@@ -426,7 +426,7 @@ func (h gitOpenHandlers) handleOpen(ctx context.Context, state *connState, req j
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -485,7 +485,7 @@ func (h gitBindingHandlers) handleStatus(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -528,7 +528,7 @@ func (h gitBindingHandlers) handleDiff(ctx context.Context, state *connState, re
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -567,7 +567,7 @@ func (h gitBindingHandlers) handleStage(ctx context.Context, state *connState, r
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -622,7 +622,7 @@ func (h gitBindingHandlers) handleUnstage(ctx context.Context, state *connState,
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -657,7 +657,7 @@ func (h gitBindingHandlers) handleStageAll(ctx context.Context, state *connState
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -691,7 +691,7 @@ func (h gitBindingHandlers) handleUnstageAll(ctx context.Context, state *connSta
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -736,7 +736,7 @@ func (h gitBindingHandlers) handleCommit(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -773,7 +773,7 @@ func (h gitBindingHandlers) handleHeadMessage(ctx context.Context, state *connSt
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -810,7 +810,7 @@ func (h gitBindingHandlers) handleLog(ctx context.Context, state *connState, req
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -854,7 +854,7 @@ func (h gitBindingHandlers) handleRemote(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -889,7 +889,7 @@ func (h gitBindingHandlers) handleClose(ctx context.Context, state *connState, r
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 

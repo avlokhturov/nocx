@@ -64,6 +64,9 @@ type openMachine interface {
 	replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUp(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUpLocal()
+	// Replays any lifecycle fact that arrived while open was still dialing.
+	// Called only after the result has published the authoritative session id.
+	replayLifecycleFacts(sid session.ID)
 	// The session integration axis (nocx-dvql): the remote registration
 	// from the connect path's own decision, and the first emission — which
 	// must happen AFTER the open ack (AD-7).
@@ -266,7 +269,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		if capability.IsRefused(err) {
 			var rej *capability.RefusedError
 			errors.As(err, &rej)
-			_ = wconn.TryError(req.ID, saturationRPCError(&rej.Rejection))
+			_ = wconn.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 			return
 		}
 		h.log.Error("failed to open session", "error", err)
@@ -316,12 +319,15 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 		_ = respond(wconn, resp)
 		return
 	}
-	rx.setSubscriber(wconn, state)
 
-	// Port discovery (nocx-wzc4.2): only now, once the session is fully
-	// established (ring created, subscriber attached) is the target "up" —
-	// a session that failed its ring setup must not leave a discovery
-	// target behind with nobody to tear it down.
+	// Port discovery (nocx-wzc4.2): only now, once the session's ring
+	// exists, is the target "up" — a session that failed its ring setup
+	// must not leave a discovery target behind with nobody to tear it down.
+	// The subscriber is NOT attached yet; it lands after the open result
+	// below, because a session-scoped notification may not precede the id
+	// that addresses it (AD-7). This call only schedules — whatever the
+	// scheduler later publishes does its own subscriber lookup — so the
+	// ring alone is the condition the target's liveness waits on.
 	switch {
 	case cfg.ProfileID != "":
 		h.sess.discoveryUp(cfg.ProfileID, cfg.Host, cfg.Remote)
@@ -356,12 +362,14 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, state *conn
 	resp := newJSONRPCResult(req.ID, resultJSON)
 	_ = respond(wconn, resp)
 
-	// The session's integration axis, AFTER the ack. AD-7: the ack must
-	// precede the session's own traffic in both directions, and the launch
-	// (which registered the axis) ran inside the dial above — a
-	// notification sent from there would reach a renderer whose sessionId
-	// is still null and be dropped.
-	//
+	// Every session-scoped notification must follow the open result (AD-7).
+	// Install the subscriber only now: lifecycle can authenticate during the
+	// dial above, and publishing it to this shared WebSocket before the
+	// renderer knows sessionId lets an existing tab claim the fact. The
+	// current projection is replayed immediately after installation, so a
+	// fact dropped during the pre-result window is not lost.
+	rx.setSubscriber(wconn, state)
+	h.sess.replayLifecycleFacts(sess.ID())
 	// A remote session's launch-time refusal is registered here rather than
 	// at the dial because ShellIntegrationReason is the ssh channel's own
 	// answer and this is where the session first exists as a session. A
@@ -473,7 +481,7 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -534,7 +542,7 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -645,7 +653,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, sta
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(wconn, req.ID, err)
+		answerOperationRefusal(wconn, req, err)
 	}
 }
 
@@ -686,13 +694,13 @@ func (h ackHandler) handleAck(req jsonrpcRequest) {
 // answerOperationRefusal answers a *capability.RefusedError (a gate refusal)
 // with the saturation error; any other error is unexpected and answered as an
 // internal error. A nil error is a no-op.
-func answerOperationRefusal(r Responder, id json.RawMessage, err error) {
+func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 	var rej *capability.RefusedError
 	if errors.As(err, &rej) {
-		_ = r.TryError(id, saturationRPCError(&rej.Rejection))
+		_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 		return
 	}
-	_ = r.TryError(id, RPCError{Code: -32603, Message: err.Error()})
+	_ = r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
 }
 
 // sessionSpecs declares the session-plane control methods. open and attach

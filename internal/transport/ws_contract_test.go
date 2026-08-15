@@ -3544,7 +3544,7 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 			n := lifecycleChangedNotification{
 				JSONRPC: "2.0",
 				Method:  "lifecycle.changed",
-				Params:  params,
+				Params:  lifecycleChangedParams{SessionID: "sid-1", Fact: params},
 			}
 			raw, err := json.Marshal(n)
 			if err != nil {
@@ -3587,9 +3587,12 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
 	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	validateJSON(t, schema, raw, "lifecycle.changed params (real socket)")
-	var params lifecyclepub.Fact
+	var params lifecycleChangedParams
 	if err := json.Unmarshal(raw, &params); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+	if params.SessionID != sid {
+		t.Errorf("sessionId = %q, want %q", params.SessionID, sid)
 	}
 	if params.Lifecycle != lifecyclepub.LifecyclePromptReady {
 		t.Errorf("lifecycle = %q, want prompt_ready", params.Lifecycle)

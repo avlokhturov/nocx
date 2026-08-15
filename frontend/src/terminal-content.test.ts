@@ -35,6 +35,7 @@ import {
   makeBanner,
   makeSession,
   integrationHandler,
+  lifecycleHandler,
   type ClipboardFake,
   type ClientFake,
   type LiveContentHeightSpy,
@@ -1102,6 +1103,103 @@ describe('lifecycle kernel transition table (ADR-0024 §6)', () => {
 })
 
 describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
+  // The registration seam, which is the half of nocx-upqz the renderer owns:
+  // the shell can authenticate while session.open is still dialing, and the
+  // backend replays that projection the instant it installs the subscriber —
+  // immediately after the open result. A subscription registered after the
+  // await would therefore miss the replay, so it must already exist when
+  // openSession is called, and the fact that follows must reach the tab.
+  it('subscribes before session.open so the replay that follows the result is heard', async () => {
+    const client = makeClient()
+    const session = makeSession()
+    let subscribedBeforeOpen = false
+    client.openSession.mockImplementation(() => {
+      client._sessions.push(session)
+      subscribedBeforeOpen = client.dispatcher.subscribe.mock.calls.some(
+        (candidate: unknown[]) => candidate[0] === 'lifecycle.changed',
+      )
+      return Promise.resolve(session)
+    })
+
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(subscribedBeforeOpen, 'lifecycle subscription must exist before session.open').toBe(
+        true,
+      )
+      lifecycleHandler(client)({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+      expect(editorOf(content).isVisible).toBe(true)
+      expect(client.dispatcher.call).toHaveBeenCalledWith('lifecycle.establishAck', {
+        sessionId: session.sessionId,
+        lane: 'lane-1',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  // ADR-0024 decision 9 across an AD-9 reconnect. The acknowledgement is what
+  // flushes the backend's pending ACCEPT; nothing else does. An ack that was
+  // in flight when the socket dropped is rejected by the dispatcher
+  // (rejectAllPending) and the backend never saw it, so its accept is still
+  // pending — and the reattach replay carries the SAME generation, because
+  // only a fresh shell hello mints a new one. The renderer must therefore
+  // treat "sent" and "landed" as different states: claiming the generation
+  // optimistically suppressed the one retry that could still complete the
+  // handshake, and the tab stayed conventional until the accept expired.
+  it('re-acknowledges the replayed generation when the first acknowledgement never landed', async () => {
+    const client = makeClient()
+    const acks: unknown[] = []
+    let failNext = true
+    client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
+      if (method !== 'lifecycle.establishAck') return Promise.resolve({})
+      acks.push(params)
+      if (failNext) {
+        failNext = false
+        return Promise.reject(new Error('ws closed'))
+      }
+      return Promise.resolve({ accepted: true })
+    })
+    const { teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = lifecycleHandler(client)
+      const fact = {
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-0000000000000000',
+      }
+      handler(fact)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(acks).toHaveLength(1)
+
+      // The reattach replay: same lane, same domain, same generation.
+      handler(fact)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(acks).toHaveLength(2)
+
+      // And once it HAS landed, a further replay is not acknowledged again —
+      // the accept is flushed and a second ack would only be refused.
+      handler(fact)
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(acks).toHaveLength(2)
+    } finally {
+      teardown()
+    }
+  })
+
   it('a prompt_ready fact shows the editor and a native fact hides it — through the dispatcher seam', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -1112,7 +1210,7 @@ describe('the lifecycle fact wires editor ownership (ADR-0024 §6)', () => {
       // The LifecycleClient subscribed through the fake dispatcher.
       const subscribe = client.dispatcher.subscribe
       expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       // An authenticated prompt_ready fact for a live domain gives the
       // editor the keyboard.
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
@@ -1139,8 +1237,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       const ed = editorOf(content)
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const setAction = vi.spyOn(ed, 'setRecoveryAction')
 
       // The interval: from the lost fact until the acknowledgement lands,
@@ -1165,8 +1262,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       const renderer = rendererOf(content)
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const call = client.dispatcher.call
       handler(LOST_WITH_RECOVERY)
 
@@ -1197,8 +1293,7 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       const ed = editorOf(content)
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const setAction = vi.spyOn(ed, 'setRecoveryAction')
       handler(LOST_WITH_RECOVERY)
       rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
@@ -1224,8 +1319,7 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
     const client = makeClient()
     const { teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const call = client.dispatcher.call
 
       // No generation on the fact: there is no establishment episode open,
@@ -1233,14 +1327,18 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(call).not.toHaveBeenCalledWith('lifecycle.establishAck', expect.anything())
 
-      // The establishment fact carries the backend-minted generation.
-      handler({
+      // A live transition and the post-open replay can carry the same
+      // backend-minted generation. Both apply idempotently, but only one
+      // acknowledgement may claim the generation.
+      const establishment = {
         lane: 'lane-1',
         lifecycle: 'prompt_ready',
         domain: 'd1',
         epoch: 1,
         generation: 'est-0000000000000000',
-      })
+      } as const
+      handler(establishment)
+      handler(establishment)
       const sid = client._sessions[0].sessionId
       expect(call).toHaveBeenCalledWith('lifecycle.establishAck', {
         sessionId: sid,
@@ -1261,8 +1359,7 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
     const client = makeClient()
     const { teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
-      const subscribe = client.dispatcher.subscribe
-      const handler = subscribe.mock.calls[0][1] as (params: unknown) => void
+      const handler = lifecycleHandler(client)
       const call = client.dispatcher.call
       // native and lost carry no establishment; a running fact is past the
       // gate. None of them may release an accept.
@@ -1584,7 +1681,7 @@ describe('the ports target follows where the pane IS, not how it was opened (noc
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   it('a local tab with no remote domain scopes to the local machine', async () => {
@@ -1725,7 +1822,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   it('the native escape holds through a later prompt_ready fact — the input router (ADR-0024 §6)', async () => {
@@ -2275,7 +2372,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   it('two shell-originated attempts keep their own blocks while the first is still settling its fence (nocx-m87n)', async () => {
@@ -2650,7 +2747,7 @@ describe('alt-screen exit and the ready prompt present the structured layout (no
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   const scrollbackOf = (content: TerminalContent): ScrollbackController =>
@@ -2760,7 +2857,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
   function factHandler(client: ClientFake): (p: unknown) => void {
     const subscribe = client.dispatcher.subscribe
     expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
-    return subscribe.mock.calls[0][1] as (p: unknown) => void
+    return lifecycleHandler(client)
   }
 
   /** Dispatch a keydown exactly where a user's keystroke lands. */

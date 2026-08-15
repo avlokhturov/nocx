@@ -76,7 +76,7 @@ func (h vaultResetHandlers) handleResetPreview(ctx context.Context, req jsonrpcR
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -110,6 +110,6 @@ func (h vaultResetHandlers) handleReset(ctx context.Context, req jsonrpcRequest)
 		return nil
 	})
 	if err != nil {
-		answerOperationRefusal(h.r, req.ID, err)
+		answerOperationRefusal(h.r, req, err)
 	}
 }

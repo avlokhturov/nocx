@@ -39,9 +39,18 @@ import (
 // defect hides. Its schema covers the params object only; the params are the
 // lifecyclepub.Fact, declared once (AD-8: one owner per behaviour).
 type lifecycleChangedNotification struct {
-	JSONRPC string            `json:"jsonrpc"`
-	Method  string            `json:"method"`
-	Params  lifecyclepub.Fact `json:"params"`
+	JSONRPC string                 `json:"jsonrpc"`
+	Method  string                 `json:"method"`
+	Params  lifecycleChangedParams `json:"params"`
+}
+
+// lifecycleChangedParams is the renderer-facing addressing envelope. Fact
+// remains the lifecycle publisher's single projection; SessionID is added at
+// the transport seam because one WebSocket owns several terminal tabs and only
+// this layer knows which session the lane belongs to.
+type lifecycleChangedParams struct {
+	SessionID string `json:"sessionId"`
+	lifecyclepub.Fact
 }
 
 // WithLifecyclePublisher wires the lifecycle publication boundary into the
@@ -153,18 +162,21 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	}
 	// The envelope is the Responder's now (nocx-292k): every write goes
 	// through the outbound queue and its pump, which is the only writer on
-	// the socket, so the notification is built from its params alone.
-	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(f)); err != nil {
-		s.log.Debug("write lifecycle.changed", "lane", f.Lane, "error", err)
+	// the socket. SessionID is transport addressing, not a lifecycle fact:
+	// one WebSocket carries several tabs, and the renderer must route this
+	// notification before any tab mutates or acknowledges its state.
+	params := lifecycleChangedParams{SessionID: string(sid), Fact: f}
+	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
+		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
 	}
 }
 
 // replayLifecycleFacts re-emits the current lifecycle projection of every
-// lane bound to the session — the AD-9 reconnect resume (protocol §12). Runs
-// from handleAttach after the attach response so the reattached frontend
-// receives the current state of its domains, whether or not a transition
-// happened while it was away. Lanes of the session with no state yet derive
-// nothing and are skipped.
+// lane bound to the session. It runs after both open and attach results: the
+// renderer first learns or resumes the server-authoritative session id, then
+// receives the current state of its domains even when the transition happened
+// while it could not acknowledge it. Lanes with no state derive nothing and
+// are skipped.
 func (s *WSServer) replayLifecycleFacts(sid session.ID) {
 	if s.lifecyclePub == nil {
 		return
