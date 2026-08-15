@@ -628,6 +628,8 @@ func (s *configService) secretRowInputs() ([]vault.CredentialInventory, error) {
 type SettingsService interface {
 	Descriptors() []settings.Descriptor
 	Declarations() []settings.Declaration
+	Groups() []settings.SettingsGroup
+	SectionGroups() map[string]string
 	GetSnapshot() (settings.SettingsSnapshot, error)
 	Reset(d settings.Descriptor) error
 	SetBool(b *settings.Bool, v bool) error
@@ -656,6 +658,20 @@ func (s *settingsService) Declarations() []settings.Declaration {
 		return nil
 	}
 	return s.reg.Declarations()
+}
+
+func (s *settingsService) Groups() []settings.SettingsGroup {
+	if !s.guard.ok() {
+		return nil
+	}
+	return s.reg.Groups()
+}
+
+func (s *settingsService) SectionGroups() map[string]string {
+	if !s.guard.ok() {
+		return nil
+	}
+	return s.reg.SectionGroups()
 }
 
 func (s *settingsService) GetSnapshot() (settings.SettingsSnapshot, error) {
