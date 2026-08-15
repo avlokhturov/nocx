@@ -808,10 +808,11 @@ export class TerminalContent extends BaseTabContent {
       // the session id is read per submit (a reconnect mints a new
       // session — the target must never capture against a stale one).
       this.inputTargets = createRegistry((target) => {
-        // The caret indicator renders the registry's active target and
-        // nothing else repaints it: this notification IS its refresh
-        // signal (ask-entry.ts).
-        this.indicator?.set(target.label)
+        // The line-start indicator renders the registry's active target
+        // and nothing else repaints it: this notification IS its refresh
+        // signal (ask-entry.ts). The indicator derives its own WORD from
+        // the target id — the registry's label stays the registry's.
+        this.indicator?.set(target.id, target.label)
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({

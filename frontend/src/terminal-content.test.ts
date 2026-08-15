@@ -3503,10 +3503,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
 
-      // The indicator is the registry's own word, rendered at the caret:
-      // shell by default, and it says so before anything is submitted.
+      // The indicator is the registry's own WORD, rendered at the line
+      // start: Run for the shell target by default, and it says so before
+      // anything is submitted. The registry's label ('Shell') is untouched
+      // — the indicator maps the target to what the person does.
       expect(activeLabel(content)).toBe('Shell')
-      expect(indicatorOf(ed)?.textContent).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      expect(indicatorOf(ed)?.dataset.target).toBe('shell')
 
       // ── Plain Enter: the shell receives the line ─────────────────────
       const sentBefore = sessionOf(content).send.mock.calls.length
@@ -3524,7 +3527,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The editor is re-shown (the next prompt, as the lifecycle would);
       // the indicator still renders what the registry reports.
       ed.show()
-      expect(indicatorOf(ed)?.textContent).toBe(activeLabel(content))
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
       const sentAfterShell = sessionOf(content).send.mock.calls.length
       ed.insertText('what does docs mean?')
       submitKey(ed, { metaKey: true })
@@ -3545,11 +3548,10 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       expect(scrollback.blockManager.runningBlock?.command).toBe('echo hi')
       // The one-shot ask did NOT change where Enter goes: the editor stays
-      // on screen (no handoff) and the indicator still matches the
-      // registry — still the shell.
+      // on screen (no handoff) and the indicator still says Run.
       expect(ed.isVisible).toBe(true)
       expect(activeLabel(content)).toBe('Shell')
-      expect(indicatorOf(ed)?.textContent).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
     } finally {
       teardown()
     }
@@ -3575,9 +3577,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(chips[0].textContent).toContain('rows 1–2')
 
       // The selection created the chip and NOTHING else: the active target
-      // is untouched and the indicator still says shell.
+      // is untouched and the indicator still says Run.
       expect(activeLabel(content)).toBe('Shell')
-      expect(indicatorOf(ed)?.textContent).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
       expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
 
       // Submit with plain Enter: the SHELL receives the command — the chip
@@ -3805,6 +3807,61 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The editor stays up for the next attempt — a refusal is not a
       // handoff and not a dead end.
       expect(ed.isVisible).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the indicator is a stable line-start prefix: typing moves the caret, never the token (nocx-4wtlh)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // Type: the caret travels to the END of the line — and the token
+      // stays at position 0, the FIRST child of the line, exactly where a
+      // prompt sigil sits. It never sits beside the caret mid-text.
+      ed.insertText('ls -la')
+      const line = viewOf(ed).contentDOM.querySelector('.cm-line')
+      expect(line?.firstElementChild?.classList.contains('nocx-editor-target-indicator')).toBe(true)
+      expect(line?.firstElementChild?.textContent).toBe('Run')
+      expect(viewOf(ed).state.selection.main.head).toBe('ls -la'.length)
+
+      // A real selection in the draft does not hide it: a person selecting
+      // part of their command still wants to know where Enter goes, and a
+      // line-start token has no reason to disappear (the old caret chip
+      // hid because it sat inside the selection).
+      viewOf(ed).dispatch({ selection: { anchor: 0, head: 2 } })
+      expect(indicatorOf(ed)).not.toBeNull()
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('⇧⌘Enter flips the target and the indicator names what the person does — Run ⇄ Ask (nocx-4wtlh)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+
+      // The explicit switch: the registry's active target is the agent —
+      // its label is still the registry's 'Agent', while the indicator
+      // says what the person does: Ask.
+      submitKey(ed, { metaKey: true, shiftKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(indicatorOf(ed)?.textContent).toBe('Ask')
+      expect(indicatorOf(ed)?.dataset.target).toBe('agent')
+
+      // And back: the switch is a toggle, and the word follows it.
+      submitKey(ed, { metaKey: true, shiftKey: true })
+      expect(activeLabel(content)).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
     } finally {
       teardown()
     }
