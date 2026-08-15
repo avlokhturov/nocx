@@ -559,3 +559,64 @@ func TestEndpoints_PersistAcrossRestart(t *testing.T) {
 		t.Fatalf("credential after restart = %v, want the same row handle", got[0].Credential)
 	}
 }
+
+// The endpoints path must carry the vault's reason on the wire when the key
+// mint fails because the vault needs setup or is sealed — the renderer's
+// operation-first wrapper (saveSecretWithVault) and the dispatcher's sealed
+// interception both key on data.reason, and a bare -32603 with prose is
+// indistinguishable from a disk error: the setup/unlock sheet never opens
+// and the save dies in a toast (the whole of nocx-25k9.7, re-lit on the
+// endpoint surface by nocx-4egm).
+func TestEndpointsCreate_CarriesVaultReasons(t *testing.T) {
+	h := newEndpointHarness(t)
+
+	// Fresh vault: minting the key fails with vault-uninitialized. The RPC
+	// must say so with the reason, not a bare internal error.
+	raw := jsonrpcCall(t, h.conn, "endpoints.create",
+		endpointParams("OpenAI", "https://api.openai.com/v1", "sk-test-123"))
+	var env struct {
+		Error *struct {
+			Code int            `json:"code"`
+			Data map[string]any `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\nraw: %s", err, raw)
+	}
+	if env.Error == nil {
+		t.Fatal("create with a key on an uninitialized vault must fail")
+	}
+	if env.Error.Code != -32000 {
+		t.Errorf("uninitialized code = %d, want -32000 (vault-uninitialized)", env.Error.Code)
+	}
+	if env.Error.Data == nil || env.Error.Data["reason"] != "vault-uninitialized" {
+		t.Errorf("uninitialized data = %v, want reason %q", env.Error.Data, "vault-uninitialized")
+	}
+	// The failed save must not have created a record: an endpoint that
+	// exists without its key is the exact data loss the bead is about.
+	if eps := h_listHelper(t, h.conn); len(eps) != 0 {
+		t.Errorf("endpoints after a failed key mint = %+v, want none", eps)
+	}
+
+	// Sealed vault: same shape, vault-sealed — the dispatcher's sealed
+	// interception re-sends the request after the unlock sheet.
+	h.setupAndUnseal()
+	h.v.Seal()
+	raw = jsonrpcCall(t, h.conn, "endpoints.create",
+		endpointParams("OpenAI", "https://api.openai.com/v1", "sk-test-123"))
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\nraw: %s", err, raw)
+	}
+	if env.Error == nil {
+		t.Fatal("create with a key on a sealed vault must fail")
+	}
+	if env.Error.Code != -32001 {
+		t.Errorf("sealed code = %d, want -32001 (vault-sealed)", env.Error.Code)
+	}
+	if env.Error.Data == nil || env.Error.Data["reason"] != "vault-sealed" {
+		t.Errorf("sealed data = %v, want reason %q", env.Error.Data, "vault-sealed")
+	}
+	if eps := h_listHelper(t, h.conn); len(eps) != 0 {
+		t.Errorf("endpoints after a sealed key mint = %+v, want none", eps)
+	}
+}
