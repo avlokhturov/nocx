@@ -306,8 +306,8 @@ None / Status / PR / Project` over a flat list, with hosts and projects as indep
    model does not obstruct it later.
 5. **`nocx-wyp3p`'s resolution** — renamed to the connection it is, or re-keyed on the
    session. §5.2 rules out the third option.
-6. **Whether a workspace survives a restart at all** — see §8.1. Not answered here, because
-   answering it decides how large epic B is.
+6. **How restore is sequenced against this epic** — §8.1 settles that restore exists and is
+   a setting; what is open is only whether epic B lands before it or after it.
 
 ### 8.1 Nothing survives a restart today, and the prior design says otherwise
 
@@ -324,11 +324,32 @@ to epic E rather than A. **The conclusion survives and is in fact stronger** (th
 less to preserve than it thought); the supporting fact is false and must be corrected in
 that document. Found by the worker on `feat/notificcations` and confirmed here.
 
-**What it costs this design:** §9's criterion below says "restarts the app, and finds the
-workspace intact". That silently assumes a restore path that does not exist, so as written
-it makes epic B build tab persistence from scratch — a different and much larger epic than
-"pure grouping". Either B builds it deliberately, or the criterion drops the restart. **This
-is the one open question that changes the size of the work**, and it is the owner's call.
+### 8.2 Restore exists, is a setting, and is its own epic
+
+**The owner's decision**, with Warp as the reference: tabs come back on startup, the user
+chooses whether they do, and what comes back includes **blocks and workspace membership**.
+
+Warp ships this as **two settings for two different features**, and they must not be
+conflated here:
+
+- General → **"Restore windows, tabs, and panes on startup"** — what happens when the app
+  starts.
+- Session → **"Enable reopening of closed sessions"**, with a **grace period in seconds** —
+  undo-close while the app is running.
+
+**Restoring a tab is not resurrecting a process, and writing that down is the point.** D5
+of the prior design stands: workers die with the backend. What comes back is the tab — its
+kind, its endpoint, its cwd, its workspace — re-opened, plus its **blocks**, which are
+already durable. `content.ContentDB` is wired at the composition root (`app.go:449`,
+`:523`) with `Conversations()` and `CommandHistory()`, reachable from the transport through
+`ws_content.go`, `ws_agent.go` and `ws_secrets.go`. So the scrollback-as-blocks survives
+while the process does not, and the missing pieces are the tab list, the setting, and the
+tab → session → blocks mapping. A restore that tried to resurrect the process would be
+epic E, and it is not this.
+
+**This is its own epic, not part of B.** It can be handed to one person whole, and folding
+it into B would turn "pure grouping" into an area — the failure `nocx-6ek` and `nocx-k0xk`
+were split to escape. Its criterion carries the workspace half; B's does not.
 
 ## 9. The acceptance criterion this replaces
 
@@ -337,8 +358,9 @@ is the one open question that changes the size of the work**, and it is the owne
 > the chip, and finds the other two tabs still at top level with no header. Closing the
 > workspace asks first and names the three tabs it will close.
 
-**The restart is deliberately absent** — see §8.1. Add it back only together with a decision
-that epic B owns tab persistence.
+**The restart is deliberately absent**, and belongs to the restore epic (§8.2), whose own
+criterion is: with the setting on, a restart brings back the tabs, their blocks and their
+workspaces; with it off, one fresh tab — asserted both ways.
 
 Out of scope for that criterion, and for epic B: any authority behaviour, any settings
 inheritance, the agent, the worktree list, and any change to the tree's grouping axis.
