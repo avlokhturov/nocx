@@ -3462,6 +3462,15 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     )
   }
 
+  /** Ask through the REAL gesture: ⌘Enter flips the active target to Ask
+   *  and sends NOTHING, then plain Enter — the one send key — delivers the
+   *  question. The flip is skipped when Ask is already active, exactly as
+   *  a person experiences it: the target stays where they put it. */
+  function askKey(ed: CommandEditor, content: TerminalContent): void {
+    if (activeLabel(content) !== 'Agent') submitKey(ed, { metaKey: true })
+    submitKey(ed)
+  }
+
   /** Select rows [start, end) of a frozen block's output and fire the
    *  selectionchange event the product listens for. */
   function selectRows(block: HTMLElement, start: number, end: number): void {
@@ -3498,7 +3507,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     sub[1](params)
   }
 
-  it('plain Enter goes to the shell, ⌘Enter goes to the assistant — one walk, and the indicator matches the registry after each (nocx-4wtlh)', async () => {
+  it('plain Enter goes to the shell; ⌘Enter flips to Ask and the next Enter goes to the assistant — one walk, and the indicator matches the registry after each (nocx-4wtlh)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
@@ -3526,14 +3535,14 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(ed.isVisible).toBe(false)
       expect(activeLabel(content)).toBe('Shell')
 
-      // ── ⌘Enter: the assistant receives the line, ONE-SHOT ─────────────
+      // ── ⌘Enter then Enter: the assistant receives the line ────────────
       // The editor is re-shown (the next prompt, as the lifecycle would);
       // the indicator still renders what the registry reports.
       ed.show()
       expect(indicatorOf(ed)?.textContent).toBe('Run')
       const sentAfterShell = sessionOf(content).send.mock.calls.length
       ed.insertText('what does docs mean?')
-      submitKey(ed, { metaKey: true })
+      askKey(ed, content)
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -3550,11 +3559,12 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(dispatcherCalls.find((c) => c.method === 'history.record')).toBeUndefined()
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       expect(scrollback.blockManager.runningBlock?.command).toBe('echo hi')
-      // The one-shot ask did NOT change where Enter goes: the editor stays
-      // on screen (no handoff) and the indicator still says Run.
+      // A question is not a handoff: the editor stays on screen for the
+      // next one. And Enter still goes to Ask — the person moved it, and
+      // nothing but the person moves it back; the indicator says so.
       expect(ed.isVisible).toBe(true)
-      expect(activeLabel(content)).toBe('Shell')
-      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      expect(activeLabel(content)).toBe('Agent')
+      expect(indicatorOf(ed)?.textContent).toBe('Ask')
     } finally {
       teardown()
     }
@@ -3598,7 +3608,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('a ⌘Enter question carries the chips that are in the line and no others — two selections, one unrelated block (nocx-4wtlh)', async () => {
+  it('a question carries the chips that are in the line and no others — two selections, one unrelated block (nocx-4wtlh)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -3619,7 +3629,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       const sentBefore = sessionOf(content).send.mock.calls.length
       ed.insertText('how are these related?')
-      submitKey(ed, { metaKey: true })
+      askKey(ed, content)
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
       })
@@ -3674,7 +3684,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(chipsIn(ed)).toHaveLength(1)
 
       ed.insertText('what is left?')
-      submitKey(ed, { metaKey: true })
+      askKey(ed, content)
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -3685,7 +3695,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('the editor stays available after a question — a second ⌘Enter works while the first streams, and each answer lands on its own entry (nocx-wmy4)', async () => {
+  it('the editor stays available after a question — a second question works while the first streams, and each answer lands on its own entry (nocx-wmy4)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -3700,20 +3710,20 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
 
-      // Question one, through the REAL ⌘Enter path.
+      // Question one, through the REAL gesture: ⌘Enter to Ask, then Enter.
       selectRows(blockA, 0, 2)
       ed.insertText('what does docs mean?')
-      submitKey(ed, { metaKey: true })
+      askKey(ed, content)
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
       })
-      // The one-shot ask left the editor up — no handoff.
+      // The question left the editor up — no handoff.
       expect(ed.isVisible).toBe(true)
 
       // While the first answer streams, point at block B and ask again.
       selectRows(blockB, 0, 1)
       ed.insertText('what did it fix?')
-      submitKey(ed, { metaKey: true })
+      askKey(ed, content)
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(2)
       })
@@ -3773,7 +3783,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('with no endpoint configured, a ⌘Enter question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
+  it('with no endpoint configured, a question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
     const client = makeClient()
     const dispatcherCalls: Array<{ method: string; params: unknown }> = []
     client.dispatcher.call.mockImplementation((method: string, params: unknown) => {
@@ -3798,7 +3808,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       selectRows(block, 0, 2)
 
       ed.insertText('why did it fail?')
-      submitKey(ed, { metaKey: true })
+      askKey(ed, content)
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -3844,7 +3854,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('⇧⌘Enter flips the target and the indicator names what the person does — Run ⇄ Ask (nocx-4wtlh)', async () => {
+  it('⌘Enter flips the target and sends nothing — the indicator names what the person does, Run ⇄ Ask (nocx-4wtlh)', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
@@ -3856,13 +3866,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The explicit switch: the registry's active target is the agent —
       // its label is still the registry's 'Agent', while the indicator
       // says what the person does: Ask.
-      submitKey(ed, { metaKey: true, shiftKey: true })
+      submitKey(ed, { metaKey: true })
       expect(activeLabel(content)).toBe('Agent')
       expect(indicatorOf(ed)?.textContent).toBe('Ask')
       expect(indicatorOf(ed)?.dataset.target).toBe('agent')
 
       // And back: the switch is a toggle, and the word follows it.
-      submitKey(ed, { metaKey: true, shiftKey: true })
+      submitKey(ed, { metaKey: true })
       expect(activeLabel(content)).toBe('Shell')
       expect(indicatorOf(ed)?.textContent).toBe('Run')
     } finally {

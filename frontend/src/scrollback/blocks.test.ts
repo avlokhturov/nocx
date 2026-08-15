@@ -1770,7 +1770,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(ask.highlightHeader).toBe(false)
     expect(ask.outputClass).toBe('cmd-output cmd-output-ask')
     expect(ask.statusChips).toEqual({
-      inProgress: 'waiting for the model…',
+      inProgress: 'thinking',
       done: 'completed',
       failed: 'failed',
     })
@@ -1816,11 +1816,11 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(body?.className).toBe('cmd-output cmd-output-ask')
   })
 
-  it('says it is waiting for the model between submit and the first delta, and stops on the first delta', () => {
+  it('says it is thinking between submit and the first delta, and stops on the first delta', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     const waiting = h.el.querySelector('.cmd-answer-waiting')
-    expect(waiting?.textContent).toBe('waiting for the model…')
+    expect(waiting?.textContent).toBe('thinking')
     h.append('first')
     expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
   })

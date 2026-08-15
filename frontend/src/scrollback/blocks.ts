@@ -96,7 +96,9 @@ export interface BlockKindRules {
    *  in progress, then the terminal word from the close path. */
   readonly statusChips: {
     /** Shown while the work is in progress — the ask block says it is
-     *  waiting for the model until the first delta lands. */
+     *  thinking until the first delta lands. Kept SHORT: it sits beside
+     *  the live pulse, which is what carries "something is happening", so
+     *  the word only has to name what the pulse is about. */
     readonly inProgress: string
     readonly done: string
     readonly failed: string
@@ -113,7 +115,7 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     highlightHeader: false,
     outputClass: 'cmd-output cmd-output-ask',
     statusChips: {
-      inProgress: 'waiting for the model…',
+      inProgress: 'thinking',
       done: 'completed',
       failed: 'failed',
     },
@@ -368,11 +370,25 @@ function createHeader(
     }
 
     // The kind's own in-progress vocabulary: the ask block says it is
-    // waiting for the model until the first delta lands, and the answer
+    // thinking until the first delta lands, and the answer
     // lifecycle removes it at exactly that moment (nocx-ex636). The
     // command kind has no in-progress WORD — its running state is the
     // spinner above.
     if (rules.statusChips && status === 'waiting') {
+      // The SAME pulse a running command's header carries, in the SAME
+      // place: a bare dot in the chip row, left of the chip (AD-8 — one
+      // owner for "this block is in progress", and one shape for it). A
+      // static word is a label; a word beside a live pulse is a report
+      // that something is happening right now. It sat INSIDE the chip for
+      // one round and read as a different control from the command's,
+      // which is two vocabularies for one concept.
+      const pulse = document.createElement('span')
+      // Its own identity class beside the shared appearance: the pulse is a
+      // SIBLING of the chip now, so whoever ends the wait has to be able to
+      // find it. Removing only the chip left a dot pulsing next to
+      // `completed` — the report half that nobody owned.
+      pulse.className = 'cmd-header-spinner cmd-answer-waiting-pulse'
+      right.appendChild(pulse)
       const wait = document.createElement('span')
       wait.className = 'nocx-chip nocx-chip-muted cmd-answer-waiting'
       wait.textContent = rules.statusChips.inProgress
@@ -564,7 +580,21 @@ function buildOverflowMenu(blockEl: HTMLElement, command: string): HTMLElement {
     // answer a person wants to read as it came. The override is the DOM
     // state `data-wrap` on the block, so the CSS reads one attribute and the
     // kind's own rule stays the default underneath it.
-    const wrapOn = () => blockEl.getAttribute('data-wrap') === 'on'
+    //
+    // The label names the EFFECTIVE state, not the attribute: with the
+    // `terminal.wrapOutput` setting deciding untouched blocks, a block that
+    // is already wrapping carries no attribute at all, and a menu offering
+    // to "Wrap lines" on a wrapped block is a control you have to try in
+    // order to understand. So the attribute answers when it is there, and
+    // the rendered style answers when it is not — one question, asked of
+    // whoever actually decided it.
+    const wrapOn = (): boolean => {
+      const attr = blockEl.getAttribute('data-wrap')
+      if (attr === 'on') return true
+      if (attr === 'off') return false
+      const out = blockEl.querySelector<HTMLElement>('.cmd-output')
+      return out ? getComputedStyle(out).whiteSpace.startsWith('pre-wrap') : false
+    }
     const wrapItem = document.createElement('button')
     wrapItem.className = 'cmd-overflow-menu-item'
     wrapItem.textContent = wrapOn() ? 'Do not wrap' : 'Wrap lines'
@@ -1429,7 +1459,8 @@ export class BlockManager {
       null,
       null,
       // The question is out and no answer has arrived: the header paints
-      // the ask kind's in-progress word ("waiting for the model…"), which
+      // the ask kind's in-progress word ("thinking") beside a live pulse,
+      // and the body shows the typing dots — both of which
       // the first delta — or a terminal close — removes.
       'waiting',
       this._getContainer,
@@ -1444,6 +1475,16 @@ export class BlockManager {
     // policy is owned there, never a second copy (nocx-ex636).
     outputEl.className = blockKindRules('ask').outputClass
     outputEl.dataset.answerBody = ''
+    // The answer's body says it is being written, WHERE it will be written.
+    // The header chip is in the corner a person checks; the body is where
+    // they are already looking, and an empty body under a finished question
+    // is indistinguishable from a product that did nothing. Removed by the
+    // first delta, so the dots are replaced by the text they stood in for.
+    const typing = document.createElement('span')
+    typing.className = 'cmd-answer-typing'
+    typing.setAttribute('aria-label', blockKindRules('ask').statusChips!.inProgress)
+    for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('i'))
+    outputEl.appendChild(typing)
     el.appendChild(outputEl)
     this._scrollbackInner.insertBefore(el, this._xtermContainer)
     this._answerBlocks.push({ id, question, el })
@@ -1454,6 +1495,12 @@ export class BlockManager {
     // are two ends of one fact, nocx-ex636).
     const stopWaiting = (): void => {
       el.querySelector('.cmd-answer-waiting')?.remove()
+      el.querySelector('.cmd-answer-waiting-pulse')?.remove()
+      // Both ends of one fact: the corner stops reporting work and the body
+      // stops standing in for text. A run that fails before any delta
+      // clears both, or the dots would go on typing an answer that will
+      // never arrive.
+      el.querySelector('.cmd-answer-typing')?.remove()
     }
 
     // The streamed chunks split MID-LINE, so the body keeps one persistent

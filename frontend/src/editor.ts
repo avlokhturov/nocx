@@ -12,7 +12,7 @@
 // decide exactly as they did on the textarea. Binding these keys as a CM6
 // keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
 
-import { EditorState, Extension } from '@codemirror/state'
+import { Compartment, EditorState, Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { setSecretCandidate } from './secret-candidate'
@@ -135,18 +135,11 @@ export interface EditorActions {
    * for the next question (nocx-wmy4).
    */
   handoffToShell?: () => boolean
-  /** ⌘Enter / Ctrl+Enter (the ask entry gesture, nocx-4wtlh): submit the
-   *  document to the ASSISTANT target as a ONE-SHOT question. The active
-   *  target is NOT changed — nothing but the person changes where Enter
-   *  goes (the registry stays whatever it was). The question clears the
-   *  document like a command does, but the editor does not hide: there is
-   *  no handoff to a shell to hand off to (the grid keeps its keys and
-   *  the editor stays for the next question). An empty document is
-   *  ignored — there is nothing to ask. */
-  submitToAgent?: (doc: string) => void
-  /** ⇧⌘Enter / ⇧Ctrl+Enter: the explicit target switch ADR-0004 §3
-   *  requires — the indicator's keyboard twin. The host flips the
-   *  registry's active target; the editor stays passive. */
+  /** ⌘Enter / Ctrl+Enter: the explicit target switch ADR-0004 §3 requires
+   *  — the indicator's keyboard twin, flipping Run ⇄ Ask. The host flips
+   *  the registry's active target; the editor stays passive, the draft is
+   *  untouched, and the next plain Enter goes wherever the person just
+   *  put it. */
   onToggleTarget?: () => void
   /** A reference chip's drop control: the host removes that chip (the
    *  chip is data the host owns; this only reports the dismissal). */
@@ -270,6 +263,14 @@ export class CommandEditor {
     }
   })
 
+  /** The ACTIVE target's extensions, in a compartment so they can be
+   *  swapped when the person switches where Enter goes (ADR-0004 §3). The
+   *  shell's highlighting is the shell's — prose typed at Ask is not a
+   *  command and must not be painted as one. The editor still chooses
+   *  nothing: it only holds the slot, and the host reconfigures it from
+   *  the registry's active target (setTargetExtensions). */
+  private readonly targetCompartment = new Compartment()
+
   constructor(
     private readonly actions: EditorActions,
     extensions: Extension[] = [],
@@ -369,6 +370,10 @@ export class CommandEditor {
           }),
           CommandEditor.editorTheme,
           this.onViewUpdate,
+          // The active target's layer sits where the shell's used to: the
+          // caller's stable extensions (the target indicator) follow it,
+          // so a swap never disturbs them.
+          this.targetCompartment.of([]),
           ...extensions,
         ],
       }),
@@ -383,6 +388,14 @@ export class CommandEditor {
     // (verified empirically: a capture-phase listener on an ancestor
     // preempts the defaultKeymap's Enter binding).
     this.root.addEventListener('keydown', this.onKeydown, true)
+  }
+
+  /** Install the extensions of the target Enter currently goes to. Called
+   *  by the host on wire-up and on every switch — the editor never reads
+   *  the registry itself (it stays passive) and never keeps a mode of its
+   *  own: what is installed IS the mode. */
+  setTargetExtensions(extensions: Extension[]): void {
+    this.view.dispatch({ effects: this.targetCompartment.reconfigure(extensions) })
   }
 
   private startClock(): void {
@@ -517,9 +530,15 @@ export class CommandEditor {
     // answers with a fresh prompt exactly as it would in a plain terminal.
     // Neither the ledger nor the attempt path is entered, which is what
     // keeps the editor from being hidden by a handoff that then throws.
+    // And the bare newline goes to the pty only when the line was going to
+    // the SHELL. With Ask active there is nothing to ask and no reason to
+    // poke the shell — an empty Enter in a mode the person chose must not
+    // reach a program that is waiting on stdin. The seam is the same one
+    // authority the handoff reads (the registry's active target), never a
+    // second answer to "where does Enter go".
     if (doc.trim() === '') {
       this.clearDoc()
-      this.actions.submitEmpty?.()
+      if (this.actions.handoffToShell?.() ?? true) this.actions.submitEmpty?.()
       return
     }
     const hook = this.actions.beforeSubmit
@@ -661,33 +680,21 @@ export class CommandEditor {
       return
     }
 
-    // The ask entry gesture (nocx-4wtlh): ⌘/Ctrl+Enter asks ONCE — it
-    // routes to the assistant target WITHOUT changing the active target,
-    // so plain Enter in the same moment still runs the line as a command
-    // (a missed modifier degrades to the familiar behaviour, never to a
-    // surprise). ⇧⌘/⇧Ctrl+Enter is the explicit switch the ADR requires:
-    // it flips the active target itself, exactly as clicking the caret
-    // indicator does. An empty ⌘Enter has nothing to ask: it is ignored,
-    // draft intact. Unwired (no submitToAgent/onToggleTarget), the chord
-    // falls through untouched.
+    // The ask entry gesture (nocx-4wtlh): ⌘/Ctrl+Enter is the explicit
+    // switch ADR-0004 §3 requires — it flips the ACTIVE target, exactly as
+    // clicking the caret indicator does, and sends nothing. The chord that
+    // asked ONCE without moving the target is gone (owner's correction):
+    // one chord that submits and one that submits somewhere else is two
+    // send keys on one line, and the person could not see, before pressing
+    // it, where the text was about to go. Now the chord only ever changes
+    // the indicator, plain Enter is the only send, and the indicator says
+    // where it goes. The draft is untouched by the flip. Unwired (no
+    // onToggleTarget), the chord falls through to CM6.
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.altKey) {
-      // The switch and the one-shot ask are different seams wired by
-      // different hosts: each branch guards on ITS action, so a host that
-      // wires only the switch never has ⌘Enter clear its document.
-      if (e.shiftKey) {
-        if (!this.actions.onToggleTarget) return
-        e.preventDefault()
-        e.stopPropagation()
-        this.actions.onToggleTarget()
-        return
-      }
-      if (!this.actions.submitToAgent) return
+      if (!this.actions.onToggleTarget) return
       e.preventDefault()
       e.stopPropagation()
-      const askDoc = this.view.state.doc.toString()
-      if (askDoc.trim() === '') return
-      this.clearDoc()
-      this.actions.submitToAgent(askDoc)
+      this.actions.onToggleTarget()
       return
     }
 

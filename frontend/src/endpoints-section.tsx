@@ -11,7 +11,7 @@
  * button and the address restriction belong to nocx-edio. Validation goes
  * through the kit's createFormValidation + createSubmitGate.
  */
-import { For, Show, createEffect, createMemo, createSignal, onMount } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { CollectionView } from './ui/collection-view'
@@ -180,6 +180,12 @@ export interface EndpointsSectionProps {
    *  the dev-web harness has no vault, and the pickers then offer nothing,
    *  exactly like the connections editor's vaultClient. */
   vaultClient?: VaultClient
+  /** An outside request to open the editor on a blank endpoint, as a
+   *  counter: the ask refused with "no endpoint configured" and the
+   *  surface is offering the repair. A counter rather than a boolean for
+   *  the reason the secrets page uses one — asking twice must open it
+   *  twice, and a boolean that is already true is silence. */
+  addEndpointRequest?: number
 }
 export function EndpointsSection(props: EndpointsSectionProps) {
   const [endpoints, setEndpoints] = createSignal<Endpoint[]>([])
@@ -187,6 +193,16 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   const [loadError, setLoadError] = createSignal('')
   const [searchQuery, setSearchQuery] = createSignal('')
   const [dialogOpen, setDialogOpen] = createSignal(false)
+  // The outside request (a refused ask → "configure an endpoint"). Same
+  // shape as the secrets page's add-secret request.
+  createEffect(
+    on(
+      () => props.addEndpointRequest ?? 0,
+      (n) => {
+        if (n > 0) openNew()
+      },
+    ),
+  )
   /** The vault's password rows for the pickers (ADR-0017). Empty when the
    *  vault is sealed or absent (dev harness). */
   const [secretRows, setSecretRows] = createSignal<InventoryEntry[]>([])

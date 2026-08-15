@@ -108,6 +108,11 @@ export interface SettingsComponentHandle {
    * picker offering to create a secret when the one you want is not there.
    */
   newSecret(name?: string): void
+  /**
+   * Show the Endpoints page with the editor open on a blank endpoint — the
+   * ask surface's repair for "no endpoint configured".
+   */
+  newEndpoint(): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -150,6 +155,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // means "nobody asked", which is what a normally-opened Settings tab reads.
   const [newConnectionRequest, setNewConnectionRequest] = createSignal(0)
   const [newSecretRequest, setNewSecretRequest] = createSignal(0)
+  const [newEndpointRequest, setNewEndpointRequest] = createSignal(0)
   const [newSecretName, setNewSecretName] = createSignal('')
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
   // The rail's group catalogue and the section→group mapping, straight from
@@ -423,6 +429,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             agentClient={props.agentClient}
             vaultController={props.vaultController}
             vaultClient={props.vaultClient}
+            addEndpointRequest={newEndpointRequest()}
           />
         </Show>
       ),
@@ -645,6 +652,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
       // on the counter and reads the name as it stands then.
       setNewSecretName(name ?? '')
       setNewSecretRequest((n) => n + 1)
+    },
+    newEndpoint(): void {
+      // Same reason as newConnection: an active search hides the page the
+      // request is addressed to.
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage('endpoints')
+      setNewEndpointRequest((n) => n + 1)
     },
     ready(): Promise<void> {
       return readyPromise

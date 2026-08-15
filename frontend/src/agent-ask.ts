@@ -10,12 +10,14 @@
 // The wire shapes are declared once in contracts/agent.*.schema.json; the
 // types here are generated from them.
 
+import type { Extension } from '@codemirror/state'
 import { Dispatcher } from './dispatcher'
 import { frozenFrameSourceFromBlock, mintFrozenFrame } from './frame/frozen'
 import type { AgentAsk } from './generated/agent.ask'
 import type { AgentCaptureFrame } from './generated/agent.captureFrame'
 import type { AgentRunDelta } from './generated/agent.runDelta'
 import type { AgentRunState } from './generated/agent.runState'
+import type { AgentStatusResult } from './generated/agent.status'
 import type { InputTarget } from './input-target'
 import type { ReferenceChip } from './ask-entry'
 import type { AnswerBlockHandle } from './scrollback/blocks'
@@ -42,6 +44,27 @@ export interface AgentAskSeams {
    *  The ask surface raises it through the kit's one notification
    *  affordance. */
   onRefusal: (message: string) => void
+  /** The refusal that has a REPAIR: no endpoint is configured, so there is
+   *  a thing the person can do about it and the surface offers to do it
+   *  (the host opens the endpoint editor). Raised in addition to
+   *  onRefusal — the sentence is still shown; this only adds the way out.
+   *  Optional: a host with nowhere to send them wires nothing and the
+   *  refusal stays a sentence. */
+  onNoEndpoint?: () => void
+  /** The assistant's readiness facts (agent.status). WHY an ask was refused
+   *  is read from this contract-declared fact, never sniffed out of the
+   *  error text: the message is prose the backend may reword, while
+   *  endpointConfigured is the schema's own answer to the same question.
+   *  Absent, the refusal is reported and nothing else happens. */
+  status?: () => Promise<AgentStatusResult>
+  /** This target's editor layer (design §8.8), installed while Ask is
+   *  where Enter goes. Deliberately NOT the shell's: a question is prose,
+   *  so the shell highlighter and the command completion surface stay
+   *  behind — `Привет!` is not an operator. The document-level surfaces
+   *  that are language-agnostic (the vault chip and its candidate mark)
+   *  are the caller's to pass, so a reference the person inserts is still
+   *  rendered as a chip rather than raw text. */
+  editorExtensions?: () => Extension[]
 }
 
 /** The wire params of agent.captureFrame for a frozen frame (design §2.2:
@@ -84,6 +107,26 @@ export class AgentInputTarget implements InputTarget {
   private subscribed = false
 
   constructor(private readonly seams: AgentAskSeams) {}
+
+  /** Ask agent.status why the refusal happened, and raise the repair seam
+   *  when the answer is "no endpoint". Fire-and-forget and fail-quiet: the
+   *  refusal sentence is already on screen, so a status call that fails
+   *  costs the offer, never the report. */
+  private async offerEndpointRepair(): Promise<void> {
+    if (!this.seams.status || !this.seams.onNoEndpoint) return
+    try {
+      const st = await this.seams.status()
+      if (!st.endpointConfigured) this.seams.onNoEndpoint()
+    } catch {
+      // The refusal is reported; the offer is what is lost.
+    }
+  }
+
+  /** The editor layer for a question (design §8.8). Empty unless the host
+   *  supplies one — the target never reaches into the editor itself. */
+  editorExtensions(): Extension[] {
+    return this.seams.editorExtensions?.() ?? []
+  }
 
   /** Submit a question: ingest one frozen frame PER REFERENCED BLOCK (the
    *  backend mints the frame ids), then ask with one reference per chip —
@@ -172,6 +215,11 @@ export class AgentInputTarget implements InputTarget {
         // accepting questions nothing answers.
         const message = err instanceof Error ? err.message : String(err)
         this.seams.onRefusal(message)
+        // …and when the reason is a missing endpoint, the surface offers
+        // the repair rather than only naming the problem: a person told
+        // "no endpoint configured" at the prompt has no way, from there,
+        // to find where an endpoint is configured.
+        void this.offerEndpointRepair()
         throw err
       })
 

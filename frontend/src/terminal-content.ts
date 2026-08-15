@@ -22,6 +22,7 @@ import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
 import { AgentInputTarget } from './agent-ask'
+import { AgentClient } from './agent'
 import {
   TargetIndicator,
   chipFromSelection,
@@ -221,6 +222,10 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+  /** A question was refused because no endpoint is configured: open the
+   *  endpoint editor so the refusal comes with its repair — wired by
+   *  main.tsx to the Settings tab's Endpoints page. */
+  onCreateEndpoint?: () => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -271,9 +276,9 @@ export class TerminalContent extends BaseTabContent {
   /** The input-target registry (ADR-0004 §3): a submitted document routes
    *  through active().submit — never a branch on "which mode am I in".
    *  Shell is the default; the person switches it explicitly through the
-   *  caret indicator (click or ⇧⌘Enter), and ⌘Enter is a one-shot ask
-   *  that never touches the active target (nocx-4wtlh). Registration and
-   *  routing ARE this slice. */
+   *  caret indicator — click, or the ⌘/Ctrl+Enter chord, which flips the
+   *  target and sends nothing (nocx-4wtlh). Registration and routing ARE
+   *  this slice. */
   private inputTargets: InputTargetRegistry | null = null
   private agentTarget: AgentInputTarget | null = null
   private scrollback: ScrollbackController | null = null
@@ -313,8 +318,8 @@ export class TerminalContent extends BaseTabContent {
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
   /** The reference chips in the input line (nocx-4wtlh): the frozen
-   *  regions a question carries. A selection raises one; a ⌘Enter question
-   *  consumes them all; a cleared scrollback takes their blocks. The
+   *  regions a question carries. A selection raises one; a question sent
+   *  to Ask consumes them all; a cleared scrollback takes their blocks. The
    *  chips ARE the ask's payload — never re-derived from DOM selection at
    *  submit time (AD-8: selection is copy; the chip is the record). */
   private referenceChips: ReferenceChip[] = []
@@ -782,20 +787,28 @@ export class TerminalContent extends BaseTabContent {
         env: () => ({ isLocal: !this.sshOpts, cwd: this._cwd, host: this._host }),
         recallIsOpen: () => this.recall?.isOpen ?? false,
       })
+      // The DOCUMENT-level layer, shared by both targets: the
+      // vault-reference chip (a decoration, not a language), the quiet
+      // composition-time candidate mark, and the unresolved-redaction field
+      // a recalled masked row registers in. None of them is about shell
+      // syntax, so a question keeps them; and they are built ONCE, so
+      // switching targets reconfigures the editor with the same state
+      // fields rather than minting fresh ones under the same document.
+      const documentLayer = [
+        secretChipExtension(),
+        secretCandidateExtension(),
+        unresolvedRedactionField,
+      ]
       this.shellTarget = new ShellInputTarget(
         (text: string) => renderer.paste(text),
         (data: string) => this.session!.send(data),
         // The target carries the shell's editor extensions through the §8.8
-        // seam: the shell highlighter, the completion surface, the
-        // vault-reference chip (a document-level decoration, not a
-        // language), the quiet composition-time candidate mark, and the
-        // unresolved-redaction field a recalled masked row registers in.
+        // seam: the shell highlighter and the completion surface — the two
+        // that ARE about commands — on top of the shared document layer.
         [
           ...shellExtensions(renderer.snapshotStore),
           ...this.completion.extensions(),
-          secretChipExtension(),
-          secretCandidateExtension(),
-          unresolvedRedactionField,
+          ...documentLayer,
         ],
       )
       const vault = new VaultClient(this.client)
@@ -813,6 +826,12 @@ export class TerminalContent extends BaseTabContent {
         // signal (ask-entry.ts). The indicator derives its own WORD from
         // the target id — the registry's label stays the registry's.
         this.indicator?.set(target.id, target.label)
+        // And the editor wears the target's own layer: the shell's
+        // highlighting and completion surface belong to the shell, so a
+        // question typed at Ask is plain prose — never `Привет!` painted
+        // as a command with an operator in it. One authority decides
+        // both — the registry — and the editor stays passive.
+        this.editor?.setTargetExtensions(target.editorExtensions?.() ?? [])
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
@@ -823,15 +842,54 @@ export class TerminalContent extends BaseTabContent {
         // never re-derived from DOM selection at submit time (AD-8:
         // selection is copy; the chip is the record).
         chips: () => this.referenceChips,
-        openAnswer: (question, cwd) => this.scrollback!.blockManager.addAnswerBlock(question, cwd),
+        // A new answer block, kept at the bottom of the view — the same
+        // rule a command's output lives by, which the ask path never had:
+        // nothing scrolled when a block was ADDED, so a question landed
+        // below the fold whenever the transcript already filled the pane
+        // (and looked fine whenever it did not, which is why it read as
+        // intermittent). The controller's scrollToBottom is a no-op while
+        // the person has scrolled away to read, so this follows without
+        // ever yanking the view out from under them.
+        openAnswer: (question, cwd) => {
+          const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd)
+          this.scrollback?.scrollToBottom()
+          // The streamed answer grows the block, and growth is the same
+          // situation as arrival: stay at the bottom unless the reader has
+          // gone elsewhere.
+          return {
+            ...handle,
+            append: (text: string) => {
+              handle.append(text)
+              this.scrollback?.scrollToBottom()
+            },
+            close: (status: 'success' | 'failure', error?: string) => {
+              handle.close(status, error)
+              this.scrollback?.scrollToBottom()
+            },
+          }
+        },
         // The no-endpoint refusal is visible in the product, never only in
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
         // feature that does not exist survives a release).
         onRefusal: (message) => showToast({ level: 'warning', message }),
+        // The typed readiness fact behind a refusal (agent.status), so the
+        // target never has to read the reason out of the message text.
+        status: () => new AgentClient(this.client.dispatcher).status(),
+        // No endpoint: the toast says what is wrong and this opens where it
+        // is fixed. A refusal with nowhere to go is how a person concludes
+        // the feature is broken rather than unconfigured.
+        onNoEndpoint: () => this.hooks.onCreateEndpoint?.(),
+        // A question's editor layer: the DOCUMENT-level surfaces only. The
+        // shell highlighter and the completion surface stay with the shell
+        // — prose is not a command and must not be painted as one — while
+        // the vault chip, its candidate mark and the unresolved-redaction
+        // field are language-agnostic and keep working, so an inserted
+        // reference is still a chip and not raw text in a question.
+        editorExtensions: () => documentLayer,
       })
       this.inputTargets.register(this.agentTarget)
       // The caret indicator + its toggle: the person's one explicit
-      // switch. Clicking the chip (or ⇧⌘Enter) flips the active target;
+      // switch. Clicking the chip (or ⌘/Ctrl+Enter) flips the active target;
       // the registry's notification repaints the label. Ordinary use
       // never touches it — it is the confirmation that Enter goes to the
       // shell (nocx-4wtlh).
@@ -891,6 +949,11 @@ export class TerminalContent extends BaseTabContent {
               // toast); the rethrow is for programmatic callers, so the
               // fire-and-forget path swallows it.
               void active.submit(doc, { targetId: active.id }).catch(() => {})
+              // The chips in the line are consumed: they rode this
+              // question. The target reads them SYNCHRONOUSLY at the top of
+              // submit (before its first await), so the clear after the
+              // call can never eat them.
+              this.clearReferenceChips()
               return
             }
             // The atomic handoff transfers input ownership to the grid at
@@ -1072,21 +1135,9 @@ export class TerminalContent extends BaseTabContent {
            *  registry — the one authority — so the agent target's question
            *  keeps the editor on screen for the next one (nocx-wmy4). */
           handoffToShell: () => this.inputTargets?.active().routesToShell ?? true,
-          // ⌘Enter: the one-shot ask (nocx-4wtlh). The ACTIVE target is
-          // untouched — the agent target gets this question directly, and
-          // plain Enter keeps going wherever it went. The chips in the
-          // line are consumed: they rode this question. The target reads
-          // the chips SYNCHRONOUSLY at the top of submit (before its
-          // first await), so the clear after the call can never eat them.
-          submitToAgent: (doc) => {
-            // The refusal (no endpoint, vault locked) already reached the
-            // surface through onRefusal; the rethrow is for programmatic
-            // callers, so the fire-and-forget path swallows it.
-            void this.agentTarget!.submit(doc).catch(() => {})
-            this.clearReferenceChips()
-          },
-          // ⇧⌘Enter: the explicit switch (ADR-0004 §3) — same flip as
-          // clicking the caret indicator.
+          // ⌘/Ctrl+Enter: the explicit switch (ADR-0004 §3) — same flip as
+          // clicking the caret indicator, and the only thing the chord
+          // does. Asking is plain Enter with Ask active.
           onToggleTarget: () => {
             const current = this.inputTargets?.active().id
             if (!this.inputTargets || !current) return
@@ -1099,20 +1150,23 @@ export class TerminalContent extends BaseTabContent {
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
-        // will want prose with mentions on this same surface, and an editor
-        // that defaults to shell would have to be edited to gain one — exactly
-        // what ADR-0004 §3 exists to prevent. The seam (design §8.8) carries
-        // the shell layer: the target supplies its extensions, the editor
-        // never hard-codes them.
+        // wants prose on this same surface, and an editor that defaults to
+        // shell would have to be edited to gain one — exactly what ADR-0004
+        // §3 exists to prevent. The seam (design §8.8) carries the layer: the
+        // target supplies its extensions, the editor never hard-codes them.
+        //
+        // Only the STABLE layer is passed here. The target's own layer goes
+        // through setTargetExtensions below, because it changes when the
+        // person switches targets.
         [
-          ...(this.shellTarget.editorExtensions?.() ?? []),
-          // The caret indicator (nocx-4wtlh): composed at the root with the
-          // target's extensions — it renders the registry's ACTIVE target,
-          // so it belongs to neither target alone. The editor stays passive;
-          // this is decoration, fed by the same constructor seam.
+          // The caret indicator (nocx-4wtlh): composed at the root, outside
+          // the target's layer — it renders the registry's ACTIVE target, so
+          // it belongs to neither target alone and must survive every swap.
           this.indicator.extension(),
         ],
       )
+      // The layer of the target Enter goes to right now (shell at start).
+      this.editor.setTargetExtensions(this.inputTargets.active().editorExtensions?.() ?? [])
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
@@ -2547,8 +2601,8 @@ export class TerminalContent extends BaseTabContent {
     return `${name} · ${rows}`
   }
 
-  /** Drop every reference chip: a ⌘Enter question consumed them, or a
-   *  `clear` took their blocks. The editor's strip follows. */
+  /** Drop every reference chip: a question sent to Ask consumed them, or
+   *  a `clear` took their blocks. The editor's strip follows. */
   private clearReferenceChips(): void {
     if (this.referenceChips.length === 0) return
     this.referenceChips = []
