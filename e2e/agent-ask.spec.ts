@@ -36,7 +36,8 @@
  * - The payload to the model contains the referenced block's output and no
  *   other block's (bead acceptance 2).
  * - agent.status drives the no-endpoint sentence on BOTH surfaces: the
- *   AI Endpoints readiness line and the ask chip's
+ *   Endpoints readiness line (the page was renamed from AI Endpoints) and
+ *   the ask chip's
  *   `.ui-block-receipt__status` (agent-status-line.ts, one derivation).
  *
  * FRESH-STATE PATH (nocx-4egm): a fresh dev home has NO vault, and creating
@@ -105,7 +106,7 @@ const devharnessBin = () => readStand().devharness
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
-const SETTINGS_AI_NAV = '.ui-settings-section-nav-item[data-section="AI Endpoints"]'
+const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 /** The ask chip (BlockReceipt ask variant), mounted inside its block. */
 const ASK_CHIP = '.ui-block-receipt[data-variant="ask"]'
 
@@ -146,8 +147,9 @@ async function openApp(page: Page): Promise<void> {
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
 }
 
-/** Open Settings via the keyboard shortcut and select the AI Endpoints
- *  section in the rail — the surface a user configures the assistant with
+/** Open Settings via the keyboard shortcut and select the Endpoints page in
+ *  the rail (renamed from AI Endpoints; the Assistant group carries the AI)
+ *  — the surface a user configures the assistant with
  *  (the connections-settings.spec.ts walk). */
 async function openAIEndpoints(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')

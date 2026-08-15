@@ -13,7 +13,7 @@ import { test, expect, type Page } from './harness'
 // comes first on purpose: if that section ever shrinks, this test must fail
 // loudly rather than pass because there was nothing to scroll (nocx-pp3y.1).
 
-const BACKUP_SECTION = '.ui-settings-section-nav-item[data-section="Backup & Restore"]'
+const BACKUP_SECTION = '.ui-grouped-nav__item[data-item="backup"]'
 
 async function openOverflowingSection(page: Page): Promise<void> {
   await page.goto('/')
