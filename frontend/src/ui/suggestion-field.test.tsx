@@ -10,7 +10,10 @@ afterEach(() => cleanup())
  *  round trip the product makes (updateModel → new row object → value prop),
  *  so the guarded mirror and the list's reactions to a changing value are
  *  exercised for real. */
-function harness(overrides?: Partial<SuggestionFieldProps> & { onInput?: (v: string) => void }) {
+function harness(
+  overrides?: Partial<SuggestionFieldProps> & { onInput?: (v: string) => void },
+  renderOptions?: { container?: HTMLElement },
+) {
   const onInput = vi.fn()
   const suggestions = overrides?.suggestions ?? ['gpt-4o', 'gpt-4', 'claude-3']
   const Harness = () => {
@@ -28,7 +31,7 @@ function harness(overrides?: Partial<SuggestionFieldProps> & { onInput?: (v: str
       />
     )
   }
-  const utils = render(() => <Harness />)
+  const utils = render(() => <Harness />, renderOptions)
   return { ...utils, onInput }
 }
 
@@ -223,5 +226,146 @@ describe('SuggestionField — the combobox the datalist was not (fix-kit-rowlist
     expect(input.getAttribute('aria-invalid')).toBe('true')
     expect(input.getAttribute('aria-describedby')).toMatch(/model__error/)
     expect(input).toHaveProperty('required', true)
+  })
+})
+
+/** A fake laid-out input rect — jsdom measures nothing. */
+function rect(left: number, top: number, width: number): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    right: left + width,
+    bottom: top + 24,
+    width,
+    height: 24,
+    toJSON: () => ({}),
+  }
+}
+
+describe('the floating list (nocx-0plm6) — portalled out of the clipping context', () => {
+  it('is not a descendant of a clipped ancestor — an overflow:hidden container cannot cut it', () => {
+    // The endpoint dialog clips its body the way this container does; the
+    // list must live OUTSIDE the flow it used to be clipped by.
+    const clipped = document.createElement('div')
+    clipped.setAttribute('data-testid', 'clipped-ancestor')
+    clipped.style.overflow = 'hidden'
+    clipped.style.maxHeight = '60px'
+    document.body.appendChild(clipped)
+    try {
+      harness({}, { container: clipped })
+      openList()
+      const list = listbox()
+      // In-flow markup fails this: the list was a child of the clipped
+      // container, and `closest` walked straight to it.
+      expect(list.closest('[data-testid="clipped-ancestor"]')).toBeNull()
+      expect(document.body.contains(list)).toBe(true)
+    } finally {
+      clipped.remove()
+    }
+  })
+
+  it('positions against the input rect and matches its width', () => {
+    harness()
+    const input = combobox()
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
+    vi.spyOn(input, 'getBoundingClientRect').mockReturnValue(rect(40, 100, 200))
+    openList()
+    const list = listbox()
+    expect(list.style.left).toBe('40px')
+    expect(list.style.top).toBe('128px') // input bottom (124) + the 4px gap
+    expect(list.style.width).toBe('200px')
+  })
+
+  it('flips above the input when there is no room below', () => {
+    harness()
+    const input = combobox()
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
+    vi.spyOn(input, 'getBoundingClientRect').mockReturnValue(rect(40, 700, 200))
+    const list = listbox()
+    Object.defineProperty(list, 'offsetHeight', { configurable: true, value: 120 })
+    openList()
+    // Room below is 768 − 724 = 44 < 124; the list goes ABOVE the input.
+    expect(list.style.top).toBe('576px') // input top (700) − height (120) − gap (4)
+    expect(list.style.left).toBe('40px')
+  })
+
+  it('closes when the container scrolls — a list that stopped anchoring to its input does not float', () => {
+    const scroller = document.createElement('div')
+    scroller.style.overflow = 'auto'
+    scroller.style.maxHeight = '120px'
+    document.body.appendChild(scroller)
+    try {
+      harness({}, { container: scroller })
+      openList()
+      expect(combobox().getAttribute('aria-expanded')).toBe('true')
+      fireEvent.scroll(scroller)
+      // Closed — and nothing is left floating over unrelated content: the
+      // portalled list is hidden, not parked over the page.
+      expect(combobox().getAttribute('aria-expanded')).toBe('false')
+      expect(listbox().hasAttribute('hidden')).toBe(true)
+    } finally {
+      scroller.remove()
+    }
+  })
+
+  it('scrolling INSIDE the list does not close it — a long list must stay scrollable', () => {
+    const many = Array.from({ length: 60 }, (_, i) => `model-${i}`)
+    harness({ suggestions: many })
+    openList()
+    fireEvent.scroll(listbox())
+    expect(combobox().getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('an outside pointerdown dismisses the list', () => {
+    harness()
+    openList()
+    fireEvent.pointerDown(document.body)
+    expect(combobox().getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('a pointer click on an option lands — the dismissal contains the list, so the click is not eaten', () => {
+    const { onInput } = harness()
+    openList()
+    const opt = screen.getByRole('option', { name: 'claude-3' })
+    // pointerdown reaches the document-level dismissal FIRST. It must
+    // contain the list: the pointer is on an option.
+    fireEvent.pointerDown(opt)
+    expect(combobox().getAttribute('aria-expanded')).toBe('true')
+    fireEvent.mouseDown(opt)
+    fireEvent.click(opt)
+    expect(onInput).toHaveBeenLastCalledWith('claude-3')
+    expect(combobox().value).toBe('claude-3')
+    expect(combobox().getAttribute('aria-expanded')).toBe('false')
+    expect(document.activeElement).toBe(combobox())
+  })
+
+  it('the combobox ARIA resolves across the portal, and Escape keeps what was typed', () => {
+    harness()
+    openList()
+    const input = combobox()
+    fireEvent.keyDown(input, { key: 'ArrowDown' })
+    const controls = input.getAttribute('aria-controls')!
+    const active = input.getAttribute('aria-activedescendant')!
+    // Both ids resolve to elements that live in the portalled list.
+    const list = document.getElementById(controls)
+    expect(list).not.toBeNull()
+    expect(list!.getAttribute('role')).toBe('listbox')
+    expect(document.getElementById(active)).not.toBeNull()
+    fireEvent.input(input, { target: { value: 'gp' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(input.getAttribute('aria-expanded')).toBe('false')
+    expect(input.value).toBe('gp')
+    expect(document.activeElement).toBe(input)
+  })
+
+  it('unmounting with the list open leaves nothing behind in the portal host', () => {
+    const utils = harness()
+    openList()
+    expect(document.body.querySelector('.ui-suggestion-field__list')).not.toBeNull()
+    utils.unmount()
+    expect(document.body.querySelector('.ui-suggestion-field__list')).toBeNull()
+    expect(document.getElementById('model-suggestions')).toBeNull()
   })
 })

@@ -16,6 +16,12 @@
  *   and an endpoint that lists none — GET /models is not universally
  *   implemented — must stay configurable by hand. The list only ever
  *   narrows what is offered; it never refuses a value.
+ * - The list floats: it is portalled out of the field's flow so no
+ *   ancestor's overflow can clip it (nocx-0plm6 — the endpoint dialog
+ *   scrolled and cut the old list at four and a half rows), anchored to
+ *   the input's rect, and it CLOSES rather than follows when the page
+ *   scrolls under it — a list that floats over content it no longer
+ *   anchors to is worse than the list being gone.
  * - Keyboard first: Up/Down move the active option, Enter takes it,
  *   Escape dismisses the list without losing what was typed, and typing
  *   keeps filtering — the list never closes on the input that fills it.
@@ -34,7 +40,8 @@
  * kit.css styled all input types from one selector list and the T1 split
  * gives each primitive its own (search-field.css says the same).
  */
-import { For, createEffect, createSignal, on } from 'solid-js'
+import { For, createEffect, createSignal, on, onCleanup } from 'solid-js'
+import { Portal } from 'solid-js/web'
 import { Field } from './field'
 import { mirrorControlledValue } from './controlled-value'
 
@@ -74,6 +81,20 @@ export function SuggestionField(props: SuggestionFieldProps) {
   const [focused, setFocused] = createSignal(false)
   const [active, setActive] = createSignal(-1)
 
+  // The portalled list's anchor and its mount. Plain DOM refs: the
+  // component reads them imperatively, never reactively.
+  let inputElement: HTMLInputElement | undefined
+  let listElement: HTMLUListElement | undefined
+
+  /**
+   * Where the list floats. A native modal `<dialog>` renders in the browser
+   * TOP LAYER, which no z-index can float anything above — only parentage
+   * can. So the list mounts into the nearest owning `<dialog>` element
+   * itself (a sibling of its panel), which escapes the panel's clipping
+   * (nocx-0plm6) while staying above the dialog. Outside a dialog it mounts
+   * on document.body, floating above the page like the context menu.
+   */
+  const portalMount = () => inputElement?.closest('dialog') ?? document.body
   /** Prefix match on the typed value; an empty value offers everything. */
   const filtered = () => {
     const q = String(props.value).trim().toLowerCase()
@@ -122,6 +143,79 @@ export function SuggestionField(props: SuggestionFieldProps) {
     ),
   )
 
+  /** Gap between the input and the floating list. */
+  const FLOAT_GAP_PX = 4
+
+  /**
+   * Anchor the list to the input's viewport rect and match its width. The
+   * model field sits low in a tall dialog — below is exactly where there is
+   * no room — so when the space below cannot hold the list, it flips above
+   * the input. Measured when the list opens; the dismissal effect below
+   * guarantees the anchor cannot move while the list is up.
+   */
+  createEffect(() => {
+    if (!expanded()) return
+    const input = inputElement
+    const list = listElement
+    if (!input || !list) return
+    const rect = input.getBoundingClientRect()
+    const height = list.offsetHeight
+    const roomBelow = window.innerHeight - rect.bottom
+    const roomAbove = rect.top
+    const flip = roomBelow < height + FLOAT_GAP_PX && roomAbove > height + FLOAT_GAP_PX
+    list.style.left = `${rect.left}px`
+    list.style.top = `${flip ? rect.top - height - FLOAT_GAP_PX : rect.bottom + FLOAT_GAP_PX}px`
+    list.style.width = `${rect.width}px`
+  })
+
+  /**
+   * Dismissal while open. Two listeners, two jobs:
+   *
+   * - An outside pointerdown closes the list. The list is portalled, so it
+   *   is no longer under the input's blur for free: a click on something
+   *   that does not take focus (the dialog panel, a label) never blurs the
+   *   input. The input itself and the list are contained — a pointer on an
+   *   option must land, never dismiss.
+   * - Any scroll closes the list. The list anchors to the input's VIEWPORT
+   *   rect; if that anchor moves, the list shows what it no longer sits
+   *   next to. Follow-the-input was the alternative, and a list chasing a
+   *   scrolling dialog is a second scrolling surface fighting the first.
+   *   So it closes instead: one ArrowDown reopens it, and a stale list
+   *   over unrelated content can never happen. The one scroll that is not
+   *   an anchor move — the list's OWN long-list scrolling — is contained.
+   */
+  createEffect(() => {
+    if (!expanded()) return
+    const onPointerDown = (e: PointerEvent): void => {
+      const input = inputElement
+      const list = listElement
+      if (e.target instanceof Node) {
+        if (input && input.contains(e.target)) return
+        if (list && list.contains(e.target)) return
+      }
+      setOpen(false)
+      setActive(-1)
+    }
+    const onScroll = (e: Event): void => {
+      const list = listElement
+      if (list && e.target instanceof Node && list.contains(e.target)) return
+      setOpen(false)
+      setActive(-1)
+    }
+    const onResize = (): void => {
+      setOpen(false)
+      setActive(-1)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
+    onCleanup(() => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
+    })
+  })
+
   const onInput = (e: Event) => {
     const value = (e.currentTarget as HTMLInputElement).value
     props.onInput?.(value)
@@ -157,7 +251,12 @@ export function SuggestionField(props: SuggestionFieldProps) {
       case 'Enter': {
         const a = active()
         if (expanded() && a >= 0 && a < n) {
+          // Take the option AND keep the key out of the dialog's own Enter
+          // handling: while the list is open, Enter belongs to the combobox,
+          // never to the form (nocx-0plm6). With the list closed, Enter is
+          // left to bubble — the form submits exactly as it always did.
           e.preventDefault()
+          e.stopPropagation()
           take(filtered()[a])
         }
         break
@@ -215,10 +314,14 @@ export function SuggestionField(props: SuggestionFieldProps) {
             placeholder={props.placeholder ?? ''}
             disabled={props.disabled === true}
             required={props.required === true}
-            // mirrorControlledValue reads the accessor inside its own createEffect
-            // (a tracked scope); the gate cannot see across that helper boundary.
-            // eslint-disable-next-line solid/reactivity -- helper-boundary contract
-            ref={(element) => mirrorControlledValue(element, () => props.value)}
+            ref={(element) => {
+              inputElement = element
+              // mirrorControlledValue reads the accessor inside its own
+              // createEffect (a tracked scope); the gate cannot see across
+              // that helper boundary.
+              // eslint-disable-next-line solid/reactivity -- helper-boundary contract
+              mirrorControlledValue(element, () => props.value)
+            }}
             onInput={onInput}
             onKeyDown={onKeyDown}
             onFocus={() => {
@@ -228,23 +331,33 @@ export function SuggestionField(props: SuggestionFieldProps) {
             }}
             onBlur={onBlur}
           />
-          <ul id={listId()} role="listbox" class="ui-suggestion-field__list" hidden={!expanded()}>
-            <For each={filtered()}>
-              {(s, i) => (
-                <li
-                  id={optionId(i())}
-                  role="option"
-                  aria-selected={active() === i()}
-                  class="ui-suggestion-field__option"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => take(s)}
-                  onMouseEnter={() => setActive(i())}
-                >
-                  {s}
-                </li>
-              )}
-            </For>
-          </ul>
+          <Portal mount={portalMount()}>
+            <ul
+              id={listId()}
+              role="listbox"
+              class="ui-suggestion-field__list"
+              hidden={!expanded()}
+              ref={(el) => {
+                listElement = el
+              }}
+            >
+              <For each={filtered()}>
+                {(s, i) => (
+                  <li
+                    id={optionId(i())}
+                    role="option"
+                    aria-selected={active() === i()}
+                    class="ui-suggestion-field__option"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => take(s)}
+                    onMouseEnter={() => setActive(i())}
+                  >
+                    {s}
+                  </li>
+                )}
+              </For>
+            </ul>
+          </Portal>
         </div>
       </Field>
     </div>

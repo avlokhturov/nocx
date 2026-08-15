@@ -323,6 +323,100 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(toastMessages()).toContain('Saved "My provider"')
   })
 
+  it('Enter with the model list open takes the option instead of saving; Enter with it closed submits (nocx-0plm6)', async () => {
+    const { container, createEndpoint, probeEndpoint } = mount()
+    await waitForRows(container, 0)
+
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'My provider')
+    fillField(container, 'endpoint-base-url', 'https://api.example.com/v1')
+    fillField(container, 'endpoint-key', 'sk-live-abc')
+    clickButton(dialog, 'Add model')
+    // Focus discovers the endpoint's models over the wire — a connection
+    // probe answers with the offering list.
+    probeEndpoint.mockResolvedValueOnce({
+      name: 'My provider',
+      model: '',
+      kind: 'connection',
+      ok: true,
+      models: ['gpt-4o', 'qwen3'],
+      elapsedMs: 12,
+      at: new Date().toISOString(),
+    })
+    const modelInput = dialog.querySelector<HTMLInputElement>('#endpoint-model-0-name')!
+    modelInput.focus()
+    await vi.waitFor(() => {
+      expect(modelInput.getAttribute('aria-expanded')).toBe('true')
+    })
+    // The list lives inside the dialog element (the top layer) — portalled
+    // out of the panel that used to clip it, so it is never behind the
+    // dialog and never parked in the body.
+    const list = dialog.querySelector('.ui-suggestion-field__list')
+    expect(list).not.toBeNull()
+    expect(document.body.contains(list)).toBe(true)
+
+    // Type to narrow and activate the first match — the state the owner is
+    // in when the dropdown is open: Enter must pick the option, not save.
+    fireEvent.input(modelInput, { target: { value: 'g' } })
+    expect(modelInput.getAttribute('aria-activedescendant')).toBe(
+      'endpoint-model-0-name-suggestions-option-0',
+    )
+    fireEvent.keyDown(modelInput, { key: 'Enter' })
+    await flush()
+    expect(modelInput.value).toBe('gpt-4o')
+    expect(createEndpoint).not.toHaveBeenCalled()
+
+    // The take closed the list; Enter now means "save" again — the same
+    // walk the owner takes, one keystroke apart.
+    expect(modelInput.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.keyDown(modelInput, { key: 'Enter' })
+    await vi.waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(createEndpoint.mock.calls[0][0].models[0].name).toBe('gpt-4o')
+  })
+
+  it('closing the dialog with the list open leaves nothing floating in the portal host (nocx-0plm6)', async () => {
+    const { container, probeEndpoint } = mount()
+    await waitForRows(container, 0)
+
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'My provider')
+    fillField(container, 'endpoint-base-url', 'https://api.example.com/v1')
+    clickButton(dialog, 'Add model')
+    probeEndpoint.mockResolvedValueOnce({
+      name: 'My provider',
+      model: '',
+      kind: 'connection',
+      ok: true,
+      models: ['gpt-4o', 'qwen3'],
+      elapsedMs: 12,
+      at: new Date().toISOString(),
+    })
+    const modelInput = dialog.querySelector<HTMLInputElement>('#endpoint-model-0-name')!
+    modelInput.focus()
+    await vi.waitFor(() => {
+      expect(modelInput.getAttribute('aria-expanded')).toBe('true')
+    })
+    // The list is open, inside the dialog element — its portal host.
+    const list = dialog.querySelector('.ui-suggestion-field__list')!
+    expect(list.hasAttribute('hidden')).toBe(false)
+
+    // Close the dialog the way a person does — a real pointer gesture on
+    // the Cancel button (pointerdown, then the click). The pointerdown is
+    // the dismissal's event; the list must not survive the gesture, and
+    // the portal host must not hold a floating list afterwards. (A naive
+    // portal without dismissal wiring strands the open list over whatever
+    // the dialog covered — this fails.)
+    const cancel = Array.from(dialog.querySelectorAll('.ui-button')).find(
+      (b) => b.textContent?.trim() === 'Cancel',
+    )!
+    fireEvent.pointerDown(cancel)
+    fireEvent.click(cancel)
+    expect(list.hasAttribute('hidden')).toBe(true)
+    expect(document.querySelector('.ui-suggestion-field__list:not([hidden])')).toBeNull()
+  })
+
   it('opens on the key SOURCE, never the key material: a saved credential is the bound row', async () => {
     const { container } = mount([
       ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:9' }),
