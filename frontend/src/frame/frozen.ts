@@ -25,11 +25,13 @@ export interface FrozenFrameSource {
   serializerVersion: number
 }
 
-/** Satisfy the seam from a frozen block's output element — the block's DOM,
- *  which is what the user actually sees. null yields an empty frame. */
-export function frozenFrameSourceFromBlock(outputEl: HTMLElement | null): FrozenFrameSource {
+/** Satisfy the seam from a frozen block's DOM element — the block itself,
+ *  which is what the user actually sees. blockOutputText is asked of the
+ *  block (it resolves the output element, the fact the kind owns);
+ *  null yields an empty frame. */
+export function frozenFrameSourceFromBlock(blockEl: HTMLElement | null): FrozenFrameSource {
   return {
-    text: () => blockOutputText(outputEl),
+    text: () => blockOutputText(blockEl),
     serializerVersion: SERIALIZER_VERSION,
   }
 }

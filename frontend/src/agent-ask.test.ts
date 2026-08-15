@@ -270,6 +270,69 @@ describe('AgentInputTarget', () => {
   })
 })
 
+describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
+  it('opens the answer block BEFORE the ask resolves, so the wait covers the run-start RPC', async () => {
+    const dispatcher = new FakeDispatcher()
+    const handle: AnswerBlockHandle = {
+      id: 1,
+      el: document.createElement('div'),
+      append: vi.fn(),
+      close: vi.fn(),
+    }
+    const openAnswer = vi.fn(() => handle)
+    const target = new AgentInputTarget({
+      dispatcher: dispatcher as never,
+      sessionId: () => 's',
+      cwd: () => '/',
+      chips: () => [],
+      openAnswer,
+      onRefusal: vi.fn(),
+    })
+    // The ask is still in flight the moment submit returns its promise:
+    // the block already exists — a slow run start is not silence.
+    const pending = target.submit('q')
+    expect(openAnswer).toHaveBeenCalledTimes(1)
+    await pending
+  })
+  it('a refusal removes the speculative block — no run, no entry, no phantom question', async () => {
+    const failDispatcher = {
+      calls: [] as { method: string; params: unknown }[],
+      call<T = unknown>(method: string): Promise<T> {
+        if (method === 'agent.captureFrame') {
+          return Promise.resolve({ frameId: 'frame-1' }) as Promise<T>
+        }
+        const err = new Error('no endpoint configured') as Error & { code?: number }
+        err.code = -32603
+        return Promise.reject(err)
+      },
+      subscribe: () => () => {},
+    }
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const handle: AnswerBlockHandle = {
+      id: 1,
+      el,
+      append: vi.fn(),
+      close: vi.fn(),
+    }
+    const openAnswer = vi.fn(() => handle)
+    const onRefusal = vi.fn()
+    const target = new AgentInputTarget({
+      dispatcher: failDispatcher as never,
+      sessionId: () => 's',
+      cwd: () => '/',
+      chips: () => [],
+      openAnswer,
+      onRefusal,
+    })
+    await expect(target.submit('q')).rejects.toThrow('no endpoint configured')
+    expect(openAnswer).toHaveBeenCalledTimes(1)
+    expect(onRefusal).toHaveBeenCalledWith('no endpoint configured')
+    // The block that was opened in case the ask succeeded is gone.
+    expect(el.isConnected).toBe(false)
+  })
+})
+
 describe('AgentInputTarget refusal', () => {
   it('surfaces a no-endpoint refusal through onRefusal — the renderable condition, not a silent throw', async () => {
     const failDispatcher = {
