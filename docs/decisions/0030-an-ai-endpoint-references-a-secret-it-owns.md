@@ -171,9 +171,27 @@ and makes the shared-secret case ambiguous.
 
 ## Not decided here
 
-- Whether an endpoint may reference a secret picked from the Secrets page
+- **Whether an endpoint may reference a secret picked from the Secrets page
   (a picker rather than a key input). This pass has no picker; if one
   arrives, the ownership rule changes and this ADR is the place that says
-  so.
+  so.**
+
+  Decided by nocx-rzjw, 2026-08-15: the picker arrived. The ownership rule
+  is now **owning is a case of referencing**: an endpoint REFERENCES a
+  secret; when it mints one (a typed key) it also owns it, and when it
+  references an existing secret it does not. The consequences:
+
+  - The key field is a source control ("type a new one" / "use an existing
+    secret") — the same control the connections editor's password field
+    uses (one vocabulary, one component).
+  - A reference swap (updating an endpoint to reference a different secret)
+    touches no material: nothing is minted, rotated or deleted. An owned
+    key the endpoint abandons stops being referenced and stays visible on
+    the Secrets page, where ADR-0016 makes ownerless secrets first-class.
+  - The custom HTTP headers an endpoint sends (nocx-lyyk) may reference
+    vault secrets the same way; `ClearSecretRefs` and the reset impact
+    cover header references alongside the credential (a header whose secret
+    is deleted is dropped from the record, never left sourceless).
+
 - The address restriction and the Test button — `nocx-edio`, with the HTTP
   client (design §4.5).

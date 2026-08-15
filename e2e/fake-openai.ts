@@ -39,6 +39,9 @@ export interface FakeRequest {
   readonly authorization: string
   /** The request path, e.g. /v1/chat/completions. */
   readonly path: string
+  /** Every request header the backend sent, verbatim — the endpoints
+   *  surface's custom headers (nocx-lyyk) are asserted here. */
+  readonly headers: Record<string, string | string[] | undefined>
   /** received — connection open, no content chunk written yet
    *  streaming — holdAfter content chunks flushed, response held or writing
    *  done — the whole stream, [DONE] included, was written out */
@@ -199,10 +202,20 @@ export class FakeOpenAI {
         body,
         authorization: req.headers.authorization ?? '',
         path: req.url ?? '',
+        headers: { ...req.headers },
         state: 'received',
         chunksSent: 0,
       }
       this.requests_.push(record)
+      // The connection check (a GET to /models, nocx-q27y) is a real
+      // endpoint request too: answer it with a model list so the check has
+      // something to find, and record its headers the same way.
+      if (req.method === 'GET' && (req.url ?? '').endsWith('/models')) {
+        record.state = 'done'
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ object: 'list', data: [{ id: 'e2e-model' }] }))
+        return
+      }
       const script = this.scripts.shift() ?? { chunks: ['ok'] }
       this.stream(record, res, script)
     })

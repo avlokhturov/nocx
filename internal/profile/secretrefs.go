@@ -52,9 +52,26 @@ func impactOf(d *storeData) SecretReferenceImpact {
 		}
 	}
 	for i := range d.Endpoints {
-		if d.Endpoints[i].CredentialRef != "" {
-			distinct[d.Endpoints[i].CredentialRef] = struct{}{}
-			heldByEndpoints[d.Endpoints[i].ID] = struct{}{}
+		ep := &d.Endpoints[i]
+		holds := ep.CredentialRef != ""
+		if !holds {
+			for j := range ep.Headers {
+				if ep.Headers[j].ValueRef != "" {
+					holds = true
+					break
+				}
+			}
+		}
+		if holds {
+			heldByEndpoints[ep.ID] = struct{}{}
+		}
+		if ep.CredentialRef != "" {
+			distinct[ep.CredentialRef] = struct{}{}
+		}
+		for j := range ep.Headers {
+			if ref := ep.Headers[j].ValueRef; ref != "" {
+				distinct[ref] = struct{}{}
+			}
 		}
 	}
 
@@ -115,7 +132,16 @@ func (s *JSONStore) ClearAllSecretReferences() (SecretReferenceImpact, error) {
 		o.KeyPassphraseSecret = ""
 	}
 	for i := range d.Endpoints {
-		d.Endpoints[i].CredentialRef = ""
+		ep := &d.Endpoints[i]
+		ep.CredentialRef = ""
+		kept := ep.Headers[:0]
+		for _, h := range ep.Headers {
+			if h.ValueRef != "" {
+				continue
+			}
+			kept = append(kept, h)
+		}
+		ep.Headers = kept
 	}
 
 	if err := s.writeLocked(d); err != nil {
@@ -188,10 +214,25 @@ func clearSecretRefLocked(d *storeData, secretID string) bool {
 		}
 	}
 	for i := range d.Endpoints {
-		if d.Endpoints[i].CredentialRef == secretID {
-			d.Endpoints[i].CredentialRef = ""
+		ep := &d.Endpoints[i]
+		if ep.CredentialRef == secretID {
+			ep.CredentialRef = ""
 			changed = true
 		}
+		kept := ep.Headers[:0]
+		for _, h := range ep.Headers {
+			if h.ValueRef == secretID {
+				// The row goes: a header whose value was the deleted secret
+				// can no longer produce a value, must not be sent, and a
+				// stored row with no source could not be validated anyway.
+				// Inventing a literal here would store material the user
+				// never typed.
+				changed = true
+				continue
+			}
+			kept = append(kept, h)
+		}
+		ep.Headers = kept
 	}
 	return changed
 }

@@ -48,7 +48,16 @@ export type Endpoint = ListEndpoint | CreatedEndpoint | UpdatedEndpoint
 export interface EndpointWrite {
   name: string
   baseUrl: string
+  /** A key typed fresh: an input, sent once, minted or rotated by the
+   *  backend, never read back (ADR-0030 §3). */
   key: string
+  /** The row handle of an existing vault secret, when the key's source is
+   *  "use an existing secret" (nocx-rzjw). Mutually exclusive with a typed
+   *  key: one source per credential. */
+  credential: string
+  /** Custom HTTP headers (nocx-lyyk): exactly one of value (literal) and
+   *  secret (row handle) per row. */
+  headers: { name: string; value: string | null; secret: string | null }[]
   models: { name: string; alias: string | null }[]
 }
 
@@ -98,6 +107,7 @@ export class EndpointClient {
     key: string
     model: string
     endpointId?: string
+    headers?: { name: string; value: string | null; secret: string | null }[]
   }): Promise<EndpointsProbeResult> {
     return this.dispatcher.call<EndpointsProbeResult>('endpoints.probe', input)
   }

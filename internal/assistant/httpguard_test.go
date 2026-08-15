@@ -197,11 +197,82 @@ func TestGuardedHTTPClient_CredentialNeverCrossesOriginChange(t *testing.T) {
 	}
 }
 
+// TestGuardedHTTPClient_CustomHeadersNeverCrossOriginChange: the endpoint's
+// custom headers follow the SAME rule as the credential (bead nocx-lyyk) —
+// a header can carry a token, and a token must not survive a redirect the
+// Authorization header would not. The initial request carries the custom
+// headers AND tags its context with their names (the way engine.go and
+// connection.go do); the guard drops exactly those names on an origin
+// change, and the same-origin hop keeps them.
+func TestGuardedHTTPClient_CustomHeadersNeverCrossOriginChange(t *testing.T) {
+	var sawXTitleAtTarget, sawXTenantAtTarget string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawXTitleAtTarget = r.Header.Get("X-Title")
+		sawXTenantAtTarget = r.Header.Get("X-Tenant")
+		_, _ = io.WriteString(w, "landed")
+	}))
+	defer target.Close()
+
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Title"); got != "nocx" {
+			t.Fatalf("origin A saw X-Title %q, want nocx", got)
+		}
+		if got := r.Header.Get("X-Tenant"); got != "tenant-7" {
+			t.Fatalf("origin A saw X-Tenant %q, want tenant-7", got)
+		}
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	cl := newGuardedHTTPClient(nil)
+	req, _ := http.NewRequest(http.MethodGet, redirector.URL, nil)
+	req.Header.Set("X-Title", "nocx")
+	req.Header.Set("X-Tenant", "tenant-7")
+	req = req.WithContext(withCustomHeaderNames(req.Context(), []string{"X-Title", "X-Tenant"}))
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatalf("redirect chain: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if sawXTitleAtTarget != "" {
+		t.Fatalf("X-Title forwarded across origin change: %q", sawXTitleAtTarget)
+	}
+	if sawXTenantAtTarget != "" {
+		t.Fatalf("X-Tenant forwarded across origin change: %q", sawXTenantAtTarget)
+	}
+}
+
+// TestGuardedHTTPClient_CustomHeadersSurviveSameOriginRedirect: a redirect
+// WITHIN one origin is not a crossing, so the custom headers ride it — the
+// same rule as the credential.
+func TestGuardedHTTPClient_CustomHeadersSurviveSameOriginRedirect(t *testing.T) {
+	var sawXTitle string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, srv.URL+"/done", http.StatusFound)
+			return
+		}
+		sawXTitle = r.Header.Get("X-Title")
+		_, _ = io.WriteString(w, "done")
+	}))
+	defer srv.Close()
+
+	cl := newGuardedHTTPClient(nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/start", nil)
+	req.Header.Set("X-Title", "nocx")
+	req = req.WithContext(withCustomHeaderNames(req.Context(), []string{"X-Title"}))
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatalf("same-origin redirect: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if sawXTitle != "nocx" {
+		t.Fatalf("X-Title = %q after the same-origin hop, want nocx", sawXTitle)
+	}
+}
+
 // TestGuardedHTTPClient_CredentialStrippedOnSchemeChange is the case the
-// stock net/http redirect copy would GET wrong: same host, scheme change
-// http→https, which is an origin change per the design ("never forwarded
-// across an origin change"). Go's own copy rule keeps sensitive headers on
-// a same-host hop; the guard's strict origin comparison strips them.
 func TestGuardedHTTPClient_CredentialStrippedOnSchemeChange(t *testing.T) {
 	var sawAuthAtTLS string
 	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

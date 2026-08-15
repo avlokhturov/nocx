@@ -230,6 +230,15 @@ func (t *guardedTransport) dial(ctx context.Context, network, addr string) (net.
 // (scheme, host or port) never carries the credential. It also bounds the
 // chain length. The address rule itself is enforced per hop in RoundTrip —
 // this is only the credential boundary.
+//
+// The endpoint's custom headers follow the SAME rule (bead nocx-lyyk): a
+// header value can BE a credential — Azure's api-key header is the key — so
+// a token in a custom header must not survive a redirect the Authorization
+// header would not. The names of the custom headers ride the request
+// context (withCustomHeaderNames, set by the callers that build the
+// requests), and exactly those names are dropped on a crossing — never a
+// guess from arbitrary request headers, which would strip headers the user
+// deliberately set on an endpoint that is supposed to keep them.
 func (t *guardedTransport) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return errors.New("assistant: stopped after 10 redirects")
@@ -239,8 +248,35 @@ func (t *guardedTransport) checkRedirect(req *http.Request, via []*http.Request)
 		req.Header.Del("Www-Authenticate")
 		req.Header.Del("Cookie")
 		req.Header.Del("Cookie2")
+		for _, name := range customHeaderNames(req.Context()) {
+			req.Header.Del(name)
+		}
 	}
 	return nil
+}
+
+// customHeaderNamesKey carries the canonical names of the endpoint's custom
+// headers on the request context. The redirect rule needs them (checkRedirect
+// above); the context is the one channel that survives from the initial
+// request into every redirect hop (net/http clones the initial request's
+// context), so the names are available exactly when they are needed.
+type customHeaderNamesKey struct{}
+
+// withCustomHeaderNames tags ctx with the canonical names of the custom
+// headers the request carries. Set by the request builders (engine.go for
+// the completion, connection.go for the connection check) so the guard never
+// has to guess which headers are the endpoint's.
+func withCustomHeaderNames(ctx context.Context, names []string) context.Context {
+	if len(names) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, customHeaderNamesKey{}, names)
+}
+
+// customHeaderNames reads the tagged names back, or nil when none.
+func customHeaderNames(ctx context.Context) []string {
+	names, _ := ctx.Value(customHeaderNamesKey{}).([]string)
+	return names
 }
 
 // origin is the RFC 6454 origin triple, compared strictly: a subdomain or a

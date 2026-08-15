@@ -22,14 +22,13 @@ import { IconButton } from './ui/icon-button'
 import { PencilIcon, TrashIcon } from './ui/icons'
 import { Spinner } from './ui/spinner'
 import { Stack } from './ui/stack'
-import { SuggestionField } from './ui/suggestion-field'
 import { TextField } from './ui/text-field'
+import { SuggestionField } from './ui/suggestion-field'
 import { absoluteHttpUrl, combine, createFormValidation, required } from './ui/validation'
 import { createSubmitGate } from './ui/submit-gate'
 import { showToast } from './ui/toast'
 import { log } from './log'
 import type { AgentClient } from './agent'
-// The probe result shape is declared once in endpoints.probe.schema.json and
 // INLINED by agent.status.schema.json's cross-file ref, so the generated
 // agent.status.ts exports both AgentStatusResult and its own copy of
 // EndpointsProbeResult. This module consumes the latter (the type is
@@ -37,8 +36,9 @@ import type { AgentClient } from './agent'
 // export used — the same union trick endpoints.ts documents.
 import type { EndpointsProbeResult } from './generated/agent.status'
 import { EndpointClient, type Endpoint } from './endpoints'
+import { SecretSource, type SecretSourceMode } from './secret-source'
+import type { InventoryEntry, VaultClient } from './vault-client'
 import { VaultOperationCancelledError, type VaultController } from './vault'
-
 /** The schema's one value today (design §4.5, decision 2). Display label
  *  only; the select appears when the second implementation does. */
 const SCHEMA_LABEL: Record<Endpoint['schema'], string> = {
@@ -52,16 +52,44 @@ interface ModelDraft {
   alias: string
 }
 
-/** The dialog draft: the key is an input ('' = none / keep), never a value
- *  read back from the record. */
+/** One custom header row in the draft (bead nocx-lyyk). The value's SOURCE
+ *  is chosen with the same SecretSource control the endpoint's key uses: a
+ *  literal typed fresh ('new'), or an existing vault secret ('secret' with
+ *  the row handle). Exactly one source per row; on the wire the row becomes
+ *  {name, value, secret} with the unused side null. */
+interface HeaderDraft {
+  name: string
+  mode: SecretSourceMode
+  value: string
+  row: string
+}
+
+/** The dialog draft. The key's source is chosen (type a new one / use an
+ *  existing vault secret, nocx-rzjw) instead of inferred from a caption; a
+ *  typed key is an input that never crosses back, and a referenced key is a
+ *  row handle that does (ADR-0030 §3). */
 interface EndpointDraft {
   name: string
   baseUrl: string
+  keyMode: SecretSourceMode
+  /** A key typed fresh ('new' mode). Sent once, minted/rotated by the
+   *  backend, never read back. */
   key: string
+  /** The row handle of an existing vault secret ('secret' mode). */
+  keyRow: string
   models: ModelDraft[]
+  headers: HeaderDraft[]
 }
 
-const blankDraft = (): EndpointDraft => ({ name: '', baseUrl: '', key: '', models: [] })
+const blankDraft = (): EndpointDraft => ({
+  name: '',
+  baseUrl: '',
+  keyMode: 'new',
+  key: '',
+  keyRow: '',
+  models: [],
+  headers: [],
+})
 type LoadState = 'loading' | 'ready' | 'failed'
 export interface EndpointsSectionProps {
   client: EndpointClient
@@ -77,14 +105,34 @@ export interface EndpointsSectionProps {
    *  connections path uses at the moment a secret is created (nocx-v64o).
    *  Absent in the dev-web harness and bare embeds. */
   vaultController?: VaultController
+  /** Vault inventory for the secret pickers (nocx-rzjw: the endpoint's key
+   *  and header values may reference an existing vault secret). Optional:
+   *  the dev-web harness has no vault, and the pickers then offer nothing,
+   *  exactly like the connections editor's vaultClient. */
+  vaultClient?: VaultClient
 }
-
 export function EndpointsSection(props: EndpointsSectionProps) {
   const [endpoints, setEndpoints] = createSignal<Endpoint[]>([])
   const [loadState, setLoadState] = createSignal<LoadState>('loading')
   const [loadError, setLoadError] = createSignal('')
   const [searchQuery, setSearchQuery] = createSignal('')
   const [dialogOpen, setDialogOpen] = createSignal(false)
+  /** The vault's password rows for the pickers (ADR-0017). Empty when the
+   *  vault is sealed or absent (dev harness). */
+  const [secretRows, setSecretRows] = createSignal<InventoryEntry[]>([])
+  /** The pickers only ever offer live vault data: while the vault is sealed
+   *  or uninitialized, stale rows from an earlier load must not be offered. */
+  const vaultOffersSecrets = createMemo(() => {
+    const state = props.vaultController?.status()?.state
+    return state === undefined || state === 'unsealed'
+  })
+  /** The pickers' rows, filtered to the kind a secret-valued header may
+   *  reference — an API key is a password-kind secret (ADR-0030's mint is
+   *  KindPassword). */
+  const passwordRows = createMemo(() =>
+    vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : [],
+  )
+  const [discovered, setDiscovered] = createSignal<string[]>([])
   /** The endpoint being edited, or null for a new one. */
   const [editing, setEditing] = createSignal<Endpoint | null>(null)
   const [draft, setDraft] = createSignal<EndpointDraft>(blankDraft())
@@ -94,7 +142,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** Models the endpoint says it offers — filled by an explicit connection
    *  test OR by the silent discovery on focus. One owner, so the two paths
    *  cannot disagree about what an endpoint offers. */
-  const [discovered, setDiscovered] = createSignal<string[]>([])
   /** The (base URL, key, endpoint) the discovered list belongs to, so
    *  re-focusing does not re-dial and changing the URL does. */
   const [discoveryKey, setDiscoveryKey] = createSignal('')
@@ -138,8 +185,9 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       const res = await props.client.probeEndpoint({
         name: d.name.trim(),
         baseUrl: d.baseUrl.trim(),
-        key: d.key,
+        key: draftKey(d),
         model,
+        headers: draftHeaders(d),
         ...(editing() ? { endpointId: editing()!.id } : {}),
       })
       setProbeResult(res)
@@ -174,6 +222,19 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   })
 
   // ── Draft editing ────────────────────────────────────────────────────
+  /** Load the vault inventory for the pickers. Called when an editor opens
+   *  (the vault is accessed for data at that moment, not when the list is
+   *  shown). A sealed vault leaves the pickers empty, exactly like the
+   *  connections editor. */
+  async function loadSecretRows() {
+    try {
+      const inv = await props.vaultClient?.inventory()
+      setSecretRows(inv?.entries ?? [])
+    } catch {
+      setSecretRows([])
+    }
+  }
+
   function openNew() {
     setEditing(null)
     setDraft(blankDraft())
@@ -181,24 +242,35 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setDiscovered([])
     setDiscoveryKey('')
     validation.reset()
+    void loadSecretRows()
     setDialogOpen(true)
   }
 
   function openEdit(ep: Endpoint) {
     setEditing(ep)
-    // The key is never pre-filled: it is an input, and the record cannot
-    // be read back (ADR-0030 §3) — an empty key means "keep the existing
-    // material" on update.
+    // The key is never pre-filled with material: a typed key is an input,
+    // and the record cannot be read back (ADR-0030 §3). What CAN be
+    // pre-filled is the SOURCE: a saved credential is the row handle the
+    // result carried, so the form opens on "Use existing secret" with the
+    // bound row — keeping the key is now a choice, not a caption.
     setDraft({
       name: ep.name,
       baseUrl: ep.baseUrl,
+      keyMode: ep.credential !== null ? 'secret' : 'new',
       key: '',
+      keyRow: ep.credential ?? '',
       models: ep.models.map((m) => ({ name: m.name, alias: m.alias ?? '' })),
+      headers: ep.headers.map((h) =>
+        h.value !== null
+          ? { name: h.name, mode: 'new' as const, value: h.value, row: '' }
+          : { name: h.name, mode: 'secret' as const, value: '', row: h.secret ?? '' },
+      ),
     })
     validation.reset()
     setProbeResult(null)
     setDiscovered([])
     setDiscoveryKey('')
+    void loadSecretRows()
     setDialogOpen(true)
   }
 
@@ -226,6 +298,50 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setDraft((d) => ({ ...d, models: d.models.filter((_, i) => i !== index) }))
   }
 
+  // ── Custom headers (nocx-lyyk) ───────────────────────────────────────
+  function updateHeader(index: number, patch: Partial<HeaderDraft>) {
+    setDraft((d) => ({
+      ...d,
+      headers: d.headers.map((h, i) => (i === index ? { ...h, ...patch } : h)),
+    }))
+  }
+
+  function addHeader() {
+    setDraft((d) => ({
+      ...d,
+      headers: [...d.headers, { name: '', mode: 'new', value: '', row: '' }],
+    }))
+  }
+
+  function removeHeader(index: number) {
+    setDraft((d) => ({ ...d, headers: d.headers.filter((_, i) => i !== index) }))
+  }
+
+  /** The key the WIRE carries: only a fresh 'new' mode key is material. In
+   *  'secret' mode the wire carries the row handle instead (draftKeyRow),
+   *  and a blank 'new' key keeps the existing material on update (design
+   *  §4.5.4) — the source control has made "keep" a visible choice. */
+  const draftKey = (d: EndpointDraft): string => (d.keyMode === 'new' ? d.key : '')
+
+  /** The row handle the WIRE carries in 'secret' mode, or '' to keep the
+   *  existing reference (or stay keyless on create). */
+  const draftKeyRow = (d: EndpointDraft): string => (d.keyMode === 'secret' ? d.keyRow : '')
+
+  /** The wire form of the draft's header rows: exactly one source per row,
+   *  the unused side null. A 'secret' row with no picker selection is
+   *  dropped — it is an empty row, not a claim about material. */
+  function draftHeaders(
+    d: EndpointDraft,
+  ): { name: string; value: string | null; secret: string | null }[] {
+    return d.headers
+      .map((h) => ({
+        name: h.name.trim(),
+        value: h.mode === 'new' ? h.value : null,
+        secret: h.mode === 'secret' && h.row !== '' ? h.row : null,
+      }))
+      .filter((h) => h.name !== '' || h.value !== null || h.secret !== null)
+  }
+
   // ── Validation (the kit's one answer to "how a form refuses") ─────────
 
   const validation = createFormValidation(
@@ -237,6 +353,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         if (rows.length === 0) return 'Add at least one model'
         return rows.some((m) => m.name.trim() === '') ? 'Model name is required' : undefined
       },
+      // A header row needs a name; the refused-name and control-character
+      // rules are the BACKEND's (profile.ValidateEndpointHeaders, one
+      // owner) and surface as the save's toast — the form refuses what it
+      // can see, the backend refuses what it must.
+      headers: () => {
+        const rows = draft().headers
+        return rows.some((h) => h.name.trim() === '') ? 'Header name is required' : undefined
+      },
     },
     {
       controlId: (field) => {
@@ -245,6 +369,10 @@ export function EndpointsSection(props: EndpointsSectionProps) {
         if (field === 'models') {
           const first = draft().models.findIndex((m) => m.name.trim() === '')
           return first >= 0 ? `endpoint-model-${first}-name` : undefined
+        }
+        if (field === 'headers') {
+          const first = draft().headers.findIndex((h) => h.name.trim() === '')
+          return first >= 0 ? `endpoint-header-${first}-name` : undefined
         }
         return field
       },
@@ -260,7 +388,9 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     const input = {
       name: d.name.trim(),
       baseUrl: d.baseUrl.trim(),
-      key: d.key,
+      key: draftKey(d),
+      credential: draftKeyRow(d),
+      headers: draftHeaders(d),
       models: d.models.map((m) => ({
         name: m.name.trim(),
         alias: m.alias.trim() === '' ? null : m.alias.trim(),
@@ -275,7 +405,10 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       }
     }
     try {
-      if (props.vaultController && d.key !== '') {
+      // The vault seam guards the MINT path only: a referenced key needs no
+      // mint, so a save that references an existing secret proceeds without
+      // raising the setup sheet.
+      if (props.vaultController && draftKey(d) !== '') {
         // The key is about to be minted into the vault (design §4.5.3), so
         // the save goes through the vault layer's own operation-first seam —
         // the same owner the connections path uses at the moment a secret is
@@ -323,13 +456,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       (ep) => ep.name.toLowerCase().includes(q) || ep.baseUrl.toLowerCase().includes(q),
     )
   })
-
-  const keyHint = () => {
-    const ep = editing()
-    return ep !== null && ep.credential !== null
-      ? 'Leave blank to keep the saved key. A new key replaces it.'
-      : 'Optional — the key is stored in your vault, never in the record.'
-  }
 
   function modelSummary(models: Endpoint['models']): string {
     const n = models.length
@@ -389,15 +515,16 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     const baseUrl = d.baseUrl.trim()
     if (baseUrl === '' || probing()) return
     const ep = editing()
-    const key = `${baseUrl} ${d.key} ${ep?.id ?? ''}`
+    const key = `${baseUrl}${draftKey(d)}${draftKeyRow(d)}${ep?.id ?? ''}`
     if (discoveryKey() === key) return
     setDiscoveryKey(key)
     try {
       const res = await props.client.probeEndpoint({
         name: d.name.trim(),
         baseUrl,
-        key: d.key,
+        key: draftKey(d),
         model: '',
+        headers: draftHeaders(d),
         ...(ep ? { endpointId: ep.id } : {}),
       })
       if (res.ok && res.kind === 'connection') setDiscovered(res.models ?? [])
@@ -495,6 +622,48 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           value={row().alias}
           onInput={(v) => updateModel(index, { alias: v })}
           placeholder="Optional"
+        />
+      </div>
+    )
+  }
+
+  /** One custom-header row: a name, and a value whose SOURCE is chosen with
+   *  the same control the key uses (nocx-lyyk) — a literal typed fresh, or a
+   *  reference to an existing vault secret (Azure's api-key header is the
+   *  key). The rows are EditableRowList's, so a keystroke never rebuilds the
+   *  row's DOM (nocx-fngd). */
+  function renderHeaderRow(row: () => HeaderDraft, index: number) {
+    return (
+      <div class="ep-header-row">
+        <TextField
+          id={`endpoint-header-${index}-name`}
+          label="Header"
+          value={row().name}
+          onInput={(v) => updateHeader(index, { name: v })}
+          onBlur={() => validation.touch('headers')}
+          placeholder="X-Title"
+        />
+        <SecretSource
+          id={`endpoint-header-${index}`}
+          label="Value"
+          mode={row().mode}
+          onModeChange={(mode) => updateHeader(index, { mode })}
+          newLabel="Type a value"
+          secretLabel="Use existing secret"
+          ariaLabel={`Header ${row().name || index + 1} value source`}
+          newControl={
+            <TextField
+              id={`endpoint-header-${index}-value`}
+              label="Value"
+              value={row().value}
+              onInput={(v) => updateHeader(index, { value: v })}
+              placeholder="nocx"
+            />
+          }
+          secrets={passwordRows()}
+          value={row().row}
+          onValueChange={(v) => updateHeader(index, { row: v ?? '' })}
+          placeholder="\u2014 None \u2014"
         />
       </div>
     )
@@ -600,13 +769,27 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             error={validation.error('baseUrl')}
             placeholder="https://api.example.com/v1"
           />
-          <TextField
+          <SecretSource
             id="endpoint-key"
             label="API key"
-            type="password"
-            value={draft().key}
-            onInput={(v) => setDraftField('key', v)}
-            description={keyHint()}
+            mode={draft().keyMode}
+            onModeChange={(mode) => setDraft((d) => ({ ...d, keyMode: mode }))}
+            newLabel="Type a new one"
+            secretLabel="Use existing secret"
+            ariaLabel="API key source"
+            newControl={
+              <TextField
+                id="endpoint-key"
+                label="API key"
+                type="password"
+                value={draft().key}
+                onInput={(v) => setDraftField('key', v)}
+                description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
+              />
+            }
+            secrets={passwordRows()}
+            value={draft().keyRow}
+            onValueChange={(v) => setDraft((d) => ({ ...d, keyRow: v ?? '' }))}
           />
           <div class="ep-test-row">
             <Button
@@ -637,6 +820,17 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             onAdd={addModel}
             error={validation.error('models')}
             renderRow={renderModelRow}
+          />
+          <EditableRowList
+            rows={draft().headers}
+            ariaLabel="Custom headers"
+            addLabel="Add header"
+            emptyLabel="No custom headers — requests go out with just the credential."
+            removeLabel={(i) => `Remove header ${i + 1}`}
+            onRemove={removeHeader}
+            onAdd={addHeader}
+            error={validation.error('headers')}
+            renderRow={renderHeaderRow}
           />
         </Stack>
       </Dialog>

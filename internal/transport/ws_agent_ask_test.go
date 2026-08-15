@@ -33,11 +33,12 @@ import (
 // scriptedAssistantClient is the injected engine: Ask plays back a script of
 // deltas and an outcome, so the orchestration is deterministic.
 type scriptedAssistantClient struct {
-	mu       sync.Mutex
-	deltas   []string
-	err      error // terminal error Ask returns after the deltas
-	received []assistant.Message
-	aborted  bool // onDelta returned an error and Ask aborted
+	mu             sync.Mutex
+	deltas         []string
+	err            error // terminal error Ask returns after the deltas
+	received       []assistant.Message
+	receivedParams assistant.AskParams
+	aborted        bool // onDelta returned an error and Ask aborted
 }
 
 func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
@@ -48,6 +49,7 @@ func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.received = append([]assistant.Message(nil), p.Messages...)
+	s.receivedParams = p
 	for _, d := range s.deltas {
 		if err := onDelta(d); err != nil {
 			s.aborted = true
@@ -61,6 +63,7 @@ func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams
 // real vault, real profile store, scripted engine.
 type askHarness struct {
 	t    *testing.T
+	v    *vault.Vault
 	db   content.ContentDB
 	ws   *WSServer
 	conn *websocket.Conn
@@ -115,7 +118,7 @@ func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &askHarness{t: t, db: db, ws: ws, conn: conn}
+	return &askHarness{t: t, v: v, db: db, ws: ws, conn: conn}
 }
 
 // createEndpoint makes one endpoint with a resolvable key.

@@ -22,13 +22,15 @@ import (
 )
 
 // fakeOpenAIServer is a minimal OpenAI-compatible /chat/completions SSE
-// server. It records the last request (body + Authorization) so a test can
-// assert what the adapter actually sent.
+// server. It records the last request (body, Authorization, path and the
+// custom headers a test names) so a test can assert what the adapter
+// actually sent.
 type fakeOpenAIServer struct {
 	handler  func(w http.ResponseWriter, r *http.Request)
 	lastBody atomic.Value // string
 	lastAuth atomic.Value // string
 	lastPath atomic.Value // string
+	lastHdrs atomic.Value // map[string]string
 }
 
 func newFakeOpenAI(handler func(w http.ResponseWriter, r *http.Request)) (*fakeOpenAIServer, *httptest.Server) {
@@ -38,6 +40,13 @@ func newFakeOpenAI(handler func(w http.ResponseWriter, r *http.Request)) (*fakeO
 		f.lastBody.Store(string(body))
 		f.lastAuth.Store(r.Header.Get("Authorization"))
 		f.lastPath.Store(r.URL.Path)
+		hdrs := make(map[string]string)
+		for name, values := range r.Header {
+			if len(values) > 0 {
+				hdrs[name] = values[0]
+			}
+		}
+		f.lastHdrs.Store(hdrs)
 		if f.handler != nil {
 			f.handler(w, r)
 			return
@@ -86,6 +95,14 @@ func (f *fakeOpenAIServer) auth() string {
 func (f *fakeOpenAIServer) path() string {
 	s, _ := f.lastPath.Load().(string)
 	return s
+}
+
+func (f *fakeOpenAIServer) header(name string) string {
+	hdrs, _ := f.lastHdrs.Load().(map[string]string)
+	// Go canonicalizes header names on the wire (HTTP-Referer → Http-Referer);
+	// the accessor canonicalizes too so callers can ask for the name they
+	// configured.
+	return hdrs[http.CanonicalHeaderKey(name)]
 }
 
 func testProbeParams(baseURL string) ProbeParams {
@@ -147,6 +164,71 @@ func TestProbe_SucceedsEndToEnd(t *testing.T) {
 	}
 	if req.Model != "probe-model" {
 		t.Fatalf("request model = %q, want probe-model", req.Model)
+	}
+}
+
+// TestProbe_SendsCustomHeadersOnCompletion (bead nocx-lyyk, acceptance 1):
+// the completion carries the endpoint's custom headers — the OpenRouter
+// HTTP-Referer/X-Title case, verbatim, over the real eino path.
+func TestProbe_SendsCustomHeadersOnCompletion(t *testing.T) {
+	f, srv := newFakeOpenAI(nil)
+	defer srv.Close()
+
+	p := testProbeParams(srv.URL)
+	p.Headers = []Header{
+		{Name: "HTTP-Referer", Value: "https://nocx.dev"},
+		{Name: "X-Title", Value: "nocx"},
+	}
+	cl := NewClient(nil)
+	res, err := cl.Probe(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("Probe = %+v, want OK", res)
+	}
+	if got := f.header("HTTP-Referer"); got != "https://nocx.dev" {
+		t.Errorf("completion carried HTTP-Referer %q, want https://nocx.dev", got)
+	}
+	if got := f.header("X-Title"); got != "nocx" {
+		t.Errorf("completion carried X-Title %q, want nocx", got)
+	}
+}
+
+// TestProbe_ConnectionCheckSendsCustomHeaders (bead nocx-lyyk, acceptance 1):
+// the no-model connection check sends the SAME headers on GET /models — a
+// Test that passes must mean the real calls will.
+func TestProbe_ConnectionCheckSendsCustomHeaders(t *testing.T) {
+	var sawXTenant, sawReferer string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("connection check hit %s, want /models", r.URL.Path)
+		}
+		sawXTenant = r.Header.Get("X-Tenant")
+		sawReferer = r.Header.Get("HTTP-Referer")
+		_, _ = io.WriteString(w, `{"data":[]}`)
+	}))
+	defer srv.Close()
+
+	p := testProbeParams(srv.URL)
+	p.Model = ""
+	p.Headers = []Header{
+		{Name: "X-Tenant", Value: "tenant-7"},
+		{Name: "HTTP-Referer", Value: "https://nocx.dev"},
+	}
+	cl := NewClient(nil)
+	res, err := cl.Probe(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if res.Kind != ProbeConnection || !res.OK {
+		t.Fatalf("Probe = %+v, want a successful connection check", res)
+	}
+	if sawXTenant != "tenant-7" {
+		t.Errorf("connection check carried X-Tenant %q, want tenant-7", sawXTenant)
+	}
+	if sawReferer != "https://nocx.dev" {
+		t.Errorf("connection check carried HTTP-Referer %q, want https://nocx.dev", sawReferer)
 	}
 }
 

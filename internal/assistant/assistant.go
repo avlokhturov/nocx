@@ -61,6 +61,16 @@ type Message struct {
 	Content string
 }
 
+// Header is one resolved custom HTTP header the endpoint sends on every
+// request it makes (bead nocx-lyyk): the name, and the value ALREADY
+// RESOLVED — a literal, or the material of a vault secret the transport
+// resolved before the call. The resolver is the transport (it owns the
+// vault); this package only ever sends.
+type Header struct {
+	Name  string
+	Value string
+}
+
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
 // conversation context (question + referenced frames, design §4.2).
 type AskParams struct {
@@ -71,6 +81,10 @@ type AskParams struct {
 	BaseURL string
 	// Model is the model id the run resolved to.
 	Model string
+	// Headers are the endpoint's custom headers, resolved to their values.
+	// Sent on the completion AND the connection check, so a Test that
+	// passes means the real calls will too.
+	Headers []Header
 	// Messages is the assembled context: the system rule (frame content is
 	// data, not instructions — design §6.2), the question, and the
 	// referenced frames' text as labelled data.
@@ -107,6 +121,9 @@ type ProbeParams struct {
 	// result names which one ran, so it can never be mistaken for the
 	// other.
 	Model string
+	// Headers are the form's draft custom headers, resolved to their
+	// values. Sent on whichever check runs.
+	Headers []Header
 }
 
 // ProbeKind names which of the two checks a ProbeResult reports.

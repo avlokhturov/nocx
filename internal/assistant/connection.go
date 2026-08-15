@@ -93,6 +93,18 @@ func (c *client) probeConnection(ctx context.Context, p ProbeParams) (ProbeResul
 			return nil
 		})
 	}
+	// The endpoint's custom headers ride the connection check too, so a Test
+	// that passes means the real calls will: a gateway that wants a tenant
+	// header refuses both the probe and the completion equally. Their
+	// canonical names tag the context so the redirect rule drops exactly
+	// them on an origin change (httpguard.go) — the same treatment the
+	// credential gets.
+	if m, names := headerMap(p.Headers); m != nil {
+		for name, value := range m {
+			req.Header.Set(name, value)
+		}
+		req = req.WithContext(withCustomHeaderNames(req.Context(), names))
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

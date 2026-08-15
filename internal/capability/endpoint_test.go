@@ -29,6 +29,21 @@ type fakeEndpointSecrets struct {
 	mintErr   error
 	rotateErr error
 	deleteErr error
+
+	// rows resolves renderer row handles to stored references — the fake's
+	// RowResolver half, so a test can hand the service a "vault" that holds
+	// known rows without standing up a real vault.
+	rows map[string]string
+}
+
+func (f *fakeEndpointSecrets) ResolveRow(row string, _ []vault.CredentialInventory) (credential.SecretID, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	ref, ok := f.rows[row]
+	if !ok {
+		return "", false
+	}
+	return credential.SecretID(ref), true
 }
 
 func (f *fakeEndpointSecrets) CreateNamed(_ context.Context, _ credential.Secret, meta vault.SecretMeta) (credential.SecretID, error) {
@@ -79,7 +94,7 @@ func newEndpointEnv(t *testing.T, secrets *fakeEndpointSecrets) (capability.Conf
 	store := profile.NewJSONStore(filepath.Join(dir, "profiles.json"))
 	configGate, vaultGate, _, _, _, _ := testGates()
 	op := capability.NewConfigOperation(configGate, vaultGate, testLane(),
-		store, store, store, newProfileService(t), nil, nil, secrets)
+		store, store, store, newProfileService(t), nil, secrets, secrets)
 	return op, store, filepath.Join(dir, "profiles.json")
 }
 
