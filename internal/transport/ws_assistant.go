@@ -97,7 +97,7 @@ type endpointProbeParams struct {
 // shape profiles and groups use.
 type assistantStatusHandlers struct {
 	op      capability.ConfigOperation
-	secrets credential.SecretStore
+	secrets credential.Resolver
 	probes  *assistant.ProbeStore
 	wired   bool
 	r       Responder
@@ -174,10 +174,14 @@ func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref str
 	if ref == "" || h.secrets == nil {
 		return credNone
 	}
-	secret, err := h.secrets.Get(ctx, credential.SecretID(ref))
+	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref), credential.ToReport)
 	if err != nil {
 		switch {
-		case errors.Is(err, vault.ErrVaultSealed):
+		case errors.Is(err, credential.ErrSealedQuiet):
+			// The stance did the work: a ToReport resolution translates the
+			// sealed condition into an error the seam cannot recognize, so
+			// this page can name the state without any chance of a prompt
+			// appearing over somebody who was only reading.
 			return credSealed
 		case errors.Is(err, vault.ErrSecretNotFound):
 			return credDeleted
@@ -201,7 +205,7 @@ func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref str
 // the config operation, material at stream time).
 type assistantProbeHandlers struct {
 	op      capability.ConfigOperation
-	secrets credential.SecretStore
+	secrets credential.Resolver
 	client  assistant.Client
 	probes  *assistant.ProbeStore
 	wired   bool
@@ -328,7 +332,8 @@ func (h assistantProbeHandlers) resolveProbeHeaders(ctx context.Context, params 
 
 	material := make(map[string]string, len(rows))
 	for i, ref := range refs {
-		secret, getErr := h.secrets.Get(ctx, credential.SecretID(ref))
+		secret, getErr := h.secrets.Resolve(
+			ctx, credential.SecretID(ref), credential.ForOperation)
 		if getErr != nil {
 			if errors.Is(getErr, vault.ErrVaultSealed) {
 				return nil, nil, vault.ErrVaultSealed
@@ -417,7 +422,7 @@ func (h assistantProbeHandlers) resolveProbeCredential(ctx context.Context, para
 		// vault, so it stays a refused result with the honest sentence.
 		return credential.Secret{}, refusedProbeResult(params), nil
 	}
-	secret, err := h.secrets.Get(ctx, credential.SecretID(ref))
+	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref), credential.ForOperation)
 	if err != nil {
 		if errors.Is(err, vault.ErrVaultSealed) {
 			// The vault is sealed: this is a sealed-vault failure. The

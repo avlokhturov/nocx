@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
+	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -663,6 +664,25 @@ func WithCredentialStore(cs credential.SecretStore) WSServerOption {
 	return func(s *WSServer) { s.credentials = cs }
 }
 
+// credentialResolver is the STANCED read seam over the credential store
+// (nocx-k41yv): the form every handler that resolves material on a person's
+// behalf is wired with. Handlers hold this rather than the store, because
+// the store's Get takes no stance and a seam that can be bypassed is the
+// one that was — three times.
+//
+// The sealed predicate is injected here, at the composition root, because
+// internal/credential must not import the vault (the vault imports it) and
+// because which implementation's sealed error is in play is precisely a
+// composition decision.
+func (s *WSServer) credentialResolver() credential.Resolver {
+	if s.credentials == nil {
+		return nil
+	}
+	return credential.NewResolver(s.credentials, func(err error) bool {
+		return errors.Is(err, vault.ErrVaultSealed)
+	})
+}
+
 // WithCredentialStore attaches a credential store, enabling the
 
 // WithSettingsRegistry attaches a settings registry to the server, enabling
@@ -899,7 +919,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentials, s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)

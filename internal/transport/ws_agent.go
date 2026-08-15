@@ -211,7 +211,7 @@ type agentHandlers struct {
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
 	// service, so the ask refuses before the call.
 	endpointWired bool
-	credentials   credential.SecretStore
+	credentials   credential.Resolver
 	client        assistant.Client
 	askSub        control.Submission
 	state         *connState
@@ -345,6 +345,33 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	}
 	in.Facts = facts
 
+	// THE CREDENTIAL IS RESOLVED HERE, while we are still answering the
+	// agent.ask REQUEST — before the run exists (nocx-k41yv).
+	//
+	// It used to be resolved at stream time, and that is what put the ask
+	// outside the vault's own seam: by then the response had been sent, so
+	// a sealed vault could only travel as a run-state notification, which
+	// sealedNormalizer cannot see and the renderer's dispatcher cannot act
+	// on. All the product could do was print a sentence naming a door the
+	// person had to go find. Resolved here, a sealed vault is an ordinary
+	// error on a request: the normalizer rewrites it, the renderer raises
+	// the unlock, and the SAME ask is re-sent when the vault answers. No
+	// new mechanism, and no call site that has to remember any of this.
+	//
+	// The cost, stated rather than slid past: the material is resolved
+	// earlier and therefore held in memory longer — from here until the
+	// stream ends, instead of from the stream's start. It is the same
+	// process and the same secret; what changes is the span.
+	//
+	// NOT covered by this: a vault that seals MID-RUN, after this point.
+	// That is the wait-and-continue question nocx-k41yv sequences after
+	// this move, together with the ADR-0032 amendment.
+	secret, headers, credErr := h.resolveEndpointMaterial(ctx, endpoint)
+	if credErr != nil {
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "", credErr))
+		return
+	}
+
 	// The transaction records question + run + answer entry + edges in ONE
 	// commit, and the response is sent with the answer's identity BEFORE
 	// the stream starts — the renderer places the answer block from the
@@ -377,6 +404,8 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
 	rc := askRunContext{
+		secret:        secret,
+		headers:       headers,
 		runID:         askRes.RunID,
 		questionID:    askRes.QuestionID,
 		answerEntryID: askRes.AnswerEntryID,
@@ -394,11 +423,70 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	}
 }
 
+// resolveEndpointMaterial resolves everything the stream will need from the
+// vault — the endpoint's credential and its secret-valued headers — as ONE
+// step on the request path, so a sealed vault is a failure of the REQUEST
+// and reaches the person as the unlock prompt (nocx-k41yv, ADR-0032).
+//
+// The errors are deliberately three different facts, never the one sentence
+// they used to collapse into: a sealed vault is returned as-is so the seam
+// can recognize it (rpcErrorFor maps it to the canonical shape and the
+// renderer raises the unlock), while a missing credential and a header that
+// references a missing secret each keep their own words and name what is
+// missing. Nothing here writes a sentence about unlocking: the seam owns
+// that, and a second copy of it in prose is what this change removes.
+func (h agentHandlers) resolveEndpointMaterial(
+	ctx context.Context,
+	endpoint profile.Endpoint,
+) (credential.Secret, []assistant.Header, error) {
+	secret, err := h.credentials.Resolve(
+		ctx, credential.SecretID(endpoint.CredentialRef), credential.ForOperation)
+	if err != nil {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			return credential.Secret{}, nil, err
+		}
+		return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
+	}
+	if secret.IsEmpty() {
+		return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
+	}
+
+	headers := make([]assistant.Header, 0, len(endpoint.Headers))
+	for _, hd := range endpoint.Headers {
+		if hd.Value != nil {
+			headers = append(headers, assistant.Header{Name: hd.Name, Value: *hd.Value})
+			continue
+		}
+		hSecret, hErr := h.credentials.Resolve(
+			ctx, credential.SecretID(hd.ValueRef), credential.ForOperation)
+		if hErr != nil && errors.Is(hErr, vault.ErrVaultSealed) {
+			return credential.Secret{}, nil, hErr
+		}
+		if hErr != nil || hSecret.IsEmpty() {
+			return credential.Secret{}, nil,
+				fmt.Errorf("the header %q references a missing secret", hd.Name)
+		}
+		var value string
+		_ = hSecret.Use(func(b []byte) error {
+			value = string(b)
+			return nil
+		})
+		headers = append(headers, assistant.Header{Name: hd.Name, Value: value})
+	}
+	return secret, headers, nil
+}
+
 // askRunContext is everything the stream task needs — the run's identities
 // (backend-minted), the question, the references and the resolved endpoint.
 // Constructed in the handler from the transaction's result; the task holds
 // nothing it was not given.
 type askRunContext struct {
+	// The endpoint's material, resolved before the run was created (see
+	// handleAsk): the stream is handed what it needs and never reaches for
+	// the vault itself, which is what keeps a sealed vault on the request
+	// path where the unlock seam lives.
+	secret        credential.Secret
+	headers       []assistant.Header
 	runID         int64
 	questionID    string
 	answerEntryID string
@@ -427,48 +515,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		return
 	}
 
-	// The endpoint's credential, resolved at stream time — the vault may
-	// have sealed since the ask was recorded. A sealed vault gets its own
-	// sentence (the offer, not a dead end); a missing secret gets the
-	// missing-secret sentence. They are not the same fact, and the
-	// conflation was the thing ADR-0032 deleted everywhere else.
-	secret, err := h.credentials.Get(ctx, credential.SecretID(rc.endpoint.CredentialRef))
-	if err != nil || secret.IsEmpty() {
-		sentence := "the endpoint's credential is missing"
-		if errors.Is(err, vault.ErrVaultSealed) {
-			sentence = "the vault is locked — unlock it and ask again"
-		}
-		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed, sentence, r)
-		return
-	}
-
-	// The endpoint's custom headers, resolved at stream time alongside the
-	// credential — the vault may have sealed since the ask was recorded.
-	// A literal rides as-is; a secret-valued header resolves to material,
-	// and an unresolvable one fails the run with a sentence naming the
-	// header (the same shape as the missing-credential sentence above).
-	headers := make([]assistant.Header, 0, len(rc.endpoint.Headers))
-	for _, hd := range rc.endpoint.Headers {
-		if hd.Value != nil {
-			headers = append(headers, assistant.Header{Name: hd.Name, Value: *hd.Value})
-			continue
-		}
-		hSecret, hErr := h.credentials.Get(ctx, credential.SecretID(hd.ValueRef))
-		if hErr != nil || hSecret.IsEmpty() {
-			sentence := fmt.Sprintf("the header %q references a missing secret", hd.Name)
-			if errors.Is(hErr, vault.ErrVaultSealed) {
-				sentence = "the vault is locked — unlock it and ask again"
-			}
-			h.terminalize(ctx, rc, content.RunFailed, content.TermFailed, sentence, r)
-			return
-		}
-		var value string
-		_ = hSecret.Use(func(b []byte) error {
-			value = string(b)
-			return nil
-		})
-		headers = append(headers, assistant.Header{Name: hd.Name, Value: value})
-	}
+	// No credential resolution here: the endpoint's material was resolved
+	// on the request path, before this run existed (handleAsk). The stream
+	// never reaches for the vault, so it can never fail in a way the unlock
+	// seam cannot see.
 
 	// Context assembly: the system rule (frame content is data, not
 	// instructions — design §6.2) rides only when content actually
@@ -510,11 +560,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	}
 
 	seq := 0
-	err = h.client.Ask(ctx, assistant.AskParams{
-		Key:      secret,
+	err := h.client.Ask(ctx, assistant.AskParams{
+		Key:      rc.secret,
 		BaseURL:  rc.endpoint.BaseURL,
 		Model:    rc.model,
-		Headers:  headers,
+		Headers:  rc.headers,
 		Messages: msgs,
 	}, func(text string) error {
 		// Persist BEFORE emitting: a delta the renderer lost is still in
@@ -839,7 +889,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, credentials credential.SecretStore, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)

@@ -2300,14 +2300,14 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			// probe names a saved endpoint and the backend resolves the
 			// credential it owns — the same seams agent.status holds.
 			h := assistantProbeHandlers{
-				op: configOp, secrets: s.credentials,
+				op: configOp, secrets: s.credentialResolver(),
 				client: s.assistantClient, probes: s.assistantProbes,
 				wired: s.assistantClient != nil, r: r,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),
 		regResponder(configSub, "agent.status", noParams(), func(r Responder) handlerFunc {
-			h := assistantStatusHandlers{op: configOp, secrets: s.credentials, probes: s.assistantProbes, wired: endpointWired, r: r}
+			h := assistantStatusHandlers{op: configOp, secrets: s.credentialResolver(), probes: s.assistantProbes, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAgentStatus(ctx, req) }
 		}),
 		regResponder(configSub, "groups.list", noParams(), func(r Responder) handlerFunc {
