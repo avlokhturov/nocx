@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,6 +68,9 @@ type askHarness struct {
 	db   content.ContentDB
 	ws   *WSServer
 	conn *websocket.Conn
+	// fakeRequests counts provider requests the readScreen failure-path
+	// tests drive (the harness itself never dials a provider).
+	fakeRequests atomic.Int64
 }
 
 func newAskHarness(t *testing.T, client assistant.Client) *askHarness {

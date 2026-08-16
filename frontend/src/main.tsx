@@ -28,6 +28,7 @@ import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
 import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
+import { mountReadScreenHandler } from './read-screen'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
 import {
@@ -264,6 +265,13 @@ async function main() {
   // editor already up on a blank one.
   tm.onCreateEndpoint = () => openSettingsTab().startNewEndpoint()
   tm.onActivity = reportActivity
+
+  // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────
+  // The broker's pull: the backend asks the renderer to produce a session's
+  // frame (the readScreen tool). The handler resolves the session to the
+  // tab that owns its grid; a request for a session no tab holds is
+  // answered failed, honestly — never a hang.
+  mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
 
   const observer = new SettingsObserver(dispatcher)
 

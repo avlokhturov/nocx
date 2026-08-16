@@ -73,6 +73,8 @@ import {
   type ContentViewport,
   type ActiveOrigin,
 } from './tab-content'
+import { type CapturedFrame } from './frame/types'
+import { CaptureAbortedError } from './frame/capture-identity'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { secretReference } from './secret-reference'
@@ -2329,6 +2331,22 @@ export class TerminalContent extends BaseTabContent {
     this._noticeDispose()
     this._noticeDispose = null
     this.scheduleLiveResize()
+  }
+
+  /** The session id this content's terminal belongs to — the readScreen
+   *  pull's lookup key (nocx-ljfwz). The renderer answers only requests
+   *  naming ITS session; a request for any other session is answered
+   *  failed by the app-level handler. */
+  sessionId(): string {
+    return this.session?.sessionId ?? ''
+  }
+
+  /** Capture this session's live frame (the readScreen pull): the renderer
+   *  produces the frame because it owns the grid (AD-6). Rejects with
+   *  CaptureAbortedError when no renderer is mounted (yet or anymore). */
+  captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
+    if (!this.renderer) return Promise.reject(new CaptureAbortedError())
+    return this.renderer.captureLiveFrame(region)
   }
 
   /** Raise the degraded-session card, unless the user has already answered

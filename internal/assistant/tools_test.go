@@ -104,13 +104,26 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 		t.Fatalf("mutate grant declared tools %v, want none", toolNames(t, got))
 	}
 
-	// A grant whose resource kinds are not covered declares nothing.
+	// A grant whose resource kinds are not covered declares nothing: the
+	// declared tools touch paths and sessions, never credentials.
+	f = askWithGrant(t, &content.Grant{
+		Effects: []content.Effect{content.EffectObserve},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceCredential, ID: "cred-1"}},
+	})
+	if got := requestTools(t, f.body()); len(got) != 0 {
+		t.Fatalf("credential grant declared tools %v, want none", toolNames(t, got))
+	}
+
+	// A session grant declares exactly the session tool — readScreen is the
+	// first tool whose resource kind is a session, so a session scope is
+	// now meaningful (the positive end of the same rule).
 	f = askWithGrant(t, &content.Grant{
 		Effects: []content.Effect{content.EffectObserve},
 		Scopes:  []content.GrantScope{{Kind: content.ResourceSession, ID: "lane-1"}},
 	})
-	if got := requestTools(t, f.body()); len(got) != 0 {
-		t.Fatalf("session grant declared tools %v, want none", toolNames(t, got))
+	got = toolNames(t, requestTools(t, f.body()))
+	if len(got) != 1 || got[0] != "readScreen" {
+		t.Fatalf("session grant declared tools %v, want exactly [readScreen]", got)
 	}
 }
 

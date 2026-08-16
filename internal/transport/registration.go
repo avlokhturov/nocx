@@ -38,6 +38,11 @@ var ingressCriticalMethods = map[string]struct{}{
 	"ack":                          {},
 	"vault.unlockResolved":         {},
 	"connections.passwordResolved": {},
+	// The broker's resolutions (nocx-e2j1z): a pending requestor — a tool
+	// under the ask stream — blocks on the answer, so an answer queued
+	// behind a full lane would deadlock the run. Same disposition as the
+	// two existing resolvers, for the same reason.
+	"agent.readScreenResolved": {},
 }
 
 // methodSpec declares one control method at server construction: the

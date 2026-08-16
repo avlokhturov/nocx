@@ -86,11 +86,13 @@ type Registry struct {
 }
 
 // declarations is the table — the only place a tool comes into existence.
-// Two observe-class reads are enough for this slice (design §4.2): files.read
-// executes (its Narrow is wired and its executor lives in internal/assistant),
-// git.status is declared-but-not-executable (Narrow nil — the middleware
-// refuses to run it honestly). The exclusion tests need at least two rows so
-// a grant can be shown to admit and to refuse.
+// Three rows, three execution states (design §4.1–§4.2): files.read executes
+// in Go (its Narrow is wired and its executor lives in internal/assistant),
+// readScreen executes in the renderer (the first InRenderer tool — the
+// executor asks the renderer through the transport's broker), and git.status
+// is declared-but-not-executable (Narrow nil — the middleware refuses to run
+// it honestly). The exclusion tests need at least two permitted/refused rows
+// so a grant can be shown to admit and to refuse.
 var declarations = []Declaration{
 	{
 		Name:        "files.read",
@@ -100,6 +102,15 @@ var declarations = []Declaration{
 		Executes:    InGo,
 		Params:      "files.read.schema.json",
 		Narrow:      narrowFilesRead,
+	},
+	{
+		Name:        "readScreen",
+		Effect:      content.EffectObserve,
+		Resources:   []content.ResourceKind{content.ResourceSession},
+		ResourceArg: "sessionId",
+		Executes:    InRenderer,
+		Params:      "readScreen.schema.json",
+		Narrow:      narrowReadScreen,
 	},
 	{
 		Name:      "git.status",

@@ -28,3 +28,14 @@ func narrowFilesRead(grant content.Grant) (Capability, error) {
 	}
 	return r, nil
 }
+
+// narrowReadScreen is the readScreen row's capability constructor: the
+// grant's ResourceSession scopes, nothing else. The renderer request seam —
+// how a read is performed — is infrastructure wired at the run (the
+// assistant's RendererRequester), not authority, so it does not live on the
+// capability: the capability answers ONLY "may this run read this session",
+// and an executor that holds it cannot name a session outside the grant
+// (design §2.2: authority crosses in neither direction).
+func narrowReadScreen(grant content.Grant) (Capability, error) {
+	return NewScreenReader(grant.Scopes), nil
+}
