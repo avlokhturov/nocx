@@ -595,6 +595,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
+		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
