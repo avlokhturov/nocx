@@ -26,6 +26,10 @@ export interface Open {
    */
   sessionEpoch: number
   /**
+   * The workspace this session belongs to (nocx-fraus). NEVER empty and never absent: a tab is always in exactly one workspace, and there is no null (.internal/specs/2026-08-15-workspaces-ux-design.md §4.2). The open REQUEST may omit a workspace — the renderer has no name for the default because the default never renders — and the backend registry then supplies it, which is why this result field is required while the request field is not. It CARRIES NO BEHAVIOUR: nothing reads authority, addressability or reachability from it, the fence that later consults membership is a separate epic (§5), and §5.5 forbids any surface before that epic from describing a workspace as safe, isolated or contained.
+   */
+  workspaceId: string
+  /**
    * Starting working directory of the session's shell, with the home directory abbreviated to ~.
    */
   cwd: string

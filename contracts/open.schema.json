@@ -5,7 +5,7 @@
   "description": "Result of the open JSON-RPC method: a session is created and acknowledged (AD-7 — the server assigns the authoritative session id, so the id is minted by the backend, never the renderer). cwd is the session's starting directory, the tab's name until a program sets a title. instanceId + sessionEpoch (nocx-3oupk) name the session's incarnation: the renderer learns them here and compares every later observation of this session against them, so a record or message from a previous backend instance is told from this one. shellIntegrationReason is deliberately NOT here (nocx-dvql): it could only answer at open time, and the two integration failures that matter most arrive later — a handshake that expires ten seconds in, and a channel lost mid-session. That question is answered by the session.integrationChanged notification, as a state the backend keeps revising, and keeping a second answer in this ack is the defect AD-8 names.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "instanceId", "sessionEpoch", "cwd", "desiredMode"],
+  "required": ["sessionId", "instanceId", "sessionEpoch", "workspaceId", "cwd", "desiredMode"],
   "properties": {
     "sessionId": {
       "description": "Backend-assigned session id (AD-7).",
@@ -19,6 +19,11 @@
       "description": "This session's epoch within its backend instance: minted by the backend per session, monotonic and never reused (the rule internal/lifecycle states for its own epochs, decision 8). Distinguishes a later session that reuses a sessionId from the incarnation a record names, even within one instance. Named sessionEpoch to stand apart from the lifecycle domain epoch the renderer already sees on lifecycle.changed.",
       "type": "integer",
       "minimum": 1
+    },
+    "workspaceId": {
+      "description": "The workspace this session belongs to (nocx-fraus). NEVER empty and never absent: a tab is always in exactly one workspace, and there is no null (.internal/specs/2026-08-15-workspaces-ux-design.md §4.2). The open REQUEST may omit a workspace — the renderer has no name for the default because the default never renders — and the backend registry then supplies it, which is why this result field is required while the request field is not. It CARRIES NO BEHAVIOUR: nothing reads authority, addressability or reachability from it, the fence that later consults membership is a separate epic (§5), and §5.5 forbids any surface before that epic from describing a workspace as safe, isolated or contained.",
+      "type": "string",
+      "minLength": 1
     },
     "cwd": {
       "description": "Starting working directory of the session's shell, with the home directory abbreviated to ~.",

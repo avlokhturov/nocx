@@ -17,6 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/workspace"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -130,15 +131,22 @@ const (
 )
 
 type Config struct {
-	Kind   Kind
-	Cwd    string
-	Host   string
-	Local  *pty.Config
-	Remote *ssh.ConnectConfig
-	Cols   uint16
-	Rows   uint16
-	XPixel uint16
-	YPixel uint16
+	Kind Kind
+	Cwd  string
+	Host string
+	// WorkspaceID is the workspace the caller puts this session in.
+	// Empty means the default (workspace.Default): the renderer has no
+	// name for the default because it never renders (design §4.2), so
+	// the registry supplies it rather than making every caller know it.
+	// nocx-isoph starts filling this in when workspaces are real; the
+	// wire needs no change then, only a renderer that names one.
+	WorkspaceID workspace.ID
+	Local       *pty.Config
+	Remote      *ssh.ConnectConfig
+	Cols        uint16
+	Rows        uint16
+	XPixel      uint16
+	YPixel      uint16
 	// Enhanced requests the marker-only prompt env (ADR-0006) for this session.
 	Enhanced bool
 	// ProfileID records the profile this session was opened from, enabling
@@ -168,6 +176,17 @@ type Session interface {
 	// instance, or an earlier epoch of this one, is a different
 	// incarnation and must not resolve to this session.
 	Identity() Identity
+	// WorkspaceID returns the workspace this session belongs to. NEVER
+	// empty (design §4.2 — a tab is always in a workspace, there is no
+	// null) and immutable for the session's lifetime, like Identity: a
+	// session opened without one is given workspace.Default by the
+	// registry, which is the single owner of that decision (AD-7).
+	//
+	// It CARRIES NO BEHAVIOUR in this epic. Nothing reads authority,
+	// addressability or reachability from it; the fence that later
+	// consults membership is a separate epic (design §5), and §5.5
+	// forbids anything before it from advertising one.
+	WorkspaceID() workspace.ID
 	// Host returns the session's remote hostname. Empty for a local session.
 	Host() string
 	// Cwd is where the session's shell was started. It is the tab's name
@@ -356,6 +375,13 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	// names is (instance, epoch), and the identity is immutable from the
 	// moment the session exists.
 	epoch := r.epochCounter.Add(1)
+	// A session is ALWAYS in a workspace (design §4.2). The default is
+	// resolved here, at the one place that mints a session record, so
+	// there is a single owner of "which workspace, when nobody said".
+	ws := cfg.WorkspaceID
+	if ws == "" {
+		ws = workspace.Default
+	}
 
 	var ch Channel
 	var err error
@@ -396,6 +422,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	s := &realSession{
 		id:           id,
 		identity:     Identity{InstanceID: r.instanceID, Epoch: epoch},
+		workspaceID:  ws,
 		kind:         cfg.Kind,
 		host:         cfg.Host,
 		cwd:          resolveSessionCwd(cfg.Cwd),
@@ -598,7 +625,8 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 // (SSH connection or PTY) and does not reference the profile store at
 type realSession struct {
 	id           ID
-	identity     Identity // the incarnation identity: instance + epoch, immutable
+	identity     Identity     // the incarnation identity: instance + epoch, immutable
+	workspaceID  workspace.ID // never empty; immutable, like identity (design §4.2)
 	kind         Kind
 	host         string // empty for local sessions; the remote hostname for SSH
 	cwd          string
@@ -643,6 +671,7 @@ type writeResult struct {
 
 func (s *realSession) ID() ID                          { return s.id }
 func (s *realSession) Identity() Identity              { return s.identity }
+func (s *realSession) WorkspaceID() workspace.ID       { return s.workspaceID }
 func (s *realSession) Kind() Kind                      { return s.kind }
 func (s *realSession) Host() string                    { return s.host }
 func (s *realSession) Cwd() string                     { return s.cwd }

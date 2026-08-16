@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // fakeProfileRepo is an in-memory profile.ProfileRepository that also
@@ -456,13 +457,18 @@ type fakeSession struct {
 
 func (f *fakeSession) ID() session.ID             { return f.id }
 func (f *fakeSession) Identity() session.Identity { return f.identity }
-func (f *fakeSession) Kind() session.Kind         { return f.kind }
-func (f *fakeSession) Host() string               { return f.host }
-func (f *fakeSession) Cwd() string                { return "/home/test" }
-func (f *fakeSession) ProfileID() string          { return "" }
-func (f *fakeSession) CredentialID() string       { return "" }
-func (f *fakeSession) Write([]byte) (int, error)  { return 0, nil }
-func (f *fakeSession) EnqueueWrite([]byte) bool   { return true }
+
+// WorkspaceID reports the default: this fake stands in for a session in
+// tests that are about capability, and membership carries no behaviour
+// (nocx-fraus), so there is nothing here for a workspace to change.
+func (f *fakeSession) WorkspaceID() workspace.ID { return workspace.Default }
+func (f *fakeSession) Kind() session.Kind        { return f.kind }
+func (f *fakeSession) Host() string              { return f.host }
+func (f *fakeSession) Cwd() string               { return "/home/test" }
+func (f *fakeSession) ProfileID() string         { return "" }
+func (f *fakeSession) CredentialID() string      { return "" }
+func (f *fakeSession) Write([]byte) (int, error) { return 0, nil }
+func (f *fakeSession) EnqueueWrite([]byte) bool  { return true }
 func (f *fakeSession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
 	return nil
 }
