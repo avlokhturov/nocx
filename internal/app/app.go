@@ -36,7 +36,6 @@ import (
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -801,7 +800,7 @@ func New(opts ...Option) (*App, error) {
 	attentionHost := &notify.HostHolder{}
 	notifyRouter, routerErr := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: wailsadapter.HostSink{Host: attentionHost}},
+			{Sink: notify.HostSink{Host: attentionHost}},
 		},
 	}, notify.Limits{
 		MaxInFlight:     4,

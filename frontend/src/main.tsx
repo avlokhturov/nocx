@@ -1,9 +1,15 @@
 import './style.css'
-import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
+import {
+  GetWSPort,
+  GetWSToken,
+  CheckForUpdate,
+  ReportHealthy,
+} from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { render } from 'solid-js/web'
 import { Show, createSignal } from 'solid-js'
 import App from './App'
 import { log } from './log'
+import { installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
 import { TabManager } from './tabs'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
@@ -64,6 +70,11 @@ import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
 
 async function main() {
+  // The browser transport must be installed before any binding call: in the
+  // dev-web and headless-e2e browsers the window.go shim is the only thing
+  // that can answer GetWSPort/GetWSToken. A no-op in the packaged webview.
+  installBrowserTransport()
+
   log.info('nocx: main() called')
 
   // Single Solid root owns the shell. App renders the skeleton with empty

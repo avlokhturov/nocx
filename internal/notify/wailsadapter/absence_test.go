@@ -11,9 +11,13 @@ import (
 // TestLegacyBannerPathAbsent guards the tree against the old banner path:
 // pkg/mac's osascript banner sprintfed the body into an AppleScript string
 // literal, so a body containing a double quote broke the banner. The banner
-// path is runtime.SendNotification, where the body is data.
+// path is the v3 notifications service, where the body is data.
 //
-// The guard is the import, not the identifier: the defect this task exists to
+// Wails v3's pkg/mac no longer contains a banner function at all — the
+// osascript path is gone from the runtime — so the import half of the guard
+// defends against reaching pkg/mac as a banner path and the identifier half
+// is the net for a reimplementation that never imports the package. The
+// guard is the import, not the identifier: the defect this task exists to
 // prevent is nocx reaching pkg/mac at all, so any file that imports it is a
 // hit. The identifier check stays as a second net for a reimplementation
 // that never imports the package. Both strings are assembled so this file
@@ -22,7 +26,7 @@ import (
 func TestLegacyBannerPathAbsent(t *testing.T) {
 	root := moduleRoot(t)
 	identifier := "Show" + "Notification"
-	importPath := "github.com/wailsapp/wails/v2/pkg/" + "mac"
+	importPath := "github.com/wailsapp/wails/v3/pkg/" + "mac"
 	var identHits, importHits []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

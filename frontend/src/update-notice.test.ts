@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mountUpdateNotice, type UpdateNoticeController } from './update-notice'
 
-vi.mock('../wailsjs/go/main/WailsApp', () => ({
+vi.mock('../bindings/github.com/shady2k/nocx/wailsapp', () => ({
   ApplyUpdate: vi.fn<() => Promise<void>>(),
   CheckForUpdate: vi.fn(),
   ReportHealthy: vi.fn(),
@@ -10,7 +10,7 @@ vi.mock('../wailsjs/go/main/WailsApp', () => ({
   GetWSToken: vi.fn(),
 }))
 
-import { ApplyUpdate } from '../wailsjs/go/main/WailsApp'
+import { ApplyUpdate } from '../bindings/github.com/shady2k/nocx/wailsapp'
 
 function stateClass(kind: string): string {
   if (kind === 'hidden' || kind === 'available') return 'update-notice'

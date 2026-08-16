@@ -102,7 +102,7 @@ go_test_containerized() {
             groupadd --gid "$RUN_GID" nocx-sshtest 2>/dev/null || true
             useradd -M -u "$RUN_UID" -g "$RUN_GID" -s /bin/bash -d /tmp/nocx-sshd-home nocx-sshtest 2>/dev/null || true
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \
-                go test -race ./...
+                go test -race -tags gtk3 ./...
         '
 }
 

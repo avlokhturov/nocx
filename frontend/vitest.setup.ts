@@ -2,6 +2,8 @@
 // jsdom does not provide ResizeObserver, so we supply a minimal stub
 // that never fires — enough for unit tests that don't depend on layout.
 
+import { afterAll, beforeAll } from 'vitest'
+
 if (typeof window !== 'undefined' && typeof window.localStorage === 'undefined') {
   let values = new Map<string, string>()
   const storage = {
@@ -76,4 +78,74 @@ if (typeof Element !== 'undefined') {
 // crashing on the measurement path while never fabricating geometry.
 if (typeof Range !== 'undefined' && !Range.prototype.getClientRects) {
   Range.prototype.getClientRects = () => []
+}
+
+// A timer armed while the module graph loads must not outlive the jsdom it
+// was armed in. @wailsio/runtime bought this: importing it arms a 50 ms
+// polling interval (dist/drag.js, waiting for the window environment) and a
+// frame callback (dist/appregion.js). Neither belongs to any test and
+// nothing ever clears them, so a file that finishes in under 50 ms — most
+// of them — is torn down with the interval still armed. The tick then runs
+// against a dead environment, throws "window is not defined" as an uncaught
+// exception, and the runner attributes it to whichever file happened to be
+// in flight while every test in the run passes. Measured on this tree: 28
+// jsdom files reach the real runtime through log.ts and clipboard.ts and
+// every one of them arms both timers, so the file the runner names is a
+// lottery rather than the defect.
+//
+// The sweep is deliberately confined to what module evaluation armed, and
+// the natives go back before the first test runs. A timer a TEST arms
+// belongs to the product, and one left running there is a real defect —
+// exactly the kind this same uncaught-exception report is how we find out
+// about. So this must never grow into a general "clear every timer at the
+// end", which would make that whole class invisible.
+if (typeof window !== 'undefined') {
+  const armedIntervals = new Map<number, () => void>()
+  const armedTimeouts = new Map<number, () => void>()
+
+  const nativeSetInterval = window.setInterval.bind(window)
+  const nativeClearInterval = window.clearInterval.bind(window)
+  const nativeSetTimeout = window.setTimeout.bind(window)
+  const nativeClearTimeout = window.clearTimeout.bind(window)
+
+  // Recording stops when the first test starts. The wrappers stay installed
+  // rather than being swapped back, so nothing here writes to a global after
+  // setup — which is what keeps it clear of a file that installs fake timers
+  // while it loads, and of vi.useFakeTimers() inside a test.
+  let recording = true
+
+  window.setInterval = ((...args: Parameters<typeof nativeSetInterval>) => {
+    const id = nativeSetInterval(...args)
+    if (recording) armedIntervals.set(id, () => nativeClearInterval(id))
+    return id
+  }) as typeof window.setInterval
+
+  window.setTimeout = ((...args: Parameters<typeof nativeSetTimeout>) => {
+    const id = nativeSetTimeout(...args)
+    if (recording) armedTimeouts.set(id, () => nativeClearTimeout(id))
+    return id
+  }) as typeof window.setTimeout
+
+  window.clearInterval = ((id?: number) => {
+    if (typeof id === 'number') armedIntervals.delete(id)
+    nativeClearInterval(id)
+  }) as typeof window.clearInterval
+
+  window.clearTimeout = ((id?: number) => {
+    if (typeof id === 'number') armedTimeouts.delete(id)
+    nativeClearTimeout(id)
+  }) as typeof window.clearTimeout
+
+  // Module evaluation is over once the first hook runs.
+  beforeAll(() => {
+    recording = false
+  })
+
+  // The last thing that happens before jsdom goes away.
+  afterAll(() => {
+    for (const disarm of armedIntervals.values()) disarm()
+    for (const disarm of armedTimeouts.values()) disarm()
+    armedIntervals.clear()
+    armedTimeouts.clear()
+  })
 }
