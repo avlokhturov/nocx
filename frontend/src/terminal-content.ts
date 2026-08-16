@@ -474,6 +474,10 @@ export class TerminalContent extends BaseTabContent {
 
   constructor(
     private readonly client: WSClient,
+    /** The renderer-minted per-tab identity (nocx-tsajw): minted once per
+     *  tab by TabManager, never reused, and carried on history.record so
+     *  the backend scopes pending captures to this tab. */
+    private readonly tabId: string,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
@@ -1514,7 +1518,7 @@ export class TerminalContent extends BaseTabContent {
           },
         },
         (rec, attempt) =>
-          recordCommand(this.client, rec, attempt).then((ack) => {
+          recordCommand(this.client, this.tabId, rec, attempt).then((ack) => {
             if (ack) {
               const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
               this.attachRecordedAck(rec.id, block, ack)

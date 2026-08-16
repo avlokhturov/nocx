@@ -35,6 +35,11 @@ import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
 
 export class Tab implements TabHost {
   readonly id: number
+  /** The renderer-minted wire identity (nocx-tsajw): a UUID minted once per
+   *  tab, never reused, and shared with the content so history.record and
+   *  tab.close address the same backend-scoped captures. Chrome keeps its
+   *  own numeric id; this one is what crosses the wire. */
+  readonly wireId: string
   readonly pane = document.createElement('div')
 
   /** Model-level descriptor: surface type, singleton key, restore info. */
@@ -64,8 +69,9 @@ export class Tab implements TabHost {
   private _latestViewport: ContentViewport | null = null
   private _mountStarted = false
 
-  constructor(content: TabContent, descriptor: ContentDescriptor, id: number) {
+  constructor(content: TabContent, descriptor: ContentDescriptor, id: number, wireId: string) {
     this.id = id
+    this.wireId = wireId
     this.content = content
     this.descriptor = descriptor
 
@@ -457,8 +463,10 @@ export class TabManager {
   /** Create a new local terminal tab and activate it. */
   newTab(): Tab {
     const tabRef = { current: undefined as Tab | undefined }
+    const wireId = crypto.randomUUID()
     const content = new TerminalContent(
       this.client,
+      wireId,
       this.clipboard,
       this.gate,
       this.banner,
@@ -492,7 +500,7 @@ export class TabManager {
       // nothing moves when the real one lands.
       defaultTitle: '',
     }
-    const tab = this.addTab(content, descriptor)
+    const tab = this.addTab(content, descriptor, wireId)
     tabRef.current = tab
     return tab
   }
@@ -501,8 +509,10 @@ export class TabManager {
     log.info('nocx: newSSHTab called', { profileId, host, user, port, title })
     const sshOpts = { profileId, host, user, port } as const
     const tabRef = { current: undefined as Tab | undefined }
+    const wireId = crypto.randomUUID()
     const content = new TerminalContent(
       this.client,
+      wireId,
       this.clipboard,
       this.gate,
       this.banner,
@@ -537,7 +547,7 @@ export class TabManager {
       supportsAttention: true,
       defaultTitle: title || host,
     }
-    const tab = this.addTab(content, descriptor)
+    const tab = this.addTab(content, descriptor, wireId)
     tabRef.current = tab
     return tab
   }
@@ -605,12 +615,14 @@ export class TabManager {
         return existing
       }
     }
-    return this.addTab(content, descriptor)
+    // Every tab gets a wire identity — view tabs carry no captures, but the
+    // chrome must still be able to announce a close (nocx-tsajw).
+    return this.addTab(content, descriptor, crypto.randomUUID())
   }
 
   /** Internal: create a Tab, wire lifecycle, add to model, activate. */
-  private addTab(content: TabContent, descriptor: ContentDescriptor): Tab {
-    const tab = new Tab(content, descriptor, this.nextTabId++)
+  private addTab(content: TabContent, descriptor: ContentDescriptor, wireId: string): Tab {
+    const tab = new Tab(content, descriptor, this.nextTabId++, wireId)
 
     this.tabs.push(tab)
     this.panes.append(tab.pane)
@@ -691,6 +703,12 @@ export class TabManager {
   closeTab(tab: Tab): void {
     const index = this.tabs.indexOf(tab)
     if (index === -1) return
+
+    // The tab's pending captures die with it: announce the close so the
+    // backend destroys them (nocx-tsajw). Sent before the DOM teardown —
+    // a dropped notification is covered by the transport-disconnect
+    // trigger, which is the same destruction.
+    this.client.notifyTabClosed(tab.wireId)
 
     const wasActive = tab === this.activeTab
     this.removeFromRecent(tab.id)

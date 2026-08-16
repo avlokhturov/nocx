@@ -137,6 +137,7 @@ async function mountTerminal(
   const wsClient = clientFake as unknown as WSClient
   const content = new TerminalContent(
     wsClient,
+    'tab-wire-1',
     clipboard,
     new ClipboardGate(),
     makeBanner(),
@@ -155,6 +156,7 @@ async function mountTerminal(
       defaultTitle: 'Terminal',
     },
     99,
+    'tab-99',
   )
   const paneParent = document.createElement('div')
   paneParent.append(tab.pane)
@@ -902,6 +904,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
     const wsClient = clientFake as unknown as WSClient
     const content = new TerminalContent(
       wsClient,
+      'tab-wire-1',
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -919,6 +922,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
         defaultTitle: 'Terminal',
       },
       99,
+      'tab-99',
     )
     const paneParent = document.createElement('div')
     paneParent.append(tab.pane)
@@ -1603,6 +1607,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     const wsClient = makeClient() as unknown as WSClient
     const unmounted = new TerminalContent(
       wsClient,
+      'tab-wire-1',
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),

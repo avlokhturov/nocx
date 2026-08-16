@@ -143,7 +143,7 @@ func (f *captureFakeDB) Query(_ context.Context, scope content.Scope, cwd, host 
 // newCaptureWSServer wires a WSServer over the capture fake with an
 // injected registry (clock-controllable) and a fake vault whose resolved
 // name is fixed so the tests can assert what the save actually used.
-func newCaptureWSServer(t *testing.T, db *captureFakeDB, clock *time.Time) (*WSServer, *fakeVaultLifecycle, func()) {
+func newCaptureWSServer(t *testing.T, db content.ContentDB, clock *time.Time) (*WSServer, *fakeVaultLifecycle, func()) {
 	t.Helper()
 	caps, err := credential.NewCaptureRegistry()
 	if err != nil {
@@ -162,7 +162,7 @@ func newCaptureWSServer(t *testing.T, db *captureFakeDB, clock *time.Time) (*WSS
 // Same server, handing back the registry instead of the vault fake — the
 // tests that need to trigger a destruction event directly.
 func newCaptureWSServerWithRegistry(
-	t *testing.T, db *captureFakeDB, clock *time.Time,
+	t *testing.T, db content.ContentDB, clock *time.Time,
 ) (*WSServer, *credential.CaptureRegistry, func()) {
 	t.Helper()
 	caps, err := credential.NewCaptureRegistry()

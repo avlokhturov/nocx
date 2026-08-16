@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -2441,8 +2440,11 @@ func (s *WSServer) registerConn(wc *wsConn) {
 }
 
 // unregisterConn removes a connection from the broadcast set and destroys
-// its pending captures: a transport disconnect and a tab closure are both
-// on the capture contract's destruction list. It also stops the tunnels the
+// every pending capture it owns: a transport disconnect is on the capture
+// contract's destruction list, and one WebSocket carries every tab in a
+// window, so the connection's death takes all of them (DestroyConnection —
+// tab closure is a separate, per-tab trigger the renderer fires through
+// tab.close). It also stops the tunnels the
 // tab opened — tab-scoped teardown (spec §7.3): each forward holds its OWN
 // pooled reference, so stopping this tab's forwards never touches another
 // tab's on the same shared connection.
@@ -2451,7 +2453,7 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 	delete(s.conns, wc)
 	s.connsMu.Unlock()
 	if s.captures != nil {
-		s.captures.DestroyTab(strconv.FormatUint(wc.id, 10))
+		s.captures.DestroyConnection(connectionID(wc))
 	}
 	s.stopOwnerTunnels(wc)
 }

@@ -76,15 +76,22 @@ var ErrCaptureSaveFailed = errors.New("capture: save failed")
 // dismiss the capture, and it carries no secret material.
 type CaptureID string
 
-// CaptureScope is where a capture came from — the backend's own identity
-// facts. Tab is the per-connection id the transport assigns; SessionIDs
-// are the terminal sessions the tab held at record time (informational:
-// a tab can hold several sessions, and ambiguous ownership falls back
-// rather than guessing); EntryID is the store row the capture first
-// attached to ("" when no row was written); Generation is the tab's
+// CaptureScope is where a capture came from — the identity facts that decide
+// which destruction event owns it. Connection is the backend's own
+// per-connection id (the transport assigns it; it never crosses the wire).
+// Tab is the renderer-minted per-tab identity that rides history.record
+// (nocx-tsajw — the one wire exception to "session-local ids never cross",
+// and the handle tab closure destroys by). Destruction is keyed on the PAIR:
+// a tab id is opaque and minted per renderer, so it is not an authorization
+// boundary on its own — a tab's captures die only to its own connection.
+// SessionIDs are the terminal sessions the tab held at record time
+// (informational: a tab can hold several sessions, and ambiguous ownership
+// falls back rather than guessing); EntryID is the store row the capture
+// first attached to ("" when no row was written); Generation is the tab's
 // submission counter, which is what makes "the next submission from that
 // tab" a fact instead of a guess.
 type CaptureScope struct {
+	Connection string
 	Tab        string
 	SessionIDs []string
 	EntryID    string
@@ -254,14 +261,15 @@ func (r *CaptureRegistry) SavedName(fingerprint string) (string, bool) {
 // Submit processes one command submission from a tab. In one atomic step
 // it:
 //
-//  1. Supersedes the tab's older pending captures — a new submission from
-//     a tab destroys the previous ones (typing the next command does not;
-//     only submitting does) — except any that this very submission links
-//     to by fingerprint.
-//  2. Links same-fingerprint findings to the existing pending capture (no
+//  1. Links same-fingerprint findings to the existing pending capture (no
 //     second offer; one save repairs every linked masked row).
-//  3. Applies the session's saved/dismissed suppression.
-//  4. Mints new captures for everything else.
+//  2. Applies the session's saved/dismissed suppression.
+//  3. Mints new captures for everything else.
+//
+// A new submission does NOT destroy the tab's older pending captures: the
+// supersede rule was removed by the owner's decision (file header) — several
+// unsaved captures coexist, one per unanswered offer, each living until it
+// is settled or a real destruction event takes it.
 //
 // The results are parallel to creds.
 func (r *CaptureRegistry) Submit(scope CaptureScope, creds []PendingCredential) []RegisterResult {
@@ -449,15 +457,34 @@ func (r *CaptureRegistry) Dismiss(id CaptureID) error {
 	}
 }
 
-// DestroyTab destroys every capture originating from a tab: superseding
-// submission, tab closure, transport disconnect. A capture whose save is in
-// flight is left to settle — its outcome is already decided and a seal or
-// disconnect must not make it create a secret it was entitled to.
-func (r *CaptureRegistry) DestroyTab(tab string) {
+// DestroyTab destroys every pending capture originating from a tab: tab
+// closure (the renderer's tab.close notification) and history-record failure.
+// The connection is part of the key: the tab identity is renderer-minted and
+// opaque, so a tab id from one connection must never destroy another
+// connection's captures. A capture whose save is in flight is left to settle
+// — its outcome is already decided and a seal or disconnect must not make it
+// create a secret it was entitled to.
+func (r *CaptureRegistry) DestroyTab(conn, tab string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, c := range r.byID {
-		if c.scope.Tab == tab && c.state == statePending {
+		if c.scope.Connection == conn && c.scope.Tab == tab && c.state == statePending {
+			r.destroyLocked(c)
+		}
+	}
+}
+
+// DestroyConnection destroys every pending capture from one connection:
+// transport disconnect. One WebSocket carries every tab in a window, so the
+// connection's death takes all of them — the per-tab destroy (DestroyTab)
+// cannot express "the connection is gone", and a disconnect is the one
+// destruction event that is genuinely connection-scoped. Settling saves are
+// left to finish, exactly as DestroyTab leaves them.
+func (r *CaptureRegistry) DestroyConnection(conn string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.byID {
+		if c.scope.Connection == conn && c.state == statePending {
 			r.destroyLocked(c)
 		}
 	}
