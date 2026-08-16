@@ -219,6 +219,11 @@ how two agents ship two answers to one question.
    bugfix is how it stops being settled.
 
 5. **Is the code reachable?** A file on `main` is not a feature in the product.
+   And when you are the one PLANNING the work: a task that adds a Go package lands
+   together with the wiring that makes it reachable, or its commit cannot pass the
+   deadcode ratchet at all — the gate is the hook, not the brief, so a worker cannot be
+   briefed out of it (`nocx-z7s6`; two commits went in with `--no-verify` before anybody
+   noticed the plan had made that unavoidable).
 
    ```bash
    deadcode -filter 'nocx/internal/<pkg>' ./...              # unreachable from main()

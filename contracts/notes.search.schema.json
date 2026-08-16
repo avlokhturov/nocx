@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notes.search.schema.json",
+  "title": "NotesSearch",
+  "description": "Result of the notes.search JSON-RPC method: the rows whose BODY matched, best first, each with an excerpt carrying the match. Never null: no matches is [].",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["matches"],
+  "properties": {
+    "matches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/noteRow"
+      }
+    }
+  },
+  "$defs": {
+    "noteRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "excerpt", "updatedAt"],
+      "properties": {
+        "id": {
+          "description": "Opaque, backend-minted. The renderer never constructs one.",
+          "type": "string"
+        },
+        "title": {
+          "description": "DERIVED from the body's first non-empty line, every time it is read \u2014 never stored (design \u00a77). Empty when the body has nothing to name it by; the surface names that one with its creation date, which needs a locale the backend does not have.",
+          "type": "string"
+        },
+        "excerpt": {
+          "description": "One line of the body for the row's second line, bounded. On a search hit it carries the words that matched, so a row can explain why it is there.",
+          "type": "string"
+        },
+        "updatedAt": {
+          "description": "Epoch milliseconds of the last edit.",
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

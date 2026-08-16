@@ -139,6 +139,7 @@ const rig = (opts: {
   latencyBudgetMs?: number
   recallIsOpen?: () => boolean
   editorDoc?: string
+  acceptSnippet?: (snippetId: string) => void
 }): Rig => {
   const editor = new FakeEditor(opts.editorDoc ?? 'git sta')
   const container = document.createElement('div')
@@ -150,6 +151,7 @@ const rig = (opts: {
     env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
     recallIsOpen: opts.recallIsOpen,
     latencyBudgetMs: opts.latencyBudgetMs,
+    acceptSnippet: opts.acceptSnippet,
     now: () => 1_750_000_000_000,
   })
   controller.attach(editor, container)
@@ -1294,3 +1296,80 @@ describe('ghost refusal tracing (nocx-mlm7)', () => {
 
 // The budget constant is exported and used by the wiring.
 void LATENCY_BUDGET_MS
+
+describe('accepting a snippet row (nocx-nlhe)', () => {
+  const snippetCandidate = (over: Partial<Candidate> = {}): Candidate =>
+    cand({
+      id: 'snippet:a',
+      providerId: 'snippet',
+      source: 'snippet',
+      snippetId: 'a',
+      displayText: 'deploy',
+      insertText: 'deploy',
+      eligibleForGhostText: false,
+      replacement: { from: 4, to: 7 },
+      ...over,
+    })
+
+  const snippetProviderStub = (c: Candidate = snippetCandidate()): SuggestionProvider => ({
+    id: 'snippet',
+    targetId: 'shell',
+    applicable: () => true,
+    suggest: () => ({ candidates: [c] }),
+  })
+
+  it('does NOT insert the row text: the body is resolved by the accept seam', async () => {
+    const accepted: string[] = []
+    const { editor, controller } = rig({
+      providers: [snippetProviderStub()],
+      editorDoc: 'git dep',
+      acceptSnippet: (id) => accepted.push(id),
+    })
+    controller.open()
+    await flush()
+    controller.handleKey(key('Enter'))
+
+    // The token is cleared and NOTHING else is written here — the resolved
+    // text arrives through the fire path, which reads cwd and branch at
+    // that moment and asks for any ask: fields (design §8, §10.2).
+    expect(editor.applied).toEqual([{ from: 4, to: 7, text: '' }])
+    expect(accepted).toEqual(['a'])
+  })
+
+  it('with no accept seam wired it inserts nothing at all, rather than the title', async () => {
+    // A half-wired build must not put the row's LABEL into the line: the
+    // title is not the phrase, and a person would submit it.
+    const { editor, controller } = rig({
+      providers: [snippetProviderStub()],
+      editorDoc: 'git dep',
+    })
+    controller.open()
+    await flush()
+    controller.handleKey(key('Enter'))
+
+    expect(editor.applied).toEqual([])
+  })
+
+  it('Tab does not auto-apply a sole snippet candidate', async () => {
+    // The unique-completion path finishes a WORD. A snippet is a whole
+    // phrase behind a title, and applying one because it was the only row
+    // would fire a saved command the person never chose.
+    const accepted: string[] = []
+    const { editor, controller, dropdown } = rig({
+      providers: [snippetProviderStub()],
+      editorDoc: 'git dep',
+      acceptSnippet: (id) => accepted.push(id),
+    })
+    // open() IS the Tab path: it is what the editor's keymap calls, and it
+    // is where the unique-completion shortcut lives.
+    controller.open()
+    await flush()
+    controller.open()
+    await flush()
+
+    expect(editor.applied).toEqual([])
+    expect(accepted).toEqual([])
+    // It stays offered — the row is still there to be chosen deliberately.
+    expect(dropdown.root.querySelectorAll('.ui-floating-panel__row').length).toBe(1)
+  })
+})

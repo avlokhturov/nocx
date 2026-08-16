@@ -20,6 +20,7 @@ import type { Candidate } from './candidate'
 import { ProfileClient } from '../profiles'
 import type { SSHProfile } from '../profiles'
 import { Dispatcher } from '../dispatcher'
+import { rankCandidates } from './rank'
 
 const ctx = (over: Partial<SuggestContext> = {}): SuggestContext => ({
   doc: 'git sta',
@@ -835,5 +836,56 @@ describe('createShellProviders under ssh (nocx-r35s)', () => {
     expect(all.filter((c) => c.source === 'history').map((c) => c.insertText)).toEqual([
       'ssh prod-db',
     ])
+  })
+})
+
+describe('createShellProviders and the snippet library (nocx-nlhe)', () => {
+  const assembled = (snippets?: {
+    snippets: () => { id: string; title: string; body: string }[]
+    ensureLoaded: () => void
+  }) =>
+    createShellProviders({
+      store: snapshotted(['git']),
+      queryHistory: () =>
+        Promise.resolve({
+          scope: 'directory',
+          exhausted: true,
+          source: 'store',
+          coverage: null,
+          entries: [],
+        }),
+      completeFs: () => Promise.resolve({ entries: [], truncated: false }),
+      snippets,
+    })
+
+  it('registers the snippet provider when a library is wired', () => {
+    const providers = assembled({ snippets: () => [], ensureLoaded: () => {} })
+    expect(providers.map((p) => p.id)).toContain('snippet')
+  })
+
+  it('registers nothing when no library is wired — a provider that cannot answer is absent', () => {
+    // The same rule the host provider follows: an unwired seam is not a
+    // provider that answers nothing, it is a provider that does not exist.
+    expect(assembled().map((p) => p.id)).not.toContain('snippet')
+  })
+
+  it('a snippet row and a command row come back from ONE query, ranked command-first', async () => {
+    // The dropdown a person sees, not the provider in isolation: both
+    // sources answer the same keystroke, and the executable keeps its place.
+    const providers = assembled({
+      snippets: () => [{ id: 's1', title: 'gitsync', body: 'git pull && git push' }],
+      ensureLoaded: () => {},
+    })
+    const c = ctx({ doc: 'git', token: { text: 'git', from: 0, to: 3 }, position: 'command' })
+    // Both shipped providers answer synchronously here; the awaits keep the
+    // call the same shape the controller makes.
+    const batches = providers
+      .filter((p) => p.applicable(c))
+      .map((p) => p.suggest(c, new AbortController().signal))
+    const candidates = (await Promise.all(batches.map(async (b) => await b))).flatMap(
+      (b) => b.candidates,
+    )
+    const ranked = rankCandidates(candidates, { query: 'git', now: 1_750_000_000_000 })
+    expect(ranked.map((r) => r.source)).toEqual(['command', 'snippet'])
   })
 })

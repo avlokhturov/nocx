@@ -11,19 +11,46 @@
     "settings",
     "connections",
     "groups",
+    "snippets",
+    "notes",
     "connectionsRequiringCredential",
     "omissions"
   ],
   "properties": {
-    "previewToken": { "type": "string" },
-    "createdAt": { "type": "string" },
-    "strategy": { "type": "string", "enum": ["merge", "replace"] },
-    "settings": { "$ref": "#/$defs/settingsCounts" },
-    "connections": { "$ref": "#/$defs/itemCounts" },
-    "groups": { "$ref": "#/$defs/itemCounts" },
+    "previewToken": {
+      "type": "string"
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "strategy": {
+      "type": "string",
+      "enum": ["merge", "replace"]
+    },
+    "settings": {
+      "$ref": "#/$defs/settingsCounts"
+    },
+    "connections": {
+      "$ref": "#/$defs/itemCounts"
+    },
+    "groups": {
+      "$ref": "#/$defs/itemCounts"
+    },
+    "snippets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included"],
+      "properties": {
+        "included": {
+          "type": "integer"
+        }
+      }
+    },
     "connectionsRequiringCredential": {
       "type": "array",
-      "items": { "$ref": "#/$defs/profileRef" }
+      "items": {
+        "$ref": "#/$defs/profileRef"
+      }
     },
     "omissions": {
       "type": "object",
@@ -34,9 +61,26 @@
         "groupDefaultKeysOmitted"
       ],
       "properties": {
-        "credentialBindingsRemoved": { "type": "integer" },
-        "groupCredentialBindingsRemoved": { "type": "integer" },
-        "groupDefaultKeysOmitted": { "type": "integer" }
+        "credentialBindingsRemoved": {
+          "type": "integer"
+        },
+        "groupCredentialBindingsRemoved": {
+          "type": "integer"
+        },
+        "groupDefaultKeysOmitted": {
+          "type": "integer"
+        }
+      }
+    },
+    "notes": {
+      "description": "The note count the preview reports \u2014 what a person reads before deciding to restore over what they have.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["included"],
+      "properties": {
+        "included": {
+          "type": "integer"
+        }
       }
     }
   },
@@ -46,9 +90,15 @@
       "additionalProperties": false,
       "required": ["included", "changed", "reset"],
       "properties": {
-        "included": { "type": "integer" },
-        "changed": { "type": "integer" },
-        "reset": { "type": "integer" }
+        "included": {
+          "type": "integer"
+        },
+        "changed": {
+          "type": "integer"
+        },
+        "reset": {
+          "type": "integer"
+        }
       }
     },
     "itemCounts": {
@@ -56,17 +106,32 @@
       "additionalProperties": false,
       "required": ["included", "added", "updated", "removed"],
       "properties": {
-        "included": { "type": "integer" },
-        "added": { "type": "integer" },
-        "updated": { "type": "integer" },
-        "removed": { "type": "integer" }
+        "included": {
+          "type": "integer"
+        },
+        "added": {
+          "type": "integer"
+        },
+        "updated": {
+          "type": "integer"
+        },
+        "removed": {
+          "type": "integer"
+        }
       }
     },
     "profileRef": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "name"],
-      "properties": { "id": { "type": "string" }, "name": { "type": "string" } }
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
     }
   }
 }

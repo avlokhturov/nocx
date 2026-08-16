@@ -11,6 +11,7 @@ import {
   MIN_PANEL_WIDTH_PX,
   MAX_PANEL_WIDTH_PX,
   type FloatingPanelRow,
+  type FloatingPanelVariant,
 } from './floating-panel'
 
 const row = (over: Partial<FloatingPanelRow> & { id: string }): FloatingPanelRow => ({
@@ -25,7 +26,7 @@ const row = (over: Partial<FloatingPanelRow> & { id: string }): FloatingPanelRow
  *  the project's CSS. (jsdom computes longhands but never resolves var(),
  *  so the match-contrast proof lives in the theme-catalogue test below and
  *  the e2e computed-style assertion — see match-contrast.test.ts.) */
-const mount = (variant: 'completion' | 'recall' = 'completion') => {
+const mount = (variant: FloatingPanelVariant = 'completion') => {
   const container = document.createElement('div')
   Object.defineProperty(container, 'clientWidth', { value: 1200 })
   document.body.appendChild(container)

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"time"
 
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/snippet"
 )
 
 // ── Format constants ────────────────────────────────────────────────────
@@ -56,6 +58,27 @@ type SettingsSnapshotStore interface {
 	ValidateSetting(key string, value any) error
 }
 
+// SnippetStore reads and replaces the snippet library document
+// (internal/snippet's store satisfies it). A backup service wired without
+// one (nil) simply omits the snippets section: the backup still covers
+// everything the service was given.
+type SnippetStore interface {
+	LoadAll() ([]snippet.Snippet, error)
+	SaveAll([]snippet.Snippet) error
+}
+
+// NoteStore reads and replaces the notes library (internal/note's store
+// satisfies it, through a thin adapter that supplies the context). A backup
+// service wired without one (nil) simply omits the notes section.
+//
+// Notes are the section where "the backup carries it, restore refuses to
+// half-apply it" matters most: a snippet can be retyped from the thing it
+// automates, and a note cannot be retyped from anything.
+type NoteStore interface {
+	LoadAllNotes() ([]note.Note, error)
+	ReplaceNotes([]note.Note) error
+}
+
 // ── Document envelope ────────────────────────────────────────────────────
 
 // Document is the on-disk/wire shape of a nocx backup file.
@@ -65,6 +88,24 @@ type Document struct {
 	CreatedAt   time.Time          `json:"createdAt"`
 	Settings    SettingsSection    `json:"settings"`
 	Connections ConnectionsSection `json:"connections"`
+	// Snippets is the library at backup time, in display order. Absent for
+	// a backup written before this section existed — which restore must
+	// accept and leave the current library alone under merge.
+	Snippets []BackupSnippet `json:"snippets,omitempty"`
+	// Notes is the notes library at backup time, oldest first. Absent for a
+	// backup written before this section existed, with the same rule.
+	Notes []BackupNote `json:"notes,omitempty"`
+}
+
+// BackupNote is the wire shape of one note. The title is deliberately
+// absent: it is derived from the body wherever it is read, and a stored one
+// here would be a second owner of the name that could arrive disagreeing
+// with the text under it.
+type BackupNote struct {
+	ID        string `json:"id"`
+	Body      string `json:"body"`
+	CreatedAt int64  `json:"createdAt"`
+	UpdatedAt int64  `json:"updatedAt"`
 }
 
 // SettingsSection holds only saved non-secret overrides.
@@ -141,4 +182,15 @@ type BackupGroupDefaults struct {
 // BackupSSHDefaults wraps the ten safe SSH option fields.
 type BackupSSHDefaults struct {
 	Options BackupSSHOptions `json:"options"`
+}
+
+// ── Snippet DTO ──────────────────────────────────────────────────────────
+
+// BackupSnippet is the wire shape of one snippet in a backup. It mirrors
+// snippet.Snippet exactly; the library's own type is not used here so the
+// backup document format stays independent of the store's domain type.
+type BackupSnippet struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
 }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, afterEach } from 'vitest'
 import { cleanup } from '@solidjs/testing-library'
-import { VerticalTabStrip } from './tab-strip'
+import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import type { TabView } from './tab-strip'
 
 afterEach(() => {
@@ -131,5 +131,48 @@ describe('VerticalTabStrip filtering', () => {
     // Tab 1 is hidden by the filter but still active
     expect(isHidden(tab1)).toBe(true)
     expect(tab1.getAttribute('aria-selected')).toBe('true')
+  })
+})
+
+describe('the snippets action (nocx-d346)', () => {
+  // The strip is a presentation port: it reports that the button was
+  // pressed, nothing more. What opens is the quick-connect palette in its
+  // snippets variant — the same surface the caret and the key icon beside
+  // it open, which is the correction the owner's review made.
+  const pressesOf = (strip: { onSnippets: (() => void) | null }) => {
+    let presses = 0
+    strip.onSnippets = () => (presses += 1)
+    return () => presses
+  }
+
+  it('the vertical strip offers it and reports the press', () => {
+    const { strip } = setupVerticalStrip()
+    const presses = pressesOf(strip)
+
+    const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')
+    expect(button, 'the vertical strip has no snippets action').not.toBeNull()
+    button!.click()
+
+    expect(presses()).toBe(1)
+  })
+
+  it('the horizontal strip offers it too — a strip replacement must not lose it', () => {
+    const strip = new HorizontalTabStrip()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    strip.mount(container)
+    const presses = pressesOf(strip)
+
+    const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')
+    expect(button, 'the horizontal strip has no snippets action').not.toBeNull()
+    button!.click()
+
+    expect(presses()).toBe(1)
+  })
+
+  it('with no callback wired the button is inert rather than broken', () => {
+    setupVerticalStrip()
+    const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')!
+    expect(() => button.click()).not.toThrow()
   })
 })

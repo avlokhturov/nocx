@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/snippets.reorder.schema.json",
+  "title": "SnippetsReorder",
+  "description": "Result of the snippets.reorder JSON-RPC method: the whole library in the new order, so the renderer never guesses it. Never null — an empty library is [].",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["snippets"],
+  "properties": {
+    "snippets": { "type": "array", "items": { "$ref": "#/$defs/snippet" } }
+  },
+  "$defs": {
+    "snippet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "body"],
+      "properties": {
+        "id": {
+          "description": "Opaque, backend-minted. The renderer never constructs one.",
+          "type": "string"
+        },
+        "title": { "type": "string" },
+        "body": {
+          "description": "The template text with its {{ns:arg}} spans intact. Never resolved backend-side.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

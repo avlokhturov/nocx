@@ -95,6 +95,14 @@ export function extensionOf(path: string): string {
   return base.slice(dot).toLowerCase()
 }
 
+/** Markdown by NAME rather than by path — the snippet body is authored as
+ *  prose and is not a file, so it has no extension to look up (design
+ *  §10.4). Same registry, because "which language module a surface gets" is
+ *  one question with one owner. */
+export function markdownLanguage(): Extension {
+  return markdown()
+}
+
 /** The CM6 language extension for a file path, or [] for plain text. */
 export function languageForPath(path: string): Extension {
   switch (extensionOf(path)) {

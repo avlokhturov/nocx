@@ -163,8 +163,23 @@ export interface TerminalRenderer {
   // paste inserts text at the cursor, preserving bracketed-paste semantics
   // when the running program has enabled mode 2004. Implemented via
   // xterm.js's term.paste() so the engine owns the wrapping — hand-rolling
-  // it would duplicate engine behaviour and drift from it.
-  paste(text: string): void
+  // it would duplicate engine behaviour and drift from it. Returns whether
+  // the write happened: false when no terminal is mounted, which a caller
+  // must treat as a refusal, never as a reported delivery.
+  paste(text: string): boolean
+
+  /** Whether the running program has enabled bracketed paste (mode 2004).
+   *  False when no terminal is mounted. The snippet policy reads this to
+   *  decide whether a multi-line body may be pasted (design §9.4). */
+  bracketedPasteActive(): boolean
+
+  /** Register the snippet-palette chord (⌥⌘P) handler. The renderer's
+   *  custom key handler sees the chord BEFORE xterm encodes it, calls this
+   *  callback and returns false — the chord is consumed at the xterm
+   *  boundary and zero bytes reach the pty (design §10.1, bead nocx-jj77).
+   *  Optional so a renderer that does not parse chords degrades to the
+   *  editor-arbiter path only. */
+  onSnippetChord?(cb: (() => void) | null): void
 
   // refreshAtlas is called when the renderer becomes visible after being
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale
