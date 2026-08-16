@@ -148,6 +148,22 @@ never named by anybody, so demanding a name asks for something the user did not 
 identity is its panes, so their titles are its label — `nocx · srv-01 · claude`, elided to
 the available width. A name the user **does** type is stored and wins.
 
+**And a pane's own title has three sources, in this order** (`nocx-n8n82`):
+
+```
+the title the program declared (OSC 0/2)
+  || the command running in the foreground
+  || the pane's cwd
+```
+
+The middle one is missing today, which is why a tab running `herdr` is labelled
+`Users/shady`: nothing sits between a program that declares a title and a directory that
+declares nothing. The renderer already knows the answer — `command-ledger.ts` holds the
+command text and a `running` status, put there by the shell integration — so this is a
+source to connect, not one to build. It is written here because it is the same rule the
+paragraph above states for a tab: **the label flows pane → tab**, and a tab can only be
+named by its panes if a pane is named by what is in it.
+
 **`workspaceId` moves here from the session** (`nocx-fraus`). The invariant is unchanged —
 never null, one owner of the default — and the argument in §5.2 for keeping it in the
 backend survives whole, because the backend now owns the whole chain and resolves
