@@ -801,6 +801,10 @@ func TestExecutionRecordsGrantWithScopes(t *testing.T) {
 		Grant: &content.Grant{
 			Version: 2, ExpiresAt: 1_750_000_200_000,
 			Policy: content.GrantAutonomous,
+			Effects: []content.Effect{
+				content.EffectObserve,
+				content.EffectMutateReversible,
+			},
 			Scopes: []content.GrantScope{
 				{Kind: content.ResourceEnvironment, ID: "local"},
 				{Kind: content.ResourceSession, ID: "sess-1"},
@@ -820,6 +824,9 @@ func TestExecutionRecordsGrantWithScopes(t *testing.T) {
 	}
 	if g.Version != 2 || g.Policy != content.GrantAutonomous || g.ExpiresAt != 1_750_000_200_000 {
 		t.Fatalf("grant = %+v, want version 2 autonomous expiring 1750000200000", g)
+	}
+	if len(g.Effects) != 2 || g.Effects[0] != content.EffectMutateReversible || g.Effects[1] != content.EffectObserve {
+		t.Fatalf("grant effects = %v, want [mutate-reversible observe] (stored ORDER BY effect)", g.Effects)
 	}
 	if len(g.Scopes) != 2 || g.Scopes[0].Kind != content.ResourceEnvironment || g.Scopes[1].Kind != content.ResourceSession {
 		t.Fatalf("grant scopes = %+v, want environment + session", g.Scopes)

@@ -489,8 +489,8 @@ func New(opts ...Option) (*App, error) {
 
 	settingsRegistry := settings.New(docStore, v)
 	backupService := backup.NewService(profileStore, settingsRegistry, docStore)
-	if err := backupService.Recover(); err != nil {
-		return nil, fmt.Errorf("backup recovery: %w", err)
+	if recoverErr := backupService.Recover(); recoverErr != nil {
+		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
 
 	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
@@ -540,13 +540,13 @@ func New(opts ...Option) (*App, error) {
 			switch k {
 			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
 				settings.HistoryOutputEnabled.Key():
-				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
+				if v, getErr := settingsRegistry.GetBool(settings.HistoryEnabled); getErr == nil {
 					historyPolicy.SetEnabled(v)
 				}
-				if v, err := settingsRegistry.GetNumber(settings.HistoryRetentionDays); err == nil {
+				if v, getErr := settingsRegistry.GetNumber(settings.HistoryRetentionDays); getErr == nil {
 					historyPolicy.SetRetentionDays(int(v))
 				}
-				if v, err := settingsRegistry.GetBool(settings.HistoryOutputEnabled); err == nil {
+				if v, getErr := settingsRegistry.GetBool(settings.HistoryOutputEnabled); getErr == nil {
 					historyPolicy.SetOutputEnabled(v)
 				}
 			}
@@ -749,8 +749,16 @@ func New(opts ...Option) (*App, error) {
 	// process-lifetime: agent.status's "last probe result" fact, whose
 	// meaning expires with the endpoint that produced it.
 	assistantProbes := assistant.NewProbeStore()
+	// NewClient fails loudly when the tool schemas did not reach the binary
+	// (nocx-jtz3q): an assistant whose registry assembled empty would offer
+	// no tools to any run and fail silently — the composition root refuses
+	// to start with a broken registry instead.
+	assistantClient, err := assistant.NewClient(logger)
+	if err != nil {
+		return nil, err
+	}
 	tpOpts = append(tpOpts,
-		transport.WithAssistantClient(assistant.NewClient(logger)),
+		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
 	)
 	tp := transport.NewWSServer(logger, sess, tpOpts...)

@@ -168,6 +168,28 @@ const (
 	ResourceTool        ResourceKind = "tool"
 )
 
+// Effect is the ADR-0020 effect lattice — what an execution may do to the
+// world (docs/decisions/0020-the-agent-gets-a-lane-authority-is-granted-per-run.md
+// decision 6): observe | mutate-reversible | mutate-destructive |
+// privilege-change | disclose | cross-boundary | delegate. It lives here
+// beside ResourceKind for the same reason ResourceKind does: the ledger owns
+// the vocabulary the durable grant record stores, and a consumer (the agent
+// tool registry, the policy) consumes it, never duplicates it. A grant names
+// the effect classes it permits; authority_grants persists them
+// (grant_effects), so "forgot to classify a tool" stops compiling in the
+// registry and stops persisting here.
+type Effect string
+
+const (
+	EffectObserve           Effect = "observe"
+	EffectMutateReversible  Effect = "mutate-reversible"
+	EffectMutateDestructive Effect = "mutate-destructive"
+	EffectPrivilegeChange   Effect = "privilege-change"
+	EffectDisclose          Effect = "disclose"
+	EffectCrossBoundary     Effect = "cross-boundary"
+	EffectDelegate          Effect = "delegate"
+)
+
 // CaptureMethod records whether artifact text came from terminal cells, from
 // raw output, from serialized block HTML, or was never captured (ADR-0019
 // §6: derived text must be able to say how it was taken).
@@ -303,6 +325,21 @@ type FinishExecution struct {
 	Status            EntryStatus
 }
 
+// Grant is the authority recorded on a run (ADR-0020 §5): versioned,
+// expiring, immutable once execution starts. It names BOTH dimensions of
+// the authority — the effect classes permitted (what the run may do to the
+// world, decision 6) and the resource scopes it may touch (what exists to
+// be touched, decision 5). A grant over effect classes alone permits
+// nothing in particular and everything in general: "may observe" reaches
+// every path, session and credential unless the scopes say otherwise.
+type Grant struct {
+	Version   int
+	ExpiresAt int64
+	Policy    GrantPolicy
+	Effects   []Effect
+	Scopes    []GrantScope
+}
+
 // FinishAgentRun is the terminal close of an assistant run (the state
 // machine this slice's driver persists: prepared → streaming → completed |
 // failed | cancelled | interrupted). The run's terminal state and the
@@ -314,14 +351,6 @@ type FinishAgentRun struct {
 	TerminationReason TerminationReason
 	Error             string // the renderable reason; empty when completed
 	EndedAt           int64
-}
-
-// Grant is the authority recorded on a run (ADR-0020 §5).
-type Grant struct {
-	Version   int
-	ExpiresAt int64
-	Policy    GrantPolicy
-	Scopes    []GrantScope
 }
 
 // GrantScope is one resource the grant touches — what "this run held a grant
