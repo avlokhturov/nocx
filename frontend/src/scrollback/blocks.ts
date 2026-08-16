@@ -984,6 +984,14 @@ export interface BlockManagerOpts {
    *  output end. The freeze originated inside the manager (sightFence /
    *  the deferral timer), so the caller learns to settle the live region. */
   onDeferredFreeze?: () => void
+  /** Fired at the end of EVERY visual freeze — the moment the frozen
+   *  element replaces the running one and the block's output rows are fixed
+   *  in the DOM (nocx-tjppv: the run tool's completion wait reads the
+   *  output window from the frozen block, so it must observe this exact
+   *  moment, not the logical freeze, which may still be waiting on the
+   *  render fence). Fires after afterVisualFreeze, so a waiter that sets
+   *  that slot and an observer here never race. */
+  onBlockFrozen?: (rec: BlockRecord) => void
 }
 
 export class BlockManager {
@@ -997,6 +1005,7 @@ export class BlockManager {
   private _answerBlocks: AnswerBlockRecord[] = []
   private _nextId = 1
   private _now: () => number
+  private _onBlockFrozen?: (rec: BlockRecord) => void
   private _scrollbackInner: HTMLElement
   private _xtermContainer: HTMLElement
   private _runningBlock: BlockRecord | null = null
@@ -1051,6 +1060,7 @@ export class BlockManager {
     this._now = opts.now ?? (() => performance.now())
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
+    this._onBlockFrozen = opts.onBlockFrozen
   }
 
   get blocks(): readonly BlockRecord[] {
@@ -1320,6 +1330,12 @@ export class BlockManager {
       rec.afterVisualFreeze = undefined
       after()
     }
+    // The visual freeze is complete: the frozen element is in the DOM with
+    // its output rows fixed. Observers (the run tool's completion wait,
+    // nocx-tjppv) read the block's output window from THIS element. Fires
+    // after afterVisualFreeze, so a waiter that sets that slot and an
+    // observer here never race.
+    this._onBlockFrozen?.(rec)
   }
 
   /** Freeze the block bound to the attempt, from the attempt's authenticated

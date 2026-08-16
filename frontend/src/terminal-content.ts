@@ -23,6 +23,7 @@ import type { ShellComplete } from './generated/shell.complete'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
 import { AgentInputTarget } from './agent-ask'
 import { AgentClient } from './agent'
+import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
   chipFromSelection,
@@ -53,7 +54,7 @@ import {
 import { mountIntegrationNotice } from './integration/notice'
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { renderRecordedCommand } from './scrollback/blocks'
+import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -61,7 +62,7 @@ import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboar
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
-import { CommandLedger } from './command-ledger'
+import { CommandLedger, type CommandAuthor } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
@@ -353,6 +354,20 @@ export class TerminalContent extends BaseTabContent {
    *  line, for the receipt's hover emphasis (chips carry the span; rows
    *  carry the capture id). */
   private readonly receiptChipSpans = new Map<string, { start: number; end: number }>()
+  /** The run tool's pending completions (nocx-tjppv), keyed by the block
+   *  each agent submission opened — the SAME object the freeze mutates in
+   *  place, so a freeze resolves exactly the waiter whose command finished.
+   *  The ledger id is minted at submit by the ordinary path; the waiter
+   *  resolves when the block's VISUAL freeze lands (onBlockFrozen) with
+   *  the completed run body. */
+  private readonly agentRuns = new Map<
+    BlockRecord,
+    {
+      ledgerId: number
+      resolve: (run: AgentRunCompletion) => void
+      reject: (reason: unknown) => void
+    }
+  >()
   /** The prompt's vault surfaces: the '@' picker, the composition-time
    *  candidate, and the resolve-at-submit wiring. */
   private promptVault: PromptVaultController | null = null
@@ -814,6 +829,10 @@ export class TerminalContent extends BaseTabContent {
         // (AGENTS.md: a soft degrade the UI contradicts is how a feature
         // that does not exist survives a release).
         onClear: () => this.clearReferenceChips(),
+        // A frozen block's output rows are fixed in the DOM: resolve any
+        // pending agent-run completion waits (nocx-tjppv — the run tool
+        // reads the output window from the frozen block).
+        onBlockFrozen: (rec) => this._onBlockFrozen(rec),
       })
 
       log.info('nocx: mounting renderer')
@@ -1065,122 +1084,19 @@ export class TerminalContent extends BaseTabContent {
             // reordered one — measured, the letters of the next input
             // arriving at the pty ahead of the command that was going to
             // read them.
-            this.takeKeyboardToGrid()
-            this.holdRawUntilSubmitted()
-            const recordLine = plan?.recordLine ?? doc
-            // Where the command RUNS, captured before anything below can
-            // change it. Entering an environment blanks `_cwd` (we know the
-            // host, not the remote directory), and the ledger and the block
-            // both read it further down — so `ssh pi@…` was recorded with no
-            // directory and vanished from a history scoped to "this
-            // directory". The command ran here, whatever it goes on to do.
-            const submitCwd = this._cwd
-            // An empty line is a bare newline: no execution, no attempt, no
-            // ledger record (CommandLedger.open refuses empty commands) and
-            // no block. The shell still gets its newline — a conventional
-            // terminal stays conventional.
-            const write = (): void => {
-              // Detach the queue BEFORE the command goes out, flush it after.
-              //
-              // Both halves matter and the order is the whole point. The
-              // command is delivered through renderer.paste, and a paste is
-              // itself an onData — so a queue still armed here would swallow
-              // the command and put it BEHIND the keys that were waiting for
-              // it, which is the same reordering with the operands swapped
-              // (measured: a bare `\r` reaching the pty ahead of its own
-              // command line).
-              const held = this.takeHeldRaw()
-              try {
-                submitCommand(doc, {
-                  focusGrid: () => this.takeKeyboardToGrid(),
-                  sendDoc: (d) => {
-                    void active.submit(d, { targetId: active.id })
-                  },
-                })
-              } finally {
-                // In a `finally`, and fail-open: a write that threw sent
-                // nothing, and holding the keys anyway would swallow them
-                // for the rest of the session. Late at a prompt is a line
-                // the user can see and erase; silently gone is not.
-                for (const data of held) this.session?.send(data)
-              }
-            }
-            if (recordLine === '') {
-              write()
-              return
-            }
-            // SEVERED (ADR-0024): the ssh attempt binding (expected passport
-            // id, tagged A→B entry, local-D completion) and the
-            // environment-entry heuristic (docker, su, …) are deleted with
-            // the marker cycle — nothing stream-derived may activate an
-            // environment, and without a completion there is nothing to
-            // restore. The submitted line still opens a ledger record and a
-            // running block (the app-owned ordering ADR-0024 §5 keeps).
-            if (this.ledger) {
-              let markerLine: () => number | undefined = () => undefined
-              const rec = this.ledger.open(
-                recordLine,
-                submitCwd,
-                this._host,
-                () => markerLine(),
-                active.author,
-              )
-              const m = renderer.registerMarker()
-              if (m) {
-                markerLine = () => m.line()
-                this._markers.set(rec.id, m)
-                m.onDispose(() => {
-                  this.ledger?.dispose(rec.id)
-                  this._markers.delete(rec.id)
-                })
-              }
-            }
-            this.scrollback?.maybeClear(recordLine)
-            // The running block opens at the app-owned submit — before any
-            // bytes and before any fact can arrive — so the published
-            // running fact (which the backend emits BEFORE the RPC response,
-            // inside SubmitAttempt) always finds the block it binds to
-            // (ADR-0024 §5, §7). That ordering is why the block's CREATION
-            // line is the prompt line, and why its OUTPUT range starts one
-            // row later (nocx-4yhi): the bytes go out after this call, and
-            // the shell's echo of the typed command lands on the creation
-            // line itself. The header already shows the command; a body
-            // that repeats it is the defect — so the range and the
-            // creation time are two different things, and the record
-            // carries both.
-            if (this.scrollback && this.renderer) {
-              const startLine = this.renderer.cursorLine()
-              this.scrollback.beginBlock(
-                recordLine,
-                submitCwd,
-                startLine,
-                startLine + 1,
-                active.author,
-              )
-            }
-            const st = this.lifecycle.state
-            if (st.kind !== 'prompt_ready') {
-              // No live domain: nothing to attach the app-owned text to. The
-              // shell's own start (if any) opens a shell-originated attempt
-              // and the block binds to it — a conventional terminal stays
-              // conventional, and the privacy rule holds either way.
-              write()
-              return
-            }
-            // ADR-0024 decision 5: the app-owned attempt opens BEFORE the
-            // bytes that can cause the shell's own start are written to the
-            // pty; the later authenticated start attaches to it and replaces
-            // nothing. Fail-open: a refused attempt (the domain lost its
-            // prompt mid-typing) must never swallow the command — the bytes
-            // still go out and the session stays conventional.
-            void new LifecycleClient(this.client.dispatcher)
-              .submitAttempt({
-                domain: st.domain.id,
-                command: recordLine,
-                cwd: submitCwd,
-                host: this._host,
-              })
-              .then(write, write)
+            // The ONE shell submit orchestration (submitShellCommand):
+            // the keyboard handoff (a person's submit takes the grid; the
+            // agent's never does — ADR-0020 decision 1), the ledger record,
+            // the running block and the lifecycle attempt all run in one
+            // place, and this call differs from the agent's by exactly the
+            // author, the handoff and the byte route (nocx-tjppv).
+            this.submitShellCommand({
+              doc,
+              recordLine: plan?.recordLine ?? doc,
+              author: active.author,
+              takeKeys: true,
+              sendLine: (d) => void active.submit(d, { targetId: active.id }),
+            })
           },
           // A bare newline: the shell gets its keystroke and answers with a
           // fresh prompt. Deliberately not routed through the submit path —
@@ -1281,7 +1197,6 @@ export class TerminalContent extends BaseTabContent {
         requestCreateSecret: (name) => this.hooks.onCreateSecret?.(name),
       })
       this.promptVault.mount()
-
       // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
       // The history palette above the prompt. Rows are served by the store
       // over the control plane (history.query, source=store); when the
@@ -2988,6 +2903,211 @@ export class TerminalContent extends BaseTabContent {
   private _disposeAllMarkers(): void {
     for (const m of this._markers.values()) m.dispose()
     this._markers.clear()
+  }
+
+  // ── the shell submit orchestration (nocx-tjppv) ────────────────────────
+
+  /** The ONE path a command takes to the pty (ADR-0004 §2's atomic handoff,
+   *  ADR-0024 §5's app-owned attempt). A human command and an agent-run
+   *  command differ by exactly three things: the author minted at submit
+   *  (design §3.1), whether the keyboard changes hands (a person's submit
+   *  takes the grid; the agent's never does — ADR-0020 decision 1: the
+   *  agent never takes the user's keys), and how the bytes are sent (the
+   *  active shell target vs the lane's own paste+CR). Everything else —
+   *  the ledger record, the running block, the lifecycle attempt, the
+   *  fail-open write — is one implementation, never two.
+   *
+   *  Returns the block the submission opened (the same object the freeze
+   *  mutates in place) and the ledger record id, both minted at submit by
+   *  the ordinary path — the agent-run wait keys on the block object. */
+  private submitShellCommand(opts: {
+    doc: string
+    recordLine: string
+    author: CommandAuthor
+    takeKeys: boolean
+    sendLine: (d: string) => void
+  }): { block: BlockRecord | null; ledgerId: number | null } {
+    const { doc, recordLine, author, takeKeys, sendLine } = opts
+    if (takeKeys) {
+      this.takeKeyboardToGrid()
+      this.holdRawUntilSubmitted()
+    }
+    // Where the command RUNS, captured before anything below can change it.
+    // Entering an environment blanks `_cwd` (we know the host, not the
+    // remote directory), and the ledger and the block both read it further
+    // down — so `ssh pi@…` was recorded with no directory and vanished from
+    // a history scoped to "this directory". The command ran here, whatever
+    // it goes on to do.
+    const submitCwd = this._cwd
+    // An empty line is a bare newline: no execution, no attempt, no ledger
+    // record (CommandLedger.open refuses empty commands) and no block. The
+    // shell still gets its newline — a conventional terminal stays
+    // conventional.
+    const write = (): void => {
+      // Detach the queue BEFORE the command goes out, flush it after.
+      //
+      // Both halves matter and the order is the whole point. The command is
+      // delivered through renderer.paste, and a paste is itself an onData —
+      // so a queue still armed here would swallow the command and put it
+      // BEHIND the keys that were waiting for it, which is the same
+      // reordering with the operands swapped (measured: a bare `\r`
+      // reaching the pty ahead of its own command line).
+      const held = this.takeHeldRaw()
+      try {
+        submitCommand(doc, {
+          focusGrid: () => this.takeKeyboardToGrid(),
+          sendDoc: sendLine,
+        })
+      } finally {
+        // In a `finally`, and fail-open: a write that threw sent nothing,
+        // and holding the keys anyway would swallow them for the rest of
+        // the session. Late at a prompt is a line the user can see and
+        // erase; silently gone is not.
+        for (const data of held) this.session?.send(data)
+      }
+    }
+    if (recordLine === '') {
+      write()
+      return { block: null, ledgerId: null }
+    }
+    // SEVERED (ADR-0024): the ssh attempt binding (expected passport id,
+    // tagged A→B entry, local-D completion) and the environment-entry
+    // heuristic (docker, su, …) are deleted with the marker cycle — nothing
+    // stream-derived may activate an environment, and without a completion
+    // there is nothing to restore. The submitted line still opens a ledger
+    // record and a running block (the app-owned ordering ADR-0024 §5 keeps).
+    let ledgerId: number | null = null
+    if (this.ledger) {
+      let markerLine: () => number | undefined = () => undefined
+      const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine(), author)
+      ledgerId = rec.id
+      const m = this.renderer?.registerMarker() ?? null
+      if (m) {
+        markerLine = () => m.line()
+        this._markers.set(rec.id, m)
+        m.onDispose(() => {
+          this.ledger?.dispose(rec.id)
+          this._markers.delete(rec.id)
+        })
+      }
+    }
+    this.scrollback?.maybeClear(recordLine)
+    // The running block opens at the app-owned submit — before any bytes
+    // and before any fact can arrive — so the published running fact (which
+    // the backend emits BEFORE the RPC response, inside SubmitAttempt)
+    // always finds the block it binds to (ADR-0024 §5, §7). That ordering
+    // is why the block's CREATION line is the prompt line, and why its
+    // OUTPUT range starts one row later (nocx-4yhi): the bytes go out after
+    // this call, and the shell's echo of the typed command lands on the
+    // creation line itself. The header already shows the command; a body
+    // that repeats it is the defect — so the range and the creation time
+    // are two different things, and the record carries both.
+    let block: BlockRecord | null = null
+    if (this.scrollback && this.renderer) {
+      const startLine = this.renderer.cursorLine()
+      this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1, author)
+      block = this.scrollback.blockManager.runningBlock
+    }
+    const st = this.lifecycle.state
+    if (st.kind !== 'prompt_ready') {
+      // No live domain: nothing to attach the app-owned text to. The
+      // shell's own start (if any) opens a shell-originated attempt and the
+      // block binds to it — a conventional terminal stays conventional, and
+      // the privacy rule holds either way.
+      write()
+      return { block, ledgerId }
+    }
+    // ADR-0024 decision 5: the app-owned attempt opens BEFORE the bytes
+    // that can cause the shell's own start are written to the pty; the
+    // later authenticated start attaches to it and replaces nothing.
+    // Fail-open: a refused attempt (the domain lost its prompt mid-typing)
+    // must never swallow the command — the bytes still go out and the
+    // session stays conventional.
+    void new LifecycleClient(this.client.dispatcher)
+      .submitAttempt({
+        domain: st.domain.id,
+        command: recordLine,
+        cwd: submitCwd,
+        host: this._host,
+      })
+      .then(write, write)
+    return { block, ledgerId }
+  }
+
+  /** The run tool's renderer half (nocx-tjppv): submit a command through
+   *  the SAME orchestration a person's Enter runs — ledger record, running
+   *  block, lifecycle attempt, paste+CR delivery — with the agent's author
+   *  (design §3.1) and WITHOUT the keyboard handoff (ADR-0020 decision 1:
+   *  the agent never takes the user's keys; the lane is a session of its
+   *  own). The backend never writes to the PTY (design §2.1): the bytes go
+   *  out the same route a person's line takes, never a direct
+   *  session.write from the backend. Resolves when the block this
+   *  submission opened freezes, with the completed run body: the entry id
+   *  (the app-owned ledger record id, minted at submit by the ordinary
+   *  path), the exit status and a window of the output. */
+  submitAgentCommand(command: string): Promise<AgentRunCompletion> {
+    if (command === '') {
+      return Promise.reject(new Error('run: an empty command is a bare newline, not an execution'))
+    }
+    // Promise.withResolvers needs ES2024 and this project targets ES2021,
+    // so the resolvers are captured via the executor form (the same trade
+    // host-key-controller.ts makes).
+    let resolve!: (run: AgentRunCompletion) => void
+    let reject!: (reason: unknown) => void
+    const promise = new Promise<AgentRunCompletion>((done, fail) => {
+      resolve = done
+      reject = fail
+    })
+    const { block, ledgerId } = this.submitShellCommand({
+      doc: command,
+      recordLine: command,
+      author: 'agent',
+      takeKeys: false,
+      sendLine: (d) => {
+        this.renderer?.paste(d)
+        this.session?.send('\r')
+      },
+    })
+    if (block === null || ledgerId === null) {
+      reject(new Error('run: the submission could not open a block — the agent lane is not usable'))
+      return promise
+    }
+    this.agentRuns.set(block, { ledgerId, resolve, reject })
+    return promise
+  }
+
+  /** A block's VISUAL freeze landed (onBlockFrozen): its output rows are
+   *  fixed in the DOM. Resolve the agent-run completion wait whose block
+   *  this is — the same object the submission's beginBlock returned, so a
+   *  freeze resolves exactly the waiter whose command finished. The window
+   *  contract (design §4.4): total is the block's output line count, the
+   *  renderer clamps the text to the wire bound and states how much more
+   *  the block holds — never a silent truncation. */
+  private _onBlockFrozen(rec: BlockRecord): void {
+    const waiter = this.agentRuns.get(rec)
+    if (!waiter) return
+    this.agentRuns.delete(rec)
+    const all = blockOutputText(rec.el)
+    const lines = all.split('\n')
+    let end = 0
+    let chars = 0
+    for (; end < lines.length; end++) {
+      const next = chars + lines[end].length + (end > 0 ? 1 : 0)
+      if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
+      chars = next
+    }
+    waiter.resolve({
+      entryId: String(waiter.ledgerId),
+      exitCode: rec.exitCode,
+      // The hook fires on the visual freeze, when the block is logically
+      // frozen too — the type union still admits 'running', which a frozen
+      // block can never be; the honest mapping is 'unknown'.
+      status: rec.status === 'running' ? 'unknown' : rec.status,
+      total: lines.length,
+      start: 0,
+      end,
+      text: lines.slice(0, end).join('\n'),
+    })
   }
 
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────

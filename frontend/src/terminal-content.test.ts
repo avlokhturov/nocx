@@ -2594,6 +2594,167 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('submitAgentCommand runs the command through the ordinary path with the agent author and resolves with the completed run body (nocx-tjppv)', async () => {
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e1',
+          author: 'agent',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'make',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      const pending = content.submitAgentCommand('make')
+
+      // The ordinary path ran: the ledger record and the running block were
+      // BOTH minted at submit with the agent's author (design §3.1) — the
+      // command exists as a command, not as bytes (criterion 3: asserted on
+      // the ledger, not the DOM).
+      expect(ledger.records()).toHaveLength(1)
+      expect(ledger.records()[0].author).toBe('agent')
+      expect(ledger.records()[0].command).toBe('make')
+      expect(ledger.records()[0].status).toBe('running')
+      expect(withScrollback.scrollback.blockManager.blocks).toHaveLength(1)
+      expect(withScrollback.scrollback.blockManager.blocks[0].author).toBe('agent')
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('running')
+      // The attempt: the app-owned lifecycle submit ran with the agent's
+      // command — the command exists as an attempt, not only as bytes
+      // (criterion 3). The attempt goes through the DISPATCHER (the
+      // LifecycleClient's seam), not the WS client's call.
+      const attemptCall = client.dispatcher.call.mock.calls.find(
+        (c) => c[0] === 'lifecycle.submitAttempt',
+      )
+      expect(attemptCall).toBeTruthy()
+      expect((attemptCall![1] as { command: string }).command).toBe('make')
+
+      // The attempt attaches and completes: the block freezes with the exit
+      // status, exactly as a human command's does.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+
+      const run = await pending
+      expect(run.entryId).toBe(String(ledger.records()[0].id))
+      expect(run.exitCode).toBe(0)
+      expect(run.status).toBe('success')
+      expect(run.total).toBeGreaterThanOrEqual(0)
+      expect(typeof run.text).toBe('string')
+      // The frozen block is the same object the freeze mutated — the wait
+      // resolved on the block's completion, never on a timer.
+      expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('success')
+      expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it("submitAgentCommand marks the agent's command in the flow and leaves the human's submissions untouched (nocx-tjppv, criterion 5)", async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      // The agent's command first, completed through the ordinary path.
+      const pendingAgent = content.submitAgentCommand('agent-command')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'agent-command' },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      await pendingAgent
+
+      // The human's command, through the same content's editor: still the
+      // human's, in the same ledger, on the same flow.
+      ed.insertText('human-command')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      const records = ledger.records()
+      expect(records[0].author).toBe('agent')
+      expect(records[1].author).toBe('shell')
+      expect(withScrollback.scrollback.blockManager.blocks[0].author).toBe('agent')
+      expect(withScrollback.scrollback.blockManager.blocks[1].author).toBe('shell')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
   it('the whole authenticated cycle: submit attaches, output stays visible, the completion freezes the block, the status persists exactly once, and the next command reaches the shell', async () => {
     // The epic's positive criterion, watched end to end through the real
     // composition root (ADR-0024 §5–§7): in an authenticated session the

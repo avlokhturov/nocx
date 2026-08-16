@@ -914,20 +914,25 @@ func (m *policyMiddleware) run(decl agenttools.Tool, ctx context.Context, capabi
 }
 
 // executeInRenderer runs one InRenderer tool: the capability is the
-// narrowed session authority (agenttools.ScreenReader — the grant's
-// sessions), the renderer request goes through the run's requester seam.
-// The capability check happens BEFORE the request: a session outside the
-// grant is refused here and the renderer is never asked (criterion 2 —
-// asserted by trying, not by inspecting).
+// narrowed session authority (agenttools.ScreenReader for readScreen, the
+// grant's sessions; agenttools.Runner for run — same narrowing, its own
+// type), the renderer request goes through the run's requester seam. The
+// capability check happens BEFORE the request: a session outside the grant
+// is refused here and the renderer is never asked (criterion 4 — asserted
+// by trying, not by inspecting). The type switch is the exhaustiveness
+// proof: a third InRenderer tool extends the switch or it does not compile.
 func (m *policyMiddleware) executeInRenderer(ctx context.Context, decl agenttools.Tool, capability agenttools.Capability, rawArgs []byte) (string, error) {
 	if m.requester == nil {
 		return "", fmt.Errorf("tool %q executes in the renderer but no renderer requester is wired for this run", decl.Name)
 	}
-	reader, ok := capability.(*agenttools.ScreenReader)
-	if !ok {
-		return "", fmt.Errorf("tool %q: capability is %T, not *agenttools.ScreenReader", decl.Name, capability)
+	switch cap := capability.(type) {
+	case *agenttools.ScreenReader:
+		return executeReadScreen(ctx, cap, m.requester, rawArgs)
+	case *agenttools.Runner:
+		return executeRun(ctx, cap, m.requester, rawArgs)
+	default:
+		return "", fmt.Errorf("tool %q: capability is %T, not a renderer-executable capability", decl.Name, capability)
 	}
-	return executeReadScreen(ctx, reader, m.requester, rawArgs)
 }
 
 // ── the batch latch ───────────────────────────────────────────────────────

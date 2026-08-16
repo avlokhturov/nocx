@@ -86,13 +86,15 @@ type Registry struct {
 }
 
 // declarations is the table — the only place a tool comes into existence.
-// Three rows, three execution states (design §4.1–§4.2): files.read executes
+// Four rows, three execution states (design §4.1–§4.2): files.read executes
 // in Go (its Narrow is wired and its executor lives in internal/assistant),
-// readScreen executes in the renderer (the first InRenderer tool — the
-// executor asks the renderer through the transport's broker), and git.status
-// is declared-but-not-executable (Narrow nil — the middleware refuses to run
-// it honestly). The exclusion tests need at least two permitted/refused rows
-// so a grant can be shown to admit and to refuse.
+// readScreen and run execute in the renderer (InRenderer tools — the
+// executor asks the renderer through the transport's broker; readScreen
+// reads a session's screen, run submits a command through the same submit
+// path a person uses), and git.status is declared-but-not-executable
+// (Narrow nil — the middleware refuses to run it honestly). The exclusion
+// tests need at least two permitted/refused rows so a grant can be shown to
+// admit and to refuse.
 var declarations = []Declaration{
 	{
 		Name:        "files.read",
@@ -111,6 +113,15 @@ var declarations = []Declaration{
 		Executes:    InRenderer,
 		Params:      "readScreen.schema.json",
 		Narrow:      narrowReadScreen,
+	},
+	{
+		Name:        "run",
+		Effect:      content.EffectMutateDestructive,
+		Resources:   []content.ResourceKind{content.ResourceSession},
+		ResourceArg: "sessionId",
+		Executes:    InRenderer,
+		Params:      "run.schema.json",
+		Narrow:      narrowRun,
 	},
 	{
 		Name:      "git.status",

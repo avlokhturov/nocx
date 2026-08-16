@@ -33,4 +33,15 @@ type RendererRequester interface {
 	// capability check happens before this call, and a failed capture is a
 	// returned error, never a hang.
 	RequestScreen(ctx context.Context, sessionID string, region *FrameRegion) (json.RawMessage, error)
+	// RequestRun asks the renderer to submit command to sessionID's lane
+	// through the same submit path a person uses — the renderer's ordinary
+	// orchestration (block, ledger entry, attempt, output artifact, all
+	// minted at submit; design §4.1) — to wait for the completion, and to
+	// resolve with the run body: the entry id, the exit status and a window
+	// of the output (design §4.4). The backend never writes to the PTY
+	// (design §2.1 — rejected, not open for re-litigation). A session the
+	// run cannot use must be refused HERE or before: the capability check
+	// happens before this call, and a refused or failed submission is a
+	// returned error, never a hang.
+	RequestRun(ctx context.Context, sessionID string, command string) (json.RawMessage, error)
 }

@@ -62,6 +62,16 @@ const readScreenSchema = `{
   "properties": {"sessionId": {"type": "string"}}
 }`
 
+const runSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "command"],
+  "properties": {
+    "sessionId": {"type": "string"},
+    "command": {"type": "string"}
+  }
+}`
+
 // TestAssemble_MissingSchemaDoesNotAssemble is acceptance criterion 1: a tool
 // whose params schema is absent from contracts/ does not assemble into the
 // set — asserted, not documented in a comment. The tool is omitted and named
@@ -235,6 +245,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"files.read.schema.json": filesReadSchema,
 		"git.status.schema.json": gitStatusSchema,
 		"readScreen.schema.json": readScreenSchema,
+		"run.schema.json":        runSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -267,6 +278,13 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if got := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)); !containsName(got, "readScreen") || len(got) != 1 {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly [readScreen]", toolNames(got))
 	}
+	// The run row's classification: mutate-destructive + session. A grant
+	// carrying exactly that effect and kind offers exactly run; an observe
+	// grant offers the read tool instead, never the mutating one.
+	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
+	if got := reg.ForGrant(runGrant); !containsName(got, "run") || len(got) != 1 {
+		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly [run]", toolNames(got))
+	}
 	// Empty grant offers nothing.
 	if got := reg.ForGrant(content.Grant{}); len(got) != 0 {
 		t.Fatalf("ForGrant(empty) = %v, want empty", toolNames(got))
@@ -292,6 +310,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"files.read.schema.json": filesReadSchema,
 		"git.status.schema.json": gitStatusSchema,
 		"readScreen.schema.json": readScreenSchema,
+		"run.schema.json":        runSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

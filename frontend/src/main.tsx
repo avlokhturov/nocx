@@ -33,6 +33,7 @@ import { IconButton } from './ui/icon-button'
 import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
+import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
 import {
@@ -347,6 +348,14 @@ async function main() {
   // tab that owns its grid; a request for a session no tab holds is
   // answered failed, honestly — never a hang.
   mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
+
+  // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
+  // The broker's pull for the headline tool: the backend asks the renderer
+  // to run a command through the same submit path a person uses, in the
+  // lane session the grant permitted. The handler resolves the session to
+  // the tab that owns it; a request for a session no tab holds is answered
+  // failed, honestly — never a hang.
+  mountRunCommandHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
 
   const observer = new SettingsObserver(dispatcher)
 
