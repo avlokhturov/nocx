@@ -414,6 +414,36 @@ the owner chose the workspace _over_ the project deliberately.
 | **`nocx-49d4`**                | `workspace:default` is synthetic state nobody chose; the acceptance is to re-parent marked rows and then **delete** `DefaultWorkspaceID`                                          | **Must be rewritten.** A permanent invisible default contradicts its acceptance criterion. The schema shape agrees with §4.2; the bead does not, and the first draft cited it as if it did                                                                         |
 | **`nocx-isoph` acceptance**    | Create a workspace, add three rows, open a terminal in each from the workspace itself, restart, find them intact                                                                  | **Rewritten** — there are no rows, and see §9 on the restart                                                                                                                                                                                                       |
 
+### 7.1 Discharged, 2026-08-16
+
+Every obligation above is now paid **in the beads themselves**, which is where a worker
+reads them. Two of them were left by this design as decisions rather than edits, and both
+are settled here rather than in a conversation somebody has to remember.
+
+**The chip is `nocx-isoph`'s, not `nocx-jv3q`'s.** `jv3q`'s note left the choice open —
+land the chip in that epic, or narrow its exclusion. The design had already answered it:
+§9 names the chip inside epic B's acceptance criterion, and a chip has nothing to display
+until workspaces exist. So `jv3q`'s exclusion narrows to "any **grouping** in the
+horizontal strip", which is the part §4.3 genuinely preserves — the tree stays in the
+vertical strip.
+
+**`nocx-49d4` promotes the default row rather than dropping it**, and that is neither of
+the two answers the conflict offered. The bead and §4.2 were not describing one object:
+the ledger's `workspace:default` exists because the product had no way to choose, while
+§4.2's default exists because the product deliberately chooses it for anything unassigned.
+A session that was never assigned belongs there under both readings, so nothing moves. What
+goes is `captureEnsuredSessionMarker`, which is the part that actually encoded "unchosen".
+This **dissolves** the bead's `ON DELETE CASCADE` hazard instead of scheduling it: with
+nothing dropped there is no ordering to get wrong and no re-parenting migration to run.
+
+**`nocx-jv3q.1`'s keyboard criterion is scoped, not flipped.** `jv3q.1` ships _before_
+workspaces — `isoph` is blocked by that epic — so there is nothing to scope the keys to
+when it lands. Its promise, that grouping by kind does not renumber, survives whole. What
+is written down is that global numbering was never a promise, so its test may not pin one.
+
+**`nocx-ebl4`'s own `WHAT LANDS` said "nullable"** while its note and its child `nocx-fraus`
+said the opposite. The list is what a worker reads first, so the list is what was corrected.
+
 ## 8. Open questions
 
 1. **What replaces D9** — see §8.1.
