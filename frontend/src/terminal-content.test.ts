@@ -42,6 +42,7 @@ import {
   type RendererMock,
   type SessionFake,
   FIXTURE_CWD,
+  FIXTURE_DIRECTORY_LABEL,
 } from './test-support/tabs-fixtures'
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
@@ -4586,6 +4587,206 @@ describe('TerminalContent visibility repaints the grid', () => {
       content.setVisible(false)
       expect(tab.pane.classList.contains('active')).toBe(false)
     } finally {
+      teardown()
+    }
+  })
+})
+
+// ── The tab is named by what runs in it (nocx-n8n82) ─────────────────────
+//
+// A tab's title has exactly three sources, in absolute order: the
+// program's own OSC 0/2 title, the command currently running in it — the
+// ledger's running record, the app-owned submit (ADR-0024 §5) — and the
+// cwd. This suite watches the middle source through the real submit and
+// the real authenticated completion, so a regression in either direction
+// fails here.
+describe('the running command names the tab (nocx-n8n82)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return lifecycleHandler(client)
+  }
+
+  /** jsdom does not implement scrollTo/scrollIntoView; the block model
+   *  calls them on submit. Stub them for the duration — the same trade
+   *  the projections tests make. Returns the restore. */
+  function stubScrolling(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+    }
+  }
+
+  /** Dispatch a submit key exactly where a user's keystroke lands. */
+  function submitEnter(view: EditorView): void {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+  }
+
+  it('shows the running command while it runs and the cwd when it finishes', async () => {
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // A fresh tab is named after where it is.
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+
+      // 1. The authenticated prompt gives the editor the keyboard.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+
+      // 2. The user submits; the command is now the ledger's running
+      //    record, and the tab is named by it.
+      ed.insertText('herdr')
+      submitEnter(view)
+      expect(tab.title).toBe('herdr')
+
+      // 3. The authenticated completion ends the command: the record is
+      //    no longer running, and the tab falls back to the cwd.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'b'.repeat(64),
+          completedAt: '2026-08-16T00:00:00Z',
+        },
+      })
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('a program that declares an OSC 0/2 title still wins over the command name', async () => {
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('herdr')
+      submitEnter(view)
+      expect(tab.title).toBe('herdr')
+
+      // Absolute order: the program's own title outranks the command name.
+      renderer._fireTitle('herdr 2.0')
+      expect(tab.title).toBe('herdr 2.0')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does not resurrect a name the program cleared on the way out', async () => {
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('herdr')
+      submitEnter(view)
+      expect(tab.title).toBe('herdr')
+
+      // The program sets its own title and clears it on the way out —
+      // an OSC 0/2 with an EMPTY string (tabs.ts documents the gesture).
+      renderer._fireTitle('herdr')
+      renderer._fireTitle('')
+      // The command is still the running record: without the clear guard
+      // the running-command source would resurrect 'herdr' right here.
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger.records()[0].status).toBe('running')
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+
+      // And when the command finally completes, the name stays gone.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'b'.repeat(64),
+          completedAt: '2026-08-16T00:00:00Z',
+        },
+      })
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('shows the location line when the title is a name of its own, and none when the title IS the location', async () => {
+    const onSubtitleChange = vi.fn()
+    const onProgramTitleChange = vi.fn()
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onSubtitleChange, onProgramTitleChange } },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // The title IS the cwd: a second line would print the same string.
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+      expect(onSubtitleChange).toHaveBeenLastCalledWith('')
+
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('herdr')
+      submitEnter(view)
+      // A command title is a name of its own: the location is the second
+      // line, never a duplicate.
+      expect(tab.title).toBe('herdr')
+      expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
+      // The agent-state classifier is fed the real program title, which
+      // is empty here — never the composed string.
+      expect(onProgramTitleChange).toHaveBeenLastCalledWith('')
+
+      // A program title is also a name of its own — same second line.
+      renderer._fireTitle('herdr')
+      expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
+      expect(onProgramTitleChange).toHaveBeenLastCalledWith('herdr')
+    } finally {
+      restoreScroll()
       teardown()
     }
   })

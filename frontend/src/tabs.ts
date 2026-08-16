@@ -54,7 +54,13 @@ export class Tab implements TabHost {
   onDisplayChange: (() => void) | null = null
 
   private _title = ''
-  private _programTitle = ''
+  /** The last COMPOSED title the content pushed (`programTitle ||
+   *  runningCommandTitle || cwdTitle`), before the default-title
+   *  fallback. Deliberately not called `_programTitle`: that name was a
+   *  lie — the field holds whatever the content composed, which is
+   *  usually a filesystem path. The program's own title arrives
+   *  separately, through updateProgramTitle. */
+  private _pushedTitle = ''
   private _hasActivity = false
   private _agentStatus: AgentStatus | null = null
   private _tooltip = ''
@@ -115,9 +121,10 @@ export class Tab implements TabHost {
    * line already says it.
    *
    * The decision cannot be made here. TerminalContent composes the title as
-   * `programTitle || cwdTitle` and hands the RESULT to setTitle, so from the tab's
-   * side every title looks equally like a name. Only the content knows whether a
-   * program supplied one, so the content decides and pushes the answer.
+   * `programTitle || runningCommandTitle || cwdTitle` and hands the RESULT to
+   * setTitle, so from the tab's side every title looks equally like a name.
+   * Only the content knows whether a program (or a command) supplied one, so
+   * the content decides and pushes the answer.
    */
   get subtitle(): string {
     return this._subtitle
@@ -184,13 +191,8 @@ export class Tab implements TabHost {
   setTitle(title: string): void {
     if (this._disposed) return
 
-    // A TUI clears the title on the way out by emitting OSC 0/2 with empty
-    // string. Classify before falling back: the marker lives in the raw
-    // title, and an empty title is the shell clearing it — not an agent state.
-    this.updateAgentStatus(title)
-
-    this._programTitle = title.trim()
-    const next = this._programTitle || this.descriptor.defaultTitle
+    this._pushedTitle = title.trim()
+    const next = this._pushedTitle || this.descriptor.defaultTitle
     if (next !== this._title) {
       this._title = next
       this.onDisplayChange?.()
@@ -222,6 +224,19 @@ export class Tab implements TabHost {
   requestClose(): void {
     if (this._disposed) return
     this.onCloseRequested?.()
+  }
+
+  /** Terminal-content-only, like updateTooltip: the program's own OSC 0/2
+   *  title, delivered separately from the composed display title — the
+   *  agent-state classifier keys on THIS, never on the composed title
+   *  (which is usually a filesystem path or a command line). A TUI
+   *  clearing its title on the way out emits OSC 0/2 with an EMPTY
+   *  string; that empty delivery reaches here too and resets the status,
+   *  the way an empty title always did.
+   *  Wired through TerminalContent's constructor. */
+  updateProgramTitle(programTitle: string): void {
+    if (this._disposed) return
+    this.updateAgentStatus(programTitle)
   }
 
   /** Called when the content (terminal session) wants the tab closed. */
@@ -275,9 +290,9 @@ export class Tab implements TabHost {
     }
   }
 
-  private updateAgentStatus(title: string): void {
+  private updateAgentStatus(programTitle: string): void {
     if (this._disposed) return
-    const next = detectAgentStatus(title)
+    const next = detectAgentStatus(programTitle)
     if (next === this._agentStatus) return
     this._agentStatus = next
     if (next === 'idle' && !this._active) {
@@ -499,6 +514,7 @@ export class TabManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
+        onProgramTitleChange: (programTitle) => tabRef.current?.updateProgramTitle(programTitle),
       },
     )
     const descriptor: ContentDescriptor = {
@@ -545,6 +561,7 @@ export class TabManager {
           }
         },
         onWarningChange: (warning, label) => tabRef.current?.setWarningState(warning, label),
+        onProgramTitleChange: (programTitle) => tabRef.current?.updateProgramTitle(programTitle),
         onActiveOriginChange: () => this.onActiveTabChange?.(),
         onPortsTargetChange: () => this.onActiveTabChange?.(),
         onVaultSealed: this.onVaultSealed,
