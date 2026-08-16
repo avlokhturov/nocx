@@ -2,16 +2,15 @@ package content
 
 // Schema v1 of the one authoritative ledger (nocx-rtg0.2), per ADR-0019,
 // ADR-0020 and design §5.2. The types here are the public repository seam:
-// ContentDB.Ledger() returns a LedgerRepository, the only writer of the v1
-// tables. The interim command_history table and CommandHistoryRepository are
-// untouched by this surface — they are the live path until nocx-rtg0.3 cuts
-// the wire protocol over to ledger.* (design §6.2), and nothing may write
-// both (ADR-0019 §4).
+// the history adapter persists command-bearing rows in entries.kind; the
+// legacy command_history table remains only for old files and fixtures; and
+// the ledger.* wire methods (nocx-rtg0.3) are still tests-only until the
+// cutover. Nothing may write both (ADR-0019 §4).
 //
-// Until that cutover the v1 write path has NO PRODUCTION CALLER — only
-// tests. Stated loudly because the same shape shipped once before
-// (nocx-rtg0: ContentDB.Add reachable only from its own tests while a
-// reachable read path hid the unreachable write): the v1 tables are
+// Until that cutover the LedgerRepository write path has NO PRODUCTION
+// CALLER — only tests. Stated loudly because the same shape shipped once
+// before (nocx-rtg0: ContentDB.Add reachable only from its own tests while
+// a reachable read path hid the unreachable write): the v1 tables are
 // schema-complete and test-proven, and deliberately not wired into the
 // transport until nocx-rtg0.3.
 
@@ -745,9 +744,10 @@ type Artifact struct {
 }
 
 // LedgerRepository is the typed repository for schema v1 (ADR-0019,
-// ADR-0020, design §5.2). It is the ONLY writer of the v1 tables; the
-// interim CommandHistoryRepository writes command_history, and nothing may
-// write both. The write path has no production caller until nocx-rtg0.3.
+// ADR-0020, design §5.2). The history adapter already writes the
+// command-bearing projection in entries.kind; the legacy command_history
+// table stays only for old files and fixtures; and the write path has no
+// production caller until nocx-rtg0.3.
 type LedgerRepository interface {
 	// CreateWorkspace records a narrative scope.
 	CreateWorkspace(ctx context.Context, ws Workspace) error

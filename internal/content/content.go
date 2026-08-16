@@ -78,8 +78,10 @@ type ContentDB interface {
 	// design §5.2): entries, edges, executions, artifacts, environments
 	// with their versioned observations, sessions and workspaces. The
 	// ledger.* wire methods (nocx-rtg0.3) will drive this surface; until
-	// that cutover its only callers are tests, and command_history remains
-	// the live history path. Nothing may write both (ADR-0019 §4).
+	// that cutover its only callers are tests, and the history adapter
+	// writes the command-bearing projection in entries.kind. command_history
+	// stays only as the legacy schema shape for old files and fixtures.
+	// Nothing may write both (ADR-0019 §4).
 	Ledger() LedgerRepository
 }
 
@@ -104,6 +106,7 @@ type CommandRecord struct {
 	Command   string
 	Cwd       string
 	Host      string
+	Author    string
 	Status    CommandStatus
 	ExitCode  *int
 	StartedAt *int64
