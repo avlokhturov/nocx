@@ -87,6 +87,30 @@ describe('createRunningBlock', () => {
     const btn = el.querySelector('.cmd-overflow-btn')
     expect(btn).not.toBeNull()
   })
+
+  it('marks a block whose author is not the human — the kit badge in its info tone (nocx-iadtt)', () => {
+    const container = document.createElement('div')
+    const el = createRunningBlock(
+      1,
+      'ls -la',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'agent',
+    )
+    const mark = el.querySelector('.ui-badge[data-author="agent"]')
+    expect(mark).not.toBeNull()
+    expect(mark?.getAttribute('data-tone')).toBe('info')
+    expect(mark?.textContent).toBe('agent')
+  })
+
+  it("a human's block carries no mark at all — the default author is the shell (nocx-iadtt)", () => {
+    const container = document.createElement('div')
+    const el = createRunningBlock(1, 'ls -la', '~', '', () => container, noopSelect, freshStore())
+    expect(el.querySelector('.ui-badge[data-author]')).toBeNull()
+  })
 })
 
 describe('createCommandBlock', () => {
@@ -674,6 +698,18 @@ describe('BlockManager', () => {
   it('freezeBlock returns null when no running block', () => {
     const result = manager.freezeBlock(() => undefined, 20, 0)
     expect(result).toBeNull()
+  })
+
+  it('the author mark survives the running → frozen replacement (nocx-iadtt)', () => {
+    const rec = manager.startBlock('ls', '~', 0, undefined, 'agent')
+    expect(rec.author).toBe('agent')
+    expect(rec.el.querySelector('.ui-badge[data-author="agent"]')).not.toBeNull()
+    manager.freezeBlock((y) => new BufferLine('out' + y), 1, 0)
+    const frozen = manager.blocks[0]
+    expect(frozen?.author).toBe('agent')
+    // The visual freeze REPLACES the element — the mark must be re-rendered
+    // from the record, never carried over from the discarded running DOM.
+    expect(frozen?.el.querySelector('.ui-badge[data-author="agent"]')).not.toBeNull()
   })
 
   it('dispose clears all', () => {
