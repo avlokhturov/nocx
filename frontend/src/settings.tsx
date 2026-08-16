@@ -18,6 +18,7 @@ import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
+import { RolesSection } from './roles-section'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -434,7 +435,35 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, backupPage, connectionPage, vaultPage, secretsPage, endpointsPage]
+    const rolesPage: SettingsPage = {
+      kind: 'component',
+      id: 'roles',
+      title: 'Roles',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      // Registered unconditionally for the same reason endpointsPage is: a
+      // surface that appears only once some other state exists is how a
+      // feature ships unreachable. The guard is the client being absent.
+      renderContent: () => (
+        <Show
+          when={props.endpointsClient}
+          fallback={
+            <PageSection title="Roles">Model roles are not available in this window.</PageSection>
+          }
+        >
+          <RolesSection client={props.endpointsClient} />
+        </Show>
+      ),
+    }
+    return [
+      ...generated,
+      backupPage,
+      connectionPage,
+      vaultPage,
+      secretsPage,
+      endpointsPage,
+      rolesPage,
+    ]
   })
 
   /** The rail rows the grouped rail renders: every page resolved to a group

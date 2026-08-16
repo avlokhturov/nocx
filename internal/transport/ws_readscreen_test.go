@@ -146,23 +146,21 @@ func readScreenFrameWire(t *testing.T, rid string, texts ...string) map[string]a
 // test needs the fake provider).
 func (h *askHarness) createEndpointAt(baseURL string) {
 	h.t.Helper()
-	raw := jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
+	created, code := decodeEndpointResult(h.t, jsonrpcCall(h.t, h.conn, "endpoints.create", map[string]any{
 		"name":    "Local",
 		"baseUrl": baseURL,
 		"schema":  "openai-compatible",
 		"key":     "sk-test-123",
 		"models":  []map[string]any{{"name": "qwen3"}},
-	})
-	var env struct {
-		Error *struct {
-			Code int `json:"code"`
-		} `json:"error"`
+	}))
+	if code != 0 {
+		h.t.Fatalf("endpoints.create: code %d", code)
 	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		h.t.Fatalf("endpoints.create unmarshal: %v", err)
-	}
-	if env.Error != nil {
-		h.t.Fatalf("endpoints.create: code %d\nraw: %s", env.Error.Code, raw)
+	// The ask resolves through the ANSWERING ROLE (bead nocx-e6kn2).
+	if isErrorResponse(h.t, jsonrpcCall(h.t, h.conn, "roles.assign", map[string]any{
+		"role": "answering", "endpointId": created.ID, "model": "qwen3",
+	})) {
+		h.t.Fatalf("roles.assign refused")
 	}
 }
 

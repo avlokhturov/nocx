@@ -69,6 +69,7 @@
 @import './styles/components/context-menu.css';
 @import './styles/components/file-viewer.css';
 @import './styles/components/endpoints.css';
+@import './styles/components/roles.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';
@@ -769,6 +770,15 @@
     opacity: 1;
     transform: translateY(-2px);
   }
+}
+
+/* The model that answered, under the answer text (nocx-e6kn2): the person
+   must be able to tell which model answered without looking it up. Muted
+   provenance — the answer is the content; this is its caption. */
+.cmd-answer-provenance {
+  margin-top: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
 }
 
 .cmd-output {

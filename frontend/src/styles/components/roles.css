@@ -1,0 +1,54 @@
+/* Model Roles surface (nocx-e6kn2) — placement for the role rows and the
+   role state sentence. The controls are the kit's Selects and StatusDot;
+   this file only places the surface's own wrappers and paints its own
+   text (the state sentence's tone, mirroring the endpoint rows). */
+
+.roles-role {
+  padding-block: var(--space-4);
+}
+
+.roles-role__title {
+  font-weight: 600;
+}
+
+.roles-role__description {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* The two selects side by side; each field is a column of label + control. */
+.roles-role__controls {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.roles-role__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 16rem;
+}
+
+.roles-role__label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* The state sentence: the kit's StatusDot + text, the text painted by the
+   same tone the dot carries. A sentence without its meaning is decoration. */
+.roles-role__state {
+  font-size: var(--font-size-sm);
+}
+
+.roles-role__state[data-tone='ok'] {
+  color: var(--color-success);
+}
+
+.roles-role__state[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.roles-role__state[data-tone='error'] {
+  color: var(--color-error);
+}

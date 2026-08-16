@@ -170,6 +170,12 @@ type agentAskResponse struct {
 	State         string `json:"state"`
 	IngestSeq     int64  `json:"ingestSeq"`
 	Replayed      bool   `json:"replayed"`
+	// Model is the model id the run will answer with — the answering
+	// role's pair, pinned BEFORE the transaction (RunFacts.Model) and
+	// announced on the wire because the renderer draws it: the answer
+	// block names which model answered (bead nocx-e6kn2 acceptance: "a
+	// person must be able to tell which model answered").
+	Model string `json:"model"`
 }
 
 // agentRunDelta is the agent.runDelta notification (design §7): one chunk
@@ -386,12 +392,16 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// tools, which is the state before readScreen.
 	runGrant := h.grantFor(p.SessionID)
 
-	// The endpoint the run will use comes from the endpoint store, resolved
-	// here so the run pins "endpoint and model as they were at the time"
-	// (design §5) and the refusal is visible before anything is recorded.
-	// With none configured the ask is refused — a renderable condition, not
-	// a server fault — and NOTHING lands in the ledger (there is no run to
-	// record: the ask never started).
+	// The endpoint the run will use comes from the ANSWERING ROLE (bead
+	// nocx-e6kn2): the one resolver maps the role to its assigned
+	// (endpoint, model) pair, resolved here so the run pins "endpoint and
+	// model as they were at the time" (design §5) and the refusal is
+	// visible before anything is recorded. With the role unassigned — or
+	// the assigned pair gone (endpoint deleted, model removed) — the ask
+	// is refused with the reason: a role is NEVER silently re-pointed at
+	// another endpoint or model, because then nobody can tell which model
+	// answered. Nothing lands in the ledger on a refusal (there is no run
+	// to record: the ask never started).
 	var endpoint profile.Endpoint
 	var facts content.RunFacts
 	if !h.endpointWired {
@@ -399,28 +409,31 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 	err := h.configOp.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-		eps, err := svc.ListEndpoints()
+		ep, model, err := svc.ResolveRole(profile.RoleAnswering)
 		if err != nil {
 			return err
 		}
-		if len(eps) == 0 || len(eps[0].Models) == 0 {
-			return errNoEndpoint
-		}
-		endpoint = eps[0]
+		endpoint = ep
 		facts = content.RunFacts{
 			Mode:       "explain",
-			EndpointID: endpoint.ID,
-			BaseURL:    endpoint.BaseURL,
-			Model:      endpoint.Models[0].Name,
+			EndpointID: ep.ID,
+			BaseURL:    ep.BaseURL,
+			Model:      model,
 		}
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errNoEndpoint) {
-			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: errNoEndpoint.Error()})
-			return
+		// A role refusal is a RENDERABLE condition with a repair: the
+		// surface shows the sentence (and its way out), not a server
+		// fault. Anything else is an internal error on the ordinary path.
+		switch {
+		case errors.Is(err, profile.ErrRoleUnassigned):
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "the answering role has no model assigned — assign one in Settings → Roles"})
+		case errors.Is(err, profile.ErrRoleEndpointGone), errors.Is(err, profile.ErrRoleModelGone):
+			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error() + " — reassign the answering role in Settings → Roles"})
+		default:
+			h.answerError(req, err)
 		}
-		h.answerError(req, err)
 		return
 	}
 	in.Facts = facts
@@ -468,6 +481,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 				State:         string(content.RunPrepared),
 				IngestSeq:     res.IngestSeq,
 				Replayed:      res.Replayed,
+				Model:         facts.Model,
 			}))
 		}
 		return submitErr

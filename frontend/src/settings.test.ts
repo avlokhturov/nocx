@@ -260,6 +260,7 @@ describe('SettingsContent', () => {
     expect(labels).toEqual([
       'Connections',
       'Endpoints',
+      'Roles',
       'Protection',
       'Secrets',
       'Terminal',

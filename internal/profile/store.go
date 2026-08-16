@@ -71,6 +71,14 @@ type storeData struct {
 	Profiles  []SSHProfile   `json:"profiles,omitempty"`
 	Groups    []ProfileGroup `json:"groups,omitempty"`
 	Endpoints []Endpoint     `json:"endpoints,omitempty"`
+	// Roles are the role assignments (bead nocx-e6kn2): each role's one
+	// (endpoint, model) pair. They share this document with endpoints
+	// because a role names an endpoint — the same reason endpoints share
+	// it with profiles (ADR-0030) — and a vault reset's reference sweeps
+	// stay one atomic write. An assignment may dangle (deleted endpoint,
+	// removed model); resolution reports the dangle instead of resolving
+	// to a neighbour.
+	Roles []RoleAssignment `json:"roles,omitempty"`
 }
 
 func (s *JSONStore) load() (*storeData, error) {
@@ -498,6 +506,61 @@ func (s *JSONStore) DeleteEndpoint(id string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// LoadRoleAssignments returns every stored role assignment (bead
+// nocx-e6kn2). Never nil: a store with no assignments returns an empty
+// slice — the wire's roles.list still lists every role, null-assigned.
+func (s *JSONStore) LoadRoleAssignments() ([]RoleAssignment, error) {
+	d, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	return d.Roles, nil
+}
+
+// AssignRole upserts ONE role's assignment (bead nocx-e6kn2): a role has at
+// most one (endpoint, model) pair, so a second assignment for the same role
+// REPLACES the first in the same single write. A CLEAR write (both fields
+// empty) REMOVES the assignment, returning the role to the visible
+// "no model assigned" state. Shape-validates the assignment first
+// (ValidateRoleAssignment); whether the endpoint and model still exist is
+// deliberately not this write's question — resolution answers it, once, so
+// a deletion or model-list update can never race a write into a
+// validated-but-stale assignment.
+func (s *JSONStore) AssignRole(a RoleAssignment) error {
+	if err := ValidateRoleAssignment(a); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	// The empty pair is the CLEAR write: remove the role's assignment so
+	// the role is unresolvable again — the visible "no model assigned"
+	// failure state. Idempotent: clearing an already-clear role writes
+	// nothing.
+	if a.EndpointID == "" && a.Model == "" {
+		for i, existing := range d.Roles {
+			if existing.Role == a.Role {
+				d.Roles = append(d.Roles[:i], d.Roles[i+1:]...)
+				return s.writeLocked(d)
+			}
+		}
+		return nil
+	}
+	for i, existing := range d.Roles {
+		if existing.Role == a.Role {
+			d.Roles[i] = a
+			return s.writeLocked(d)
+		}
+	}
+	d.Roles = append(d.Roles, a)
+	return s.writeLocked(d)
 }
 
 // LoadConnectionSnapshot returns one locked copy of profiles and groups.

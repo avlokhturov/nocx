@@ -123,6 +123,23 @@ type ConfigService interface {
 
 	// Settings is the settings surface of the config domain.
 	Settings() SettingsService
+
+	// Model roles (bead nocx-e6kn2): the layer above endpoints — a named
+	// role resolves to one (endpoint, model) pair, and a feature asks for
+	// a role, never for a model id. The roles surface and the ask
+	// transaction both go through the service, so ResolveRole is the ONE
+	// resolution path in the product.
+	// ListRoleAssignments returns the stored assignments; the wire's
+	// roles.list completes them to the closed role set, so an unassigned
+	// role is a visible null row, never an absent one.
+	ListRoleAssignments() ([]profile.RoleAssignment, error)
+	// AssignRole upserts ONE role's (endpoint, model) pair.
+	AssignRole(a profile.RoleAssignment) error
+	// ResolveRole maps a role to its assigned endpoint and model, or
+	// refuses (profile.ErrRoleUnassigned / ErrRoleEndpointGone /
+	// ErrRoleModelGone) — resolution is the truth-teller: a deleted
+	// endpoint or removed model stays a refusal, never a neighbour hop.
+	ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error)
 }
 
 // ConfigOperation is the typed operation for the config domain. Its gates
@@ -143,13 +160,14 @@ func NewConfigOperation(
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	endpoints profile.EndpointRepository,
+	roles profile.RoleRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
 	secrets EndpointSecrets,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, svc, reg, rows, secrets))
+	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
 }
 
 // newConfigService builds the concrete config service bound to guard g.
@@ -160,6 +178,7 @@ func newConfigService(
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	endpoints profile.EndpointRepository,
+	roles profile.RoleRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
@@ -170,6 +189,7 @@ func newConfigService(
 		profiles:  profiles,
 		groups:    groups,
 		endpoints: endpoints,
+		roles:     roles,
 		svc:       svc,
 		settings:  reg,
 		rows:      rows,
@@ -182,6 +202,7 @@ type configService struct {
 	profiles  profile.ProfileRepository
 	groups    profile.GroupRepository
 	endpoints profile.EndpointRepository
+	roles     profile.RoleRepository
 	svc       *profile.ProfileService
 	settings  *settings.Registry
 	rows      RowResolver
@@ -584,6 +605,56 @@ func (s *configService) DeleteEndpoint(ctx context.Context, id string) error {
 	}
 	_ = s.secrets.Delete(ctx, credential.SecretID(ref))
 	return nil
+}
+
+func (s *configService) ListRoleAssignments() ([]profile.RoleAssignment, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	if s.roles == nil {
+		return nil, errors.New("role store not wired")
+	}
+	return s.roles.LoadRoleAssignments()
+}
+
+// AssignRole upserts ONE role's (endpoint, model) pair (bead nocx-e6kn2).
+// The assignment references the endpoint and model by NAME — nothing
+// secret — so this is a config-domain write like any endpoint write, with
+// no vault involvement.
+func (s *configService) AssignRole(a profile.RoleAssignment) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if s.roles == nil {
+		return errors.New("role store not wired")
+	}
+	return s.roles.AssignRole(a)
+}
+
+// ResolveRole is the config domain's one role→(endpoint, model) resolution
+// (bead nocx-e6kn2): it loads the assignments and the endpoints and calls
+// profile.ResolveRole — the pure, storage-free resolver — so the refusal
+// rules (unassigned, endpoint gone, model gone) live in exactly one place
+// and every consumer (agent.ask, the classifier bead, the roles surface
+// itself) sees the same answers. Re-read per call: an assignment made a
+// moment ago is picked up by the next ask (acceptance: "picks up the
+// change").
+func (s *configService) ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.Endpoint{}, "", err
+	}
+	if s.roles == nil {
+		return profile.Endpoint{}, "", errors.New("role store not wired")
+	}
+	assignments, err := s.roles.LoadRoleAssignments()
+	if err != nil {
+		return profile.Endpoint{}, "", err
+	}
+	eps, err := s.endpoints.LoadEndpoints()
+	if err != nil {
+		return profile.Endpoint{}, "", err
+	}
+	return profile.ResolveRole(role, assignments, eps)
 }
 
 // loadEndpoint returns the stored endpoint with the given id, or nil when
