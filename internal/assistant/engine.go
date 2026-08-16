@@ -219,7 +219,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 			if approvals == nil {
 				approvals = c.approvals
 			}
-			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.RunID, p.Attempt)
+			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.RunID, p.Attempt, p.Requester)
 			if err != nil {
 				return err
 			}

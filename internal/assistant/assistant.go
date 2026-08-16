@@ -112,6 +112,14 @@ type AskParams struct {
 	// fails closed rather than acting without a record. The transport wires
 	// the real ledger when it mints grants; today no caller does.
 	AttemptLedger AttemptLedger
+	// Requester is the seam a renderer-executed tool asks the renderer
+	// through (design §2.2, §6.6 — Executes: InRenderer): the transport
+	// adapts its request broker to this interface, so readScreen's executor
+	// holds a broker request rather than touching the terminal domain.
+	// Nil with an InRenderer tool declared means the tool is executed
+	// honestly as an error — a declaration without its transport is a
+	// wiring gap, never a silent no-op.
+	Requester RendererRequester
 	// Approvals is the process-lifetime approval store (design §7.2): the
 	// human's yes to one exact proposal, bound to run, attempt, tool, call
 	// id and a hash of the canonical arguments. Nil disables escalation's

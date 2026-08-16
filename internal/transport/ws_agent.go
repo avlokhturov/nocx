@@ -214,9 +214,23 @@ type agentHandlers struct {
 	credentials   credential.Resolver
 	client        assistant.Client
 	askSub        control.Submission
-	state         *connState
-	clientID      string
-	r             Responder
+	// attemptLedger is the ledger seam the tool-call pipeline records its
+	// attempts with (design §6.4 — the attempt is durable, before the
+	// call). The real ledger when the content store is wired; nil otherwise,
+	// which disables tool execution (the middleware refuses to run a tool
+	// without a durable attempt).
+	attemptLedger assistant.AttemptLedger
+	// grantFor mints the run's default grant from the workspace policy the
+	// composition root named (ADR-0020 §7; runGrantFor). Nil when no policy
+	// is named — the run carries no grant and the model is offered no tools.
+	grantFor func(sessionID string) *content.Grant
+	// requester is the broker-backed seam a renderer-executed tool asks
+	// through (assistant.RendererRequester); nil when the broker is not
+	// wired, which disables InRenderer tools.
+	requester assistant.RendererRequester
+	state     *connState
+	clientID  string
+	r         Responder
 }
 
 // environmentForSession derives the ledger environment from the session's
@@ -305,6 +319,13 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	in.Client = h.clientID
 	sess, _ := h.state.get(sid)
 	in.Env = environmentForSession(sess)
+	// The run's authority is minted here, with the question: the workspace
+	// policy preset the composition root named, scoped to the run's own
+	// session and the observe effect class (ADR-0020 decision 5 — the grant
+	// is immutable once execution starts, so it is decided before the
+	// stream begins). Nil when no policy is named: the run executes no
+	// tools, which is the state before readScreen.
+	runGrant := h.grantFor(p.SessionID)
 
 	// The endpoint the run will use comes from the endpoint store, resolved
 	// here so the run pins "endpoint and model as they were at the time"
@@ -414,6 +435,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		references:    in.References,
 		endpoint:      endpoint,
 		model:         facts.Model,
+		grant:         runGrant,
 	}
 	if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 		h.runAskStream(taskCtx, rc, h.r)
@@ -495,6 +517,10 @@ type askRunContext struct {
 	references    []content.AgentReference
 	endpoint      profile.Endpoint
 	model         string
+	// grant is the run's authority (ADR-0020 decision 5), minted by the
+	// workspace policy the composition root named (runGrantFor). Nil: the
+	// run executes no tools — the model is offered none.
+	grant *content.Grant
 }
 
 // runAskStream drives the prepared run to completion: persist streaming,
@@ -561,14 +587,15 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 
 	seq := 0
 	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:      rc.secret,
-		BaseURL:  rc.endpoint.BaseURL,
-		Model:    rc.model,
-		Headers:  rc.headers,
-		Messages: msgs,
+		Key:           rc.secret,
+		BaseURL:       rc.endpoint.BaseURL,
+		Model:         rc.model,
+		Headers:       rc.headers,
+		Messages:      msgs,
+		Grant:         rc.grant,
+		AttemptLedger: h.attemptLedger,
+		Requester:     h.requester,
 	}, func(text string) error {
-		// Persist BEFORE emitting: a delta the renderer lost is still in
-		// the ledger, and a persist failure aborts the stream.
 		if persistErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 			return svc.AppendRunDelta(ctx, rc.artifactID, []byte(text))
 		}); persistErr != nil {
@@ -706,41 +733,13 @@ func validateCaptureFrame(p captureFrameParams) (content.CaptureFrame, string) {
 		Cursor:    wireCursor(p.Cursor),
 	}
 
+	bodyChars := 0
 	if source == content.FrameLive {
-		if p.Identity == nil {
-			return content.CaptureFrame{}, "a live frame requires the capture identity"
-		}
-		if p.Range == nil {
-			return content.CaptureFrame{}, "a live frame requires the buffer row range"
+		var msg string
+		if msg, bodyChars = validateLiveFrameBody(p.Rows, p.Cursor, p.Identity, p.Range); msg != "" {
+			return content.CaptureFrame{}, msg
 		}
 		id := p.Identity
-		if id.Cols < 1 || id.Cols > maxFrameCols {
-			return content.CaptureFrame{}, "identity cols are out of bounds"
-		}
-		if id.Rows < 1 || id.Rows > maxFrameRows {
-			return content.CaptureFrame{}, "identity rows are out of bounds"
-		}
-		if id.Generation < 0 {
-			return content.CaptureFrame{}, "identity generation must not be negative"
-		}
-		switch id.Buffer.Kind {
-		case "normal":
-		case "alternate":
-			if id.Buffer.AltSession == nil || *id.Buffer.AltSession < 0 {
-				return content.CaptureFrame{}, "an alternate buffer identity requires a non-negative altSession"
-			}
-		default:
-			return content.CaptureFrame{}, "buffer kind must be normal or alternate"
-		}
-		if p.Range.Start < 0 || p.Range.End <= p.Range.Start || p.Range.End-p.Range.Start != len(p.Rows) {
-			return content.CaptureFrame{}, "range must be non-negative and span exactly the frame's rows"
-		}
-		// The cursor is an absolute buffer line: at most scrollback cap +
-		// screen height. Col is within the frame's geometry.
-		if p.Cursor.Col < 0 || p.Cursor.Col >= id.Cols ||
-			p.Cursor.Line < 0 || p.Cursor.Line >= maxFrameRows+id.Rows {
-			return content.CaptureFrame{}, "cursor is out of bounds"
-		}
 		in.Identity = &content.FrameIdentity{
 			Buffer:     content.BufferIdentity{Kind: id.Buffer.Kind, AltSession: id.Buffer.AltSession},
 			Cols:       id.Cols,
@@ -755,37 +754,16 @@ func validateCaptureFrame(p captureFrameParams) (content.CaptureFrame, string) {
 		in.SerializerVersion = p.SerializerVersion
 	}
 
-	var totalChars int
+	totalChars := bodyChars
 	for _, row := range p.Rows {
 		switch source {
 		case content.FrameLive:
-			if row.Kind != "cells" {
-				return content.CaptureFrame{}, "a live frame row must be cells"
-			}
-			if len(row.Cells) != p.Identity.Cols {
-				return content.CaptureFrame{}, "a live frame row must carry exactly identity.cols cells"
-			}
-			for _, c := range row.Cells {
-				if utf8.RuneCountInString(c.Char) > maxCellRunes {
-					return content.CaptureFrame{}, "a cell carries more than a terminal glyph"
-				}
-				totalChars += utf8.RuneCountInString(c.Char)
-				if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Fg)); n > 64 {
-					return content.CaptureFrame{}, "a cell attribute exceeds the length bound"
-				}
-				if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Bg)); n > 64 {
-					return content.CaptureFrame{}, "a cell attribute exceeds the length bound"
-				}
-			}
 			cells := make([]content.FrameCell, 0, len(row.Cells))
 			for _, c := range row.Cells {
 				cells = append(cells, content.FrameCell{Char: c.Char, Attrs: wireAttrs(c.Attrs)})
 			}
 			in.Rows = append(in.Rows, content.FrameRow{Kind: "cells", Cells: cells})
 		case content.FrameFrozen:
-			if row.Kind != "text" {
-				return content.CaptureFrame{}, "a frozen frame row must be text"
-			}
 			totalChars += utf8.RuneCountInString(row.Text)
 			in.Rows = append(in.Rows, content.FrameRow{Kind: "text", Text: row.Text})
 		}
@@ -794,6 +772,78 @@ func validateCaptureFrame(p captureFrameParams) (content.CaptureFrame, string) {
 		return content.CaptureFrame{}, "frame is too large: character budget exceeded"
 	}
 	return in, ""
+}
+
+// validateLiveFrameBody checks the LIVE half of a frame — the identity, the
+// buffer row range, the cursor and every row's cells against the capture
+// bounds — and returns the first refusal message, or "" with the row-char
+// total when the body is valid. It is the ONE validator of the live frame
+// vocabulary: the captureFrame push (validateCaptureFrame) and the readScreen
+// pull resolution (validateReadScreenResolvedRaw) both call it, so a rule
+// added here applies to both directions (AD-8 — one owner per behaviour).
+func validateLiveFrameBody(rows []frameRowWire, cursor *frameCursorWire, identity *frameIdentityWire, rng *frameRangeWire) (string, int) {
+	if cursor == nil {
+		return "a live frame requires a cursor", 0
+	}
+	if identity == nil {
+		return "a live frame requires the capture identity", 0
+	}
+	if rng == nil {
+		return "a live frame requires the buffer row range", 0
+	}
+	id := identity
+	if id.Cols < 1 || id.Cols > maxFrameCols {
+		return "identity cols are out of bounds", 0
+	}
+	if id.Rows < 1 || id.Rows > maxFrameRows {
+		return "identity rows are out of bounds", 0
+	}
+	if id.Generation < 0 {
+		return "identity generation must not be negative", 0
+	}
+	switch id.Buffer.Kind {
+	case "normal":
+	case "alternate":
+		if id.Buffer.AltSession == nil || *id.Buffer.AltSession < 0 {
+			return "an alternate buffer identity requires a non-negative altSession", 0
+		}
+	default:
+		return "buffer kind must be normal or alternate", 0
+	}
+	if rng.Start < 0 || rng.End <= rng.Start || rng.End-rng.Start != len(rows) {
+		return "range must be non-negative and span exactly the frame's rows", 0
+	}
+	// The cursor is an absolute buffer line: at most scrollback cap +
+	// screen height. Col is within the frame's geometry.
+	if cursor.Col < 0 || cursor.Col >= id.Cols ||
+		cursor.Line < 0 || cursor.Line >= maxFrameRows+id.Rows {
+		return "cursor is out of bounds", 0
+	}
+	var totalChars int
+	for _, row := range rows {
+		if row.Kind != "cells" {
+			return "a live frame row must be cells", 0
+		}
+		if len(row.Cells) != id.Cols {
+			return "a live frame row must carry exactly identity.cols cells", 0
+		}
+		for _, c := range row.Cells {
+			if utf8.RuneCountInString(c.Char) > maxCellRunes {
+				return "a cell carries more than a terminal glyph", 0
+			}
+			totalChars += utf8.RuneCountInString(c.Char)
+			if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Fg)); n > 64 {
+				return "a cell attribute exceeds the length bound", 0
+			}
+			if n := utf8.RuneCountInString(derefOrEmpty(c.Attrs.Bg)); n > 64 {
+				return "a cell attribute exceeds the length bound", 0
+			}
+		}
+	}
+	if totalChars > maxFrameChars {
+		return "frame is too large: character budget exceeded", 0
+	}
+	return "", totalChars
 }
 
 // validateAgentAsk maps the wire ask onto the ledger's AgentAsk.
@@ -894,11 +944,16 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
 	}
+	var attemptLedger assistant.AttemptLedger
+	if s.contentDB != nil {
+		attemptLedger = s.contentDB.Ledger()
+	}
 	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
 		return agentHandlers{
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
-			log: s.log, state: state, clientID: tabID(w), r: r,
+			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
+			requester: s, log: s.log, state: state, clientID: tabID(w), r: r,
 		}
 	}
 	return []methodSpec{

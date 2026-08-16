@@ -55,6 +55,13 @@ const gitStatusSchema = `{
   "properties": {}
 }`
 
+const readScreenSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {"sessionId": {"type": "string"}}
+}`
+
 // TestAssemble_MissingSchemaDoesNotAssemble is acceptance criterion 1: a tool
 // whose params schema is absent from contracts/ does not assemble into the
 // set — asserted, not documented in a comment. The tool is omitted and named
@@ -223,16 +230,11 @@ func grant(effects []content.Effect, kinds ...content.ResourceKind) content.Gran
 	return content.Grant{Effects: effects, Scopes: scopes}
 }
 
-// TestForGrant_ExactPermittedSet is acceptance criterion 3: given a grant,
-// the set contains exactly the permitted tools and a forbidden tool is
-// absent rather than present-and-filtered. Both directions of "exactly" are
-// asserted on the built set: a grant covering observe+path admits both
-// observe reads and nothing else; a grant that does not cover their effect or
-// their resource kind admits nothing.
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json": filesReadSchema,
 		"git.status.schema.json": gitStatusSchema,
+		"readScreen.schema.json": readScreenSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -254,14 +256,30 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if got := reg.ForGrant(grant([]content.Effect{content.EffectMutateReversible}, content.ResourcePath)); len(got) != 0 {
 		t.Fatalf("ForGrant(mutate+path) = %v, want empty (observe tools forbidden)", toolNames(got))
 	}
-	// Resource kind not covered: a session grant offers no path tool.
-	if got := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)); len(got) != 0 {
-		t.Fatalf("ForGrant(observe+session) = %v, want empty (path tools forbidden)", toolNames(got))
+	// Resource kind not covered: a path grant offers no session tool (the
+	// readScreen row declares ResourceSession, which the path grant lacks).
+	if got := reg.ForGrant(observePath); containsName(got, "readScreen") {
+		t.Fatalf("ForGrant(observe+path) = %v, want readScreen absent (session tool, path grant)", toolNames(got))
+	}
+	// A session grant offers exactly the session tool — the positive end of
+	// the same rule: readScreen's resource kind is what a session grant
+	// covers, and the path tools stay absent.
+	if got := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)); !containsName(got, "readScreen") || len(got) != 1 {
+		t.Fatalf("ForGrant(observe+session) = %v, want exactly [readScreen]", toolNames(got))
 	}
 	// Empty grant offers nothing.
 	if got := reg.ForGrant(content.Grant{}); len(got) != 0 {
 		t.Fatalf("ForGrant(empty) = %v, want empty", toolNames(got))
 	}
+}
+
+func containsName(tools []Tool, name string) bool {
+	for _, t := range tools {
+		if t.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TestForGrant_PermittedToolCarriesSchema is acceptance criterion 4, the
@@ -273,6 +291,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json": filesReadSchema,
 		"git.status.schema.json": gitStatusSchema,
+		"readScreen.schema.json": readScreenSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

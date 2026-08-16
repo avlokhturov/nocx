@@ -189,12 +189,18 @@ func writeFile(t *testing.T, path, body string) {
 
 // middlewareFor builds the pipeline for one test grant + registry.
 func middlewareFor(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore) *policyMiddleware {
+	return middlewareForWithRequester(t, grant, ledger, approvals, nil)
+}
+
+// middlewareForWithRequester builds the pipeline for one test grant +
+// registry with an explicit renderer-request seam (the readScreen tests).
+func middlewareForWithRequester(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester) *policyMiddleware {
 	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, "run-1", 1)
+	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, "run-1", 1, requester)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -596,8 +602,12 @@ func TestMiddleware_UnknownToolAndBadArgumentsAreMalformed(t *testing.T) {
 // ── the executor table stays honest ──────────────────────────────────────
 
 // TestExecutorsCoverTheRegistry is the exhaustiveness test of §5's "the
-// table grows by addition plus tests": a tool with a Narrow but no executor
-// is a registration that cannot run, and must not assemble silently.
+// table grows by addition plus tests": every tool with a Narrow must be
+// EXECUTABLE — an InGo tool needs an entry in the executors table, an
+// InRenderer tool is executed by the middleware's renderer-request branch
+// (design §6.6 — the step differs by exactly one field of the declaration).
+// A Narrowed tool with neither is a registration that cannot run and must
+// not assemble silently.
 func TestExecutorsCoverTheRegistry(t *testing.T) {
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
@@ -607,8 +617,17 @@ func TestExecutorsCoverTheRegistry(t *testing.T) {
 		if tl.Narrow == nil {
 			continue // declared-but-not-executable: the middleware refuses honestly
 		}
-		if _, ok := executors[tl.Name]; !ok {
-			t.Fatalf("tool %q has a capability constructor but no executor", tl.Name)
+		switch tl.Executes {
+		case agenttools.InGo:
+			if _, ok := executors[tl.Name]; !ok {
+				t.Fatalf("tool %q executes in Go but has no executor entry", tl.Name)
+			}
+		case agenttools.InRenderer:
+			// The middleware's executeInRenderer branch is the executor; a
+			// Narrowed InRenderer tool without the branch is a compile-time
+			// impossibility, asserted by the branch's own type switch.
+		default:
+			t.Fatalf("tool %q has an unknown execution site %q", tl.Name, tl.Executes)
 		}
 	}
 }
@@ -630,15 +649,15 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	if !ok {
 		t.Fatalf("NewClient returned %T, want *client", cl)
 	}
-	if got := len(internal.tools.All()); got != 2 {
-		t.Fatalf("registry has %d tools, want the real set of 2", got)
+	if got := len(internal.tools.All()); got != 3 {
+		t.Fatalf("registry has %d tools, want the real set of 3", got)
 	}
 	names := make([]string, 0, len(internal.tools.All()))
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	if names[0] != "files.read" || names[1] != "git.status" {
-		t.Fatalf("assembled tools = %v, want [files.read git.status]", names)
+	if names[0] != "files.read" || names[1] != "readScreen" || names[2] != "git.status" {
+		t.Fatalf("assembled tools = %v, want [files.read readScreen git.status]", names)
 	}
 }
 

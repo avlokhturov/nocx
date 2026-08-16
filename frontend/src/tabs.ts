@@ -761,6 +761,19 @@ export class TabManager {
     return content instanceof TerminalContent ? content : null
   }
 
+  /** The terminal content whose session matches, when any tab holds it —
+   *  the readScreen pull's lookup (nocx-ljfwz): the renderer answers a
+   *  screen request only for the tab that owns the session's grid. */
+  terminalContentForSession(sessionId: string): TerminalContent | null {
+    for (const tab of this.tabs) {
+      const content = tab.content
+      if (content instanceof TerminalContent && content.sessionId() === sessionId) {
+        return content
+      }
+    }
+    return null
+  }
+
   /** The ports.* target the ACTIVE tab scopes to (nocx-wzc4.8): the
    *  reserved "local" for a local shell, the saved-profile id for a
    *  saved-profile SSH tab, null otherwise (alias tab, Settings, …): the

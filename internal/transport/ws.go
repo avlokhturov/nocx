@@ -137,6 +137,21 @@ type WSServer struct {
 	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
 
+	// broker is the server→client request broker (nocx-e2j1z): the
+	// mechanism backend code asks the renderer through (readScreen — the
+	// first production request). Constructed in buildControlPlane with the
+	// server's own connection set and per-connection enqueue as its
+	// delivery seams; its resolution RPCs register on the read-loop ingress
+	// and its ConnectionLost signal fires in unregisterConn.
+	broker *Broker
+	// agentGrantPolicy is the workspace policy preset the ask run grants
+	// are minted with (ADR-0020 §7), named by the composition root. Unset,
+	// ask runs carry no grant and the model is offered no tools — the
+	// state before readScreen, and the production state until the egress
+	// gate lands (see runGrantFor).
+	agentGrantPolicy    content.GrantPolicy
+	agentGrantPolicySet bool
+
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
 	// Structured backup capability and native file saver. The operation is
@@ -914,11 +929,18 @@ func (s *WSServer) buildControlPlane() {
 	// The per-operation queue submissions bound in-flight tasks per operation.
 	gates := s.domainGates()
 	immediate := control.ImmediateSubmission{}
+	// The request broker is constructed here, once the server's connection
+	// set exists: its delivery seams are this server's own snapshot and
+	// per-connection enqueue, and its resolution methods register on the
+	// ingress-critical set below (the resolution must never wait behind the
+	// lane — a pending requestor blocks on it).
+	s.broker = NewBroker(s.rendererConns, s.rendererDeliver)
 	configOp, endpointWired := s.buildConfigOp(lane, gates.config, gates.vault)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
+	specs = append(specs, s.brokerSpecs(immediate)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
@@ -1460,6 +1482,12 @@ func paramsBudgetForMethod(method string) int {
 	switch method {
 	case "vault.unlockResolved", "connections.passwordResolved":
 		return budgetTiny
+	case "agent.readScreenResolved":
+		// A readScreen resolution carries a live frame — every cell of a
+		// screen with its attributes — bounded by the frame validation
+		// (rows ≤ 10k, cols ≤ 2k, 5M chars) and this wire budget, the
+		// document tier. The broker's own per-kind bound matches.
+		return budgetDocument
 	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
 		"profiles.importTabby", "profiles.tabbyPreview":
 		return budgetDocument
@@ -1472,12 +1500,11 @@ func paramsBudgetForMethod(method string) int {
 // not an object.
 var errEnvelopeNotObject = errors.New("not a JSON object")
 
-// errEnvelopeTooLarge reports a control frame whose method does not appear
-// within envelopeScanCap bytes of top-level structure.
-var errEnvelopeTooLarge = errors.New("envelope exceeds scan cap")
+// errEnvelopeTooLarge reports a control frame whose envelope could not be
+// decoded within the scan cap: the method did not appear in time, which is
+// how a huge params value is refused without ever being materialised.
+var errEnvelopeTooLarge = errors.New("envelope exceeds the scan cap")
 
-// errEnvelopeDuplicateMember reports a control frame that repeats a
-// the budget gate and at dispatch. Refusing it keeps one meaning per frame.
 var errEnvelopeDuplicateMember = errors.New("duplicate envelope member")
 
 // decodeEnvelope extracts the JSON-RPC envelope — jsonrpc, id, method —
@@ -2430,6 +2457,15 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 	if s.captures != nil {
 		s.captures.DestroyTab(strconv.FormatUint(wc.id, 10))
 	}
+	// The request broker's lifecycle signal (nocx-e2j1z): a pending request
+	// this connection could answer loses an answerer, and a request with no
+	// surviving recipient terminalizes instead of hanging. Called on EVERY
+	// teardown — this function is the single path out of handleSession, so
+	// a hijacked or stopped connection reaches it the same way a closed
+	// socket does.
+	if s.broker != nil {
+		s.broker.ConnectionLost(wc)
+	}
 	s.stopOwnerTunnels(wc)
 }
 
@@ -2453,4 +2489,32 @@ func (s *WSServer) broadcastSettingsChanged(revision int, keys []string) {
 	for _, wc := range conns {
 		_ = wc.TryNotify("settings.changed", mustMarshal(params))
 	}
+}
+
+// rendererConns is the broker's Conns seam: a snapshot of the renderer
+// connections currently attached. The snapshot is taken at Request time and
+// is that request's recipient set — the only connections that can resolve
+// it.
+func (s *WSServer) rendererConns() []Conn {
+	s.connsMu.Lock()
+	defer s.connsMu.Unlock()
+	out := make([]Conn, 0, len(s.conns))
+	for wc := range s.conns {
+		out = append(out, wc)
+	}
+	return out
+}
+
+// rendererDeliver is the broker's Deliver seam: one request notification to
+// one connection, through the connection's outbound enqueue — the pump is
+// the sole writer (Responder's rule), so the broker never writes the socket
+// directly. The returned error is the enqueue's real error (a full or
+// closed outbound), which is what lets an undelivered request terminalize
+// rather than wait for a timeout that may not come.
+func (s *WSServer) rendererDeliver(conn Conn, method string, params json.RawMessage) error {
+	wc, ok := conn.(*wsConn)
+	if !ok {
+		return fmt.Errorf("renderer deliver: connection %T is not a *wsConn", conn)
+	}
+	return wc.TryNotify(method, params)
 }

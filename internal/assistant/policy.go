@@ -126,14 +126,18 @@ type policyMiddleware struct {
 	approvals *ApprovalStore
 	runID     string
 	attempt   int
+	requester RendererRequester
 
 	validators map[string]*jsonschema.Schema
 }
 
 // newPolicyMiddleware builds the pipeline for one run. A schema that does
 // not compile is a broken declaration — the run fails here, loudly, rather
-// than at the call.
-func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, runID string, attempt int) (*policyMiddleware, error) {
+// than at the call. requester is the renderer-request seam for
+// Executes: InRenderer tools (design §6.6 — the only step that differs
+// differs by the declaration row); it may be nil when no InRenderer tool can
+// be reached under this build, which the run branch reports honestly.
+func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, runID string, attempt int, requester RendererRequester) (*policyMiddleware, error) {
 	m := &policyMiddleware{
 		grant:      grant,
 		registry:   registry,
@@ -141,6 +145,7 @@ func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledg
 		approvals:  approvals,
 		runID:      runID,
 		attempt:    attempt,
+		requester:  requester,
 		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
 	}
 	for _, t := range registry.All() {
@@ -368,13 +373,25 @@ func (m *policyMiddleware) inScope(t agenttools.Tool, args map[string]any) bool 
 		// grant's own scope for the kinds it declares.
 		return true
 	}
-	path, ok := args[t.ResourceArg].(string)
+	id, ok := args[t.ResourceArg].(string)
 	if !ok {
 		return false // validation already required it; refuse to be sure
 	}
 	for _, s := range m.grant.Scopes {
-		if s.Kind == content.ResourcePath && pathUnder(path, s.ID) {
-			return true
+		// A path scope is a lexical containment test (pathUnder — both ends
+		// absolute); a session scope is an exact identity match: the
+		// spelled sessionId IS the resource, there is no containment to
+		// approximate. A call this check lets through can still be refused
+		// by the capability; a call it refuses never reaches it.
+		switch s.Kind {
+		case content.ResourcePath:
+			if pathUnder(id, s.ID) {
+				return true
+			}
+		case content.ResourceSession:
+			if id == s.ID {
+				return true
+			}
 		}
 	}
 	return false
@@ -540,13 +557,36 @@ func (m *policyMiddleware) closeAttempt(ctx context.Context, execID int64, reaso
 
 // run dispatches one executable tool to its executor. The capability and the
 // executor stay paired by the declaration row: the same tool name looked up
-// here is the name the middleware narrowed the capability with.
+// here is the name the middleware narrowed the capability with. Execution
+// differs by exactly one field of the declaration (design §6.6): an InGo
+// tool runs against its narrowed capability in-process; an InRenderer tool
+// is asked of the renderer through the run's requester seam.
 func (m *policyMiddleware) run(decl agenttools.Tool, ctx context.Context, capability agenttools.Capability, rawArgs []byte) (string, error) {
+	if decl.Executes == agenttools.InRenderer {
+		return m.executeInRenderer(ctx, decl, capability, rawArgs)
+	}
 	fn, ok := executors[decl.Name]
 	if !ok {
 		return "", fmt.Errorf("tool %q has a capability constructor but no executor — a registration that cannot run", decl.Name)
 	}
 	return fn(ctx, capability, rawArgs)
+}
+
+// executeInRenderer runs one InRenderer tool: the capability is the
+// narrowed session authority (agenttools.ScreenReader — the grant's
+// sessions), the renderer request goes through the run's requester seam.
+// The capability check happens BEFORE the request: a session outside the
+// grant is refused here and the renderer is never asked (criterion 2 —
+// asserted by trying, not by inspecting).
+func (m *policyMiddleware) executeInRenderer(ctx context.Context, decl agenttools.Tool, capability agenttools.Capability, rawArgs []byte) (string, error) {
+	if m.requester == nil {
+		return "", fmt.Errorf("tool %q executes in the renderer but no renderer requester is wired for this run", decl.Name)
+	}
+	reader, ok := capability.(*agenttools.ScreenReader)
+	if !ok {
+		return "", fmt.Errorf("tool %q: capability is %T, not *agenttools.ScreenReader", decl.Name, capability)
+	}
+	return executeReadScreen(ctx, reader, m.requester, rawArgs)
 }
 
 // ── the batch latch ───────────────────────────────────────────────────────
