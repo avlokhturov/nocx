@@ -70,27 +70,7 @@ func newFilesTestEnv(t *testing.T, opts ...WSServerOption) *filesTestEnv {
 // server-authoritative sessionId.
 func (e *filesTestEnv) openSession(t *testing.T, id int) string {
 	t.Helper()
-	resp := jsonrpcCallWithID(t, e.conn, "open", map[string]uint16{"cols": 80, "rows": 24}, id)
-	var envelope struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &envelope); err != nil {
-		t.Fatalf("open: unmarshal: %v\nraw: %s", err, resp)
-	}
-	if envelope.Error != nil {
-		t.Fatalf("open: %+v", envelope.Error)
-	}
-	var got struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(envelope.Result, &got); err != nil {
-		t.Fatalf("open: decode result: %v", err)
-	}
-	if got.SessionID == "" {
-		t.Fatal("open returned an empty sessionId")
-	}
-	return got.SessionID
+	return openSessionOnConn(t, e.ws, e.conn, id)
 }
 
 // openBinding opens a filesystem binding over the wire and returns its

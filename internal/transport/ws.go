@@ -1123,10 +1123,35 @@ func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
 	return rx
 }
 
-func (s *WSServer) removeRx(id session.ID) {
+// removeRx drops a session's receiver and returns it, or nil when another
+// goroutine removed it first.
+//
+// The return value is a CLAIM, not a convenience. A session has two teardown
+// owners — monitorExit, when the shell exits or the channel drops, and
+// closeSession, when the user closes the tab — and on an explicit close BOTH
+// run, because closing the session through the registry is what wakes the
+// monitor. Deleting a session's files/git bindings is also the only chance to
+// ANNOUNCE them: the destination is resolved at emit time from the receiver
+// being removed here, so an owner captures the subscriber and then deletes.
+// Two owners doing that is one of them deleting the bindings the other was
+// about to announce, and the terminal notification is lost with no trace
+// (nocx-2h08: git.changed(reason=sessionClosed) never arrived, and whichever
+// test was waiting for a notification reported the package's 30-second bound).
+//
+// So the receiver is the token. Whoever removes it captured the subscriber
+// from it and owns the binding teardown; the other leaves the bindings alone.
+// The interval, both ends named: the session is claimed from the moment this
+// returns non-nil until that owner's gitSessionClosed has enqueued the last
+// terminal notification.
+func (s *WSServer) removeRx(id session.ID) *sessionRx {
 	s.ringsMu.Lock()
 	defer s.ringsMu.Unlock()
+	rx, ok := s.rx[id]
+	if !ok {
+		return nil
+	}
 	delete(s.rx, id)
+	return rx
 }
 
 // Responder is the outbound capability handed to control-plane handlers:
@@ -2129,7 +2154,11 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		state.remove(sess.ID())
 	}
 	rx.ring.close()
-	s.removeRx(sess.ID())
+	// The claim on the binding teardown (removeRx). On an explicit close the
+	// handler's closeSession is running the same teardown on its own
+	// goroutine; exactly one of us may delete the bindings, because deleting
+	// them is also the one chance to announce them.
+	owns := s.removeRx(sess.ID()) != nil
 	_ = s.registry.Close(sess.ID())
 
 	// The two responsibilities this path used to drop. closeSession has had
@@ -2156,16 +2185,17 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// profile, forget the target and release its lease.
 	s.discoverySessionClosed(sess)
 
-	// Files (fm-w8): closing the terminal closes its bindings (spec
-	// §5.1). Idempotent — a session that reaches this twice cleans up
-	// once.
-	s.filesSessionClosed(sess.ID())
-
-	// Git (spec §5.5): the session's git bindings die with it, and their
-	// subscriber was captured above — the one deliverable moment, because
-	// removeRx already ran and an emit-time lookup would find nobody
-	// (spec §5.2, nocx-lzfb).
-	s.gitSessionClosed(sess.ID(), wconn)
+	// Files (fm-w8) and git (spec §5.5): closing the terminal closes its
+	// bindings (spec §5.1), and closing a binding is also the moment it is
+	// announced — to the subscriber captured above, because removeRx has
+	// already run and an emit-time lookup would find nobody (spec §5.2,
+	// nocx-lzfb). Only the claimant does this: the other owner captured the
+	// same subscriber and will announce with it, and both running is how the
+	// announcement got lost (nocx-2h08).
+	if owns {
+		s.filesSessionClosed(sess.ID())
+		s.gitSessionClosed(sess.ID(), wconn)
+	}
 
 	if wconn == nil {
 		return
@@ -2240,17 +2270,20 @@ func (s *WSServer) notifyInputStalled(sid session.ID) {
 // close finding). sess is the pre-close registry value, needed by the
 // discovery teardown; nil is tolerated (callers without it).
 func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
-	// The subscriber is captured BEFORE removeRx — the git teardown below
-	// writes its notification to this capture, because at that moment an
-	// emit-time lookup finds nobody (spec §5.2, nocx-lzfb). monitorExit
-	// already captured; the explicit-close path captures nothing today.
-	var wconn *wsConn
-	rx := s.getRx(sid)
-	if rx != nil {
-		wconn, _ = rx.getSubscriber()
-		rx.ring.close()
+	// Removing the receiver is the claim (removeRx), and the subscriber comes
+	// off the receiver this goroutine removed — so the git teardown below
+	// always has a destination, which an emit-time lookup no longer would.
+	// A nil claim means monitorExit got there first: an explicit close wakes
+	// it through the registry close, so both owners run on every hand-closed
+	// tab. It captured the same subscriber and will announce with it; running
+	// the teardown here as well would delete the bindings it is about to
+	// announce and lose the notification (spec §5.2, nocx-lzfb, nocx-2h08).
+	rx := s.removeRx(sid)
+	if rx == nil {
+		return
 	}
-	s.removeRx(sid)
+	wconn, _ := rx.getSubscriber()
+	rx.ring.close()
 	// Session death wins (decision 8): cancel any pending restoration
 	// episode as teardown begins, so a late ack is rejected and no
 	// recovery is promised over a dead connection. The registry close is

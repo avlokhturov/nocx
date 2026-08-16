@@ -1716,13 +1716,30 @@ func (h tabbyHandlers) handleTabbyExecute(ctx context.Context, req jsonrpcReques
 		return
 	}
 
-	// On any failure, release the plan for retry (vault setup/unlock flow).
-	var succeeded bool
-	defer func() {
-		if !succeeded {
+	// On any failure, release the plan for retry (vault setup/unlock flow),
+	// and release it BEFORE the caller is told the attempt failed. The retry
+	// is sent the instant the renderer reads the error — that is what this
+	// method exists for: unlock the vault, send the same token again — and it
+	// arrives on its own goroutine, so it races the tail of this one. A claim
+	// still standing when it lands refuses it with "Please preview again",
+	// which throws away the decrypted plan and makes the user re-enter the
+	// tabby passphrase, for no reason but that the machine was busy.
+	//
+	// The release used to be deferred, which put it after the response AND
+	// after h.op.Run had already dropped the operation's own gate, so nothing
+	// held the retry back over exactly the window in which the retry could
+	// not be served. It reported as an intermittent import of zero profiles
+	// in TestTabbyExecute_VaultRetry — one of the names nocx-2h08 rotates
+	// through. release is idempotent, and the defer stays as the guard for
+	// the paths that return without answering.
+	var settled bool
+	release := func() {
+		if !settled {
+			settled = true
 			h.plans.releasePlan(params.PlanToken)
 		}
-	}()
+	}
+	defer release()
 
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.TabbyImportService) error {
 		// Mint every secret, binding each password onto the profile whose
@@ -1738,6 +1755,7 @@ func (h tabbyHandlers) handleTabbyExecute(ctx context.Context, req jsonrpcReques
 			secretID, err := svc.CreateSecret(ctx, credential.NewSecret(cp.secret),
 				vault.SecretMeta{Name: cp.name, Kind: kind})
 			if err != nil {
+				release()
 				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "Store secret: ", err))
 				return nil
 			}
@@ -1764,17 +1782,22 @@ func (h tabbyHandlers) handleTabbyExecute(ctx context.Context, req jsonrpcReques
 		// No credential records are imported: the bindings live on the profiles.
 		result := svc.AtomicImport(plan.profiles, plan.groups)
 		if len(result.ImportErrors) > 0 {
+			release()
 			_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "Import failed: " + result.ImportErrors[0]})
 			return nil
 		}
 
-		// All writes succeeded — remove the plan permanently.
+		// All writes succeeded — remove the plan permanently, before the
+		// result, so a client that fires the same token again on seeing the
+		// success is refused by a store that no longer holds it rather than
+		// by a claim that is about to be released.
 		h.plans.finishPlan(params.PlanToken)
-		succeeded = true
+		settled = true
 		_ = h.r.TryResult(req.ID, mustMarshal(result))
 		return nil
 	})
 	if err != nil {
+		release()
 		answerOperationRefusal(h.r, req, err)
 	}
 }
