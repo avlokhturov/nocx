@@ -4845,3 +4845,89 @@ func TestExit_DTOStatusRulesAreExact(t *testing.T) {
 		})
 	}
 }
+
+// ── policy.get / policy.set ──────────────────────────────────────────────
+
+// The DTO's own conformance for policy.get: the matrix's wire form — seven
+// rows, effective decisions for unstated rows, non-null scopes arrays — must
+// satisfy the schema exactly (additionalProperties false on the result AND on
+// every row AND every scope, so nothing extra can ride along).
+func TestPolicyGet_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+
+	askOnMutate := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}
+	raw, err := json.Marshal(policyResult{Policy: askOnMutate})
+	if err != nil {
+		t.Fatalf("marshal ask-on-mutate: %v", err)
+	}
+	validateJSON(t, schema, raw, "policy.get ask-on-mutate DTO")
+
+	var finer content.EffectPolicy
+	finer.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	finer.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	rawFiner, err := json.Marshal(policyResult{Policy: finer})
+	if err != nil {
+		t.Fatalf("marshal finer: %v", err)
+	}
+	validateJSON(t, schema, rawFiner, "policy.get finer-than-presets DTO")
+}
+
+// The real result off the real socket: the handler's response — not a test
+// payload — must satisfy the contract, with the scope and decisions the store
+// actually holds (the third row of the contracts README's table).
+func TestPolicyGet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.Delegate = content.EffectRow{Decision: content.DecisionRefuse}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	resp := jsonrpcCall(t, h.conn, "policy.get", nil)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.get: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.get result (real socket)")
+}
+
+// The policy.set result's conformance: {ok: true}, asserted off the real
+// socket after a set the validator accepted.
+func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.set.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	resp := jsonrpcCall(t, h.conn, "policy.set", map[string]any{
+		"policy": map[string]any{
+			"observe": map[string]any{
+				"decision": "permit",
+				"scopes":   []any{map[string]any{"kind": "path", "id": "/workspace"}},
+			},
+		},
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.set: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.set result (real socket)")
+}

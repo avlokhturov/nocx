@@ -58,7 +58,7 @@ func askParamsWith(baseURL string, grant *content.Grant, ledger AttemptLedger, a
 // vault comparison is what catches it, and the assertion proves that path
 // fires. Nothing reached the model: exactly one request hit the server.
 func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	const secret = "known-secret-value-123"
 	writeFile(t, filepath.Join(dir, "a.txt"), "deploy key: "+secret)
 
@@ -118,7 +118,7 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 // which detector fired, and the heuristic finding carries the recognizer's
 // own kind where the known finding carried the vault's name.
 func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	const key = "sk-proj-abcdefghijklmnopqrstuvwx"
 	writeFile(t, filepath.Join(dir, "a.txt"), "the key is "+key)
 
@@ -161,7 +161,7 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 // readScreen tool's renderer-request seam fails with a secret-shaped
 // message; the suspension reports the finding and that it was an error.
 func TestAsk_EgressErrorStringScreened(t *testing.T) {
-	grant := sessionGrant("session-a", content.GrantAutonomous)
+	grant := sessionGrant("session-a", autonomousMatrix())
 	requester := &recordingRequester{err: errors.New("capture failed: token sk-proj-abcdefghijklmnopqrstuvwx")}
 
 	ledger := &fakeLedger{}
@@ -197,7 +197,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 // byte for byte — the gate never re-serializes or rewrites what the executor
 // produced. The reference is the executor's own output, computed directly.
 func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	path := filepath.Join(dir, "a.txt")
 	writeFile(t, path, "the file's contents")
 	args := fmt.Sprintf(`{"path":%q}`, path)
@@ -299,7 +299,7 @@ func TestEgressRequest_NeverCarriesMaterial(t *testing.T) {
 // that model response runs — asserted by what the ledger records: exactly
 // one execution (the first call's), never a second.
 func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "token: sk-proj-abcdefghijklmnopqrstuvwx")
 	writeFile(t, filepath.Join(dir, "b.txt"), "clean")
 
@@ -337,7 +337,7 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 // leave for the provider unscreened. The failure is at construction, before
 // any tool runs — never a silent weaker gate.
 func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
-	grant, _ := testDirGrant(t, content.GrantAutonomous)
+	grant, _ := testDirGrant(t, autonomousMatrix())
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

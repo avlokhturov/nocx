@@ -148,15 +148,6 @@ const (
 	TermInterrupted   TerminationReason = "interrupted"
 )
 
-// GrantPolicy is the autonomy preset the workspace mints (ADR-0020 §7).
-type GrantPolicy string
-
-const (
-	GrantAskEveryTime GrantPolicy = "ask-every-time"
-	GrantAskOnMutate  GrantPolicy = "ask-on-mutate"
-	GrantAutonomous   GrantPolicy = "autonomous"
-)
-
 type ResourceKind string
 
 const (
@@ -332,10 +323,16 @@ type FinishExecution struct {
 // be touched, decision 5). A grant over effect classes alone permits
 // nothing in particular and everything in general: "may observe" reaches
 // every path, session and credential unless the scopes say otherwise.
+//
+// Policy is the decision MATRIX of the amended §7 (policy.go): one row per
+// effect class. Effects and Scopes are the matrix's derivations, materialized
+// by EffectPolicy.AsGrant when the run's grant is minted — the matrix is the
+// one source of what a run may do, and a grant built any other way is a
+// hand-rolled authority the consumer cannot have reasoned about.
 type Grant struct {
 	Version   int
 	ExpiresAt int64
-	Policy    GrantPolicy
+	Policy    EffectPolicy
 	Effects   []Effect
 	Scopes    []GrantScope
 }
@@ -355,9 +352,11 @@ type FinishAgentRun struct {
 
 // GrantScope is one resource the grant touches — what "this run held a grant
 // for these environments and touched these three sessions" is a query over.
+// The json tags are the wire form of a policy row's scope (the settings RPC);
+// the durable record persists kind and id as columns, not JSON.
 type GrantScope struct {
-	Kind ResourceKind
-	ID   string
+	Kind ResourceKind `json:"kind"`
+	ID   string       `json:"id"`
 }
 
 // ── the assistant ask (design §5, §7; bead nocx-f4s5) ────────────────────

@@ -97,7 +97,7 @@ func TestApprovalStore_Seam(t *testing.T) {
 // the exact binding, and its own attempt closed interrupted. The call that
 // is asking has NOT run: no artifact, no completed attempt.
 func TestAsk_EscalationRecordsTheProposalThread(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAskEveryTime)
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 	writeFile(t, filepath.Join(dir, "a.txt"), "must not be read yet")
 
@@ -170,7 +170,7 @@ func TestAsk_EscalationRecordsTheProposalThread(t *testing.T) {
 // distinguishable from the escalation that preceded it (attempt 1,
 // interrupted). The thread is read back from the real store.
 func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAskEveryTime)
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 	writeFile(t, filepath.Join(dir, "a.txt"), "approved read")
 
@@ -260,7 +260,7 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 // capability — a resume that re-ran the tool would repeat the effect and
 // could produce a different result than the one approved.
 func TestMiddleware_ApprovedEgressResumeSendsRetained(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 	writeFile(t, filepath.Join(dir, "a.txt"), "the key is sk-proj-abcdefghijklmnopqrstuvwx")
 
@@ -300,7 +300,7 @@ func (c *countingCapability) Read(context.Context, string) (string, error) {
 // entry, the retained result sent, the retention dropped. The finding never
 // re-suspends: one question, answered once.
 func TestAsk_ApprovedEgressResumeThread(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 	const secret = "known-secret-value-123"
 	writeFile(t, filepath.Join(dir, "a.txt"), "deploy key: "+secret)

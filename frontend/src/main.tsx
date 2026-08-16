@@ -23,6 +23,7 @@ import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
+import { PolicyClient } from './policy-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -144,6 +145,7 @@ async function main() {
   // wire, a writer re-reads). Constructed with the other clients because
   // the Settings tab's factory below closes over it.
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
+  const policyClient = new PolicyClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -365,6 +367,7 @@ async function main() {
         endpointsClient,
         agentClient,
         snippetsStore,
+        policyClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

@@ -41,6 +41,7 @@ export class SettingsContent extends SolidTabContent {
     private readonly endpointsClient?: EndpointClient,
     private readonly agentClient?: AgentClient,
     private readonly snippetsStore?: SnippetsStore,
+    private readonly policyClient?: import('./policy-client').PolicyClient,
   ) {
     super()
   }
@@ -55,6 +56,7 @@ export class SettingsContent extends SolidTabContent {
           dialogClient: this.dialogClient,
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
+          policyClient: this.policyClient,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
           observer: this.observer,

@@ -325,10 +325,21 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 			return err
 		}
 		if in.Grant != nil {
+			// The policy column holds the decision MATRIX as JSON (ADR-0020
+			// §7 as amended 2026-08-16): the recorded grant's rows are what
+			// the decision was, so "what was this allowed to do" is a query
+			// over the record, never a reconstruction. A grant whose
+			// policy the store cannot reproduce is not recorded — writing
+			// a run whose authority cannot be answered later is the hole
+			// ADR-0020 decision 5 exists to close.
+			policyJSON, err := json.Marshal(in.Grant.Policy)
+			if err != nil {
+				return fmt.Errorf("authority grant policy: %w", err)
+			}
 			g, err := tx.ExecContext(ctx, `INSERT INTO authority_grants
 				(execution_id, version, issued_at, expires_at, policy) VALUES (?, ?, ?, ?, ?)`,
 				id, in.Grant.Version, time.Now().UnixMilli(), in.Grant.ExpiresAt,
-				string(in.Grant.Policy))
+				string(policyJSON))
 			if err != nil {
 				return err
 			}
@@ -663,14 +674,24 @@ func (s *sqliteContent) observationByID(ctx context.Context, id int64) (*Observa
 func (s *sqliteContent) grantFor(ctx context.Context, executionID int64) (*Grant, error) {
 	var g Grant
 	var grantID int64
+	var policyJSON string
 	err := s.db.QueryRowContext(ctx, `SELECT id, version, expires_at, policy
 		FROM authority_grants WHERE execution_id = ?`, executionID).Scan(
-		&grantID, &g.Version, &g.ExpiresAt, &g.Policy)
+		&grantID, &g.Version, &g.ExpiresAt, &policyJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	// A stored policy that no longer parses — an older build's shape, a
+	// hand-edited row — degrades to the zero matrix, which decides ask:
+	// the recorded authority is never re-read as "permitted" because it
+	// cannot be read at all.
+	if parsed, perr := ParseEffectPolicy([]byte(policyJSON)); perr != nil {
+		g.Policy = EffectPolicy{}
+	} else {
+		g.Policy = parsed
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT resource_kind, resource_id FROM grant_scopes WHERE grant_id = ? ORDER BY resource_kind, resource_id`,

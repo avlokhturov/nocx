@@ -213,28 +213,27 @@ func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSp
 
 // runGrantFor mints the default grant of ONE ask run (ADR-0020 decision 5:
 // authority is granted per run, immutable once execution starts). The policy
-// preset is the workspace's, read from the server's field — the composition
-// root's seam, set when the product flips the agent on; the scope is the
-// run's own session and the effect class is observe, the only class this
-// slice's tools need.
+// is the matrix of the amended §7, resolved by content.ResolvePolicy — the
+// ONE place the order is stated: the workspace override when nocx-mp2vd
+// lands, the global default now (the store the composition root wired).
+// The mint adds the run's OWN session as the base scope of every row — a run
+// can touch the lane it lives in, and nothing else unless the policy says
+// so — and the matrix derives the grant's effects and the declaration
+// filter's scope union (EffectPolicy.AsGrant).
 //
 // This is the workspace's default grant: the workspace concept (which
 // sessions read as one story) is not wired yet, so the single-session
 // default is the honest first form, and the workspace bead rehosts the
 // mint. Unset, the run carries no grant — the model is offered no tools,
 // which is the state before readScreen AND the deliberate production state
-// until the egress gate (design §7.1 — every return path is screened) and
-// the approval surface land: naming a policy here is the one-line flip the
-// egress-gate bead makes, and the readScreen over-the-wire tests prove the
-// machinery with the policy named at the harness.
+// until a policy is named: naming one is the one-line flip this seam makes,
+// and the readScreen over-the-wire tests prove the machinery with the
+// policy named at the harness.
 func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
-	if !s.agentGrantPolicySet {
+	if s.agentPolicy == nil {
 		return nil
 	}
-	return &content.Grant{
-		Version: 1,
-		Policy:  s.agentGrantPolicy,
-		Effects: []content.Effect{content.EffectObserve},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}},
-	}
+	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil)
+	g := p.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}})
+	return &g
 }

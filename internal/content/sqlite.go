@@ -363,7 +363,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -629,7 +629,11 @@ CREATE TABLE IF NOT EXISTS authority_grants (
   version      INTEGER NOT NULL,
   issued_at    INTEGER NOT NULL,           -- backend wall clock
   expires_at   INTEGER NOT NULL,           -- expiring: a grant is not a toggle
-  policy       TEXT NOT NULL CHECK (policy IN ('ask-every-time','ask-on-mutate','autonomous')),
+  -- policy is the decision MATRIX as JSON (ADR-0020 §7 as amended
+  -- 2026-08-16); the CHECK replaced the old preset enum, and the column
+  -- stays SQLite's discipline in a weaker form: a grant whose policy is
+  -- not even JSON cannot be recorded.
+  policy       TEXT NOT NULL CHECK (json_valid(policy)),
   payload      TEXT NOT NULL DEFAULT '{}'
 ) STRICT;
 
