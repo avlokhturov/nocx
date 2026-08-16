@@ -8,6 +8,7 @@
 // authority checks (kernel freezeBlock) run at the composition site; these
 // methods paint the attempt's verdict.
 
+import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type GetLineFn } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
@@ -440,9 +441,19 @@ export class ScrollbackController {
    * startLine + 1 because the shell's echo lands on the creation line
    * (nocx-4yhi). It defaults to startLine for shell-originated blocks.
    */
-  beginBlock(command: string, cwd: string, startLine: number, outputStart?: number): void {
+  beginBlock(
+    command: string,
+    cwd: string,
+    startLine: number,
+    outputStart?: number,
+    /** Who submitted the command (design §3.1, nocx-iadtt): the app-owned
+     *  submit passes the minted author; a shell-originated block — the
+     *  shell's own start event, no app-owned submit — is the human's
+     *  shell and defaults to 'shell'. */
+    author: CommandAuthor = 'shell',
+  ): void {
     const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
+    this._blockManager.startBlock(cmd, cwd, startLine, outputStart, author)
     this.setRunning()
   }
 

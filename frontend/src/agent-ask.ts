@@ -96,6 +96,12 @@ interface AskParams {
 export class AgentInputTarget implements InputTarget {
   readonly id = 'agent'
   readonly label = 'Agent'
+  /** The assistant is the author of the questions it asks. A question
+   *  never opens a ledger record (the shell orchestration skips it), but
+   *  the target still declares its author — the same vocabulary a
+   *  command-bearing agent target will submit with (design §3.1,
+   *  nocx-iadtt). */
+  readonly author = 'agent'
   /** A question is not a shell command: the composition root must not run
    *  the shell submit orchestration (keyboard handoff, ledger record,
    *  running block, attempt) for it (nocx-x8s2.2). */

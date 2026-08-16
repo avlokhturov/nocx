@@ -1042,7 +1042,13 @@ export class TerminalContent extends BaseTabContent {
             // running block (the app-owned ordering ADR-0024 §5 keeps).
             if (this.ledger) {
               let markerLine: () => number | undefined = () => undefined
-              const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine())
+              const rec = this.ledger.open(
+                recordLine,
+                submitCwd,
+                this._host,
+                () => markerLine(),
+                active.author,
+              )
               const m = renderer.registerMarker()
               if (m) {
                 markerLine = () => m.line()
@@ -1068,7 +1074,13 @@ export class TerminalContent extends BaseTabContent {
             // carries both.
             if (this.scrollback && this.renderer) {
               const startLine = this.renderer.cursorLine()
-              this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1)
+              this.scrollback.beginBlock(
+                recordLine,
+                submitCwd,
+                startLine,
+                startLine + 1,
+                active.author,
+              )
             }
             const st = this.lifecycle.state
             if (st.kind !== 'prompt_ready') {

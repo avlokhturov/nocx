@@ -126,6 +126,7 @@ func recordParams(overrides map[string]any) map[string]any {
 		"command":   "ls -la",
 		"cwd":       "/srv/api",
 		"host":      "",
+		"author":    "shell",
 		"status":    "success",
 		"exitCode":  0,
 		"startedAt": int64(1_750_000_000_000),
@@ -241,6 +242,58 @@ func TestHistoryRecord_RejectsUnknownStatus(t *testing.T) {
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"status": "crashed"}), 1)
 	if resp.Error == nil || resp.Error.Code != -32602 {
 		t.Fatalf("error = %+v, want -32602", resp.Error)
+	}
+}
+
+// The author is required, and it is the entries.kind vocabulary: 'shell'
+// and 'agent' are the two command-bearing kinds. A request without an
+// author is malformed — the renderer mints it at submit (design §3.1,
+// nocx-iadtt) — and 'action' (the ledger's third kind) can never be a
+// command's author: an action has no block and no command line.
+func TestHistoryRecord_RejectsMissingOrUnknownAuthor(t *testing.T) {
+	ws, stop := newHistoryWSServer(t, newFakeRecordHistoryDB())
+	defer stop()
+	conn := connectWS(t, ws)
+
+	missing := recordParams(nil)
+	delete(missing, "author")
+	resp := vaultCall(t, conn, "history.record", missing, 1)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("missing author: error = %+v, want -32602", resp.Error)
+	}
+
+	for _, author := range []string{"robot", "action", ""} {
+		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"author": author}), 1)
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Fatalf("author %q: error = %+v, want -32602", author, resp.Error)
+		}
+	}
+}
+
+// The ack carries the author the record was accepted under, over the real
+// socket: the renderer minted it at submit, and the ack's echo is how it
+// verifies the backend kept the fact — the two sides never derive the same
+// thing twice (design §3.1, nocx-iadtt).
+func TestHistoryRecord_AckCarriesTheAuthor(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"author": "agent",
+	}), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error: %+v", resp.Error)
+	}
+	var ack struct {
+		Author string `json:"author"`
+	}
+	if err := json.Unmarshal(resp.Result, &ack); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if ack.Author != "agent" {
+		t.Fatalf("ack author = %q, want agent", ack.Author)
 	}
 }
 
@@ -426,13 +479,15 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 		"nothing masked": {
 			MaskedCount:   0,
 			MaskedKinds:   []string{},
+			Author:        "shell",
 			Redactions:    []redactionWire{},
 			Captures:      []captureWire{},
 			MaskedCommand: "echo hi",
 		},
 		"two kinds": {
 			MaskedCount:   2,
-			MaskedKinds:   []string{"openai", "jwt"},
+			MaskedKinds:   []string{"openai"},
+			Author:        "agent",
 			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
 			Redactions: []redactionWire{
 				{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
@@ -443,6 +498,7 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 			MaskedCount:   1,
 			MaskedKinds:   []string{"openai"},
 			EntryID:       "7",
+			Author:        "shell",
 			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
 			Redactions:    []redactionWire{{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"}},
 			Captures: []captureWire{{
@@ -477,6 +533,7 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
 		"command": `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api`,
+		"author":  "agent",
 	}), 1)
 	if resp.Error != nil {
 		t.Fatalf("record error: %+v", resp.Error)
@@ -484,6 +541,7 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, resp.Result, "history.record result (real socket)")
 
 	var got struct {
+		Author        string   `json:"author"`
 		MaskedCount   int      `json:"maskedCount"`
 		MaskedKinds   []string `json:"maskedKinds"`
 		MaskedCommand string   `json:"maskedCommand"`
@@ -497,6 +555,9 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.MaskedCount != 1 || len(got.MaskedKinds) != 1 || got.MaskedKinds[0] != "openai" {
 		t.Errorf("ack facts = %d %v, want 1 [openai]", got.MaskedCount, got.MaskedKinds)
+	}
+	if got.Author != "agent" {
+		t.Errorf("ack author = %q, want agent — the minted fact rides the wire both ways", got.Author)
 	}
 	if got.MaskedCommand != `curl -H "Authorization: Bearer sk-p...7890" https://api` {
 		t.Errorf("maskedCommand = %q, want the masked command the row keeps", got.MaskedCommand)

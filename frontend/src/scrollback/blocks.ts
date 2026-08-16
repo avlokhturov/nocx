@@ -14,6 +14,7 @@ import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 import type { ExecutionAttempt } from '../lifecycle/state'
+import type { CommandAuthor } from '../command-ledger'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 function clipboardFallback(text: string): void {
@@ -161,6 +162,12 @@ export interface BlockRecord {
   id: number
   command: string
   cwd: string
+  /** Who submitted the command — the minted author from the submitting
+   *  target (design §3.1, nocx-iadtt), defaulting to the human's shell
+   *  for a shell-originated block. The header renders the mark from this;
+   *  the freeze path reuses it, so the mark survives the running → frozen
+   *  replacement. */
+  author: CommandAuthor
   /** Duration in ms: C marker to D marker. */
   durationMs: number | null
   exitCode: number | null
@@ -306,12 +313,27 @@ function createHeader(
   exitCode: number | null,
   status: 'running' | 'success' | 'failure' | 'entered' | 'unknown' | 'waiting',
   store: CommandSnapshotStore,
+  author: CommandAuthor = 'shell',
 ): HTMLElement {
   const header = div('cmd-header')
   const rules = blockKindRules(kind)
 
   // ── Chips row (above command text): cwd left, duration+exit right ──
   const chipsRow = div('cmd-header-chips')
+
+  // Who ran it, when it was not the human (design §3.1, nocx-iadtt): the
+  // kit's badge in its info tone — the same "informational provenance"
+  // register the secret chip speaks. A human's block carries no mark at
+  // all; only a non-human author is worth saying out loud. Never a
+  // hand-rolled chip: this is the kit's badge, placed like any other chip.
+  if (author !== 'shell') {
+    const mark = document.createElement('span')
+    mark.className = 'ui-badge'
+    mark.dataset.tone = 'info'
+    mark.dataset.author = author
+    mark.textContent = author
+    chipsRow.appendChild(mark)
+  }
 
   // Where the command ran, when it is somewhere other than this machine. Warp
   // puts `user@host` at the head of every block header and it is the attribute
@@ -724,6 +746,7 @@ export function createCommandBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
+  author: CommandAuthor = 'shell',
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -745,7 +768,17 @@ export function createCommandBlock(
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(kind, command, cwd, location, durationMs, exitCode, status, store)
+  const header = createHeader(
+    kind,
+    command,
+    cwd,
+    location,
+    durationMs,
+    exitCode,
+    status,
+    store,
+    author,
+  )
 
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
@@ -810,6 +843,7 @@ export function createRunningBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
+  author: CommandAuthor = 'shell',
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block cmd-block-running'
@@ -819,7 +853,17 @@ export function createRunningBlock(
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader('command', command, cwd, location, null, null, 'running', store)
+  const header = createHeader(
+    'command',
+    command,
+    cwd,
+    location,
+    null,
+    null,
+    'running',
+    store,
+    author,
+  )
 
   // Overflow menu — minimal: copy command only while running.
   // Always the LAST element of header-right (owner directive).
@@ -855,6 +899,7 @@ export function freezeBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   status: 'success' | 'failure' | 'entered' | 'unknown',
+  author: CommandAuthor = 'shell',
 ): HTMLElement {
   const newEl = createCommandBlock(
     'command',
@@ -869,6 +914,7 @@ export function freezeBlock(
     getContainer,
     onSelect,
     store,
+    author,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -1108,6 +1154,10 @@ export class BlockManager {
     cwd: string,
     startLine: number,
     outputStart = startLine,
+    /** Who submitted the command (design §3.1, nocx-iadtt): the app-owned
+     *  submit passes the minted author; a shell-originated block is the
+     *  human's shell and defaults to 'shell'. */
+    author: CommandAuthor = 'shell',
   ): BlockRecord {
     if (this._runningBlock) {
       this._finalizeRunningUnsafe()
@@ -1127,6 +1177,7 @@ export class BlockManager {
         else this._onBlockDeselected(bid)
       },
       this._snapshotStore,
+      author,
     )
     this._scrollbackInner.insertBefore(el, this._xtermContainer)
 
@@ -1134,6 +1185,7 @@ export class BlockManager {
       id,
       command,
       cwd,
+      author,
       durationMs: null,
       exitCode: null,
       status: 'running',
@@ -1253,6 +1305,7 @@ export class BlockManager {
       },
       this._snapshotStore,
       status,
+      rec.author,
     )
 
     rec.el = newEl
