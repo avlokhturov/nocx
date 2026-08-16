@@ -30,6 +30,35 @@
 GO_IMAGE="golang:1.26-bookworm"
 NODE_IMAGE="node:22-bookworm-slim"
 
+# A RELATIVE CPU WEIGHT, DELIBERATELY NOT A CEILING. This hook fires on every
+# commit while the developer goes on using the machine, and uncapped it took
+# three of six cores: sampled on the owner's box (6 cores, 11.7 GiB) across one
+# hook run, the container at 290/302/283/108/4 % CPU, desktop unusable.
+# (Memory was never the constraint in that measurement — the host never dropped
+# below 4.5 GiB free, peak container RSS 1.53 GiB — so there is no --memory
+# here either.)
+#
+# NOT --cpus. A hard cap is the thing scripts/ci-linux.sh and
+# e2e/run-in-container.sh removed on purpose: it "does not produce the runner,
+# it produces a third machine", and it kept timing-dependent tests alive by
+# reproducing the conditions they depended on. --cpu-shares has neither
+# property. It is a weight in the scheduler, consulted only when two cgroups
+# both want the same core: with nothing else runnable the container still gets
+# every core, so an idle-machine commit has exactly today's timing profile, and
+# no test can pass or fail because of this line unless something else was
+# competing — in which case it was already nondeterministic.
+#
+# The value, against Docker's documented default weight of 1024: 512 is half of
+# it. What that buys under contention depends on the cgroup version, and both
+# directions are toward the desktop. On cgroup v2 (what Docker/OrbStack run
+# today) runc converts shares to cpu.weight as 1+(shares-2)*9999/262142, so 512
+# becomes weight 20 against the weight 100 an unconstrained cgroup carries —
+# 20/120, about a sixth of contested time, i.e. ~1 of 6 cores for the hook and
+# ~5 for the desktop, where it used to be 3 and 3. On cgroup v1 the ratio is
+# read literally, 512/(512+1024) = a third. Neither number applies when the
+# machine is idle, which is the common case and is unchanged.
+CPU_SHARES=512
+
 # The Go test runner uses a derived image (GO_TEST_IMAGE) built from
 # .githooks/images/go-tests/Dockerfile — the stock golang image carries bash
 # and dash but NOT zsh, and the shellintegration launcher tests fail, not
@@ -83,7 +112,9 @@ go_test_containerized() {
     # Build before every run: the layer cache makes a warm build ~0.3s
     # (measured 2026-08-04) and keeps the Dockerfile the source of truth.
     docker build -q -t "$GO_TEST_IMAGE" "$GO_TEST_IMAGE_DIR" >/dev/null || return 1
-    docker run --rm \
+    # --cpu-shares is a weight, not a cap; see CPU_SHARES above. Quoted, so it
+    # is always exactly one word — nothing here can word-split it away.
+    docker run --rm --cpu-shares="$CPU_SHARES" \
         -v "$PWD:/src:ro" \
         -v "$GOMOD_VOL:/cache/gomod" \
         -v "$GOBUILD_VOL:/cache/gobuild" \
@@ -120,7 +151,8 @@ vitest_containerized() {
         npm ci --prefer-offline --no-audit --no-fund
         npm test
     '
-    docker run --rm \
+    # Weight, not a cap — see CPU_SHARES above.
+    docker run --rm --cpu-shares="$CPU_SHARES" \
         -v "$PWD/frontend:/src:ro" \
         -v "$FE_VOL:/work" \
         -v "$NPM_VOL:/npm" \
