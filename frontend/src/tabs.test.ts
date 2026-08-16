@@ -12,11 +12,12 @@ import {
   FIXTURE_DIRECTORY_LABEL,
   type RendererMock,
 } from './test-support/tabs-fixtures'
-import { TabManager } from './tabs'
+import { Tab, TabManager } from './tabs'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
 import {
   BaseTabContent,
+  SURFACE_TERMINAL,
   type ContentDescriptor,
   type TabHost,
   type ContentViewport,
@@ -1739,5 +1740,55 @@ describe('TabManager', () => {
     expect(tabs[0].getAttribute('data-tab-id')).toBe('2')
     expect(tabs[1].getAttribute('data-tab-id')).toBe('1')
     expect(tabs[2].getAttribute('data-tab-id')).toBe('3')
+  })
+})
+
+// ── Agent status keys on the program title, never the composed title ────
+//
+// nocx-n8n82: Tab._programTitle held the COMPOSED title (program || cwd),
+// and the agent-state classifier was fed that same value — a string that
+// is usually a filesystem path. The program's own OSC 0/2 title now
+// arrives separately (updateProgramTitle) and is the classifier's only
+// input, so a path or command line can never masquerade as agent state.
+describe('Tab agent-status channel (nocx-n8n82)', () => {
+  function bareTab(): Tab {
+    const content = new CountingTestContent()
+    return new Tab(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      1,
+    )
+  }
+
+  it('classifies the program title, never the composed display title', () => {
+    const tab = bareTab()
+
+    // The composed title is usually a path or a command line. A directory
+    // named with a braille glyph must not light the tab as a working
+    // agent — the classifier parses the program's own title, not the
+    // tab label. (Feeding the composed title here is exactly the defect
+    // this bead removes: setTitle no longer touches agent status.)
+    tab.setTitle('/Users/⣿shady')
+    expect(tab.title).toBe('/Users/⣿shady')
+    expect(tab.agentStatus).toBeNull()
+
+    // The program's own OSC 0/2 title is the agent-state input.
+    tab.updateProgramTitle('⣿ working')
+    expect(tab.agentStatus).toBe('working')
+
+    // Claude Code's idle marker is the other classified state.
+    tab.updateProgramTitle('✳ waiting for input')
+    expect(tab.agentStatus).toBe('idle')
+
+    // A TUI clearing its title on the way out (OSC 0/2 with an empty
+    // string) reaches this channel too and resets the status.
+    tab.updateProgramTitle('')
+    expect(tab.agentStatus).toBeNull()
   })
 })

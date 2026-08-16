@@ -61,7 +61,7 @@ import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboar
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
-import { CommandLedger } from './command-ledger'
+import { CommandLedger, type CommandRecord } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
@@ -192,6 +192,13 @@ export interface TerminalContentHooks {
    *  when the title already says it. Only TerminalContent holds both halves
    *  of that question. */
   onSubtitleChange?: (subtitle: string) => void
+  /** The program's own OSC 0/2 title, delivered separately from the
+   *  composed display title. Agent-state classification keys on THIS,
+   *  never on the composed title — which is usually a filesystem path or
+   *  a command line (tabs.ts: the classifier must parse the program's
+   *  title, not the tab label). Only TerminalContent knows the two
+   *  apart, so it pushes the program title on its own hook. */
+  onProgramTitleChange?: (programTitle: string) => void
   /** The session is an alias (not a saved profile) and can be adopted as a
    *  nocx connection. True = adoptable, false = not. */
   onAdoptabilityChange?: (adoptable: boolean) => void
@@ -375,6 +382,11 @@ export class TerminalContent extends BaseTabContent {
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
+  /** Re-pushes the composed title after the projections have reconciled
+   *  the ledger from a kernel change (a completion ends the running
+   *  command; the ledger must already reflect it). Registered AFTER the
+   *  projections' own subscriber so it always sees the reconciled state. */
+  private _titleReconcileUnsub: (() => void) | null = null
   /** The pending restoration episode (ADR-0024 decision 8): the fence the
    *  shell must write to the pty and the generation to acknowledge, captured
    *  from the lost fact. Non-null from the moment the channel is declared
@@ -488,10 +500,17 @@ export class TerminalContent extends BaseTabContent {
   private _degradedLabel = ''
 
   // ── Title composition ────────────────────────────────────────────────
-  // Title = programTitle || cwdTitle (no placeholder — nocx-83a)
-  // Computed here so the host receives the final string.
+  // Title = programTitle || runningCommandTitle || cwdTitle (no
+  // placeholder — nocx-83a). Computed here so the host receives the
+  // final string. The running command is the LEDGER's current running
+  // record — the app-owned submit (ADR-0024 §5) completed by the
+  // authenticated attempt; no new stream source is invented for it.
   private programTitle = ''
   private cwdTitle = ''
+  /** The ledger record whose program cleared its title on the way out
+   *  (an OSC 0/2 with an EMPTY string, tabs.ts): the running-command
+   *  source must not resurrect a name the program just cleared. */
+  private _clearedCommandId: number | null = null
 
   // Grid dimensions computed by the renderer from the last authoritative
   // viewport. Owned here so PTY resize policy lives with the content.
@@ -621,15 +640,42 @@ export class TerminalContent extends BaseTabContent {
     if (this.session === null || this._sessionExited) return null
     return { cwd: this._cwd, host: this._host, user: this._user }
   }
-  /** Push the composed title to the host: program title, else the cwd label. */
+  /** Push the composed title to the host: program title, else the name
+   *  of the running command, else the cwd label. */
   private pushTitle(): void {
     if (!this.host) return
-    const title = this.programTitle || this.cwdTitle
+    const commandTitle = this.runningCommandTitle()
+    const title = this.programTitle || commandTitle || this.cwdTitle
     this.host.setTitle(title)
-    // The location line earns a row only when the title is a name of its own.
-    // With no program title the title IS the location, and a second line would
-    // print the first one again.
-    this.hooks.onSubtitleChange?.(this.programTitle ? this.locationLine() : '')
+    // The location line earns a row only when the title is a name of its
+    // own. With no program title the title IS the location, and a second
+    // line would print the first one again. A running-command title is a
+    // name of its own too — the command runs in a place, so the location
+    // line is the missing half, not a duplicate — and the strip shows it
+    // the same way it shows a program title.
+    this.hooks.onSubtitleChange?.(this.programTitle || commandTitle ? this.locationLine() : '')
+    // Agent-state classification keys on the program's own title, never
+    // on the composed one: tabs.ts feeds this into detectAgentStatus.
+    this.hooks.onProgramTitleChange?.(this.programTitle)
+  }
+
+  /** The name of the currently running command, or '' when none: the
+   *  latest ledger record still in flight — unless its program cleared
+   *  its own title, in which case the cleared name stays gone. */
+  private runningCommandTitle(): string {
+    const rec = this.latestRunningRecord()
+    if (rec === null || rec.id === this._clearedCommandId) return ''
+    return rec.command.trim()
+  }
+
+  /** The most recent ledger record still running, or null when none. */
+  private latestRunningRecord(): CommandRecord | null {
+    const records = this.ledger?.records()
+    if (!records || records.length === 0) return null
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (records[i].status === 'running') return records[i]
+    }
+    return null
   }
 
   /** Where this tab is, following the ACTIVE domain (bead nocx-u7uh.11):
@@ -1115,6 +1161,10 @@ export class TerminalContent extends BaseTabContent {
                 })
               }
             }
+            // The submitted line is now the running command: recompose
+            // the title immediately. The running fact arrives later over
+            // the wire, and a conventional shell may never send one.
+            this.pushTitle()
             this.scrollback?.maybeClear(recordLine)
             // The running block opens at the app-owned submit — before any
             // bytes and before any fact can arrive — so the published
@@ -1597,6 +1647,13 @@ export class TerminalContent extends BaseTabContent {
       )
       this._projections.attach()
 
+      // The running command names the tab, and the projections reconcile
+      // the ledger from the kernel: a completion (or any attempt
+      // transition) recomposes the title AFTER the ledger has been
+      // re-read — subscriber order is the mechanism, this listener is
+      // registered after the projections' own.
+      this._titleReconcileUnsub = this.lifecycle.onChange(() => this.pushTitle())
+
       // The kernel starts Native and onChange may not fire for the initial
       // state: present the session with the terminal visible from the first
       // byte, and the editor hidden (a conventional terminal, no ownership).
@@ -2010,7 +2067,17 @@ export class TerminalContent extends BaseTabContent {
         // has no writer identity; the domain that was active when the bytes
         // arrived is the only honest attribution) and the projection's
         // change callback re-composes the tab title.
-        this.env?.recordTitle(title.trim())
+        const t = title.trim()
+        // A TUI clears its title on the way out by emitting OSC 0/2 with
+        // an EMPTY string (tabs.ts). xterm fires onTitle only on a CHANGE,
+        // so an empty delivery is exactly such a clear: remember the
+        // record that was running when it arrived, and the
+        // running-command title source will not resurrect the name the
+        // program just cleared.
+        if (t === '') {
+          this._clearedCommandId = this.latestRunningRecord()?.id ?? null
+        }
+        this.env?.recordTitle(t)
       })
       renderer.onCwd(({ path }) => {
         // An OSC 7 report is the shell's verified claim of where it is:
@@ -2857,6 +2924,8 @@ export class TerminalContent extends BaseTabContent {
     this._lifecycleChangeUnsub?.()
     this._lifecycleChangeUnsub = null
     this._projections?.detach()
+    this._titleReconcileUnsub?.()
+    this._titleReconcileUnsub = null
     this._projections = null
     this.env?.detach()
     this.env = null
