@@ -66,16 +66,14 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// race and the test sometimes interrupts an empty prompt instead — a
 	// weaker case than the one under test.
 	waitForOutput(t, s, "echo abandoned", 10*time.Second)
-	if _, err := s.ptmx.Write([]byte("\x03")); err != nil {
-		t.Fatalf("write interrupt: %v", err)
-	}
 
-	// The interrupt must produce a fresh prompt: the shell is alive and back
-	// at readline. Anchoring on that (rather than on a sleep) is also what
-	// makes the assertions below non-vacuous — they run only once the
-	// interrupt's whole prompt cycle has been observed on both sides.
-	waitForCount(t, func() int { return strings.Count(s.output(), "\x1b]133;A") },
-		promptsBefore+1, "OSC 133 A after the interrupt", s, 15*time.Second)
+	// The interrupt, and then the fresh prompt it must leave behind: the
+	// shell is alive and back at readline. Anchoring on that (rather than on
+	// a sleep) is what makes the assertions below non-vacuous — they run
+	// only once the interrupt's whole prompt cycle has been observed on both
+	// sides. Why the helper re-sends rather than waits longer is its own
+	// comment, and it is the whole of nocx-yjen.
+	interruptUntilPrompt(t, s, promptsBefore)
 	waitForCount(t, func() int { return s.kernel.count("prompt_ready") },
 		promptReadyBefore+1, "prompt_ready after the interrupt", s, 15*time.Second)
 
@@ -100,6 +98,73 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	}
 	if !strings.Contains(s.output(), "AFTERMARK") {
 		t.Errorf("the command after the interrupt never ran; output: %q", s.output())
+	}
+}
+
+// interruptUntilPrompt writes the interrupt the frontend writes — \x03 into
+// the pty, terminal-content.ts's `cancel` — and returns when the shell has
+// come back to a prompt, re-sending it if the shell did not take the first
+// one. Bounded by the same 15 seconds the single wait used; nothing here is
+// a longer deadline.
+//
+// WHY IT IS A LOOP, which is the whole of nocx-yjen. A ^C at a bash prompt
+// does not always reach the command loop. Roughly one run in a hundred, with
+// the test container starved to a single CPU, the wire shows the interrupt
+// being handled and then abandoned:
+//
+//	^C \e[?2004l \r \e[?2004h        and nothing, ever again
+//
+// which is readline echoing the signal character, running its signal
+// cleanup, and re-prepping the terminal — with bash's abort never following.
+// No newline, no PROMPT_COMMAND, no A marker. /proc says the shell is back
+// in pselect; the pty's Lflag is readline's own 0x8a31 the whole time; the
+// line is still in readline's buffer (a later Enter runs it, minus its first
+// character). The shell is not slow, it is waiting for another key — and the
+// 15-second timeout the bead recorded was reporting exactly that.
+//
+// It is NOT nocx's, and that is why this is a test change and not a script
+// change. Measured in the same container with the same byte pattern against
+// a PLAIN interactive bash carrying no integration at all — no hooks, no
+// PROMPT_COMMAND, no DEBUG trap: same absorbed interrupt, same missing
+// prompt, same eaten first character, once in 120 rounds. Adding an
+// observable that proves readline is idle before the interrupt does not help
+// either: driving readline to a clear-screen redraw first (so the read-ahead
+// is provably drained and the terminal provably readline's) still hung three
+// times in 600 rounds. So there is nothing for the shell scripts to report
+// and nothing for them to fix.
+//
+// What this test owns is the other half: whatever bash does with the
+// interrupt, nocx must not announce a command for it. The assertions below
+// count deltas from before the FIRST interrupt, so N interrupts are as
+// strong a case as one — none of them may emit a C marker or a start frame.
+// A slow machine simply sends the interrupt again and still passes, which is
+// the property a duration-based wait could never have.
+func interruptUntilPrompt(t *testing.T, s *channelShell, promptsBefore int) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := s.ptmx.Write([]byte("\x03")); err != nil {
+			t.Fatalf("write interrupt: %v", err)
+		}
+		// Long enough that a prompt cycle on a starved machine is not
+		// mistaken for an absorbed interrupt; short enough that the bound
+		// above allows several tries. Neither end is a correctness
+		// parameter — a retry costs nothing and the exit is observable.
+		retry := time.Now().Add(3 * time.Second)
+		for time.Now().Before(retry) {
+			if strings.Count(s.output(), "\x1b]133;A") > promptsBefore {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("no prompt after repeated interrupts (OSC 133 A still %d); accepted=%v output=%q",
+					strings.Count(s.output(), "\x1b]133;A"), s.kernel.events(), s.output())
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		// Logged rather than silent: when this line appears in a run, the
+		// shell absorbed an interrupt, and that is worth seeing rather than
+		// smoothing away.
+		t.Logf("the shell took no prompt from the interrupt; sending it again")
 	}
 }
 

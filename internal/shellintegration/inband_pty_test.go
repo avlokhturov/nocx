@@ -146,6 +146,11 @@ func (s *ptySession) pump() {
 	for {
 		n, err := s.ptmx.Read(buf)
 		if n > 0 {
+			// The same fault-injection window channelShell.readPump opens;
+			// see ptyPumpLag for what it is for.
+			if ptyPumpLag > 0 {
+				time.Sleep(ptyPumpLag)
+			}
 			s.mu.Lock()
 			s.buf.Write(buf[:n])
 			s.mu.Unlock()
@@ -227,17 +232,72 @@ func (s *ptySession) assertEchoOff(ts unix.Termios) {
 	}
 }
 
-// assertEchoOn fails if ECHO is not set in the given termios. Anchored at the
-// integration hello (OSC 636 ; H): the sourced hooks emit it INSIDE the
-// wrapper, AFTER the `stty "$saved"` restore and before any user code or
-// readline re-prep runs. ECHO on there is the "the user can see themselves
-// typing" proof — the restore completed before the hooks ran. (At the prompt
-// itself readline legitimately runs with tty ECHO off and echoes itself, so
-// the prompt is not the right sampling point.)
+// assertEchoOn fails if ECHO is not set in the given termios. Its argument
+// comes from deliverPayloadHeldAtRestore, which HOLDS the shell at the first
+// instruction after the wrapper's `stty "$saved"` — so ECHO on there is the
+// "the user can see themselves typing" proof, taken at the moment fence 2
+// (inband.go) is about, before any of the payload has run. (At the prompt
+// itself readline/zle legitimately runs with tty ECHO off and echoes itself,
+// so the prompt is never a place to read this.)
 func (s *ptySession) assertEchoOn(ts unix.Termios) {
 	s.t.Helper()
 	if ts.Lflag&unix.ECHO == 0 {
 		s.t.Errorf("ECHO not restored before the hooks ran: Lflag %#x", ts.Lflag)
+	}
+}
+
+// restoreParkName names the private OSC the park probe writes and the Go
+// side waits for. One constant, two spellings: the shell writes it with
+// printf's octal escape (the wrapper's own idiom for an OSC — see
+// inBandReadyOSC), the test matches the bytes.
+const restoreParkName = "NOCX_TEST_AT_RESTORE"
+
+const restoreParkMarker = "\x1b]1337;" + restoreParkName + "\a"
+
+// deliverPayloadHeldAtRestore streams the payload and returns the pty's
+// termios read while the shell is HELD at the first instruction that runs
+// after the wrapper's `stty "$saved"`, together with the release the caller
+// must invoke to let the integration continue.
+//
+// WHY A HOLD AND NOT A SAMPLE. "the restore completed before the hooks ran"
+// is a claim about ORDER, and the state that evidences it is transient: the
+// wrapper restores the terminal, the hooks are sourced, and a moment later
+// zle (or readline) takes the terminal back and legitimately clears ECHO
+// again. A test that waits for a marker on the pty and only then reads
+// termios is racing the shell's forward progress from a poll loop, and it
+// loses that race under contention — reproduced 1 run in 5 with
+// `docker run --cpus=0.5`, reporting zsh's zle mode, Lflag 0x8a31, which is
+// the state AFTER the window it meant to look at (nocx-j41jx). No timeout
+// fixes that: a later read is a worse read, not a better one.
+//
+// So the probe removes the transience instead of chasing it. It is streamed
+// AHEAD of the product payload, which lands it at the top of the file the
+// wrapper sources — after `stty "$saved"` and before the dispatcher, the
+// exact instant fence 2 in inband.go names ("restores the EXACT prior
+// termios before any user code runs"). It announces itself and then parks on
+// a file that only this test creates, so from the marker until the release
+// the shell executes nothing at all: the termios below is held, not caught.
+// Everything else about the delivery is the product's own bytes — the probe
+// sits outside every START/END extraction range and ahead of the capability
+// probe's 64-hex shape, so neither the staged sections nor the completion
+// marker change.
+func (s *ptySession) deliverPayloadHeldAtRestore(p InBandPlan) (unix.Termios, func()) {
+	s.t.Helper()
+	release := filepath.Join(s.t.TempDir(), "release")
+	// Released from a cleanup as well as by the caller: a test that fails
+	// between the two must not leave a shell spinning on a file that will
+	// never appear. Registered after t.TempDir()'s own cleanup, so it runs
+	// before the directory is removed.
+	s.t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) })
+	// POSIX sh: the probe runs in whichever shell is under test.
+	probe := "printf '\\033]1337;" + restoreParkName + "\\a'\n" +
+		"while [ ! -e " + ShellQuote(release) + " ]; do sleep 0.02; done\n"
+	s.typeAndWait(probe+p.Payload+p.Terminator+"\n", restoreParkMarker, 15*time.Second)
+	return s.termios(), func() {
+		s.t.Helper()
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			s.t.Fatalf("release the held shell: %v", err)
+		}
 	}
 }
 
@@ -323,10 +383,14 @@ func TestInBandBootstrap_RealBashIntegratesAndRestores(t *testing.T) {
 	// READY arrives only after `stty raw -echo`: the window is provably
 	// silent before any payload byte goes out.
 	s.assertEchoOff(s.termios())
-	s.typeAndWait(p.Payload+p.Terminator+"\n", "\x1b]636;H;", 15*time.Second)
-	// The 636 hello is emitted INSIDE the wrapper, after the exact restore
-	// and before any user code or readline re-prep runs: echo is back on.
-	s.assertEchoOn(s.termios())
+	// The restore is read with the shell HELD at the first instruction the
+	// wrapper sources — the fence's own moment, not a moment near it.
+	atRestore, release := s.deliverPayloadHeldAtRestore(p)
+	s.assertEchoOn(atRestore)
+	release()
+	// And the hooks then integrate for real: the 636 hello is emitted from
+	// inside the wrapper, after the restore.
+	s.waitFor("\x1b]636;H;", 15*time.Second)
 	s.waitFor("\x1b]133;A", 15*time.Second)
 	// The A marker fires from PROMPT_COMMAND BEFORE readline re-enters its
 	// own termios mode; an immediate capture would race the mode change and
@@ -461,16 +525,16 @@ func TestInBandBootstrap_RealZshIntegratesAndRestores(t *testing.T) {
 	p := plan(t, "0123456789abcdef0123456789abcdef")
 	s.typeAndWait(p.Wrapper+"\r", "\x1b]1337;NOCX_IB_READY\x07", 15*time.Second)
 	s.assertEchoOff(s.termios())
-	s.typeAndWait(p.Payload+p.Terminator+"\n", "\x1b]636;H;", 15*time.Second)
-	// The zsh tier now has the same source-time emission the bash tier has
-	// (nocx-qduc), so it gets the same anchor: the 636 hello is written
-	// INSIDE the wrapper, after the exact `stty "$saved"` restore and before
-	// any user code or zle re-prep runs, so ECHO is back on there. Until the
-	// snapshot landed, this test could only wait for the A marker — which
-	// fires from precmd AFTER zle has taken the terminal (measured: Lflag
-	// 0x8a31, zle's editing mode, ECHO off by design) — and so could assert
-	// nothing about the restore beyond the bit-exact before==after below.
-	s.assertEchoOn(s.termios())
+	// Read with the shell held at the restore. zsh is the tier that made the
+	// point: everything after the wrapper is zle's, and zle's editing mode
+	// clears ECHO by design (Lflag 0x8a31), so any read that arrives a
+	// moment late reports zle's terminal and calls it a broken restore.
+	atRestore, release := s.deliverPayloadHeldAtRestore(p)
+	s.assertEchoOn(atRestore)
+	release()
+	// The zsh tier has the bash tier's source-time emission (nocx-qduc), so
+	// the hello is the proof the hooks integrated after the restore.
+	s.waitFor("\x1b]636;H;", 15*time.Second)
 	s.waitFor("\x1b]133;A", 15*time.Second)
 	s.settleUntilReadline(before, 5*time.Second)
 	after := s.termios()
@@ -494,10 +558,14 @@ func TestInBandBootstrap_RealDashIntegratesAndRestores(t *testing.T) {
 	p := plan(t, "0123456789abcdef0123456789abcdef")
 	s.typeAndWait(p.Wrapper+"\r", "\x1b]1337;NOCX_IB_READY\x07", 15*time.Second)
 	s.assertEchoOff(s.termios())
-	s.typeAndWait(p.Payload+p.Terminator+"\n", "\x1b]133;A", 15*time.Second)
-	// dash does no termios gymnastics of its own; the A marker arrives from
-	// PS1 expansion with the wrapper's restored state in effect — echo on.
-	s.assertEchoOn(s.termios())
+	// dash does no termios gymnastics of its own, but the read is held at
+	// the restore all the same: the assertion is about the wrapper's fence,
+	// and it should not depend on which shell happens to leave the terminal
+	// alone for longest afterwards.
+	atRestore, release := s.deliverPayloadHeldAtRestore(p)
+	s.assertEchoOn(atRestore)
+	release()
+	s.waitFor("\x1b]133;A", 15*time.Second)
 	s.settleUntilReadline(before, 5*time.Second)
 	after := s.termios()
 	if before != after {

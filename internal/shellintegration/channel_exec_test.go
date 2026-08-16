@@ -379,11 +379,39 @@ func startChannelShellCfg(t *testing.T, shell, scriptName, script string, k *fak
 	return s
 }
 
+// ptyPumpLag delays every pty pump in this package between the read that
+// takes bytes out of the kernel and the append that makes them visible to an
+// assertion — the exact window a descheduled pump occupies on a loaded
+// machine. Off by default; set NOCX_TEST_PTY_PUMP_LAG_MS to open it.
+//
+// It exists because this package's fragile assertions are fragile ONE AT A
+// TIME: they read the pty after synchronising on the lifecycle channel, which
+// is a different transport, and whichever one the scheduler catches is the
+// one that goes red. Two of them cost three red gates before anybody could
+// name the class (nocx-yjen, nocx-j41jx). With the knob open the whole class
+// fails deterministically in a single run on an idle machine, so a fix can be
+// verified against a failure instead of against silence:
+//
+//	NOCX_TEST_PTY_PUMP_LAG_MS=150 go test -race ./internal/shellintegration/
+//
+// A test that passes with this open does not depend on the pump being
+// prompt. That is the property, and it is cheap to re-check.
+var ptyPumpLag = func() time.Duration {
+	ms, err := strconv.Atoi(os.Getenv("NOCX_TEST_PTY_PUMP_LAG_MS"))
+	if err != nil || ms <= 0 {
+		return 0
+	}
+	return time.Duration(ms) * time.Millisecond
+}()
+
 func (s *channelShell) readPump() {
 	buf := make([]byte, 8192)
 	for {
 		n, err := s.ptmx.Read(buf)
 		if n > 0 {
+			if ptyPumpLag > 0 {
+				time.Sleep(ptyPumpLag)
+			}
 			s.mu.Lock()
 			s.out = append(s.out, buf[:n]...)
 			s.mu.Unlock()
@@ -415,7 +443,39 @@ func (s *channelShell) waitForHandshake() {
 	s.t.Fatalf("handshake never completed; accepted=%v output=%q", s.kernel.events(), s.output())
 }
 
-// run types one command line and waits for its completion to be accepted.
+// run types one command line and returns when the command is finished on
+// BOTH transports: its completion accepted on the lifecycle channel, and its
+// whole render arrived on the pty.
+//
+// THE SECOND HALF IS THE POINT, and it is why this helper exists rather than
+// a bare write. A channelShell carries two independent transports — a TCP
+// socket to the fake kernel, and the pty — and a shell writes to both. Every
+// wait this type used to offer was a wait on the SOCKET: waitForAccepted,
+// waitForPromptAfterComplete, waitForHandshake, and the fake kernel's own
+// flags. A test that waited on one of those and then read s.output() was
+// reading a buffer fed by the other transport, with no wait on it at all —
+// not a short deadline, no deadline: a plain read of whatever the pump
+// goroutine happened to have appended by then.
+//
+// That is one defect with twenty faces. It surfaced as a missing fence
+// (nocx-yjen's neighbour), a missing "STILLBORN-SUDO-RAN", a missing
+// AFTERMARK — whichever assertion the scheduler caught that run — and each
+// looked like its own bug. Set NOCX_TEST_PTY_PUMP_LAG_MS (see ptyPumpLag)
+// and the whole class fails together, on an idle machine, every time.
+//
+// The anchor is the RENDER FENCE — 32 random bytes the shell mints for this
+// command and writes to the pty AFTER the command's output, which is the
+// rendezvous the protocol defines for exactly this question (doc §8, the
+// decision 1 carve-out). Its arrival means every byte this command rendered
+// is in the buffer, and because the fence is unique per command it needs no
+// baseline count to be read against.
+//
+// A count of prompt markers was tried first and is wrong for a reason worth
+// keeping: `promptsBefore := Count(output, A)` taken before the write reads
+// the SAME lagging buffer, so under lag it misses the current prompt's own
+// marker, and that marker then arrives and satisfies "one more than before"
+// while the command has not started. A baseline sampled through the race
+// cannot anchor the race.
 func (s *channelShell) run(cmdline string) {
 	s.t.Helper()
 	if _, err := s.ptmx.Write([]byte(cmdline + "\n")); err != nil {
@@ -428,6 +488,43 @@ func (s *channelShell) run(cmdline string) {
 	// require. On a fast host it usually arrived anyway; in the test container
 	// it did not, and the test failed for a race rather than for a defect.
 	s.waitForPromptAfterComplete()
+	// The pty half, per the note above.
+	s.waitForRenderedThroughPrompt()
+}
+
+// waitForRenderedThroughPrompt blocks until the pty carries the render fence
+// of the LAST accepted complete, and then a prompt marker after it — the
+// command's whole render, and the prompt that follows it.
+//
+// The fence pins a POSITION in the buffer, which is what lets the prompt
+// marker be found without counting: "an A after this fence" is unambiguous
+// where "one more A than before" is not.
+func (s *channelShell) waitForRenderedThroughPrompt() {
+	s.t.Helper()
+	var fence string
+	for _, e := range s.kernel.events() {
+		if e.Evt == "complete" {
+			if f, ok := e.Body["fence"].(string); ok && f != "" {
+				fence = f
+			}
+		}
+	}
+	if fence == "" {
+		s.t.Fatalf("no accepted complete carried a render fence; accepted=%v", s.kernel.events())
+	}
+	marker := "\x1b]1337;NOCX_FENCE;" + fence
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		out := s.output()
+		if i := strings.Index(out, marker); i >= 0 {
+			if strings.Contains(out[i:], "\x1b]133;A") {
+				return
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	s.t.Fatalf("the command's render never reached the pty (fence %s and the prompt after it); accepted=%v output=%q",
+		fence, s.kernel.events(), s.output())
 }
 
 // waitForPromptAfterComplete blocks until a prompt_ready is accepted with a
@@ -660,7 +757,11 @@ func testBashChannel_AnswersRefreshWithSnapshot(t *testing.T, shell string) {
 	if _, err := s.ptmx.Write([]byte(`printf 'PS1=[%s]\n' "$PS1"` + "\n")); err != nil {
 		t.Fatalf("write probe: %v", err)
 	}
+	// The probe's answer is written to the PTY; the complete is accepted on
+	// the CHANNEL. Waiting for the second says nothing about the first, so
+	// wait for the answer itself (see run's note on the two transports).
 	s.waitForAccepted("complete")
+	waitForOutput(t, s, `PS1=[\w`, 15*time.Second)
 	if !strings.Contains(s.output(), `PS1=[\w`) {
 		t.Errorf("visible prompt not restored after desync; output=%q", s.output())
 	}
