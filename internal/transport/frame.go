@@ -45,7 +45,7 @@
 //	        <-- {"jsonrpc":"2.0","id":4,"result":{"resumed":true,"from":1234}}
 //	        <-- {"jsonrpc":"2.0","id":4,"result":{"reset":true,"from":5678}}
 //	ack:    <-- {"jsonrpc":"2.0","method":"ack","params":{"sessionId":"...","offset":1234}}   (notification, no id)
-//	exit:   <-- {"jsonrpc":"2.0","method":"exit","params":{"sessionId":"..."}}                 (notification)
+//	exit:   <-- {"jsonrpc":"2.0","method":"exit","params":{"sessionId":"...","cause":"exited","status":0}}   (notification; cause is a closed set — "exited" with the shell's exit status, or "interrupted" for a loss, contracts/exit.schema.json)
 //
 // The attach method (AD-9 reconnect) requests replay from a byte offset. If
 // the offset is still in the ring the result is {resumed:true,from:<offset>}

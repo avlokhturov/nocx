@@ -77,6 +77,7 @@ import {
 } from './tab-content'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
+import { NotifyClient } from './notify-client'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
 import { LOCAL_TARGET_ID } from './ports-client'
@@ -434,6 +435,13 @@ export class TerminalContent extends BaseTabContent {
   /** True once the session's exit was observed — the tab is closing, and an
    *  origin that names this session would name a machine that is gone. */
   private _sessionExited = false
+  /** True once the session ended in a loss (an interrupted exit: the channel
+   *  is gone, the host unreachable, a handshake expired, a reattach failed).
+   *  The tab stays open and marked, and this flag owns the warning state for
+   *  the rest of the tab's life: a late integration fact — the last status
+   *  the backend emitted before the session died — must not clear it
+   *  (nocx-ictcq). */
+  private _sessionLost = false
   private _host = ''
   /** The ssh user of `_host` ('' for local shells) — the location line's
    *  `user@host`, from the same projection view. */
@@ -524,6 +532,10 @@ export class TerminalContent extends BaseTabContent {
 
   constructor(
     private readonly client: WSClient,
+    /** The renderer-minted per-tab identity (nocx-tsajw): minted once per
+     *  tab by TabManager, never reused, and carried on history.record so
+     *  the backend scopes pending captures to this tab. */
+    private readonly tabId: string,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
@@ -1486,6 +1498,39 @@ export class TerminalContent extends BaseTabContent {
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
       })
 
+      // Optional on the renderer contract (types.ts): a renderer that does
+      // not parse these degrades to raising nothing rather than failing to
+      // mount, which is what the fakes in the test suite rely on.
+      renderer.onNotification?.((request) => {
+        // A program asked nocx to present a message (ADR-0029). The renderer
+        // reports the request and never grants it: what crosses is the text
+        // the program supplied plus this session's id, and the backend stamps
+        // kind, trust, level and attribution from the method invoked and its
+        // own registry. There is no argument here by which a program could
+        // name a destination, and that absence is the design, not an omission.
+        //
+        // Fire-and-forget on purpose. A notification is not worth blocking
+        // terminal output on, and every refusal is final rather than
+        // retryable: the method missing (a backend without the pipeline), the
+        // session not live on this connection, or the pipeline refusing the
+        // delivery. Each is logged and dropped.
+        // Read at fire time rather than at subscribe time: the id is
+        // server-authoritative (AD-7) and a reattach replaces it, so a
+        // captured one would address the session the pane used to hold. No
+        // session means nothing to address — the pane is between sessions and
+        // the request has nowhere to belong.
+        const sid = this.session?.sessionId
+        if (!sid) return
+        void new NotifyClient(this.client.dispatcher)
+          .raise({ sessionId: sid, title: request.title, body: request.body })
+          .catch((err: unknown) => {
+            log.warn('nocx: notification not raised', {
+              sid,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
+      })
+
       renderer.onBufferChange((type) => {
         this._bufferType = type
         // The buffer is its own axis (ADR-0024 §6): a renderer-owned
@@ -1637,7 +1682,7 @@ export class TerminalContent extends BaseTabContent {
           },
         },
         (rec, attempt) =>
-          recordCommand(this.client, rec, attempt).then((ack) => {
+          recordCommand(this.client, this.tabId, rec, attempt).then((ack) => {
             if (ack) {
               const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
               this.attachRecordedAck(rec.id, block, ack)
@@ -2036,14 +2081,32 @@ export class TerminalContent extends BaseTabContent {
         }
         this.session?.send(data)
       })
-      session.onExit((sid: string) => {
-        log.info('nocx: session exited', { sid })
+      session.onExit((exit) => {
+        log.info('nocx: session exited', {
+          sid: exit.sessionId,
+          cause: exit.cause,
+          ...(exit.cause === 'exited' ? { status: exit.status } : {}),
+        })
         // The session is gone: an origin naming it would name a machine
-        // that no longer exists (B.9).
+        // that no longer exists (B.9). True for a clean exit AND a loss.
         this._sessionExited = true
         this.hooks.onActiveOriginChange?.()
         this.lifecycle.reset()
         this._disposeAllMarkers()
+        if (exit.cause === 'interrupted') {
+          // A loss is not a close (nocx-ictcq): the channel is gone, the
+          // host unreachable, a handshake expired, or a reattach failed —
+          // the work in the tab and the evidence of what happened must
+          // survive. The tab stays in both strips with the scrollback
+          // readable and a warning mark that says what the state is; the
+          // user closes it themselves. `_sessionLost` owns the mark for the
+          // rest of the tab's life, so a late integration fact cannot clear
+          // it (the lost state is terminal for this tab).
+          this._sessionLost = true
+          this.hooks.onWarningChange?.(true, 'Connection lost')
+          return
+        }
+        // A clean exit closes the tab exactly as it always did.
         host.requestClose()
       })
       session.onInputStalled(() => {
@@ -2399,6 +2462,10 @@ export class TerminalContent extends BaseTabContent {
    *  presentation fact — what the user sees. Nothing stream-derived reaches
    *  either axis. */
   private _updateCapability(): void {
+    // The lost state owns the warning mark: a loss is terminal for this tab,
+    // and nothing the integration axis reports afterwards may clear it
+    // (nocx-ictcq). The mark was set by the exit path with its own wording.
+    if (this._sessionLost) return
     const shellState: ShellState = shellStateFromLifecycle(
       this.lifecycle.state,
       this.lifecycle.domainStack,
@@ -2446,6 +2513,11 @@ export class TerminalContent extends BaseTabContent {
    *  needs to special-case it. */
   private _applyIntegration(fact: SessionIntegrationChanged): void {
     if (this._disposed) return
+    // The session has exited (clean or lost): the tab is closing or marked
+    // lost, and a fact that was already in flight when the session died —
+    // the last status the backend emitted — must not re-open the capability
+    // logic or clear the loss mark (nocx-ictcq).
+    if (this._sessionExited) return
     this._integration = fact
     this._updateCapability()
     if (!isDegraded(fact)) {

@@ -618,6 +618,50 @@ describe('TabManager', () => {
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
   })
 
+  it('closing a tab announces tab.close with its wire identity (nocx-tsajw)', async () => {
+    // Pin the per-tab wire identities so the announcement can be asserted
+    // against the exact id the chrome minted.
+    // Values kept verbatim — the assertions below name them. Only the TYPE
+    // needs help: crypto.randomUUID returns a UUID template literal, not a
+    // plain string.
+    const uuids = ['tab-wire-one', 'tab-wire-two', 'tab-wire-spare'] as unknown as ReturnType<
+      typeof crypto.randomUUID
+    >[]
+    const uuidSpy = vi
+      .spyOn(crypto, 'randomUUID')
+      .mockImplementation(() => uuids.shift() ?? uuids[uuids.length - 1])
+    try {
+      const { client, manager, bar } = await mountTabManager()
+
+      manager.newTab()
+      await vi.waitFor(() => {
+        expect(client.openSession).toHaveBeenCalledTimes(2)
+      })
+
+      // Close the FIRST tab: its own id is announced, the second's is not.
+      bar
+        .querySelectorAll('.nocx-tab')[0]
+        .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
+      await vi.waitFor(() => {
+        expect(client.notifyTabClosed).toHaveBeenCalledWith('tab-wire-one')
+      })
+      expect(client.notifyTabClosed).not.toHaveBeenCalledWith('tab-wire-two')
+
+      // Close the remaining tab: its own id is announced. The automatic
+      // replacement tab mints a NEW id — a closed tab's identity is never
+      // reused (the backend scopes captures to it).
+      bar
+        .querySelectorAll('.nocx-tab')[0]
+        .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
+      await vi.waitFor(() => {
+        expect(client.notifyTabClosed).toHaveBeenCalledWith('tab-wire-two')
+      })
+      expect(client.notifyTabClosed).not.toHaveBeenCalledWith('tab-wire-spare')
+    } finally {
+      uuidSpy.mockRestore()
+    }
+  })
+
   // ── flex-grow regression guards ──────────────────────────────────────
 
   it('a lone tab does not stretch (flex-grow is not a stretching value)', async () => {
@@ -1144,7 +1188,15 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
+    const content = new TerminalContent(
+      wsClient,
+      'tab-wire-1',
+      clipboard,
+      gate,
+      banner,
+      null,
+      () => {},
+    )
     const tab = new Tab(
       content,
       {
@@ -1155,6 +1207,7 @@ describe('TabManager', () => {
         defaultTitle: 'Terminal',
       },
       99,
+      'tab-wire-1',
     )
 
     // Before start(): ready must still be pending.
@@ -1188,7 +1241,15 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
+    const content = new TerminalContent(
+      wsClient,
+      'tab-wire-1',
+      clipboard,
+      gate,
+      banner,
+      null,
+      () => {},
+    )
     const tab = new Tab(
       content,
       {
@@ -1199,6 +1260,7 @@ describe('TabManager', () => {
         defaultTitle: 'Terminal',
       },
       99,
+      'tab-wire-1',
     )
 
     const paneParent = document.createElement('div')
@@ -1237,7 +1299,15 @@ describe('TabManager', () => {
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
     const banner = makeBanner()
-    const content = new TerminalContent(wsClient, clipboard, gate, banner, null, () => {})
+    const content = new TerminalContent(
+      wsClient,
+      'tab-wire-1',
+      clipboard,
+      gate,
+      banner,
+      null,
+      () => {},
+    )
     const tab = new Tab(
       content,
       {
@@ -1248,6 +1318,7 @@ describe('TabManager', () => {
         defaultTitle: 'Terminal',
       },
       99,
+      'tab-wire-1',
     )
 
     const paneParent = document.createElement('div')
@@ -1401,7 +1472,7 @@ describe('TabManager', () => {
 
     // Tab constructor calls content.setTarget(this.pane) — _target is
     // set before any activation.
-    const tab = new Tab(content, descriptor, 99)
+    const tab = new Tab(content, descriptor, 99, 'tab-wire-1')
     expect(content.callLog).toEqual([]) // no lifecycle calls yet
 
     // Append pane to DOM and stub getBoundingClientRect to return non-zero,
@@ -1574,6 +1645,7 @@ describe('TabManager', () => {
       const wsClient = client as unknown as import('./ipc').WSClient
       const content = new TerminalContent(
         wsClient,
+        'tab-wire-1',
         makeClipboard(),
         new ClipboardGate(),
         makeBanner(),
@@ -1591,6 +1663,7 @@ describe('TabManager', () => {
           defaultTitle: 'Terminal',
         },
         99,
+        'tab-99',
       )
 
       // Pane enters DOM → ResizeObserver fires.
@@ -1763,6 +1836,7 @@ describe('Tab agent-status channel (nocx-n8n82)', () => {
         defaultTitle: '',
       },
       1,
+      'tab-wire-agent-status',
     )
   }
 

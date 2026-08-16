@@ -895,10 +895,15 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
 	}
 	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
+		// clientID is the CONNECTION identity, deliberately: it binds the
+		// ask/captureFrame idempotency to the connection (a reconnect mints
+		// a new one), never to a renderer-minted tab — the agent ask is not
+		// a capture-scope consumer (nocx-tsajw keeps the two identities
+		// apart).
 		return agentHandlers{
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
-			log: s.log, state: state, clientID: tabID(w), r: r,
+			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}
 	}
 	return []methodSpec{
