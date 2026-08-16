@@ -61,6 +61,68 @@ func connectWS(t *testing.T, ws *WSServer) *websocket.Conn {
 	return conn
 }
 
+// openSessionOnConn opens a local session over a connection and returns its
+// server-authoritative sessionId. It is the package's one opener: the files,
+// git and lifecycle envs all reach it, because the wait below belongs to
+// every one of them.
+//
+// The wait is what makes the open OVER: handleOpen answers the request and
+// only THEN installs the connection as the session's subscriber — deliberately,
+// because a session-scoped notification may not reach a renderer that does not
+// yet know the sessionId (AD-7), and the production window is closed by the
+// replay that follows the install. A test that acts on the open result is not
+// covered by that replay: it drives the publisher directly, and its env often
+// wires no publisher into the server at all, so a fact published in the window
+// is dropped by the emit-time subscriber lookup and never replayed. The
+// visible cost was a lost lifecycle.changed the test then waited out, and a
+// files.changed delivered to a subscriber the test had just cleared.
+//
+// It cost this package a 30-second timeout reported under a different test
+// name on every run (nocx-2h08): whoever was holding the package when the
+// machine happened to be slow. The bound is an observable state — the
+// session's subscriber slot is filled — never a duration; a slower machine
+// takes longer to reach it and the test simply waits.
+func openSessionOnConn(t *testing.T, ws *WSServer, conn *websocket.Conn, id int) string {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{"cols": 80, "rows": 24}, id)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("open: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("open: %+v", envelope.Error)
+	}
+	var got struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("open: decode result: %v", err)
+	}
+	if got.SessionID == "" {
+		t.Fatal("open returned an empty sessionId")
+	}
+	awaitSubscriber(t, ws, session.ID(got.SessionID))
+	return got.SessionID
+}
+
+// awaitSubscriber blocks until the session's subscriber slot is filled — the
+// last step of handleOpen's tail, and the one every notification's emit-time
+// lookup reads. See openSessionOnConn for why the tail outlives the response.
+func awaitSubscriber(t *testing.T, ws *WSServer, sid session.ID) {
+	t.Helper()
+	waitFor(t, "the open's subscriber install", wantWithin, func() bool {
+		rx := ws.getRx(sid)
+		if rx == nil {
+			return false
+		}
+		wconn, _ := rx.getSubscriber()
+		return wconn != nil
+	})
+}
+
 func jsonrpcCall(t *testing.T, conn *websocket.Conn, method string, params any) json.RawMessage {
 	t.Helper()
 	return jsonrpcCallWithID(t, conn, method, params, 1)

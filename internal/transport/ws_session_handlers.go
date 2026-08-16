@@ -33,7 +33,7 @@ import (
 type sessionMachine interface {
 	getRx(sid session.ID) *sessionRx
 	getOrCreateRx(sid session.ID) *sessionRx
-	removeRx(sid session.ID)
+	removeRx(sid session.ID) *sessionRx
 	laneFor(sid session.ID, sess session.Session) *sessionLane
 	closeLane(sid session.ID)
 	closeSession(sid session.ID, sess session.Session)
@@ -58,7 +58,7 @@ type sessionMachine interface {
 // the discovery hooks. Same narrow-surface rule as sessionMachine.
 type openMachine interface {
 	getOrCreateRx(sid session.ID) *sessionRx
-	removeRx(sid session.ID)
+	removeRx(sid session.ID) *sessionRx
 	pumpToRing(ctx context.Context, sess session.Session, ring *outputRing)
 	monitorExit(rx *sessionRx, sess session.Session)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)

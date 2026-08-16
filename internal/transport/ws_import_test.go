@@ -10,11 +10,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/importer"
 	"github.com/shady2k/nocx/internal/log"
@@ -1306,5 +1309,109 @@ func TestTabbyExecute_VaultRetry(t *testing.T) {
 	}
 	if errResp3.Error == nil {
 		t.Fatal("expected error on third execute (plan consumed after success)")
+	}
+}
+
+// ── the retry may not race the release ───────────────────────────────────
+
+// recordingPlanStore records the order of the plan-store calls a handler
+// makes, against the same list the responder writes to — so the assertion
+// below can read one sequence and see where the response sits in it.
+type recordingPlanStore struct {
+	plan   *importPlan
+	events *[]string
+}
+
+func (s recordingPlanStore) storePlan(*importPlan) (string, error) {
+	*s.events = append(*s.events, "store")
+	return "", nil
+}
+
+func (s recordingPlanStore) claimPlan(string) *importPlan {
+	*s.events = append(*s.events, "claim")
+	return s.plan
+}
+func (s recordingPlanStore) releasePlan(string) { *s.events = append(*s.events, "release") }
+func (s recordingPlanStore) finishPlan(string)  { *s.events = append(*s.events, "finish") }
+
+// sequenceResponder records the moment a response is handed to the outbound
+// queue, into the same sequence the plan store writes to. From that moment
+// the caller can be reading it, so everything the caller is entitled to act
+// on must already be true.
+type sequenceResponder struct{ events *[]string }
+
+func (r sequenceResponder) TryResult(json.RawMessage, json.RawMessage) error {
+	*r.events = append(*r.events, "result")
+	return nil
+}
+
+func (r sequenceResponder) TryError(json.RawMessage, RPCError) error {
+	*r.events = append(*r.events, "error")
+	return nil
+}
+func (r sequenceResponder) TryNotify(string, json.RawMessage) error { return nil }
+
+// inlineTabbyOp runs the callback on the caller's goroutine with a fixed
+// service — the operation's gates are not what this test is about.
+type inlineTabbyOp struct{ svc capability.TabbyImportService }
+
+func (o inlineTabbyOp) Run(ctx context.Context, fn func(context.Context, capability.TabbyImportService) error) error {
+	return fn(ctx, o.svc)
+}
+
+// failingSecretService fails every CreateSecret — the vault-sealed shape the
+// retry exists for.
+type failingSecretService struct{ capability.TabbyImportService }
+
+func (failingSecretService) CreateSecret(context.Context, credential.Secret, vault.SecretMeta) (credential.SecretID, error) {
+	return "", errors.New("vault is sealed")
+}
+
+// TestTabbyExecute_PlanIsReleasedBeforeTheFailureIsAnswered pins the ordering
+// the retry depends on. profiles.tabbyExecute tells the renderer "store
+// secret: vault is sealed" and the renderer answers by unlocking and sending
+// the SAME token again — immediately, and on a goroutine of its own. So the
+// claim has to be gone by the time the error is handed to the outbound queue,
+// not merely by the time the handler returns: everything after the response
+// is a window in which the retry is refused with "Please preview again" and
+// the decrypted plan is thrown away.
+//
+// The interval, both ends named: the plan is claimed from the moment
+// claimPlan returns it until releasePlan on the failure path — and that end
+// is BEFORE the response, never after it.
+//
+// Against the deferred release this test fails deterministically: the release
+// lands after the response instead of before it. On the wire it showed as an
+// import of zero profiles under whichever test name the machine was slow
+// enough to lose (nocx-2h08).
+func TestTabbyExecute_PlanIsReleasedBeforeTheFailureIsAnswered(t *testing.T) {
+	var events []string
+	plan := &importPlan{
+		profiles: []profile.SSHProfile{{Base: profile.Base{ID: "ssh:test:1", Name: "web"}}},
+		creds:    []credentialPlan{{name: "web", secret: "hunter2", targetHost: "web.example.com"}},
+	}
+	h := tabbyHandlers{
+		op:           inlineTabbyOp{svc: failingSecretService{}},
+		configWired:  true,
+		executeWired: true,
+		storeWired:   true,
+		plans:        recordingPlanStore{plan: plan, events: &events},
+		log:          log.NewSlogAdapter(nil),
+		r:            sequenceResponder{events: &events},
+	}
+	h.handleTabbyExecute(context.Background(), jsonrpcRequest{
+		ID:     json.RawMessage(`1`),
+		Method: "profiles.tabbyExecute",
+		Params: json.RawMessage(`{"planToken":"` + strings.Repeat("a", 64) + `"}`),
+	})
+
+	want := []string{"claim", "release", "error"}
+	if len(events) != len(want) {
+		t.Fatalf("events = %v, want %v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("events = %v, want %v — the caller is told it failed before the retry can be served", events, want)
+		}
 	}
 }

@@ -55,32 +55,6 @@ func (e *lifecycleTestEnv) openSession(t *testing.T, id int) string {
 	return openSessionOnConn(t, e.ws, e.conn, id)
 }
 
-// openSessionOnConn opens a local session over an arbitrary connection.
-func openSessionOnConn(t *testing.T, ws *WSServer, conn *websocket.Conn, id int) string {
-	t.Helper()
-	resp := jsonrpcCallWithID(t, conn, "open", map[string]uint16{"cols": 80, "rows": 24}, id)
-	var envelope struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &envelope); err != nil {
-		t.Fatalf("open: unmarshal: %v\nraw: %s", err, resp)
-	}
-	if envelope.Error != nil {
-		t.Fatalf("open: %+v", envelope.Error)
-	}
-	var got struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := json.Unmarshal(envelope.Result, &got); err != nil {
-		t.Fatalf("open: decode result: %v", err)
-	}
-	if got.SessionID == "" {
-		t.Fatal("open returned an empty sessionId")
-	}
-	return got.SessionID
-}
-
 // noopPort swallows the kernel's outbound envelopes (accept, refresh_request);
 // the shell side is not reading, and the kernel treats send failures as
 // best-effort.

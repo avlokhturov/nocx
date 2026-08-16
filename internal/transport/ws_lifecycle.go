@@ -256,6 +256,11 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	}
 	wconn, _ := rx.getSubscriber()
 	if wconn == nil {
+		// Said out loud, because the drop is otherwise invisible: the fact is
+		// gone and the only trace is a renderer that never hears about a
+		// transition. That silence is what made nocx-2h08 read as three
+		// different tests hanging on three different deadlines.
+		s.log.Debug("lifecycle.changed dropped: no subscriber", "session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
 		return
 	}
 	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
