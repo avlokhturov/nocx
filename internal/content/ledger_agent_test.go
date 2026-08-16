@@ -740,12 +740,14 @@ func TestFinishExecution_MapsTerminationToRunState(t *testing.T) {
 		want   content.RunState
 	}{
 		{content.TermCompleted, content.RunCompleted},
-		{content.TermUserKilled, content.RunCancelled},
 		{content.TermInterrupted, content.RunInterrupted},
+		{content.TermUserKilled, content.RunCancelled},
 		{content.TermFailed, content.RunFailed},
 		{content.TermTimeout, content.RunFailed},
 		{content.TermTransportGone, content.RunFailed},
 		{content.TermAgentDeclined, content.RunFailed},
+		{content.TermInactivity, content.RunFailed},
+		{content.TermOutputBudget, content.RunFailed},
 	}
 	for i, tc := range cases {
 		res := askOne(t, led, "session-a", content.AgentReference{FrameID: frameID, Region: fullRegion()})

@@ -390,8 +390,13 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// 8. The outcome is recorded on the attempt — the interval closes
 		// with the outcome or the terminal reason, never before.
 		if runErr != nil {
-			_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+			_ = m.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)
 			return "", runErr
+		}
+
+		if len(out) > maxToolResultBytes {
+			_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+			return "", fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
 		}
 
 		// The window and the size bound. The executor windows its own
@@ -894,6 +899,21 @@ func (m *policyMiddleware) closeAttempt(ctx context.Context, execID int64, reaso
 		TerminationReason: reason,
 		Status:            status,
 	})
+}
+
+// terminationReasonOf maps a tool call's terminal error to the reason the
+// attempt records. A run the LEASE terminalized (ADR-0020 decision 2) is
+// the one case where the generic "failed" is the wrong fact: the ledger
+// must say WHICH bound ended the run — wall-clock, inactivity or the
+// output budget — so "the command was terminalized, and here is the bound
+// that did it" stays answerable from the record, never reconstructed.
+// Everything else keeps TermFailed.
+func terminationReasonOf(err error) content.TerminationReason {
+	var leaseErr *RunLeaseError
+	if errors.As(err, &leaseErr) {
+		return leaseErr.Reason
+	}
+	return content.TermFailed
 }
 
 // run dispatches one executable tool to its executor. The capability and the

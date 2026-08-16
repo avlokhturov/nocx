@@ -135,6 +135,10 @@ const (
 // TerminationReason distinguishes the five outcomes a single status plus
 // exit code cannot (ADR-0020 §4): the command failed, the executor timed
 // out, the transport vanished, the user killed it, the agent declined.
+// The lease (ADR-0020 decision 2) adds the two deadlines a single
+// "timeout" cannot tell apart — silence is a different failure from
+// slowness — and the output budget, so "which bound ended this run" is
+// answerable from the record, never reconstructed.
 type TerminationReason string
 
 const (
@@ -145,6 +149,15 @@ const (
 	TermUserKilled    TerminationReason = "user-killed"
 	TermAgentDeclined TerminationReason = "agent-declined"
 	TermInterrupted   TerminationReason = "interrupted"
+	// TermInactivity is the lease's silence bound: the execution produced
+	// no output for the inactivity deadline and was terminalized for it.
+	// Distinct from TermTimeout because a command can be slow AND alive;
+	// silence is the failure that looks like life.
+	TermInactivity TerminationReason = "inactivity"
+	// TermOutputBudget is the lease's volume bound: the execution produced
+	// more than its output budget allowed and was terminalized for it —
+	// bounded visibly, never truncated silently.
+	TermOutputBudget TerminationReason = "output-budget"
 )
 
 type ResourceKind string

@@ -2755,6 +2755,45 @@ describe('the projections consume the kernel through the composition root (ADR-0
     }
   })
 
+  it('reports the lane buffer kind to the backend on every buffer change and at session open (ADR-0020 decision 3)', async () => {
+    // The backend cannot see the alternate screen (AD-6 — it never sniffs
+    // the byte stream), so the renderer reports the buffer kind it owns
+    // and the backend decides the awaiting-takeover transition from it:
+    // a program that takes the alternate screen demotes the agent.
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const laneCalls = () =>
+        client.call.mock.calls.filter((c) => c[0] === 'agent.laneInteractivity')
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+
+      // The open re-reported the CURRENT kind once the session had a
+      // backend id (a change before open had no session to name).
+      expect(laneCalls().length).toBeGreaterThanOrEqual(1)
+      expect(laneCalls()[0][1]).toEqual({ sessionId: session.sessionId, bufferKind: 'normal' })
+
+      // A program enters the alternate screen: reported as it happens.
+      renderer._fireBufferChange('alternate')
+      await vi.waitFor(() => {
+        expect(laneCalls()[laneCalls().length - 1]?.[1]).toEqual({
+          sessionId: session.sessionId,
+          bufferKind: 'alternate',
+        })
+      })
+      // The TUI exits: the lane leaves awaiting-takeover, reported again.
+      renderer._fireBufferChange('normal')
+      await vi.waitFor(() => {
+        expect(laneCalls()[laneCalls().length - 1]?.[1]).toEqual({
+          sessionId: session.sessionId,
+          bufferKind: 'normal',
+        })
+      })
+    } finally {
+      teardown()
+    }
+  })
+
   it('the whole authenticated cycle: submit attaches, output stays visible, the completion freezes the block, the status persists exactly once, and the next command reaches the shell', async () => {
     // The epic's positive criterion, watched end to end through the real
     // composition root (ADR-0024 §5–§7): in an authenticated session the

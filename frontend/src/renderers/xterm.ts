@@ -1118,6 +1118,16 @@ export class XtermRenderer implements TerminalRenderer {
       },
     )
   }
+
+  /** The active buffer's kind right now: 'normal' | 'alternate' — the one
+   *  interactivity fact the backend cannot see for itself (AD-6). The
+   *  renderer owns the grid; this reports the capture tracker's current
+   *  identity, the same vocabulary agent.captureFrame carries. */
+  activeBufferKind(): 'normal' | 'alternate' {
+    const tracker =
+      this._captureTracker ?? (this._captureTracker = new CaptureIdentityTracker(this))
+    return tracker.identity().buffer.kind
+  }
   get paneElement(): HTMLElement {
     return this.container ?? document.createElement('div')
   }
