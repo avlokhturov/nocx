@@ -143,7 +143,7 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// silently reported as a completed run.
 		if ev.Action != nil && ev.Action.Interrupted != nil {
 			if req := approvalRequestFrom(ev.Action.Interrupted); req != nil {
-				return &errApprovalRequested{request: req}
+				return &ApprovalRequestedError{Request: req}
 			}
 			// The egress gate's ask (design §7.1): a tool result contained
 			// secret-shaped material and the run suspended before the bytes
@@ -152,7 +152,7 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 			if req := egressRequestFrom(ev.Action.Interrupted); req != nil {
 				return &EgressRequestedError{Request: req}
 			}
-			return &errApprovalRequested{}
+			return &ApprovalRequestedError{}
 		}
 		if ev.Output == nil || ev.Output.MessageOutput == nil {
 			continue

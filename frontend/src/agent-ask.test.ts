@@ -367,3 +367,31 @@ describe('AgentInputTarget refusal', () => {
     expect(onRefusal).toHaveBeenCalledWith('no endpoint configured')
   })
 })
+
+describe('AgentInputTarget approval routing', () => {
+  it('awaiting_approval keeps the block open and routable; the resume closes it (nocx-z9hj4)', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('will this need approval?')
+    const runId = dispatcher.next.run - 1 // the run the ask minted
+    expect(handle.el.dataset.answerEntryId).toBe('answer-1')
+
+    // The run suspends: the block stays OPEN (nothing closed) and the run
+    // stays routable — the question is being decided elsewhere.
+    dispatcher.emit('agent.runState', { runId, state: 'awaiting_approval' })
+    expect(handle.close).not.toHaveBeenCalled()
+
+    // The person approves; the resumed run streams into the SAME block —
+    // a run deleted at awaiting_approval would drop these deltas.
+    dispatcher.emit('agent.runDelta', {
+      runId,
+      entryId: 'answer-1',
+      seq: 0,
+      text: 'approved answer',
+    })
+    expect(handle.append).toHaveBeenCalledWith('approved answer')
+
+    // The run completes: the block closes once.
+    dispatcher.emit('agent.runState', { runId, state: 'completed' })
+    expect(handle.close).toHaveBeenCalledWith('success')
+  })
+})

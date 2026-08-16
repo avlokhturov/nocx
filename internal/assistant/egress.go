@@ -76,6 +76,10 @@ type EgressRequest struct {
 	Tool      string `json:"tool"`
 	CallID    string `json:"callId"`
 	Arguments string `json:"arguments"`
+	// ArgHash is the canonical-argument hash of the binding (design §7.2):
+	// the surface echoes it back on agent.approve so the decision names the
+	// exact proposal — the same hash the approval store keys.
+	ArgHash string `json:"argHash"`
 	// Findings are what the surface shows: what was found and where.
 	Findings []EgressFinding `json:"findings"`
 	// WasError reports whether the findings are in an ERROR string the

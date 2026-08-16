@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.approve.schema.json",
+  "title": "AgentApprove",
+  "description": "Params of the agent.approve request (nocx-z9hj4, design §7.2): the person's decision on one exact proposal. Carries the FULL binding — run, attempt, tool, call id and the canonical-argument hash — so a yes names the exact proposal the notification showed and nothing else, plus the decision. A stale or unknown binding is answered honestly and resumes nothing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "attempt", "tool", "callId", "argHash", "approved"],
+  "properties": {
+    "runId": {
+      "description": "The backend-minted run id — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt": {
+      "description": "The run's attempt — echoed from agent.approvalRequested.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "tool": {
+      "description": "The tool name — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1
+    },
+    "callId": {
+      "description": "The model's call id — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1
+    },
+    "argHash": {
+      "description": "The canonical-argument hash — echoed from agent.approvalRequested. A changed argument hashes differently and does not resume under this approval.",
+      "type": "string",
+      "minLength": 1
+    },
+    "approved": {
+      "description": "The person's decision: yes resumes the run as a new attempt of the same entry; no terminalizes it with agent-declined.",
+      "type": "boolean"
+    }
+  }
+}

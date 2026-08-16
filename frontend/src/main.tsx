@@ -1,7 +1,7 @@
 import './style.css'
 import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
 import { render } from 'solid-js/web'
-import { Show, createSignal } from 'solid-js'
+import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { WSClient } from './ipc'
@@ -15,6 +15,9 @@ import { DialogClient } from './dialog-client'
 import { createVaultState, SetupDialog, UnlockDialog } from './vault'
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
+import { AgentApprovalPrompt } from './agent-approval-prompt'
+import type { AgentApprove } from './generated/agent.approve'
+import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
@@ -157,6 +160,59 @@ async function main() {
     if (!p || !p.requestId) return
     setPendingConnectionPassword(p)
   })
+
+  // ── Backend-initiated approval questions (nocx-z9hj4) ──────────────
+  // A run suspended — the policy gate or the egress gate asked a person a
+  // question. ONE surface for both (design §7.3): the prompt renders the
+  // question and the decision names the exact binding. Questions are
+  // QUEUED keyed by runId: two runs can escalate while a person is deciding
+  // the first, and no run may be stranded unanswered — the next question
+  // shows when the current one is decided.
+  const pendingApprovals = new Map<string, AgentApprovalRequested>()
+  const [activeApproval, setActiveApproval] = createSignal<AgentApprovalRequested | null>(null)
+  const [approvalBusy, setApprovalBusy] = createSignal(false)
+  dispatcher.subscribe('agent.approvalRequested', (params) => {
+    const p = params as AgentApprovalRequested
+    if (!p || !p.runId || !p.argHash) return
+    if (pendingApprovals.has(p.runId)) return // the same run's question is already open
+    pendingApprovals.set(p.runId, p)
+    // One-shot guard: only the FIRST unanswered question is shown; the
+    // rest wait in the queue. The read is deliberately untracked — this is
+    // an event handler, not a reactive scope.
+    if (!untrack(() => activeApproval())) setActiveApproval(p)
+  })
+  const nextApproval = () => {
+    const first = pendingApprovals.values().next().value
+    setActiveApproval(first ?? null)
+  }
+  const decideApproval = async (approved: boolean) => {
+    const ask = activeApproval()
+    if (!ask || approvalBusy()) return
+    setApprovalBusy(true)
+    try {
+      await dispatcher.call('agent.approve', {
+        runId: ask.runId,
+        attempt: ask.attempt,
+        tool: ask.tool,
+        callId: ask.callId,
+        argHash: ask.argHash,
+        approved,
+      } satisfies AgentApprove)
+      // Only a RECORDED decision closes the question. A refusal (a stale
+      // binding — the question was already answered) keeps the prompt up:
+      // the person sees the honest refusal and can answer anew or deny.
+      pendingApprovals.delete(ask.runId)
+      nextApproval()
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not record the decision: ${err instanceof Error ? err.message : String(err)}`,
+        duration: 0,
+      })
+    } finally {
+      setApprovalBusy(false)
+    }
+  }
 
   // Open-time host-key decisions share the same consent surface as
   // Connections → Test. Requests are queued because restored tabs can fail
@@ -938,6 +994,17 @@ async function main() {
               onDone={() => {
                 setPendingConnectionPassword(null)
               }}
+            />
+          )}
+        </Show>
+        <Show when={activeApproval()} keyed>
+          {(ask) => (
+            <AgentApprovalPrompt
+              open
+              ask={ask}
+              busy={approvalBusy()}
+              onAllow={() => void decideApproval(true)}
+              onDeny={() => void decideApproval(false)}
             />
           )}
         </Show>

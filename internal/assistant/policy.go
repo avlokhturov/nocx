@@ -58,35 +58,47 @@ var ErrPolicyRefused = errors.New("agent policy: tool call refused")
 // cannot act on. Terminal, like a refusal.
 var ErrMalformedModelOutput = errors.New("agent policy: malformed model output")
 
-// errApprovalRequested is what Ask returns when the run suspended for human
-// approval: the run is NOT failed — it is awaiting_approval, and the request
-// is what the approval surface renders and the resume re-validates.
-type errApprovalRequested struct {
-	request *approvalRequest
+// ApprovalRequestedError is what Ask returns when the run suspended for
+// human approval: the run is NOT failed — it is awaiting_approval, and
+// Request is what the approval surface renders and the resume re-validates.
+// It is exported because the transport renders it (nocx-z9hj4), matching the
+// egress gate's EgressRequestedError: a person meets one kind of question.
+type ApprovalRequestedError struct {
+	Request *ApprovalRequest
 }
 
-func (e *errApprovalRequested) Error() string {
-	if e.request == nil {
+func (e *ApprovalRequestedError) Error() string {
+	if e.Request == nil {
 		return "agent run suspended for approval"
 	}
-	return fmt.Sprintf("agent run suspended for approval: %s %s", e.request.Tool, e.request.CallID)
+	return fmt.Sprintf("agent run suspended for approval: %s %s", e.Request.Tool, e.Request.CallID)
 }
 
-// approvalRequest is the user-facing ask (design §7.2): what was proposed,
+// ApprovalRequest is the user-facing ask (design §7.2): what was proposed,
 // bound to the exact proposal. The surface shows it; the resume re-runs the
 // pipeline and the approval record decides. It is also the interrupt state
 // the checkpoint persists, so it is gob-registered: checkpoints are
 // serialized, and an unregistered type fails the run at the suspension.
-type approvalRequest struct {
+type ApprovalRequest struct {
 	RunID     string `json:"runId"`
 	Attempt   int    `json:"attempt"`
 	Tool      string `json:"tool"`
 	CallID    string `json:"callId"`
 	Arguments string `json:"arguments"`
+	// ArgHash is the canonical-argument hash of the binding (design §7.2):
+	// the surface echoes it back on agent.approve so the decision names the
+	// exact proposal. It is NOT derived from Arguments by the renderer —
+	// the backend computes it once, and a changed argument must not resume
+	// under the old approval.
+	ArgHash string `json:"argHash"`
+	// EntryID is the ledger entry that recorded the proposal — what the
+	// approved call runs as a SUBSEQUENT attempt of (ADR-0020 decision 4).
+	// A carrier for the resume, never displayed.
+	EntryID string `json:"-"`
 }
 
 func init() {
-	gob.Register(approvalRequest{})
+	gob.Register(ApprovalRequest{})
 }
 
 // attemptLedger is the slice of the ledger one tool attempt needs (design
@@ -243,15 +255,15 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			if m.approvals != nil && m.approvals.IsApproved(ap) {
 				break // the exact proposal was approved; execute it
 			}
-			tripLatch(ctx, &errApprovalRequested{request: m.request(decl.Name, tCtx.CallID, rawArgs)})
-			return "", m.escalate(ctx, decl.Name, tCtx.CallID, rawArgs)
+			tripLatch(ctx, &ApprovalRequestedError{Request: m.request(decl.Name, tCtx.CallID, rawArgs)})
+			return "", m.escalate(ctx, decl, tCtx.CallID, rawArgs)
 		}
 
 		// 4. The attempt is written BEFORE the call. If that write fails, no
 		// capability is constructed, next is not called, and the run fails
 		// with a terminal infrastructure error — an interrupted run can
 		// never be told "this may already have happened" when it cannot.
-		execID, err := m.openAttempt(ctx, decl, rawArgs)
+		execID, entryID, err := m.openAttempt(ctx, decl, tCtx.CallID, rawArgs)
 		if err != nil {
 			return "", fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
 		}
@@ -270,9 +282,12 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
 			return "", fmt.Errorf("agent tool %q: construct capability: %w", decl.Name, err)
 		}
-
-		// 6. Execution — in Go, against the narrowed capability.
-		out, runErr := m.run(decl, ctx, capability, []byte(rawArgs))
+		// 6. Execution — in Go, against the narrowed capability. An
+		// APPROVED egress resume does not re-run the tool: the result that
+		// was withheld and shown to the person is retained (design §7.1's
+		// "send it as it is"), and re-running would repeat the effect and
+		// could produce a different result than the one approved.
+		out, runErr := m.runWithRetained(decl, tCtx.CallID, ctx, capability, []byte(rawArgs))
 
 		// 7. Result ingest — the egress gate (design §7.1) FIRST, then the
 		// window and the size bound. The gate screens EVERY return path
@@ -289,27 +304,48 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			return "", fmt.Errorf("agent tool %q: egress screening failed — the result was withheld: %w", decl.Name, screenErr)
 		}
 		if len(egress) > 0 {
-			// A finding REFUSES AND ASKS (design §7.1): nothing is sent,
-			// the run suspends carrying the findings, and a person is shown
-			// what was found and where. It never silently masks and
-			// continues — off-machine a miss is invisible and permanent,
-			// and an honest redaction that says nothing is
-			// indistinguishable from there having been nothing to redact
-			// (ADR-0021). The ask binds to the exact proposal through the
-			// existing approval machinery; the run is NOT failed — it is
-			// awaiting the decision the surface renders.
-			req := m.egressRequest(decl.Name, tCtx.CallID, rawArgs, egress, runErr != nil)
+			ap := m.proposal(decl.Name, tCtx.CallID, rawArgs)
+			// The approved egress resume: the EXACT result the person
+			// approved sending is what was screened. Nothing re-ran; the
+			// bytes go as decided and the retention is dropped. An
+			// approval of the POLICY gate is not an approval of this gate —
+			// a call approved at the policy step whose result carries a
+			// finding still suspends here (design §7.3: two gates, one
+			// surface; each asks once).
+			approvedResume := false
 			if m.approvals != nil {
-				m.approvals.Request(m.proposal(decl.Name, tCtx.CallID, rawArgs))
+				if _, _, retained := m.approvals.RetainedResult(ap); retained {
+					m.approvals.ClearRetained(ap)
+					approvedResume = true
+				}
 			}
-			tripLatch(ctx, &EgressRequestedError{Request: req})
-			// The attempt of THIS pass closes as interrupted: the call ran
-			// and its result was withheld pending the decision. Replay and
-			// result retention across the suspension are deliberately not
-			// wired here — a resume that re-ran the tool would repeat the
-			// effect — and are the follow-up seam (reported).
-			_ = m.closeAttempt(ctx, execID, content.TermInterrupted, content.EntryInterrupted)
-			return "", compose.StatefulInterrupt(ctx, req, req)
+			if !approvedResume {
+				// A finding REFUSES AND ASKS (design §7.1): nothing is
+				// sent, the run suspends carrying the findings, and a
+				// person is shown what was found and where. It never
+				// silently masks and continues — off-machine a miss is
+				// invisible and permanent, and an honest redaction that
+				// says nothing is indistinguishable from there having
+				// been nothing to redact (ADR-0021). The ask binds to the
+				// exact proposal through the existing approval machinery;
+				// the run is NOT failed — it is awaiting the decision the
+				// surface renders.
+				req := m.egressRequest(decl.Name, tCtx.CallID, rawArgs, egress, runErr != nil)
+				if m.approvals != nil {
+					ap.EntryID = entryID
+					m.approvals.Request(ap)
+					// The withheld result is retained so the approved
+					// resume sends the EXACT bytes the person was shown —
+					// never a re-run's freshly produced ones.
+					m.approvals.Retain(ap, out, runErr != nil)
+				}
+				tripLatch(ctx, &EgressRequestedError{Request: req})
+				// The attempt of THIS pass closes as interrupted: the call
+				// ran and its result was withheld pending the decision; the
+				// approved call is a SUBSEQUENT attempt of the same entry.
+				_ = m.closeAttempt(ctx, execID, content.TermInterrupted, content.EntryInterrupted)
+				return "", compose.StatefulInterrupt(ctx, req, req)
+			}
 		}
 
 		// 8. The outcome is recorded on the attempt — the interval closes
@@ -464,19 +500,40 @@ func pathUnder(path, scope string) bool {
 // ── the ask and the latch ─────────────────────────────────────────────────
 
 // escalate suspends the run BEFORE next — the call that is asking has not
-// run, and no call after it in this model response will. The persisted state
-// is the proposal itself: the resume re-runs the pipeline and the approval
-// record decides whether the exact proposal may execute.
-func (m *policyMiddleware) escalate(ctx context.Context, toolName, callID, rawArgs string) error {
-	req := m.request(toolName, callID, rawArgs)
+// run, and no call after it in this model response will. The escalation is
+// RECORDED, not only held in memory (nocx-5dldy): the proposal put to a
+// person is an action entry in the ledger with its own interrupted attempt —
+// "the proposal, the decision, the attempt and the result are one readable
+// thread" — and the approved call runs as a SUBSEQUENT attempt of that same
+// entry (ADR-0020 decision 4: a retry after approval is an execution of the
+// same intent, never a new intent). The persisted interrupt state is the
+// proposal itself: the resume re-runs the pipeline and the approval record
+// decides whether the exact proposal may execute.
+func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string) error {
+	ap := m.proposal(decl.Name, callID, rawArgs)
+	var entryID string
+	if m.ledger != nil {
+		id, err := m.recordProposal(ctx, decl, rawArgs, ap)
+		if err != nil {
+			// The proposal could not be recorded: the run fails rather than
+			// asking a question whose answer would resume nothing — a
+			// question with no thread is the hole the epic names.
+			return err
+		}
+		entryID = id
+	}
+	req := m.request(decl.Name, callID, rawArgs)
+	req.ArgHash = ap.ArgHash
+	req.EntryID = entryID
 	if m.approvals != nil {
-		m.approvals.Request(m.proposal(toolName, callID, rawArgs))
+		ap.EntryID = entryID
+		m.approvals.Request(ap)
 	}
 	return compose.StatefulInterrupt(ctx, req, req)
 }
 
-func (m *policyMiddleware) request(toolName, callID, rawArgs string) *approvalRequest {
-	return &approvalRequest{
+func (m *policyMiddleware) request(toolName, callID, rawArgs string) *ApprovalRequest {
+	return &ApprovalRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
 		Tool:      toolName,
@@ -538,9 +595,6 @@ func (m *policyMiddleware) screenResult(ctx context.Context, out string, runErr 
 	return findings, nil
 }
 
-// egressRequest builds the finding-carrying ask of the egress gate, bound to
-// the exact proposal like the inbound ask. WasError tells the surface
-// whether the findings are in an error string rather than in the result.
 func (m *policyMiddleware) egressRequest(toolName, callID, rawArgs string, findings []EgressFinding, wasError bool) *EgressRequest {
 	return &EgressRequest{
 		RunID:     m.runID,
@@ -548,6 +602,7 @@ func (m *policyMiddleware) egressRequest(toolName, callID, rawArgs string, findi
 		Tool:      toolName,
 		CallID:    callID,
 		Arguments: rawArgs,
+		ArgHash:   canonicalArgHash(rawArgs),
 		Findings:  findings,
 		WasError:  wasError,
 	}
@@ -582,15 +637,15 @@ func (m *policyMiddleware) deferred(ctx context.Context, tCtx *adk.ToolContext, 
 }
 
 // approvalRequestFrom finds the pipeline's own ask among an interrupt
-// event's contexts: the asking call carries our *approvalRequest as its
+// event's contexts: the asking call carries our *ApprovalRequest as its
 // info; the latched, deferred calls carry a plain string ("a prior call
 // ..."). The first ask is the one the human decides about.
-func approvalRequestFrom(info *adk.InterruptInfo) *approvalRequest {
+func approvalRequestFrom(info *adk.InterruptInfo) *ApprovalRequest {
 	if info == nil {
 		return nil
 	}
 	for _, ic := range info.InterruptContexts {
-		if req, ok := ic.Info.(*approvalRequest); ok {
+		if req, ok := ic.Info.(*ApprovalRequest); ok {
 			return req
 		}
 	}
@@ -599,32 +654,40 @@ func approvalRequestFrom(info *adk.InterruptInfo) *approvalRequest {
 
 // ── the attempt ───────────────────────────────────────────────────────────
 
-// openAttempt writes the durable attempt BEFORE the call: the environment,
-// the action entry (the audit row — kind='action', design §3.2) and the
-// execution that records the grant. The grant recorded is the run's grant:
-// "what was this allowed to do" is a query over the record, not a
-// reconstruction (ADR-0020 decision 5).
-func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, rawArgs string) (int64, error) {
-	if m.ledger == nil {
-		return 0, errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
-	}
+// recordProposal writes the escalation's ledger facts BEFORE the run
+// suspends (nocx-5dldy: "an escalation is recorded, not only held in
+// memory"): the proposal is an action entry whose payload names the exact
+// binding — tool, effect, arguments, and the run/attempt/callId/argHash the
+// approval store keys — and its own attempt, closed interrupted: the call
+// that is asking has NOT run (the escalation is before next). The approved
+// call runs as a SUBSEQUENT attempt of this same entry. A failed write
+// fails the run: a question whose answer would resume nothing is the hole
+// the thread criterion exists to close.
+func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, ap Approval) (string, error) {
 	envID := content.EnvironmentIDFor(content.EnvLocal, "")
 	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
-		return 0, fmt.Errorf("environment: %w", err)
+		return "", fmt.Errorf("proposal environment: %w", err)
 	}
 	if _, err := m.ledger.RecordObservation(ctx, content.Observation{
 		EnvironmentID: envID,
 		Criticality:   content.CriticalityRoutine,
 	}); err != nil {
-		return 0, fmt.Errorf("observation: %w", err)
+		return "", fmt.Errorf("proposal observation: %w", err)
 	}
 	payload, err := json.Marshal(map[string]any{
 		"tool":   decl.Name,
 		"effect": decl.Effect,
 		"args":   json.RawMessage(rawArgs),
+		"approval": map[string]any{
+			"runId":   ap.RunID,
+			"attempt": ap.Attempt,
+			"tool":    ap.Tool,
+			"callId":  ap.CallID,
+			"argHash": ap.ArgHash,
+		},
 	})
 	if err != nil {
-		return 0, fmt.Errorf("payload: %w", err)
+		return "", fmt.Errorf("proposal payload: %w", err)
 	}
 	res, err := m.ledger.Submit(ctx, content.SubmitEntry{
 		ID:            uuid.NewString(),
@@ -636,17 +699,111 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		Payload:       string(payload),
 	})
 	if err != nil {
-		return 0, fmt.Errorf("submit: %w", err)
+		return "", fmt.Errorf("proposal submit: %w", err)
 	}
 	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
 		EntryID:  res.ID,
+		Attempt:  1, // the escalation itself: recorded, never run
 		Executor: new("agent"),
 		Grant:    &m.grant,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("start execution: %w", err)
+		return "", fmt.Errorf("proposal start execution: %w", err)
 	}
-	return execID, nil
+	if err := m.ledger.FinishExecution(ctx, execID, content.FinishExecution{
+		EndedAt:           time.Now().UnixMilli(),
+		TerminationReason: content.TermInterrupted,
+		Status:            content.EntryInterrupted,
+	}); err != nil {
+		return "", fmt.Errorf("proposal close: %w", err)
+	}
+	return res.ID, nil
+}
+
+// openAttempt writes the durable attempt BEFORE the call: the environment,
+// the action entry (the audit row — kind='action', design §3.2) and the
+// execution that records the grant. The grant recorded is the run's grant:
+// "what was this allowed to do" is a query over the record, not a
+// reconstruction (ADR-0020 decision 5).
+//
+// An APPROVED call does not create a new intent: it runs as its own
+// SUBSEQUENT attempt of the proposal's own entry (ADR-0020 decision 4,
+// nocx-5dldy) — the entry the escalation recorded, found through the
+// approval store. The returned entryID is what the egress gate's request
+// carries into the store, so the same rule holds for a finding's approval.
+func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string) (int64, string, error) {
+	if m.ledger == nil {
+		return 0, "", errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
+	}
+	envID := content.EnvironmentIDFor(content.EnvLocal, "")
+	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
+		return 0, "", fmt.Errorf("environment: %w", err)
+	}
+	if _, err := m.ledger.RecordObservation(ctx, content.Observation{
+		EnvironmentID: envID,
+		Criticality:   content.CriticalityRoutine,
+	}); err != nil {
+		return 0, "", fmt.Errorf("observation: %w", err)
+	}
+
+	entryID := ""
+	attempt := 1
+	if m.approvals != nil {
+		if id, ok := m.approvals.EntryIDFor(m.proposal(decl.Name, callID, rawArgs)); ok {
+			entryID = id
+			attempt = 2 // the approved call is the escalation's subsequent attempt
+		}
+	}
+	if entryID == "" {
+		payload, err := json.Marshal(map[string]any{
+			"tool":   decl.Name,
+			"effect": decl.Effect,
+			"args":   json.RawMessage(rawArgs),
+		})
+		if err != nil {
+			return 0, "", fmt.Errorf("payload: %w", err)
+		}
+		res, err := m.ledger.Submit(ctx, content.SubmitEntry{
+			ID:            uuid.NewString(),
+			Client:        "agent",
+			EnvironmentID: envID,
+			Cwd:           "/",
+			Kind:          content.EntryAction,
+			Intent:        decl.Name,
+			Payload:       string(payload),
+		})
+		if err != nil {
+			return 0, "", fmt.Errorf("submit: %w", err)
+		}
+		entryID = res.ID
+	}
+	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
+		EntryID:  entryID,
+		Attempt:  attempt,
+		Executor: new("agent"),
+		Grant:    &m.grant,
+	})
+	if err != nil {
+		return 0, "", fmt.Errorf("start execution: %w", err)
+	}
+	return execID, entryID, nil
+}
+
+// runWithRetained executes the tool — unless the EXACT proposal's result is
+// retained from an egress suspension (design §7.1): then the withheld bytes
+// the person approved sending are returned instead of re-running the tool,
+// which would repeat the effect and could produce a different result than
+// the one approved.
+func (m *policyMiddleware) runWithRetained(decl agenttools.Tool, callID string, ctx context.Context, capability agenttools.Capability, rawArgs []byte) (string, error) {
+	if m.approvals != nil {
+		if out, wasError, ok := m.approvals.RetainedResult(m.proposal(decl.Name, callID, string(rawArgs))); ok {
+			if wasError {
+				return "", errors.New(out)
+			}
+			return out, nil
+		}
+	}
+	return m.run(decl, ctx, capability, rawArgs)
 }
 
 // closeAttempt records the outcome on the attempt — the closing event of the
