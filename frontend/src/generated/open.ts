@@ -34,7 +34,7 @@ export interface Open {
    */
   desiredMode: 'raw' | 'script' | 'relay'
   /**
-   * Immutable sandbox metadata for a sandboxed local session (ADR-0030). Absent for ordinary and SSH sessions.
+   * Immutable realized sandbox metadata for a sandboxed local session (ADR-0030, ADR-0031). Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.
    */
   sandbox?: {
     backend: 'landlock' | 'seatbelt'

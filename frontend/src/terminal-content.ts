@@ -64,7 +64,7 @@ import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle, SessionSandboxInfo } from './ipc'
+import type { WSClient, SessionHandle, SessionSandboxInfo, SandboxRequest } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
@@ -245,8 +245,10 @@ export interface TerminalContentHooks {
    *  endpoint editor so the refusal comes with its repair — wired by
    *  main.tsx to the Settings tab's Endpoints page. */
   onCreateEndpoint?: () => void
-  /** Filesystem-isolated local-session request (ADR-0030 §3.2). */
-  sandboxWorkspace?: string
+  /** Filesystem-isolated local-session request (ADR-0031 §5): the canonical
+   *  workspace plus the immutable permission deltas. Absent for ordinary and
+   *  SSH sessions. */
+  sandbox?: SandboxRequest
   /** Reports sandbox confirmation from the open response to the owning tab. */
   onSandboxedChange?: (sandboxed: boolean) => void
 }
@@ -731,12 +733,10 @@ export class TerminalContent extends BaseTabContent {
   // environment-commands.ts stays as the label classifier for environments
   // nocx could not integrate — it never names an authenticated domain.
 
-  // ── TabContent ──────────────────────────────────────────────────────────
-
   private openRequestedSession(): Promise<SessionHandle> {
     if (!this.sshOpts) {
-      if (this.hooks.sandboxWorkspace) {
-        return this.client.openSandboxedSession(this.cols, this.rows, this.hooks.sandboxWorkspace)
+      if (this.hooks.sandbox) {
+        return this.client.openSandboxedSession(this.cols, this.rows, this.hooks.sandbox)
       }
       return this.client.openSession(this.cols, this.rows)
     }
@@ -2223,7 +2223,7 @@ export class TerminalContent extends BaseTabContent {
           return
         }
       }
-      if (this.hooks.sandboxWorkspace) {
+      if (this.hooks.sandbox) {
         const message = err instanceof Error ? err.message : String(err)
         showToast({
           level: 'danger',

@@ -7,6 +7,7 @@
 // See AD-7: sessionId is server-authoritative, cwd is set once at session
 // open. The fake must carry both.
 import { vi, type Mock } from 'vitest'
+import type { SessionSandboxInfo } from '../ipc'
 import type {
   CommandMarkerCallback,
   CwdCallback,
@@ -232,12 +233,13 @@ let sessionCounter = 0
 export function resetSessionCounter(): void {
   sessionCounter = 0
 }
-
 export interface SessionFake {
   sessionId: string
   cwd: string
   /** The resolved destination mode from the open ack (nocx-mlm7). */
   desiredMode: DesiredMode
+  /** Immutable sandbox metadata for a sandboxed session; absent otherwise. */
+  sandbox?: SessionSandboxInfo
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>

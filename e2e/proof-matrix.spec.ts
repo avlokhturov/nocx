@@ -497,7 +497,7 @@ test.describe('4. Scroll ownership — measured', () => {
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
     // Scroll the last setting row into view using the scroll container
-    const lastRow = page.locator('.ui-settings-row').last()
+    const lastRow = page.locator('#st-section-Interface .ui-settings-row').last()
     const scroller = page.locator('.ui-page__scroll')
     await page.evaluate(() => {
       const s = document.querySelector('.ui-page__scroll')
@@ -888,7 +888,7 @@ test.describe('6. Page duties', () => {
       await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
       // The last row should be scrollable into view
-      const lastRow = page.locator('.ui-settings-row').last()
+      const lastRow = page.locator('#st-section-Interface .ui-settings-row').last()
       const scroller = page.locator('.ui-page__scroll')
       await page.evaluate(() => {
         const s = document.querySelector('.ui-page__scroll')

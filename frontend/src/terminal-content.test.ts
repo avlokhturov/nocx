@@ -199,7 +199,7 @@ describe('sandboxed session launch failure', () => {
       null,
       () => {},
       undefined,
-      { sandboxWorkspace: '/workspace' },
+      { sandbox: { workspace: '/workspace', settingsRevision: 0, add: [], remove: [] } },
     )
     const tab = new Tab(
       content,
@@ -218,7 +218,12 @@ describe('sandboxed session launch failure', () => {
     await tab.start()
 
     await expect(content.ready).resolves.toBe(false)
-    expect(client.openSandboxedSession).toHaveBeenCalledWith(80, 24, '/workspace')
+    expect(client.openSandboxedSession).toHaveBeenCalledWith(80, 24, {
+      workspace: '/workspace',
+      settingsRevision: 0,
+      add: [],
+      remove: [],
+    })
     expect(client.openSession).not.toHaveBeenCalled()
     expect(showToast).toHaveBeenCalledWith({
       level: 'danger',

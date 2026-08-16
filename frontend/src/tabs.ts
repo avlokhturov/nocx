@@ -9,7 +9,7 @@
 // It constructs content, creates tabs, and wires tab-chrome intents.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { WSClient } from './ipc'
+import type { WSClient, SandboxLaunch, SandboxRequest } from './ipc'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
@@ -532,11 +532,20 @@ export class TabManager {
     return tab
   }
 
-  /** Create a new sandboxed local terminal tab (ADR-0030 §3.2): opens a
-   *  filesystem-isolated session in the given workspace. The backend
-   *  canonicalizes the workspace and enforces the sandbox before the session
-   *  is registered; a failure rejects the open and the tab closes. */
-  newSandboxedTab(workspace: string): Tab {
+  /** Create a new sandboxed local terminal tab (ADR-0031 §4.2): opens a
+   *  filesystem-isolated session in the given workspace with the permission
+   *  deltas the launch dialog confirmed. The backend canonicalizes the
+   *  workspace, reads the baseline from `settingsRevision`, and enforces the
+   *  sandbox before the session is registered; a failure rejects the open
+   *  and the tab closes. The launch object is immutable and never mutated
+   *  after the tab is created (ADR-0031 invariant 8/9). */
+  newSandboxedTab(workspace: string, launch: SandboxLaunch): Tab {
+    const request: SandboxRequest = {
+      workspace,
+      settingsRevision: launch.settingsRevision,
+      add: [...launch.add],
+      remove: [...launch.remove],
+    }
     const tabRef = { current: undefined as Tab | undefined }
     const content = new TerminalContent(
       this.client,
@@ -553,7 +562,7 @@ export class TabManager {
         onActiveOriginChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
-        sandboxWorkspace: workspace,
+        sandbox: request,
         onSandboxedChange: () => tabRef.current?.setSandboxed(),
       },
     )
