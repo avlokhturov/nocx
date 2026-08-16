@@ -1027,9 +1027,10 @@ async function main() {
   // Chosen to match the command-palette convention. The tab-strip caret
   // (wireQuickConnect above) stays the plain server list. Does not collide
   // with TabManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
-  // CodeMirror (which does not register this binding in its keymap).
+  // CodeMirror (which does not register this binding in its keymap). Match the
+  // physical key so the chord survives non-Latin keyboard layouts.
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyP') {
       e.preventDefault()
       qc.showPalette()
     }
@@ -1041,7 +1042,7 @@ async function main() {
   // (or focuses it when it is already there) instead of opening another
   // anything.
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'o') {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyO') {
       e.preventDefault()
       sidebar.revealView('ports')
     }
