@@ -75,6 +75,7 @@ import {
 } from './tab-content'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
+import { NotifyClient } from './notify-client'
 import { secretReference } from './secret-reference'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { DomainEnvironmentProjection } from './lifecycle/domain-environment'
@@ -1365,6 +1366,39 @@ export class TerminalContent extends BaseTabContent {
         // activate an environment or enable rewriting — every one of those
         // paths was deleted with the marker cycle (nocx-u7uh.1).
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
+      })
+
+      // Optional on the renderer contract (types.ts): a renderer that does
+      // not parse these degrades to raising nothing rather than failing to
+      // mount, which is what the fakes in the test suite rely on.
+      renderer.onNotification?.((request) => {
+        // A program asked nocx to present a message (ADR-0029). The renderer
+        // reports the request and never grants it: what crosses is the text
+        // the program supplied plus this session's id, and the backend stamps
+        // kind, trust, level and attribution from the method invoked and its
+        // own registry. There is no argument here by which a program could
+        // name a destination, and that absence is the design, not an omission.
+        //
+        // Fire-and-forget on purpose. A notification is not worth blocking
+        // terminal output on, and every refusal is final rather than
+        // retryable: the method missing (a backend without the pipeline), the
+        // session not live on this connection, or the pipeline refusing the
+        // delivery. Each is logged and dropped.
+        // Read at fire time rather than at subscribe time: the id is
+        // server-authoritative (AD-7) and a reattach replaces it, so a
+        // captured one would address the session the pane used to hold. No
+        // session means nothing to address — the pane is between sessions and
+        // the request has nowhere to belong.
+        const sid = this.session?.sessionId
+        if (!sid) return
+        void new NotifyClient(this.client.dispatcher)
+          .raise({ sessionId: sid, title: request.title, body: request.body })
+          .catch((err: unknown) => {
+            log.warn('nocx: notification not raised', {
+              sid,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
       })
 
       renderer.onBufferChange((type) => {

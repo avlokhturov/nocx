@@ -7,8 +7,14 @@
         <string>{{.Info.ProductName}}</string>
         <key>CFBundleExecutable</key>
         <string>{{.OutputFilename}}</string>
+        <!-- The dev identity, disjoint from the shipped one exactly as the dev
+             profile directory is (internal/storage/appdir_dev.go). $HOME
+             isolation moves directories and cannot move a per-user OS service:
+             notification authorization is held by macOS against the bundle
+             identifier, so sharing one would let a dev stand or an e2e run
+             grant, deny and consume the installed app's permission. -->
         <key>CFBundleIdentifier</key>
-        <string>com.wails.{{safeBundleID .Name}}</string>
+        <string>io.github.shady2k.nocx-dev</string>
         <key>CFBundleVersion</key>
         <string>{{.Info.ProductVersion}}</string>
         <key>CFBundleGetInfoString</key>
@@ -48,7 +54,7 @@
           {{range .Info.Protocols}}
             <dict>
                 <key>CFBundleURLName</key>
-                <string>com.wails.{{.Scheme}}</string>
+                <string>io.github.shady2k.{{.Scheme}}</string>
                 <key>CFBundleURLSchemes</key>
                 <array>
                     <string>{{.Scheme}}</string>
