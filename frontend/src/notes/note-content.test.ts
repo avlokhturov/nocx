@@ -34,6 +34,7 @@ function harness(over: Partial<NotesClientLike> = {}) {
   document.body.append(target)
   const host: TabHost = {
     setTitle: (t) => titles.push(t),
+    updateTooltip: () => {},
     requestAttention: () => {},
     requestClose: () => {},
   }

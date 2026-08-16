@@ -173,7 +173,7 @@ export class Tab implements TabHost {
     return this._sandboxed
   }
 
-  /** Mark the tab as sandboxed (ADR-0030 §3.3): the lock/shield marker
+  /** Mark the tab as sandboxed (ADR-0033 §3.3): the lock/shield marker
    *  renders in the tab chrome. Set once at open, never toggled. */
   setSandboxed(): void {
     if (this._disposed) return
@@ -210,8 +210,8 @@ export class Tab implements TabHost {
     }
   }
 
-  /** Terminal-content-only: update tooltip from cwd or SSH info.
-   *  Not on TabHost — wired through TerminalContent's constructor. */
+  /** Update the tooltip from content-owned metadata, including terminal cwd,
+   *  SSH destination, and immutable sandbox policy. */
   updateTooltip(tooltip: string): void {
     if (this._disposed) return
     this._tooltip = tooltip
@@ -532,13 +532,13 @@ export class TabManager {
     return tab
   }
 
-  /** Create a new sandboxed local terminal tab (ADR-0031 §4.2): opens a
+  /** Create a new sandboxed local terminal tab (ADR-0034 §4.2): opens a
    *  filesystem-isolated session in the given workspace with the permission
    *  deltas the launch dialog confirmed. The backend canonicalizes the
    *  workspace, reads the baseline from `settingsRevision`, and enforces the
    *  sandbox before the session is registered; a failure rejects the open
    *  and the tab closes. The launch object is immutable and never mutated
-   *  after the tab is created (ADR-0031 invariant 8/9). */
+   *  after the tab is created (ADR-0034 invariant 8/9). */
   newSandboxedTab(workspace: string, launch: SandboxLaunch): Tab {
     const request: SandboxRequest = {
       workspace,

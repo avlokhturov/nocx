@@ -245,7 +245,7 @@ export interface TerminalContentHooks {
    *  endpoint editor so the refusal comes with its repair — wired by
    *  main.tsx to the Settings tab's Endpoints page. */
   onCreateEndpoint?: () => void
-  /** Filesystem-isolated local-session request (ADR-0031 §5): the canonical
+  /** Filesystem-isolated local-session request (ADR-0034 §5): the canonical
    *  workspace plus the immutable permission deltas. Absent for ordinary and
    *  SSH sessions. */
   sandbox?: SandboxRequest
@@ -1972,7 +1972,7 @@ export class TerminalContent extends BaseTabContent {
       })
       // Sandboxed session: flip the tab's lock/shield marker (immutable for
       // the tab's lifetime) and name backend + writable roots in the tooltip
-      // (ADR-0030 §3.3).
+      // (ADR-0033 §3.3).
       const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
       this.hooks.onSandboxedChange?.(sandboxInfo != null)
       if (sandboxInfo) {
@@ -2227,7 +2227,7 @@ export class TerminalContent extends BaseTabContent {
         const message = err instanceof Error ? err.message : String(err)
         showToast({
           level: 'danger',
-          message: `Sandboxed shell failed to start: ${message}`,
+          message: `Sandboxed opencode failed to start: ${message}`,
         })
         this._readyResolve(false)
         log.error('nocx: sandboxed terminal failed', { error: message })

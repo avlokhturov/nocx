@@ -1815,7 +1815,7 @@ describe('TabManager', () => {
   })
 })
 
-describe('newSandboxedTab (ADR-0031)', () => {
+describe('newSandboxedTab (ADR-0034)', () => {
   it('carries an immutable launch object and marks the tab sandboxed exactly once', async () => {
     const openSandboxedSession = vi.fn(() =>
       Promise.resolve(
@@ -1831,7 +1831,7 @@ describe('newSandboxedTab (ADR-0031)', () => {
     const tab = manager.newSandboxedTab('/w', launch)
 
     // Mutating the caller's object after the tab is created must not reach the
-    // request — the launch arrays are copied at construction (ADR-0031 invariant 8).
+    // request — the launch arrays are copied at construction (ADR-0034 invariant 8).
     launch.add.push('/mutated')
     launch.remove.pop()
 

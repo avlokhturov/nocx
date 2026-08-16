@@ -97,7 +97,7 @@ type openHandlers struct {
 	lifecycle ssh.RemoteLifecycle
 	// settings is the atomic snapshot seam: handleOpen reads enabled,
 	// sandbox.allowedWritablePaths and the revision from one GetSnapshot
-	// call (ADR-0031 invariant 3). nil means no registry — a sandbox
+	// call (ADR-0034 invariant 3). nil means no registry — a sandbox
 	// request then fails closed as disabled.
 	settings capability.SettingsService
 	log      log.Logger
@@ -138,7 +138,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 
 	// Presence of a sandbox object is the sole wire opt-in; omitted means
-	// ordinary local and null is rejected at decode (ADR-0031 §5). The
+	// ordinary local and null is rejected at decode (ADR-0034 §5). The
 	// backend reads one settings snapshot, gates the experimental flag,
 	// validates the local-only boundary, and canonicalizes the workspace
 	// once for cmd.Dir, policy input, session CWD, and result metadata.
@@ -213,7 +213,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 	if sandboxReq != nil {
 		// The canonical workspace drives cmd.Dir, policy input, session CWD,
-		// and result metadata (ADR-0031 item 9 / invariant 5). Ordinary and
+		// and result metadata (ADR-0034 item 9 / invariant 5). Ordinary and
 		// SSH sessions leave Cwd empty, preserving their existing behavior.
 		cfg.Cwd = sandboxReq.Workspace
 	}
@@ -378,6 +378,15 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 				"abi", statusErr.Status.ABI,
 			)
 			_ = wconn.TryError(req.ID, RPCError{Code: -32011, Message: statusErr.Status.Reason, Data: map[string]any{"reason": statusErr.Status.Reason}})
+			return
+		}
+		var launchErr *sandbox.LaunchError
+		if errors.As(err, &launchErr) {
+			h.log.Warn("sandbox launch unavailable", "reason", launchErr.Reason)
+			_ = wconn.TryError(req.ID, RPCError{
+				Code: -32012, Message: "sandbox launch unavailable",
+				Data: map[string]any{"reason": launchErr.Reason},
+			})
 			return
 		}
 		var setupErr *sandbox.SetupError
@@ -1031,10 +1040,10 @@ func validateAckRaw(raw json.RawMessage) string {
 }
 
 // maxSandboxPaths bounds each sandbox add/remove array and the persisted
-// allowedWritablePaths baseline (ADR-0031 §3.1 maxEntries).
+// allowedWritablePaths baseline (ADR-0034 §3.1 maxEntries).
 const maxSandboxPaths = 32
 
-// --- strict open decoding (ADR-0031 §5) ------------------------------------
+// --- strict open decoding (ADR-0034 §5) ------------------------------------
 
 // decodeOpenParams strictly decodes the "open" params. The permissive
 // json.Unmarshal is gone: an unknown member (including the obsolete
