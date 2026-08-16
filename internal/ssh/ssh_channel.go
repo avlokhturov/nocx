@@ -23,6 +23,15 @@ type RealChannel struct {
 	// means integration succeeded or was never attempted.
 	shellIntegrationReason RefusalReason
 
+	// waitMu guards waitErr/waitSet: the watcher records the outcome of
+	// session.Wait before closing done, but an explicit Close may close done
+	// first, and the exit monitor may then read the fields while the
+	// watcher is still writing them. waitSet is what makes "not yet
+	// recorded" distinguishable from "recorded as nil" (nocx-ictcq).
+	waitMu  sync.Mutex
+	waitErr error
+	waitSet bool
+
 	closeOnce sync.Once
 	closeCb   func()
 	// lifecycleClose releases the session's authenticated lifecycle
@@ -100,6 +109,32 @@ func (c *RealChannel) Close() error {
 		}
 	})
 	return nil
+}
+
+// recordWait captures what session.Wait returned when the remote session
+// ended, and is called by the watcher BEFORE Close closes done, so a reader
+// that has observed <-Done sees the record (nocx-ictcq). It is first-wins
+// under the mutex: an explicit Close can close done first and the watcher
+// records afterwards, and the first record is the only truth worth keeping.
+func (c *RealChannel) recordWait(err error) {
+	c.waitMu.Lock()
+	defer c.waitMu.Unlock()
+	if c.waitSet {
+		return
+	}
+	c.waitErr = err
+	c.waitSet = true
+}
+
+// WaitErr reports what session.Wait returned, and whether it has been
+// captured. The session layer maps the error to an exit cause: nil or an
+// *ssh.ExitError means the remote shell exited on its own (authoritative,
+// with a status); anything else — and a not-yet-set outcome, which happens
+// when the channel was closed before the watcher recorded — is a loss.
+func (c *RealChannel) WaitErr() (error, bool) {
+	c.waitMu.Lock()
+	defer c.waitMu.Unlock()
+	return c.waitErr, c.waitSet
 }
 
 func (c *RealChannel) Done() <-chan struct{} {

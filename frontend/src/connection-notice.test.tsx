@@ -12,6 +12,7 @@ import { Dispatcher } from './dispatcher'
 import { WSClient } from './ipc'
 
 const SID = '0123456789abcdef0011223344556677'
+const OPEN_IDENTITY = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
 
 class MockWebSocket {
   static readonly CONNECTING = 0
@@ -129,7 +130,7 @@ async function connect(client: WSClient): Promise<void> {
 async function openSession(client: WSClient): Promise<void> {
   const opening = client.openSession(80, 24)
   const openID = socket().requests()[0].id
-  socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
+  socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID, ...OPEN_IDENTITY } })
   await opening
 }
 

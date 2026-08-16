@@ -94,6 +94,20 @@ type openHandlers struct {
 	log       log.Logger
 }
 
+// openResult is the open ack payload, declared once (contracts/open.schema
+// .json) and pinned by the DTO contract test. The session identity
+// (nocx-3oupk) rides it because this is where the renderer first learns
+// the session: instanceId + sessionEpoch are minted by the backend
+// (AD-7), never here or on the renderer, and every later observation of
+// this session is compared against the pair this ack carried.
+type openResult struct {
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
+	Cwd          string `json:"cwd"`
+	DesiredMode  string `json:"desiredMode"`
+}
+
 // handleOpen creates a new session and output ring.
 //
 // Per AD-7: the server assigns the authoritative session-id. The JSON-RPC
@@ -358,10 +372,13 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// starts from — script wraps and installs automatically, raw adds
 	// nothing, relay is consent-gated. It is the mode, never proof
 	// integration succeeded.
-	result := map[string]string{
-		"sessionId":   string(sess.ID()),
-		"cwd":         sess.Cwd(),
-		"desiredMode": desiredModeForAck(cfg.Remote),
+	ident := sess.Identity()
+	result := openResult{
+		SessionID:    string(sess.ID()),
+		InstanceID:   string(ident.InstanceID),
+		SessionEpoch: ident.Epoch,
+		Cwd:          sess.Cwd(),
+		DesiredMode:  desiredModeForAck(cfg.Remote),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)

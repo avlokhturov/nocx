@@ -147,7 +147,9 @@ type lifecycleChangedNotification struct {
 // the transport seam because one WebSocket owns several terminal tabs and only
 // this layer knows which session the lane belongs to.
 type lifecycleChangedParams struct {
-	SessionID string `json:"sessionId"`
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
 	lifecyclepub.Fact
 }
 
@@ -221,7 +223,8 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// has already marked the domains lost and open attempts unknown. What is
 	// dropped is a notification to a session that is going away, never the
 	// backend's own authority state.
-	if _, err := s.registry.Get(sid); err != nil {
+	sess, err := s.registry.Get(sid)
+	if err != nil {
 		s.cancelRecovery(sid)
 		return
 	}
@@ -263,7 +266,19 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	// the socket. SessionID is transport addressing, not a lifecycle fact:
 	// one WebSocket carries several tabs, and the renderer must route this
 	// notification before any tab mutates or acknowledges its state.
-	params := lifecycleChangedParams{SessionID: string(sid), Fact: f}
+	//
+	// The session identity rides the fact (nocx-3oupk): the renderer
+	// compares it against the pair it learned at open, so a fact for this
+	// sessionId out of a previous backend instance — or an earlier epoch of
+	// this one — is refused instead of applied. It is distinct from the
+	// domain epoch the Fact itself carries, which is the lifecycle
+	// kernel's per-domain counter.
+	params := lifecycleChangedParams{
+		SessionID:    string(sid),
+		InstanceID:   string(sess.Identity().InstanceID),
+		SessionEpoch: sess.Identity().Epoch,
+		Fact:         f,
+	}
 	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
 		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
 	}
