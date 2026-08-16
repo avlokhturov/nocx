@@ -25,8 +25,8 @@ func newTestRegistry(t *testing.T, start time.Time) (*CaptureRegistry, *time.Tim
 	return r, &clock
 }
 
-func scope(tab string, gen uint64) CaptureScope {
-	return CaptureScope{Tab: tab, Generation: gen}
+func scope(conn, tab string, gen uint64) CaptureScope {
+	return CaptureScope{Connection: conn, Tab: tab, Generation: gen}
 }
 
 func cred(value, name string) PendingCredential {
@@ -41,7 +41,7 @@ func TestSubmitMintsAndLinks(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
 	// First submission: a capture.
-	res := r.Submit(scope("tab1", 1), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
+	res := r.Submit(scope("c1", "tab1", 1), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
 	if len(res) != 1 || res[0].Outcome != OutcomeCaptured || res[0].CaptureID == "" {
 		t.Fatalf("first submit = %+v, want one captured", res)
 	}
@@ -49,7 +49,7 @@ func TestSubmitMintsAndLinks(t *testing.T) {
 
 	// Same value again, next command: linked to the SAME capture, no second
 	// offer.
-	res = r.Submit(scope("tab1", 2), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
+	res = r.Submit(scope("c1", "tab1", 2), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
 	if len(res) != 1 || res[0].Outcome != OutcomeLinked || res[0].CaptureID != id {
 		t.Fatalf("second submit = %+v, want linked to %s", res, id)
 	}
@@ -60,14 +60,14 @@ func TestSubmitSuppression(t *testing.T) {
 
 	// Save a value, then re-submit it: the row stores the reference
 	// automatically, nothing is offered.
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-saved-value-1234567890", "saved.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-saved-value-1234567890", "saved.ai")})
 	id := res[0].CaptureID
 	if _, err := r.Reserve(id); err != nil {
 		t.Fatalf("Reserve: %v", err)
 	}
 	r.Complete(id, "saved.ai", "sec:v1:system:x", false, nil)
 
-	res = r.Submit(scope("t", 2), []PendingCredential{cred("sk-proj-saved-value-1234567890", "saved.ai")})
+	res = r.Submit(scope("c1", "t", 2), []PendingCredential{cred("sk-proj-saved-value-1234567890", "saved.ai")})
 	if len(res) != 1 || res[0].Outcome != OutcomeSaved || res[0].SavedName != "saved.ai" {
 		t.Fatalf("re-submit after save = %+v, want OutcomeSaved with the existing name", res)
 	}
@@ -76,12 +76,12 @@ func TestSubmitSuppression(t *testing.T) {
 	}
 
 	// Dismiss a value, then re-submit it in the same session: suppressed.
-	res = r.Submit(scope("t", 3), []PendingCredential{cred("sk-proj-dismissed-value-123456", "dismissed.ai")})
+	res = r.Submit(scope("c1", "t", 3), []PendingCredential{cred("sk-proj-dismissed-value-123456", "dismissed.ai")})
 	id2 := res[0].CaptureID
 	if err := r.Dismiss(id2); err != nil {
 		t.Fatalf("Dismiss: %v", err)
 	}
-	res = r.Submit(scope("t", 4), []PendingCredential{cred("sk-proj-dismissed-value-123456", "dismissed.ai")})
+	res = r.Submit(scope("c1", "t", 4), []PendingCredential{cred("sk-proj-dismissed-value-123456", "dismissed.ai")})
 	if len(res) != 1 || res[0].Outcome != OutcomeSuppressed {
 		t.Fatalf("re-submit after dismiss = %+v, want OutcomeSuppressed", res)
 	}
@@ -95,14 +95,14 @@ func TestSubmitSuppression(t *testing.T) {
 func TestPendingCaptureHasNoLifetimeOfItsOwn(t *testing.T) {
 	r, clock := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-long-lived-value-12345", "long.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-long-lived-value-12345", "long.ai")})
 	id := res[0].CaptureID
 
 	// A day later, and after several unrelated submissions from the same
 	// tab, the offer is still answerable.
 	*clock = clock.Add(24 * time.Hour)
-	r.Submit(scope("t", 2), []PendingCredential{cred("sk-proj-another-value-123456789", "other.ai")})
-	r.Submit(scope("t", 3), nil)
+	r.Submit(scope("c1", "t", 2), []PendingCredential{cred("sk-proj-another-value-123456789", "other.ai")})
+	r.Submit(scope("c1", "t", 3), nil)
 	if _, err := r.Reserve(id); err != nil {
 		t.Fatalf("reserve after a day and three submissions: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestPendingCaptureHasNoLifetimeOfItsOwn(t *testing.T) {
 func TestReserveIsSingleUseAndIdempotent(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-single-use-value-123456", "once.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-single-use-value-123456", "once.ai")})
 	id := res[0].CaptureID
 
 	h, err := r.Reserve(id)
@@ -152,7 +152,7 @@ func TestReserveIsSingleUseAndIdempotent(t *testing.T) {
 func TestSaveFailureIsRecordedNotRetried(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-failing-value-1234567890", "fail.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-failing-value-1234567890", "fail.ai")})
 	id := res[0].CaptureID
 
 	if _, err := r.Reserve(id); err != nil {
@@ -173,7 +173,7 @@ func TestSaveFailureIsRecordedNotRetried(t *testing.T) {
 func TestRewritePendingIsRedoable(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-partial-value-123456789", "partial.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-partial-value-123456789", "partial.ai")})
 	id := res[0].CaptureID
 
 	if _, err := r.Reserve(id); err != nil {
@@ -203,7 +203,7 @@ func TestRewritePendingIsRedoable(t *testing.T) {
 func TestDismissConsumesTheToken(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-dismiss-token-1234567890", "d.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-dismiss-token-1234567890", "d.ai")})
 	id := res[0].CaptureID
 	if err := r.Dismiss(id); err != nil {
 		t.Fatalf("Dismiss: %v", err)
@@ -226,14 +226,14 @@ func TestDismissConsumesTheToken(t *testing.T) {
 func TestSubmissionsDoNotSupersedeOlderPending(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	resA := r.Submit(scope("tab1", 1), []PendingCredential{cred("sk-proj-super-a-1234567890123", "a.ai")})
-	resB := r.Submit(scope("tab1", 2), []PendingCredential{cred("sk-proj-super-b-1234567890123", "b.ai")})
+	resA := r.Submit(scope("c1", "tab1", 1), []PendingCredential{cred("sk-proj-super-a-1234567890123", "a.ai")})
+	resB := r.Submit(scope("c1", "tab1", 2), []PendingCredential{cred("sk-proj-super-b-1234567890123", "b.ai")})
 	idA, idB := resA[0].CaptureID, resB[0].CaptureID
 
 	// A third submission carrying its own key, and an ordinary one carrying
 	// none: neither touches what is already pending.
-	r.Submit(scope("tab1", 3), []PendingCredential{cred("sk-proj-super-c-1234567890123", "c.ai")})
-	r.Submit(scope("tab1", 4), nil)
+	r.Submit(scope("c1", "tab1", 3), []PendingCredential{cred("sk-proj-super-c-1234567890123", "c.ai")})
+	r.Submit(scope("c1", "tab1", 4), nil)
 
 	if _, err := r.Reserve(idA); err != nil {
 		t.Fatalf("capture A after later submissions = %v, want live", err)
@@ -246,7 +246,7 @@ func TestSubmissionsDoNotSupersedeOlderPending(t *testing.T) {
 func TestTypingNextCommandDoesNotDestroy(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-typing-keeps-1234567890", "keep.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-typing-keeps-1234567890", "keep.ai")})
 	id := res[0].CaptureID
 
 	// The deliberate exception: no submission happened, so nothing is
@@ -260,12 +260,14 @@ func TestTypingNextCommandDoesNotDestroy(t *testing.T) {
 func TestDestroyTabAndDestroyAll(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res1 := r.Submit(scope("tab1", 1), []PendingCredential{cred("sk-proj-dt-a-1234567890123456", "a.ai")})
-	res2 := r.Submit(scope("tab2", 1), []PendingCredential{cred("sk-proj-dt-b-1234567890123456", "b.ai")})
+	res1 := r.Submit(scope("c1", "tab1", 1), []PendingCredential{cred("sk-proj-dt-a-1234567890123456", "a.ai")})
+	res2 := r.Submit(scope("c1", "tab2", 1), []PendingCredential{cred("sk-proj-dt-b-1234567890123456", "b.ai")})
 	id1, id2 := res1[0].CaptureID, res2[0].CaptureID
 
-	// Tab closure / disconnect destroys only that tab's pending captures.
-	r.DestroyTab("tab1")
+	// Tab closure destroys only that tab's pending captures — two tabs on
+	// ONE connection is the arrangement the scope fix exists for (the old
+	// connection-keyed destroy took both).
+	r.DestroyTab("c1", "tab1")
 	if _, err := r.Reserve(id1); !errors.Is(err, ErrCaptureUnknown) {
 		t.Fatalf("tab1 capture after DestroyTab = %v, want unknown", err)
 	}
@@ -273,10 +275,33 @@ func TestDestroyTabAndDestroyAll(t *testing.T) {
 		t.Fatalf("tab2 capture after DestroyTab(tab1) = %v, want live", err)
 	}
 
-	// Vault seal / app lock / shutdown destroys everything still pending
-	// (id2 was consumed by the alive-check above, so a fresh capture is
-	// used for the DestroyAll assertion).
-	res3 := r.Submit(scope("tab3", 1), []PendingCredential{cred("sk-proj-dt-c-1234567890123456", "c.ai")})
+	// The tab identity is renderer-minted and opaque, so it is not an
+	// authorization boundary on its own: the same tab id submitted from
+	// ANOTHER connection must not be reachable by this connection's
+	// DestroyTab. The pair key is what isolates them.
+	resOther := r.Submit(scope("c2", "tab2", 1), []PendingCredential{cred("sk-proj-dt-other-1234567890123", "o.ai")})
+	otherID := resOther[0].CaptureID
+	r.DestroyTab("c1", "tab2")
+	if _, err := r.Reserve(otherID); err != nil {
+		t.Fatalf("same tab id on another connection after DestroyTab(c1,tab2) = %v, want live", err)
+	}
+
+	// Transport disconnect destroys everything ON that connection — both of
+	// c2's tabs die, and a capture on a different connection survives.
+	resOther2 := r.Submit(scope("c2", "tab3", 1), []PendingCredential{cred("sk-proj-dt-other2-12345678901", "p.ai")})
+	other2ID := resOther2[0].CaptureID
+	resAlive := r.Submit(scope("c1", "tab9", 1), []PendingCredential{cred("sk-proj-dt-alive-1234567890123", "q.ai")})
+	aliveID := resAlive[0].CaptureID
+	r.DestroyConnection("c2")
+	if _, err := r.Reserve(other2ID); !errors.Is(err, ErrCaptureUnknown) {
+		t.Fatalf("c2 capture after DestroyConnection = %v, want unknown", err)
+	}
+	if _, err := r.Reserve(aliveID); err != nil {
+		t.Fatalf("c1 capture after DestroyConnection(c2) = %v, want live", err)
+	}
+
+	// Vault seal / app lock / shutdown destroys everything still pending.
+	res3 := r.Submit(scope("c1", "tab3", 1), []PendingCredential{cred("sk-proj-dt-c-1234567890123456", "c.ai")})
 	id3 := res3[0].CaptureID
 	r.DestroyAll()
 	if _, err := r.Reserve(id3); !errors.Is(err, ErrCaptureUnknown) {
@@ -299,7 +324,7 @@ func TestFingerprintsAreKeyedAndDistinct(t *testing.T) {
 
 func TestCaptureNeverSerializes(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-non-serial-1234567890", "n.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-non-serial-1234567890", "n.ai")})
 	h, err := r.Reserve(res[0].CaptureID)
 	if err != nil {
 		t.Fatalf("Reserve: %v", err)
@@ -317,7 +342,7 @@ func TestCaptureNeverSerializes(t *testing.T) {
 
 func TestConcurrentReservesSettleToOneCreate(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
-	res := r.Submit(scope("t", 1), []PendingCredential{cred("sk-proj-concurrent-12345678901", "c.ai")})
+	res := r.Submit(scope("c1", "t", 1), []PendingCredential{cred("sk-proj-concurrent-12345678901", "c.ai")})
 	id := res[0].CaptureID
 
 	if _, err := r.Reserve(id); err != nil {

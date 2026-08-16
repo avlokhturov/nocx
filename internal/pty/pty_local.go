@@ -20,6 +20,16 @@ type LocalPty struct {
 	mu     sync.Mutex
 	done   chan struct{}
 	closed bool
+
+	// waitErr is what cmd.Wait returned when the shell process ended, and
+	// waitSet whether it has been captured. Written by the watcher goroutine
+	// BEFORE close(done), so a reader that has observed <-done sees the
+	// write (channel-close ordering) and needs no additional synchronisation.
+	// The exit-caused classification (nocx-ictcq) reads it to tell an
+	// authoritative shell exit — nil, or an *exec.ExitError carrying the
+	// status — from a teardown that never let the process report one.
+	waitErr error
+	waitSet bool
 }
 
 // localeVars are checked in POSIX precedence order; any one of them present
@@ -160,7 +170,15 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	}
 
 	go func() {
-		_ = cmd.Wait()
+		waitErr := cmd.Wait()
+		// Record BEFORE close(done): the transport's exit monitor wakes on
+		// Done and reads WaitErr to classify how the session ended — a
+		// shell's own exit (authoritative, with a status) versus a loss
+		// (nocx-ictcq). Channel-close ordering publishes the write.
+		lp.mu.Lock()
+		lp.waitErr = waitErr
+		lp.waitSet = true
+		lp.mu.Unlock()
 		close(lp.done)
 	}()
 
@@ -247,4 +265,17 @@ func (lp *LocalPty) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16)
 
 func (lp *LocalPty) Done() <-chan struct{} {
 	return lp.done
+}
+
+// WaitErr reports what cmd.Wait returned when the shell process ended, and
+// whether it has been captured yet (nocx-ictcq). The session layer maps the
+// error to an exit cause: nil or an *exec.ExitError means the shell exited on
+// its own (authoritative, with a status); anything else — and a not-yet-set
+// outcome, which only happens when Done was closed by a path that never let
+// the process report — is a loss. Recorded before close(done), so a caller
+// that has observed <-Done sees it.
+func (lp *LocalPty) WaitErr() (error, bool) {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	return lp.waitErr, lp.waitSet
 }

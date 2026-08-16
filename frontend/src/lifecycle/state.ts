@@ -28,9 +28,12 @@
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
 
 /** The authenticated lifecycle projection after its transport address has
- *  routed it to one session. sessionId belongs to the shared-WebSocket
- *  envelope; the per-session state machine owns only the fact body. */
-export type LifecycleFact = Omit<LifecycleChanged, 'sessionId'>
+ *  routed it to one session. sessionId and the incarnation identity
+ *  (instanceId + sessionEpoch, nocx-3oupk) belong to the shared-WebSocket
+ *  envelope — the renderer compares the envelope's pair against the
+ *  session's own to refuse a fact out of a previous incarnation; the
+ *  per-session state machine owns only the fact body. */
+export type LifecycleFact = Omit<LifecycleChanged, 'sessionId' | 'instanceId' | 'sessionEpoch'>
 import {
   activateDomain,
   emptyStack,

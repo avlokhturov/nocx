@@ -1,6 +1,8 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
+import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
+import type { TabClose } from './generated/tab.close'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -15,6 +17,8 @@ import type { Open } from './generated/open'
  *  names. */
 type OpenResult = {
   sessionId?: string
+  instanceId?: string
+  sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
 }
@@ -145,6 +149,15 @@ interface AttachResult {
 interface SessionState {
   decoder: UTF8StreamDecoder
 
+  // The session's incarnation identity (nocx-3oupk), as minted by the
+  // backend at open (AD-7): instanceId + sessionEpoch. Every observation
+  // of this session — exit, integrationChanged, lifecycle.changed — is
+  // compared against the pair, so a message out of a previous backend
+  // instance is refused instead of applied. Always present: the open
+  // contract requires the pair, and _registerHandle refuses an ack
+  // without it.
+  instanceId: string
+  sessionEpoch: number
   // Monotonic byte offset — the total count of payload bytes received for
   // this session. Counted as frame.payload.byteLength, NOT decoded string
   // length, because a multi-byte rune is several bytes and one character.
@@ -161,8 +174,12 @@ interface SessionState {
   // response, so the initial shell prompt can race the caller's
   // session.onData() — without this buffer the prompt is silently lost.
   pendingData: string
-
-  exitCallback: ((sessionId: string) => void) | null
+  // exitCallback receives the wire Exit (contracts/exit.schema.json): the
+  // closed-set cause separating an authoritative shell exit (with its
+  // status) from a loss. The failed-reattach path delivers a loss with the
+  // same object, so a tab that lost its backend session is treated exactly
+  // like a tab whose channel died — marked, never destroyed (nocx-ictcq).
+  exitCallback: ((exit: Exit) => void) | null
   resetCallback: (() => void) | null
 
   // Fires when the backend reports that this session's write queue refused
@@ -208,7 +225,7 @@ export class SessionHandle {
     this.client.onSessionData(this.sessionId, cb)
   }
 
-  onExit(cb: (sessionId: string) => void): void {
+  onExit(cb: (exit: Exit) => void): void {
     this.client.onSessionExit(this.sessionId, cb)
   }
 
@@ -289,7 +306,21 @@ export class WSClient {
             return 'resumed' as const
           })
           .catch(() => {
-            state.exitCallback?.(sid)
+            // A reattach that failed is a loss, not an exit: the backend no
+            // longer holds the session, and the tab must be marked, never
+            // destroyed (nocx-ictcq). Delivered through the SAME callback
+            // as the backend's exit notification, with the same closed-set
+            // cause, so a fix that only touches the notification's sender
+            // leaves this path uncaused and the tab still dies on it.
+            state.exitCallback?.({
+              sessionId: sid,
+              cause: 'interrupted',
+              // The identity this session was opened with (nocx-3oupk):
+              // echoed, never minted (AD-7) — the backend's pair is the
+              // only one that exists.
+              instanceId: state.instanceId,
+              sessionEpoch: state.sessionEpoch,
+            })
             this.sessions.delete(sid)
             return 'lost' as const
           }),
@@ -306,13 +337,45 @@ export class WSClient {
       })
     })
 
-    // Handle server-initiated exit notifications.
+    // Handle server-initiated exit notifications. The cause is the closed
+    // set of contracts/exit.schema.json: "exited" (the shell exited, with
+    // its status) or "interrupted" (a loss). A cause that is neither — or
+    // absent, from a peer that predates the contract — is treated as a
+    // loss, deliberately: a wrongly-marked tab is recoverable, a wrongly
+    // destroyed tab is lost work, so the safe direction is to never close
+    // on ambiguous data.
     this.dispatcher.subscribe('exit', (params: unknown) => {
       if (!params || typeof params !== 'object') return
-      const sid = (params as Record<string, unknown>).sessionId
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
       if (typeof sid !== 'string') return
+      // The session's own identity (nocx-3oupk): the wire's pair is the
+      // backend's word (AD-7), and the identity learned at open is the
+      // fallback for a notification that predates the fields — the renderer
+      // never mints one. With neither, the notification cannot be told from
+      // a previous incarnation and is dropped rather than applied.
+      const state = this.sessions.get(sid)
+      const instanceId = typeof raw.instanceId === 'string' ? raw.instanceId : state?.instanceId
+      const sessionEpoch =
+        typeof raw.sessionEpoch === 'number' ? raw.sessionEpoch : state?.sessionEpoch
+      if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
+        return
+      }
+      const isExited = raw.cause === 'exited' && Number.isInteger(raw.status)
+      // A loss never carries a status; an exited event missing its status is
+      // malformed and reads as a loss too (the schema's exited branch
+      // requires it).
+      const exit: Exit = isExited
+        ? {
+            sessionId: sid,
+            cause: 'exited',
+            status: raw.status as number,
+            instanceId,
+            sessionEpoch,
+          }
+        : { sessionId: sid, cause: 'interrupted', instanceId, sessionEpoch }
       this._flushAck(sid)
-      this.sessions.get(sid)?.exitCallback?.(sid)
+      state?.exitCallback?.(exit)
       this.sessions.delete(sid)
     })
 
@@ -351,6 +414,17 @@ export class WSClient {
    *  correlation with the binary data plane stays owned here. */
   call<T = unknown>(method: string, params: unknown): Promise<T> {
     return this.dispatcher.call<T>(method, params)
+  }
+
+  /** Tell the backend a tab closed, so its pending captures die with it
+   *  (nocx-tsajw). The tabId is the renderer-minted per-tab identity — the
+   *  one wire exception to "session-local ids never cross" — declared once
+   *  in contracts/tab.close.schema.json (TabClose is generated from it).
+   *  Fire-and-forget: a lost notification is covered by the transport
+   *  disconnect, which is the same destruction the tab's death implies. */
+  notifyTabClosed(tabId: string): void {
+    const params: TabClose = { tabId }
+    this.dispatcher.notify('tab.close', params)
   }
 
   // --- ack plumbing -------------------------------------------------------
@@ -458,6 +532,13 @@ export class WSClient {
     if (!sid || !isSessionID(sid)) {
       throw new Error(`nocx: invalid session-id from server: ${sid}`)
     }
+    // The identity is required by the contract and never minted here
+    // (AD-7): an ack without it cannot tell this session from a restored
+    // record, so it is refused like an invalid id (nocx-3oupk).
+    const { instanceId, sessionEpoch } = result
+    if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
+      throw new Error(`nocx: invalid session identity from server: ${sid}`)
+    }
     this.sessions.set(sid, {
       decoder: new UTF8StreamDecoder(),
       offset: 0,
@@ -466,6 +547,8 @@ export class WSClient {
       exitCallback: null,
       resetCallback: null,
       inputStalledCallback: null,
+      instanceId,
+      sessionEpoch,
     })
     return new SessionHandle(this, sid, result?.cwd ?? '', result?.desiredMode ?? 'script')
   }
@@ -526,7 +609,7 @@ export class WSClient {
     }
   }
 
-  onSessionExit(sessionId: string, cb: (sessionId: string) => void): void {
+  onSessionExit(sessionId: string, cb: (exit: Exit) => void): void {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.exitCallback = cb

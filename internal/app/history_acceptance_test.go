@@ -77,6 +77,7 @@ func TestHistory_NoKeystoreSealedVault_RecordSurvivesRestart(t *testing.T) {
 		"startedAt": int64(1_750_000_000_000),
 		"endedAt":   int64(1_750_000_000_100),
 		"trusted":   true,
+		"tabId":     "tab-acceptance",
 	}, 1); resp.Error != nil {
 		t.Fatalf("history.record: %+v", resp.Error)
 	}
@@ -211,6 +212,7 @@ func TestHistory_KeyMaskedOnTheWireAndAcrossRestart(t *testing.T) {
 		"startedAt": int64(1_750_000_000_000),
 		"endedAt":   int64(1_750_000_000_100),
 		"trusted":   true,
+		"tabId":     "tab-acceptance",
 	}, 1)
 	if rec.Error != nil {
 		t.Fatalf("history.record: %+v", rec.Error)

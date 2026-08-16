@@ -7,8 +7,13 @@
         <string>{{.Info.ProductName}}</string>
         <key>CFBundleExecutable</key>
         <string>{{.OutputFilename}}</string>
+        <!-- Our own identity, written out rather than templated from the app
+             name. macOS keys per-app state to this string — notification
+             authorization above all — so a rename that silently moved it would
+             orphan every grant a user had given. It is a constant on purpose.
+             The dev build takes a disjoint one; see Info.dev.plist. -->
         <key>CFBundleIdentifier</key>
-        <string>com.wails.{{safeBundleID .Name}}</string>
+        <string>io.github.shady2k.nocx</string>
         <key>CFBundleVersion</key>
         <string>{{.Info.ProductVersion}}</string>
         <key>CFBundleGetInfoString</key>
@@ -48,7 +53,7 @@
           {{range .Info.Protocols}}
             <dict>
                 <key>CFBundleURLName</key>
-                <string>com.wails.{{.Scheme}}</string>
+                <string>io.github.shady2k.{{.Scheme}}</string>
                 <key>CFBundleURLSchemes</key>
                 <array>
                     <string>{{.Scheme}}</string>

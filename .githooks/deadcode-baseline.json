@@ -59,6 +59,26 @@
       "func": "ImportTabbyWithService"
     },
     {
+      "file": "internal/notify/clock.go",
+      "func": "ManualClock.Advance"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "ManualClock.AfterFunc"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "ManualClock.Now"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "manualTimer.Stop"
+    },
+    {
+      "file": "internal/notify/clock.go",
+      "func": "NewManualClock"
+    },
+    {
       "file": "internal/profile/profile.go",
       "func": "BuildGroupTree"
     },

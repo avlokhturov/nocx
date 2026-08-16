@@ -13,7 +13,7 @@
 
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
 
-type DomainLifecycleFact = Omit<LifecycleChanged, 'sessionId'>
+type DomainLifecycleFact = Omit<LifecycleChanged, 'sessionId' | 'instanceId' | 'sessionEpoch'>
 
 const integrationDomainBrand = Symbol('integrationDomain')
 
