@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,9 +30,11 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
@@ -133,6 +134,11 @@ type WSServer struct {
 	// hold the holder and read the current value per call.
 	resolver *resolverHolder
 
+	// notifyRaiser raises program-sourced notifications through the notify
+	// pipeline (ADR-0029). Wired through WithNotifyRaiser; when nil,
+	// notify.raise answers -32601.
+	notifyRaiser NotifyRaiser
+
 	// Profile service provides a single validated write path for profiles
 	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
@@ -154,6 +160,12 @@ type WSServer struct {
 
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
+	// snippets is the snippet library service backing the snippets.* JSON-RPC
+	// methods. When nil, those methods return -32601.
+	snippets *snippet.Service
+	// notes is the notes library service backing the notes.* JSON-RPC
+	// methods. When nil, those methods return -32601.
+	notes *note.Service
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
@@ -776,6 +788,19 @@ func WithProfileService(svc *profile.ProfileService) WSServerOption {
 	return func(s *WSServer) { s.profileSvc = svc }
 }
 
+// WithSnippets attaches the snippet library service to the server, enabling
+// the snippets.* JSON-RPC methods. When nil, those methods return -32601.
+func WithSnippets(svc *snippet.Service) WSServerOption {
+	return func(s *WSServer) { s.snippets = svc }
+}
+
+// WithNotes attaches the notes library service, enabling the notes.*
+// JSON-RPC methods. When nil, those methods return -32601 and the panel
+// says the library is unavailable — never an empty list.
+func WithNotes(svc *note.Service) WSServerOption {
+	return func(s *WSServer) { s.notes = svc }
+}
+
 // WithCaptureRegistry injects the pending-capture registry. Test seam:
 // production constructs its own. The injected registry must not be shared
 // across servers.
@@ -976,6 +1001,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
+	specs = append(specs, s.notifySpecs()...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
@@ -2204,11 +2230,39 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		return
 	}
 
-	if err := wconn.TryNotify("exit", mustMarshal(map[string]string{
-		"sessionId": string(sess.ID()),
+	// The cause discriminates an authoritative shell exit (with its status)
+	// from a loss, so a tab whose ssh connection dropped is marked instead
+	// of destroyed (nocx-ictcq). The classification is the session layer's
+	// single owner; here the outcome is only mapped onto the wire fields.
+	cause, status := sess.ExitOutcome()
+	var statusPtr *int
+	if cause == session.ExitExited {
+		statusPtr = &status
+	}
+	ident := sess.Identity()
+	if err := wconn.TryNotify("exit", mustMarshal(exitNotificationParams{
+		SessionID:    string(sess.ID()),
+		InstanceID:   string(ident.InstanceID),
+		SessionEpoch: ident.Epoch,
+		Cause:        string(cause),
+		Status:       statusPtr,
 	})); err != nil {
 		s.log.Debug("write exit notification", "error", err)
 	}
+}
+
+// exitNotificationParams is the exit notification payload, declared once
+// (contracts/exit.schema.json) and pinned by the contract tests: a closed-set
+// cause discriminating an authoritative shell exit from a loss, with the
+// exit status present exactly when the cause is "exited". additionalProperties
+// is false on the schema, so a field added here but not declared there fails
+// the DTO contract check (AD-8).
+type exitNotificationParams struct {
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
+	Cause        string `json:"cause"`
+	Status       *int   `json:"status,omitempty"`
 }
 
 // notifyInputStalled tells the tab that its keystrokes are being dropped:
@@ -2477,8 +2531,11 @@ func (s *WSServer) registerConn(wc *wsConn) {
 }
 
 // unregisterConn removes a connection from the broadcast set and destroys
-// its pending captures: a transport disconnect and a tab closure are both
-// on the capture contract's destruction list. It also stops the tunnels the
+// every pending capture it owns: a transport disconnect is on the capture
+// contract's destruction list, and one WebSocket carries every tab in a
+// window, so the connection's death takes all of them (DestroyConnection —
+// tab closure is a separate, per-tab trigger the renderer fires through
+// tab.close). It also stops the tunnels the
 // tab opened — tab-scoped teardown (spec §7.3): each forward holds its OWN
 // pooled reference, so stopping this tab's forwards never touches another
 // tab's on the same shared connection.
@@ -2487,7 +2544,7 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 	delete(s.conns, wc)
 	s.connsMu.Unlock()
 	if s.captures != nil {
-		s.captures.DestroyTab(strconv.FormatUint(wc.id, 10))
+		s.captures.DestroyConnection(connectionID(wc))
 	}
 	// The request broker's lifecycle signal (nocx-e2j1z): a pending request
 	// this connection could answer loses an answerer, and a request with no

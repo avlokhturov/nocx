@@ -71,6 +71,40 @@ $CHANGED
 CHANGED_EOF
 fi
 
+# host_gate runs a check and, on failure, prints it and aborts the commit. Once
+# section 1 has started them, the background containers die with the shell via
+# the EXIT trap; before that there is nothing to clean up.
+host_gate() {
+    _label=$1
+    shift
+    if ! "$@" 2>&1; then
+        warn "$_label"
+        printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+        exit 1
+    fi
+    ok "$_label"
+}
+
+# --- 0b. deadcode ratchet (Go changes only) ---------------------------------
+# This runs BEFORE the containers rather than inside their shadow, which is
+# where every other host gate runs. It is the one host gate with a large memory
+# peak: the analysis loads the whole module twice (darwin and linux) and tops
+# out around 1.4 GB, while `go test -race` in a container next to it wants
+# several GB of its own. On an 8 GB machine the kernel picks one, and on
+# 2026-08-14 it picked this one twice in a row — reported as "deadcode exited
+# null", which says nothing about the tree and reads like it does.
+#
+# The whole ratchet is 13s measured on that same machine, against container
+# gates that are minutes, so running it first costs 13s of overlap and buys a
+# gate that fails for reasons in the diff. The committed baseline in
+# .githooks/deadcode-baseline.json is what makes a NEW unreachable function a
+# failure rather than the 84 already there.
+if [ "$RUN_GO" = 1 ]; then
+    host_gate "deadcode ratchet" node .githooks/check-deadcode.mjs
+else
+    ok "deadcode ratchet — skipped (no Go changes staged)"
+fi
+
 # --- 1. start the container gates now, in parallel --------------------------
 # They share nothing — one is a Go toolchain, the other a Node one — and between
 # them they were 72% of this hook's wall time when run in sequence. Starting them
@@ -96,19 +130,6 @@ if [ "$RUN_FE" = 1 ]; then
     FE_PID=$!
 fi
 
-# host_gate runs a check and, on failure, prints it and aborts the commit. The
-# background containers die with the shell via the EXIT trap.
-host_gate() {
-    _label=$1
-    shift
-    if ! "$@" 2>&1; then
-        warn "$_label"
-        printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
-        exit 1
-    fi
-    ok "$_label"
-}
-
 # --- 2. gofumpt (always: one second, and it reads the whole module) ----------
 UNFMT=$(gofumpt -l . 2>&1) || true
 if [ -n "$UNFMT" ]; then
@@ -121,16 +142,6 @@ ok "gofumpt"
 
 # --- 3. golangci-lint (always: it is cached and effectively free) -----------
 host_gate "golangci-lint" golangci-lint run ./...
-
-# --- 3b. deadcode ratchet (Go changes only: ~4s and it loads the whole
-# module, so a commit that touches no Go must not pay for it; the committed
-# baseline in .githooks/deadcode-baseline.json is what makes a new unreachable
-# function fail rather than the 86 existing ones) ---------------------------
-if [ "$RUN_GO" = 1 ]; then
-    host_gate "deadcode ratchet" node .githooks/check-deadcode.mjs
-else
-    ok "deadcode ratchet — skipped (no Go changes staged)"
-fi
 
 # --- 3c. control goroutine ratchet (Go changes only, same reasoning as the
 # deadcode ratchet: ~10ms, and the committed baseline is what makes a NEW

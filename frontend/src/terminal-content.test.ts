@@ -52,7 +52,7 @@ import {
   type InputTarget,
   type InputTargetRegistry,
 } from './input-target'
-import { TerminalContent, type TerminalContentHooks } from './terminal-content'
+import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { Tab } from './tabs'
 import { SURFACE_TERMINAL } from './tab-content'
@@ -104,6 +104,13 @@ const rendererOf = (content: TerminalContent): RendererMock => {
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
 
+/** The live recall overlay behind TerminalContent's private field — the
+ *  same escape hatch editorOf uses. */
+const recallOf = (content: TerminalContent): { isOpen: boolean } => {
+  const withRecall = content as unknown as { recall: { isOpen: boolean } }
+  return withRecall.recall
+}
+
 /** The editor's internal CM6 view — reached only to seed selections. */
 const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
@@ -143,6 +150,7 @@ async function mountTerminal(
   const wsClient = clientFake as unknown as WSClient
   const content = new TerminalContent(
     wsClient,
+    'tab-wire-1',
     clipboard,
     new ClipboardGate(),
     makeBanner(),
@@ -161,6 +169,7 @@ async function mountTerminal(
       defaultTitle: 'Terminal',
     },
     99,
+    'tab-99',
   )
   const paneParent = document.createElement('div')
   paneParent.append(tab.pane)
@@ -847,6 +856,424 @@ describe('inserting a saved secret into the pane in front (nocx-fk32)', () => {
     }
   })
 })
+describe('characterising insertSecret before the input-owner extraction (nocx-xqu5)', () => {
+  // Written BEFORE the extraction and required to pass unchanged after it:
+  // the extraction may change only WHERE the question 'who owns input in
+  // this pane' is answered (into a private inputOwner()), never the
+  // answers. These three branches are the whole current contract.
+
+  /** The reference line insertSecret must ask the vault to resolve. */
+  const REFERENCE = '{{secret:pi@far}}'
+
+  /** A client whose vault.resolveLine answers with a resolved value. */
+  function resolvingClient(value: string) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({ line: value, refs: [{ name: 'pi@far', resolved: true }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  it('with the editor owning the prompt, the REFERENCE enters the draft and nothing resolves or sends', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).show()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('reference')
+      expect(view.state.doc.toString()).toContain(REFERENCE)
+      expect(view.state.doc.toString()).not.toContain('hunter2')
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with the terminal owning input, the value is resolved and sent WITH its newline', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('value')
+      // The vault is asked for exactly the reference line — nothing more.
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', { line: REFERENCE })
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      // The resolved value crosses, with the newline: choosing a secret at
+      // a password prompt IS the answer to that prompt (owner, 2026-08-10).
+      expect(sent).toEqual(['hunter2\n'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with no editor and no session the insert is unavailable and nothing is sent', async () => {
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('hunter2'),
+    )
+    const session = sessionOf(content)
+    const withSession = content as unknown as { session: SessionFake | null }
+    const original = withSession.session
+    withSession.session = null
+    try {
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSecret('pi@far')).resolves.toBe('unavailable')
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      withSession.session = original
+      teardown()
+    }
+  })
+})
+describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
+  /** The refusal the palette must render when nothing owns input (§9.2). */
+  const NO_OWNER: SnippetFire = { ok: false, reason: 'no-owner' }
+
+  /** A client whose vault.resolveLine answers with a resolved value. */
+  function resolvingClient(value: string) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') {
+        return Promise.resolve({ line: value, refs: [{ name: 'pi@far', resolved: true }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  it('into the editor: the text enters the draft, no newline is appended, nothing resolves or sends', async () => {
+    const client = resolvingClient('hunter2')
+    const { content, view, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      editorOf(content).show()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('git push --force')).resolves.toEqual({
+        ok: true,
+        where: 'editor',
+      })
+      // Exactly the body, nothing appended: the user submits with Enter.
+      expect(view.state.doc.toString()).toBe('git push --force')
+      // The secret policy resolves into the pty only; into the editor a
+      // {{secret:…}} stays a reference for the chip and submit (§11.1), so
+      // nothing touches the vault or the session.
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('into the pty: {{secret:…}} resolves exactly as insertSecret resolves it, and NO newline is sent', async () => {
+    const client = resolvingClient('run hunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('run {{secret:pi@far}}')).resolves.toEqual({
+        ok: true,
+        where: 'pty',
+      })
+      // The vault is asked for exactly the snippet body.
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', {
+        line: 'run {{secret:pi@far}}',
+      })
+      // The paste goes through the engine with the resolved line, and the
+      // engine's onData is what reaches the session — byte for byte. No
+      // newline is appended anywhere on this path (§9.3).
+      expect(renderer.paste).toHaveBeenCalledWith('run hunter2')
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      expect(sent).toEqual(['run hunter2'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('refuses an unresolved {{secret:…}} and names it, pasting nothing', async () => {
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params: unknown) => {
+      if (method === 'vault.resolveLine') {
+        let line = ''
+        if (params !== null && typeof params === 'object' && 'line' in params) {
+          const candidate = params.line
+          if (typeof candidate === 'string') line = candidate
+        }
+        return Promise.resolve({ line, refs: [{ name: 'gone', resolved: false }] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('fire {{secret:gone}}')).resolves.toEqual({
+        ok: false,
+        reason: 'unresolved-secret',
+        name: 'gone',
+      })
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a vault that FAILS the call refuses the fire — it does not escape as a rejection', async () => {
+    // The paired case for the test above: "unresolved" is an answer, and
+    // this is no answer at all (the vault is sealed, the socket is gone,
+    // the method is not wired). Nothing was written either way, and the
+    // palette must get a refusal it can render — an exception here would
+    // leave its panel waiting on a promise that never settles.
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'vault.resolveLine') return Promise.reject(new Error('vault is sealed'))
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('fire {{secret:pi@far}}')).resolves.toEqual({
+        ok: false,
+        reason: 'unresolved-secret',
+      })
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("'none' is a refusal, never a fallthrough: with no session the fire stops and the pty is untouched", async () => {
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('hunter2'),
+    )
+    const session = sessionOf(content)
+    const renderer = rendererOf(content)
+    const withSession = content as unknown as { session: SessionFake | null }
+    const original = withSession.session
+    withSession.session = null
+    try {
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('echo hi')).resolves.toEqual(NO_OWNER)
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      withSession.session = original
+      teardown()
+    }
+  })
+
+  it('a multi-line body is refused when the destination has no bracketed paste — before any resolution or write', async () => {
+    const client = resolvingClient('line1\nhunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.bracketedPasteActive.mockReturnValue(false)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
+        ok: false,
+        reason: 'multi-line-no-bracketed-paste',
+      })
+      // The refusal is about the destination, so it is decided before the
+      // vault is asked and before the engine is touched (§9.4).
+      expect(client.call).not.toHaveBeenCalledWith('vault.resolveLine', expect.anything())
+      expect(renderer.paste).not.toHaveBeenCalled()
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a multi-line body is delivered WHOLE — resolved and newline intact — when bracketed paste is on', async () => {
+    const client = resolvingClient('line1\nhunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.bracketedPasteActive.mockReturnValue(true)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
+        ok: true,
+        where: 'pty',
+      })
+      expect(client.call).toHaveBeenCalledWith('vault.resolveLine', {
+        line: 'line1\n{{secret:pi@far}}',
+      })
+      // One document: resolved, newline intact, nothing appended (§9.4).
+      expect(renderer.paste).toHaveBeenCalledWith('line1\nhunter2')
+      const sent = session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])
+      expect(sent).toEqual(['line1\nhunter2'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a single-line body is unaffected by the paste mode either way', async () => {
+    for (const active of [false, true]) {
+      const client = resolvingClient('echo hunter2')
+      const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      try {
+        const renderer = rendererOf(content)
+        editorOf(content).hide()
+        renderer.bracketedPasteActive.mockReturnValue(active)
+        await expect(content.insertSnippet('echo {{secret:pi@far}}')).resolves.toEqual({
+          ok: true,
+          where: 'pty',
+        })
+        expect(renderer.paste).toHaveBeenCalledWith('echo hunter2')
+      } finally {
+        teardown()
+      }
+    }
+  })
+
+  it('a multi-line body into the editor is fine: the refusal is about the pty, not the text', async () => {
+    const { content, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('a\nb'),
+    )
+    try {
+      editorOf(content).show()
+      await expect(content.insertSnippet('a\nb')).resolves.toEqual({ ok: true, where: 'editor' })
+      expect(view.state.doc.toString()).toBe('a\nb')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a paste that reports no write is a refusal, not a reported delivery', async () => {
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {},
+      resolvingClient('echo hunter2'),
+    )
+    try {
+      const session = sessionOf(content)
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+      renderer.paste.mockReturnValue(false)
+      const sentBefore = session.send.mock.calls.length
+      await expect(content.insertSnippet('echo {{secret:pi@far}}')).resolves.toEqual({
+        ok: false,
+        reason: 'write-failed',
+      })
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the snippet palette chord (nocx-jj77)', () => {
+  /** Dispatch a keydown exactly where a user's keystroke lands. */
+  const key = (view: EditorView, init: KeyboardEventInit): void => {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
+    )
+  }
+  const CHORD = { key: 'p', code: 'KeyP', altKey: true, metaKey: true }
+
+  it('the editor arbiter delegates the chord to the ONE opener (hooks.onSnippetChord)', async () => {
+    const onSnippetChord = vi.fn()
+    const { view, teardown } = await mountTerminal(makeClipboard(), { hooks: { onSnippetChord } })
+    try {
+      key(view, CHORD)
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+      // The neighbouring chord (⌥⌘O) is NOT the snippet chord: the arbiter
+      // lets it fall through to the editor.
+      key(view, { key: 'o', code: 'KeyO', altKey: true, metaKey: true })
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the xterm boundary (the renderer chord registration) delegates to the SAME opener', async () => {
+    const onSnippetChord = vi.fn()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {
+      hooks: { onSnippetChord },
+    })
+    try {
+      rendererOf(content)._fireSnippetChord()
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("the chord closes the pane's own floating surfaces before opening the palette", async () => {
+    const onSnippetChord = vi.fn()
+    const { content, ed, teardown } = await mountTerminal(makeClipboard(), {
+      hooks: { onSnippetChord },
+      attachToDocument: true,
+    })
+    try {
+      ed.show()
+      // Open recall over the editor, then press the chord: recall must be
+      // dismissed (the surfaces never stack) before the opener runs.
+      const recall = recallOf(content)
+      ed.insertText('ssh')
+      // The recall shortcut opens it.
+      const view = viewOf(ed)
+      key(view, { key: 'r', metaKey: true })
+      expect(recall.isOpen).toBe(true)
+      key(view, CHORD)
+      expect(recall.isOpen).toBe(false)
+      expect(onSnippetChord).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('the snippet env view (nocx-jj77)', () => {
+  it("exposes the active domain's raw cwd/host/user, or null with no session", async () => {
+    const { content, teardown } = await mountTerminal()
+    try {
+      const env = content.snippetEnv()
+      expect(env).not.toBeNull()
+      expect(env!.cwd).toBe(FIXTURE_CWD)
+      expect(typeof env!.host).toBe('string')
+      expect(typeof env!.user).toBe('string')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('answers null when no session owns the pane', async () => {
+    const { content, teardown } = await mountTerminal()
+    const withSession = content as unknown as { session: SessionFake | null }
+    const original = withSession.session
+    withSession.session = null
+    try {
+      expect(content.snippetEnv()).toBeNull()
+    } finally {
+      withSession.session = original
+      teardown()
+    }
+  })
+})
 
 describe('vault references in the prompt (ADR-0021, the renderer half)', () => {
   it('an unresolved reference is NOT sent: the draft stays and the editor stays up', async () => {
@@ -908,6 +1335,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
     const wsClient = clientFake as unknown as WSClient
     const content = new TerminalContent(
       wsClient,
+      'tab-wire-1',
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -925,6 +1353,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
         defaultTitle: 'Terminal',
       },
       99,
+      'tab-99',
     )
     const paneParent = document.createElement('div')
     paneParent.append(tab.pane)
@@ -1609,6 +2038,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     const wsClient = makeClient() as unknown as WSClient
     const unmounted = new TerminalContent(
       wsClient,
+      'tab-wire-1',
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -1626,9 +2056,12 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
       expect(content.activeOrigin()).not.toBeNull()
-      const exitCb = session.onExit.mock.calls[0]?.[0] as (sid: string) => void
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (exit: {
+        sessionId: string
+        cause: 'exited' | 'interrupted'
+      }) => void
       expect(exitCb).toBeTypeOf('function')
-      exitCb(session.sessionId)
+      exitCb({ sessionId: session.sessionId, cause: 'exited' })
       expect(content.activeOrigin()).toBeNull()
     } finally {
       teardown()
@@ -1677,10 +2110,104 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
       expect(content.activeOrigin()?.cwd).toBe('/srv/new/path')
 
       // The session dying changes it back to null.
-      const exitCb = session.onExit.mock.calls[0]?.[0] as (sid: string) => void
-      exitCb(session.sessionId)
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (exit: {
+        sessionId: string
+        cause: 'exited' | 'interrupted'
+      }) => void
+      exitCb({ sessionId: session.sessionId, cause: 'exited' })
       expect(onActiveOriginChange).toHaveBeenCalledTimes(3)
       expect(content.activeOrigin()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('an interrupted session is marked, never destroyed (nocx-ictcq)', () => {
+  type ExitCb = (exit: {
+    sessionId: string
+    cause: 'exited' | 'interrupted'
+    status?: number
+  }) => void
+
+  const exitCbOf = (session: SessionFake): ExitCb => session.onExit.mock.calls[0]?.[0] as ExitCb
+
+  // The heart of the bead: a session whose connection dropped must not
+  // vanish. The tab stays in the strip with its pane and scrollback, and the
+  // warning mark says what the state is — the same mark the integration
+  // axis already owns, with the loss's own wording.
+  it('a loss keeps the tab present, marked with its own label', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onWarningChange: (w, l) => warnings.push([w, l]) } },
+      client,
+    )
+    const closeRequested = vi.fn()
+    tab.onCloseRequested = closeRequested
+    try {
+      exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
+
+      // Not closed: the tab and its scrollback survive.
+      expect(closeRequested).not.toHaveBeenCalled()
+      expect(tab.pane.isConnected).toBe(true)
+      // The session is gone, so the origin names nothing — the same cleanup
+      // a clean exit performs.
+      expect(content.activeOrigin()).toBeNull()
+      // Marked, with a label that says what happened.
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Connection lost'])
+    } finally {
+      teardown()
+    }
+  })
+
+  // A clean exit is unchanged: the tab closes exactly as it always did.
+  it('a clean exit closes the tab as before', async () => {
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const closeRequested = vi.fn()
+    tab.onCloseRequested = closeRequested
+    try {
+      exitCbOf(session)({ sessionId: session.sessionId, cause: 'exited', status: 0 })
+      expect(closeRequested).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  // The backend may emit its last integration status in the same instant the
+  // session dies; once the tab is marked lost, no later fact may clear it —
+  // the lost state is terminal for this tab (the strip mark is what the user
+  // looks at an hour later).
+  it('a late integration fact does not clear the loss mark', async () => {
+    const warnings: Array<[boolean, string | undefined]> = []
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onWarningChange: (w, l) => warnings.push([w, l]) } },
+      client,
+    )
+    try {
+      exitCbOf(session)({ sessionId: session.sessionId, cause: 'interrupted' })
+      const markedAt = warnings.length
+
+      // A recovered-looking fact ("integrated", no reason) arriving late:
+      // before the guard this cleared the mark and the tab read healthy.
+      integrationHandler(client)({
+        sessionId: session.sessionId,
+        status: 'integrated',
+        shell: '/bin/bash',
+      })
+
+      expect(warnings.length).toBe(markedAt)
+      expect(warnings[warnings.length - 1]).toEqual([true, 'Connection lost'])
     } finally {
       teardown()
     }

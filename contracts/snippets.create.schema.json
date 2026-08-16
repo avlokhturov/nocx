@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/snippets.create.schema.json",
+  "title": "SnippetsCreate",
+  "description": "Result of the snippets.create JSON-RPC method: the created snippet, id minted by the backend.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "body"],
+  "properties": {
+    "id": {
+      "description": "Opaque, backend-minted. The renderer never constructs one.",
+      "type": "string"
+    },
+    "title": { "type": "string" },
+    "body": {
+      "description": "The template text with its {{ns:arg}} spans intact. Never resolved backend-side.",
+      "type": "string"
+    }
+  }
+}

@@ -3,7 +3,8 @@
 // write PTY output in, emit user input out, and report its grid size.
 import type { ITheme } from '@xterm/xterm'
 import type { CapturedFrame } from '../frame/types'
-// write PTY output in, emit user input out, and report its grid size.
+import type { OscNotification } from '../osc-notification'
+
 export type DataCallback = (data: string) => void
 export type ResizeCallback = (cols: number, rows: number) => void
 
@@ -49,6 +50,12 @@ export interface CommandMarkerEvent extends CommandMarker {
 // The VT frontend parses OSC 133 via parser.registerOscHandler and surfaces
 // each enriched marker as an event — the backend never sniffs the byte stream.
 export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
+
+// NotificationRequestCallback fires when a program asks nocx to present a
+// message (ADR-0029) — OSC 9 or OSC 777. Like every other OSC on this
+// contract the renderer parses and reports; it carries only what the program
+// supplied, and never where the message should go.
+export type NotificationRequestCallback = (request: OscNotification) => void
 
 // RenderFenceEvent — the ADR-0024 §7 carve-out rendezvous: the shell writes
 // ESC]1337;NOCX_FENCE;<64hex> BEL to the pty AFTER a command's output, and
@@ -138,6 +145,16 @@ export interface TerminalRenderer {
   // renderer that does not parse fences degrades to the documented
   // no-fence deferral instead of failing to mount.
   onRenderFence?(cb: RenderFenceCallback): void
+
+  // onNotification registers a callback that fires when a program asks nocx
+  // to present a message (ADR-0029) — OSC 9 or OSC 777, two spellings of one
+  // request, fanned out identically so nothing downstream depends on which
+  // one a program chose. Parse-and-report only: the renderer says a program
+  // asked and never says where the message goes; the backend's router is the
+  // only holder of that. Optional, like onRenderFence, so a renderer that
+  // does not parse these degrades to raising nothing rather than failing to
+  // mount.
+  onNotification?(cb: NotificationRequestCallback): void
   // onBell registers a callback that fires when the terminal receives BEL
   // (\x07). Bell always deserves attention regardless of buffer, so the
   // tab bar always lights the activity indicator on bell.
@@ -164,8 +181,23 @@ export interface TerminalRenderer {
   // paste inserts text at the cursor, preserving bracketed-paste semantics
   // when the running program has enabled mode 2004. Implemented via
   // xterm.js's term.paste() so the engine owns the wrapping — hand-rolling
-  // it would duplicate engine behaviour and drift from it.
-  paste(text: string): void
+  // it would duplicate engine behaviour and drift from it. Returns whether
+  // the write happened: false when no terminal is mounted, which a caller
+  // must treat as a refusal, never as a reported delivery.
+  paste(text: string): boolean
+
+  /** Whether the running program has enabled bracketed paste (mode 2004).
+   *  False when no terminal is mounted. The snippet policy reads this to
+   *  decide whether a multi-line body may be pasted (design §9.4). */
+  bracketedPasteActive(): boolean
+
+  /** Register the snippet-palette chord (⌥⌘P) handler. The renderer's
+   *  custom key handler sees the chord BEFORE xterm encodes it, calls this
+   *  callback and returns false — the chord is consumed at the xterm
+   *  boundary and zero bytes reach the pty (design §10.1, bead nocx-jj77).
+   *  Optional so a renderer that does not parse chords degrades to the
+   *  editor-arbiter path only. */
+  onSnippetChord?(cb: (() => void) | null): void
 
   // refreshAtlas is called when the renderer becomes visible after being
   // hidden (e.g. tab switch). xterm.js's WebGL texture atlas goes stale

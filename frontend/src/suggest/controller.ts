@@ -79,6 +79,18 @@ export interface CompletionControllerOptions {
    *  the controller's own guard. */
   recallIsOpen?: () => boolean
   latencyBudgetMs?: number
+  /**
+   * Accepting a snippet row (design §10.2, bead nocx-nlhe). The controller
+   * clears the token the row completed and hands the LIBRARY ID over —
+   * it never inserts the row's text, because a snippet body is resolved at
+   * acceptance (env and ask read at fire time, §8) and the surface that
+   * resolves it is the palette's fire path, not this one.
+   *
+   * Absent in a build with no snippets wired, and then a snippet row
+   * inserts NOTHING rather than its own title: the title is a label, and a
+   * person would submit it as a command.
+   */
+  acceptSnippet?: (snippetId: string) => void
   now?: () => number
 }
 
@@ -709,6 +721,11 @@ export class CompletionController {
     const completions = this.queryCandidates.filter(
       (c) =>
         c.source !== 'history' &&
+        // A snippet row is not a completion of the word either: it stands
+        // for a whole saved phrase behind a title, and applying one because
+        // it happened to be the only row would fire a command the person
+        // never chose (design §10.2).
+        c.source !== 'snippet' &&
         c.replacement.from === range.from &&
         c.replacement.to === range.to,
     )
@@ -923,12 +940,38 @@ export class CompletionController {
    * still cannot open anything.
    */
   private apply(c: Candidate): void {
+    if (c.source === 'snippet') {
+      this.applySnippet(c)
+      return
+    }
     this.editor?.applyReplacement(c.replacement.from, c.replacement.to, c.insertText)
     if (c.kind === 'directory') {
       this.runQuery(true)
       return
     }
     this.dismiss()
+  }
+
+  /**
+   * Accepting a snippet row: clear the token it completed and hand the id
+   * to the accept seam, which resolves the body AT THAT MOMENT and delivers
+   * it through the same fire path the palette and the toolbar menu use —
+   * one owner for "what a snippet turns into", so the dropdown cannot bake
+   * in a cwd or a branch that has moved since the query (design §8, §10.2).
+   *
+   * With no seam wired nothing is written at all: the row's text is its
+   * TITLE, and a title in the line is a command the person would submit.
+   */
+  private applySnippet(c: Candidate): void {
+    const id = c.snippetId
+    const accept = this.options.acceptSnippet
+    if (id === undefined || accept === undefined) {
+      this.dismiss()
+      return
+    }
+    this.editor?.applyReplacement(c.replacement.from, c.replacement.to, '')
+    this.dismiss()
+    accept(id)
   }
 
   /** The suggestion still belongs to the current document revision. */

@@ -1,14 +1,20 @@
 // @vitest-environment jsdom
 //
-// ReadOnlyHost tests — the ownership contract from the git-manager design
-// §5.4: read-only enforcement, caller extensions appended after the host's,
-// setDoc as the one document writer, and disposal on both paths (explicit
-// dispose() and AbortSignal). Everything is asserted through the DOM and the
-// public methods — the underlying EditorView is the host's private property.
+// CM host tests — the ownership contract from the git-manager design §5.4:
+// read-only enforcement, caller extensions appended after the host's, setDoc
+// as the one document writer, and disposal on both paths (explicit dispose()
+// and AbortSignal). Everything is asserted through the DOM and the public
+// methods — the underlying EditorView is the host's private property.
+//
+// The host has two modes and one lifecycle (nocx-gjnr): ReadOnlyHost is the
+// file viewer's and the diff's, EditableHost is the snippet body editor's.
+// The read-only tests below are the reason the modes are one module — an
+// editable sibling built beside it would have been a second construction of
+// the same view, free to drift on the theme, the disposal and the facets.
 import { afterEach, describe, expect, it } from 'vitest'
 import { EditorState, type Extension } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
-import { ReadOnlyHost } from './read-only-host'
+import { EditableHost, ReadOnlyHost } from './cm-host'
 
 // CM6 renders each line as a div.cm-line (no newline text nodes), so a raw
 // textContent read collapses lines. Joining the line divs reconstructs the
@@ -131,6 +137,84 @@ describe('ReadOnlyHost — disposal', () => {
 
     host.mount(parent, controller.signal)
     expect(parent.querySelector('.cm-editor')).toBeNull()
+    host.dispose()
+  })
+})
+
+describe('EditableHost — the editable mode of the same host', () => {
+  it('takes typed input the read-only mode refuses, and reports the document', () => {
+    const host = new EditableHost()
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const controller = new AbortController()
+    host.mount(parent, controller.signal)
+    host.setDoc('start')
+
+    const contentEl = parent.querySelector('.cm-content') as HTMLElement
+    expect(contentEl.getAttribute('contenteditable')).toBe('true')
+    expect(contentEl.getAttribute('aria-readonly')).toBe(null)
+
+    // What the read-only mode's own test proves cannot happen: keystrokes
+    // reach an editable region. jsdom does not emulate contenteditable
+    // input, so the assertion is the structural one above plus the
+    // document seam the surface actually saves from.
+    expect(host.doc()).toBe('start')
+    expect(docText(parent)).toBe('start')
+
+    host.dispose()
+  })
+
+  it('reports every document change to the caller, so a draft never lags the field', () => {
+    const seen: string[] = []
+    const host = new EditableHost()
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const controller = new AbortController()
+    host.mount(parent, controller.signal, [], (text) => seen.push(text))
+
+    host.setDoc('one')
+    host.setDoc('two')
+
+    // setDoc is a document change like any other, and the listener is how
+    // the surface's draft signal follows the field: a surface that only
+    // read doc() on Save would write what it last set rather than what the
+    // person typed.
+    expect(seen).toEqual(['one', 'two'])
+    host.dispose()
+  })
+
+  it('doc() is empty before mount and after dispose, never a stale document', () => {
+    const host = new EditableHost()
+    expect(host.doc()).toBe('')
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const controller = new AbortController()
+    host.mount(parent, controller.signal)
+    host.setDoc('text')
+    host.dispose()
+    expect(host.doc()).toBe('')
+  })
+})
+
+describe('EditableHost — what an editable field must already have', () => {
+  it('binds Enter, undo and redo: a field where Return does nothing is not a field', () => {
+    // The read-only modes need no keymap at all, so the editable one has to
+    // bring the editing essentials itself. Enter is the one that bites: with
+    // no binding, a Return inside a dialog falls through to the dialog's own
+    // submit and the person's newline saves the form instead.
+    const host = new EditableHost()
+    const parent = document.createElement('div')
+    document.body.append(parent)
+    const controller = new AbortController()
+    host.mount(parent, controller.signal)
+
+    const bound = (key: string): boolean => {
+      const contentEl = parent.querySelector('.cm-content') as HTMLElement
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })
+      contentEl.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    expect(bound('Enter')).toBe(true)
     host.dispose()
   })
 })

@@ -42,6 +42,17 @@ export type LiveContentHeightSpy = Mock<() => number>
 export interface RendererMock extends TerminalRenderer {
   /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
   snapshotStore: CommandSnapshotStore
+  /** The mock's paste is a spy: tests program it to refuse the write. */
+  paste: Mock<(text: string) => boolean>
+  /** The mock's bracketed-paste-mode answer is a spy: tests flip mode 2004
+   *  on and off. */
+  bracketedPasteActive: Mock<() => boolean>
+  /** The snippet-palette chord handler — stored, so a test can fire it the
+   *  way xterm's custom key handler would. */
+  onSnippetChord: Mock<(cb: (() => void) | null) => void>
+  /** Fire the registered snippet chord handler (the xterm boundary's
+   *  delegation). */
+  _fireSnippetChord(): void
   _cbs: {
     onData?: DataCallback
     onResize?: ResizeCallback
@@ -81,6 +92,7 @@ export function createRendererMock(): RendererMock {
   const cbs: RendererMock['_cbs'] = {}
   const recoverySubs: Array<(hex: string) => void> = []
   const fenceSubs: Array<(ev: RenderFenceEvent) => void> = []
+  let snippetChordCb: (() => void) | null = null
   const mock: Record<string, unknown> = {
     mount: vi.fn().mockResolvedValue(undefined),
     write: vi.fn(),
@@ -127,6 +139,16 @@ export function createRendererMock(): RendererMock {
     // typed after it until the e2e suite found it (nocx-yb5y).
     paste: vi.fn((text: string) => {
       cbs.onData?.(text)
+      // The write happened: the mock's terminal is always mounted, and the
+      // real renderer returns true whenever a terminal exists. A test
+      // wanting the refusal path overrides this with mockReturnValue(false).
+      return true
+    }),
+    // Mode 2004 off by default — a test that wants bracketed paste on
+    // flips it with mockReturnValue(true) on this same vi.fn.
+    bracketedPasteActive: vi.fn(() => false),
+    onSnippetChord: vi.fn((cb: (() => void) | null) => {
+      snippetChordCb = cb
     }),
     setReadOnly: vi.fn(),
     refreshAtlas: vi.fn(),
@@ -190,6 +212,11 @@ export function createRendererMock(): RendererMock {
      *  cares asserts on setReadOnly instead. */
     _fireData(data: string) {
       cbs.onData?.(data)
+    },
+    /** Fire the snippet-palette chord the way xterm's custom key handler
+     *  does when ⌥⌘P is pressed in the terminal (nocx-jj77). */
+    _fireSnippetChord() {
+      snippetChordCb?.()
     },
   }
   return mock as unknown as RendererMock
@@ -282,6 +309,9 @@ export interface ClientFake {
    *  default — the no-store state, which the recall overlay labels
    *  source=session. */
   call: ReturnType<typeof vi.fn>
+  /** The tab.close notification (nocx-tsajw): records the wire identity of
+   *  the closed tab so tests can assert the backend was told. */
+  notifyTabClosed: ReturnType<typeof vi.fn>
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
@@ -349,6 +379,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
+    notifyTabClosed: vi.fn(),
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),
       // A live prompt opens the attempt before the pty write; the default

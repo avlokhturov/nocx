@@ -99,6 +99,16 @@ const TARGET_PLATFORMS = [
  * Run deadcode from the repo root for one platform and return its raw stdout.
  * A nonzero exit is a tool failure (module does not compile, the binary is
  * missing) and is never a pass.
+ *
+ * A signal-kill is a third thing, and it needs its own message. `status` is
+ * null rather than nonzero when the kernel kills the process, and stdout and
+ * stderr are both empty, so the nonzero branch used to report the bare string
+ * "deadcode exited null" underneath the banner "FAIL: deadcode ratchet" — which
+ * reads as a finding about the tree and invites the reader to go make something
+ * reachable in a tree where the ratchet is already green. It is not a finding:
+ * the analysis peaks around 1.4 GB and the hook has two containers running
+ * beside it, so on a small machine the OOM killer takes it (measured
+ * 2026-08-14). Say so, and say to re-run rather than to edit anything.
  */
 function runDeadcode(platform) {
   const proc = spawnSync(DEADCODE_CMD, ['./...'], {
@@ -107,6 +117,15 @@ function runDeadcode(platform) {
     maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, ...platform, CGO_ENABLED: '0' },
   })
+
+  if (proc.signal) {
+    throw new Error(
+      `deadcode was killed by ${proc.signal} for ${platform.GOOS}/${platform.GOARCH} ` +
+        `— the analysis did not run, so this says nothing about the tree. ` +
+        `It needs ~1.4 GB beside this hook's two containers; free memory and ` +
+        `re-run the commit. Do not change code or the baseline in response.`,
+    )
+  }
 
   if (proc.status !== 0) {
     const detail = (proc.stderr || proc.stdout || '').trim()

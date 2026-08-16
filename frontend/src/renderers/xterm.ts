@@ -11,6 +11,7 @@ import type {
   CwdCallback,
   DataCallback,
   MarkerAdapter,
+  NotificationRequestCallback,
   RenderFenceCallback,
   RenderFenceEvent,
   ResizeCallback,
@@ -29,6 +30,8 @@ import {
 import { mintLiveFrame } from '../frame/mint'
 import type { CapturedFrame } from '../frame/types'
 import { fromITheme } from '../scrollback/serializer'
+import { isSnippetChord } from '../snippets/chord'
+import { parseOscNotification } from '../osc-notification'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -225,6 +228,8 @@ export class XtermRenderer implements TerminalRenderer {
   private refreshTimer: ReturnType<typeof setInterval> | null = null
   private commandMarkerSubs: CommandMarkerCallback[] = []
   private osc133Disposable?: { dispose(): void }
+  private notificationSubs: NotificationRequestCallback[] = []
+  private notifyOscDisposables: Array<{ dispose(): void }> = []
   private scrollSubs: Array<(viewportY: number) => void> = []
   private renderSubs: Array<(range: { start: number; end: number }) => void> = []
   private fenceSubs: Array<(event: RenderFenceEvent) => void> = []
@@ -246,6 +251,20 @@ export class XtermRenderer implements TerminalRenderer {
   readonly snapshotStore = new CommandSnapshotStore()
   /** Unsubscribe from the module-level theme watcher. */
   private _themeUnsub: (() => void) | null = null
+  /** The snippet-palette chord handler (⌥⌘P), registered by the
+   *  composition root after construction. Null until then: the chord falls
+   *  through to xterm's ordinary encoding — and the bytes reach the pty —
+   *  only while no handler is registered, which is the pre-wiring state,
+   *  never a live one (TerminalContent registers it at mount). */
+  private _snippetChordHandler: (() => void) | null = null
+
+  /** Register (or clear) the snippet-palette chord handler. The custom key
+   *  handler below calls it and returns false, so the chord never reaches
+   *  xterm's encoder and zero bytes go to the pty (design §10.1). */
+  onSnippetChord(cb: (() => void) | null): void {
+    this._snippetChordHandler = cb
+  }
+
   /** Frame capture (nocx-3j9b): subscribers to the parse-settle event. */
   private writeParsedSubs: Array<() => void> = []
   private writeParsedDisposable?: { dispose(): void }
@@ -353,6 +372,19 @@ export class XtermRenderer implements TerminalRenderer {
     // same data path a keystroke takes (onData → transport → pty), and
     // every other key returns true so xterm encodes it exactly as before.
     term.attachCustomKeyEventHandler((event) => {
+      // The snippet palette chord (⌥⌘P, design §10.1) is consumed HERE, at
+      // the xterm boundary: returning false keeps xterm from encoding the
+      // chord, so ZERO bytes reach the program — the one place the chord is
+      // needed most (a TUI owns the pane and no editor is showing). The
+      // predicate is the shared one from snippets/chord.ts: the editor's
+      // arbiter reads the same definition and delegates to the same opener
+      // (AD-8). The opener runs synchronously in the keydown, like the
+      // Shift+Enter branch below.
+      if (isSnippetChord(event)) {
+        event.preventDefault()
+        this._snippetChordHandler?.()
+        return false
+      }
       // The plain chord only: Enter + Shift alone. A Ctrl/Alt/Meta-modified
       // Enter must not be collapsed into the Shift bytes — that would lie
       // about the chord. Keyup passes through so xterm's own cursor-style
@@ -686,6 +718,38 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
+  /** Subscribe to notification requests: a program asked nocx to present a
+   *  message (ADR-0029). OSC 9 and OSC 777 are two spellings of one request,
+   *  so both register here and fan out to one subscriber list — the consumer
+   *  never learns which sequence a program chose, because nothing downstream
+   *  may depend on it.
+   *
+   *  Render-only, exactly like every other OSC on this renderer: the request
+   *  is reported, never granted. This handler decides nothing about where the
+   *  message goes — that is the router's, on the backend — and it cannot,
+   *  because the only thing it can send is the text the program supplied. */
+  onNotification(cb: NotificationRequestCallback): void {
+    this.notificationSubs.push(cb)
+    if (this.notifyOscDisposables.length || !this.term) return
+    for (const ident of [9, 777] as const) {
+      this.notifyOscDisposables.push(
+        this.term.parser.registerOscHandler(ident, (data: string) => {
+          // Untrusted bytes from whatever the user ran. parseOscNotification
+          // is total and returns null rather than throwing; a throw inside a
+          // parser callback would take the renderer down.
+          const parsed = parseOscNotification(ident, data)
+          if (parsed) {
+            for (const sub of this.notificationSubs) sub(parsed)
+          }
+          // false: xterm.js may also handle the ident. This matters for 9 —
+          // the ConEmu progress payload (9;4;…) parses to null here and must
+          // stay available to anything that renders progress.
+          return false
+        }),
+      )
+    }
+  }
+
   onRenderFence(cb: RenderFenceCallback): void {
     this.fenceSubs.push(cb)
     this._ensureFenceOsc()
@@ -723,11 +787,11 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  paste(text: string): void {
+  paste(text: string): boolean {
     // term.paste() owns bracketed-paste wrapping: when the running program
     // has enabled mode 2004, it wraps the payload in the escape sequences.
     const term = this.term
-    if (!term) return
+    if (!term) return false
     // A submitted command must reach the program while the grid is
     // read-only: disableStdin guards USER input (keystrokes land in the
     // editor instead), and the editor's submit delivers its document
@@ -741,6 +805,13 @@ export class XtermRenderer implements TerminalRenderer {
     } finally {
       term.options.disableStdin = wasDisabled
     }
+    return true
+  }
+
+  /** The running program's bracketed-paste mode (2004), or false when no
+   *  terminal is mounted. */
+  bracketedPasteActive(): boolean {
+    return this.term?.modes.bracketedPasteMode ?? false
   }
 
   refreshAtlas(): void {
@@ -811,6 +882,9 @@ export class XtermRenderer implements TerminalRenderer {
     this.osc133Disposable?.dispose()
     this.osc133Disposable = undefined
     this.commandMarkerSubs = []
+    for (const d of this.notifyOscDisposables) d.dispose()
+    this.notifyOscDisposables = []
+    this.notificationSubs = []
     if (this._dprMedia !== null && this._dprChangeHandler !== null) {
       this._dprMedia.removeEventListener('change', this._dprChangeHandler)
       this._dprMedia = null

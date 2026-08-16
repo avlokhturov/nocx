@@ -11,8 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -23,18 +25,27 @@ type Service struct {
 	connections ConnectionSnapshotStore
 	settings    SettingsSnapshotStore
 	doc         storage.DocumentStore
+	snippets    SnippetStore // nil → the backup has no snippets section
+	notes       NoteStore    // nil → the backup has no notes section
 }
 
 // NewService wires the backup service from its three dependencies.
+// NewService wires the backup service from its dependencies. snippets may be
+// nil: the backup then simply carries no snippets section, and restore
+// leaves the current library alone.
 func NewService(
 	connections ConnectionSnapshotStore,
 	settingsStore SettingsSnapshotStore,
 	doc storage.DocumentStore,
+	snippets SnippetStore,
+	notes NoteStore,
 ) *Service {
 	return &Service{
 		connections: connections,
 		settings:    settingsStore,
 		doc:         doc,
+		snippets:    snippets,
+		notes:       notes,
 	}
 }
 
@@ -52,6 +63,8 @@ type CreateSummary struct {
 	Settings                       int `json:"settings"`
 	Connections                    int `json:"connections"`
 	Groups                         int `json:"groups"`
+	Snippets                       int `json:"snippets"`
+	Notes                          int `json:"notes"`
 	CredentialBindingsRemoved      int `json:"credentialBindingsRemoved"`
 	GroupCredentialBindingsRemoved int `json:"groupCredentialBindingsRemoved"`
 	GroupDefaultKeysOmitted        int `json:"groupDefaultKeysOmitted"`
@@ -65,8 +78,21 @@ type RestorePreview struct {
 	Settings                       SettingsPreview    `json:"settings"`
 	Connections                    ConnectionsPreview `json:"connections"`
 	Groups                         GroupsPreview      `json:"groups"`
+	Snippets                       SnippetsPreview    `json:"snippets"`
+	Notes                          NotesPreview       `json:"notes"`
 	ConnectionsRequiringCredential []ProfileRef       `json:"connectionsRequiringCredential"`
 	Omissions                      RestoreOmissions   `json:"omissions"`
+}
+
+// SnippetsPreview carries the snippet count the preview reports.
+type SnippetsPreview struct {
+	Included int `json:"included"`
+}
+
+// NotesPreview carries the note count the preview reports — the number a
+// person reads before deciding to restore over what they have.
+type NotesPreview struct {
+	Included int `json:"included"`
 }
 
 // SettingsPreview carries setting-level diff counts.
@@ -121,6 +147,16 @@ type RestoreResult struct {
 	Omissions                      RestoreOmissions `json:"omissions,omitempty"`
 }
 
+// loadNotes reads the library, or nothing when no store is wired. A read
+// FAILURE is an error the caller reports: a backup that quietly omitted the
+// notes it could not read would be a backup somebody trusted.
+func (s *Service) loadNotes() ([]note.Note, error) {
+	if s.notes == nil {
+		return nil, nil
+	}
+	return s.notes.LoadAllNotes()
+}
+
 // ── Create ────────────────────────────────────────────────────────────────
 
 // Create builds a backup document from the current live state.
@@ -130,8 +166,16 @@ func (s *Service) Create() (*CreateResult, error) {
 		return nil, fmt.Errorf("load connection snapshot: %w", err)
 	}
 	overrides := s.settings.NonSecretOverrides()
+	snips, err := s.loadSnippets()
+	if err != nil {
+		return nil, fmt.Errorf("load snippets: %w", err)
+	}
+	notes, err := s.loadNotes()
+	if err != nil {
+		return nil, fmt.Errorf("load notes: %w", err)
+	}
 
-	doc, summary := buildDocument(snap, overrides)
+	doc, summary := buildDocument(snap, overrides, snips, notes)
 	doc.CreatedAt = time.Now().UTC()
 
 	raw, err := json.MarshalIndent(doc, "", "  ")
@@ -200,18 +244,42 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 		return nil, fmt.Errorf("load connection snapshot: %w", err)
 	}
 	overrides := s.settings.NonSecretOverrides()
+	beforeSnips, err := s.loadSnippets()
+	if err != nil {
+		return nil, fmt.Errorf("load snippets: %w", err)
+	}
+	beforeNotesLib, err := s.loadNotes()
+	if err != nil {
+		return nil, fmt.Errorf("load notes: %w", err)
+	}
 
 	expectedToken := computePreviewToken(contents, strategy, snap, overrides)
 	if previewToken != expectedToken {
 		return nil, fmt.Errorf("%w: preview is stale", ErrInvalidDocument)
 	}
 
-	result, targetSnap, targetOverrides := computeRestore(doc, snap, overrides, strategy, omissions)
+	result, targetSnap, targetOverrides, targetSnips, writeSnips := computeRestore(doc, snap, overrides, beforeSnips, strategy, omissions)
+	targetNotes, writeNotes := computeRestoreNotes(doc, beforeNotesLib, strategy)
+
+	// A document that carries snippets cannot be applied by a service wired
+	// without the snippet store (the transport's test servers are). Refuse
+	// before the journal is written so nothing is half-applied.
+	if writeSnips && s.snippets == nil {
+		return nil, fmt.Errorf("restore: backup carries snippets but no snippet store is wired")
+	}
+	// Same refusal for notes, and it matters more: a snippet can be retyped
+	// from the thing it automates, and a note cannot be retyped from
+	// anything.
+	if writeNotes && s.notes == nil {
+		return nil, fmt.Errorf("restore: backup carries notes but no notes store is wired")
+	}
 
 	beforeSnap := snap
 	beforeOverrides := overrides
+	beforeSnippets := toBackupSnippets(beforeSnips)
+	beforeNotes := toBackupNotes(beforeNotesLib)
 
-	if jerr := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides); jerr != nil {
+	if jerr := writeJournal(s.doc, "prepared", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes); jerr != nil {
 		return nil, fmt.Errorf("journal prepared: %w", jerr)
 	}
 
@@ -231,7 +299,31 @@ func (s *Service) Restore(contents string, strategy RestoreStrategy, previewToke
 		return nil, fmt.Errorf("replace settings: %w", err)
 	}
 
-	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides); werr != nil {
+	// The snippet write lives INSIDE the prepared/committed interval: a
+	// failure after it must take the library back with connections and
+	// settings, or the restore looks successful everywhere it was not.
+	if writeSnips {
+		if serr := s.snippets.SaveAll(targetSnips); serr != nil {
+			if recErr := s.Recover(); recErr != nil {
+				return nil, fmt.Errorf("replace snippets: %w; recovery failed: %w", serr, recErr)
+			}
+			return nil, fmt.Errorf("replace snippets: %w", serr)
+		}
+	}
+
+	// The notes write is inside the same interval, for the same reason: a
+	// failure after it must take the library back with everything else, or
+	// the restore looks successful everywhere it was not.
+	if writeNotes {
+		if nerr := s.notes.ReplaceNotes(targetNotes); nerr != nil {
+			if recErr := s.Recover(); recErr != nil {
+				return nil, fmt.Errorf("replace notes: %w; recovery failed: %w", nerr, recErr)
+			}
+			return nil, fmt.Errorf("replace notes: %w", nerr)
+		}
+	}
+
+	if werr := writeJournal(s.doc, "committed", &beforeSnap, &beforeOverrides, beforeSnippets, beforeNotes); werr != nil {
 		if recErr := s.Recover(); recErr != nil {
 			return nil, fmt.Errorf("journal committed: %w; recovery failed: %w", werr, recErr)
 		}
@@ -264,6 +356,20 @@ func (s *Service) Recover() error {
 		if err != nil {
 			return fmt.Errorf("%w: rollback settings: %w", ErrRecoveryRequired, err)
 		}
+		// The library was written inside the same interval, so it rolls back
+		// with everything else. A journal from before this field existed (or
+		// from a service wired without the snippet store) carries none and
+		// has nothing to restore.
+		if js.snippets != nil && s.snippets != nil {
+			if err := s.snippets.SaveAll(fromBackupSnippets(*js.snippets)); err != nil {
+				return fmt.Errorf("%w: rollback snippets: %w", ErrRecoveryRequired, err)
+			}
+		}
+		if js.notes != nil && s.notes != nil {
+			if err := s.notes.ReplaceNotes(fromBackupNotes(*js.notes)); err != nil {
+				return fmt.Errorf("%w: rollback notes: %w", ErrRecoveryRequired, err)
+			}
+		}
 		cleanupJournal(s.doc)
 		s.settings.Publish(pn)
 		return nil
@@ -277,7 +383,7 @@ func (s *Service) Recover() error {
 
 // ── Internal: document building ──────────────────────────────────────────
 
-func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any) (Document, CreateSummary) {
+func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any, snips []snippet.Snippet, notes []note.Note) (Document, CreateSummary) {
 	doc := Document{
 		Format:  Format,
 		Version: Version,
@@ -293,6 +399,31 @@ func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any) (D
 		Settings:    len(overrides),
 		Connections: len(snap.Profiles),
 		Groups:      len(snap.Groups),
+		Snippets:    len(snips),
+		Notes:       len(notes),
+	}
+	// An empty library is omitted entirely (the omitempty on Document
+	// Snippets): a backup without the key predates the section, and restore
+	// treats a missing section as "say nothing about snippets".
+	if len(snips) > 0 {
+		doc.Snippets = make([]BackupSnippet, 0, len(snips))
+		for _, s := range snips {
+			doc.Snippets = append(doc.Snippets, BackupSnippet{ID: s.ID, Title: s.Title, Body: s.Body})
+		}
+	}
+	// Notes follow the same rule: an empty library is omitted entirely, and
+	// a document without the key says nothing about notes rather than
+	// saying "you had none".
+	if len(notes) > 0 {
+		doc.Notes = make([]BackupNote, 0, len(notes))
+		for _, n := range notes {
+			doc.Notes = append(doc.Notes, BackupNote{
+				ID:        n.ID,
+				Body:      n.Body,
+				CreatedAt: n.CreatedAt,
+				UpdatedAt: n.UpdatedAt,
+			})
+		}
 	}
 
 	groupMap := make(map[string]profile.ProfileGroup, len(snap.Groups))
@@ -329,6 +460,123 @@ func buildDocument(snap profile.ConnectionSnapshot, overrides map[string]any) (D
 	}
 
 	return doc, sum
+}
+
+// loadSnippets reads the library for the backup document. A service wired
+// without the snippet store backs up no snippets and reports none.
+func (s *Service) loadSnippets() ([]snippet.Snippet, error) {
+	if s.snippets == nil {
+		return nil, nil
+	}
+	return s.snippets.LoadAll()
+}
+
+// computeRestoreNotes decides what the notes library becomes. A document
+// without the section says NOTHING about notes — restore leaves what is
+// there alone, under either strategy — and that is what makes a backup
+// written before this feature safe to restore.
+//
+// Merge keeps what the machine has and adds what it does not, matched on
+// id: a restore is not a way to lose a note that only exists here.
+func computeRestoreNotes(doc Document, current []note.Note, strategy RestoreStrategy) ([]note.Note, bool) {
+	if len(doc.Notes) == 0 {
+		return nil, false
+	}
+	if strategy == RestoreReplace {
+		return fromBackupNotes(doc.Notes), true
+	}
+	byID := make(map[string]struct{}, len(current))
+	merged := make([]note.Note, 0, len(current)+len(doc.Notes))
+	for _, n := range current {
+		byID[n.ID] = struct{}{}
+		merged = append(merged, n)
+	}
+	for _, bn := range doc.Notes {
+		if _, exists := byID[bn.ID]; exists {
+			continue
+		}
+		merged = append(merged, note.Note{
+			ID:        bn.ID,
+			Body:      bn.Body,
+			CreatedAt: bn.CreatedAt,
+			UpdatedAt: bn.UpdatedAt,
+		})
+	}
+	return merged, true
+}
+
+// toBackupNotes converts the library to the journal's wire form. nil stays
+// nil — "no notes carried" is a state distinct from "an empty library".
+func toBackupNotes(notes []note.Note) *[]BackupNote {
+	if notes == nil {
+		return nil
+	}
+	out := make([]BackupNote, 0, len(notes))
+	for _, n := range notes {
+		out = append(out, BackupNote{ID: n.ID, Body: n.Body, CreatedAt: n.CreatedAt, UpdatedAt: n.UpdatedAt})
+	}
+	return &out
+}
+
+func fromBackupNotes(rows []BackupNote) []note.Note {
+	out := make([]note.Note, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, note.Note{ID: r.ID, Body: r.Body, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+	}
+	return out
+}
+
+// toBackupSnippets converts the library to the document's wire form. nil
+// stays nil — the journal and the document use "no snippets carried" to
+// distinguish a service without the store from an empty library.
+func toBackupSnippets(snips []snippet.Snippet) *[]BackupSnippet {
+	if snips == nil {
+		return nil
+	}
+	out := make([]BackupSnippet, 0, len(snips))
+	for _, s := range snips {
+		out = append(out, BackupSnippet{ID: s.ID, Title: s.Title, Body: s.Body})
+	}
+	return &out
+}
+
+func fromBackupSnippets(bs []BackupSnippet) []snippet.Snippet {
+	if bs == nil {
+		return nil
+	}
+	out := make([]snippet.Snippet, 0, len(bs))
+	for _, b := range bs {
+		out = append(out, snippet.Snippet{ID: b.ID, Title: b.Title, Body: b.Body})
+	}
+	return out
+}
+
+// mergeSnippets merges the backup's snippets into the current library by
+// id: a record present in both keeps its current position and takes the
+// backup's field values (the backup is newer); a record only in the backup
+// is appended in backup order.
+func mergeSnippets(current []snippet.Snippet, backupSnips []BackupSnippet) []snippet.Snippet {
+	byID := make(map[string]BackupSnippet, len(backupSnips))
+	for _, b := range backupSnips {
+		byID[b.ID] = b
+	}
+	out := make([]snippet.Snippet, 0, len(current)+len(backupSnips))
+	seen := make(map[string]struct{}, len(backupSnips))
+	for _, c := range current {
+		if b, ok := byID[c.ID]; ok {
+			c.ID, c.Title, c.Body = b.ID, b.Title, b.Body
+			seen[c.ID] = struct{}{}
+		}
+		out = append(out, c)
+	}
+	for _, b := range backupSnips {
+		if _, dup := seen[b.ID]; dup {
+			continue
+		}
+		seen[b.ID] = struct{}{}
+		out = append(out, snippet.Snippet{ID: b.ID, Title: b.Title, Body: b.Body})
+	}
+	return out
 }
 
 func profileToBackup(p profile.SSHProfile) BackupProfile {
@@ -896,6 +1144,9 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 	p.Settings.Included = len(doc.Settings.Overrides)
 	p.Connections.Included = len(doc.Connections.Profiles)
 	p.Groups.Included = len(doc.Connections.Groups)
+	p.Snippets.Included = len(doc.Snippets)
+	// What a person reads before deciding to restore over what they have.
+	p.Notes.Included = len(doc.Notes)
 
 	currentProfiles := snap.Profiles
 	currentGroups := snap.Groups
@@ -1006,7 +1257,7 @@ func computePreview(doc Document, snap profile.ConnectionSnapshot, overrides map
 	return p
 }
 
-func computeRestore(doc Document, snap profile.ConnectionSnapshot, overrides map[string]any, strategy RestoreStrategy, omissions RestoreOmissions) (*RestoreResult, profile.ConnectionSnapshot, map[string]any) {
+func computeRestore(doc Document, snap profile.ConnectionSnapshot, overrides map[string]any, currentSnips []snippet.Snippet, strategy RestoreStrategy, omissions RestoreOmissions) (*RestoreResult, profile.ConnectionSnapshot, map[string]any, []snippet.Snippet, bool) {
 	result := &RestoreResult{Strategy: strategy, Omissions: omissions}
 
 	var targetSnap profile.ConnectionSnapshot
@@ -1147,7 +1398,22 @@ func computeRestore(doc Document, snap profile.ConnectionSnapshot, overrides map
 		}
 	}
 
-	return result, targetSnap, targetOverrides
+	// Snippets: a document that carries the section replaces (or merges)
+	// the library; a document without it — written before the section
+	// existed — says nothing about snippets, and restore leaves the current
+	// library alone under either strategy. The write therefore happens only
+	// when the backup mentions snippets.
+	var targetSnips []snippet.Snippet
+	if len(doc.Snippets) > 0 {
+		if strategy == RestoreReplace {
+			targetSnips = fromBackupSnippets(doc.Snippets)
+		} else {
+			targetSnips = mergeSnippets(currentSnips, doc.Snippets)
+		}
+	}
+	writeSnips := len(doc.Snippets) > 0
+
+	return result, targetSnap, targetOverrides, targetSnips, writeSnips
 }
 
 func backupToProfile(bp BackupProfile) profile.SSHProfile {

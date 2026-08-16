@@ -18,6 +18,8 @@ import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
+import { SnippetsSection } from './snippets/snippets-settings'
+import type { SnippetsStore } from './snippets/snippets-store'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -113,6 +115,14 @@ export interface SettingsComponentHandle {
    * ask surface's repair for "no endpoint configured".
    */
   newEndpoint(): void
+  /**
+   * Show a component page by its registry id, with nothing else asked for —
+   * the general form of the three above, for a surface that only wants the
+   * page ("Manage snippets…", nocx-d346). An id no page carries shows the
+   * generated sections, which is where an unrouted Settings tab already
+   * lands.
+   */
+  openPage(id: string): void
   /** Resolves when the initial data load completes. */
   ready(): Promise<void>
 }
@@ -131,6 +141,10 @@ export interface SettingsComponentProps {
   /** The assistant's control-plane client (nocx-edio). Absent in the
    *  dev-web harness; the endpoints section then shows no status line. */
   agentClient?: AgentClient
+  /** The snippet library (nocx-gjnr) — the SAME store the palette reads, so
+   *  a snippet saved here is in the next fire without a notification on the
+   *  wire (design §6). Absent in an embedding with no snippets service. */
+  snippetsStore?: SnippetsStore
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -434,7 +448,36 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, backupPage, connectionPage, vaultPage, secretsPage, endpointsPage]
+    const snippetsPage: SettingsPage = {
+      kind: 'component',
+      id: 'snippets',
+      title: 'Snippets',
+      groupId: 'application',
+      scrollMode: 'contained',
+      // Registered unconditionally for the same reason vaultPage is: a
+      // surface that appears only once some other state exists is how a
+      // feature ships unreachable — and until this page existed, the
+      // library's create/update/delete/reorder had no caller at all.
+      renderContent: () => (
+        <Show
+          when={props.snippetsStore}
+          fallback={
+            <PageSection title="Snippets">Snippets are not available in this window.</PageSection>
+          }
+        >
+          <SnippetsSection store={props.snippetsStore!} />
+        </Show>
+      ),
+    }
+    return [
+      ...generated,
+      backupPage,
+      connectionPage,
+      vaultPage,
+      secretsPage,
+      endpointsPage,
+      snippetsPage,
+    ]
   })
 
   /** The rail rows the grouped rail renders: every page resolved to a group
@@ -660,6 +703,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setSectionFilter(null)
       setActiveComponentPage('endpoints')
       setNewEndpointRequest((n) => n + 1)
+    },
+    openPage(id: string): void {
+      // Same reason as newConnection: an active search or section filter
+      // hides the page the request is addressed to.
+      setSearchQuery('')
+      setSectionFilter(null)
+      setActiveComponentPage(id)
     },
     ready(): Promise<void> {
       return readyPromise

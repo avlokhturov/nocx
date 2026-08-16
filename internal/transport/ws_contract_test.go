@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
 	"github.com/shady2k/nocx/internal/completion"
@@ -22,10 +25,12 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/tunnel"
@@ -101,6 +106,17 @@ func validateJSON(t *testing.T, s *jsonschema.Schema, raw []byte, what string) {
 	if err := s.Validate(doc); err != nil {
 		t.Errorf("%s does not satisfy its contract:\n%v\n\npayload was:\n%s", what, err, raw)
 	}
+}
+
+// validateJSONErr is the negative of validateJSON: it returns the schema
+// validation error instead of failing the test, so a test can assert that a
+// payload the DTO could marshal is REFUSED by the contract.
+func validateJSONErr(s *jsonschema.Schema, raw []byte) error {
+	var doc any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	return s.Validate(doc)
 }
 
 // ── vault.status ───────────────────────────────────────────────────────
@@ -1558,7 +1574,7 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 
 // ── open ─────────────────────────────────────────────────────────────────
 
-// The DTO's own conformance: the three fields the open ack always carries.
+// The DTO's own conformance: the five fields the open ack always carries.
 // shellIntegrationReason is deliberately NOT among them any more (nocx-dvql):
 // it answered "is this session integrated" once, at open, and the two
 // failures that matter most arrive after it. session.integrationChanged owns
@@ -1568,7 +1584,9 @@ func TestVaultResolveLine_OverTheWireConformsToContract(t *testing.T) {
 // present for every session, including local ones — a renderer that
 // defaulted a missing field to "script" would show a raw tab as silently
 // integrated. Each of the three mode values must marshal; the schema pins
-// the enum.
+// the enum. instanceId + sessionEpoch (nocx-3oupk) name the incarnation
+// and are present on every ack, so the renderer always learns the identity
+// the backend minted.
 func TestOpen_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "open.schema.json")
 
@@ -1577,10 +1595,12 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"raw":    "raw",
 		"relay":  "relay",
 	} {
-		raw, err := json.Marshal(map[string]string{
-			"sessionId":   "0123456789abcdef0123456789abcdef",
-			"cwd":         "~/work",
-			"desiredMode": mode,
+		raw, err := json.Marshal(openResult{
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 1,
+			Cwd:          "~/work",
+			DesiredMode:  mode,
 		})
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
@@ -1591,8 +1611,10 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 	// The removed field is removed, not merely unset: an ack that still
 	// carried it must fail the contract, or "removed" is a claim nothing
 	// checks.
-	stale, err := json.Marshal(map[string]string{
+	stale, err := json.Marshal(map[string]any{
 		"sessionId":              "0123456789abcdef0123456789abcdef",
+		"instanceId":             "fedcba9876543210fedcba9876543210",
+		"sessionEpoch":           1,
 		"cwd":                    "~/work",
 		"desiredMode":            "script",
 		"shellIntegrationReason": "no-secure-temp",
@@ -3544,7 +3566,12 @@ func TestLifecycleChanged_DTOConformsToContract(t *testing.T) {
 			n := lifecycleChangedNotification{
 				JSONRPC: "2.0",
 				Method:  "lifecycle.changed",
-				Params:  lifecycleChangedParams{SessionID: "sid-1", Fact: params},
+				Params: lifecycleChangedParams{
+					SessionID:    "sid-1",
+					InstanceID:   "0123456789abcdef0123456789abcdef",
+					SessionEpoch: 3,
+					Fact:         params,
+				},
 			}
 			raw, err := json.Marshal(n)
 			if err != nil {
@@ -3588,8 +3615,8 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	raw := readNotification(t, e.conn, "lifecycle.changed", wantWithin)
 	validateJSON(t, schema, raw, "lifecycle.changed params (real socket)")
 	var params lifecycleChangedParams
-	if err := json.Unmarshal(raw, &params); err != nil {
-		t.Fatalf("decode: %v", err)
+	if derr := json.Unmarshal(raw, &params); derr != nil {
+		t.Fatalf("decode: %v", derr)
 	}
 	if params.SessionID != sid {
 		t.Errorf("sessionId = %q, want %q", params.SessionID, sid)
@@ -3599,6 +3626,19 @@ func TestLifecycleChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if params.Domain != string(h.Domain) || params.Epoch != h.Epoch {
 		t.Errorf("domain/epoch = %q/%d, want %q/%d", params.Domain, params.Epoch, h.Domain, h.Epoch)
+	}
+	// The session identity rides the fact (nocx-3oupk), distinct from the
+	// domain epoch asserted above: the renderer compares it against the
+	// open ack's pair, so a fact out of a previous incarnation is refused.
+	sess, err := e.ws.registry.Get(session.ID(sid))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	if params.InstanceID != string(sess.Identity().InstanceID) {
+		t.Errorf("instanceId = %q, want %q", params.InstanceID, sess.Identity().InstanceID)
+	}
+	if params.SessionEpoch != sess.Identity().Epoch {
+		t.Errorf("sessionEpoch = %d, want %d", params.SessionEpoch, sess.Identity().Epoch)
 	}
 }
 
@@ -4006,6 +4046,10 @@ func TestSessionIntegrationChanged_DTOConformsToContract(t *testing.T) {
 	}
 	for name, params := range cases {
 		t.Run(name, func(t *testing.T) {
+			// Every fact carries the session identity the open ack minted
+			// (nocx-3oupk); the loop stamps it so no case can omit it.
+			params.InstanceID = "0123456789abcdef0123456789abcdef"
+			params.SessionEpoch = 1
 			raw, err := json.Marshal(params)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
@@ -4084,6 +4128,417 @@ func TestSessionIntegrationChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if timedOut.Shell != "/bin/bash" {
 		t.Errorf("shell = %q, want /bin/bash — a diagnosis that omits the shell is not actionable", timedOut.Shell)
+	}
+}
+
+// ── snippets.* ─────────────────────────────────────────────────────────
+
+// memSnippetStore is an in-memory snippet.Store for the wire tests: a slice
+// plus an existed flag, so "the document exists and is empty" (its seeding
+// already happened) is a state the service can actually be in.
+type memSnippetStore struct {
+	list    []snippet.Snippet
+	existed bool
+}
+
+func (m *memSnippetStore) LoadAll() ([]snippet.Snippet, error) {
+	return append([]snippet.Snippet(nil), m.list...), nil
+}
+
+func (m *memSnippetStore) SaveAll(s []snippet.Snippet) error {
+	m.list = append([]snippet.Snippet(nil), s...)
+	m.existed = true
+	return nil
+}
+
+func (m *memSnippetStore) Exists() (bool, error) { return m.existed, nil }
+
+// newSnippetWSServer builds a server whose snippet service sits over an
+// in-memory store pre-seeded with `seeded`. Passing an EMPTY slice means the
+// document already exists and is empty, so the service's first-creation
+// seeding does not fire: "empty library" is then a real state rather than an
+// unwritten one, which is what the [] assertion below needs.
+func newSnippetWSServer(t *testing.T, seeded []snippet.Snippet) (*WSServer, func()) {
+	t.Helper()
+	store := &memSnippetStore{list: seeded, existed: true}
+	id := 0
+	svc := snippet.NewService(store, func() string { id++; return fmt.Sprintf("id-%d", id) })
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithSnippets(svc))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return ws, func() { _ = ws.Stop(ctx) }
+}
+
+// snippetCall mirrors vaultCall; split out so a failure names its domain.
+func snippetCall(t *testing.T, conn *websocket.Conn, method string, params any, id int) jsonrpcResponse {
+	t.Helper()
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		var msg jsonrpcResponse
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+		if string(msg.ID) == strconv.Itoa(id) {
+			return msg
+		}
+	}
+}
+
+func TestSnippetsList_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.list.schema.json")
+	cases := map[string][]snippet.Snippet{
+		"populated": {
+			{ID: "a", Title: "one", Body: "first body"},
+			{ID: "b", Title: "two", Body: "second body"},
+		},
+		// wireSnippetList(nil) is the handler's answer for an empty library;
+		// it must marshal as [] and never null — the renderer's first .map
+		// assumes it.
+		"empty": nil,
+	}
+	for name, snips := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(wireSnippetList(snips))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "snippets.list DTO")
+		})
+	}
+}
+
+func TestSnippetsCreate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.create.schema.json")
+	raw, err := json.Marshal(snippet.Snippet{ID: "id-1", Title: "t", Body: "b"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.create DTO")
+}
+
+func TestSnippetsUpdate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.update.schema.json")
+	raw, err := json.Marshal(snippet.Snippet{ID: "id-1", Title: "new title", Body: "new body"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.update DTO")
+}
+
+func TestSnippetsDelete_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.delete.schema.json")
+	raw, err := json.Marshal(snippetDeleteResponse{ID: "id-1"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.delete DTO")
+}
+
+func TestSnippetsReorder_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.reorder.schema.json")
+	raw, err := json.Marshal(wireSnippetList([]snippet.Snippet{
+		{ID: "b", Title: "B", Body: "b"},
+		{ID: "a", Title: "A", Body: "a"},
+	}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "snippets.reorder DTO")
+}
+
+func TestSnippetsList_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.list.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{})
+	defer stop()
+
+	resp := snippetCall(t, connectWS(t, ws), "snippets.list", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.list result")
+
+	// The shape this directory exists for: an empty collection is [] and not
+	// null. Its very first run found exactly this on vault.status's providers.
+	var got struct {
+		Snippets []map[string]any `json:"snippets"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Snippets == nil {
+		t.Fatal("snippets marshalled as null; must be []")
+	}
+}
+
+func TestSnippetsCreate_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.create.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.create",
+		map[string]any{"title": "t", "body": "b"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.create result")
+}
+
+func TestSnippetsUpdate_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.update.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{{ID: "a", Title: "A", Body: "a"}})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.update",
+		map[string]any{"id": "a", "title": "B", "body": "b"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.update result")
+}
+
+func TestSnippetsDelete_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.delete.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{{ID: "a", Title: "A", Body: "a"}})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.delete",
+		map[string]any{"id": "a"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.delete result")
+}
+
+func TestSnippetsReorder_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "snippets.reorder.schema.json")
+	ws, stop := newSnippetWSServer(t, []snippet.Snippet{
+		{ID: "a", Title: "A", Body: "a"},
+		{ID: "b", Title: "B", Body: "b"},
+	})
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "snippets.reorder",
+		map[string]any{"ids": []string{"b", "a"}}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "snippets.reorder result")
+
+	// Validating the payload is not enough: the ORDER is the method's whole
+	// output, and a schema cannot express it.
+	var got struct {
+		Snippets []struct {
+			ID string `json:"id"`
+		} `json:"snippets"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Snippets) != 2 || got.Snippets[0].ID != "b" || got.Snippets[1].ID != "a" {
+		t.Fatalf("reorder did not answer with the order asked for: %+v", got.Snippets)
+	}
+}
+
+// ── notes.* ────────────────────────────────────────────────────────────
+
+// newNoteWSServer builds a server whose notes service sits over a real
+// encrypted store in a temp directory — the store IS the thing under test
+// here, and a fake one would prove the DTO and nothing about the wire.
+func newNoteWSServer(t *testing.T) (*WSServer, *note.Service, func()) {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 7)
+	}
+	st, err := note.Open(context.Background(), note.Config{
+		Path: filepath.Join(t.TempDir(), "notes.db"),
+		Key:  key,
+	})
+	if err != nil {
+		t.Fatalf("open notes store: %v", err)
+	}
+	id := 0
+	svc := note.NewService(st, func() string { id++; return fmt.Sprintf("note-%d", id) }, time.Now)
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithNotes(svc))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return ws, svc, func() { _ = ws.Stop(ctx); _ = st.Close() }
+}
+
+func TestNotesList_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notes.list.schema.json")
+	ws, svc, stop := newNoteWSServer(t)
+	defer stop()
+	if _, err := svc.Create(context.Background(), "# Deploy\n\nkubectl rollout status api\n"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	resp := snippetCall(t, connectWS(t, ws), "notes.list", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "notes.list result")
+
+	var got struct {
+		Notes []map[string]any `json:"notes"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Notes == nil {
+		t.Fatal("notes marshalled as null; must be []")
+	}
+	// The list is a LIST: a row carries a derived title and an excerpt, and
+	// never the body (design §5). A row with a body would be a payload
+	// nobody asked for on every open of the panel.
+	if _, hasBody := got.Notes[0]["body"]; hasBody {
+		t.Fatal("a list row carries the body")
+	}
+	if got.Notes[0]["title"] != "Deploy" {
+		t.Fatalf("title is derived from the first line: %+v", got.Notes[0])
+	}
+}
+
+func TestNotesListOnAnEmptyLibraryIsAnEmptyArray(t *testing.T) {
+	schema := loadSchema(t, "notes.list.schema.json")
+	ws, _, stop := newNoteWSServer(t)
+	defer stop()
+	resp := snippetCall(t, connectWS(t, ws), "notes.list", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "notes.list result")
+	if !strings.Contains(string(resp.Result), `"notes":[]`) {
+		t.Fatalf("an empty library must be [], got %s", resp.Result)
+	}
+}
+
+func TestNotesCreateGetUpdateDelete_OverTheWireConformToContract(t *testing.T) {
+	ws, _, stop := newNoteWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	created := snippetCall(t, conn, "notes.create", map[string]any{"body": "first line\nsecond"}, 1)
+	if created.Error != nil {
+		t.Fatalf("create: %+v", created.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.create.schema.json"), created.Result, "notes.create result")
+	var note1 struct {
+		ID        string `json:"id"`
+		Body      string `json:"body"`
+		CreatedAt int64  `json:"createdAt"`
+	}
+	if err := json.Unmarshal(created.Result, &note1); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	got := snippetCall(t, conn, "notes.get", map[string]any{"id": note1.ID}, 2)
+	if got.Error != nil {
+		t.Fatalf("get: %+v", got.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.get.schema.json"), got.Result, "notes.get result")
+
+	updated := snippetCall(t, conn, "notes.update",
+		map[string]any{"id": note1.ID, "body": "edited\nsecond"}, 3)
+	if updated.Error != nil {
+		t.Fatalf("update: %+v", updated.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.update.schema.json"), updated.Result, "notes.update result")
+	var note2 struct {
+		Body      string `json:"body"`
+		CreatedAt int64  `json:"createdAt"`
+	}
+	if err := json.Unmarshal(updated.Result, &note2); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if note2.Body != "edited\nsecond" {
+		t.Fatalf("update did not land: %q", note2.Body)
+	}
+	if note2.CreatedAt != note1.CreatedAt {
+		t.Fatal("an edit moved createdAt; an edit is not a new note")
+	}
+
+	deleted := snippetCall(t, conn, "notes.delete", map[string]any{"id": note1.ID}, 4)
+	if deleted.Error != nil {
+		t.Fatalf("delete: %+v", deleted.Error)
+	}
+	validateJSON(t, loadSchema(t, "notes.delete.schema.json"), deleted.Result, "notes.delete result")
+
+	gone := snippetCall(t, conn, "notes.get", map[string]any{"id": note1.ID}, 5)
+	if gone.Error == nil {
+		t.Fatal("get of a deleted note must be an error, not an empty note")
+	}
+	if gone.Error.Code != -32602 {
+		t.Fatalf("a missing note is the caller's error: code %d", gone.Error.Code)
+	}
+}
+
+func TestNotesSearch_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notes.search.schema.json")
+	ws, svc, stop := newNoteWSServer(t)
+	defer stop()
+	ctx := context.Background()
+	if _, err := svc.Create(ctx, "Deploy notes\n\nkubectl rollout status api\n"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := svc.Create(ctx, "Something else\n"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	resp := snippetCall(t, connectWS(t, ws), "notes.search", map[string]any{"query": "rollout"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "notes.search result")
+
+	var got struct {
+		Matches []struct {
+			Title   string `json:"title"`
+			Excerpt string `json:"excerpt"`
+		} `json:"matches"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("want the one note whose BODY carries the word, got %d", len(got.Matches))
+	}
+	if !strings.Contains(strings.ToLower(got.Matches[0].Excerpt), "rollout") {
+		t.Fatalf("the excerpt does not carry the match: %q", got.Matches[0].Excerpt)
+	}
+}
+
+func TestNotesWithoutAServiceRefuseRatherThanAnswerEmpty(t *testing.T) {
+	// The soft degrade, stated on the wire: a build with no notes service
+	// says the method is not there. An empty list would tell somebody their
+	// notes are gone (design §8, §11.5).
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+
+	resp := snippetCall(t, connectWS(t, ws), "notes.list", map[string]any{}, 1)
+	if resp.Error == nil {
+		t.Fatal("an unwired notes domain must refuse, not answer with an empty library")
 	}
 }
 
@@ -4308,4 +4763,84 @@ func TestAgentRunNotifications_OverTheWireConformToContract(t *testing.T) {
 	}
 	raw := readNotification(t, conn, "agent.runState", 5*time.Second)
 	validateJSON(t, stateSchema, raw, "agent.runState params (real socket)")
+}
+
+// ── exit notification (nocx-ictcq) ────────────────────────────────────────
+
+// The exit notification carries the discriminator that separates an
+// authoritative shell exit from a loss, so a tab whose ssh connection
+// dropped is marked instead of destroyed. The DTO's conformance: the field
+// tags, the enum spelling, and the "status present exactly when exited"
+// rule — marshalled, because that is where omitempty does its work.
+func TestExit_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "exit.schema.json")
+	status := 42
+	cases := map[string]exitNotificationParams{
+		"exited with status": {
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitExited),
+			Status:       &status,
+		},
+		"interrupted, no status": {
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitInterrupted),
+		},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "exit DTO")
+		})
+	}
+}
+
+// A status must never ride an interrupted exit, and an exited exit must
+// never lose its status — the oneOf branches make both a schema error, and
+// the marshalled DTO is where the field tags would hide either.
+func TestExit_DTOStatusRulesAreExact(t *testing.T) {
+	schema := loadSchema(t, "exit.schema.json")
+
+	status := 0
+	bad := []struct {
+		name   string
+		params exitNotificationParams
+	}{
+		{"interrupted carries a status", exitNotificationParams{
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitInterrupted),
+			Status:       &status,
+		}},
+		{"exited carries no status", exitNotificationParams{
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        string(session.ExitExited),
+		}},
+		{"unknown cause", exitNotificationParams{
+			SessionID:    "0123456789abcdef0123456789abcdef",
+			InstanceID:   "fedcba9876543210fedcba9876543210",
+			SessionEpoch: 2,
+			Cause:        "the-wind",
+		}},
+	}
+	for _, c := range bad {
+		t.Run(c.name, func(t *testing.T) {
+			raw, err := json.Marshal(c.params)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := validateJSONErr(schema, raw); err == nil {
+				t.Fatalf("schema accepted %s: %s", c.name, raw)
+			}
+		})
+	}
 }

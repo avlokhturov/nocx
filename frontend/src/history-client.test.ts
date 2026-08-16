@@ -59,7 +59,7 @@ describe('recordCommand', () => {
   it('sends the full fact set over history.record, timestamps rounded to ints', () => {
     const client = fakeClient()
     const rec = completedRecord()
-    void recordCommand(client as unknown as WSClient, rec, completedAttempt())
+    void recordCommand(client as unknown as WSClient, 'tab-1', rec, completedAttempt())
     expect(client.call).toHaveBeenCalledTimes(1)
     const [method, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(method).toBe('history.record')
@@ -74,6 +74,7 @@ describe('recordCommand', () => {
       // store persists int64.
       startedAt: 1000,
       endedAt: 1201,
+      tabId: 'tab-1',
     })
   })
 
@@ -84,14 +85,19 @@ describe('recordCommand', () => {
     const client = fakeClient()
     client.call.mockResolvedValue({ author: 'agent' })
     const rec = completedRecord({ author: 'agent' })
-    void recordCommand(client as unknown as WSClient, rec, completedAttempt())
+    void recordCommand(client as unknown as WSClient, 'tab-1', rec, completedAttempt())
     const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(params.author).toBe('agent')
   })
 
   it('never sends the session-owned fields (id, lineOf, disposed) or output', () => {
     const client = fakeClient()
-    void recordCommand(client as unknown as WSClient, completedRecord(), completedAttempt())
+    void recordCommand(
+      client as unknown as WSClient,
+      'tab-1',
+      completedRecord(),
+      completedAttempt(),
+    )
     const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(params).not.toHaveProperty('id')
     expect(params).not.toHaveProperty('lineOf')
@@ -106,6 +112,7 @@ describe('recordCommand', () => {
       'host',
       'startedAt',
       'status',
+      'tabId',
     ])
   })
 
@@ -113,7 +120,12 @@ describe('recordCommand', () => {
     const client = { call: vi.fn().mockRejectedValue(new Error('socket closed')) }
     await expect(
       new Promise<void>((resolve) => {
-        void recordCommand(client as unknown as WSClient, completedRecord(), completedAttempt())
+        void recordCommand(
+          client as unknown as WSClient,
+          'tab-1',
+          completedRecord(),
+          completedAttempt(),
+        )
         resolve()
       }),
     ).resolves.toBeUndefined()
@@ -125,7 +137,7 @@ describe('recordCommand', () => {
     // vault-resolved values. What crosses is the record's text.
     const client = fakeClient()
     const rec = completedRecord({ command: 'make deploy {{secret:ci-token}}' })
-    void recordCommand(client as unknown as WSClient, rec, completedAttempt())
+    void recordCommand(client as unknown as WSClient, 'tab-1', rec, completedAttempt())
     const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(params.command).toBe('make deploy {{secret:ci-token}}')
   })
@@ -143,7 +155,7 @@ describe('recordCommand', () => {
     }
     client.call.mockResolvedValue(ack)
     await expect(
-      recordCommand(client as unknown as WSClient, completedRecord(), completedAttempt()),
+      recordCommand(client as unknown as WSClient, 'tab-1', completedRecord(), completedAttempt()),
     ).resolves.toEqual(ack)
   })
 
@@ -155,6 +167,7 @@ describe('recordCommand', () => {
       await expect(
         recordCommand(
           client as unknown as WSClient,
+          'tab-1',
           completedRecord({ author: 'agent' }),
           completedAttempt(),
         ),
@@ -170,10 +183,20 @@ describe('recordCommand', () => {
     const client = fakeClient()
     const rec = completedRecord()
     await expect(
-      recordCommand(client as unknown as WSClient, rec, completedAttempt({ state: 'open' })),
+      recordCommand(
+        client as unknown as WSClient,
+        'tab-1',
+        rec,
+        completedAttempt({ state: 'open' }),
+      ),
     ).resolves.toBeNull()
     await expect(
-      recordCommand(client as unknown as WSClient, rec, completedAttempt({ state: 'unknown' })),
+      recordCommand(
+        client as unknown as WSClient,
+        'tab-1',
+        rec,
+        completedAttempt({ state: 'unknown' }),
+      ),
     ).resolves.toBeNull()
     expect(client.call).not.toHaveBeenCalled()
   })

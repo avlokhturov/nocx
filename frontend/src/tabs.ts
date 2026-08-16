@@ -27,6 +27,7 @@ import type {
   SurfaceType,
 } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
+import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -35,6 +36,11 @@ import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
 
 export class Tab implements TabHost {
   readonly id: number
+  /** The renderer-minted wire identity (nocx-tsajw): a UUID minted once per
+   *  tab, never reused, and shared with the content so history.record and
+   *  tab.close address the same backend-scoped captures. Chrome keeps its
+   *  own numeric id; this one is what crosses the wire. */
+  readonly wireId: string
   readonly pane = document.createElement('div')
 
   /** Model-level descriptor: surface type, singleton key, restore info. */
@@ -64,8 +70,9 @@ export class Tab implements TabHost {
   private _latestViewport: ContentViewport | null = null
   private _mountStarted = false
 
-  constructor(content: TabContent, descriptor: ContentDescriptor, id: number) {
+  constructor(content: TabContent, descriptor: ContentDescriptor, id: number, wireId: string) {
     this.id = id
+    this.wireId = wireId
     this.content = content
     this.descriptor = descriptor
 
@@ -386,6 +393,16 @@ export class TabManager {
    *  active tab through this (nocx-wzc4.7); wired by main.tsx to a Solid
    *  signal. */
   onActiveTabChange?: () => void
+  /** The snippet palette chord (⌥⌘P) was pressed in the active pane —
+   *  forwarded from the pane's TerminalContent, whose xterm boundary and
+   *  editor arbiter both land here. The composition root opens the
+   *  palette (design §10.1). */
+  onSnippetChord?: () => void
+  /** The snippet library the completion provider in every pane reads, and
+   *  the acceptance it delegates (design §10.2). Set once by the
+   *  composition root; handed to each TerminalContent as it is built. */
+  snippets?: SnippetProviderDeps
+  onSnippetAccepted?: (snippetId: string) => void
 
   constructor(
     bar: HTMLElement,
@@ -457,8 +474,10 @@ export class TabManager {
   /** Create a new local terminal tab and activate it. */
   newTab(): Tab {
     const tabRef = { current: undefined as Tab | undefined }
+    const wireId = crypto.randomUUID()
     const content = new TerminalContent(
       this.client,
+      wireId,
       this.clipboard,
       this.gate,
       this.banner,
@@ -476,6 +495,9 @@ export class TabManager {
         onActiveOriginChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
+        onSnippetChord: this.onSnippetChord,
+        snippets: this.snippets,
+        onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
       },
     )
@@ -492,7 +514,7 @@ export class TabManager {
       // nothing moves when the real one lands.
       defaultTitle: '',
     }
-    const tab = this.addTab(content, descriptor)
+    const tab = this.addTab(content, descriptor, wireId)
     tabRef.current = tab
     return tab
   }
@@ -501,8 +523,10 @@ export class TabManager {
     log.info('nocx: newSSHTab called', { profileId, host, user, port, title })
     const sshOpts = { profileId, host, user, port } as const
     const tabRef = { current: undefined as Tab | undefined }
+    const wireId = crypto.randomUUID()
     const content = new TerminalContent(
       this.client,
+      wireId,
       this.clipboard,
       this.gate,
       this.banner,
@@ -527,6 +551,9 @@ export class TabManager {
         onHostKeyError: this.onHostKeyError,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
+        onSnippetChord: this.onSnippetChord,
+        snippets: this.snippets,
+        onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
       },
     )
@@ -537,7 +564,7 @@ export class TabManager {
       supportsAttention: true,
       defaultTitle: title || host,
     }
-    const tab = this.addTab(content, descriptor)
+    const tab = this.addTab(content, descriptor, wireId)
     tabRef.current = tab
     return tab
   }
@@ -605,12 +632,14 @@ export class TabManager {
         return existing
       }
     }
-    return this.addTab(content, descriptor)
+    // Every tab gets a wire identity — view tabs carry no captures, but the
+    // chrome must still be able to announce a close (nocx-tsajw).
+    return this.addTab(content, descriptor, crypto.randomUUID())
   }
 
   /** Internal: create a Tab, wire lifecycle, add to model, activate. */
-  private addTab(content: TabContent, descriptor: ContentDescriptor): Tab {
-    const tab = new Tab(content, descriptor, this.nextTabId++)
+  private addTab(content: TabContent, descriptor: ContentDescriptor, wireId: string): Tab {
+    const tab = new Tab(content, descriptor, this.nextTabId++, wireId)
 
     this.tabs.push(tab)
     this.panes.append(tab.pane)
@@ -692,6 +721,12 @@ export class TabManager {
     const index = this.tabs.indexOf(tab)
     if (index === -1) return
 
+    // The tab's pending captures die with it: announce the close so the
+    // backend destroys them (nocx-tsajw). Sent before the DOM teardown —
+    // a dropped notification is covered by the transport-disconnect
+    // trigger, which is the same destruction.
+    this.client.notifyTabClosed(tab.wireId)
+
     const wasActive = tab === this.activeTab
     this.removeFromRecent(tab.id)
 
@@ -754,7 +789,8 @@ export class TabManager {
 
   /** The active tab's terminal content, when the active tab is a terminal.
    *  Global actions (the quick-connect "Integrate this shell" item,
-   *  nocx-ynsx) reach the shell at the current prompt through this; the
+   *  the secret picker's insert) target it because the pane's own input
+   *  presentation is the only place that knows where text should go;
    *  content itself owns the PROMPT_READY && trusted && owned gate. */
   activeTerminalContent(): TerminalContent | null {
     const content = this.activeTab?.content
@@ -772,6 +808,14 @@ export class TabManager {
       }
     }
     return null
+  }
+
+  /** The active tab's PANE element — the always-visible mount the snippet
+   *  palette floats in (design §10.1: it must answer when the editor is
+   *  hidden, so it cannot live inside the editor root). Null when no tab
+   *  is active. */
+  activePane(): HTMLElement | null {
+    return this.activeTab?.pane ?? null
   }
 
   /** The ports.* target the ACTIVE tab scopes to (nocx-wzc4.8): the

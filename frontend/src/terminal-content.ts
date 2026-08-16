@@ -67,6 +67,8 @@ import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
+import { isSnippetChord } from './snippets/chord'
+import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import {
   BaseTabContent,
   type TabHost,
@@ -77,7 +79,9 @@ import { type CapturedFrame } from './frame/types'
 import { CaptureAbortedError } from './frame/capture-identity'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
+import { NotifyClient } from './notify-client'
 import { secretReference } from './secret-reference'
+import { hasSecretReference } from './snippets/resolve'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { DomainEnvironmentProjection } from './lifecycle/domain-environment'
 import {
@@ -224,6 +228,21 @@ export interface TerminalContentHooks {
   /** The reference picker's "Add a secret…" row: open the vault's own
    *  create dialog — wired by main.tsx to the Settings tab's Secrets page. */
   onCreateSecret?: (name: string) => void
+  /** The snippet palette chord (⌥⌘P) was pressed in this pane — from the
+   *  xterm boundary or from the editor's arbiter, both of which close this
+   *  pane's own surfaces and then delegate here. The composition root
+   *  opens the palette (design §10.1); one opener, two boundaries (AD-8). */
+  onSnippetChord?: () => void
+  /** The library the completion provider reads, and the acceptance the
+   *  dropdown delegates (design §10.2). Both absent where no snippets
+   *  service is wired: the provider is then not registered at all, and a
+   *  snippet row cannot exist to be accepted. */
+  snippets?: SnippetProviderDeps
+  /** A snippet row was accepted in the dropdown — the composition root
+   *  resolves the body NOW and fires it through the same path the palette
+   *  and the toolbar menu use (AD-8: one owner for what a snippet becomes). */
+  onSnippetAccepted?: (snippetId: string) => void
+
   /** A question was refused because no endpoint is configured: open the
    *  endpoint editor so the refusal comes with its repair — wired by
    *  main.tsx to the Settings tab's Endpoints page. */
@@ -264,6 +283,26 @@ function keyLabel(e: KeyboardEvent): string {
     .join('+')
   return mods
 }
+
+/** The outcome of firing a snippet into the pane in front — and, when it
+ *  was refused, why. A refusal is a refusal: the palette renders it in the
+ *  panel and offers what the design names (§9.4, §11.1), rather than
+ *  reporting a delivery that did not happen. */
+export type SnippetFire =
+  | { readonly ok: true; readonly where: 'editor' | 'pty' }
+  | {
+      readonly ok: false
+      readonly reason:
+        'no-owner' | 'multi-line-no-bracketed-paste' | 'unresolved-secret' | 'write-failed'
+      readonly name?: string
+    }
+
+/** Who owns input in a pane right now — the ONE derivation behind every
+ *  fire policy (design §9.2). Dependencies a policy needs beyond the owner
+ *  (vault, renderer) are that policy's own check, not part of this
+ *  question: 'pty' means a session exists, whether or not every policy has
+ *  every tool it wants. */
+type InputOwner = 'editor' | 'pty' | 'none'
 
 /**
  * TerminalContent owns the renderer, session, editor, scrollback, command
@@ -386,6 +425,13 @@ export class TerminalContent extends BaseTabContent {
   /** True once the session's exit was observed — the tab is closing, and an
    *  origin that names this session would name a machine that is gone. */
   private _sessionExited = false
+  /** True once the session ended in a loss (an interrupted exit: the channel
+   *  is gone, the host unreachable, a handshake expired, a reattach failed).
+   *  The tab stays open and marked, and this flag owns the warning state for
+   *  the rest of the tab's life: a late integration fact — the last status
+   *  the backend emitted before the session died — must not clear it
+   *  (nocx-ictcq). */
+  private _sessionLost = false
   private _host = ''
   /** The ssh user of `_host` ('' for local shells) — the location line's
    *  `user@host`, from the same projection view. */
@@ -469,6 +515,10 @@ export class TerminalContent extends BaseTabContent {
 
   constructor(
     private readonly client: WSClient,
+    /** The renderer-minted per-tab identity (nocx-tsajw): minted once per
+     *  tab by TabManager, never reused, and carried on history.record so
+     *  the backend scopes pending captures to this tab. */
+    private readonly tabId: string,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
@@ -573,6 +623,17 @@ export class TerminalContent extends BaseTabContent {
       cwdFollow: true,
       host: this._host || null,
     }
+  }
+
+  /** The active pane's raw env-view facts for the snippet provider (design
+   *  §7.4): cwd, host and user of the ACTIVE domain, with the view's ''
+   *  unknown-marker left intact — session-facts.ts maps that marker to
+   *  null at its own boundary, the last one before a substitution. Null
+   *  when no session owns the pane. Read at FIRE time: the provider is
+   *  handed the pane, never a captured snapshot (bead nocx-jj77). */
+  snippetEnv(): { cwd: string; host: string; user: string } | null {
+    if (this.session === null || this._sessionExited) return null
+    return { cwd: this._cwd, host: this._host, user: this._user }
   }
   /** Push the composed title to the host: program title, else the cwd label. */
   private pushTitle(): void {
@@ -734,6 +795,12 @@ export class TerminalContent extends BaseTabContent {
       log.info('nocx: creating renderer')
       const renderer = new XtermRenderer()
 
+      // The snippet palette chord (⌥⌘P) at the xterm boundary: the renderer
+      // consumes it before xterm encodes it (zero bytes to the pty) and
+      // delegates here — the same handler the editor's arbiter calls, so
+      // both keyboard paths reach the ONE opener (design §10.1, AD-8).
+      renderer.onSnippetChord?.(() => this.handleSnippetChord())
+
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
         pane: target,
@@ -797,6 +864,9 @@ export class TerminalContent extends BaseTabContent {
           // module); this tab's ProfileClient is handed through, absent when
           // no connection manager is wired.
           profileClient: this.profileClient ?? undefined,
+          // The snippet library (design §10.2) — rows beside command names
+          // in the ONE dropdown, never a second suggestion surface.
+          snippets: this.hooks.snippets,
         }),
         dropdown: new CompletionDropdown({
           onHover: (index) => this.completion?.select(index),
@@ -804,6 +874,10 @@ export class TerminalContent extends BaseTabContent {
         }),
         env: () => ({ isLocal: !this.sshOpts, cwd: this._cwd, host: this._host }),
         recallIsOpen: () => this.recall?.isOpen ?? false,
+        // Accepting a snippet row resolves the body at THAT moment and
+        // delivers it through the fire path; the dropdown never inserts the
+        // row's own text, which is only the title (design §8, §10.2).
+        acceptSnippet: (id) => this.hooks.onSnippetAccepted?.(id),
       })
       // The DOCUMENT-level layer, shared by both targets: the
       // vault-reference chip (a decoration, not a language), the quiet
@@ -1276,6 +1350,24 @@ export class TerminalContent extends BaseTabContent {
         // evaluation order is the accident that reads as ownership unless
         // the decision is stated. The gate is checked BEFORE any field is
         // built: with tracing off, a keystroke costs nothing but the check.
+        // The snippet palette chord (⌥⌘P, snippets/chord.ts) opens the
+        // palette from anywhere in the editor, exactly like recall's
+        // shortcut: checked BEFORE the surfaces so it cannot be swallowed
+        // by one of them, and opening it closes them — the palette owns
+        // the keys now (the surfaces never stack). Both keyboard paths
+        // (this arbiter and the xterm boundary) land in handleSnippetChord,
+        // which delegates to the composition root's ONE opener.
+        if (isSnippetChord(e)) {
+          if (isDecisionTracing()) {
+            logDecision('arbiter', {
+              surface: 'snippet-palette',
+              key: keyLabel(e),
+              why: 'the snippet chord opens the palette',
+            })
+          }
+          this.handleSnippetChord()
+          return true
+        }
         // Recall first: the shortcut opens it from anywhere, and an open
         // recall owns its keys. Opening it closes the other surfaces.
         const recallWasOpen = this.recall!.isOpen
@@ -1368,6 +1460,39 @@ export class TerminalContent extends BaseTabContent {
         // activate an environment or enable rewriting — every one of those
         // paths was deleted with the marker cycle (nocx-u7uh.1).
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
+      })
+
+      // Optional on the renderer contract (types.ts): a renderer that does
+      // not parse these degrades to raising nothing rather than failing to
+      // mount, which is what the fakes in the test suite rely on.
+      renderer.onNotification?.((request) => {
+        // A program asked nocx to present a message (ADR-0029). The renderer
+        // reports the request and never grants it: what crosses is the text
+        // the program supplied plus this session's id, and the backend stamps
+        // kind, trust, level and attribution from the method invoked and its
+        // own registry. There is no argument here by which a program could
+        // name a destination, and that absence is the design, not an omission.
+        //
+        // Fire-and-forget on purpose. A notification is not worth blocking
+        // terminal output on, and every refusal is final rather than
+        // retryable: the method missing (a backend without the pipeline), the
+        // session not live on this connection, or the pipeline refusing the
+        // delivery. Each is logged and dropped.
+        // Read at fire time rather than at subscribe time: the id is
+        // server-authoritative (AD-7) and a reattach replaces it, so a
+        // captured one would address the session the pane used to hold. No
+        // session means nothing to address — the pane is between sessions and
+        // the request has nowhere to belong.
+        const sid = this.session?.sessionId
+        if (!sid) return
+        void new NotifyClient(this.client.dispatcher)
+          .raise({ sessionId: sid, title: request.title, body: request.body })
+          .catch((err: unknown) => {
+            log.warn('nocx: notification not raised', {
+              sid,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
       })
 
       renderer.onBufferChange((type) => {
@@ -1521,7 +1646,7 @@ export class TerminalContent extends BaseTabContent {
           },
         },
         (rec, attempt) =>
-          recordCommand(this.client, rec, attempt).then((ack) => {
+          recordCommand(this.client, this.tabId, rec, attempt).then((ack) => {
             if (ack) {
               const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
               this.attachRecordedAck(rec.id, block, ack)
@@ -1913,14 +2038,32 @@ export class TerminalContent extends BaseTabContent {
         }
         this.session?.send(data)
       })
-      session.onExit((sid: string) => {
-        log.info('nocx: session exited', { sid })
+      session.onExit((exit) => {
+        log.info('nocx: session exited', {
+          sid: exit.sessionId,
+          cause: exit.cause,
+          ...(exit.cause === 'exited' ? { status: exit.status } : {}),
+        })
         // The session is gone: an origin naming it would name a machine
-        // that no longer exists (B.9).
+        // that no longer exists (B.9). True for a clean exit AND a loss.
         this._sessionExited = true
         this.hooks.onActiveOriginChange?.()
         this.lifecycle.reset()
         this._disposeAllMarkers()
+        if (exit.cause === 'interrupted') {
+          // A loss is not a close (nocx-ictcq): the channel is gone, the
+          // host unreachable, a handshake expired, or a reattach failed —
+          // the work in the tab and the evidence of what happened must
+          // survive. The tab stays in both strips with the scrollback
+          // readable and a warning mark that says what the state is; the
+          // user closes it themselves. `_sessionLost` owns the mark for the
+          // rest of the tab's life, so a late integration fact cannot clear
+          // it (the lost state is terminal for this tab).
+          this._sessionLost = true
+          this.hooks.onWarningChange?.(true, 'Connection lost')
+          return
+        }
+        // A clean exit closes the tab exactly as it always did.
         host.requestClose()
       })
       session.onInputStalled(() => {
@@ -2266,6 +2409,10 @@ export class TerminalContent extends BaseTabContent {
    *  presentation fact — what the user sees. Nothing stream-derived reaches
    *  either axis. */
   private _updateCapability(): void {
+    // The lost state owns the warning mark: a loss is terminal for this tab,
+    // and nothing the integration axis reports afterwards may clear it
+    // (nocx-ictcq). The mark was set by the exit path with its own wording.
+    if (this._sessionLost) return
     const shellState: ShellState = shellStateFromLifecycle(
       this.lifecycle.state,
       this.lifecycle.domainStack,
@@ -2313,6 +2460,11 @@ export class TerminalContent extends BaseTabContent {
    *  needs to special-case it. */
   private _applyIntegration(fact: SessionIntegrationChanged): void {
     if (this._disposed) return
+    // The session has exited (clean or lost): the tab is closing or marked
+    // lost, and a fact that was already in flight when the session died —
+    // the last status the backend emitted — must not re-open the capability
+    // logic or clear the loss mark (nocx-ictcq).
+    if (this._sessionExited) return
     this._integration = fact
     this._updateCapability()
     if (!isDegraded(fact)) {
@@ -2473,6 +2625,19 @@ export class TerminalContent extends BaseTabContent {
     this.enterNativeMode()
   }
 
+  /** The snippet palette chord fired in this pane — from the xterm
+   *  boundary or the editor's arbiter. Both paths close the pane's own
+   *  floating surfaces first (the palette owns the keys once it opens;
+   *  the surfaces never stack), then delegate to the composition root's
+   *  ONE opener (AD-8 — a second opener would be a second owner of the
+   *  chord). */
+  private handleSnippetChord(): void {
+    this.completion?.dismiss()
+    this.promptVault?.closePicker()
+    this.recall?.dismiss()
+    this.hooks.onSnippetChord?.()
+  }
+
   /** Switch back to the nocx command editor (nocx-atyf.5). Only works when
    *  the shell is integrated and the prompt is trusted. */
   switchToEditorInput(): void {
@@ -2499,6 +2664,15 @@ export class TerminalContent extends BaseTabContent {
    *  stops the A marker), so a fresh integration — not a presentation
    *  toggle — is what returns to command blocks. The capability chip still
    *  states "Native input" and the popover offers nothing while latched. */
+  /** Who owns input in this pane right now — the ONE derivation behind
+   *  every fire policy. The contract lives on the InputOwner type; a
+   *  caller reads this once and never re-derives the answer (AD-8). */
+  private inputOwner(): InputOwner {
+    if (this.editor?.isVisible === true) return 'editor'
+    if (this.session !== null) return 'pty'
+    return 'none'
+  }
+
   /** Insert a vault secret where the user is actually typing (nocx-fk32).
    *  The target is chosen by who owns input, and the difference is the
    *  point:
@@ -2520,23 +2694,100 @@ export class TerminalContent extends BaseTabContent {
    *    — that the user ruled out the moment they opened the picker.
    *
    *  Nothing here reads the byte stream to decide anything (AD-6): the
-   *  question 'who owns input' is answered by the input presentation, which
-   *  the lifecycle axis owns. Returns what happened, so the caller can say
+   *  question 'who owns input' is answered by inputOwner(), which the
+   *  input presentation feeds. Returns what happened, so the caller can say
    *  so — a password prompt echoes nothing, and an insert the user cannot
    *  see is an insert they will do twice. */
   async insertSecret(name: string): Promise<'reference' | 'value' | 'unavailable'> {
-    if (this.editor?.isVisible === true) {
-      this.editor.insertText(secretReference(name))
+    const owner = this.inputOwner()
+    const editor = this.editor
+    if (owner === 'editor') {
+      // owner === 'editor' means the editor is visible (inputOwner's
+      // contract); the null check exists for the type, and a missing
+      // editor refuses rather than falling through to a different owner
+      // (§9.2).
+      if (editor === null) return 'unavailable'
+      editor.insertText(secretReference(name))
       return 'reference'
     }
-    if (!this.session || !this.vault) return 'unavailable'
-    const resolved = await this.vault.resolveLine(secretReference(name))
+    const session = this.session
+    const vault = this.vault
+    // owner === 'pty' means a session exists (inputOwner's contract); the
+    // vault is the secret policy's dependency, checked here rather than in
+    // the owner question.
+    if (owner !== 'pty' || session === null || vault === null) return 'unavailable'
+    const resolved = await vault.resolveLine(secretReference(name))
     // An unresolved name must never be written as literal text: the far
     // side would receive `{{secret:…}}` as the password. resolveLine reports
     // every reference it could not resolve, and this line has exactly one.
     if (resolved.refs.some((r) => !r.resolved)) return 'unavailable'
-    this.session.send(resolved.line + '\n')
+    session.send(resolved.line + '\n')
     return 'value'
+  }
+
+  /** Fire a snippet body where the user is typing — the second policy over
+   *  the same inputOwner() derivation insertSecret uses (design §9.2). The
+   *  differences are policy, never mode:
+   *
+   *  - The EDITOR owns the prompt: the text goes into the draft as the
+   *    caller resolved it (env/ask at fire time; a {{secret:…}} stays a
+   *    reference — the chip decorates it and submit resolves it, §11.1).
+   *    NO newline: the user submits with Enter.
+   *  - The TERMINAL owns input: {{secret:…}} is resolved through
+   *    vault.resolveLine exactly as insertSecret resolves it, and an
+   *    unresolved name refuses the whole fire (§11.1). The text then goes
+   *    through the engine's paste — bracketed-paste semantics are the
+   *    engine's to decide, never hand-wrapped (§9.2). NO newline, ever
+   *    (§9.3): firing into a shell does not run the command.
+   *  - 'none' is a refusal, never a fallthrough (§9.2): delivering to a
+   *    different owner than the surface the user is looking at is the
+   *    defect, whichever one wins.
+   *
+   *  A multi-line body is refused when the destination has not enabled
+   *  bracketed paste (mode 2004): a plain newline would be read as Return
+   *  and run half the phrase (§9.4). We do not send it and hope, and we do
+   *  not silently join the lines. */
+  async insertSnippet(text: string): Promise<SnippetFire> {
+    const owner = this.inputOwner()
+    const editor = this.editor
+    if (owner === 'editor') {
+      if (editor === null) return { ok: false, reason: 'no-owner' }
+      editor.insertText(text)
+      return { ok: true, where: 'editor' }
+    }
+    if (owner === 'none') return { ok: false, reason: 'no-owner' }
+    const renderer = this.renderer
+    if (text.includes('\n') && !(renderer?.bracketedPasteActive() ?? false)) {
+      return { ok: false, reason: 'multi-line-no-bracketed-paste' }
+    }
+    let line = text
+    if (hasSecretReference(text)) {
+      const vault = this.vault
+      if (vault === null) return { ok: false, reason: 'unresolved-secret' }
+      // A vault that cannot answer at all — sealed, not wired, the socket
+      // gone — is the same outcome for this fire as a name that does not
+      // resolve: nothing is written, and the caller is told so. It is
+      // caught rather than allowed to propagate because the palette awaits
+      // this promise to decide what to render; an exception would leave its
+      // panel waiting on one that never settles.
+      let resolved
+      try {
+        resolved = await vault.resolveLine(text)
+      } catch (err) {
+        log.warn('nocx: snippet fire could not reach the vault', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+        return { ok: false, reason: 'unresolved-secret' }
+      }
+      const unresolved = resolved.refs.find((r) => !r.resolved)
+      if (unresolved !== undefined) {
+        return { ok: false, reason: 'unresolved-secret', name: unresolved.name }
+      }
+      line = resolved.line
+    }
+    const delivered = renderer?.paste(line) ?? false
+    if (!delivered) return { ok: false, reason: 'write-failed' }
+    return { ok: true, where: 'pty' }
   }
 
   /** The grid becomes the keyboard's owner: writable AND focused, in one

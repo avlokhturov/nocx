@@ -15,6 +15,7 @@ import { SolidTabContent, type TabHost } from './solid-tab-content'
 import type { SurfaceType, SingletonKey } from './tab-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import type { AgentClient } from './agent'
+import type { SnippetsStore } from './snippets/snippets-store'
 import type { EndpointClient } from './endpoints'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
@@ -39,6 +40,7 @@ export class SettingsContent extends SolidTabContent {
     private readonly footprintClient?: import('./footprint-client').FootprintClient,
     private readonly endpointsClient?: EndpointClient,
     private readonly agentClient?: AgentClient,
+    private readonly snippetsStore?: SnippetsStore,
   ) {
     super()
   }
@@ -54,6 +56,7 @@ export class SettingsContent extends SolidTabContent {
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
           endpointsClient: this.endpointsClient,
+          snippetsStore: this.snippetsStore,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)
@@ -86,6 +89,11 @@ export class SettingsContent extends SolidTabContent {
     if (this.pendingNewEndpoint) {
       this.pendingNewEndpoint = false
       this.handle.newEndpoint()
+    }
+    if (this.pendingPage !== null) {
+      const id = this.pendingPage
+      this.pendingPage = null
+      this.handle.openPage(id)
     }
   }
 
@@ -147,9 +155,24 @@ export class SettingsContent extends SolidTabContent {
     this.pendingNewEndpoint = true
   }
 
+  /** Open a component page by its registry id — the general form of the
+   *  three starters above, for a caller that wants the page and nothing
+   *  more ("Manage snippets…", nocx-d346). Queued before mount for the same
+   *  reason they are: opening Settings and naming the page is one user
+   *  action, and the mount is a promise the caller does not hold. */
+  openPage(id: string): void {
+    if (this.handle) {
+      this.handle.openPage(id)
+      return
+    }
+    this.pendingPage = id
+  }
+
   private pendingNewConnection = false
   /** The queued request's prefilled name, or null when nothing is queued.
    *  A string (including '') means "asked"; null means "nobody asked". */
   private pendingNewSecret: string | null = null
   private pendingNewEndpoint = false
+  /** The queued page id, or null when nobody asked. */
+  private pendingPage: string | null = null
 }

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notes.list.schema.json",
+  "title": "NotesList",
+  "description": "Result of the notes.list JSON-RPC method: every note as a row, newest first. A row carries a title and an excerpt and NEVER the body \u2014 the list is a list. Never null: an empty library is [].",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["notes"],
+  "properties": {
+    "notes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/noteRow"
+      }
+    }
+  },
+  "$defs": {
+    "noteRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "excerpt", "updatedAt"],
+      "properties": {
+        "id": {
+          "description": "Opaque, backend-minted. The renderer never constructs one.",
+          "type": "string"
+        },
+        "title": {
+          "description": "DERIVED from the body's first non-empty line, every time it is read \u2014 never stored (design \u00a77). Empty when the body has nothing to name it by; the surface names that one with its creation date, which needs a locale the backend does not have.",
+          "type": "string"
+        },
+        "excerpt": {
+          "description": "One line of the body for the row's second line, bounded. On a search hit it carries the words that matched, so a row can explain why it is there.",
+          "type": "string"
+        },
+        "updatedAt": {
+          "description": "Epoch milliseconds of the last edit.",
+          "type": "integer"
+        }
+      }
+    }
+  }
+}

@@ -63,6 +63,20 @@ func TestSessionIntegrationChanged_ObservedProcessOverTheWireConformsToContract(
 	if starting.Status != IntegrationStarting {
 		t.Fatalf("first fact = %+v, want status=starting", starting)
 	}
+	// The session identity rides the fact (nocx-3oupk): the renderer
+	// compares it against the open ack's pair, so a status out of a
+	// previous incarnation is refused. Assert the values are the session's
+	// own, not minted at emit time.
+	sess, err := e.ws.registry.Get(session.ID(sid))
+	if err != nil {
+		t.Fatalf("registry.Get: %v", err)
+	}
+	if starting.InstanceID != string(sess.Identity().InstanceID) {
+		t.Errorf("instanceId = %q, want %q", starting.InstanceID, sess.Identity().InstanceID)
+	}
+	if starting.SessionEpoch != sess.Identity().Epoch {
+		t.Errorf("sessionEpoch = %d, want %d", starting.SessionEpoch, sess.Identity().Epoch)
+	}
 
 	// A stand-in for the session's shell: it holds until the test says go,
 	// then hands its process over to another executable, which is the

@@ -915,11 +915,15 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 	// The watcher starts AFTER releasePoolRef is set (above), so a session
 	// that ends during the assignment window cannot race the field.
 	go func() {
-		_ = session.Wait()
-		// Remote session ended — release the pool reference. Close is
-		// idempotent (closeOnce), so if the tab already called Close this
-		// is a no-op; if not, it closes the session, drops the ref, and
-		// (for a jump-backed conn) releases the bastion handle.
+		waitErr := session.Wait()
+		// Record BEFORE Close: the exit monitor wakes on done (which Close
+		// closes) and reads WaitErr to classify how the session ended — the
+		// remote shell's own exit (authoritative, with a status, via nil or
+		// *ExitError) versus a loss (nocx-ictcq). Close is idempotent
+		// (closeOnce), so if the tab already called Close this is a no-op;
+		// if not, it closes the session, drops the ref, and (for a
+		// jump-backed conn) releases the bastion handle.
+		ch.recordWait(waitErr)
 		_ = ch.Close()
 	}()
 

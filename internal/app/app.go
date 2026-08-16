@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -35,12 +37,16 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
+	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
@@ -50,6 +56,22 @@ import (
 	"github.com/shady2k/nocx/internal/vault/system"
 	"github.com/shady2k/nocx/internal/vaultreset"
 )
+
+// noteBackupAdapter is the backup's view of the notes store. The store takes
+// a context (it is a database); the backup's interfaces do not, because they
+// are the shape ADR-0027 settled on. The adapter supplies the background
+// context and nothing else — no policy lives here.
+type noteBackupAdapter struct {
+	store note.Store
+}
+
+func (a *noteBackupAdapter) LoadAllNotes() ([]note.Note, error) {
+	return a.store.LoadAll(context.Background())
+}
+
+func (a *noteBackupAdapter) ReplaceNotes(notes []note.Note) error {
+	return a.store.ReplaceAll(context.Background(), notes)
+}
 
 type App struct {
 	Logger           log.Logger
@@ -65,6 +87,9 @@ type App struct {
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
 	vaultCloser interface{ Close() }
+	// noteCloser closes the notes database on shutdown; nil when the store
+	// never opened.
+	noteCloser interface{ Close() error }
 
 	// discoverySched owns the port-discovery cadence (nocx-wzc4.2); closed
 	// at shutdown so no timer outlives the process.
@@ -86,7 +111,23 @@ type App struct {
 	// logFile is the open append handle, closed at shutdown after the
 	// final line. nil when file logging is unavailable.
 	logFile *os.File
+
+	// attentionHost is the late-bound implementation behind the notify
+	// router's banner route (ADR-0029). The route itself was decided when
+	// the table was built; this is only the surface it reaches, and it stays
+	// UnavailableHost on every host that never calls SetAttentionHost.
+	attentionHost *notify.HostHolder
+
+	// slogger is the same logger Logger wraps, kept so an adapter built
+	// outside this package (main.go's attention host) writes to the log file
+	// rather than to slog.Default(), which nothing here installs.
+	slogger *slog.Logger
 }
+
+// Slog returns the backend's structured logger, for adapters constructed in
+// main.go that take a *slog.Logger directly. Prefer the Logger interface
+// everywhere else.
+func (a *App) Slog() *slog.Logger { return a.slogger }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
 // which an in-progress compaction stops (design §5.4 names hysteresis as
@@ -155,6 +196,20 @@ func (a *App) SetDialogService(ds transport.DialogService) {
 // unset state.
 func (a *App) SetUrlOpener(opener transport.UrlOpener) {
 	a.Transport.SetUrlOpener(opener)
+}
+
+// SetAttentionHost binds the desktop attention surface behind the notify
+// router's banner route (ADR-0029). Like SetDialogService it is wired from
+// main.go's WailsApp.startup — the Wails context the adapter needs exists
+// only there, after the router was built — and must be called before Start,
+// so no raise can observe the unset state.
+//
+// It binds an implementation, never a destination. The route was decided when
+// the routing table was built and is not reachable from here; a host that
+// never calls this keeps UnavailableHost, and its raises are visible failed
+// deliveries rather than silent drops.
+func (a *App) SetAttentionHost(host notify.AttentionHost) {
+	a.attentionHost.Set(host)
 }
 
 // Log logs a message from the frontend.
@@ -286,6 +341,15 @@ func WithRealSystemKeystore(reason string) Option {
 func WithLogFilePath(path string) Option {
 	return func(o *optionSet) { o.logFilePath = &path }
 }
+
+// notifyDebounceWindow is how long one session and kind is held quiet AFTER a
+// notification has gone out. The debounce is leading-edge (notify.Policy):
+// the first event is delivered at once, and the window suppresses what follows
+// it, closing with one summary naming how many were held. So this number is
+// not a delay on anything — it is how much of a burst collapses into that one
+// summary. Eight seconds is termic's number for the same job (design §6.2),
+// long enough to absorb a build's chatter.
+const notifyDebounceWindow = 8 * time.Second
 
 func New(opts ...Option) (*App, error) {
 	var o optionSet
@@ -430,6 +494,20 @@ func New(opts ...Option) (*App, error) {
 	// system (OS keychain) and file (encrypted document).
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
+	// The snippet library is the same document family: one versioned
+	// document under the profile directory, sharing the docStore. The id
+	// source is injected rather than called inline so tests can force
+	// collisions and this composition root is the one place that decides
+	// what a rand failure means; the fallback keeps Create returning a
+	// non-empty id instead of panicking inside a handler (design §5.1).
+	snippetStore := snippet.NewJSONStore(docStore, snippet.DocumentName)
+	snippetSvc := snippet.NewService(snippetStore, func() string {
+		var raw [16]byte
+		if _, rerr := rand.Read(raw[:]); rerr != nil {
+			return fmt.Sprintf("snip-%d", time.Now().UnixNano())
+		}
+		return hex.EncodeToString(raw[:])
+	})
 
 	// The installed fact (nocx-mlm7 P7, design §5.4): backend-owned,
 	// persisted across restarts, keyed by the resolved destination
@@ -488,7 +566,63 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
-	backupService := backup.NewService(profileStore, settingsRegistry, docStore)
+
+	// The content key opens BOTH encrypted stores — the history database
+	// and the notes one. One key, one lifecycle, two files: they differ in
+	// their UPGRADE rule, not in their secrecy. History rebuilds its file
+	// when the schema moves (a log can be re-made by living); notes migrate
+	// theirs and never discard, because text somebody wrote cannot
+	// (.internal/specs/2026-08-16-notes-design.md §4.2).
+	var contentKey []byte
+	if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
+		Registry:    reg,
+		KeyID:       vault.ContentKeyID,
+		SystemReady: systemReady,
+		DBPath:      filepath.Join(paths.DataDir(), "content.db"),
+		// The salt lives in the CONFIG directory — never in the data
+		// directory beside content.db: a copy of the data directory must
+		// carry nothing that opens it (nocx-rtg0.14).
+		SaltPath: filepath.Join(paths.ConfigDir(), "contentkey.salt"),
+		Logger:   logger,
+	}); keyErr != nil {
+		slogger.Warn("encrypted local stores unavailable; starting without them", "reason", keyErr)
+	} else {
+		contentKey = key
+	}
+
+	// The notes library. A store that cannot be opened leaves noteSvc nil,
+	// the notes.* methods answer -32601, and the panel says the library is
+	// unavailable — never an empty list, which would tell somebody their
+	// notes are gone (spec §8).
+	var noteSvc *note.Service
+	// The notes database is closed on the way out, after the transport has
+	// stopped: an open file handle outliving the process is how a database
+	// gets left in a state its next open has to recover from.
+	var noteCloser interface{ Close() error }
+	// The backup's view of the same store. nil when notes are unavailable,
+	// and the backup then carries no notes section — which restore reads as
+	// "this backup says nothing about notes" rather than "you had none".
+	var noteBackup backup.NoteStore
+	if contentKey != nil {
+		if noteStore, noteErr := note.Open(ctx, note.Config{
+			Path: filepath.Join(paths.DataDir(), "notes.db"),
+			Key:  contentKey,
+		}); noteErr != nil {
+			slogger.Warn("notes unavailable; starting without them", "reason", noteErr)
+		} else {
+			noteSvc = note.NewService(noteStore, func() string {
+				var raw [16]byte
+				if _, rerr := rand.Read(raw[:]); rerr != nil {
+					return fmt.Sprintf("note-%d", time.Now().UnixNano())
+				}
+				return hex.EncodeToString(raw[:])
+			}, time.Now)
+			noteCloser = noteStore
+			noteBackup = &noteBackupAdapter{store: noteStore}
+		}
+	}
+
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup)
 	if recoverErr := backupService.Recover(); recoverErr != nil {
 		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
@@ -508,21 +642,12 @@ func New(opts ...Option) (*App, error) {
 	budget, budgetErr := budgetFromSettings(settingsRegistry)
 	if budgetErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
-	} else if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
-		Registry:    reg,
-		KeyID:       vault.ContentKeyID,
-		SystemReady: systemReady,
-		DBPath:      filepath.Join(paths.DataDir(), "content.db"),
-		// The salt lives in the CONFIG directory — never in the data
-		// directory beside content.db: a copy of the data directory must
-		// carry nothing that opens it (nocx-rtg0.14).
-		SaltPath: filepath.Join(paths.ConfigDir(), "contentkey.salt"),
-		Logger:   logger,
-	}); keyErr != nil {
-		slogger.Warn("durable command history unavailable; starting without it", "reason", keyErr)
+	} else if contentKey == nil {
+		// The key already said why, once, above.
+		slogger.Warn("durable command history unavailable; starting without it", "reason", "no content key")
 	} else if db, openErr := content.Open(ctx, content.Config{
 		Path:   filepath.Join(paths.DataDir(), "content.db"),
-		Key:    key,
+		Key:    contentKey,
 		Budget: budget,
 		Policy: historyPolicy,
 		Logger: logger,
@@ -601,6 +726,8 @@ func New(opts ...Option) (*App, error) {
 		transport.WithContentDB(contentDB),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
+		transport.WithSnippets(snippetSvc),
+		transport.WithNotes(noteSvc),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
@@ -742,6 +869,68 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+	// The notification router (ADR-0029): the only holder of "where" a raised
+	// notification goes. Before this line the whole notify package was
+	// reachable from its own tests and nowhere else (AGENTS.md check 5).
+	//
+	// The banner row is the table's first, and it is decided here, once. A
+	// program that asks for a notification (notify.raise, trust
+	// programRequest) reaches the OS banner and nothing else — no network
+	// sink, no subscription route, and no way for the request to name a
+	// destination of its own. The holder behind it binds late (see
+	// notify.HostHolder): the Wails runtime needs a context that exists only
+	// in main.go's startup, so the implementation arrives after this line
+	// while the route does not.
+	//
+	// Hosts that never bind one — cmd/devharness, the dev-web harness, an e2e
+	// run — keep UnavailableHost, and a raise there is a visible failed
+	// delivery rather than a silent drop.
+	attentionHost := &notify.HostHolder{}
+	notifyRouter, routerErr := notify.NewRouter(notify.Table{
+		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
+			{Sink: wailsadapter.HostSink{Host: attentionHost}},
+		},
+	}, notify.Limits{
+		MaxInFlight:     4,
+		MaxQueued:       32,
+		MaxRetained:     1 << 20,
+		DeliveryTimeout: 10 * time.Second,
+	})
+	if routerErr != nil {
+		return nil, fmt.Errorf("notify router: %w", routerErr)
+	}
+
+	// The attention policy sits IN FRONT of the router, so notify.raise
+	// reaches the pipeline through it rather than around it. Without this a
+	// loop that writes OSC 9 a hundred times produces a hundred banners; the
+	// policy collapses a burst per (session, kind) into one notification
+	// naming the count, which is the whole point of the debounce window.
+	//
+	// Focus binds late and its unbound answer is "nothing is focused", so
+	// suppression never suppresses until something reports what the user is
+	// looking at (nocx-jiwq.2). That is the safe direction: the cost is a
+	// notification the user did not strictly need, where the other direction
+	// silently swallows one they did. Debounce and coalescing need no focus
+	// and work in full from the first raise.
+	notifyFocus := &notify.FocusHolder{}
+	notifyPolicy, policyErr := notify.NewPolicy(
+		context.Background(), notifyRouter, notifyDebounceWindow, notifyFocus, notify.RealClock{},
+		notify.WithResultHandler(func(out notify.Outcome) {
+			if out.Err != nil {
+				logger.Warn("notification refused", "error", out.Err)
+				return
+			}
+			for _, r := range out.Results {
+				if r.Err != nil {
+					logger.Warn("notification delivery failed", "target", r.Route.Destination.Target, "error", r.Err)
+				}
+			}
+		}),
+	)
+	if policyErr != nil {
+		return nil, fmt.Errorf("notify policy: %w", policyErr)
+	}
+	tpOpts = append(tpOpts, transport.WithNotifyRaiser(notifyPolicy))
 
 	// The assistant engine (nocx-edio): eino behind the guarded HTTP
 	// client, wired at the composition root like every other client —
@@ -843,11 +1032,14 @@ func New(opts ...Option) (*App, error) {
 		Profiles:         profileStore,
 		Credentials:      v,
 		vaultCloser:      v,
+		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,
+		attentionHost:    attentionHost,
+		slogger:          slogger,
 	}
 
 	logger.Info("application initialized")
@@ -1369,6 +1561,12 @@ func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
+	}
+	// After the transport, so nothing is still writing a note.
+	if a.noteCloser != nil {
+		if err := a.noteCloser.Close(); err != nil {
+			a.Logger.Error("notes database shutdown error", "error", err)
+		}
 	}
 	// After the transport, so nothing is still asking the vault for secrets.
 	// This seals it as well as stopping its timer: leaving the root key in a

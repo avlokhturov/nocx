@@ -205,3 +205,33 @@
   flex: 0 0 auto;
   color: var(--color-text-dim);
 }
+
+/* The refusal a fire came back with, above the list (design §11). It stays
+   on the surface it is about — the list is still underneath, so the person
+   can pick something else without reopening anything. Danger text rather
+   than a filled banner: it is one sentence in a panel that is already a
+   panel. */
+.quick-connect__notice {
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+/* Snippet rows are two lines: the title, then the phrase under it. A
+   snippet's detail is not a subtitle — it is the TEXT that will be
+   inserted, and it is as long as a command is, so sharing a line with the
+   title truncated the part a person is actually choosing between (owner
+   review). Every other variant keeps one line: a host's detail is a
+   profile name, and a secret's is its kind. */
+.quick-connect[data-variant='snippets'] .quick-connect__item {
+  flex-wrap: wrap;
+  align-items: baseline;
+  row-gap: 2px;
+}
+
+.quick-connect[data-variant='snippets'] .quick-connect__item-detail {
+  flex-basis: 100%;
+  font-family: var(--font-family-mono);
+  white-space: nowrap;
+}

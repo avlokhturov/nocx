@@ -37,9 +37,13 @@ import (
 // completes. It mirrors the ledger's CommandRecord minus the fields that
 // never cross (the session-local id, the live marker-line accessor, the
 // disposed flag) and minus the output, which is never retained (ADR-0008).
-// The capture scope's tab and generation are the backend's own facts (the
-// connection identity and its submission counter) — the renderer's
-// session-local ids never cross the wire.
+// TabID is the ONE deliberate exception to "the renderer's session-local ids
+// never cross the wire" (nocx-tsajw): the renderer-minted per-tab identity
+// that scopes the pending-capture registry. It is opaque to the backend —
+// minted as a UUID, never reused, and destruction is bound to the connection
+// it arrives on, so a tab id from one connection cannot reach another's
+// captures. The scope's generation stays a backend fact (the connection's
+// own submission counter).
 type historyRecordParams struct {
 	Command string `json:"command"`
 	Cwd     string `json:"cwd"`
@@ -56,6 +60,7 @@ type historyRecordParams struct {
 	StartedAt *int64 `json:"startedAt"`
 	EndedAt   *int64 `json:"endedAt"`
 	Trusted   bool   `json:"trusted"`
+	TabID     string `json:"tabId"`
 }
 
 // redactionWire is one redaction segment on the wire: kind and span in
@@ -180,7 +185,10 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		// Fail closed: the raw command must not reach the row, and the
 		// tab's pending captures die with the failed record.
 		if h.captures != nil {
-			h.captures.DestroyTab(tabID(wconn))
+			// The failing TAB's captures die — the tab id on this record,
+			// bound to this connection. A masking failure in one tab never
+			// touches another tab's offers on the same socket.
+			h.captures.DestroyTab(connectionID(wconn), p.TabID)
 		}
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: detection failed; command not recorded"})
 		return
@@ -304,7 +312,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		// keeps the store-failure answer unchanged from the pre-capability
 		// handler.
 		if h.captures != nil {
-			h.captures.DestroyTab(tabID(wconn))
+			h.captures.DestroyTab(connectionID(wconn), p.TabID)
 		}
 		var rej *capability.RefusedError
 		if errors.As(runErr, &rej) {
@@ -316,20 +324,21 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	}
 
 	// The offers, decided after the row exists (the capture's first link is
-	// the row it will rewrite). Superseding, linking and suppression are
-	// one atomic registry step.
+	// the row it will rewrite). Linking and suppression are one atomic
+	// registry step.
 	//
 	// This runs for EVERY record, not only for one carrying credentials.
-	// Submit's first act is to destroy the tab's older pending captures, and
-	// gating the whole call on len(creds) > 0 meant the ordinary next
-	// command — the overwhelmingly common one, which carries no key — never
-	// superseded anything. The plaintext then sat until the expiry timer
-	// rather than until the user moved on, which is the boundary the design
-	// actually promises. With no credentials Submit does the supersede and
-	// returns nothing, which is exactly what is wanted here.
+	// Gating the whole call on len(creds) > 0 is fine for offers — a
+	// keyless command has nothing to offer — and Submit's suppression
+	// rules (already saved, already dismissed) apply on every record
+	// regardless. A new submission deliberately does NOT destroy the tab's
+	// older pending captures (the supersede rule was removed, capture.go
+	// header); with no credentials Submit returns nothing, which is
+	// exactly what is wanted here.
 	if h.captures != nil {
 		scope := credential.CaptureScope{
-			Tab:        tabID(wconn),
+			Connection: connectionID(wconn),
+			Tab:        p.TabID,
 			SessionIDs: sessionIDsOf(state),
 			EntryID:    entryID,
 			Generation: state.nextGeneration(),
@@ -350,9 +359,11 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	_ = h.r.TryResult(req.ID, mustMarshal(ack))
 }
 
-// tabID is the per-connection identity captures are scoped to, in the
-// string form the registry keys scopes by.
-func tabID(wconn *wsConn) string {
+// connectionID is the backend's own per-connection identity, in the string
+// form the capture registry keys scopes by. It is the connection half of a
+// capture's scope (and the agent ask's clientID); the tab half is the
+// renderer-minted identity that rides the wire.
+func connectionID(wconn *wsConn) string {
 	return strconv.FormatUint(wconn.id, 10)
 }
 
@@ -392,6 +403,9 @@ func maskedKindsOf(findings []secrets.Finding) []string {
 func validateHistoryRecord(p historyRecordParams) string {
 	if p.Command == "" || strings.TrimSpace(p.Command) == "" {
 		return "command is required and must not be empty"
+	}
+	if strings.TrimSpace(p.TabID) == "" {
+		return "tabId is required"
 	}
 	switch content.CommandStatus(p.Status) {
 	case content.StatusRunning, content.StatusSuccess, content.StatusFailure,
