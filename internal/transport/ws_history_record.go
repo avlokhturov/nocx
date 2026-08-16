@@ -29,6 +29,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/masking"
 	"github.com/shady2k/nocx/internal/secrets"
 )
 
@@ -172,8 +173,9 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	// single writer of durable rows, so it is the single place masking can
 	// be forgotten: the durable command is always the masked one, and the
 	// live viewport is untouched (xterm renders what the program printed,
-	// AD-6).
-	masked, findings, segs, err := maskCommandSafe(p.Command)
+	// AD-6). The pass itself is the masking service's — the one owner of
+	// detection, shared with the egress gate (ADR-0021, nocx-a21v).
+	masked, findings, segs, err := masking.MaskWithSegments(p.Command)
 	if err != nil {
 		// Fail closed: the raw command must not reach the row, and the
 		// tab's pending captures die with the failed record.
@@ -366,20 +368,6 @@ func sessionIDsOf(state *connState) []string {
 	state.mu.Unlock()
 	sort.Strings(ids)
 	return ids
-}
-
-// maskCommandSafe runs the one detector and converts a panic into an error.
-// The known panic — an absent optional regex group sliced as [:-1] — is
-// fixed and pinned by regression tests; this is the fail-closed belt: a
-// detection failure refuses the write, never a raw command on disk.
-func maskCommandSafe(line string) (masked string, findings []secrets.Finding, segs []secrets.Segment, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("detection panicked: %v", r)
-		}
-	}()
-	masked, findings, segs = secrets.MaskWithSegments(line)
-	return masked, findings, segs, nil
 }
 
 // maskedKindsOf deduplicates the findings' kinds in first-occurrence order —

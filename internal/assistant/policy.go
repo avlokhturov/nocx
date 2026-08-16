@@ -43,6 +43,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/masking"
 )
 
 // ErrPolicyRefused is the terminal error of a refused tool call (ADR-0028
@@ -112,11 +113,11 @@ const maxArgsBytes = 64 << 10
 const maxToolResultBytes = 1 << 20
 
 // policyMiddleware is the pipeline for ONE run (one Ask): it holds the run's
-// grant, the assembled registry, the ledger seam, the approval store and the
-// run's identity — everything the permit/ask/refuse decision and the attempt
-// record need. A fresh instance per run; the grant is immutable once
-// execution starts (ADR-0020 decision 5), and only a new attempt carries a
-// different one.
+// grant, the assembled registry, the ledger seam, the approval store, the
+// egress vault comparison and the run's identity — everything the
+// permit/ask/refuse decision, the attempt record and the egress gate need. A
+// fresh instance per run; the grant is immutable once execution starts
+// (ADR-0020 decision 5), and only a new attempt carries a different one.
 type policyMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 
@@ -124,6 +125,7 @@ type policyMiddleware struct {
 	registry  agenttools.Registry
 	ledger    AttemptLedger
 	approvals *ApprovalStore
+	known     KnownMaterial
 	runID     string
 	attempt   int
 	requester RendererRequester
@@ -137,12 +139,22 @@ type policyMiddleware struct {
 // Executes: InRenderer tools (design §6.6 — the only step that differs
 // differs by the declaration row); it may be nil when no InRenderer tool can
 // be reached under this build, which the run branch reports honestly.
-func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, runID string, attempt int, requester RendererRequester) (*policyMiddleware, error) {
+//
+// known is the egress vault comparison (design §7.1) and it is REQUIRED: a
+// run that may execute tools must carry it, or the gate cannot see short
+// vault values and a result would leave for the provider unscreened. The
+// fail-closed check is here, at construction, so a wiring gap fails the run
+// before any tool runs — never as a silent weaker gate.
+func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, requester RendererRequester) (*policyMiddleware, error) {
+	if known == nil {
+		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
+	}
 	m := &policyMiddleware{
 		grant:      grant,
 		registry:   registry,
 		ledger:     ledger,
 		approvals:  approvals,
+		known:      known,
 		runID:      runID,
 		attempt:    attempt,
 		requester:  requester,
@@ -262,6 +274,44 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// 6. Execution — in Go, against the narrowed capability.
 		out, runErr := m.run(decl, ctx, capability, []byte(rawArgs))
 
+		// 7. Result ingest — the egress gate (design §7.1) FIRST, then the
+		// window and the size bound. The gate screens EVERY return path
+		// before the bytes leave for the provider, the success and the
+		// error alike: an error string is output too — it carries paths,
+		// hostnames and names, and a gate that screens successes and not
+		// failures has closed the wide door and left the narrow one open.
+		egress, screenErr := m.screenResult(ctx, out, runErr)
+		if screenErr != nil {
+			// Detection failed: the result is withheld and the run fails —
+			// the masking service's fail-closed contract, and the gate's:
+			// nothing leaves when the gate cannot see.
+			_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+			return "", fmt.Errorf("agent tool %q: egress screening failed — the result was withheld: %w", decl.Name, screenErr)
+		}
+		if len(egress) > 0 {
+			// A finding REFUSES AND ASKS (design §7.1): nothing is sent,
+			// the run suspends carrying the findings, and a person is shown
+			// what was found and where. It never silently masks and
+			// continues — off-machine a miss is invisible and permanent,
+			// and an honest redaction that says nothing is
+			// indistinguishable from there having been nothing to redact
+			// (ADR-0021). The ask binds to the exact proposal through the
+			// existing approval machinery; the run is NOT failed — it is
+			// awaiting the decision the surface renders.
+			req := m.egressRequest(decl.Name, tCtx.CallID, rawArgs, egress, runErr != nil)
+			if m.approvals != nil {
+				m.approvals.Request(m.proposal(decl.Name, tCtx.CallID, rawArgs))
+			}
+			tripLatch(ctx, &EgressRequestedError{Request: req})
+			// The attempt of THIS pass closes as interrupted: the call ran
+			// and its result was withheld pending the decision. Replay and
+			// result retention across the suspension are deliberately not
+			// wired here — a resume that re-ran the tool would repeat the
+			// effect — and are the follow-up seam (reported).
+			_ = m.closeAttempt(ctx, execID, content.TermInterrupted, content.EntryInterrupted)
+			return "", compose.StatefulInterrupt(ctx, req, req)
+		}
+
 		// 8. The outcome is recorded on the attempt — the interval closes
 		// with the outcome or the terminal reason, never before.
 		if runErr != nil {
@@ -269,9 +319,9 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			return "", runErr
 		}
 
-		// 7. Result ingest: the window and the size bound. The executor
-		// windows its own return (design §4.4); this is the bound that holds
-		// even when a tool forgets.
+		// The window and the size bound. The executor windows its own
+		// return (design §4.4); this is the bound that holds even when a
+		// tool forgets.
 		if len(out) > maxToolResultBytes {
 			_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
 			return "", fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
@@ -442,6 +492,64 @@ func (m *policyMiddleware) proposal(toolName, callID, rawArgs string) Approval {
 		Tool:    toolName,
 		CallID:  callID,
 		ArgHash: canonicalArgHash(rawArgs),
+	}
+}
+
+// screenResult runs the egress gate (design §7.1) over one tool's return —
+// the success output or the error string alike — and returns the findings.
+// Two detectors contribute, and both are the gate's, not second
+// implementations (one recognizer, two policies): the masking service's
+// heuristic pass, and the vault comparison through the run's KnownMaterial
+// seam. A detection failure is an error: the caller withholds the result
+// and fails the run — nothing leaves when the gate cannot see.
+func (m *policyMiddleware) screenResult(ctx context.Context, out string, runErr error) ([]EgressFinding, error) {
+	result := out
+	if runErr != nil {
+		result = runErr.Error()
+	}
+	heuristic, err := masking.Detect(result)
+	if err != nil {
+		return nil, err
+	}
+	findings := make([]EgressFinding, 0, len(heuristic))
+	for _, f := range heuristic {
+		findings = append(findings, EgressFinding{
+			Source: EgressFindingHeuristic,
+			Kind:   f.Kind,
+			Start:  f.Start,
+			End:    f.End,
+		})
+	}
+	known, err := m.known.FindKnown(ctx, result)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range known {
+		findings = append(findings, EgressFinding{
+			Source:     EgressFindingKnown,
+			SecretName: k.SecretName,
+			Start:      k.Start,
+			End:        k.End,
+		})
+	}
+	if len(findings) == 0 {
+		return nil, nil
+	}
+	return findings, nil
+}
+
+// egressRequest builds the finding-carrying ask of the egress gate, bound to
+// the exact proposal like the inbound ask. WasError tells the surface
+// whether the findings are in an error string rather than in the result.
+func (m *policyMiddleware) egressRequest(toolName, callID, rawArgs string, findings []EgressFinding, wasError bool) *EgressRequest {
+	return &EgressRequest{
+		RunID:     m.runID,
+		Attempt:   m.attempt,
+		Tool:      toolName,
+		CallID:    callID,
+		Arguments: rawArgs,
+		Findings:  findings,
+		WasError:  wasError,
 	}
 }
 

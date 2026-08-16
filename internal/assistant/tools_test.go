@@ -37,6 +37,7 @@ func askWithGrant(t *testing.T, grant *content.Grant) *fakeOpenAIServer {
 
 	p := testAskParams(srv.URL)
 	p.Grant = grant
+	p.KnownMaterial = &fakeKnownMaterial{}
 	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
