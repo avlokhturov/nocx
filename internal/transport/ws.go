@@ -241,6 +241,20 @@ type WSServer struct {
 	// the gate must see short vault values or a result would leave
 	// unscreened (assistant.newPolicyMiddleware).
 	agentKnownMaterial assistant.KnownMaterial
+	// agentApprovals is the process-lifetime approval store (design §7.2,
+	// nocx-z9hj4): the transport owns ONE per server and passes it on
+	// every Ask, so the run that escalated and the run that resumes consult
+	// the SAME decisions. Process-lifetime like the checkpoint: it does
+	// not survive a restart, which is what the recovery rule says.
+	agentApprovals *assistant.ApprovalStore
+	// pendingRuns holds a suspended run's stream context (question,
+	// references, resolved endpoint material — everything the resume
+	// re-drives) keyed by run id. The approval store is process-lifetime;
+	// so is this: the agent is alive while the renderer is alive (design
+	// §2.4). A run whose renderer never answers holds its context until
+	// the run terminalizes or the process restarts.
+	pendingRuns   map[int64]askRunContext
+	pendingRunsMu sync.Mutex
 	// agentProbeSub admits and runs endpoints.probe probes off the read
 	// loop: a streaming probe can take tens of seconds and must never
 	// freeze the socket that feeds every other tab. Capacity one composed
@@ -887,8 +901,12 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		conns:               make(map[*wsConn]struct{}),
 		outboundBudget:      outbound.NewBudget(outboundBudgetBytes),
 		tunnels:             make(map[string]*tunnel.Tunnel),
+		resolver:            &resolverHolder{},
 		ownerTunnels:        make(map[*wsConn]map[string]struct{}),
 		origins:             LoopbackOriginPolicy{},
+		agentApprovals:      assistant.NewApprovalStore(),
+		satNotify:           newSaturatedNotifyLimiter(time.Second),
+		pendingRuns:         make(map[int64]askRunContext),
 		filesBindings:       make(map[string]*filesBinding),
 		lanes:               make(map[session.ID]*sessionLane),
 		filesBySession:      make(map[session.ID]map[string]struct{}),
@@ -900,8 +918,6 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		controlDrainTimeout: defaultControlDrainTimeout,
 		gitBindings:         make(map[string]*gitBinding),
 		gitBySession:        make(map[session.ID]map[string]struct{}),
-		resolver:            &resolverHolder{},
-		satNotify:           newSaturatedNotifyLimiter(time.Second),
 	}
 	if caps, err := credential.NewCaptureRegistry(); err != nil {
 		// No entropy for the fingerprint key: no offers are made and

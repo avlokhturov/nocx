@@ -883,3 +883,53 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 		t.Fatalf("answer executions = %+v, want one artifact", ans.Executions)
 	}
 }
+
+// ── the approval moves (nocx-z9hj4 link 3) ────────────────────────────────
+
+// The run state machine knows three non-terminal moves: prepared → streaming
+// (the ask starts), streaming → awaiting_approval (the policy or the egress
+// gate suspended the run BEFORE the provider was reached), and
+// awaiting_approval → streaming (the person answered and the run streams
+// again). The state a reconnecting renderer reads must be able to say a
+// question is outstanding — a suspended run must never rest in streaming,
+// indistinguishable from a run mid-answer.
+func TestTransitionRun_ApprovalMoves(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	res := askOne(t, led, "session-a")
+
+	if err := led.TransitionRun(ctx, res.RunID, content.RunStreaming); err != nil {
+		t.Fatalf("prepared → streaming refused: %v", err)
+	}
+	if err := led.TransitionRun(ctx, res.RunID, content.RunAwaitingApproval); err != nil {
+		t.Fatalf("streaming → awaiting_approval refused: %v", err)
+	}
+	st, err := led.RunState(ctx, res.RunID)
+	if err != nil || st == nil || *st != content.RunAwaitingApproval {
+		t.Fatalf("RunState = %v (err %v), want awaiting_approval", st, err)
+	}
+	// The resume: the person answered, the run streams again.
+	if err := led.TransitionRun(ctx, res.RunID, content.RunStreaming); err != nil {
+		t.Fatalf("awaiting_approval → streaming refused: %v", err)
+	}
+	// Terminal moves still belong to FinishAgentRun — a transition to a
+	// terminal state via TransitionRun stays refused from any state.
+	if err := led.TransitionRun(ctx, res.RunID, content.RunCompleted); err == nil {
+		t.Fatal("awaiting_approval → completed via TransitionRun accepted — terminal moves belong to FinishAgentRun")
+	}
+	if err := led.FinishAgentRun(ctx, res.RunID, content.FinishAgentRun{
+		State: content.RunCompleted, TerminationReason: content.TermCompleted, EndedAt: 1,
+	}); err != nil {
+		t.Fatalf("FinishAgentRun from awaiting_approval: %v", err)
+	}
+}
+
+// prepared → awaiting_approval is NOT a move: a run that never streamed has
+// nothing to suspend — the machine only suspends a streaming run.
+func TestTransitionRun_SkipToApprovalRefused(t *testing.T) {
+	_, led := newLedger(t)
+	res := askOne(t, led, "session-a")
+	if err := led.TransitionRun(context.Background(), res.RunID, content.RunAwaitingApproval); err == nil {
+		t.Fatal("prepared → awaiting_approval accepted — the machine only suspends a streaming run")
+	}
+}

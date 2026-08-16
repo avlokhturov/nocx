@@ -316,10 +316,11 @@ func TestAsk_RefusalOnSecondCallPreventsThird(t *testing.T) {
 
 // TestAsk_EscalationOnSecondCallPreventsThird is acceptance criterion 2's
 // escalation half: three calls in one model response under ask-every-time —
-// the second escalates, so the third must not run, and the batch must
-// SUSPEND cleanly (the latched third call returns an interrupt, not a plain
+// the first escalates, so the second and third must not run, and the batch
+// must SUSPEND cleanly (the latched calls return an interrupt, not a plain
 // error, or the run would fail instead of awaiting approval). Asserted by
-// what the ledger records: exactly one execution (the first call's).
+// what the ledger records: exactly one execution — the first call's recorded
+// proposal attempt, closed interrupted, never run.
 func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
 	grant, dir := testDirGrant(t, content.GrantAskEveryTime)
 	writeFile(t, filepath.Join(dir, "a.txt"), "first")
@@ -338,12 +339,12 @@ func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(string) error { return nil })
-	var want *errApprovalRequested
+	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
 	}
-	if s := ledger.started(); s != 0 {
-		t.Fatalf("ledger opened %d executions, want 0 — the escalating second call must stop the third before anything runs", s)
+	if s := ledger.started(); s != 1 {
+		t.Fatalf("ledger opened %d executions, want exactly 1 — the first call's recorded proposal; the latched calls must not run", s)
 	}
 }
 
@@ -393,14 +394,15 @@ func TestAsk_FailedAttemptWritePreventsExecution(t *testing.T) {
 // TestAsk_EscalationSuspendsBeforeDomain is acceptance criterion 5's first
 // half: under ask-every-time the run SUSPENDS before the domain is touched —
 // Ask returns the approval request (not a failure, and not a tool result),
-// no second model request is made, and no attempt was opened (the call that
-// is asking has not run).
+// and no second model request is made. The escalation IS recorded (nocx-5dldy
+// — the proposal is a ledger fact): exactly one attempt, closed interrupted,
+// the call that is asking has NOT run.
 func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
 	grant, dir := testDirGrant(t, content.GrantAskEveryTime)
 	writeFile(t, filepath.Join(dir, "a.txt"), "must not be read yet")
 
 	ledger := &fakeLedger{}
-	approvals := newApprovalStore()
+	approvals := NewApprovalStore()
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
@@ -409,18 +411,23 @@ func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(string) error { return nil })
-	var want *errApprovalRequested
+	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
 	}
-	if want.request == nil || want.request.Tool != "files.read" || !strings.Contains(want.request.Arguments, "a.txt") {
-		t.Fatalf("approval request = %+v, want files.read on a.txt", want.request)
+	if want.Request == nil || want.Request.Tool != "files.read" || !strings.Contains(want.Request.Arguments, "a.txt") {
+		t.Fatalf("approval request = %+v, want files.read on a.txt", want.Request)
 	}
 	if n := f.requests.Load(); n != 1 {
 		t.Fatalf("the engine made %d model requests after the suspension, want exactly 1", n)
 	}
-	if s := ledger.started(); s != 0 {
-		t.Fatalf("ledger opened %d executions, want 0 — the call that is asking has not run", s)
+	if s := ledger.started(); s != 1 {
+		t.Fatalf("ledger opened %d executions, want exactly 1 — the recorded proposal attempt; the call that is asking has not run", s)
+	}
+	for _, c := range ledger.calls() {
+		if strings.HasPrefix(c, "finish:") && !strings.Contains(c, "interrupted") {
+			t.Fatalf("ledger log = %v — the escalation's attempt must close interrupted, never completed: the tool did not run", ledger.calls())
+		}
 	}
 }
 
@@ -435,21 +442,24 @@ func TestMiddleware_ApprovalBindsToExactArguments(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "b.txt"), "changed read")
 
 	ledger := &fakeLedger{}
-	approvals := newApprovalStore()
+	approvals := NewApprovalStore()
 	mw := middlewareFor(t, grant, ledger, approvals)
 
 	argsA := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
 	argsB := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "b.txt"))
 
-	// First call: escalates before the domain is touched.
+	// First call: escalates before the domain is touched, and the
+	// escalation is RECORDED — one proposal attempt, closed interrupted.
 	if _, err := wrappedEndpoint(mw, "files.read", "call_1", argsA); err == nil {
 		t.Fatal("the ask-every-time call was not escalated")
 	}
-	if s := ledger.started(); s != 0 {
-		t.Fatalf("ledger opened %d executions after the escalation, want 0", s)
+	if s := ledger.started(); s != 1 {
+		t.Fatalf("ledger opened %d executions after the escalation, want 1 — the recorded proposal attempt", s)
 	}
 
-	// Approve the exact proposal, then the same call runs.
+	// Approve the exact proposal, then the same call runs — as a
+	// SUBSEQUENT attempt of the proposal's own entry (ADR-0020 decision 4):
+	// the escalation's record plus the approved call's execution.
 	approvals.Approve(Approval{
 		RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1",
 		ArgHash: canonicalArgHash(argsA),
@@ -461,17 +471,17 @@ func TestMiddleware_ApprovalBindsToExactArguments(t *testing.T) {
 	if !strings.Contains(out, "approved read") {
 		t.Fatalf("approved call output = %s, want the file's contents", out)
 	}
-	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions, want exactly 1", s)
+	if s := ledger.started(); s != 2 {
+		t.Fatalf("ledger opened %d executions, want 2 — the proposal record plus the approved call's own execution", s)
 	}
 
 	// A CHANGED argument does not resume under the old approval: it
-	// escalates again, and the tool does not run.
+	// escalates again (recording a NEW proposal), and the tool does not run.
 	if _, err := wrappedEndpoint(mw, "files.read", "call_1", argsB); err == nil {
 		t.Fatal("the changed-argument call ran under the old approval")
 	}
-	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions after the changed call, want still 1 — a changed argument must not resume under the old approval", s)
+	if s := ledger.started(); s != 3 {
+		t.Fatalf("ledger opened %d executions, want 3 — the changed call recorded a NEW proposal and nothing ran under the old approval", s)
 	}
 }
 

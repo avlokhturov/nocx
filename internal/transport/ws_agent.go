@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -192,6 +193,47 @@ type agentRunState struct {
 	Error string `json:"error,omitempty"`
 }
 
+// agentApprovalRequested is the agent.approvalRequested notification (design
+// §7.2, §7.3): a question reached a person. One kind of question whether the
+// risk was an effect coming in (a policy escalation) or a secret going out
+// (an egress finding) — the surface meets the same shape either way. It
+// carries the full binding (run, attempt, tool, callId, argHash — what the
+// answer names), the arguments the person is deciding about, the reason the
+// gate asked, and the egress findings when the gate that asked was the
+// egress gate. Findings are facts, never the material.
+type agentApprovalRequested struct {
+	RunID     string                    `json:"runId"`
+	Attempt   int                       `json:"attempt"`
+	Tool      string                    `json:"tool"`
+	CallID    string                    `json:"callId"`
+	ArgHash   string                    `json:"argHash"`
+	Arguments string                    `json:"arguments"`
+	Reason    string                    `json:"reason"` // "policy" | "egress"
+	WasError  bool                      `json:"wasError,omitempty"`
+	Findings  []assistant.EgressFinding `json:"findings,omitempty"`
+}
+
+// approveParams is the agent.approve request (design §7.2): the full binding
+// — run, attempt, tool, call id and the canonical-argument hash — plus the
+// person's decision. The schema (contracts/agent.approve.schema.json) pins
+// it: additionalProperties false, every field required.
+type approveParams struct {
+	RunID    string `json:"runId"`
+	Attempt  int    `json:"attempt"`
+	Tool     string `json:"tool"`
+	CallID   string `json:"callId"`
+	ArgHash  string `json:"argHash"`
+	Approved bool   `json:"approved"`
+}
+
+// agentApproveResponse is the agent.approve result: the state the run moved
+// to — streaming (the approved resume is in flight) or declined (the
+// terminal close was persisted). The outcome the renderer draws comes from
+// the agent.runState notification either way.
+type agentApproveResponse struct {
+	State string `json:"state"`
+}
+
 // ── handlers ──────────────────────────────────────────────────────────────
 
 // agentHandlers answers agent.captureFrame and agent.ask. It holds the
@@ -234,6 +276,17 @@ type agentHandlers struct {
 	// leaving. The composition root wires the vault adapter; a grant run
 	// without it fails closed at the middleware's construction.
 	knownMaterial assistant.KnownMaterial
+	// approvals is the server's process-lifetime approval store (design
+	// §7.2): passed on every Ask so the run that escalated and the run
+	// that resumes consult the same decisions, and the source of truth
+	// agent.approve's stale-id answer is checked against.
+	approvals *assistant.ApprovalStore
+	// pendingRuns maps a suspended run's id to the stream context the
+	// resume re-drives (question, references, resolved endpoint material).
+	// Server-scoped — the person answers on the same connection that
+	// rendered the question, and the answer must resume the EXACT run.
+	pendingRuns   map[int64]askRunContext
+	pendingRunsMu *sync.Mutex
 	state         *connState
 	clientID      string
 	r             Responder
@@ -442,10 +495,26 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		endpoint:      endpoint,
 		model:         facts.Model,
 		grant:         runGrant,
+		// attempt is the run's attempt — the ledger inserted the run row at
+		// attempt 1 (SubmitAgentAsk), and it is the value the approval
+		// binding names. The resume passes the SAME attempt, so the
+		// middleware's re-built proposal matches the one the person
+		// approved; the approved call's own execution is the entry's
+		// SUBSEQUENT attempt (attempt 2), recorded by the middleware.
+		attempt: 1,
 	}
+	h.pendingRunsMu.Lock()
+	h.pendingRuns[rc.runID] = rc
+	h.pendingRunsMu.Unlock()
 	if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 		h.runAskStream(taskCtx, rc, h.r)
 	}}); rej != nil {
+		// The stream was refused: nothing is in flight. Drop the stored
+		// context so a later agent.approve cannot target a run that never
+		// started — the run terminalizes below and has no question open.
+		h.pendingRunsMu.Lock()
+		delete(h.pendingRuns, rc.runID)
+		h.pendingRunsMu.Unlock()
 		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
 	}
@@ -527,6 +596,13 @@ type askRunContext struct {
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
 	grant *content.Grant
+	// attempt is the run's attempt — the ledger inserted the run row at
+	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
+	// names. The resume passes the SAME attempt so the middleware's
+	// re-built proposal matches the one the person approved; the approved
+	// call's own execution is the proposal entry's SUBSEQUENT attempt
+	// (attempt 2), which the middleware records.
+	attempt int
 }
 
 // runAskStream drives the prepared run to completion: persist streaming,
@@ -602,6 +678,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		AttemptLedger: h.attemptLedger,
 		Requester:     h.requester,
 		KnownMaterial: h.knownMaterial,
+		Approvals:     h.approvals,
+		RunID:         strconv.FormatInt(rc.runID, 10),
+		Attempt:       rc.attempt,
 	}, func(text string) error {
 		if persistErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 			return svc.AppendRunDelta(ctx, rc.artifactID, []byte(text))
@@ -618,11 +697,186 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		return nil
 	})
 	if err != nil {
+		// A suspension is NOT a failure (criterion 1): the policy or the
+		// egress gate asked a person a question, the run moves to
+		// awaiting_approval, and the question reaches the renderer. The
+		// classifyAskFailure path that would report it as a model failure
+		// is asserted against here — it must never see a suspension.
+		var apErr *assistant.ApprovalRequestedError
+		var egErr *assistant.EgressRequestedError
+		if errors.As(err, &apErr) && apErr.Request != nil {
+			h.suspendForApproval(ctx, rc, r, apErr.Request, nil)
+			return
+		}
+		if errors.As(err, &egErr) && egErr.Request != nil {
+			h.suspendForApproval(ctx, rc, r, nil, egErr.Request)
+			return
+		}
 		reason, sentence := classifyAskFailure(err)
 		h.terminalize(ctx, rc, content.RunFailed, reason, sentence, r)
 		return
 	}
 	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
+}
+
+// suspendForApproval moves the run to awaiting_approval and sends the
+// question. The DURABLE state is the honest part (criterion 4): a
+// reconnecting renderer reads awaiting_approval — distinguishable from a run
+// mid-answer — even though the notification itself was one-shot. The run is
+// NOT terminalized: the person's answer resumes it (agent.approve) or
+// terminalizes it (decline).
+func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
+	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
+	}); err != nil {
+		// The transition was refused: the run is already terminal (closed
+		// by another path). The question is moot; nothing to render.
+		return
+	}
+	n := agentApprovalRequested{Reason: "policy"}
+	if ap != nil {
+		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
+	} else {
+		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
+		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
+	}
+	// The pending record is the wire's source of truth for criterion 7. The
+	// middleware records it at escalation in the real flow; the transport
+	// records it here when the wire received the question without it (a
+	// suspension that surfaced by any path) — and NEVER overwrites the
+	// middleware's record, which carries the proposal's ledger entry id the
+	// approved resume must run as a subsequent attempt of.
+	proposal := assistant.Approval{RunID: n.RunID, Attempt: n.Attempt, Tool: n.Tool, CallID: n.CallID, ArgHash: n.ArgHash}
+	if !h.approvals.IsPending(proposal) {
+		if ap != nil {
+			proposal.EntryID = ap.EntryID
+		}
+		h.approvals.Request(proposal)
+	}
+	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
+}
+
+// handleApprove answers agent.approve — the person's decision on one exact
+// proposal (design §7.2, acceptance criteria 2, 7, 8). Yes resumes the run
+// as a NEW attempt of the same entry (the middleware runs the approved call
+// as the proposal's subsequent attempt); no terminalizes the run with
+// agent-declined. A stale or unknown approval id is answered honestly and
+// resumes nothing.
+func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
+		return
+	}
+	if h.approvals == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "approval store not wired"})
+		return
+	}
+	var p approveParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
+		return
+	}
+	ap := assistant.Approval{RunID: p.RunID, Attempt: p.Attempt, Tool: p.Tool, CallID: p.CallID, ArgHash: p.ArgHash}
+	// Criterion 7's source of truth: the store is what was ASKED. An id
+	// that is not pending was never asked, or was already answered — a
+	// second answer to a settled question is not a decision.
+	if !h.approvals.IsPending(ap) {
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: unknown approval — nothing pending for this proposal (it was never asked, or was already answered)",
+		})
+		return
+	}
+	runID, err := strconv.ParseInt(p.RunID, 10, 64)
+	if err != nil || runID <= 0 {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: runId must be the backend-minted run id"})
+		return
+	}
+	h.pendingRunsMu.Lock()
+	rc, ok := h.pendingRuns[runID]
+	h.pendingRunsMu.Unlock()
+	if !ok {
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: no pending question for this run",
+		})
+		return
+	}
+
+	if !p.Approved {
+		// The person declined: the run terminalizes with the reason that
+		// says a person declined (criterion 2, no-half), and the withheld
+		// egress bytes — if any — are dropped: the person said don't send.
+		h.approvals.ClearRetained(ap)
+		h.terminalize(ctx, rc, content.RunFailed, content.TermAgentDeclined,
+			"the run was declined", h.r)
+		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
+		return
+	}
+	if !h.approvals.Approve(ap) {
+		// The pending check passed but the approve lost the race (another
+		// connection answered first). Honest refusal: nothing resumed.
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: unknown approval — it was already answered",
+		})
+		return
+	}
+	// The resume: the same run, the same stream context, the same binding —
+	// the middleware sees the approval and runs the call as the proposal's
+	// SUBSEQUENT attempt. The approval store is passed again, so the yes
+	// crosses the suspension.
+	if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
+		h.resumeRun(taskCtx, rc, h.r)
+	}}); rej != nil {
+		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
+			"too many answers in flight — try again in a moment", h.r)
+		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming)}))
+}
+
+// resumeRun re-drives a suspended run after the person's yes: the run
+// streams again (awaiting_approval → streaming), the Ask re-runs with the
+// approval stored, and the stream runs to its terminal state like any other.
+func (h agentHandlers) resumeRun(ctx context.Context, rc askRunContext, r Responder) {
+	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+		return svc.TransitionRun(ctx, rc.runID, content.RunStreaming)
+	}); err != nil {
+		// The move was refused: the run is already terminal (closed by
+		// another path). Nothing to resume; the approval stands harmless.
+		return
+	}
+	h.runAskStream(ctx, rc, r)
+}
+
+// validateAgentApproveRaw checks agent.approve's params BEFORE the handler
+// runs (registration.go — the ONE place params are checked): the full
+// binding — run, attempt, tool, call id, argument hash — is required and
+// bounded, exactly as the schema declares (additionalProperties false,
+// every field required).
+func validateAgentApproveRaw(raw json.RawMessage) string {
+	var p approveParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if strings.TrimSpace(p.RunID) == "" || utf8.RuneCountInString(p.RunID) > maxIDRunes {
+		return "runId is required and bounded"
+	}
+	if p.Attempt <= 0 {
+		return "attempt must be positive"
+	}
+	if strings.TrimSpace(p.Tool) == "" || utf8.RuneCountInString(p.Tool) > maxIDRunes {
+		return "tool is required and bounded"
+	}
+	if strings.TrimSpace(p.CallID) == "" || utf8.RuneCountInString(p.CallID) > maxIDRunes {
+		return "callId is required and bounded"
+	}
+	if strings.TrimSpace(p.ArgHash) == "" || utf8.RuneCountInString(p.ArgHash) > 128 {
+		return "argHash is required and bounded"
+	}
+	return ""
 }
 
 // terminalize persists the run's terminal state AND its entries in one
@@ -633,6 +887,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // ctx would fail the very write that closes the run. WithoutCancel keeps
 // the terminal close independent of the connection's fate.
 func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
+	// The run is closing: nothing may resume it. Drop the stored stream
+	// context so a late agent.approve finds no pending question.
+	h.pendingRunsMu.Lock()
+	delete(h.pendingRuns, rc.runID)
+	h.pendingRunsMu.Unlock()
 	tctx := context.WithoutCancel(ctx)
 	err := h.op.Run(tctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.FinishAgentRun(ctx, rc.runID, content.FinishAgentRun{
@@ -961,7 +1220,9 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
-			log: s.log, state: state, clientID: tabID(w), r: r,
+			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
+			pendingRunsMu: &s.pendingRunsMu,
+			log:           s.log, state: state, clientID: tabID(w), r: r,
 		}
 	}
 	return []methodSpec{
@@ -972,6 +1233,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		reg(contentSub, "agent.ask", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }
+		}),
+		reg(contentSub, "agent.approve", params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := build(w, state, r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleApprove(ctx, req) }
 		}),
 	}
 }

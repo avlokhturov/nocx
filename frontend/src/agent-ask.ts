@@ -269,6 +269,18 @@ export class AgentInputTarget implements InputTarget {
         handle.close('success')
       } else if (s.state === 'failed' || s.state === 'interrupted') {
         handle.close('failure', s.error ?? s.state)
+      } else if (s.state === 'awaiting_approval') {
+        // A question is outstanding: the block stays OPEN (nothing is
+        // closed — the person decides in the approval prompt), and the run
+        // stays routable so the RESUME's deltas land on this same block
+        // (nocx-z9hj4). The terminal close arrives when the question is
+        // answered.
+        return
+      } else {
+        // Unknown state: keep the block open and routable rather than
+        // closing or forgetting it — a state this renderer does not know
+        // may still produce deltas.
+        return
       }
       this.runs.delete(s.runId)
     })

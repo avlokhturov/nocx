@@ -262,7 +262,7 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry) Client {
 		log:       logger,
 		http:      newGuardedHTTPClient(logger),
 		tools:     reg,
-		approvals: newApprovalStore(),
+		approvals: NewApprovalStore(),
 	}
 }
 
