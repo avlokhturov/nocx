@@ -512,6 +512,14 @@ async function main() {
     },
     clipboard: { writeText: (text) => clipboard.writeText(text) },
   })
+  // Where the keyboard goes after a snippet lands: back to the pane it was
+  // fired into. TerminalContent decides which half owns it — the command
+  // editor when it is visible, the grid otherwise — so this asks the pane
+  // rather than choosing (AD-8).
+  function returnKeyboardToThePane(): void {
+    tm.activeTerminalContent()?.focus()
+  }
+
   // Snippets ride the quick-connect palette — the surface the server list,
   // the command palette and the secret picker already are. The provider is
   // registered with the others below; this reference is what the chord, the
@@ -529,11 +537,13 @@ async function main() {
     // for all of them at once (owner review — a step that filters a list
     // cannot also be where a value is typed).
     onAsk: (snippet) => snippetAsk.ask(snippet),
+    onDelivered: returnKeyboardToThePane,
   })
   // The form the fields are answered in. It reports its own refusals, so a
   // person who mistyped an answer sees why beside what they typed.
   const snippetAsk = mountSnippetAskDialog(document.body, {
     fire: (snippet, answers) => snippetsProvider.fireReporting(snippet, answers),
+    onDelivered: returnKeyboardToThePane,
   })
   /**
    * Open (or focus) the Settings tab and hand back the instance that is

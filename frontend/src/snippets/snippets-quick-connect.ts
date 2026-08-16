@@ -48,6 +48,12 @@ export interface SnippetsQuickConnectDeps {
   onManage: () => void
   /** This body asks for values: the palette closes and the form opens. */
   onAsk: (snippet: Snippet) => void
+  /** A fire landed. The keyboard goes back to the pane: the person fired
+   *  INTO something, and their next keystroke belongs to it (design §9.5).
+   *  Without this the palette's dialog leaves focus on the document and the
+   *  Enter that submits what was just inserted reaches nobody — which is
+   *  what the e2e gate caught. */
+  onDelivered: () => void
 }
 
 /** The sentence a refusal renders as — this module owns the words, the fire
@@ -107,8 +113,12 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
     const destination: SnippetDestination = 'input'
     const outcome = await this.deps.fire({ snippet, answers, destination })
     const message = snippetRefusalMessage(outcome)
-    if (message !== null) this.deps.onRefused(message)
-    return message
+    if (message !== null) {
+      this.deps.onRefused(message)
+      return message
+    }
+    this.deps.onDelivered()
+    return null
   }
 
   /** The same fire, without the palette notice — for a caller that shows

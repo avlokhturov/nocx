@@ -30,6 +30,11 @@ export interface SnippetAskDialogDeps {
    *  when the fire was refused, or null when it was delivered — the form
    *  stays open on a refusal, beside the answers that caused it. */
   fire: (snippet: Snippet, answers: ReadonlyMap<string, string>) => Promise<string | null>
+  /** Called AFTER the form closes on a delivered fire, so the keyboard goes
+   *  back to the pane rather than to whatever the dialog left it on. The
+   *  order matters: focusing before the close lets the closing dialog take
+   *  it straight back. */
+  onDelivered: () => void
 }
 
 export interface SnippetAskDialogHandle {
@@ -70,6 +75,7 @@ export function mountSnippetAskDialog(
         return
       }
       close()
+      deps.onDelivered()
     } finally {
       setFiring(false)
     }

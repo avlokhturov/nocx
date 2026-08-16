@@ -21,14 +21,33 @@ import { test, expect, promptReady, type Page } from './harness'
  */
 
 const INPUT = '.pane.active .nocx-editor-input'
-const PANEL = '.ui-floating-panel[data-variant="snippet"]'
-const ROW = `${PANEL} .ui-floating-panel__row`
+// The snippets list is a VARIANT of the quick-connect palette — the same
+// surface the server list, the command palette and the secret picker are
+// (owner review: a second surface for one job is the shape this repo has
+// deleted before).
+// A kit Dialog KEEPS its node when it closes, so every locator here is
+// scoped to `dialog[open]`: without it "closed" is indistinguishable from
+// "open", and the settings page's own snippet editor — closed, still in the
+// DOM — answers to the same class as the ask form.
+const PANEL = '.nocx-dialog[open] .quick-connect[data-variant="snippets"]'
+const ROW = `${PANEL} .quick-connect__item`
+/** A refused fire re-opens the palette with the reason above the list. */
+const NOTICE = `${PANEL} .quick-connect__notice`
+/** The form that asks for a snippet's {{ask:…}} fields — all of them at
+ *  once, with the palette closed behind it. */
+const ASK_FORM = '.nocx-dialog[open]'
 
-/** The panel closes by emptying itself and flipping data-open — its root
- *  element stays mounted beside the pane (ui/floating-panel.ts), so
- *  "closed" is that attribute and never a disappearing node. */
 async function expectPaletteClosed(page: Page): Promise<void> {
-  await expect(page.locator(PANEL)).toHaveAttribute('data-open', 'false', { timeout: 10_000 })
+  await expect(page.locator(PANEL)).toHaveCount(0, { timeout: 10_000 })
+}
+
+/** Open the palette and pick one snippet by name. */
+async function pickSnippet(page: Page, title: string): Promise<void> {
+  await pressChord(page)
+  await expect(page.locator(PANEL)).toBeVisible({ timeout: 10_000 })
+  await page.locator(`${PANEL} .quick-connect__search input`).fill(title)
+  await expect(page.locator(ROW, { hasText: title })).toHaveCount(1)
+  await page.keyboard.press('Enter')
 }
 
 /** The chord is matched on the physical key (snippets/chord.ts), which is
@@ -120,17 +139,16 @@ test.describe('a saved snippet reaches a running program', () => {
 
     // The chord reaches the palette even though no command editor exists —
     // the case the whole surface was built for.
-    await pressChord(page)
-    await expect(page.locator(PANEL)).toBeVisible({ timeout: 10_000 })
-    await page.locator(`${PANEL} .ui-floating-panel__filter input`).fill('e2e fill')
-    await expect(page.locator(ROW)).toHaveCount(1)
-    await page.keyboard.press('Enter')
+    await pickSnippet(page, 'e2e fill')
 
-    // The ask span turns the panel into the field form IN PLACE.
-    const field = page.locator(`${PANEL} .ui-floating-panel__field input`)
-    await expect(field).toBeVisible()
-    await field.fill('alpha')
-    await page.keyboard.press('Enter')
+    // A body with {{ask:…}} closes the palette and asks for every field at
+    // once, in a form (owner review: a field that filters a list cannot
+    // also be where a value is typed).
+    const form = page.locator(ASK_FORM).filter({ hasText: 'e2e fill' })
+    await expect(form).toBeVisible({ timeout: 10_000 })
+    await form.locator('#snippet-ask-tag').fill('alpha')
+    await form.getByRole('button', { name: 'Insert', exact: true }).click()
+    await expect(form).toHaveCount(0, { timeout: 10_000 })
 
     // Half one: nothing was submitted. The palette closed on delivery, no
     // new completed block appeared, and the editor is still hidden — the
@@ -160,15 +178,12 @@ test.describe('a saved snippet reaches a running program', () => {
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')
 
-    await pressChord(page)
-    await expect(page.locator(PANEL)).toBeVisible({ timeout: 10_000 })
-    await page.locator(`${PANEL} .ui-floating-panel__filter input`).fill('e2e two lines')
-    await expect(page.locator(ROW)).toHaveCount(1)
-    await page.keyboard.press('Enter')
+    await pickSnippet(page, 'e2e two lines')
 
-    // The refusal renders IN the panel and stays: a newline would be read
-    // as Return and run half the phrase, so nothing is sent at all.
-    await expect(page.locator(PANEL)).toContainText('bracketed paste', { timeout: 10_000 })
+    // The refusal re-opens the palette with the reason above the list and
+    // stays there: a newline would be read as Return and run half the
+    // phrase, so nothing is sent at all.
+    await expect(page.locator(NOTICE)).toContainText('bracketed paste', { timeout: 10_000 })
     await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
 
     await page.keyboard.press('Escape')
@@ -203,13 +218,9 @@ test.describe('a saved snippet reaches a running program', () => {
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')
 
-    await pressChord(page)
-    await expect(page.locator(PANEL)).toBeVisible({ timeout: 10_000 })
-    await page.locator(`${PANEL} .ui-floating-panel__filter input`).fill('e2e fill')
-    await expect(page.locator(ROW)).toHaveCount(1)
-    await page.keyboard.press('Enter')
+    await pickSnippet(page, 'e2e fill')
 
-    await expect(page.locator(PANEL)).toContainText('could not be resolved', { timeout: 10_000 })
+    await expect(page.locator(NOTICE)).toContainText('could not be resolved', { timeout: 10_000 })
     await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
 
     await page.keyboard.press('Escape')
