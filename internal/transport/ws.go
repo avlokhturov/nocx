@@ -233,6 +233,14 @@ type WSServer struct {
 	// probes still run and return their outcome, but agent.status reports
 	// lastProbe null.
 	assistantProbes *assistant.ProbeStore
+	// agentKnownMaterial is the egress gate's vault comparison
+	// (assistant.KnownMaterial, design §7.1): the seam that answers "does
+	// this tool result contain a value the vault holds" — in the backend,
+	// nothing leaving (ADR-0011 §2). When nil, a grant-carrying ask that
+	// may execute tools fails at the middleware's construction, closed:
+	// the gate must see short vault values or a result would leave
+	// unscreened (assistant.newPolicyMiddleware).
+	agentKnownMaterial assistant.KnownMaterial
 	// agentProbeSub admits and runs endpoints.probe probes off the read
 	// loop: a streaming probe can take tens of seconds and must never
 	// freeze the socket that feeds every other tab. Capacity one composed
@@ -656,6 +664,14 @@ func WithProbeResultStore(s *ProbeResultStore) WSServerOption {
 // available".
 func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
+}
+
+// WithAgentKnownMaterial attaches the egress gate's vault comparison — the
+// composition root wires the vault adapter here (NewVaultKnownMaterial).
+// When nil, a run that may execute tools fails closed at the middleware's
+// construction; the rule is not weakened by leaving it unwired.
+func WithAgentKnownMaterial(km assistant.KnownMaterial) WSServerOption {
+	return func(ws *WSServer) { ws.agentKnownMaterial = km }
 }
 
 // WithAssistantProbeStore attaches the process-lifetime store of the last

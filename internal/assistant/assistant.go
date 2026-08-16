@@ -125,6 +125,14 @@ type AskParams struct {
 	// id and a hash of the canonical arguments. Nil disables escalation's
 	// persistence — an ask still suspends, but nothing records the answer.
 	Approvals *ApprovalStore
+	// KnownMaterial is the egress vault comparison (design §7.1): "the
+	// vault knows the real values, and a comparison beats any pattern." It
+	// is legitimate here precisely because it happens in the backend and
+	// nothing leaves — ADR-0011 §2 survives intact. The transport adapts
+	// the vault to this seam when it mints grants. A grant-carrying ask
+	// whose tools may execute FAILS without it: the gate must see short
+	// vault values, or a result would leave for the provider unscreened.
+	KnownMaterial KnownMaterial
 	// RunID and Attempt are the run's identity — what approvals bind to.
 	// The transport passes the run's execution row id; empty with attempt 0
 	// is the un-bound shape every caller has today.

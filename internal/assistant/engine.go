@@ -145,6 +145,13 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 			if req := approvalRequestFrom(ev.Action.Interrupted); req != nil {
 				return &errApprovalRequested{request: req}
 			}
+			// The egress gate's ask (design §7.1): a tool result contained
+			// secret-shaped material and the run suspended before the bytes
+			// left for the provider. Same shape as the inbound ask — NOT a
+			// failure, the state the approval surface renders.
+			if req := egressRequestFrom(ev.Action.Interrupted); req != nil {
+				return &EgressRequestedError{Request: req}
+			}
 			return &errApprovalRequested{}
 		}
 		if ev.Output == nil || ev.Output.MessageOutput == nil {
@@ -219,7 +226,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 			if approvals == nil {
 				approvals = c.approvals
 			}
-			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.RunID, p.Attempt, p.Requester)
+			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.Requester)
 			if err != nil {
 				return err
 			}

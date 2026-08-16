@@ -99,6 +99,19 @@ func (f *fakeLedger) started() int {
 	return n
 }
 
+// fakeKnownMaterial is the egress vault-comparison seam with a scripted
+// answer: the gate's tests need "this text contains vault material" (and,
+// by default, the honest "nothing known") without standing up a vault. The
+// spans it returns are into the text the gate screens — the seam's contract
+// — and the values never cross the seam, here or in production.
+type fakeKnownMaterial struct {
+	matches []KnownMatch
+}
+
+func (f *fakeKnownMaterial) FindKnown(context.Context, string) ([]KnownMatch, error) {
+	return f.matches, nil
+}
+
 // toolCallSpec is one tool call in a model response.
 type toolCallSpec struct {
 	name string
@@ -175,6 +188,7 @@ func askParams(baseURL string, grant *content.Grant, ledger AttemptLedger, appro
 	p.Grant = grant
 	p.AttemptLedger = ledger
 	p.Approvals = approvals
+	p.KnownMaterial = &fakeKnownMaterial{}
 	p.RunID = "run-1"
 	p.Attempt = 1
 	return p
@@ -187,20 +201,29 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
-// middlewareFor builds the pipeline for one test grant + registry.
+// middlewareFor builds the pipeline for one test grant + registry. The
+// egress vault-comparison seam is a no-match fake by default — tests that
+// need a known-material finding pass their own through
+// middlewareForWithKnown.
 func middlewareFor(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore) *policyMiddleware {
-	return middlewareForWithRequester(t, grant, ledger, approvals, nil)
+	return middlewareForWithKnown(t, grant, ledger, approvals, nil, &fakeKnownMaterial{})
 }
 
 // middlewareForWithRequester builds the pipeline for one test grant +
 // registry with an explicit renderer-request seam (the readScreen tests).
 func middlewareForWithRequester(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester) *policyMiddleware {
+	return middlewareForWithKnown(t, grant, ledger, approvals, requester, &fakeKnownMaterial{})
+}
+
+// middlewareForWithKnown is the construction seam the egress tests use: the
+// pipeline with an explicit vault-comparison answer.
+func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial) *policyMiddleware {
 	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, "run-1", 1, requester)
+	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, known, "run-1", 1, requester)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

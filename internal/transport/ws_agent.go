@@ -228,9 +228,15 @@ type agentHandlers struct {
 	// through (assistant.RendererRequester); nil when the broker is not
 	// wired, which disables InRenderer tools.
 	requester assistant.RendererRequester
-	state     *connState
-	clientID  string
-	r         Responder
+	// knownMaterial is the egress gate's vault comparison (design §7.1,
+	// assistant.KnownMaterial) — the seam that answers "does this tool
+	// result contain a value the vault holds", in the backend, nothing
+	// leaving. The composition root wires the vault adapter; a grant run
+	// without it fails closed at the middleware's construction.
+	knownMaterial assistant.KnownMaterial
+	state         *connState
+	clientID      string
+	r             Responder
 }
 
 // environmentForSession derives the ledger environment from the session's
@@ -595,6 +601,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Grant:         rc.grant,
 		AttemptLedger: h.attemptLedger,
 		Requester:     h.requester,
+		KnownMaterial: h.knownMaterial,
 	}, func(text string) error {
 		if persistErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 			return svc.AppendRunDelta(ctx, rc.artifactID, []byte(text))
@@ -953,7 +960,8 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
-			requester: s, log: s.log, state: state, clientID: tabID(w), r: r,
+			requester: s, knownMaterial: s.agentKnownMaterial,
+			log: s.log, state: state, clientID: tabID(w), r: r,
 		}
 	}
 	return []methodSpec{
