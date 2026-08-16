@@ -226,7 +226,16 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 			if approvals == nil {
 				approvals = c.approvals
 			}
-			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.Requester)
+			// The classifier (bead nocx-kpy23): the middleware consults a
+			// SECOND model for every permitted proposal. The engine builds
+			// the classifier over ITS guarded client and the caller's role
+			// resolver — the model call is the engine's (design §6: usage
+			// has an owner); nil without a resolver is the feature off.
+			var classifier CallClassifier
+			if p.Classifier != nil {
+				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
+			}
+			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.Requester, classifier)
 			if err != nil {
 				return err
 			}

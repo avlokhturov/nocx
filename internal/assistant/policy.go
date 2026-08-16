@@ -141,6 +141,11 @@ type policyMiddleware struct {
 	runID     string
 	attempt   int
 	requester RendererRequester
+	// classifier is the second model that judges permitted proposals (bead
+	// nocx-kpy23). Nil = not wired for this run: permitted calls run
+	// exactly as they do without one. Consulted ONLY where the policy says
+	// permit; every failure and every suspect verdict escalates.
+	classifier CallClassifier
 
 	validators map[string]*jsonschema.Schema
 }
@@ -157,7 +162,11 @@ type policyMiddleware struct {
 // vault values and a result would leave for the provider unscreened. The
 // fail-closed check is here, at construction, so a wiring gap fails the run
 // before any tool runs — never as a silent weaker gate.
-func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, requester RendererRequester) (*policyMiddleware, error) {
+//
+// classifier is the second model that judges permitted proposals (bead
+// nocx-kpy23); nil means not wired for this run — permitted calls run
+// exactly as they do without one.
+func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, requester RendererRequester, classifier CallClassifier) (*policyMiddleware, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
@@ -170,6 +179,7 @@ func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledg
 		runID:      runID,
 		attempt:    attempt,
 		requester:  requester,
+		classifier: classifier,
 		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
 	}
 	for _, t := range registry.All() {
@@ -259,11 +269,40 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			return "", m.escalate(ctx, decl, tCtx.CallID, rawArgs)
 		}
 
+		// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
+		// judges the proposed call and may only RAISE suspicion — permit →
+		// ask — never lower it. Consulted ONLY where the policy says permit
+		// (an ask or refuse cannot be changed by its verdict, and its
+		// latency must stay off a path where a person is already waiting),
+		// and skipped for the exact proposal a person already approved —
+		// the approval covers the proposal INCLUDING its classification,
+		// and consulting the classifier again on the approved resume could
+		// ask forever. Failure is escalation, always: unreachable, timed
+		// out, unparseable and role-unassigned each escalate, and the
+		// classifier is never silently skipped.
+		var classifierFact *classifierFact
+		if m.classifier != nil && !m.proposalApproved(decl.Name, tCtx.CallID, rawArgs) {
+			ask, fact, classifyErr := m.classifyProposal(ctx, decl, tCtx.CallID, rawArgs)
+			if classifyErr != nil {
+				// The classifier's INPUT gate could not see (the recognizer
+				// failed closed): nothing decides this call unseen and
+				// nothing leaves for the classifier — the run fails with a
+				// terminal error, exactly as the result gate fails the run
+				// when IT cannot see (step 7's screenErr path).
+				return "", fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, err)
+			}
+			if ask != nil {
+				tripLatch(ctx, &ApprovalRequestedError{Request: ask})
+				return "", m.escalateClassifier(ctx, decl, tCtx.CallID, rawArgs, ask, fact)
+			}
+			classifierFact = fact
+		}
+
 		// 4. The attempt is written BEFORE the call. If that write fails, no
 		// capability is constructed, next is not called, and the run fails
 		// with a terminal infrastructure error — an interrupted run can
 		// never be told "this may already have happened" when it cannot.
-		execID, entryID, err := m.openAttempt(ctx, decl, tCtx.CallID, rawArgs)
+		execID, entryID, err := m.openAttempt(ctx, decl, tCtx.CallID, rawArgs, classifierFact)
 		if err != nil {
 			return "", fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
 		}
@@ -506,7 +545,7 @@ func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, c
 	ap := m.proposal(decl.Name, callID, rawArgs)
 	var entryID string
 	if m.ledger != nil {
-		id, err := m.recordProposal(ctx, decl, rawArgs, ap)
+		id, err := m.recordProposal(ctx, decl, rawArgs, ap, nil)
 		if err != nil {
 			// The proposal could not be recorded: the run fails rather than
 			// asking a question whose answer would resume nothing — a
@@ -523,6 +562,33 @@ func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, c
 		m.approvals.Request(ap)
 	}
 	return compose.StatefulInterrupt(ctx, req, req)
+}
+
+// escalateClassifier is escalate with the classifier's ledger fact: the
+// ask the classifier caused — suspect, failed, or its input withheld by
+// the egress gate — suspends the run BEFORE next, is RECORDED with the
+// classifier block on the proposal (criterion 6: "why was this asked" is
+// answerable from the ledger), and resumes through the SAME approval
+// machinery as a policy ask: the person's yes covers the proposal
+// INCLUDING its classification, and the resume skips a second
+// consultation (the loop property).
+func (m *policyMiddleware) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact) error {
+	ap := m.proposal(decl.Name, callID, rawArgs)
+	var entryID string
+	if m.ledger != nil {
+		id, err := m.recordProposal(ctx, decl, rawArgs, ap, fact)
+		if err != nil {
+			return err
+		}
+		entryID = id
+	}
+	ask.ArgHash = ap.ArgHash
+	ask.EntryID = entryID
+	if m.approvals != nil {
+		ap.EntryID = entryID
+		m.approvals.Request(ap)
+	}
+	return compose.StatefulInterrupt(ctx, ask, ask)
 }
 
 func (m *policyMiddleware) request(toolName, callID, rawArgs string) *ApprovalRequest {
@@ -656,7 +722,7 @@ func approvalRequestFrom(info *adk.InterruptInfo) *ApprovalRequest {
 // call runs as a SUBSEQUENT attempt of this same entry. A failed write
 // fails the run: a question whose answer would resume nothing is the hole
 // the thread criterion exists to close.
-func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, ap Approval) (string, error) {
+func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, ap Approval, fact *classifierFact) (string, error) {
 	envID := content.EnvironmentIDFor(content.EnvLocal, "")
 	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
 		return "", fmt.Errorf("proposal environment: %w", err)
@@ -667,7 +733,7 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 	}); err != nil {
 		return "", fmt.Errorf("proposal observation: %w", err)
 	}
-	payload, err := json.Marshal(map[string]any{
+	payloadBody := map[string]any{
 		"tool":   decl.Name,
 		"effect": decl.Effect,
 		"args":   json.RawMessage(rawArgs),
@@ -678,7 +744,15 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 			"callId":  ap.CallID,
 			"argHash": ap.ArgHash,
 		},
-	})
+	}
+	// The classifier block (bead nocx-kpy23, criterion 6): when this
+	// escalation was caused by the classifier — suspect, failed, or an
+	// input the gate withheld — the reason lives on the PROPOSAL, so "why
+	// was this asked" is answerable from the ledger, not from a log.
+	if fact != nil {
+		payloadBody["classifier"] = fact
+	}
+	payload, err := json.Marshal(payloadBody)
 	if err != nil {
 		return "", fmt.Errorf("proposal payload: %w", err)
 	}
@@ -724,7 +798,7 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 // nocx-5dldy) — the entry the escalation recorded, found through the
 // approval store. The returned entryID is what the egress gate's request
 // carries into the store, so the same rule holds for a finding's approval.
-func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string) (int64, string, error) {
+func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, classifierFact *classifierFact) (int64, string, error) {
 	if m.ledger == nil {
 		return 0, "", errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
 	}
@@ -748,11 +822,20 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		}
 	}
 	if entryID == "" {
-		payload, err := json.Marshal(map[string]any{
+		payloadBody := map[string]any{
 			"tool":   decl.Name,
 			"effect": decl.Effect,
 			"args":   json.RawMessage(rawArgs),
-		})
+		}
+		// The classifier block (bead nocx-kpy23, criterion 6): when the
+		// classifier was consulted and cleared the call, the attempt's own
+		// record carries the verdict and the model, so the audit shows
+		// which model saw the call and said clear. Without a classifier the
+		// payload is exactly what it was before this bead.
+		if classifierFact != nil {
+			payloadBody["classifier"] = classifierFact
+		}
+		payload, err := json.Marshal(payloadBody)
 		if err != nil {
 			return 0, "", fmt.Errorf("payload: %w", err)
 		}

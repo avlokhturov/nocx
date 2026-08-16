@@ -34,11 +34,21 @@ import (
 // the ledger is a party to the contract, and criterion 4 needs exactly the
 // StartExecution write to fail.
 type fakeLedger struct {
-	mu         sync.Mutex
-	log        []string
-	failStart  bool
-	failSubmit bool
-	nextExec   int64
+	mu          sync.Mutex
+	log         []string
+	failStart   bool
+	failSubmit  bool
+	nextExec    int64
+	submissions []fakeSubmission
+}
+
+// fakeSubmission is one Submit the ledger recorded: the intent and the
+// kind payload as submitted. The attempts' payloads carry the classifier
+// block (bead nocx-kpy23 — "why was this asked" is answerable from the
+// ledger), so the classifier tests read them back through this capture.
+type fakeSubmission struct {
+	intent  string
+	payload string
 }
 
 func (f *fakeLedger) EnsureEnvironment(context.Context, content.Environment) error {
@@ -62,6 +72,7 @@ func (f *fakeLedger) Submit(_ context.Context, in content.SubmitEntry) (content.
 	if f.failSubmit {
 		return content.SubmitResult{}, errors.New("fake ledger: submit failed")
 	}
+	f.submissions = append(f.submissions, fakeSubmission{intent: in.Intent, payload: in.Payload})
 	return content.SubmitResult{ID: "entry-" + in.Intent}, nil
 }
 
@@ -221,7 +232,7 @@ func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLed
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, known, "run-1", 1, requester)
+	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, known, "run-1", 1, requester, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

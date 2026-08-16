@@ -133,6 +133,14 @@ type AskParams struct {
 	// whose tools may execute FAILS without it: the gate must see short
 	// vault values, or a result would leave for the provider unscreened.
 	KnownMaterial KnownMaterial
+	// Classifier resolves the classifier role (bead nocx-kpy23): the
+	// second, cheaper model that judges each permitted proposal and may
+	// only escalate. Nil means the classifier is not wired for this run —
+	// permitted calls run exactly as they do without one (criterion 7's
+	// second end). Non-nil means every call the policy permits is
+	// consulted, and every classification failure escalates. The transport
+	// adapts THE ONE role resolver (e6kn2) and the vault to this seam.
+	Classifier ClassifierResolver
 	// RunID and Attempt are the run's identity — what approvals bind to.
 	// The transport passes the run's execution row id; empty with attempt 0
 	// is the un-bound shape every caller has today.
