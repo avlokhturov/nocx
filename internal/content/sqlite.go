@@ -22,6 +22,7 @@ package content
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -286,7 +287,7 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	}
 	s.sweep = func(ctx context.Context, cutoff int64) error {
 		_, err := s.db.ExecContext(ctx,
-			`DELETE FROM command_history WHERE ended_at IS NOT NULL AND ended_at < ?`, cutoff)
+			`DELETE FROM entries WHERE kind IN ('shell','agent') AND ended_at IS NOT NULL AND ended_at < ?`, cutoff)
 		return err
 	}
 	s.writeCh = make(chan writeReq)
@@ -363,7 +364,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 6
+const schemaVersion = 7
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -796,35 +797,133 @@ func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) (int64, erro
 	return id, nil
 }
 
-// insertRecord executes one command-history INSERT through the given
-// executor — the pool (single-row path) or a restore transaction. Shared so
-// the two write paths cannot drift on the row shape.
-func insertRecord(ctx context.Context, ex execer, r CommandRecord) (int64, error) {
+const historyRecordClientLabel = "history.record"
+
+type historyRecordPayload struct {
+	ExitCode    *int        `json:"exitCode,omitempty"`
+	Trusted     bool        `json:"trusted"`
+	MaskedCount int         `json:"maskedCount"`
+	MaskedKinds []string    `json:"maskedKinds"`
+	Redactions  []Redaction `json:"redactions"`
+}
+
+func historyRecordEnvironment(host string) (EnvironmentKind, *string, string) {
+	if host == "" {
+		return EnvLocal, nil, EnvironmentIDFor(EnvLocal, "")
+	}
+	endpoint := host
+	return EnvSSH, &endpoint, EnvironmentIDFor(EnvSSH, host)
+}
+
+func historyRecordDigest(r CommandRecord, client string) string {
 	kinds := r.MaskedKinds
 	if kinds == nil {
 		kinds = []string{}
-	}
-	kindsJSON, err := json.Marshal(kinds)
-	if err != nil {
-		return 0, err
 	}
 	redactions := r.Redactions
 	if redactions == nil {
 		redactions = []Redaction{}
 	}
-	redactionsJSON, err := json.Marshal(redactions)
+	h := sha256.New()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(struct {
+		Client      string
+		Author      string
+		Command     string
+		Cwd         string
+		Host        string
+		Status      CommandStatus
+		ExitCode    *int
+		StartedAt   *int64
+		EndedAt     *int64
+		Trusted     bool
+		MaskedCount int
+		MaskedKinds []string
+		Redactions  []Redaction
+	}{
+		Client: client, Author: r.Author, Command: r.Command, Cwd: r.Cwd, Host: r.Host,
+		Status: r.Status, ExitCode: r.ExitCode, StartedAt: r.StartedAt, EndedAt: r.EndedAt,
+		Trusted: r.Trusted, MaskedCount: r.MaskedCount, MaskedKinds: kinds, Redactions: redactions,
+	})
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func historyRecordDuration(startedAt, endedAt *int64) *int64 {
+	if startedAt == nil || endedAt == nil {
+		return nil
+	}
+	if *endedAt < *startedAt {
+		return nil
+	}
+	dur := *endedAt - *startedAt
+	return &dur
+}
+
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// insertRecord executes one completed-command INSERT through the given
+// executor — the pool (single-row path) or a restore transaction. The
+// durable author lives on entries.kind; the query path reads the entry back
+// from the ledger projection. Shared so the write paths cannot drift on the
+// row shape.
+func insertRecord(ctx context.Context, ex execer, r CommandRecord) (int64, error) {
+	if r.Author == "" {
+		r.Author = string(EntryShell)
+	}
+	if r.Status == "" {
+		r.Status = StatusUnknown
+	}
+	kinds := r.MaskedKinds
+	if kinds == nil {
+		kinds = []string{}
+	}
+	redactions := r.Redactions
+	if redactions == nil {
+		redactions = []Redaction{}
+	}
+	payloadJSON, err := json.Marshal(historyRecordPayload{
+		ExitCode: r.ExitCode, Trusted: r.Trusted, MaskedCount: r.MaskedCount,
+		MaskedKinds: kinds, Redactions: redactions,
+	})
 	if err != nil {
 		return 0, err
 	}
-	// One INSERT, one autocommit transaction: short, atomic, replay-safe.
-	res, err := ex.ExecContext(ctx, `INSERT INTO command_history
-		(command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds, redactions)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted, r.MaskedCount, string(kindsJSON), string(redactionsJSON))
-	if err != nil {
+
+	envKind, endpoint, envID := historyRecordEnvironment(r.Host)
+	submittedAt := time.Now().UnixMilli()
+	if _, err := ex.ExecContext(ctx, `INSERT INTO environments
+		(id, kind, endpoint, profile_id, first_seen, payload)
+		VALUES (?, ?, ?, NULL, ?, '{}')
+		ON CONFLICT(id) DO NOTHING`,
+		envID, string(envKind), endpoint, submittedAt,
+	); err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+
+	var next int64
+	if err := ex.QueryRowContext(ctx,
+		`UPDATE ledger_sequence SET next = next + 1 WHERE id = 1 RETURNING next`,
+	).Scan(&next); err != nil {
+		return 0, fmt.Errorf("content: assign ingest_seq: %w", err)
+	}
+
+	id := mintID()
+	if _, err := ex.ExecContext(ctx, `INSERT INTO entries
+		(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
+		 phase, status, conversation_id, submitted_at, started_at, ended_at, duration_ms,
+		 sensitivity, reviewed_at, payload)
+		VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'closed', ?, NULL, ?, ?, ?, ?, ?, NULL, ?)`,
+		id, next, historyRecordClientLabel, historyRecordDigest(r, historyRecordClientLabel),
+		envID, r.Cwd, r.Author, r.Command, r.Status, submittedAt,
+		r.StartedAt, r.EndedAt, historyRecordDuration(r.StartedAt, r.EndedAt),
+		SensitivityNormal, string(payloadJSON),
+	); err != nil {
+		return 0, err
+	}
+	return next, nil
 }
 
 // doRestore applies one private-content block in a single transaction:
@@ -866,11 +965,6 @@ func (s *sqliteContent) doRestore(ctx context.Context, r restoreRequest) error {
 		}
 	}
 	return nil
-}
-
-// execer is the ExecContext surface shared by *sql.DB and *sql.Tx.
-type execer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // Add serializes the insert through the single writer goroutine and returns
@@ -982,20 +1076,30 @@ func (s *sqliteContent) RewriteRedaction(ctx context.Context, id int64, span Red
 
 func (s *sqliteContent) doRewrite(ctx context.Context, rr rewriteRequest) error {
 	var command string
-	var redactionsJSON string
+	var payloadJSON string
 	err := s.db.QueryRowContext(
 		ctx,
-		"SELECT command, redactions FROM command_history WHERE id = ?", rr.id,
-	).Scan(&command, &redactionsJSON)
+		`SELECT e.intent, e.payload
+		 FROM entries e
+		 WHERE e.ingest_seq = ? AND e.kind IN ('shell','agent')`,
+		rr.id,
+	).Scan(&command, &payloadJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
-	var redactions []Redaction
-	if uerr := json.Unmarshal([]byte(redactionsJSON), &redactions); uerr != nil {
+	var payload historyRecordPayload
+	if payloadJSON == "" {
+		payloadJSON = "{}"
+	}
+	if uerr := json.Unmarshal([]byte(payloadJSON), &payload); uerr != nil {
 		return uerr
+	}
+	redactions := payload.Redactions
+	if redactions == nil {
+		redactions = []Redaction{}
 	}
 	// The span is byte offsets into the stored command. A span that no
 	// longer fits means the row changed shape underneath this caller —
@@ -1020,13 +1124,14 @@ func (s *sqliteContent) doRewrite(ctx context.Context, rr rewriteRequest) error 
 		return nil
 	}
 	newCommand := command[:rr.span.Start] + rr.reference + command[rr.span.End:]
-	keptJSON, err := json.Marshal(kept)
+	payload.Redactions = kept
+	keptJSON, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(
 		ctx,
-		"UPDATE command_history SET command = ?, redactions = ? WHERE id = ?",
+		`UPDATE entries SET intent = ?, payload = ? WHERE ingest_seq = ?`,
 		newCommand, string(keptJSON), rr.id,
 	); err != nil {
 		return err
@@ -1035,29 +1140,53 @@ func (s *sqliteContent) doRewrite(ctx context.Context, rr rewriteRequest) error 
 	return nil
 }
 
-const recordCols = "id, command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds, redactions"
+const recordCols = "e.ingest_seq, e.intent, COALESCE(env.endpoint, ''), e.cwd, e.status, e.started_at, e.ended_at, e.kind, e.payload"
+
+const historyQuerySQL = `SELECT e.ingest_seq, e.intent, COALESCE(env.endpoint, ''), e.cwd, e.status, e.started_at, e.ended_at, e.kind, e.payload
+	FROM entries e
+	LEFT JOIN environments env ON env.id = e.environment_id
+	WHERE e.kind IN ('shell','agent')
+	  AND (? = 1 OR e.environment_id = ?)
+	  AND (? = 1 OR e.cwd = ?)
+	  AND (? = 1 OR e.ingest_seq < ?)
+	  AND (? = 1 OR instr(lower(e.intent), lower(?)) > 0)
+	ORDER BY e.ingest_seq DESC LIMIT ?`
 
 func scanRecord(row interface{ Scan(...any) error }) (CommandRecord, error) {
 	var r CommandRecord
-	var kindsJSON string
-	var redactionsJSON string
-	err := row.Scan(&r.ID, &r.Command, &r.Cwd, &r.Host, &r.Status, &r.ExitCode, &r.StartedAt, &r.EndedAt, &r.Trusted, &r.MaskedCount, &kindsJSON, &redactionsJSON)
+	var payloadJSON string
+	err := row.Scan(&r.ID, &r.Command, &r.Host, &r.Cwd, &r.Status, &r.StartedAt, &r.EndedAt, &r.Author, &payloadJSON)
 	if err != nil {
 		return CommandRecord{}, err
 	}
-	if err := json.Unmarshal([]byte(kindsJSON), &r.MaskedKinds); err != nil {
+	if payloadJSON == "" {
+		payloadJSON = "{}"
+	}
+	var payload historyRecordPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return CommandRecord{}, err
 	}
-	if err := json.Unmarshal([]byte(redactionsJSON), &r.Redactions); err != nil {
-		return CommandRecord{}, err
+	r.ExitCode = payload.ExitCode
+	r.Trusted = payload.Trusted
+	r.MaskedCount = payload.MaskedCount
+	r.MaskedKinds = payload.MaskedKinds
+	r.Redactions = payload.Redactions
+	if r.MaskedKinds == nil {
+		r.MaskedKinds = []string{}
+	}
+	if r.Redactions == nil {
+		r.Redactions = []Redaction{}
 	}
 	return r, nil
 }
 
 // List returns the limit newest records, newest first.
 func (s *sqliteContent) List(ctx context.Context, limit int) ([]CommandRecord, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordCols+
-		" FROM command_history ORDER BY id DESC LIMIT ?", limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+recordCols+`
+		FROM entries e
+		LEFT JOIN environments env ON env.id = e.environment_id
+		WHERE e.kind IN ('shell','agent')
+		ORDER BY e.ingest_seq DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1075,7 +1204,10 @@ func (s *sqliteContent) List(ctx context.Context, limit int) ([]CommandRecord, e
 
 // GetByID returns one record, or (nil, nil) when no row carries that id.
 func (s *sqliteContent) GetByID(ctx context.Context, id int64) (*CommandRecord, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT "+recordCols+" FROM command_history WHERE id = ?", id)
+	row := s.db.QueryRowContext(ctx, `SELECT `+recordCols+`
+		FROM entries e
+		LEFT JOIN environments env ON env.id = e.environment_id
+		WHERE e.kind IN ('shell','agent') AND e.ingest_seq = ?`, id)
 	r, err := scanRecord(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1091,9 +1223,11 @@ func (s *sqliteContent) GetByID(ctx context.Context, id int64) (*CommandRecord, 
 // _ matches them literally.
 func (s *sqliteContent) FindByPrefix(ctx context.Context, prefix string, limit int) ([]CommandRecord, error) {
 	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordCols+
-		" FROM command_history WHERE command LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?",
-		escaped+"%", limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+recordCols+`
+		FROM entries e
+		LEFT JOIN environments env ON env.id = e.environment_id
+		WHERE e.kind IN ('shell','agent') AND e.intent LIKE ? ESCAPE '\'
+		ORDER BY e.ingest_seq DESC LIMIT ?`, escaped+"%", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1135,32 +1269,33 @@ func (s *sqliteContent) Query(ctx context.Context, scope Scope, cwd, host string
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	cond, args := scopeWhere(scope, cwd, host)
+	envBypass, cwdBypass, beforeBypass, textBypass := 1, 1, 1, 1
+	envID, cwdValue, textValue := "", "", ""
+	var beforeValue int64
+	_, _, envID = historyRecordEnvironment(host)
+	switch scope {
+	case ScopeDirectory:
+		envBypass = 0
+		cwdBypass = 0
+		cwdValue = cwd
+	case ScopeHost:
+		envBypass = 0
+	}
 	if before != nil {
-		if cond == "" {
-			cond = " WHERE id < ?"
-		} else {
-			cond += " AND id < ?"
-		}
-		args = append(args, *before)
+		beforeBypass = 0
+		beforeValue = *before
 	}
-	// The filter is a parameterized case-folded substring predicate, not
-	// LIKE: instr() has no wildcard grammar, so a search for "100%_done"
-	// matches that literal command and nothing else. lower(?) is bound once;
-	// lower(command) is computed per row (no index — the measurement above).
 	if text != "" {
-		if cond == "" {
-			cond = " WHERE instr(lower(command), lower(?)) > 0"
-		} else {
-			cond += " AND instr(lower(command), lower(?)) > 0"
-		}
-		args = append(args, text)
+		textBypass = 0
+		textValue = text
 	}
-	// Fetch limit+1: one extra row proves the rung is not exhausted.
-	// cond and recordCols are package constants — never user input.
-	rows, err := tx.QueryContext(ctx, "SELECT "+recordCols+ //nolint:gosec // constant fragments
-		" FROM command_history"+cond+" ORDER BY id DESC LIMIT ?",
-		append(args, limit+1)...)
+	rows, err := tx.QueryContext(ctx, historyQuerySQL,
+		envBypass, envID,
+		cwdBypass, cwdValue,
+		beforeBypass, beforeValue,
+		textBypass, textValue,
+		limit+1,
+	)
 	if err != nil {
 		return HistoryPage{}, err
 	}
@@ -1184,30 +1319,19 @@ func (s *sqliteContent) Query(ctx context.Context, scope Scope, cwd, host string
 	}
 
 	var total int
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&total); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM entries e WHERE e.kind IN ('shell','agent')`).Scan(&total); err != nil {
 		return HistoryPage{}, err
 	}
 	// MIN ignores NULL ended_at (running entries), so a store full of
 	// running rows reports no horizon rather than a misleading one.
 	var coverage *int64
-	if err := tx.QueryRowContext(ctx, "SELECT MIN(ended_at) FROM command_history").Scan(&coverage); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(ended_at) FROM entries e WHERE e.kind IN ('shell','agent')`).Scan(&coverage); err != nil {
 		return HistoryPage{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return HistoryPage{}, err
 	}
 	return HistoryPage{Entries: entries, Exhausted: !extra, HasRows: total > 0, Coverage: coverage}, nil
-}
-
-func scopeWhere(scope Scope, cwd, host string) (string, []any) {
-	switch scope {
-	case ScopeDirectory:
-		return " WHERE cwd = ? AND host = ?", []any{cwd, host}
-	case ScopeHost:
-		return " WHERE host = ?", []any{host}
-	default:
-		return "", nil
-	}
 }
 
 // ── backup (the canary-safe copy path) ───────────────────────────────────

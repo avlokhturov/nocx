@@ -10,6 +10,8 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,16 +19,15 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // fakeRecordHistoryDB is a real-behaving in-memory ContentDB: Add stores,
 // Query serves, so a record-then-query round trip through the socket proves
-// the handler persisted what it was handed. The real store's policy gating
-// (history.enabled off → no row) is the store's own behaviour, already
-// asserted in internal/content; this fake deliberately stores everything.
 type fakeRecordHistoryDB struct {
 	mu      sync.Mutex
 	nextID  int64
+	addErr  error
 	records []content.CommandRecord
 }
 
@@ -48,6 +49,9 @@ func (f *fakeRecordHistoryDB) Ledger() content.LedgerRepository { return nil }
 func (f *fakeRecordHistoryDB) Add(_ context.Context, record content.CommandRecord) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.addErr != nil {
+		return 0, f.addErr
+	}
 	record.ID = f.nextID
 	f.nextID++
 	f.records = append(f.records, record)
@@ -295,6 +299,105 @@ func TestHistoryRecord_AckCarriesTheAuthor(t *testing.T) {
 	}
 	if ack.Author != "agent" {
 		t.Fatalf("ack author = %q, want agent", ack.Author)
+	}
+}
+
+// The handler writes the author into durable history, and a restart still
+// sees it through both the ledger projection (entries.kind) and the
+// command-history read model. That proves the wire has not outrun the store.
+func TestHistoryRecord_PersistsAuthorThroughRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := content.Config{
+		Path: filepath.Join(dir, "content.db"),
+		Key:  []byte("0123456789abcdef0123456789abcdef"),
+		Budget: content.Budget{
+			RetentionBytes:   1 << 20,
+			DiskCeilingBytes: 2 << 20,
+			CompactionFloor:  0.8,
+		},
+		Logger: log.NewSlogAdapter(nil),
+	}
+	db, err := content.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("open content db: %v", err)
+	}
+	ws, stop := newHistoryWSServer(t, db)
+	conn := connectWS(t, ws)
+
+	for _, tc := range []struct {
+		author  string
+		command string
+	}{
+		{author: "shell", command: "shell-cmd"},
+		{author: "agent", command: "agent-cmd"},
+	} {
+		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+			"author":  tc.author,
+			"command": tc.command,
+		}), 1)
+		if resp.Error != nil {
+			t.Fatalf("%s record error: %+v", tc.author, resp.Error)
+		}
+	}
+
+	stop()
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("close content db: %v", closeErr)
+	}
+
+	db2, err := content.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("reopen content db: %v", err)
+	}
+	t.Cleanup(func() { _ = db2.Close() })
+
+	entries, err := db2.Ledger().ListEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("ledger entries = %d, want 2", len(entries))
+	}
+	if entries[0].Kind != content.EntryAgent || entries[0].Intent != "agent-cmd" {
+		t.Fatalf("newest ledger entry = %+v, want agent-cmd/agent", entries[0])
+	}
+	if entries[1].Kind != content.EntryShell || entries[1].Intent != "shell-cmd" {
+		t.Fatalf("older ledger entry = %+v, want shell-cmd/shell", entries[1])
+	}
+
+	rows, err := db2.CommandHistory().List(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("CommandHistory.List: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("history rows = %d, want 2", len(rows))
+	}
+	if rows[0].Author != "agent" || rows[0].Command != "agent-cmd" {
+		t.Fatalf("newest history row = %+v, want agent-cmd/agent", rows[0])
+	}
+	if rows[1].Author != "shell" || rows[1].Command != "shell-cmd" {
+		t.Fatalf("older history row = %+v, want shell-cmd/shell", rows[1])
+	}
+}
+
+// The handler surfaces the store's write failure rather than pretending the
+// record landed. That keeps the wire honest when the durable home rejects.
+func TestHistoryRecord_SurfacesStoreAddError(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	db.addErr = errors.New("boom")
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"author":  "agent",
+		"command": "agent-cmd",
+	}), 1)
+	if resp.Error == nil || resp.Error.Code != -32603 || !strings.Contains(resp.Error.Message, "boom") {
+		t.Fatalf("store error = %+v, want -32603 with boom", resp.Error)
+	}
+	if db.count() != 0 {
+		t.Fatalf("store count = %d, want 0", db.count())
 	}
 }
 

@@ -284,6 +284,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		Command:     rowCommand,
 		Cwd:         p.Cwd,
 		Host:        p.Host,
+		Author:      p.Author,
 		Status:      content.CommandStatus(p.Status),
 		ExitCode:    p.ExitCode,
 		StartedAt:   p.StartedAt,

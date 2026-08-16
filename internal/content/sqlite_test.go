@@ -141,6 +141,75 @@ func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 	}
 }
 
+func TestHistoryRecordAuthorSurvivesRestartInLedger(t *testing.T) {
+	db, dir := newTestStore(t)
+	ctx := context.Background()
+
+	records := []content.CommandRecord{
+		{
+			Author:  string(content.EntryAgent),
+			Command: "agent-cmd",
+			Cwd:     "/srv/api",
+			Host:    "",
+			Status:  content.StatusSuccess,
+		},
+		{
+			Author:  string(content.EntryShell),
+			Command: "shell-cmd",
+			Cwd:     "/srv/api",
+			Host:    "",
+			Status:  content.StatusSuccess,
+		},
+	}
+	for _, rec := range records {
+		if _, err := db.CommandHistory().Add(ctx, rec); err != nil {
+			t.Fatalf("Add %q: %v", rec.Command, err)
+		}
+	}
+
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+	db2, err := content.Open(ctx, content.Config{
+		Path:   filepath.Join(dir, "content.db"),
+		Key:    testKey(),
+		Budget: testBudget,
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = db2.Close() }()
+
+	entries, err := db2.Ledger().ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries after reopen: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries after reopen = %+v, want 2 durable rows", entries)
+	}
+	if entries[0].Kind != content.EntryShell || entries[0].Intent != "shell-cmd" {
+		t.Fatalf("newest ledger entry = %+v, want shell-cmd", entries[0])
+	}
+	if entries[1].Kind != content.EntryAgent || entries[1].Intent != "agent-cmd" {
+		t.Fatalf("older ledger entry = %+v, want agent-cmd", entries[1])
+	}
+
+	history, err := db2.CommandHistory().List(ctx, 10)
+	if err != nil {
+		t.Fatalf("List after reopen: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("history after reopen = %+v, want 2 rows", history)
+	}
+	if history[0].Author != string(content.EntryShell) || history[0].Command != "shell-cmd" {
+		t.Fatalf("newest history row = %+v, want shell author", history[0])
+	}
+	if history[1].Author != string(content.EntryAgent) || history[1].Command != "agent-cmd" {
+		t.Fatalf("older history row = %+v, want agent author", history[1])
+	}
+}
+
 // A wrong key fails at Open, leaves the file byte-identical, and creates no
 // second, unencrypted file.
 func TestWrongKeyFailsCleanly(t *testing.T) {
@@ -149,8 +218,8 @@ func TestWrongKeyFailsCleanly(t *testing.T) {
 	if _, err := db.CommandHistory().Add(ctx, markerRecord("wrongkey-marker")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 
 	path := filepath.Join(dir, "content.db")
@@ -669,15 +738,15 @@ func TestUnwritableDirectoryProducesError(t *testing.T) {
 func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 	_, err := db.CommandHistory().Add(ctx, markerRecord("late"))
 	if !errors.Is(err, content.ErrClosed) {
 		t.Fatalf("Add after Close = %v, want ErrClosed", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("second Close = %v, want nil (idempotent)", err)
+	if secondCloseErr := db.Close(); secondCloseErr != nil {
+		t.Fatalf("second Close = %v, want nil (idempotent)", secondCloseErr)
 	}
 }
 
@@ -689,8 +758,8 @@ func TestAutoVacuumDecidedAtCreation(t *testing.T) {
 	if _, err := db.CommandHistory().Add(ctx, markerRecord("av")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 
 	// The test opens its own keyed connection to read the pragma the way a
@@ -1013,8 +1082,8 @@ func TestRestorePrivate_CancelledBeforeAcceptanceChangesNothing(t *testing.T) {
 // still a no-op success, never a write to a closed store.
 func TestRestorePrivate_ClosedStoreRefuses(t *testing.T) {
 	db, _ := newTestStore(t)
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
 	err := db.RestorePrivate(context.Background(), nil, []content.CommandRecord{
 		{Command: "ssh prod", Cwd: "/", Host: "local", Status: content.StatusSuccess},

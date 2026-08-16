@@ -121,7 +121,7 @@ func TestPlaintextCanary(t *testing.T) {
 	if header || plain {
 		t.Fatalf("backup leaked: header=%v plaintext=%v", header, plain)
 	}
-	assertReadsMarker(t, snap, "backup destination", "SELECT command FROM command_history WHERE command = '"+canaryMarker+"'")
+	assertReadsMarker(t, snap, "backup destination", "SELECT intent FROM entries WHERE intent = '"+canaryMarker+"'")
 
 	// 3. VACUUM INTO through the keyed URI — the documented form — must be
 	// encrypted AND usable.
@@ -134,7 +134,7 @@ func TestPlaintextCanary(t *testing.T) {
 	if header || plain {
 		t.Fatalf("keyed VACUUM INTO leaked: header=%v plaintext=%v", header, plain)
 	}
-	assertReadsMarker(t, vac, "keyed VACUUM INTO destination", "SELECT command FROM command_history WHERE command = '"+canaryMarker+"'")
+	assertReadsMarker(t, vac, "keyed VACUUM INTO destination", "SELECT intent FROM entries WHERE intent = '"+canaryMarker+"'")
 
 	// 4. ATTACH through the keyed URI, writing into the attached database.
 	att := filepath.Join(dir, "attached.db")
@@ -254,14 +254,14 @@ func TestBackupProducesConsistentEncryptedSnapshot(t *testing.T) {
 	// The snapshot is a complete standalone database: reopen it directly.
 	conn := openKeyedConn(t, snap)
 	var n int
-	if err := conn.QueryRow("SELECT count(*) FROM command_history").Scan(&n); err != nil {
-		t.Fatalf("snapshot has no command_history: %v", err)
+	if err := conn.QueryRow("SELECT count(*) FROM entries").Scan(&n); err != nil {
+		t.Fatalf("snapshot has no entries: %v", err)
 	}
 	if n != rows {
 		t.Fatalf("snapshot holds %d rows, want %d (WAL-only rows lost)", n, rows)
 	}
 	var newest string
-	if err := conn.QueryRow("SELECT command FROM command_history ORDER BY id DESC LIMIT 1").Scan(&newest); err != nil {
+	if err := conn.QueryRow("SELECT intent FROM entries ORDER BY ingest_seq DESC LIMIT 1").Scan(&newest); err != nil {
 		t.Fatalf("read newest: %v", err)
 	}
 	if newest != fmt.Sprintf("cmd-%d", rows-1) {
@@ -367,7 +367,7 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	}
 
 	var n int
-	if err := conn.QueryRow("SELECT count(*) FROM command_history").Scan(&n); err != nil {
+	if err := conn.QueryRow("SELECT count(*) FROM entries").Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n == 0 {
