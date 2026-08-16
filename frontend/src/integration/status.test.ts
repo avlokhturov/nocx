@@ -27,6 +27,8 @@ const REASONS: IntegrationReason[] = [
 
 const fact = (over: Partial<SessionIntegrationChanged> = {}): SessionIntegrationChanged => ({
   sessionId: 's1',
+  instanceId: '0123456789abcdef0123456789abcdef',
+  sessionEpoch: 1,
   status: 'conventional',
   reason: 'handshake-timeout',
   shell: '/bin/bash',

@@ -101,11 +101,13 @@ const (
 // unsolicited notification, because a server-initiated frame has no request
 // to correlate against and nothing checking its shape at the call site.
 type integrationChangedParams struct {
-	SessionID string             `json:"sessionId"`
-	Status    string             `json:"status"`
-	Reason    string             `json:"reason,omitempty"`
-	Shell     string             `json:"shell"`
-	Detail    *integrationDetail `json:"detail,omitempty"`
+	SessionID    string             `json:"sessionId"`
+	InstanceID   string             `json:"instanceId"`
+	SessionEpoch uint64             `json:"sessionEpoch"`
+	Status       string             `json:"status"`
+	Reason       string             `json:"reason,omitempty"`
+	Shell        string             `json:"shell"`
+	Detail       *integrationDetail `json:"detail,omitempty"`
 }
 
 // integrationDetail is the best-effort half. Marked as a guess by the
@@ -439,10 +441,22 @@ func (s *WSServer) emitIntegration(sid session.ID) {
 	if wconn == nil {
 		return
 	}
+	// The identity the renderer compares observations against (nocx-3oupk):
+	// minted by the backend at open, never here. A session that has left
+	// the registry is gone — its teardown is already racing the exit
+	// notification, so there is nobody honest to address a status to, and
+	// the notification is dropped rather than sent without identity.
+	sess, err := s.registry.Get(sid)
+	if err != nil {
+		return
+	}
+	ident := sess.Identity()
 	params := integrationChangedParams{
-		SessionID: string(sid),
-		Status:    snap.status,
-		Shell:     snap.shell,
+		SessionID:    string(sid),
+		InstanceID:   string(ident.InstanceID),
+		SessionEpoch: ident.Epoch,
+		Status:       snap.status,
+		Shell:        snap.shell,
 	}
 	// Present exactly when the status is conventional or lost, absent
 	// otherwise — the schema pins both halves, so a reason on a 'starting'

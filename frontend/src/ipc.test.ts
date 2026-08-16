@@ -8,6 +8,7 @@ const ACK_INTERVAL_MS = 100
 
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
+const OPEN_IDENTITY = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
 
 class MockWebSocket {
   static readonly CONNECTING = 0
@@ -127,7 +128,7 @@ async function connectedSession(): Promise<{
 
   const opening = client.openSession(80, 24)
   const openID = socket().requests()[0].id
-  socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
+  socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID, ...OPEN_IDENTITY } })
   const session = await opening
 
   return { client, session, ws: socket() }
@@ -147,13 +148,17 @@ async function twoSessions(): Promise<{
   const openingA = client.openSession(80, 24)
   const reqsAfterA = socket().requests()
   const idA = reqsAfterA[reqsAfterA.length - 1].id
-  socket().deliverText({ jsonrpc: '2.0', id: idA, result: { sessionId: SID } })
+  socket().deliverText({ jsonrpc: '2.0', id: idA, result: { sessionId: SID, ...OPEN_IDENTITY } })
   const sessionA = await openingA
 
   const openingB = client.openSession(80, 24)
   const reqsAfterB = socket().requests()
   const idB = reqsAfterB.find((r) => r.method === 'open' && r.id !== idA)!.id
-  socket().deliverText({ jsonrpc: '2.0', id: idB, result: { sessionId: OTHER_SID } })
+  socket().deliverText({
+    jsonrpc: '2.0',
+    id: idB,
+    result: { sessionId: OTHER_SID, ...OPEN_IDENTITY },
+  })
   const sessionB = await openingB
 
   return { client, sessionA, sessionB, ws: socket() }
@@ -320,12 +325,16 @@ describe('openSession', () => {
     let settled = false
     const opening = client.openSession(80, 24).finally(() => (settled = true))
     const id = socket().requests()[0].id ?? 0
-    socket().deliverText({ jsonrpc: '2.0', id: id + 999, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: id + 999,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     await Promise.resolve()
 
     expect(settled).toBe(false)
 
-    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
+    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
     await opening
   })
 
@@ -339,7 +348,7 @@ describe('openSession', () => {
     expect(() => socket().deliverText('}{ not json')).not.toThrow()
 
     const id = socket().requests()[0].id
-    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
+    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
     await opening
   })
 })
@@ -432,7 +441,7 @@ describe('inbound data', () => {
     socket().deliverText({
       jsonrpc: '2.0',
       id: socket().requests()[0].id,
-      result: { sessionId: SID },
+      result: { sessionId: SID, ...OPEN_IDENTITY },
     })
     await opening
 
@@ -444,7 +453,7 @@ describe('inbound data', () => {
     const reopening = client.openSession(80, 24)
     const reqs = socket().requests()
     const id = reqs[reqs.length - 1]?.id
-    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID } })
+    socket().deliverText({ jsonrpc: '2.0', id, result: { sessionId: SID, ...OPEN_IDENTITY } })
     const second = await reopening
 
     const seen: string[] = []
@@ -456,21 +465,74 @@ describe('inbound data', () => {
 })
 
 describe('exit notification', () => {
-  it('fires onExit for this session', async () => {
+  it('delivers an interrupted exit for a session the backend lost', async () => {
     const { session, ws } = await connectedSession()
     const exited: string[] = []
-    session.onExit((sid) => exited.push(sid))
+    session.onExit((exit) => exited.push(`${exit.sessionId}:${exit.cause}`))
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'interrupted' },
+    })
+    expect(exited).toEqual([`${SID}:interrupted`])
+  })
+
+  it('delivers a clean exit with its status', async () => {
+    const { session, ws } = await connectedSession()
+    const exited: Array<{ sid: string; status?: number }> = []
+    session.onExit((exit) =>
+      exited.push(
+        exit.cause === 'exited'
+          ? { sid: exit.sessionId, status: exit.status }
+          : { sid: exit.sessionId },
+      ),
+    )
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'exited', status: 42 },
+    })
+    expect(exited).toEqual([{ sid: SID, status: 42 }])
+  })
+
+  // An exit whose cause is missing or unknown reads as a loss, never as a
+  // clean exit: a wrongly-marked tab is recoverable, a wrongly destroyed
+  // tab is lost work (nocx-ictcq). One delivery per session — the exit
+  // handler removes the session, so a second notification cannot reach it.
+  it('treats an absent cause as a loss', async () => {
+    const { session, ws } = await connectedSession()
+    const exited: string[] = []
+    session.onExit((exit) => exited.push(exit.cause))
 
     ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
-    expect(exited).toEqual([SID])
+    expect(exited).toEqual(['interrupted'])
+  })
+
+  it('treats an unknown cause as a loss', async () => {
+    const { session, ws } = await connectedSession()
+    const exited: string[] = []
+    session.onExit((exit) => exited.push(exit.cause))
+
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'the-wind' },
+    })
+    expect(exited).toEqual(['interrupted'])
   })
 
   it('ignores an exit for another session', async () => {
     const { session, ws } = await connectedSession()
     const exited: string[] = []
-    session.onExit((sid) => exited.push(sid))
+    session.onExit((exit) => exited.push(exit.sessionId))
 
-    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: OTHER_SID } })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: OTHER_SID, cause: 'interrupted' },
+    })
     expect(exited).toEqual([])
   })
 
@@ -478,7 +540,11 @@ describe('exit notification', () => {
     const { session, ws } = await connectedSession()
     session.onExit(() => {})
 
-    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'interrupted' },
+    })
 
     session.send('echo leak\n')
     expect(ws.binaryFrames()).toHaveLength(0)
@@ -617,10 +683,14 @@ describe('multi-session', () => {
     const { sessionA, sessionB, ws } = await twoSessions()
     const exitedA: string[] = []
     const exitedB: string[] = []
-    sessionA.onExit((sid) => exitedA.push(sid))
-    sessionB.onExit((sid) => exitedB.push(sid))
+    sessionA.onExit((exit) => exitedA.push(exit.sessionId))
+    sessionB.onExit((exit) => exitedB.push(exit.sessionId))
 
-    ws.deliverText({ jsonrpc: '2.0', method: 'exit', params: { sessionId: SID } })
+    ws.deliverText({
+      jsonrpc: '2.0',
+      method: 'exit',
+      params: { sessionId: SID, cause: 'interrupted' },
+    })
     expect(exitedA).toEqual([SID])
     expect(exitedB).toEqual([])
   })
@@ -752,7 +822,11 @@ describe('reconnect and reattach', () => {
 
     const opening = client.openSession(80, 24)
     const openID = socket().requests()[0].id
-    socket().deliverText({ jsonrpc: '2.0', id: openID, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openID,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     const session = await opening
     return { session, firstWS: socket() }
   }
@@ -954,12 +1028,12 @@ describe('reconnect and reattach', () => {
     expect(state.get(SID)?.offset).toBe(99)
   })
 
-  it('drops session locally on attach error', async () => {
+  it('a failed reattach delivers a loss, never a clean exit', async () => {
     const client = new WSClient(mockDispatcher())
     const { session, firstWS } = await connectedSessionWithBackoff(client)
 
-    const exited: string[] = []
-    session.onExit((sid) => exited.push(sid))
+    const exits: Array<{ sid: string; cause: string }> = []
+    session.onExit((exit) => exits.push({ sid: exit.sessionId, cause: exit.cause }))
 
     firstWS.serverHangsUp()
     vi.advanceTimersByTime(475)
@@ -984,7 +1058,11 @@ describe('reconnect and reattach', () => {
 
     await Promise.resolve() // P1 rejection → P2 rejection
     await Promise.resolve() // P2 rejection → catch handler fires
-    expect(exited).toEqual([SID])
+    // The reattach-failure path is a LOSS: the tab consumes this as
+    // "mark, never destroy" (nocx-ictcq). Delivering a clean exit here
+    // would close the tab exactly when its session went away — the bug
+    // this bead was reopened for.
+    expect(exits).toEqual([{ sid: SID, cause: 'interrupted' }])
   })
 
   it('sends attach for multiple sessions on reconnect', async () => {
@@ -997,13 +1075,21 @@ describe('reconnect and reattach', () => {
     const openIdA = socket()
       .requests()
       .find((r) => r.method === 'open')!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdA, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdA,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     await openingA
 
     const openingB = client.openSession(80, 24)
     const reqsAfterB = socket().requests()
     const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdB, result: { sessionId: OTHER_SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdB,
+      result: { sessionId: OTHER_SID, ...OPEN_IDENTITY },
+    })
     await openingB
 
     const firstWS = socket()
@@ -1034,13 +1120,21 @@ describe('reconnect and reattach', () => {
     const openIdA = socket()
       .requests()
       .find((r) => r.method === 'open')!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdA, result: { sessionId: SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdA,
+      result: { sessionId: SID, ...OPEN_IDENTITY },
+    })
     await openingA
 
     const openingB = client.openSession(80, 24)
     const reqsAfterB = socket().requests()
     const openIdB = reqsAfterB.find((r) => r.method === 'open' && r.id !== openIdA)!.id!
-    socket().deliverText({ jsonrpc: '2.0', id: openIdB, result: { sessionId: OTHER_SID } })
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openIdB,
+      result: { sessionId: OTHER_SID, ...OPEN_IDENTITY },
+    })
     await openingB
 
     const reports: { resumed: number; lost: number }[] = []

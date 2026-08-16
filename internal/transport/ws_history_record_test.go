@@ -131,6 +131,7 @@ func recordParams(overrides map[string]any) map[string]any {
 		"startedAt": int64(1_750_000_000_000),
 		"endedAt":   int64(1_750_000_000_001),
 		"trusted":   true,
+		"tabId":     "tab-1",
 	}
 	for k, v := range overrides {
 		p[k] = v

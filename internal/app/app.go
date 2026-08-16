@@ -38,6 +38,8 @@ import (
 	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -109,7 +111,23 @@ type App struct {
 	// logFile is the open append handle, closed at shutdown after the
 	// final line. nil when file logging is unavailable.
 	logFile *os.File
+
+	// attentionHost is the late-bound implementation behind the notify
+	// router's banner route (ADR-0029). The route itself was decided when
+	// the table was built; this is only the surface it reaches, and it stays
+	// UnavailableHost on every host that never calls SetAttentionHost.
+	attentionHost *notify.HostHolder
+
+	// slogger is the same logger Logger wraps, kept so an adapter built
+	// outside this package (main.go's attention host) writes to the log file
+	// rather than to slog.Default(), which nothing here installs.
+	slogger *slog.Logger
 }
+
+// Slog returns the backend's structured logger, for adapters constructed in
+// main.go that take a *slog.Logger directly. Prefer the Logger interface
+// everywhere else.
+func (a *App) Slog() *slog.Logger { return a.slogger }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
 // which an in-progress compaction stops (design §5.4 names hysteresis as
@@ -178,6 +196,20 @@ func (a *App) SetDialogService(ds transport.DialogService) {
 // unset state.
 func (a *App) SetUrlOpener(opener transport.UrlOpener) {
 	a.Transport.SetUrlOpener(opener)
+}
+
+// SetAttentionHost binds the desktop attention surface behind the notify
+// router's banner route (ADR-0029). Like SetDialogService it is wired from
+// main.go's WailsApp.startup — the Wails context the adapter needs exists
+// only there, after the router was built — and must be called before Start,
+// so no raise can observe the unset state.
+//
+// It binds an implementation, never a destination. The route was decided when
+// the routing table was built and is not reachable from here; a host that
+// never calls this keeps UnavailableHost, and its raises are visible failed
+// deliveries rather than silent drops.
+func (a *App) SetAttentionHost(host notify.AttentionHost) {
+	a.attentionHost.Set(host)
 }
 
 // Log logs a message from the frontend.
@@ -309,6 +341,15 @@ func WithRealSystemKeystore(reason string) Option {
 func WithLogFilePath(path string) Option {
 	return func(o *optionSet) { o.logFilePath = &path }
 }
+
+// notifyDebounceWindow is how long one session and kind is held quiet AFTER a
+// notification has gone out. The debounce is leading-edge (notify.Policy):
+// the first event is delivered at once, and the window suppresses what follows
+// it, closing with one summary naming how many were held. So this number is
+// not a delay on anything — it is how much of a burst collapses into that one
+// summary. Eight seconds is termic's number for the same job (design §6.2),
+// long enough to absorb a build's chatter.
+const notifyDebounceWindow = 8 * time.Second
 
 func New(opts ...Option) (*App, error) {
 	var o optionSet
@@ -827,6 +868,68 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+	// The notification router (ADR-0029): the only holder of "where" a raised
+	// notification goes. Before this line the whole notify package was
+	// reachable from its own tests and nowhere else (AGENTS.md check 5).
+	//
+	// The banner row is the table's first, and it is decided here, once. A
+	// program that asks for a notification (notify.raise, trust
+	// programRequest) reaches the OS banner and nothing else — no network
+	// sink, no subscription route, and no way for the request to name a
+	// destination of its own. The holder behind it binds late (see
+	// notify.HostHolder): the Wails runtime needs a context that exists only
+	// in main.go's startup, so the implementation arrives after this line
+	// while the route does not.
+	//
+	// Hosts that never bind one — cmd/devharness, the dev-web harness, an e2e
+	// run — keep UnavailableHost, and a raise there is a visible failed
+	// delivery rather than a silent drop.
+	attentionHost := &notify.HostHolder{}
+	notifyRouter, routerErr := notify.NewRouter(notify.Table{
+		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
+			{Sink: wailsadapter.HostSink{Host: attentionHost}},
+		},
+	}, notify.Limits{
+		MaxInFlight:     4,
+		MaxQueued:       32,
+		MaxRetained:     1 << 20,
+		DeliveryTimeout: 10 * time.Second,
+	})
+	if routerErr != nil {
+		return nil, fmt.Errorf("notify router: %w", routerErr)
+	}
+
+	// The attention policy sits IN FRONT of the router, so notify.raise
+	// reaches the pipeline through it rather than around it. Without this a
+	// loop that writes OSC 9 a hundred times produces a hundred banners; the
+	// policy collapses a burst per (session, kind) into one notification
+	// naming the count, which is the whole point of the debounce window.
+	//
+	// Focus binds late and its unbound answer is "nothing is focused", so
+	// suppression never suppresses until something reports what the user is
+	// looking at (nocx-jiwq.2). That is the safe direction: the cost is a
+	// notification the user did not strictly need, where the other direction
+	// silently swallows one they did. Debounce and coalescing need no focus
+	// and work in full from the first raise.
+	notifyFocus := &notify.FocusHolder{}
+	notifyPolicy, policyErr := notify.NewPolicy(
+		context.Background(), notifyRouter, notifyDebounceWindow, notifyFocus, notify.RealClock{},
+		notify.WithResultHandler(func(out notify.Outcome) {
+			if out.Err != nil {
+				logger.Warn("notification refused", "error", out.Err)
+				return
+			}
+			for _, r := range out.Results {
+				if r.Err != nil {
+					logger.Warn("notification delivery failed", "target", r.Route.Destination.Target, "error", r.Err)
+				}
+			}
+		}),
+	)
+	if policyErr != nil {
+		return nil, fmt.Errorf("notify policy: %w", policyErr)
+	}
+	tpOpts = append(tpOpts, transport.WithNotifyRaiser(notifyPolicy))
 
 	// The assistant engine (nocx-edio): eino behind the guarded HTTP
 	// client, wired at the composition root like every other client —
@@ -926,6 +1029,8 @@ func New(opts ...Option) (*App, error) {
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,
+		attentionHost:    attentionHost,
+		slogger:          slogger,
 	}
 
 	logger.Info("application initialized")

@@ -498,11 +498,20 @@ func TestTunnelConnDoneStopsServing(t *testing.T) {
 	waitFor(t, "adapter closed after loss", func() bool {
 		return errors.Is(a.Send(lifecycle.Envelope{}), ErrClosed)
 	})
-	// The listener is gone: a new candidate cannot connect at all.
-	if c, derr := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(cfg.Port)); derr == nil {
-		_ = c.Close()
-		t.Fatal("listener must be closed after transport loss; a dial succeeded")
-	}
+	// The listener is gone: a new candidate cannot connect at all. This
+	// waits on the dial rather than inferring it from the refusal above:
+	// lose() marks the adapter closed under the mutex and closes the
+	// listener after releasing it, so Send refuses FIRST and a dial in
+	// that window still connects. Asserting one state after waiting for
+	// the other is how this read as a product defect on a loaded box.
+	waitFor(t, "listener closed after loss", func() bool {
+		c, derr := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(cfg.Port))
+		if derr == nil {
+			_ = c.Close()
+			return false
+		}
+		return true
+	})
 	// The kernel stays authoritative: the domain is lost, and the old
 	// capability authenticates nothing further.
 	waitFor(t, "domain lost", func() bool {
