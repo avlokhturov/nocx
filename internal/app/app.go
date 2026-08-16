@@ -588,6 +588,14 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-6pz0).
 	gitFactory := gitlocal.NewFactory()
 
+	// The ONE global agent policy (ADR-0020 §7 as amended — amendment
+	// proposed, awaiting owner approval): the matrix every run's grant is
+	// minted from. Persisted as a JSON document beside the settings; the
+	// run mint and the policy.get/set RPCs read the same store live, so a
+	// Settings save applies without a restart. An unset or unreadable
+	// store IS a policy — the zero matrix, which asks — never an error.
+	policyStore := assistant.NewGlobalPolicyStore(docStore, "agent-policy.json")
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithBackupService(backupService),
@@ -597,6 +605,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithVaultLifecycle(v),
 		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
+		transport.WithAgentPolicy(policyStore),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
 		transport.WithProber(&proberAdapter{client: sshClient}),

@@ -18,6 +18,8 @@ import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
+import { AgentPolicySection } from './agent-policy-section'
+import type { PolicyClient } from './policy-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -131,6 +133,9 @@ export interface SettingsComponentProps {
   /** The assistant's control-plane client (nocx-edio). Absent in the
    *  dev-web harness; the endpoints section then shows no status line. */
   agentClient?: AgentClient
+  /** The agent policy client (ADR-0020 §7 as amended). Absent in
+   *  embeddings that never configure the agent; the page then says so. */
+  policyClient?: PolicyClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -434,7 +439,34 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    return [...generated, backupPage, connectionPage, vaultPage, secretsPage, endpointsPage]
+    const policyPage: SettingsPage = {
+      kind: 'component',
+      id: 'policy',
+      title: 'Agent policy',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.policyClient}
+          fallback={
+            <PageSection title="Agent policy">
+              The agent policy is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentPolicySection client={props.policyClient!} />
+        </Show>
+      ),
+    }
+    return [
+      ...generated,
+      backupPage,
+      connectionPage,
+      vaultPage,
+      secretsPage,
+      endpointsPage,
+      policyPage,
+    ]
   })
 
   /** The rail rows the grouped rail renders: every page resolved to a group

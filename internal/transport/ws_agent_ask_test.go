@@ -74,7 +74,13 @@ type askHarness struct {
 }
 
 func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
-	t.Helper()
+	return newAskHarnessWithOpts(t, client)
+}
+
+// newAskHarnessWithOpts is newAskHarness with additional WSServerOptions —
+// for tests that need a seam named at construction (the policy tests wire
+// WithAgentPolicy here, so the control plane registers the methods wired).
+func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSServerOption) *askHarness {
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
 	reg, err := vault.NewRegistry(file.New(docStore, "vault-blob.json"))
@@ -115,6 +121,7 @@ func newAskHarness(t *testing.T, client assistant.Client) *askHarness {
 		WithAssistantClient(client),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 	}
+	opts = append(opts, extra...)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
 	ctx := t.Context()
 	if err := ws.Start(ctx); err != nil {

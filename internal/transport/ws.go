@@ -144,13 +144,14 @@ type WSServer struct {
 	// delivery seams; its resolution RPCs register on the read-loop ingress
 	// and its ConnectionLost signal fires in unregisterConn.
 	broker *Broker
-	// agentGrantPolicy is the workspace policy preset the ask run grants
-	// are minted with (ADR-0020 §7), named by the composition root. Unset,
-	// ask runs carry no grant and the model is offered no tools — the
-	// state before readScreen, and the production state until the egress
-	// gate lands (see runGrantFor).
-	agentGrantPolicy    content.GrantPolicy
-	agentGrantPolicySet bool
+	// agentPolicy is the ONE global agent policy the ask run grants are
+	// minted from (ADR-0020 §7 as amended 2026-08-16 — amendment proposed,
+	// awaiting owner approval): the global default of content.ResolvePolicy,
+	// overridden by the workspace grant source (nocx-mp2vd) when that lands.
+	// Named by the composition root. Unset, ask runs carry no grant and the
+	// model is offered no tools — the state before readScreen (see
+	// runGrantFor).
+	agentPolicy assistant.GlobalPolicy
 
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
@@ -688,6 +689,15 @@ func WithAgentKnownMaterial(km assistant.KnownMaterial) WSServerOption {
 	return func(ws *WSServer) { ws.agentKnownMaterial = km }
 }
 
+// WithAgentPolicy attaches the ONE global agent policy the ask run grants
+// are minted from (ADR-0020 §7 as amended — amendment proposed, awaiting
+// owner approval). The run mint resolves it through content.ResolvePolicy —
+// the one place the global-default/workspace-override order is stated. When
+// nil/unset, ask runs carry no grant and the model is offered no tools.
+func WithAgentPolicy(p assistant.GlobalPolicy) WSServerOption {
+	return func(ws *WSServer) { ws.agentPolicy = p }
+}
+
 // WithAssistantProbeStore attaches the process-lifetime store of the last
 // endpoints.probe outcome — agent.status's "last probe result" fact. When
 // nil, probes still run and return their outcome, but agent.status reports
@@ -984,6 +994,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.lifecycleSpecs()...)
+	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {

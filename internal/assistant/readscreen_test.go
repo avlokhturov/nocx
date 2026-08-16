@@ -76,13 +76,10 @@ func liveFrameBody(rows ...string) json.RawMessage {
 	return b
 }
 
-func sessionGrant(sessionID string, policy content.GrantPolicy) content.Grant {
-	return content.Grant{
-		Version: 1,
-		Policy:  policy,
-		Effects: []content.Effect{content.EffectObserve},
-		Scopes:  []content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}},
-	}
+func sessionGrant(sessionID string, policy content.EffectPolicy) content.Grant {
+	// Minted as the transport mints: the matrix AsGrant with the session
+	// as the base scope, so the row scopes carry the session bound.
+	return policy.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}})
 }
 
 // TestExecuteReadScreen_SessionOutsideGrantNeverRequests is criterion 2:
@@ -129,7 +126,7 @@ func TestExecuteReadScreen_SessionOutsideGrantNeverRequests(t *testing.T) {
 // and the renderer is never asked. The grant names session-a; the model
 // names session-b.
 func TestMiddleware_ReadScreenRefusedOutsideGrantTerminates(t *testing.T) {
-	grant := sessionGrant("session-a", content.GrantAutonomous)
+	grant := sessionGrant("session-a", autonomousMatrix())
 	req := &recordingRequester{body: liveFrameBody("x")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
@@ -158,7 +155,7 @@ func TestMiddleware_ReadScreenRefusedOutsideGrantTerminates(t *testing.T) {
 // carried to the renderer (region? is the tool's one parameter beyond the
 // session), and a malformed region is refused before the request.
 func TestMiddleware_ReadScreenRegionTravels(t *testing.T) {
-	grant := sessionGrant("session-a", content.GrantAutonomous)
+	grant := sessionGrant("session-a", autonomousMatrix())
 	req := &recordingRequester{body: liveFrameBody("a", "b", "c")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
@@ -231,7 +228,7 @@ func TestExecuteReadScreen_WindowIsHonest(t *testing.T) {
 // wired no renderer-request seam reports the wiring gap as an error — a
 // declared InRenderer tool never silently no-ops.
 func TestMiddleware_ReadScreenWithoutRequesterIsHonest(t *testing.T) {
-	grant := sessionGrant("session-a", content.GrantAutonomous)
+	grant := sessionGrant("session-a", autonomousMatrix())
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil) // requester nil
 
 	_, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"session-a"}`)

@@ -405,54 +405,47 @@ const (
 )
 
 // decide is the permit/ask/refuse function over the ADR-0020 lattice
-// (decision 6) — the three presets of decision 7, plus the two rules that
-// must hold under any preset: a call naming a resource outside the grant is
-// refused (the tool's contract is "within the grant's paths"; widening the
-// grant is a NEW grant on a NEW attempt, not a mid-run question), and an
-// effect the grant does not permit is refused (the tool should never have
-// been declared under this grant — ForGrant filters — and this is the
-// defense that holds if the declaration path is bypassed).
+// (decision 6) as amended (2026-08-16, amendment pending owner approval):
+// the grant's policy MATRIX carries one decision per effect class, and two
+// rules hold under any matrix — a call naming a resource outside the
+// SELECTED EFFECT's row scopes is refused (the tool's contract is "within
+// the grant's paths"; widening the grant is a NEW grant on a NEW attempt,
+// never a mid-run question), and an effect the matrix refuses is refused
+// (the tool should never have been declared under this grant — ForGrant
+// filters — and this is the defense that holds if the declaration path is
+// bypassed).
 func (m *policyMiddleware) decide(t agenttools.Tool, args map[string]any) policyOutcome {
-	if !m.effectPermitted(t.Effect) {
+	if m.grant.Policy.DecisionFor(t.Effect) == content.DecisionRefuse {
 		return policyRefuse
 	}
 	if !m.inScope(t, args) {
 		return policyRefuse
 	}
-	switch m.grant.Policy {
-	case content.GrantAskEveryTime:
-		return policyAsk
-	case content.GrantAskOnMutate:
-		if t.Effect != content.EffectObserve {
-			return policyAsk
-		}
-		return policyPermit
-	case content.GrantAutonomous:
+	switch m.grant.Policy.DecisionFor(t.Effect) {
+	case content.DecisionPermit:
 		return policyPermit
 	default:
-		// A grant without a stated policy fails toward asking: the default
-		// for anything unreadable is to ask, and a silent grant is how a
-		// feature that does not exist survives a release.
+		// Unstated rows, and a grant without a matrix, decide ASK: the
+		// fail-toward-asking default (an empty matrix is a policy that
+		// asks), and a silent permit is how a feature that was never
+		// configured survives a release.
 		return policyAsk
 	}
-}
-
-func (m *policyMiddleware) effectPermitted(e content.Effect) bool {
-	for _, p := range m.grant.Effects {
-		if p == e {
-			return true
-		}
-	}
-	return false
 }
 
 // inScope is the policy's scope check: the resource the call names must be
-// inside the grant. It is NOT the enforcement — the capability is the
-// enforcement (ADR-0028 decision 4) — and it is deliberately the advisory
-// lexical approximation of it: the capability resolves canonical identity,
-// the policy compares the spelled path. A call this check lets through can
-// still be refused by the capability; a call it refuses never reaches the
-// capability.
+// inside the SELECTED EFFECT's row scopes. The run bound was folded into
+// every row at mint (EffectPolicy.WithRunScopes), so the row is the whole
+// resource authority here; Grant.Scopes is deliberately NOT consulted — it
+// is the derived all-rows union that exists for the declaration filter's
+// resource-kind coverage, and a decision that consulted it would let one
+// effect's scopes leak into another effect's call (an observe row scoped to
+// /home refusing /etc nowhere it matters). This is NOT the enforcement — the
+// capability is the enforcement (ADR-0028 decision 4) — and it is
+// deliberately the advisory lexical approximation of it: the capability
+// resolves canonical identity, the policy compares the spelled path. A call
+// this check lets through can still be refused by the capability; a call it
+// refuses never reaches the capability.
 func (m *policyMiddleware) inScope(t agenttools.Tool, args map[string]any) bool {
 	if t.ResourceArg == "" {
 		// The tool names no resource in its parameters; its scope is the
@@ -463,7 +456,7 @@ func (m *policyMiddleware) inScope(t agenttools.Tool, args map[string]any) bool 
 	if !ok {
 		return false // validation already required it; refuse to be sure
 	}
-	for _, s := range m.grant.Scopes {
+	for _, s := range m.grant.Policy.RowScopes(t.Effect) {
 		// A path scope is a lexical containment test (pathUnder — both ends
 		// absolute); a session scope is an exact identity match: the
 		// spelled sessionId IS the resource, there is no containment to

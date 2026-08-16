@@ -39,6 +39,7 @@ export class SettingsContent extends SolidTabContent {
     private readonly footprintClient?: import('./footprint-client').FootprintClient,
     private readonly endpointsClient?: EndpointClient,
     private readonly agentClient?: AgentClient,
+    private readonly policyClient?: import('./policy-client').PolicyClient,
   ) {
     super()
   }
@@ -53,6 +54,7 @@ export class SettingsContent extends SolidTabContent {
           dialogClient: this.dialogClient,
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
+          policyClient: this.policyClient,
           endpointsClient: this.endpointsClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {

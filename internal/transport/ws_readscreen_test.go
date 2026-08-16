@@ -25,7 +25,34 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/storage"
 )
+
+// autonomousPolicyStore returns a store seeded with the autonomous matrix —
+// the composition root's seam (WithAgentPolicy), named at server
+// CONSTRUCTION so no field is mutated after the server's goroutines start
+// (a post-start write races the run mint's reads). The autonomous matrix,
+// minted by runGrantFor with the run's own session as the base scope,
+// permits observe on that session: exactly readScreen's scope.
+func autonomousPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
+	t.Helper()
+	store := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
+	if err := store.SetPolicy(autonomousMatrixForTests()); err != nil {
+		t.Fatalf("seed global policy: %v", err)
+	}
+	return store
+}
+
+// autonomousMatrixForTests is the autonomous preset expressed as a matrix —
+// every row permits — the rows a person would write (the original §7
+// presets have no production constructors; clean-only, preset matrices only).
+func autonomousMatrixForTests() content.EffectPolicy {
+	r := content.EffectRow{Decision: content.DecisionPermit}
+	return content.EffectPolicy{
+		Observe: r, MutateReversible: r, MutateDestructive: r,
+		PrivilegeChange: r, Disclose: r, CrossBoundary: r, Delegate: r,
+	}
+}
 
 type toolCallingServer struct {
 	requests atomic.Int64
@@ -181,13 +208,10 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
-	h := newAskHarness(t, client)
-	// Name the workspace grant policy preset at the server (the composition
-	// root's seam, set directly in-package): the run's grant permits observe
-	// on its own session — exactly readScreen's scope. Production names it
-	// when the egress gate lands (runGrantFor).
-	h.ws.agentGrantPolicy = content.GrantAutonomous
-	h.ws.agentGrantPolicySet = true
+	// The composition-root seam, named at construction: the autonomous
+	// matrix minted with the run's own session permits observe on its own
+	// session — exactly readScreen's scope.
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
@@ -308,13 +332,9 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 	// request honestly with outcome failed, and the failure sentence must
 	// cross as a tool error the run proceeds past — never a hang.
 	var toolSession atomic.Value
-	h := newAskHarness(t, client)
-	// Name the workspace grant policy preset at the server (the composition
-	// root's seam, set directly in-package): the run's grant permits observe
-	// on its own session — exactly readScreen's scope. Production names it
-	// when the egress gate lands (runGrantFor).
-	h.ws.agentGrantPolicy = content.GrantAutonomous
-	h.ws.agentGrantPolicySet = true
+	// The same composition-root seam, at construction: the autonomous
+	// matrix, run-scoped to the harness session.
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if h.fakeRequests.Add(1) == 1 {
@@ -398,13 +418,10 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	// naming any other session would be refused by policy before the broker
 	// is ever asked, which is the test the grant tests own.
 	var toolSession atomic.Value
-	h := newAskHarness(t, client)
-	// Name the workspace grant policy preset at the server (the composition
-	// root's seam, set directly in-package): the run's grant permits observe
-	// on its own session — exactly readScreen's scope. Production names it
-	// when the egress gate lands (runGrantFor).
-	h.ws.agentGrantPolicy = content.GrantAutonomous
-	h.ws.agentGrantPolicySet = true
+	// The composition-root seam (WithAgentPolicy), named at construction:
+	// the autonomous matrix minted with the run's own session permits
+	// observe on its own session — exactly readScreen's scope.
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if h.fakeRequests.Add(1) == 1 {

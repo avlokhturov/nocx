@@ -171,16 +171,14 @@ func callThenAnswer(calls ...toolCallSpec) func(w http.ResponseWriter, r *http.R
 	}
 }
 
-// testDirGrant builds a grant scoped to a fresh temp dir.
-func testDirGrant(t *testing.T, policy content.GrantPolicy) (content.Grant, string) {
+// testDirGrant mints a grant scoped to a fresh temp dir the way the
+// transport does — the matrix AsGrant, with the dir as the base scope of
+// every row — so enforcement (row scopes) and declaration (derived
+// effects/union) see the form a minted grant really has.
+func testDirGrant(t *testing.T, policy content.EffectPolicy) (content.Grant, string) {
 	t.Helper()
 	dir := t.TempDir()
-	return content.Grant{
-		Version: 1,
-		Policy:  policy,
-		Effects: []content.Effect{content.EffectObserve},
-		Scopes:  []content.GrantScope{{Kind: content.ResourcePath, ID: dir}},
-	}, dir
+	return policy.AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}}), dir
 }
 
 func askParams(baseURL string, grant *content.Grant, ledger AttemptLedger, approvals *ApprovalStore) AskParams {
@@ -247,7 +245,7 @@ func wrappedEndpoint(mw *policyMiddleware, name, callID, args string) (string, e
 // sent (the fake server received exactly one request and the run's error is
 // the refusal), not on a spy over next.
 func TestAsk_RefusalTerminalizes(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "in scope")
 
 	ledger := &fakeLedger{}
@@ -284,7 +282,7 @@ func TestAsk_RefusalTerminalizes(t *testing.T) {
 // the ledger records: exactly one execution (the first call's), never a
 // second or third.
 func TestAsk_RefusalOnSecondCallPreventsThird(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "first")
 
 	ledger := &fakeLedger{}
@@ -322,7 +320,7 @@ func TestAsk_RefusalOnSecondCallPreventsThird(t *testing.T) {
 // what the ledger records: exactly one execution — the first call's recorded
 // proposal attempt, closed interrupted, never run.
 func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAskEveryTime)
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "first")
 	writeFile(t, filepath.Join(dir, "b.txt"), "third")
 
@@ -357,7 +355,7 @@ func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
 // ledger's own log: the failed start is the last write, and nothing was
 // finished (no execution ever ran).
 func TestAsk_FailedAttemptWritePreventsExecution(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "would have been read")
 
 	ledger := &fakeLedger{failStart: true}
@@ -398,7 +396,7 @@ func TestAsk_FailedAttemptWritePreventsExecution(t *testing.T) {
 // — the proposal is a ledger fact): exactly one attempt, closed interrupted,
 // the call that is asking has NOT run.
 func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAskEveryTime)
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "must not be read yet")
 
 	ledger := &fakeLedger{}
@@ -437,7 +435,7 @@ func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
 // CHANGED argument does not resume under the old approval — it escalates
 // again, and the tool does not run.
 func TestMiddleware_ApprovalBindsToExactArguments(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAskEveryTime)
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "approved read")
 	writeFile(t, filepath.Join(dir, "b.txt"), "changed read")
 
@@ -492,7 +490,7 @@ func TestMiddleware_ApprovalBindsToExactArguments(t *testing.T) {
 // its path returns the file's contents — asserted on the second request the
 // engine actually sent, whose tool message carries the window.
 func TestAsk_PermittedReadReturnsFileContents(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "the file's contents")
 
 	ledger := &fakeLedger{}
@@ -556,11 +554,7 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	short := filepath.Join(dir, "short.txt")
 	writeFile(t, short, "ten bytes!")
 
-	grant := content.Grant{
-		Version: 1, Policy: content.GrantAutonomous,
-		Effects: []content.Effect{content.EffectObserve},
-		Scopes:  []content.GrantScope{{Kind: content.ResourcePath, ID: dir}},
-	}
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 	decl, ok := reg.Lookup("files.read")
 	if !ok {
 		t.Fatal("files.read not in the registry")
@@ -611,7 +605,7 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 // are malformed model output — terminal, and NOT a refusal (there is nothing
 // to call) and NOT an ask.
 func TestMiddleware_UnknownToolAndBadArgumentsAreMalformed(t *testing.T) {
-	grant, _ := testDirGrant(t, content.GrantAutonomous)
+	grant, _ := testDirGrant(t, autonomousMatrix())
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil)
 
 	if _, err := wrappedEndpoint(mw, "no.such.tool", "c1", `{}`); !errors.Is(err, ErrMalformedModelOutput) {
@@ -721,7 +715,7 @@ func realLedger(t *testing.T) content.LedgerRepository {
 // first live caller here, and the action entry plus the recorded grant are
 // what "what was this allowed to do" queries (ADR-0020 decision 5).
 func TestAsk_PermittedReadRecordsTheAttempt(t *testing.T) {
-	grant, dir := testDirGrant(t, content.GrantAutonomous)
+	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "recorded")
 
 	ledger := realLedger(t)
@@ -755,8 +749,14 @@ func TestAsk_PermittedReadRecordsTheAttempt(t *testing.T) {
 		t.Fatalf("entry has %d executions, want 1", len(entry.Executions))
 	}
 	ex := entry.Executions[0]
-	if ex.Grant == nil || ex.Grant.Version != 1 || len(ex.Grant.Effects) != 1 || ex.Grant.Effects[0] != content.EffectObserve {
-		t.Fatalf("recorded grant = %+v, want version 1 observing over the path scope", ex.Grant)
+	if ex.Grant == nil || ex.Grant.Version != 1 {
+		t.Fatalf("recorded grant = %+v, want a version-1 minted grant", ex.Grant)
+	}
+	if ex.Grant.Policy.DecisionFor(content.EffectObserve) != content.DecisionPermit {
+		t.Fatalf("recorded grant policy = %+v, want the autonomous matrix (observe permitted) recorded on the attempt", ex.Grant.Policy)
+	}
+	if len(ex.Grant.Scopes) != 1 || ex.Grant.Scopes[0].Kind != content.ResourcePath {
+		t.Fatalf("recorded grant scopes = %+v, want the dir's path scope", ex.Grant.Scopes)
 	}
 	if ex.TerminationReason == nil || *ex.TerminationReason != content.TermCompleted {
 		t.Fatalf("termination = %v, want completed — the outcome must be recorded on the attempt", ex.TerminationReason)
