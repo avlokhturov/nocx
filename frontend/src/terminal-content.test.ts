@@ -46,6 +46,12 @@ import {
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
 import { CommandLedger } from './command-ledger'
+import {
+  createRegistry,
+  ShellInputTarget,
+  type InputTarget,
+  type InputTargetRegistry,
+} from './input-target'
 import { TerminalContent, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { Tab } from './tabs'
@@ -1882,6 +1888,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 1,
           maskedKinds: ['openai'],
           entryId: 'e-ggha',
+          author: 'shell',
           redactions: [],
           maskedCommand: 'echo sk-***',
           captures: [
@@ -1974,6 +1981,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e1',
+          author: 'shell',
           redactions: [],
           captures: [],
           maskedCommand: 'make',
@@ -2076,6 +2084,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e1',
+          author: 'shell',
           redactions: [],
           captures: [],
           maskedCommand: 'echo hello',
@@ -3665,6 +3674,159 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(ed.isVisible).toBe(true)
       expect(activeLabel(content)).toBe('Agent')
       expect(indicatorOf(ed)?.textContent).toBe('Ask')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('with only the shell target registered, every submit is attributed to the human and nothing regresses (nocx-iadtt)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // Criterion 5's interval endpoint: ONLY the shell target is
+      // registered — the state the product was in before any second target
+      // existed. The registry is replaced wholesale (the escape hatch the
+      // other tests use for private fields), so the old path is driven
+      // through the real orchestration, not a fake of it.
+      const registry = createRegistry()
+      const shellTarget = (content as unknown as { shellTarget: ShellInputTarget }).shellTarget
+      registry.register(shellTarget)
+      ;(content as unknown as { inputTargets: InputTargetRegistry }).inputTargets = registry
+
+      ed.insertText('echo hi')
+      submitKey(ed)
+
+      // The record that opened at submit is the human's — every record is,
+      // with no second target to confuse the mint.
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger?.records().length).toBe(1)
+      expect(ledger?.records()[0].author).toBe('shell')
+      // The shell submit still reached the pty: nothing regressed.
+      expect(sessionOf(content).send.mock.calls.length).toBeGreaterThan(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("a command submitted by the shell target while another registered target's submission is in flight is attributed to the shell target (nocx-iadtt)", async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    let releaseAsk: () => void = () => {}
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // A second registered test target (no agent command target exists
+      // yet — this is the stand-in) whose submission hangs: the ask is in
+      // flight for the whole test. The interleaving is the point: the
+      // human's own command arrives while the other target's submission
+      // has not settled, and must be attributed to the shell target — the
+      // author is minted at submit from the submitting target, never
+      // derived from what else is running (design §3.1).
+      const inFlight = new Promise<void>((resolve) => {
+        releaseAsk = resolve
+      })
+      // The spy is held by name, never asserted through
+      // `testTarget.submit` — detaching the method from its object is
+      // exactly the accidental call the unbound-method rule exists to
+      // refuse.
+      const agentSubmit = vi.fn(() => inFlight)
+      const testTarget: InputTarget = {
+        id: 'agent',
+        label: 'Test agent',
+        routesToShell: false,
+        author: 'agent',
+        submit: agentSubmit,
+      }
+      const registry = createRegistry()
+      const shellTarget = (content as unknown as { shellTarget: ShellInputTarget }).shellTarget
+      registry.register(shellTarget)
+      registry.register(testTarget)
+      ;(content as unknown as { inputTargets: InputTargetRegistry }).inputTargets = registry
+
+      // The other target's submission goes out THROUGH THE SEAM A PERSON
+      // REACHES: the editor's ⌘Enter target toggle flips the active target
+      // to it, plain Enter submits the question through the router. The
+      // promise never settles until the test releases it, so the whole
+      // shell submit below happens while it is in flight.
+      submitKey(ed, { metaKey: true })
+      ed.insertText('a question')
+      submitKey(ed)
+      expect(agentSubmit).toHaveBeenCalledTimes(1)
+
+      // The person flips back to the shell (⌘Enter again) and submits
+      // their own command while the question is still pending.
+      submitKey(ed, { metaKey: true })
+      ed.insertText('echo mine')
+      submitKey(ed)
+
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger?.records().length).toBe(1)
+      expect(ledger?.records()[0].author).toBe('shell')
+      expect(ledger?.records()[0].command).toBe('echo mine')
+      // The in-flight submission never settled during the shell submit —
+      // its author never leaked onto the shell's record.
+      releaseAsk()
+    } finally {
+      // An assertion failure must not leak the pending submission; release
+      // is idempotent.
+      releaseAsk()
+      teardown()
+    }
+  })
+
+  it('an agent-authored command carries the badge through the real submit path — the closest seam a person will reach (nocx-iadtt)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+
+      // No production target can submit a command as the agent today — that
+      // arrives with the agent's own lane (the agent-mode epic). The
+      // closest seam a person will actually reach once it exists is the
+      // shell submit orchestration itself: a routesToShell target whose
+      // author is the agent. Everything below is the REAL chain — the
+      // ⌘Enter target toggle, the registry router, the ledger record, the
+      // running block.
+      const agentTarget: InputTarget = {
+        id: 'agent',
+        label: 'Agent',
+        routesToShell: true,
+        author: 'agent',
+        submit: vi.fn(async () => {}),
+      }
+      const registry = createRegistry()
+      const shellTarget = (content as unknown as { shellTarget: ShellInputTarget }).shellTarget
+      registry.register(shellTarget)
+      registry.register(agentTarget)
+      ;(content as unknown as { inputTargets: InputTargetRegistry }).inputTargets = registry
+
+      submitKey(ed, { metaKey: true })
+      ed.insertText('echo agent-run')
+      submitKey(ed)
+
+      // The record is the agent's — minted at submit from the submitting
+      // target, through the same orchestration a human's command takes.
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger?.records().length).toBe(1)
+      expect(ledger?.records()[0].author).toBe('agent')
+      // The block that opened at the same submit carries the badge — the
+      // whole happy path, driven through the real orchestration, never a
+      // manufactured block.
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      const running = scrollback.blockManager.runningBlock
+      expect(running?.author).toBe('agent')
+      const mark = running?.el.querySelector('.ui-badge[data-author="agent"]')
+      expect(mark).not.toBeNull()
+      expect(mark?.getAttribute('data-tone')).toBe('info')
+      expect(mark?.textContent).toBe('agent')
     } finally {
       teardown()
     }

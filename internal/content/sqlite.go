@@ -363,7 +363,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 4
+const schemaVersion = 5
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -372,7 +372,7 @@ const schemaVersion = 4
 // schema of THIS store and is discarded deliberately; one containing any
 // other table is refused.
 var rebuildDropOrder = []string{
-	"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
+	"grant_scopes", "grant_effects", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
 	"sessions", "environments", "workspaces", "ledger_sequence",
 	"command_history",
@@ -639,6 +639,14 @@ CREATE TABLE IF NOT EXISTS grant_scopes (
                 ('environment','session','path','credential','destination','tool')),
   resource_id   TEXT NOT NULL,
   PRIMARY KEY (grant_id, resource_kind, resource_id)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS grant_effects (
+  grant_id INTEGER NOT NULL REFERENCES authority_grants(id) ON DELETE CASCADE,
+  effect   TEXT NOT NULL CHECK (effect IN
+            ('observe','mutate-reversible','mutate-destructive','privilege-change',
+             'disclose','cross-boundary','delegate')),
+  PRIMARY KEY (grant_id, effect)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS artifacts (

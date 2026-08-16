@@ -48,7 +48,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	// ── leg 1: submit a key, save it, read the row as a reference ────────
 	record := callAppWS(t, conn, "history.record", map[string]any{
 		"command": `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://openrouter.ai/api`,
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
+		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "author": "shell",
 		"startedAt": int64(1_750_000_000_000), "endedAt": int64(1_750_000_000_100), "trusted": true,
 	}, 2)
 	if record.Error != nil {
@@ -134,7 +134,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	// first offer is still answerable afterwards.
 	record2 := callAppWS(t, conn, "history.record", map[string]any{
 		"command": "TOKEN=abcdefghijklmnopqrstuvwxyz123456 ./run.sh",
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
+		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "author": "shell",
 		"startedAt": int64(1_750_000_000_200), "endedAt": int64(1_750_000_000_300), "trusted": true,
 	}, 5)
 	if record2.Error != nil {
@@ -160,7 +160,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	// Ordinary work carries on in the same tab.
 	record3 := callAppWS(t, conn, "history.record", map[string]any{
 		"command": "echo done",
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
+		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "author": "shell",
 		"startedAt": int64(1_750_000_000_400), "endedAt": int64(1_750_000_000_500), "trusted": true,
 	}, 8)
 	if record3.Error != nil {
