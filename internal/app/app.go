@@ -949,6 +949,19 @@ func New(opts ...Option) (*App, error) {
 	// session can have spawned a shell yet).
 	lifecyclePub.SetEmitter(tp)
 
+	// The vault's prompt carrier, bound post-construction for the same
+	// reason as the emitter above: the server is built here. The vault
+	// owns "I am sealed and one unlock is already pending" (nocx-o9jdu) and
+	// the transport owns "deliver one prompt to whichever renderer is
+	// there" — this line is the only place the two meet.
+	//
+	// NOT YET LIVE FOR USERS: EnsureUnsealed has no production consumer
+	// until nocx-k41yv routes the sealed secret-access paths through it.
+	// Callers still reach RequestUnlock directly and still get one prompt
+	// each. Recorded here rather than left to a green deadcode run, which
+	// is how nocx-rtg0 shipped a write path nobody called.
+	v.SetUnlockRequester(tp)
+
 	// One resolver, one consumer family: connections.test probes and
 	// ordinary connects resolve identically. Created after tp so the
 	// connection-password ask (the second direction, nocx-v64o) can be
