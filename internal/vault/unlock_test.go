@@ -162,7 +162,10 @@ func TestEnsureUnsealed_ThreeCallersRaiseOnePrompt(t *testing.T) {
 		entered: make(chan struct{}, 1),
 		release: make(chan error, 1),
 	})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 
 	ctx := context.Background()
 	done := make(chan error, 3)
@@ -229,7 +232,10 @@ func TestEnsureUnsealed_CancelledResolutionFansOutToEveryWaiter(t *testing.T) {
 		entered: make(chan struct{}, 1),
 		release: make(chan error, 1),
 	})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 	errCancelled := errors.New("unlock cancelled by user")
 
 	ctx := context.Background()
@@ -268,7 +274,10 @@ func TestEnsureUnsealed_LeaderCancelledOthersStillWait(t *testing.T) {
 		entered: make(chan struct{}, 1),
 		release: make(chan error, 1),
 	})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 
 	leaderCtx, cancelLeader := context.WithCancel(context.Background())
 	defer cancelLeader()
@@ -323,7 +332,10 @@ func TestEnsureUnsealed_WaiterDeadlineReleasesOnlyThatWaiter(t *testing.T) {
 		entered: make(chan struct{}, 1),
 		release: make(chan error, 1),
 	})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 
 	done := make(chan error, 2)
 	go func() { done <- v.EnsureUnsealed(context.Background(), "pane one") }()
@@ -374,7 +386,10 @@ func TestEnsureUnsealed_CloseReleasesOutstandingWaiters(t *testing.T) {
 		entered: make(chan struct{}, 1),
 		release: make(chan error, 1),
 	})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 
 	done := make(chan error, 2)
 	go func() { done <- v.EnsureUnsealed(context.Background(), "pane one") }()
@@ -423,7 +438,10 @@ func TestEnsureUnsealed_ResolutionRacingJoinLosesNoCaller(t *testing.T) {
 	// lost and never hangs. The fake resolves instantly, so every
 	// interleaving is exercised many times under -race.
 	v := sealedVault(t, &fakeUnlockRequester{entered: make(chan struct{}, 8)})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 
 	const callers = 8
 	ctx := context.Background()
@@ -457,7 +475,10 @@ func TestEnsureUnsealed_SecondUserActionRaisesFreshPrompt(t *testing.T) {
 		entered: make(chan struct{}, 4),
 		release: make(chan error, 4),
 	})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 	errCancelled := errors.New("unlock cancelled by user")
 
 	ctx := context.Background()
@@ -500,7 +521,10 @@ func TestEnsureUnsealed_JoinedWaiterNamedBeforeSnapshot(t *testing.T) {
 		entered: make(chan struct{}, 4),
 		release: make(chan error, 4),
 	})
-	req := v.unlockReq.(*fakeUnlockRequester)
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
 
 	ctx := context.Background()
 	done := make(chan error, 3)
