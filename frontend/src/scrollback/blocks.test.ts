@@ -1758,6 +1758,26 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(chip?.textContent).toBe('failed')
   })
 
+  // nocx-e6kn2 acceptance: the person must be able to tell which model
+  // answered. The pinned model rides the ask result and close names it on
+  // the block; a close without a model (failure, or an older caller) keeps
+  // the block unadorned rather than inventing an attribution.
+  it('close with the model renders the provenance line on success', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('the answer')
+    h.close('success', undefined, 'gpt-4o')
+    expect(h.el.querySelector('.cmd-answer-provenance')?.textContent).toBe('answered by gpt-4o')
+  })
+
+  it('a success close WITHOUT a model renders no provenance — nobody is named who did not answer', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('the answer')
+    h.close('success')
+    expect(h.el.querySelector('.cmd-answer-provenance')).toBeNull()
+  })
+
   it('clearAll removes answer blocks too', () => {
     const { inner, manager } = newManager()
     manager.addAnswerBlock('q', '/')

@@ -234,6 +234,11 @@ export class AgentInputTarget implements InputTarget {
     // the response is on the wire before the first notification), so the
     // routing check below never sees a stale undefined id.
     handle.el.dataset.answerEntryId = ask.answerEntryId
+    // Which model this run answers with — carried on the ask result and
+    // kept on the block, so the terminal close can name it: the person
+    // must be able to tell which model answered (nocx-e6kn2). The value is
+    // the PINNED run fact, never a re-derivation.
+    handle.el.dataset.answeredBy = ask.model
     this.runs.set(ask.runId, handle)
   }
 
@@ -266,7 +271,7 @@ export class AgentInputTarget implements InputTarget {
         return
       }
       if (s.state === 'completed' || s.state === 'cancelled') {
-        handle.close('success')
+        handle.close('success', undefined, handle.el.dataset.answeredBy)
       } else if (s.state === 'failed' || s.state === 'interrupted') {
         handle.close('failure', s.error ?? s.state)
       } else if (s.state === 'awaiting_approval') {

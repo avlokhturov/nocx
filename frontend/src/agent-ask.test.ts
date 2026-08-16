@@ -25,6 +25,7 @@ class FakeDispatcher {
         state: 'prepared',
         ingestSeq: 1,
         replayed: false,
+        model: 'qwen3',
       }
       // Each ask is a new run with a new answer entry (two overlapping
       // asks stream concurrently; ids never repeat).
@@ -246,7 +247,7 @@ describe('AgentInputTarget', () => {
     await target.submit('q')
 
     dispatcher.emit('agent.runState', { runId: 7, state: 'completed' })
-    expect(handle.close).toHaveBeenCalledWith('success')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
     expect(handle.close).toHaveBeenCalledTimes(1)
 
     await target.submit('q2')
@@ -392,6 +393,6 @@ describe('AgentInputTarget approval routing', () => {
 
     // The run completes: the block closes once.
     dispatcher.emit('agent.runState', { runId, state: 'completed' })
-    expect(handle.close).toHaveBeenCalledWith('success')
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
   })
 })

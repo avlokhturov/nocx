@@ -145,8 +145,11 @@ export interface AnswerBlockHandle {
    *  `this: void` — the target holds the handle and calls the method
    *  detached from any receiver (unbound-method contract). */
   append(this: void, text: string): void
-  /** Close the block: success, or failure with the renderable reason. */
-  close(this: void, status: 'success' | 'failure', error?: string): void
+  /** Close the block: success, or failure with the renderable reason.
+   *  `model` names the model that answered (the ask result's pinned
+   *  run fact, nocx-e6kn2): painted as the block's provenance on
+   *  success, so a person can tell which model answered. */
+  close(this: void, status: 'success' | 'failure', error?: string, model?: string): void
 }
 
 /** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
@@ -1655,7 +1658,7 @@ export class BlockManager {
           }
         }
       },
-      close(status: 'success' | 'failure', error?: string): void {
+      close(status: 'success' | 'failure', error?: string, model?: string): void {
         stopWaiting()
         trimEmptyTail()
         partial = null
@@ -1671,6 +1674,16 @@ export class BlockManager {
               : 'nocx-chip nocx-chip-fail cmd-header-exit'
           chip.textContent = status === 'success' ? chips.done : chips.failed
           right.appendChild(chip)
+        }
+        // The model that answered, on the answer itself (nocx-e6kn2): the
+        // person must be able to tell which model answered without going
+        // to look it up. The value is the ask result's pinned model —
+        // this run's fact, never today's assignment.
+        if (status === 'success' && model) {
+          const note = document.createElement('div')
+          note.className = 'cmd-answer-provenance'
+          note.textContent = `answered by ${model}`
+          outputEl.appendChild(note)
         }
         if (error) {
           const note = document.createElement('div')

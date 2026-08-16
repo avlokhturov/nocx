@@ -4560,6 +4560,7 @@ func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 	raw, err := json.Marshal(agentAskResponse{
 		RunID: 7, QuestionID: "ask-1", AnswerEntryID: "answer-1",
 		State: string(content.RunPrepared), IngestSeq: 3, Replayed: false,
+		Model: "qwen3",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
