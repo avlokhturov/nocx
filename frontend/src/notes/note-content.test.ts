@@ -173,6 +173,51 @@ describe('the note tab', () => {
     })
   })
 
+  it('closing a note nobody typed into removes it — an empty note is not a note', async () => {
+    const remove = vi.fn().mockResolvedValue({ id: 'n1' })
+    const h = harness({
+      get: vi.fn().mockResolvedValue({ id: 'n1', title: '', body: '', createdAt: 1, updatedAt: 1 }),
+      remove,
+    })
+    await h.content.mount(h.target, h.host, new AbortController().signal)
+
+    h.content.dispose()
+
+    await vi.waitFor(() => {
+      expect(remove).toHaveBeenCalledWith('n1')
+    })
+    // And nothing was written on the way out: there was nothing to write.
+    expect(h.update).not.toHaveBeenCalled()
+  })
+
+  it('whitespace alone is empty: a note of blank lines is removed too', async () => {
+    const remove = vi.fn().mockResolvedValue({ id: 'n1' })
+    const h = harness({
+      get: vi.fn().mockResolvedValue({ id: 'n1', title: '', body: '', createdAt: 1, updatedAt: 1 }),
+      remove,
+    })
+    await h.content.mount(h.target, h.host, new AbortController().signal)
+    type(h.content, '\n  \n\t\n')
+    h.content.dispose()
+
+    await vi.waitFor(() => {
+      expect(remove).toHaveBeenCalledWith('n1')
+    })
+  })
+
+  it('a note with words in it is kept, and the words are written', async () => {
+    const remove = vi.fn().mockResolvedValue({ id: 'n1' })
+    const h = harness({ remove })
+    await h.content.mount(h.target, h.host, new AbortController().signal)
+    type(h.content, 'worth keeping')
+    h.content.dispose()
+
+    await vi.waitFor(() => {
+      expect(h.update).toHaveBeenCalledWith('n1', 'worth keeping')
+    })
+    expect(remove).not.toHaveBeenCalled()
+  })
+
   it('a note that cannot be read says so instead of showing an empty document', async () => {
     const h = harness({ get: vi.fn().mockRejectedValue(new Error('no such note')) })
     await h.content.mount(h.target, h.host, new AbortController().signal)

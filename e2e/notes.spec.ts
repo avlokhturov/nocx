@@ -102,6 +102,28 @@ test.describe('notes', () => {
     })
   })
 
+  test('a note nobody typed into is not left in the library', async ({ page }) => {
+    // The chord is cheap to press by accident, and the record exists before
+    // the first character does — so an empty one must not survive the tab
+    // that made it, or the panel fills up with notes called by their date
+    // and containing nothing.
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await promptReady(page)
+    await openPanel(page)
+    const rowsBefore = await page.locator(ROW).count()
+
+    await pressChord(page)
+    await expect(page.locator('.nocx-tab')).toHaveCount(2, { timeout: 10_000 })
+    await page.locator('.nocx-tab[aria-selected="true"] [aria-label="Close tab"]').click()
+    await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 10_000 })
+
+    await page.reload()
+    await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 15_000 })
+    await openPanel(page)
+    await expect(page.locator(ROW)).toHaveCount(rowsBefore, { timeout: 10_000 })
+  })
+
   test('the same note opens once: asking twice focuses the tab already open', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)

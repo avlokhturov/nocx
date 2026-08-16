@@ -94,11 +94,27 @@ export class NoteContent extends BaseTabContent {
     if (this.disposed) return
     this.disposed = true
     this.clearTimer()
-    // The last save runs on the way out, so a note closed a keystroke after
-    // it was typed keeps the keystroke. It cannot be awaited here — dispose
-    // is synchronous — so a failure lands as a toast rather than on a tab
-    // that is already gone. Silence is the one thing it must not be.
-    if (this.draft !== this.saved) {
+    if (this.draft.trim() === '') {
+      // An empty note is not a note. The chord creates the record before the
+      // tab exists — the editor needs somewhere to save to, and the id is
+      // what deduplicates the tab — so "never save an empty one" is kept
+      // here, at the only moment it can be: a note closed with nothing in it
+      // is removed rather than left in the library as a row called by its
+      // date and containing nothing.
+      //
+      // It applies whether the note was never typed into or emptied
+      // deliberately: the store already holds the empty body in the second
+      // case (the idle save wrote it), so deleting the record loses nothing
+      // that closing the tab had not already lost.
+      void this.deps.store.remove(this.noteId).catch((err: unknown) => {
+        log.error('nocx: an empty note could not be removed on close', { message: message(err) })
+      })
+    } else if (this.draft !== this.saved) {
+      // The last save runs on the way out, so a note closed a keystroke
+      // after it was typed keeps the keystroke. It cannot be awaited here —
+      // dispose is synchronous — so a failure lands as a toast rather than
+      // on a tab that is already gone. Silence is the one thing it must
+      // not be.
       void this.deps.store.update(this.noteId, this.draft).catch((err: unknown) => {
         log.error('nocx: a note could not be saved on close', { message: message(err) })
         showToast({
