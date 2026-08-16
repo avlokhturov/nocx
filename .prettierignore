@@ -4,7 +4,7 @@ graphify-out/
 dist/
 build/
 frontend/dist/
-frontend/wailsjs/
+frontend/bindings/
 frontend/node_modules/
 package-lock.json
 spike/

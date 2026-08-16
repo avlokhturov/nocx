@@ -119,8 +119,14 @@ jobs:
       - name: Lint
         run: golangci-lint run ./...
 
+      # The Wails v3 module compiles cgo against WebKitGTK; the gtk3 tag
+      # selects the 4.1 surface this product ships (ADR-0007). Without the
+      # libraries the portable set cannot build.
+      - name: Install WebKitGTK build dependencies
+        run: sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
+
       - name: Build
-        run: go build ./...
+        run: go build -tags gtk3 ./...
 
       # THE OS-SPECIFIC PACKAGES ONLY, and the list comes from the Makefile
       # (`make ci-mac` runs the same set locally, in a disposable root).
@@ -142,7 +148,7 @@ jobs:
       - name: Test (the OS-specific packages)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -count=1 $PKGS
+        run: go test -race -tags gtk3 -count=1 $PKGS
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -207,15 +213,22 @@ jobs:
       # while all of Linux stayed green (nocx-cn86). The macOS job proves the
       # behaviour against a real 3.2; this makes the parse check run on the
       # side that a Linux developer and this job can both see.
+
+      # The Wails v3 module compiles cgo against WebKitGTK; the gtk3 tag
+      # selects the 4.1 surface this product ships (ADR-0007). The portable
+      # set includes internal/notify/wailsadapter, so the libraries and the
+      # tag are required to compile at all.
+      - name: Install WebKitGTK build dependencies
+        run: sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
+
       - name: Install bash 3.2 (macOS's /bin/bash)
         run: sudo scripts/install-bash32.sh
 
       - name: Install Secret Service & dbus-x11
         if: matrix.keyring == 'with-secret-service'
         run: sudo apt-get install -y -qq gnome-keyring dbus-x11
-
       - name: Build
-        run: go build ./...
+        run: go build -tags gtk3 ./...
 
       # THE PACKAGE SET COMES FROM THE MAKEFILE, never from a list written
       # here. `make ci-backend` and `make ci-linux` run these same two sets
@@ -242,14 +255,14 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -count=1 $PKGS
+          go test -race -tags gtk3 -count=1 $PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
         if: matrix.keyring == 'no-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -count=1 $PKGS
+        run: go test -race -tags gtk3 -count=1 $PKGS
 
   # ci-linux — the OS-SPECIFIC half of the Go suite on Linux.
   #
@@ -300,6 +313,12 @@ jobs:
       - name: Install zsh (internal/pty closes a real interactive shell)
         run: scripts/install-zsh-ci.sh
 
+      # The Wails v3 module compiles cgo against WebKitGTK; the gtk3 tag
+      # selects the 4.1 surface this product ships (ADR-0007). `go build ./...`
+      # below compiles the whole tree including the adapter.
+      - name: Install WebKitGTK build dependencies
+        run: sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
+
       - name: Resolve the OS-specific package set
         id: pkgs
         run: echo "list=$(make -s print-os-pkgs)" >> "$GITHUB_OUTPUT"
@@ -308,7 +327,7 @@ jobs:
         run: make ci-os-split
 
       - name: Build
-        run: go build ./...
+        run: go build -tags gtk3 ./...
 
       - name: Test (with Secret Service)
         if: matrix.keyring == 'with-secret-service'
@@ -322,14 +341,14 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -count=1 $PKGS
+          go test -race -tags gtk3 -count=1 $PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
         if: matrix.keyring == 'no-secret-service'
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -count=1 $PKGS
+        run: go test -race -tags gtk3 -count=1 $PKGS
 
   ci-frontend:
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}

@@ -57,7 +57,7 @@ RUN mkdir -p /out \
 FROM golang:1.26-bookworm
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends dash zsh openssh-server \
+ && apt-get install -y --no-install-recommends dash zsh openssh-server libgtk-3-dev libwebkit2gtk-4.1-dev \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=bash32 /out/ /opt/bash32/

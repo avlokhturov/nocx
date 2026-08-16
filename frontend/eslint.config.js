@@ -850,10 +850,15 @@ export default tseslint.config(
   // `src/generated/**` is produced by `npm run contracts` from contracts/*.schema.json.
   // Linting it would be linting the generator's output style, and any fix would be
   // overwritten on the next run — the schema is the file to change.
+  // `bindings/**` is the same thing one directory over: Wails v3 writes it, where
+  // v2 wrote `wailsjs/**`. The old entry is gone because the directory is — the
+  // migration deletes it — and the new one is here rather than in a follow-up,
+  // because an unignored generated tree does not fail loudly, it fails as ten
+  // style errors nobody can fix in a file the generator will overwrite.
   {
     ignores: [
       'dist/**',
-      'wailsjs/**',
+      'bindings/**',
       'lint-fixtures/**',
       'eslint-fixtures/**',
       'src/generated/**',

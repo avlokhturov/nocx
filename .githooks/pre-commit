@@ -23,7 +23,6 @@ check_cmd() {
 
 check_cmd gofumpt "go install mvdan.cc/gofumpt@latest"
 check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8"
-check_cmd deadcode "go install golang.org/x/tools/cmd/deadcode@latest"
 check_cmd go "install Go from https://go.dev/dl/"
 check_cmd node "install Node.js from https://nodejs.org/"
 check_cmd npm "install Node.js from https://nodejs.org/"
@@ -85,26 +84,6 @@ host_gate() {
     ok "$_label"
 }
 
-# --- 0b. deadcode ratchet (Go changes only) ---------------------------------
-# This runs BEFORE the containers rather than inside their shadow, which is
-# where every other host gate runs. It is the one host gate with a large memory
-# peak: the analysis loads the whole module twice (darwin and linux) and tops
-# out around 1.4 GB, while `go test -race` in a container next to it wants
-# several GB of its own. On an 8 GB machine the kernel picks one, and on
-# 2026-08-14 it picked this one twice in a row — reported as "deadcode exited
-# null", which says nothing about the tree and reads like it does.
-#
-# The whole ratchet is 13s measured on that same machine, against container
-# gates that are minutes, so running it first costs 13s of overlap and buys a
-# gate that fails for reasons in the diff. The committed baseline in
-# .githooks/deadcode-baseline.json is what makes a NEW unreachable function a
-# failure rather than the 84 already there.
-if [ "$RUN_GO" = 1 ]; then
-    host_gate "deadcode ratchet" node .githooks/check-deadcode.mjs
-else
-    ok "deadcode ratchet — skipped (no Go changes staged)"
-fi
-
 # --- 1. start the container gates now, in parallel --------------------------
 # They share nothing — one is a Go toolchain, the other a Node one — and between
 # them they were 72% of this hook's wall time when run in sequence. Starting them
@@ -141,7 +120,39 @@ fi
 ok "gofumpt"
 
 # --- 3. golangci-lint (always: it is cached and effectively free) -----------
-host_gate "golangci-lint" golangci-lint run ./...
+# The Wails v3 module compiles cgo against WebKitGTK, and v3 defaults to
+# GTK4/webkitgtk-6.0 which this machine class does not carry; the gtk3 tag
+# selects the 4.1 pkg-config path instead. Without it golangci-lint cannot
+# typecheck the packages that import wails at all, and every commit fails
+# on cgo rather than on anything the author wrote. Computed the same way
+# the Makefile computes WAILS_PLATFORM_TAGS, and empty off Linux, where
+# the default path already resolves.
+GOLANGCI_TAGS=""
+if [ "$(go env GOOS)" = "linux" ] && pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+    GOLANGCI_TAGS="--build-tags=gtk3"
+fi
+# shellcheck disable=SC2086 # GOLANGCI_TAGS must word-split away when empty.
+host_gate "golangci-lint" golangci-lint run $GOLANGCI_TAGS ./...
+
+# --- 3b. deadcode ratchet: MOVED TO CI (nocx-re6gk) --------------------
+# It used to run in this hook. Wails v3 ended that, and not by accident: the ratchet
+# analysed darwin AND linux from whatever machine it ran on, which was only
+# possible with CGO_ENABLED=0 — and v3 requires cgo for both targets (its own
+# cross-platform guide: macOS "Yes / Docker with macOS SDK", Linux "Yes /
+# Docker, or native if a C compiler is available"). There is no no-cgo mode to
+# reach for; the option does not exist rather than being hard to find.
+#
+# The cross-GOOS-from-one-host trick existed only because a developer machine
+# cannot be both a Mac and a Linux box. CI already has both, so each job
+# analyses its OWN platform natively with cgo on, and the union baseline keeps
+# working unchanged — a per-platform run is a subset of it, so a NEW violation
+# still fails and only staleness goes unreported. That costs no Docker image
+# and needs no macOS SDK licence, which the wails-cross image would have
+# required us to accept into a mandatory gate.
+#
+# Removing it from here is deliberate and is NOT a downgrade to nothing: this
+# repo has nocx-rtg0, where a write path with no caller shipped behind a green
+# "deadcode is empty". The ratchet keeps its teeth; it changes address.
 
 # --- 3c. control goroutine ratchet (Go changes only, same reasoning as the
 # deadcode ratchet: ~10ms, and the committed baseline is what makes a NEW

@@ -180,7 +180,8 @@ describe('shouldCopy', () => {
 
 describe('BrowserClipboard', () => {
   let origNavigator: typeof navigator
-  let origRuntime: unknown
+  let origWebview: unknown
+  let origWebkit: unknown
 
   afterEach(() => {
     // Restore globals that the test mutated.
@@ -189,16 +190,24 @@ describe('BrowserClipboard', () => {
       writable: true,
       configurable: true,
     })
-    if (origRuntime === undefined) {
-      delete (window as unknown as Record<string, unknown>).runtime
+    const w = window as unknown as Record<string, unknown>
+    if (origWebview === undefined) {
+      delete w.chrome
     } else {
-      ;(window as unknown as Record<string, unknown>).runtime = origRuntime
+      w.chrome = origWebview
+    }
+    if (origWebkit === undefined) {
+      delete w.webkit
+    } else {
+      w.webkit = origWebkit
     }
   })
 
   it('writeText calls navigator.clipboard.writeText', async () => {
     origNavigator = globalThis.navigator
-    origRuntime = (window as unknown as Record<string, unknown>).runtime
+    const w = window as unknown as Record<string, unknown>
+    origWebview = w.chrome
+    origWebkit = w.webkit
 
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(globalThis, 'navigator', {
@@ -207,8 +216,9 @@ describe('BrowserClipboard', () => {
       configurable: true,
     })
 
-    // Remove Wails runtime so the chooser picks BrowserClipboard.
-    delete (window as unknown as Record<string, unknown>).runtime
+    // Remove the Wails webview bridge so the chooser picks BrowserClipboard.
+    delete w.chrome
+    delete w.webkit
 
     const clipboard = createClipboardAccess()
     await clipboard.writeText('test')
@@ -217,7 +227,9 @@ describe('BrowserClipboard', () => {
 
   it('readText calls navigator.clipboard.readText', async () => {
     origNavigator = globalThis.navigator
-    origRuntime = (window as unknown as Record<string, unknown>).runtime
+    const w = window as unknown as Record<string, unknown>
+    origWebview = w.chrome
+    origWebkit = w.webkit
 
     const readText = vi.fn().mockResolvedValue('clipboard content')
     Object.defineProperty(globalThis, 'navigator', {
@@ -226,7 +238,8 @@ describe('BrowserClipboard', () => {
       configurable: true,
     })
 
-    delete (window as unknown as Record<string, unknown>).runtime
+    delete w.chrome
+    delete w.webkit
 
     const clipboard = createClipboardAccess()
     const result = await clipboard.readText()
@@ -236,21 +249,30 @@ describe('BrowserClipboard', () => {
 })
 
 describe('WailsClipboard', () => {
-  let origRuntime: unknown
+  let origWebview: unknown
+  let origWebkit: unknown
 
   afterEach(() => {
-    if (origRuntime === undefined) {
-      delete (window as unknown as Record<string, unknown>).runtime
+    const w = window as unknown as Record<string, unknown>
+    if (origWebview === undefined) {
+      delete w.chrome
     } else {
-      ;(window as unknown as Record<string, unknown>).runtime = origRuntime
+      w.chrome = origWebview
     }
+    if (origWebkit === undefined) {
+      delete w.webkit
+    } else {
+      w.webkit = origWebkit
+    }
+    vi.restoreAllMocks()
   })
 
-  it('is selected when window.runtime exists', () => {
-    origRuntime = (window as unknown as Record<string, unknown>).runtime
-    ;(window as unknown as Record<string, unknown>).runtime = {
-      ClipboardGetText: vi.fn(),
-      ClipboardSetText: vi.fn(),
+  it('is selected when the Wails webview bridge exists', () => {
+    const w = window as unknown as { chrome?: unknown; webkit?: unknown }
+    origWebview = w.chrome
+    origWebkit = w.webkit
+    ;(w as Record<string, unknown>).webkit = {
+      messageHandlers: { external: { postMessage: vi.fn() } },
     }
 
     const clipboard = createClipboardAccess()
@@ -261,19 +283,30 @@ describe('WailsClipboard', () => {
 })
 
 describe('createClipboardAccess', () => {
-  let origRuntime: unknown
+  let origWebview: unknown
+  let origWebkit: unknown
 
   afterEach(() => {
-    if (origRuntime === undefined) {
-      delete (window as unknown as Record<string, unknown>).runtime
+    const w = window as unknown as Record<string, unknown>
+    if (origWebview === undefined) {
+      delete w.chrome
     } else {
-      ;(window as unknown as Record<string, unknown>).runtime = origRuntime
+      w.chrome = origWebview
     }
+    if (origWebkit === undefined) {
+      delete w.webkit
+    } else {
+      w.webkit = origWebkit
+    }
+    vi.restoreAllMocks()
   })
 
   it('returns a degraded implementation when neither backend is available', async () => {
-    origRuntime = (window as unknown as Record<string, unknown>).runtime
-    delete (window as unknown as Record<string, unknown>).runtime
+    const w = window as unknown as Record<string, unknown>
+    origWebview = w.chrome
+    origWebkit = w.webkit
+    delete w.chrome
+    delete w.webkit
 
     // Replace navigator with one that has no clipboard.
     const origNavigator = globalThis.navigator

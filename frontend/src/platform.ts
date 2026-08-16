@@ -19,14 +19,14 @@
  *    browser has no Wails runtime to open a system browser with.
  *
  * Resolution order:
- *   1. The Wails runtime's Environment(), which reports the Go GOOS and is
- *      the authority inside the packaged app.
+ *   1. The Wails v3 runtime's System.Environment(), which reports the Go
+ *      GOOS and is the authority inside the packaged app.
  *   2. The user agent, for the plain-browser dev path where no runtime
  *      exists. Only ever used where there is no window chrome to match
  *      anyway.
  */
 
-import { Environment } from '../wailsjs/runtime/runtime'
+import { System } from '@wailsio/runtime'
 import { log } from './log'
 
 export type Platform = 'darwin' | 'linux' | 'windows' | 'web'
@@ -80,8 +80,8 @@ export async function bootstrapPlatform(
 ): Promise<Platform> {
   let platform: Platform
   try {
-    const env = await Environment()
-    platform = normalizePlatform(env.platform)
+    const env = await System.Environment()
+    platform = normalizePlatform(env.OS)
     current = platform
   } catch {
     platform = platformFromUserAgent(navigator.userAgent)

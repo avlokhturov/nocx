@@ -118,14 +118,14 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 
 ## Prerequisites
 
-| Tool          | Version     | Install                                                                  |
-| ------------- | ----------- | ------------------------------------------------------------------------ |
-| Go            | 1.26        | [go.dev](https://go.dev/dl/)                                             |
-| Node          | 24          | [nodejs.org](https://nodejs.org/)                                        |
-| Wails CLI     | v2          | `go install github.com/wailsapp/wails/v2/cmd/wails@latest`               |
-| gofumpt       | latest      | `go install mvdan.cc/gofumpt@latest`                                     |
-| golangci-lint | **v1.64.8** | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
-| bd (beads)    | **≥ 1.1.0** | `brew install beads`                                                     |
+| Tool          | Version           | Install                                                                  |
+| ------------- | ----------------- | ------------------------------------------------------------------------ |
+| Go            | 1.26              | [go.dev](https://go.dev/dl/)                                             |
+| Node          | 24                | [nodejs.org](https://nodejs.org/)                                        |
+| Wails CLI     | **^3.0.0-beta.9** | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9`       |
+| gofumpt       | latest            | `go install mvdan.cc/gofumpt@latest`                                     |
+| golangci-lint | **v1.64.8**       | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
+| bd (beads)    | **≥ 1.1.0**       | `brew install beads`                                                     |
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
@@ -142,7 +142,7 @@ and `uv` from nixpkgs, put `~/go/bin` and `~/.local/bin` on your `PATH`, then ge
 the rest through the language toolchains:
 
 ```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8   # exactly this — nixpkgs ships v2, which rejects .golangci.yml
 CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest        # server-mode bd; add gcc only for the embedded cgo build
 ```

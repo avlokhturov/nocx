@@ -99,22 +99,53 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      # Pinned to the version in go.mod, like the e2e job: the CLI builds the
-      # app, so drift between the two is a build no developer can reproduce.
+      # Pinned to the version in go.mod, like the e2e job. The macOS job still
+      # needs the CLI (build-assets generates the Info.plist and icon bundle;
+      # the Linux job builds with plain go build and does not).
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
 
-      - name: Patch wails.json product version
+      - name: Generate macOS bundle assets
         run: |
           set -euo pipefail
-          # wails.json has no info object today, so 1.0.0 is Wails' default, not
-          # a value in the file. Wails writes info.productVersion into both
-          # CFBundleShortVersionString and CFBundleVersion, and there is no build
-          # flag for it, so the object is created here before the build (§4).
-          tmp="$(mktemp)"
-          jq --arg v "$VERSION" '.info = {productName: "nocx", productVersion: $v}' wails.json > "$tmp"
-          mv "$tmp" wails.json
-          cat wails.json
+          # v3 has no wails.json; the version that used to be patched into it
+          # (info.productVersion -> CFBundleShortVersionString/CFBundleVersion)
+          # is now a build-assets flag. The CLI also embeds the icon and
+          # generates the Info.plist template the .app assembly copies.
+          wails3 generate build-assets \
+            -dir build/assets \
+            -binary-name nocx \
+            -product-name nocx \
+            -product-identifier com.shady2k.nocx \
+            -product-version "$VERSION"
+
+      - name: Generate macOS icon bundle
+        run: |
+          set -euo pipefail
+          # build/appicon.png is the ONE committed icon in the repository, and
+          # the Linux job already derives its AppImage icon from it. macOS
+          # derives its .icns from the same master here rather than expecting a
+          # second asset to exist: `generate build-assets` above writes plists
+          # and never an icon, so the assembly step below used to copy a file
+          # that nothing in the pipeline had produced.
+          #
+          # -windowsfilename "" is load-bearing rather than tidiness: the flag
+          # defaults to build/windows/icon.ico and the generator writes it with
+          # a plain os.WriteFile, so leaving the default in place fails this
+          # step on a directory this repo does not have.
+          #
+          # icons.icns, not the tool's default icon.icns: the Info.plist sets
+          # CFBundleIconFile to "icons", so that is the name the bundle has to
+          # carry. Wails' own Taskfile passes the same override.
+          wails3 generate icons \
+            -input build/appicon.png \
+            -macfilename build/darwin/icons.icns \
+            -windowsfilename ""
+          test -s build/darwin/icons.icns
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
 
       - name: Build universal bundle
         run: |
@@ -123,9 +154,33 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
-          # Wails v2.13 passes -ldflags to the Go compiler for both slices and
-          # joins them with lipo (§4).
-          wails build -platform darwin/universal -tags release -ldflags "$LDFLAGS"
+          # v3 has no -platform flag: build each slice and join with lipo (§4).
+          GOOS=darwin GOARCH=amd64 go build -tags "release production" -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-amd64/nocx .
+          GOOS=darwin GOARCH=arm64 go build -tags "release production" -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-arm64/nocx .
+          mkdir -p build/bin/nocx.app/Contents/MacOS build/bin/nocx.app/Contents/Resources
+          lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx \
+            build/bin/darwin-amd64/nocx build/bin/darwin-arm64/nocx
+          cp build/assets/darwin/Info.plist build/bin/nocx.app/Contents/Info.plist
+          cp build/darwin/icons.icns build/bin/nocx.app/Contents/Resources/icons.icns
+          # Ad-hoc sign the assembled bundle. This is not an extra hardening
+          # step, it is the one the CLI used to perform: v2.13 ran
+          # `codesign --force --deep --sign -` itself at the end of every
+          # darwin build ("self-sign the .app bundle so notifications work" —
+          # pkg/commands/build/build.go), and v3's own generated darwin
+          # Taskfile ends `create:app:bundle` with the identical command.
+          # Assembling the bundle by hand is what dropped it, and nothing
+          # downstream would have said so gently: `codesign --verify --deep
+          # --strict` below, the updater's VerifyExtracted (§9,
+          # internal/update/platform_darwin.go) and ADR-0003's no-Developer-ID
+          # position all rest on the ad-hoc signature existing.
+          #
+          # It must be the LAST thing that touches the bundle: the signature
+          # seals Info.plist, the icon and the binary, so any copy after this
+          # line invalidates it. The steps that follow only read, execute and
+          # copy the tree wholesale.
+          codesign --force --deep --sign - build/bin/nocx.app
 
       - name: Smoke checks
         run: |
@@ -149,8 +204,11 @@ jobs:
           reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
-          # 4. Wails' ad-hoc signature must be intact — the baseline the payload
-          #    round trip (§9) asserts is preserved through packaging.
+          # 4. The ad-hoc signature must be intact — the baseline the payload
+          #    round trip (§9) asserts is preserved through packaging. Applied
+          #    by the signing command at the end of the assembly step above;
+          #    under v2 the wails CLI applied it, which is why this check long
+          #    predates any explicit codesign call in this file.
           codesign --verify --deep --strict "$APP"
 
       - name: Package .dmg and .zip
@@ -208,8 +266,12 @@ jobs:
           # not depend on something GitHub can drop.
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev imagemagick
 
-      - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+      # The Linux job builds with plain `go build` — v3 has no build wrapper
+      # without a Taskfile, which this repo does not use — so no Wails CLI is
+      # needed here.
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
 
       - name: Build Linux binary
         run: |
@@ -218,14 +280,16 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
-          # `webkit2_41` is not optional here, it is what makes the step above
-          # mean anything: Wails v2 defaults its cgo pkg-config to
-          # webkit2gtk-4.0, so a job that installs libwebkit2gtk-4.1-dev and
-          # says nothing else fails at "Package webkit2gtk-4.0 was not found"
-          # AFTER the whole CI gate has run. 4.1 is the decided target — ADR-0007
-          # and the README support envelope both name it — so the tag states the
-          # decision rather than the apt line implying it (nocx-xy9z).
-          wails build -platform linux/amd64 -tags release,webkit2_41 -ldflags "$LDFLAGS"
+          # `gtk3` is not optional here, it is what makes the step above
+          # mean anything: Wails v3 defaults to GTK4/WebKitGTK-6.0, so a job
+          # that installs libwebkit2gtk-4.1-dev and says nothing else links a
+          # different webkit than the envelope promises. 4.1 is the decided
+          # target — ADR-0007 and the README support envelope both name it —
+          # and the tag states the decision rather than the apt line implying
+          # it (nocx-xy9z, nocx-v3yw). `production` is v3's tag for
+          # production semantics; `release` selects the shipped profile
+          # directory (appdir.go).
+          go build -tags "release production gtk3" -ldflags "$LDFLAGS" -o build/bin/nocx .
 
       - name: Smoke checks (binary)
         run: |
