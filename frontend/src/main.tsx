@@ -26,7 +26,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -62,6 +62,18 @@ import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
+import { SnippetsClient } from './snippets/snippets-client'
+import { SnippetsStore, type Snippet } from './snippets/snippets-store'
+import { createSessionFactsProvider } from './snippets/session-facts'
+import { createSnippetFireAdapter } from './snippets/fire'
+import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
+import { mountSnippetAskDialog } from './snippets/snippet-ask-dialog'
+import { NotesClient } from './notes/notes-client'
+import { NotesStore } from './notes/notes-store'
+import { NotesPanel } from './notes/notes-panel'
+import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
+import { isNoteChord } from './notes/chord'
+import { askFields } from './snippets/resolve'
 
 async function main() {
   log.info('nocx: main() called')
@@ -123,6 +135,11 @@ async function main() {
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
+  // The snippet library: ONE store, read by the palette, the settings page
+  // and every later surface (design §6 — no change notification on the
+  // wire, a writer re-reads). Constructed with the other clients because
+  // the Settings tab's factory below closes over it.
+  const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -283,6 +300,7 @@ async function main() {
         footprintClient,
         endpointsClient,
         agentClient,
+        snippetsStore,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -457,6 +475,76 @@ async function main() {
     store: gitStore,
     activeOrigin,
   })
+
+  // ── Snippets: the palette (design §10.1) ─────────────────────────────
+  // The palette is the keyboard surface that answers when there is no
+  // command editor; the fire adapter is where the design's fire-time rules
+  // live. Both read the one store built above.
+  // The pane's facts are read AT FIRE TIME, never when the palette opened
+  // (design §8, bead nocx-jj77): the provider reads the ACTIVE pane on
+  // every call, so a tab switch between choosing a snippet and confirming
+  // targets the pane in front (design §9.5).
+  const snippetFacts = createSessionFactsProvider(
+    {
+      paneFacts: () => {
+        const content = tm.activeTerminalContent()
+        if (content === null) return null
+        const env = content.snippetEnv()
+        if (env === null) return null
+        return {
+          cwd: env.cwd,
+          host: env.host,
+          user: env.user,
+          // The git panel's live binding for the active origin — the only
+          // owner of a binding; the provider never invents an id to ask
+          // with (session-facts.ts).
+          gitBindingId: gitStore.binding()?.bindingId ?? null,
+        }
+      },
+    },
+    { status: (bindingId) => gitServices.status(bindingId) },
+  )
+  const snippetFire = createSnippetFireAdapter({
+    facts: () => snippetFacts.facts(),
+    activeInsert: () => {
+      const content = tm.activeTerminalContent()
+      return content === null ? null : { insertSnippet: (t) => content.insertSnippet(t) }
+    },
+    clipboard: { writeText: (text) => clipboard.writeText(text) },
+  })
+  // Where the keyboard goes after a snippet lands: back to the pane it was
+  // fired into. TerminalContent decides which half owns it — the command
+  // editor when it is visible, the grid otherwise — so this asks the pane
+  // rather than choosing (AD-8).
+  function returnKeyboardToThePane(): void {
+    tm.activeTerminalContent()?.focus()
+  }
+
+  // Snippets ride the quick-connect palette — the surface the server list,
+  // the command palette and the secret picker already are. The provider is
+  // registered with the others below; this reference is what the chord, the
+  // strip's menu and the completion dropdown all fire through, so there is
+  // ONE accept path (AD-8).
+  const snippetsProvider = new SnippetsQuickConnectProvider({
+    store: snippetsStore,
+    fire: snippetFire,
+    // A refusal re-opens the list with the reason on it: the surface it is
+    // about is still there, and a toast would take the explanation away
+    // from it (design §11).
+    onRefused: (message) => qc.showSnippets(message),
+    onManage: () => openSettingsTab().openPage('snippets'),
+    // A body with {{ask:…}} fields: the palette closes and the form asks
+    // for all of them at once (owner review — a step that filters a list
+    // cannot also be where a value is typed).
+    onAsk: (snippet) => snippetAsk.ask(snippet),
+    onDelivered: returnKeyboardToThePane,
+  })
+  // The form the fields are answered in. It reports its own refusals, so a
+  // person who mistyped an answer sees why beside what they typed.
+  const snippetAsk = mountSnippetAskDialog(document.body, {
+    fire: (snippet, answers) => snippetsProvider.fireReporting(snippet, answers),
+    onDelivered: returnKeyboardToThePane,
+  })
   /**
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
@@ -574,7 +662,30 @@ async function main() {
     ),
     order: 0,
   }
-  const sidebarViews = [filesView, PORTS_VIEW, gitView].sort((a, b) => a.order - b.order)
+  // ── Notes (nocx-z56hq) ───────────────────────────────────────────────
+  // One store, every notes surface reads it. The panel FINDS a note and the
+  // tab writes it; the chord skips the panel entirely, which is the whole
+  // point of the feature (design §6.3).
+  const notesStore = new NotesStore(new NotesClient(dispatcher))
+  registerNotesSurface(tm, notesStore)
+  const NOTES_VIEW: SidebarViewDescriptor = {
+    id: 'notes',
+    title: 'Notes',
+    icon: TextQuoteIcon,
+    view: (props) => (
+      <NotesPanel
+        store={notesStore}
+        visible={props.visible()}
+        onOpen={(id) => openNote(id, '')}
+        onCreate={() => void createAndOpenNote()}
+      />
+    ),
+    order: 1,
+  }
+
+  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW].sort(
+    (a, b) => a.order - b.order,
+  )
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
     throw new Error('nocx: Files must be the first activity-bar view')
   }
@@ -751,6 +862,10 @@ async function main() {
       forwardPortCommand,
     ),
     sshProvider,
+    // Snippets: one kind set of its own (the 'snippets' variant), so its
+    // Enter — which types a saved phrase into the pane in front — can never
+    // sit in the server list or the command palette.
+    snippetsProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
       tm.newSSHTab('', host, user, port),
     ),
@@ -808,11 +923,74 @@ async function main() {
   const qc = new QuickConnectController()
   qc.mount(qcContainer, qcProviders)
 
+  // Firing a snippet somebody already chose — the ONE path every surface
+  // that is not the palette's own list goes through: the toolbar menu's
+  // rows and the completion dropdown's acceptance both land here, and the
+  // palette owns what happens next (the ask form, the refusal sentences,
+  // the focus return). A second copy of any of that is a second owner of
+  // one behaviour (AD-8).
+  function fireSnippet(snippet: Snippet): void {
+    // One path for every surface that hands over a chosen snippet (the
+    // completion dropdown today): a body that asks for values opens the
+    // form; a plain one fires.
+    if (askFields(snippet.body).length > 0) {
+      snippetAsk.ask(snippet)
+      return
+    }
+    void snippetsProvider.fire(snippet, new Map())
+  }
+  function fireSnippetById(id: string): void {
+    const state = snippetsStore.state()
+    if (state.kind !== 'ready') return
+    const snippet = state.snippets.find((s) => s.id === id)
+    if (snippet === undefined) return
+    fireSnippet(snippet)
+  }
+
+  // The completion dropdown's snippet rows (design §10.2): the library the
+  // provider reads and the acceptance it delegates. Set on the TabManager,
+  // so every pane built afterwards carries them.
+  tm.snippets = {
+    snippets: () => {
+      const state = snippetsStore.state()
+      return state.kind === 'ready' ? state.snippets : []
+    },
+    // Asked on a keystroke, so it must not BE a wire call per keystroke —
+    // the store fires one read for an unread library and no more.
+    ensureLoaded: () => snippetsStore.ensureLoaded(),
+  }
+  tm.onSnippetAccepted = (id) => fireSnippetById(id)
+
   function wireQuickConnect(strip: typeof tabStrip) {
     strip.onQuickConnect = () => qc.show()
     strip.onInsertSecret = () => qc.showSecrets()
+    // The snippets action (design §10.3): the library without knowing the
+    // chord — the SAME palette the chord opens, exactly as the key icon
+    // beside it opens the secret list. Wired here, in the helper every
+    // strip construction and replacement goes through: a callback set only
+    // on the first strip works until the orientation changes and then
+    // silently stops.
+    strip.onSnippets = () => qc.showSnippets()
   }
   wireQuickConnect(tabStrip)
+
+  // The snippet palette chord (⌥⌘P, snippets/chord.ts) — ONE opener, wired
+  // here, reached from both keyboard boundaries (the xterm custom key
+  // handler and the editor's arbiter chain), which both delegate through
+  // the pane's TerminalContent (AD-8). The chord is consumed at the xterm
+  // boundary, so zero bytes reach the pty (design §10.1, bead nocx-jj77).
+  tm.onSnippetChord = () => qc.showSnippets()
+
+  // ⌥⌘N: one keystroke from the impulse to the first character (design
+  // §6.3). Document-level, like the palette's chord: a note is not the
+  // pane's business, and the pane's own boundaries have nothing to add to
+  // this one.
+  document.addEventListener('keydown', (e) => {
+    if (isNoteChord(e)) {
+      e.preventDefault()
+      void createAndOpenNote()
+    }
+  })
 
   // Cmd/Ctrl+Shift+P opens the PALETTE (nocx-4t37): commands and hosts
   // mixed, each row typed on the right; target-needing commands drill in.

@@ -15,7 +15,7 @@
 // registry and tells this content whether the binding may still be called.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { ReadOnlyHost } from '../read-only-host'
+import { ReadOnlyHost } from '../cm-host'
 import { render } from 'solid-js/web'
 import { Button } from '../ui'
 import type { FilesReadResult } from '../generated/files.read'

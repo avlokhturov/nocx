@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/snippets.delete.schema.json",
+  "title": "SnippetsDelete",
+  "description": "Result of the snippets.delete JSON-RPC method: the id of the deleted snippet.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "description": "The id of the snippet that was deleted.",
+      "type": "string"
+    }
+  }
+}

@@ -112,7 +112,19 @@ function environmentScore(c: Candidate): number {
   }
 }
 
-const PROVIDER_PRIOR: Record<string, number> = { command: 2, history: 1, fs: 0, host: 3 }
+// A snippet sits BELOW every command name and below history: it is a phrase
+// this product saved, and the shell's own executables are what a person
+// means when they type a prefix that fits both (design §10.2 — "a real
+// executable never loses its row to a snippet with the same prefix"). It
+// still sits above a filesystem path in command position, where a path is
+// the least likely reading of a bare word.
+const PROVIDER_PRIOR: Record<string, number> = {
+  command: 2,
+  history: 1,
+  snippet: 0.5,
+  fs: 0,
+  host: 3,
+}
 
 /**
  * Rank candidates in place of the dropdown order. Stable: candidates with

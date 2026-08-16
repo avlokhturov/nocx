@@ -2,7 +2,7 @@ import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
-import { ChevronDownIcon, KeyIcon, PlusIcon } from './ui/icons'
+import { ChevronDownIcon, KeyIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
 import type { Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
@@ -67,6 +67,11 @@ export interface TabStrip {
   onReorder: ((fromId: number, toId: number) => void) | null
   onQuickConnect: (() => void) | null
   onInsertSecret: (() => void) | null
+  /** The snippets action was pressed. Shaped exactly like onQuickConnect
+   *  and onInsertSecret because it opens exactly what they open — the same
+   *  palette, in its snippets variant (design §10.3). The strip knows
+   *  nothing about a library. */
+  onSnippets: (() => void) | null
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -103,6 +108,7 @@ abstract class TabStripBase implements TabStrip {
   onReorder: ((fromId: number, toId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
+  onSnippets: (() => void) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -161,6 +167,14 @@ abstract class TabStripBase implements TabStrip {
                   tabIndex={-1}
                 >
                   <KeyIcon />
+                </IconButton>
+                <IconButton
+                  ariaLabel="Snippets"
+                  title="Snippets"
+                  onClick={() => this.onSnippets?.()}
+                  tabIndex={-1}
+                >
+                  <TextQuoteIcon />
                 </IconButton>
               </div>
             </div>
@@ -225,6 +239,14 @@ abstract class TabStripBase implements TabStrip {
                 tabIndex={-1}
               >
                 <KeyIcon />
+              </IconButton>
+              <IconButton
+                ariaLabel="Snippets"
+                title="Snippets"
+                onClick={() => this.onSnippets?.()}
+                tabIndex={-1}
+              >
+                <TextQuoteIcon />
               </IconButton>
             </div>
             <div class="tabbar-spacer" />

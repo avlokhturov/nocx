@@ -74,13 +74,14 @@ import { aliasRows, profileRows } from './quick-connect-assembly'
 
 /** The palette's type vocabulary — rendered as the badge on the right of
  *  each row in palette mode (nocx-4t37). */
-export type QuickConnectItemKind = 'command' | 'host' | 'setting' | 'secret'
+export type QuickConnectItemKind = 'command' | 'host' | 'setting' | 'secret' | 'snippet'
 
 const KIND_LABELS: Record<QuickConnectItemKind, string> = {
   command: 'Command',
   host: 'Host',
   setting: 'Setting',
   secret: 'Secret',
+  snippet: 'Snippet',
 }
 
 export interface QuickConnectItem {
@@ -116,7 +117,19 @@ export interface QuickConnectItem {
 export interface QuickConnectProvider {
   readonly id: string
   readonly label: string
-  /** Return the current list of items. Called on every open. */
+  /**
+   * The kinds this provider can produce — declared, so a variant that shows
+   * none of them is never CONSULTED (nocx-8rtr, owner review).
+   *
+   * Applicability has to be part of the contract, exactly as it is for the
+   * completion providers: getItems is an RPC for most of these, and the
+   * vault's is one that can raise the unlock prompt. Without this gate,
+   * opening the snippet list — or the plain server list — asked the vault
+   * for its inventory, which is a question nobody at that surface asked.
+   */
+  readonly kinds: readonly QuickConnectItemKind[]
+  /** Return the current list of items. Called on every open, and only when
+   *  the open variant shows one of `kinds`. */
   getItems(): QuickConnectItem[] | Promise<QuickConnectItem[]>
   /**
    * Optional query-dependent items. Consulted only when nothing from getItems
@@ -158,7 +171,12 @@ export interface DrillChoice {
   readonly value?: string
 }
 
-/** One drill step: a named picker over `fetch`'s choices. */
+/** One drill step: a named picker over `fetch`'s choices. A step that needs
+ *  a value nobody can offer choices for — a snippet's `{{ask:…}}` field —
+ *  is NOT this: it belongs in a form that asks for every field at once, and
+ *  the palette closes to show it. A step that looked like a filter and was
+ *  in fact an input read as a filter, which is exactly how it was used
+ *  (owner review). */
 export interface DrillStepSpec {
   /** Breadcrumb name for this step, e.g. "server" or "port". */
   readonly name: string
@@ -206,6 +224,7 @@ function drillItem(cmd: DrillCommand): QuickConnectItem {
 export class ActionsQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'actions'
   readonly label = 'Commands'
+  readonly kinds = ['command', 'host'] as const
 
   constructor(
     private newTab: () => Tab,
@@ -255,6 +274,7 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
 export class SSHQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'ssh'
   readonly label = 'SSH Connections'
+  readonly kinds = ['host'] as const
 
   constructor(
     private profileClient: ProfileClient,
@@ -284,6 +304,7 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
 export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'ssh-aliases'
   readonly label = 'SSH Aliases'
+  readonly kinds = ['host'] as const
 
   constructor(
     private profileClient: ProfileClient,
@@ -372,6 +393,7 @@ export interface SecretsProviderDeps {
 export class SecretsQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'secrets'
   readonly label = 'Secrets'
+  readonly kinds = ['secret'] as const
 
   /** Whether the last getItems saw a vault that can hold a new secret. The
    *  create row is offered from getTrailingItems, which is synchronous and
@@ -478,6 +500,7 @@ const SECRET_KIND_DETAIL: Record<string, string> = {
 export class AdHocQuickConnectProvider implements QuickConnectProvider {
   readonly id = 'ad-hoc'
   readonly label = 'Quick Connect'
+  readonly kinds = ['host'] as const
 
   constructor(private newTabByHost: (host: string, user?: string, port?: number) => Tab) {}
 
@@ -517,7 +540,19 @@ export class AdHocQuickConnectProvider implements QuickConnectProvider {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** Which presentation of the one surface is showing. */
-export type PaletteVariant = 'hosts' | 'palette' | 'secrets'
+export type PaletteVariant = 'hosts' | 'palette' | 'secrets' | 'snippets'
+
+/** Which kinds each variant shows — ONE table, read by both the row filter
+ *  and the provider gate below, so a variant cannot admit a kind whose
+ *  provider it never consulted (or consult one whose rows it then hides).
+ *  'hosts' also admits a per-item opt-in ("New connection"), which is why
+ *  its row filter is a shade wider than this table. */
+const VARIANT_KINDS: Record<PaletteVariant, readonly QuickConnectItemKind[]> = {
+  hosts: ['host', 'command'],
+  palette: ['command', 'host', 'setting'],
+  secrets: ['secret'],
+  snippets: ['snippet'],
+}
 
 interface QuickConnectDialogProps {
   open: boolean
@@ -529,8 +564,20 @@ interface QuickConnectDialogProps {
    *  inserted into whatever owns input in the pane in front. Secrets are
    *  deliberately absent from the palette — a list that mixes 'open a
    *  connection' with 'type a password into what is in front of you' would
-   *  make one Enter mean two very different things. */
+   *  make one Enter mean two very different things. 'snippets' (⌥⌘P and the
+   *  strip's snippets action) is the same shape for the same reason: its
+   *  Enter fires a saved phrase into the pane in front. */
   variant: PaletteVariant
+  /** A sentence to show above the list — the refusal a fire came back with
+   *  (design §11): it renders here and STAYS, because the surface it is
+   *  about is still on screen and a toast would take the explanation away
+   *  from it. */
+  notice?: string
+  /** The person moved on — picked a row, entered a drill, walked back. The
+   *  notice is about the choice they just made, so it dies with it: a
+   *  refusal still on screen inside the NEXT row's questions is a sentence
+   *  about something that is no longer in front of anybody. */
+  onNoticeDone?: () => void
 }
 
 /**
@@ -592,7 +639,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     currentGen: number,
   ): Promise<void> => {
     const all: GroupedItem[] = []
+    const shown = VARIANT_KINDS[props.variant]
     for (const provider of providers) {
+      // Not applicable to this variant: not consulted. getItems is a wire
+      // call for most providers and a vault read for one of them.
+      if (!provider.kinds.some((k) => shown.includes(k))) continue
       try {
         const providerItems = await provider.getItems()
         if (currentGen !== gen) return
@@ -655,12 +706,26 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   })
 
   /** Enter a command's drill: step 0 replaces the list. */
+  /** Put the keyboard back in the filter field. The field is the ONLY place
+   *  this surface takes input, so anything that keeps the dialog open —
+   *  entering a drill step, walking back — has to leave the caret there.
+   *  A typed step made this visible: its row says "type to replace it" and
+   *  a person who reached it by clicking had nowhere for the typing to go
+   *  (owner review). rAF for the same reason the open path uses one: the
+   *  list is re-rendering. */
+  const focusSearch = (): void => {
+    requestAnimationFrame(() => {
+      panelRef?.querySelector<HTMLElement>('.quick-connect__search input')?.focus()
+    })
+  }
+
   const enterDrill = (command: DrillCommand): void => {
     const state: DrillState = { command, selections: [] }
     setDrill(state)
     setQuery('')
     setSelectedIndex(0)
     void loadStep(state, gen)
+    focusSearch()
   }
 
   /** Choose the current step's item: advance a step, or run the command
@@ -682,14 +747,17 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     setQuery('')
     setSelectedIndex(0)
     void loadStep(next, gen)
+    focusSearch()
   }
 
   /** Walk the drill back one step; at its root, back to the palette. */
   const walkBack = (): void => {
+    props.onNoticeDone?.()
     const state = drill()
     if (!state) return
     setQuery('')
     setSelectedIndex(0)
+    focusSearch()
     if (state.selections.length === 0) {
       setDrill(null)
       return
@@ -725,9 +793,10 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     // not saved yet — so it belongs to the caret's single job, while "Forward
     // a port" and every other command stay out (nocx-d4us).
     const admits = (item: QuickConnectItem): boolean => {
+      // The caret's one exception is per ITEM, not per kind: "New
+      // connection" is about connecting to a machine, one not saved yet.
       if (props.variant === 'hosts') return item.kind === 'host' || item.allowInHosts === true
-      if (props.variant === 'secrets') return item.kind === 'secret'
-      return item.kind !== 'secret'
+      return VARIANT_KINDS[props.variant].includes(item.kind)
     }
     // Rows that always sit last — the vault's "Add a secret…". Admitted by
     // the same kind rule as everything else, so the offer to create a secret
@@ -792,6 +861,9 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   })
 
   function activate(index: number) {
+    // Whatever this is — a row, a drill step, a walk-back — the person has
+    // moved past the refusal that was on screen.
+    props.onNoticeDone?.()
     if (drill()) {
       const choice = drillFiltered()[index]
       if (!choice) return
@@ -859,7 +931,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
 
   return (
     <Dialog open={props.open} onClose={props.onClose} onEscape={onDialogEscape} size="lg">
-      <div class="quick-connect" ref={panelRef} onKeyDown={onKeyDown}>
+      <div class="quick-connect" data-variant={props.variant} ref={panelRef} onKeyDown={onKeyDown}>
         {/* Drill-in breadcrumbs: the command's path, walked back one step at
             a time with Backspace or Escape. */}
         <Show when={drill()}>
@@ -894,7 +966,9 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                   ? 'Type to filter…'
                   : props.variant === 'secrets'
                     ? 'Type to filter secrets…'
-                    : 'Search commands and hosts…'
+                    : props.variant === 'snippets'
+                      ? 'Type to filter snippets…'
+                      : 'Search commands and hosts…'
             }
             ariaLabel={
               drill()
@@ -903,10 +977,20 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                   ? 'Quick connect filter'
                   : props.variant === 'secrets'
                     ? 'Secret filter'
-                    : 'Command palette filter'
+                    : props.variant === 'snippets'
+                      ? 'Snippet filter'
+                      : 'Command palette filter'
             }
           />
         </div>
+        {/* What a refused fire came back with, kept on the surface it is
+            about (design §11): the list stays underneath, so the person can
+            pick something else without reopening anything. */}
+        <Show when={props.notice !== undefined && props.notice !== ''}>
+          <div class="quick-connect__notice" role="alert">
+            {props.notice}
+          </div>
+        </Show>
         {/* No listbox at all when nothing matches: the empty notice takes the
             list's place in the layout rather than sitting under a list box that
             stretches to the bottom of the panel, and an empty `role="listbox"`
@@ -934,6 +1018,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     }}
                     role="option"
                     aria-selected={selectedIndex() === index()}
+                    // The row is not a focus target: the field is. Without
+                    // this the mouse silently moves the caret out of the
+                    // one place this surface takes input, and the next
+                    // keystroke goes nowhere.
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => activate(index())}
                     onMouseEnter={() => setSelectedIndex(index())}
                   >
@@ -966,6 +1055,7 @@ export class QuickConnectController {
   private dispose: (() => void) | null = null
   private _setOpen: Setter<boolean> | null = null
   private _setVariant: Setter<PaletteVariant> | null = null
+  private _setNotice: Setter<string | undefined> | null = null
   private _mounted = false
 
   mount(container: HTMLElement, providers: QuickConnectProvider[]): void {
@@ -974,8 +1064,10 @@ export class QuickConnectController {
 
     const [open, setOpen] = createSignal(false)
     const [variant, setVariant] = createSignal<PaletteVariant>('hosts')
+    const [notice, setNotice] = createSignal<string | undefined>(undefined)
     this._setOpen = setOpen
     this._setVariant = setVariant
+    this._setNotice = setNotice
 
     this.dispose = render(
       () => (
@@ -984,6 +1076,8 @@ export class QuickConnectController {
           onClose={() => setOpen(false)}
           providers={providers}
           variant={variant()}
+          notice={notice()}
+          onNoticeDone={() => setNotice(undefined)}
         />
       ),
       container,
@@ -993,6 +1087,7 @@ export class QuickConnectController {
   /** Open the plain server list — the tab-strip caret's fast path: hosts
    *  only, no commands, no type badges (nocx-4t37). */
   show(): void {
+    this._setNotice?.(undefined)
     this._setVariant?.('hosts')
     this._setOpen?.(true)
   }
@@ -1000,13 +1095,26 @@ export class QuickConnectController {
   /** Open the palette — Ctrl/Cmd+Shift+P: commands and hosts mixed, each
    *  row typed, target-needing commands drilling in (nocx-4t37). */
   showPalette(): void {
+    this._setNotice?.(undefined)
     this._setVariant?.('palette')
+    this._setOpen?.(true)
+  }
+
+  /** Open the snippet list — ⌥⌘P and the strip's snippets action: the saved
+   *  phrases, fired into whatever owns input in the pane in front. Same
+   *  surface as every other list this palette shows; `notice` carries a
+   *  refusal from the last fire, which is why reopening with one is how a
+   *  refusal stays on screen (design §11). */
+  showSnippets(notice?: string): void {
+    this._setNotice?.(notice)
+    this._setVariant?.('snippets')
     this._setOpen?.(true)
   }
 
   /** Open the secret list — the tab-strip key icon (nocx-fk32): vault names
    *  only, inserted into whatever owns input in the pane in front. */
   showSecrets(): void {
+    this._setNotice?.(undefined)
     this._setVariant?.('secrets')
     this._setOpen?.(true)
   }

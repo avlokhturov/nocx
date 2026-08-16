@@ -21,6 +21,7 @@ import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
 import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
+import { isSnippetChord } from '../snippets/chord'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -238,6 +239,20 @@ export class XtermRenderer implements TerminalRenderer {
   readonly snapshotStore = new CommandSnapshotStore()
   /** Unsubscribe from the module-level theme watcher. */
   private _themeUnsub: (() => void) | null = null
+  /** The snippet-palette chord handler (⌥⌘P), registered by the
+   *  composition root after construction. Null until then: the chord falls
+   *  through to xterm's ordinary encoding — and the bytes reach the pty —
+   *  only while no handler is registered, which is the pre-wiring state,
+   *  never a live one (TerminalContent registers it at mount). */
+  private _snippetChordHandler: (() => void) | null = null
+
+  /** Register (or clear) the snippet-palette chord handler. The custom key
+   *  handler below calls it and returns false, so the chord never reaches
+   *  xterm's encoder and zero bytes go to the pty (design §10.1). */
+  onSnippetChord(cb: (() => void) | null): void {
+    this._snippetChordHandler = cb
+  }
+
   /** Frame capture (nocx-3j9b): subscribers to the parse-settle event. */
   private writeParsedSubs: Array<() => void> = []
   private writeParsedDisposable?: { dispose(): void }
@@ -333,6 +348,19 @@ export class XtermRenderer implements TerminalRenderer {
     // same data path a keystroke takes (onData → transport → pty), and
     // every other key returns true so xterm encodes it exactly as before.
     term.attachCustomKeyEventHandler((event) => {
+      // The snippet palette chord (⌥⌘P, design §10.1) is consumed HERE, at
+      // the xterm boundary: returning false keeps xterm from encoding the
+      // chord, so ZERO bytes reach the program — the one place the chord is
+      // needed most (a TUI owns the pane and no editor is showing). The
+      // predicate is the shared one from snippets/chord.ts: the editor's
+      // arbiter reads the same definition and delegates to the same opener
+      // (AD-8). The opener runs synchronously in the keydown, like the
+      // Shift+Enter branch below.
+      if (isSnippetChord(event)) {
+        event.preventDefault()
+        this._snippetChordHandler?.()
+        return false
+      }
       // The plain chord only: Enter + Shift alone. A Ctrl/Alt/Meta-modified
       // Enter must not be collapsed into the Shift bytes — that would lie
       // about the chord. Keyup passes through so xterm's own cursor-style
@@ -703,11 +731,11 @@ export class XtermRenderer implements TerminalRenderer {
     })
   }
 
-  paste(text: string): void {
+  paste(text: string): boolean {
     // term.paste() owns bracketed-paste wrapping: when the running program
     // has enabled mode 2004, it wraps the payload in the escape sequences.
     const term = this.term
-    if (!term) return
+    if (!term) return false
     // A submitted command must reach the program while the grid is
     // read-only: disableStdin guards USER input (keystrokes land in the
     // editor instead), and the editor's submit delivers its document
@@ -721,6 +749,13 @@ export class XtermRenderer implements TerminalRenderer {
     } finally {
       term.options.disableStdin = wasDisabled
     }
+    return true
+  }
+
+  /** The running program's bracketed-paste mode (2004), or false when no
+   *  terminal is mounted. */
+  bracketedPasteActive(): boolean {
+    return this.term?.modes.bracketedPasteMode ?? false
   }
 
   refreshAtlas(): void {

@@ -27,6 +27,7 @@ import type {
   SurfaceType,
 } from './tab-content'
 import { SURFACE_TERMINAL } from './tab-content'
+import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -386,6 +387,16 @@ export class TabManager {
    *  active tab through this (nocx-wzc4.7); wired by main.tsx to a Solid
    *  signal. */
   onActiveTabChange?: () => void
+  /** The snippet palette chord (⌥⌘P) was pressed in the active pane —
+   *  forwarded from the pane's TerminalContent, whose xterm boundary and
+   *  editor arbiter both land here. The composition root opens the
+   *  palette (design §10.1). */
+  onSnippetChord?: () => void
+  /** The snippet library the completion provider in every pane reads, and
+   *  the acceptance it delegates (design §10.2). Set once by the
+   *  composition root; handed to each TerminalContent as it is built. */
+  snippets?: SnippetProviderDeps
+  onSnippetAccepted?: (snippetId: string) => void
 
   constructor(
     bar: HTMLElement,
@@ -476,6 +487,9 @@ export class TabManager {
         onActiveOriginChange: () => this.onActiveTabChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
+        onSnippetChord: this.onSnippetChord,
+        snippets: this.snippets,
+        onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
       },
     )
@@ -527,6 +541,9 @@ export class TabManager {
         onHostKeyError: this.onHostKeyError,
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
+        onSnippetChord: this.onSnippetChord,
+        snippets: this.snippets,
+        onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
       },
     )
@@ -754,11 +771,20 @@ export class TabManager {
 
   /** The active tab's terminal content, when the active tab is a terminal.
    *  Global actions (the quick-connect "Integrate this shell" item,
-   *  nocx-ynsx) reach the shell at the current prompt through this; the
+   *  the secret picker's insert) target it because the pane's own input
+   *  presentation is the only place that knows where text should go;
    *  content itself owns the PROMPT_READY && trusted && owned gate. */
   activeTerminalContent(): TerminalContent | null {
     const content = this.activeTab?.content
     return content instanceof TerminalContent ? content : null
+  }
+
+  /** The active tab's PANE element — the always-visible mount the snippet
+   *  palette floats in (design §10.1: it must answer when the editor is
+   *  hidden, so it cannot live inside the editor root). Null when no tab
+   *  is active. */
+  activePane(): HTMLElement | null {
+    return this.activeTab?.pane ?? null
   }
 
   /** The ports.* target the ACTIVE tab scopes to (nocx-wzc4.8): the

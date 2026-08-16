@@ -713,6 +713,81 @@ describe('Shift+Enter as its own chord (nocx-nt70)', () => {
   })
 })
 
+describe('the snippet palette chord (⌥⌘P, nocx-jj77)', () => {
+  async function mountChordRenderer(): Promise<{ r: XtermRenderer; received: string[] }> {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    const received: string[] = []
+    r.onData((text) => received.push(text))
+    return { r, received }
+  }
+
+  /** Dispatch a real keydown at xterm's hidden textarea — the production
+   *  path (xterm binds its key handling to the textarea with capture). */
+  function pressKey(r: XtermRenderer, init: KeyboardEventInit & { keyCode: number }): void {
+    const term = (r as unknown as Record<string, unknown>).term as { element: HTMLElement }
+    const textarea = term.element.querySelector('textarea')
+    expect(textarea).not.toBeNull()
+    const event = new KeyboardEvent('keydown', { ...init, bubbles: true })
+    Object.defineProperty(event, 'keyCode', { value: init.keyCode })
+    textarea!.dispatchEvent(event)
+  }
+  // The snippet palette chord (⌥⌘P, design §10.1, bead nocx-jj77) is
+  // consumed at the xterm boundary: the custom key handler sees it BEFORE
+  // xterm encodes it, calls the registered opener and returns false — so
+  // ZERO bytes reach the pty. The proof subscribes onData: the opener
+  // fires and the byte log stays empty.
+  it('consumes the snippet chord (⌥⌘P): the opener fires and ZERO bytes reach the pty', async () => {
+    const { r, received } = await mountChordRenderer()
+    const opener = vi.fn()
+    r.onSnippetChord(opener)
+    pressKey(r, { key: 'p', code: 'KeyP', keyCode: 80, altKey: true, metaKey: true })
+    expect(opener).toHaveBeenCalledTimes(1)
+    expect(received).toEqual([])
+    r.dispose()
+  })
+
+  it('the chord is consumed even before the opener is wired — zero bytes then too', async () => {
+    // The handler is registered at mount, before any keystroke, so the
+    // pre-wiring state never faces a user; still, the chord's contract is
+    // unconditional: ZERO bytes, handler or none.
+    const { r, received } = await mountChordRenderer()
+    pressKey(r, { key: 'p', code: 'KeyP', keyCode: 80, altKey: true, metaKey: true })
+    expect(received).toEqual([])
+    r.dispose()
+  })
+
+  it('leaves every neighbouring chord to xterm: the handler never fires for Alt+P, ⌘P, ⌥⌘⇧P or ⌥⌘O', async () => {
+    const { r, received } = await mountChordRenderer()
+    const opener = vi.fn()
+    r.onSnippetChord(opener)
+    // Alt+P alone (no Meta): not the chord — the handler returns true and
+    // xterm encodes ESC p, exactly as before the hook existed.
+    pressKey(r, { key: 'p', code: 'KeyP', keyCode: 80, altKey: true })
+    // ⌘P alone, ⌥⌘⇧P and ⌥⌘O: xterm drops Meta-chords in this (non-mac,
+    // jsdom) environment — they are browser-level chords there. The bytes
+    // are xterm's own decision; the assertion is that MY handler neither
+    // fired nor swallowed them (each still produced xterm's answer).
+    pressKey(r, { key: 'p', code: 'KeyP', keyCode: 80, metaKey: true })
+    pressKey(r, {
+      key: 'P',
+      code: 'KeyP',
+      keyCode: 80,
+      altKey: true,
+      metaKey: true,
+      shiftKey: true,
+    })
+    pressKey(r, { key: 'o', code: 'KeyO', keyCode: 79, altKey: true, metaKey: true })
+    expect(opener).not.toHaveBeenCalled()
+    expect(received).toEqual(['\x1bp'])
+    r.dispose()
+  })
+})
+
 describe('XtermRenderer cell metric (nocx-yy9g)', () => {
   async function mountRenderer() {
     stubBrowser()
@@ -1231,5 +1306,56 @@ describe('XtermRenderer repaints after a grid resize (nocx-jfgb)', () => {
     r.fitViewport({ width: 800, height: 405 })
 
     expect(refresh).not.toHaveBeenCalled()
+  })
+})
+
+describe('bracketed paste, read from the real parser', () => {
+  const stubBrowser = () => {
+    window.matchMedia = (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+  }
+
+  // The paired "and on a normal machine it succeeds" for the multi-line
+  // policy (AGENTS.md rule 2). Every other test of that policy MOCKS
+  // bracketedPasteActive, so all of them would keep passing if the real read
+  // never answered true — and a snippet with two lines would then be refused
+  // for everybody, always.
+  it('reports the mode a program turned on, and reports it off again', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    expect(r.bracketedPasteActive()).toBe(false)
+
+    // write() is fire-and-forget; onWriteParsed is the renderer's own
+    // "the bytes have been parsed" signal, and it is what a caller reading
+    // parser state has to wait for.
+    const parsed = (data: string) =>
+      new Promise<void>((resolve) => {
+        r.onWriteParsed(resolve)
+        r.write(data)
+      })
+    await parsed('\x1b[?2004h')
+    expect(r.bracketedPasteActive()).toBe(true)
+
+    await parsed('\x1b[?2004l')
+    expect(r.bracketedPasteActive()).toBe(false)
+    r.dispose()
   })
 })
