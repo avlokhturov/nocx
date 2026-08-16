@@ -878,6 +878,13 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+	// The run lease (ADR-0020 decision 2) every agent run is supervised
+	// under, named here the way the lane capacity is: the wall-clock
+	// deadline, the inactivity deadline, the output budget and the
+	// escalation grace. The transport's default IS the production value —
+	// this line names it, so the seam stays reachable from production and
+	// a future settings surface flips one option here, not a default.
+	tpOpts = append(tpOpts, transport.WithRunLease(transport.DefaultRunLeaseConfig()))
 	// The notification router (ADR-0029): the only holder of "where" a raised
 	// notification goes. Before this line the whole notify package was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).

@@ -27,19 +27,18 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
-// runRequestTimeout bounds one run request. Unlike readScreen — a capture
-// the renderer answers in milliseconds — a run request legitimately waits
-// for the submitted command to COMPLETE (the resolution carries the exit
-// status and a window of the output), and the renderer resolves only when
-// the block freezes. Without the lease (ADR-0020 decision 2 — its own
-// bead), this fixed bound is the honest interim: a command that outlives it
-// terminalizes the tool call through the broker timeout while the command
-// keeps running in its lane — the wedged-agent-command gap this bead
-// documents rather than hides. Generous, and bounded: a renderer that never
-// answers must not leak a pending request.
+// runRequestTimeout bounds one run request WHEN THE LEASE IS DISABLED
+// (every bound zero in the server's RunLeaseConfig): the pre-lease
+// fallback, kept so the path before ADR-0020 decision 2 is still bounded.
+// Under the lease — the production state — the wall-clock deadline IS the
+// bound (and the escalation kills the execution rather than abandoning
+// it), so RequestRun sets the kind's Timeout to 0: a broker timeout that
+// could fire before the lease would recreate the wedged-command gap this
+// bead closes.
 const runRequestTimeout = 10 * time.Minute
 
 // maxRunOutputWindowChars is the renderer-side clamp on the output window
@@ -193,17 +192,106 @@ func validateRunResolvedRaw(raw json.RawMessage) string {
 // the executor holds refuses out-of-grant sessions BEFORE this call), so
 // the request names only the lane the run may use. The broker mints the
 // request id, delivers the notification to every attached renderer and
-// waits for the resolution — terminalizing through the kind's timeout or
-// the death of the renderers if none answers.
+// waits for the resolution — under the lease (ADR-0020 decision 2): a
+// wall-clock deadline, an inactivity deadline and an output budget bound
+// the execution, and a bound that fires escalates INT → TERM → KILL against
+// the execution's process group before the request is terminalized, so a
+// command that never finishes is killed, not merely abandoned.
 func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command string) (json.RawMessage, error) {
 	if s.broker == nil {
 		return nil, errors.New("run: no renderer request broker is wired")
 	}
+	// The lane's awaiting-takeover transition (ADR-0020 decision 3) is
+	// decided HERE, in Go, from the renderer's buffer-kind report: while a
+	// program owns the terminal the agent is demoted, not evicted — it
+	// loses write authority, so a new run is refused; reading
+	// (RequestScreen) is untouched.
+	sid := session.ID(sessionID)
+	if s.laneInteractivity.awaitingTakeover(sid) {
+		return nil, errors.New("run: the lane is awaiting takeover — the agent may not write while a program owns the terminal")
+	}
+
+	cfg := s.effectiveRunLease()
+	kind := runKind()
+	if cfg.WallClock <= 0 && cfg.Inactivity <= 0 && cfg.OutputBudget <= 0 {
+		// Lease disabled: the pre-lease broker bound applies unchanged.
+		kind.Timeout = runRequestTimeout
+	} else {
+		// The lease is the ONLY bound. A broker timeout that could fire
+		// before the lease — or while the lease is suspended by a takeover,
+		// when the human legitimately owns the terminal past every bound —
+		// would terminalize the run without killing the execution: the
+		// exact gap this bead closes.
+		kind.Timeout = 0
+	}
+
+	lease := s.newRunLease(sid, cfg)
 	var body json.RawMessage
-	if err := s.broker.Request(ctx, runKind(), runRequestParams{SessionID: sessionID, Command: command}, &body); err != nil {
+	err := lease.supervise(ctx, func(ctx context.Context) error {
+		return s.broker.Request(ctx, kind, runRequestParams{SessionID: sessionID, Command: command}, &body)
+	})
+	if err != nil {
 		return nil, fmt.Errorf("run: %w", err)
 	}
 	return body, nil
+}
+
+// ── agent.laneInteractivity — the renderer's interactivity report ─────────
+
+// laneInteractivityParams is the renderer's report of the lane's buffer
+// kind (ADR-0020 decision 3): the one interactivity fact the backend cannot
+// see for itself (AD-6 forbids sniffing the byte stream; the renderer owns
+// the grid and its buffer kind). bufferKind is the capture identity's own
+// vocabulary — "normal" | "alternate" — reported on every buffer change.
+type laneInteractivityParams struct {
+	SessionID  string `json:"sessionId"`
+	BufferKind string `json:"bufferKind"`
+}
+
+// validateLaneInteractivityRaw is the ingress shape check: a bounded
+// session id and the closed buffer-kind vocabulary. A malformed report is
+// refused, never silently defaulted — the transition it would have caused
+// is a decision the backend makes from facts it can trust.
+func validateLaneInteractivityRaw(raw json.RawMessage) string {
+	var p laneInteractivityParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.SessionID == "" || utf8.RuneCountInString(p.SessionID) > maxIDRunes {
+		return "sessionId is required and bounded"
+	}
+	switch p.BufferKind {
+	case "normal", "alternate":
+		return ""
+	default:
+		return "bufferKind must be one of normal, alternate"
+	}
+}
+
+// laneInteractivitySpec registers agent.laneInteractivity on the
+// ingress-critical immediate set: the report feeds the lane state the run
+// lease waits on, so it must never wait behind the control lane — a queued
+// report would delay the awaiting-takeover transition, and a lease that
+// has not seen the transition would keep enforcing its bounds on a TUI the
+// human now owns. The handler is a mutex-guarded state update — exactly
+// the microseconds immediate exists for.
+func (s *WSServer) laneInteractivitySpec(immediate control.ImmediateSubmission) methodSpec {
+	return reg(immediate, "agent.laneInteractivity", params(validateLaneInteractivityRaw),
+		func(w *wsConn, _ *connState, r Responder) handlerFunc {
+			return func(_ context.Context, req jsonrpcRequest) {
+				var p laneInteractivityParams
+				if err := json.Unmarshal(req.Params, &p); err != nil {
+					_ = w.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
+					return
+				}
+				if msg := validateLaneInteractivityRaw(req.Params); msg != "" {
+					_ = w.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
+					return
+				}
+				s.laneInteractivity.note(session.ID(p.SessionID), p.BufferKind)
+				_ = r.TryResult(req.ID, json.RawMessage(`{}`))
+			}
+		})
 }
 
 // runResolutionSpec registers agent.runResolved alongside readScreen's

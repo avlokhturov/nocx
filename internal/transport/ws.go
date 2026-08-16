@@ -150,6 +150,18 @@ type WSServer struct {
 	// delivery seams; its resolution RPCs register on the read-loop ingress
 	// and its ConnectionLost signal fires in unregisterConn.
 	broker *Broker
+	// runLeaseCfg bounds one run execution (ADR-0020 decision 2 — the
+	// wall-clock deadline, the inactivity deadline, the output budget and
+	// the escalation grace RequestRun supervises every run under). Zero
+	// means the package default (defaultRunLease); every bound zero
+	// disables the lease and restores the pre-lease broker timeout.
+	runLeaseCfg RunLeaseConfig
+	// lanes is the per-session lane interactivity state (ADR-0020 decision
+	// 3): the awaiting-takeover transition decided in Go from the
+	// renderer's agent.laneInteractivity reports. RequestRun refuses a
+	// lane awaiting takeover (the agent lost write authority); the run
+	// lease suspends its enforcement while a TUI owns the lane.
+	laneInteractivity *laneState
 	// agentPolicy is the ONE global agent policy the ask run grants are
 	// minted from (ADR-0020 §7 as amended 2026-08-16 — amendment proposed,
 	// awaiting owner approval): the global default of content.ResolvePolicy,
@@ -693,6 +705,15 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
 }
 
+// WithRunLease names the lease bounds every run execution is supervised
+// under (ADR-0020 decision 2): the wall-clock deadline, the inactivity
+// deadline, the output budget and the escalation grace. Zero fields mean
+// the corresponding default (defaultRunLease); a config with every bound
+// zero disables the lease and restores the pre-lease broker timeout.
+func WithRunLease(cfg RunLeaseConfig) WSServerOption {
+	return func(s *WSServer) { s.runLeaseCfg = cfg }
+}
+
 // WithAgentKnownMaterial attaches the egress gate's vault comparison — the
 // composition root wires the vault adapter here (NewVaultKnownMaterial).
 // When nil, a run that may execute tools fails closed at the middleware's
@@ -940,6 +961,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		ownerTunnels:        make(map[*wsConn]map[string]struct{}),
 		origins:             LoopbackOriginPolicy{},
 		agentApprovals:      assistant.NewApprovalStore(),
+		laneInteractivity:   newLaneState(),
 		satNotify:           newSaturatedNotifyLimiter(time.Second),
 		pendingRuns:         make(map[int64]askRunContext),
 		filesBindings:       make(map[string]*filesBinding),
@@ -1007,6 +1029,7 @@ func (s *WSServer) buildControlPlane() {
 	specs := make([]methodSpec, 0, 96)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
+	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.brokerSpecs(immediate)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
@@ -2333,6 +2356,7 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	// the caller's under main's signature (nocx-292k).
 	s.cancelRecovery(sid)
 	s.filesSessionClosed(sid)
+	s.laneInteractivity.remove(sid)
 	s.gitSessionClosed(sid, wconn)
 	s.unregisterLifecycleLanes(sid)
 	s.unregisterIntegration(sid)

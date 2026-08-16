@@ -816,6 +816,15 @@ export class TerminalContent extends BaseTabContent {
       // both keyboard paths reach the ONE opener (design §10.1, AD-8).
       renderer.onSnippetChord?.(() => this.handleSnippetChord())
 
+      // The lane's interactivity report (ADR-0020 decision 3): the backend
+      // cannot see the alternate screen (AD-6 — it never sniffs the byte
+      // stream) and the renderer owns the buffer kind, so the renderer
+      // reports every buffer change and the backend decides the lane's
+      // awaiting-takeover transition from it. Before the session opens the
+      // report has no session to name — the open handler re-reports the
+      // current kind (reportLaneBufferKind).
+      renderer.onBufferChange((bufferKind) => this.reportLaneBufferKind(bufferKind))
+
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
         pane: target,
@@ -1878,6 +1887,13 @@ export class TerminalContent extends BaseTabContent {
       lifecycleSubscription.bindSession(session.sessionId)
       log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
 
+      // Re-report the CURRENT buffer kind now that the session has a
+      // backend id: a buffer change before open had no session to name,
+      // and the backend's lane starts at normal — the report brings a lane
+      // already inside a TUI (an alt screen restored by replay) up to
+      // date (ADR-0020 decision 3).
+      this.reportLaneBufferKind(renderer.activeBufferKind())
+
       // The open ack carries the resolved launch policy and the refusal
       // reason (nocx-4t37.2): the capability control starts from the
       // backend's own resolution, never from a second fetch that could
@@ -2414,6 +2430,18 @@ export class TerminalContent extends BaseTabContent {
   captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
     if (!this.renderer) return Promise.reject(new CaptureAbortedError())
     return this.renderer.captureLiveFrame(region)
+  }
+
+  /** Report the lane's buffer kind to the backend (agent.laneInteractivity,
+   *  ADR-0020 decision 3): the renderer observed the buffer change, the
+   *  backend decides the awaiting-takeover transition from it. Fire-and-
+   *  forget — the backend treats a refused report (a stale session, a
+   *  closed lane) as nothing to transition; a lost report costs only a
+   *  delayed transition, and the next change re-reports. */
+  private reportLaneBufferKind(bufferKind: 'normal' | 'alternate'): void {
+    const sid = this.session?.sessionId
+    if (!sid) return
+    void this.client.call('agent.laneInteractivity', { sessionId: sid, bufferKind }).catch(() => {})
   }
 
   /** Raise the degraded-session card, unless the user has already answered

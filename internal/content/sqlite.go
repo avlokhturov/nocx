@@ -612,7 +612,7 @@ CREATE TABLE IF NOT EXISTS executions (
   started_at          INTEGER,
   ended_at            INTEGER,
   termination_reason  TEXT CHECK (termination_reason IN
-                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted')),
+                      ('completed','failed','timeout','transport-gone','user-killed','agent-declined','interrupted','inactivity','output-budget')),
   executor            TEXT,                -- executor identity
   -- state is the ASSISTANT RUN state the renderer draws (design §7):
   -- prepared | streaming | awaiting_approval | completed | cancelled |

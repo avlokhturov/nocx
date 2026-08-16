@@ -3,6 +3,9 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+
+	"github.com/shady2k/nocx/internal/content"
 )
 
 // FrameRegion is an absolute buffer row span [Start, End) of a session's
@@ -45,3 +48,25 @@ type RendererRequester interface {
 	// returned error, never a hang.
 	RequestRun(ctx context.Context, sessionID string, command string) (json.RawMessage, error)
 }
+
+// RunLeaseError is the terminal failure of a run whose lease bound fired
+// (ADR-0020 decision 2): the execution was terminalized by its wall-clock
+// deadline (TermTimeout), its inactivity deadline (TermInactivity) or its
+// output budget (TermOutputBudget), after cancellation escalated
+// INT → TERM → KILL against the execution's process group. The transport's
+// RequestRun returns it once the escalation has completed; the policy
+// middleware records Reason on the attempt so the ledger says WHICH bound
+// ended the run, and the run driver turns it into the failure sentence the
+// block shows. Err is the underlying broker terminalization (usually
+// context.Canceled — the request was cancelled so a late resolution could
+// not win the race and report the run completed).
+type RunLeaseError struct {
+	Reason content.TerminationReason
+	Err    error
+}
+
+func (e *RunLeaseError) Error() string {
+	return fmt.Sprintf("run lease: %s: %v", e.Reason, e.Err)
+}
+
+func (e *RunLeaseError) Unwrap() error { return e.Err }

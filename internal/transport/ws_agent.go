@@ -940,6 +940,18 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	if errors.As(err, &se) {
 		return content.TermFailed, se.Message
 	}
+	// The run lease (ADR-0020 decision 2) fired: the sentence names WHICH
+	// bound ended the run, so the block says why — the ledger already
+	// records the reason on the attempt; this is the same fact in the
+	// human's words. Checked BEFORE the context.Canceled case below: the
+	// lease's terminalization cancels the request, so the error also
+	// unwraps to context.Canceled — mapping that first would report the
+	// run as a lost connection, which is the wrong lie in the wrong
+	// direction.
+	var leaseErr *assistant.RunLeaseError
+	if errors.As(err, &leaseErr) {
+		return leaseErr.Reason, runLeaseSentence(leaseErr.Reason)
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return content.TermTransportGone, "the connection was lost while the answer was streaming"
@@ -947,6 +959,22 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 		return content.TermTimeout, "the model did not answer in time"
 	default:
 		return content.TermFailed, "the model failed to answer: " + err.Error()
+	}
+}
+
+// runLeaseSentence is the human-readable statement of one lease bound, for
+// the runState error a block shows. A visible bound is the feature; a
+// silent truncation is the defect (the bead's criterion 4).
+func runLeaseSentence(reason content.TerminationReason) string {
+	switch reason {
+	case content.TermTimeout:
+		return "the command did not finish within its wall-clock deadline and was terminalized"
+	case content.TermInactivity:
+		return "the command was terminalized for inactivity: it produced no output for too long"
+	case content.TermOutputBudget:
+		return "the command was terminalized: its output exceeded the budget, and was bounded rather than truncated"
+	default:
+		return "the command was terminalized by its lease"
 	}
 }
 
