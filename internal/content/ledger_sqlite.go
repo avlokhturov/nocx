@@ -343,6 +343,13 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 					return err
 				}
 			}
+			for _, e := range in.Grant.Effects {
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO grant_effects (grant_id, effect) VALUES (?, ?)`,
+					grantID, string(e)); err != nil {
+					return err
+				}
+			}
 		}
 		// The entry is bound while a run is live (phase owned by the driver;
 		// the store records the transition).
@@ -674,12 +681,29 @@ func (s *sqliteContent) grantFor(ctx context.Context, executionID int64) (*Grant
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var sc GrantScope
-		if err := rows.Scan(&sc.Kind, &sc.ID); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&sc.Kind, &sc.ID); scanErr != nil {
+			return nil, scanErr
 		}
 		g.Scopes = append(g.Scopes, sc)
 	}
-	return &g, rows.Err()
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+	erows, err := s.db.QueryContext(ctx,
+		`SELECT effect FROM grant_effects WHERE grant_id = ? ORDER BY effect`,
+		grantID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = erows.Close() }()
+	for erows.Next() {
+		var e Effect
+		if escanErr := erows.Scan(&e); escanErr != nil {
+			return nil, escanErr
+		}
+		g.Effects = append(g.Effects, e)
+	}
+	return &g, erows.Err()
 }
 
 // artifactsFor loads one execution's artifacts, metadata only (no bodies).
