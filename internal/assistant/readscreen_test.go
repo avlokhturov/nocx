@@ -44,6 +44,12 @@ func (r *recordingRequester) RequestScreen(ctx context.Context, sessionID string
 	return r.body, nil
 }
 
+// RequestRun exists only to satisfy the RendererRequester interface: the
+// readScreen tests never call it. The run tool's tests use recordingRunner.
+func (r *recordingRequester) RequestRun(ctx context.Context, sessionID string, command string) (json.RawMessage, error) {
+	return nil, errors.New("readscreen test: RequestRun is not scripted")
+}
+
 func (r *recordingRequester) calls() []askedScreen {
 	r.mu.Lock()
 	defer r.mu.Unlock()

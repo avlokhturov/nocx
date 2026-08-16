@@ -687,15 +687,15 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	if !ok {
 		t.Fatalf("NewClient returned %T, want *client", cl)
 	}
-	if got := len(internal.tools.All()); got != 3 {
-		t.Fatalf("registry has %d tools, want the real set of 3", got)
+	if got := len(internal.tools.All()); got != 4 {
+		t.Fatalf("registry has %d tools, want the real set of 4", got)
 	}
 	names := make([]string, 0, len(internal.tools.All()))
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	if names[0] != "files.read" || names[1] != "readScreen" || names[2] != "git.status" {
-		t.Fatalf("assembled tools = %v, want [files.read readScreen git.status]", names)
+	if names[0] != "files.read" || names[1] != "readScreen" || names[2] != "run" || names[3] != "git.status" {
+		t.Fatalf("assembled tools = %v, want [files.read readScreen run git.status]", names)
 	}
 }
 

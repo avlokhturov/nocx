@@ -1557,6 +1557,12 @@ func paramsBudgetForMethod(method string) int {
 		// (rows ≤ 10k, cols ≤ 2k, 5M chars) and this wire budget, the
 		// document tier. The broker's own per-kind bound matches.
 		return budgetDocument
+	case "agent.runResolved":
+		// A run resolution carries a command's output window — text
+		// bounded by the renderer's maxRunOutputWindowChars clamp and this
+		// wire budget, the document tier. The broker's own per-kind bound
+		// matches.
+		return budgetDocument
 	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
 		"profiles.importTabby", "profiles.tabbyPreview":
 		return budgetDocument

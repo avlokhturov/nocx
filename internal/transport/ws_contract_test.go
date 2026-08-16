@@ -4711,6 +4711,105 @@ func TestAgentReadScreenResolved_DTOConformsToContract(t *testing.T) {
 	validateJSON(t, schema, raw, "agent.readScreenResolved DTO")
 }
 
+// ── agent.runRequest / agent.runResolved (nocx-tjppv) ─────────────────────
+
+// The run request notification is SERVER-built, so its contract check is the
+// real payload off the real socket: the broker's request params (requestId +
+// sessionId + command) must satisfy the schema the renderer's generated type
+// was declared from.
+func TestAgentRunRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runRequest.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestRun(t.Context(), sid, "ls -la")
+		done <- err
+	}()
+	raw := readNotification(t, conn, "agent.runRequest", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.runRequest notification params")
+
+	// Settle the request so the goroutine above exits: a failed outcome is
+	// the honest terminal answer for a test that only wants the params.
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("requestId decode: %v", err)
+	}
+	resp := jsonrpcCall(t, conn, "agent.runResolved", map[string]any{
+		"requestId": req.RequestID,
+		"outcome":   "failed",
+		"error":     "contract test",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("resolution refused: %+v", env.Error)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "could not run the command") {
+			t.Fatalf("RequestRun returned %v, want the failed-outcome error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestRun never settled")
+	}
+}
+
+func TestAgentRunResolved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	body, err := json.Marshal(runResolvedParams{
+		Outcome:  "completed",
+		EntryID:  "entry-7",
+		ExitCode: new(0),
+		Status:   "success",
+		Total:    2,
+		Start:    0,
+		End:      2,
+		Text:     "file1\nfile2",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The wire envelope carries the broker-minted requestId beside the
+	// resolution body — the renderer echoes it back (the broker correlates
+	// on it before the kind's shape check runs).
+	var wire map[string]any
+	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
+		t.Fatalf("decode body: %v", wireErr)
+	}
+	wire["requestId"] = "0123456789abcdef"
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved DTO")
+}
+
+// The failed outcome's shape: no run body, only the requestId and the
+// failure sentence.
+func TestAgentRunResolved_FailedDTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId": "0123456789abcdef",
+		"outcome":   "failed",
+		"error":     "the agent lane is not prompt-ready",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved failed DTO")
+}
+
 // ── agent.runDelta / agent.runState notifications (nocx-x8s2.2, design §7) ─
 
 // The DTOs' conformance: field tags and enum spelling.

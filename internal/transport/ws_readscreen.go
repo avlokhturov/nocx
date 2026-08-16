@@ -206,6 +206,7 @@ func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSp
 					_ = w.TryResult(req.ID, json.RawMessage(`{}`))
 				}
 			}),
+		s.runResolutionSpec(immediate),
 	}
 }
 

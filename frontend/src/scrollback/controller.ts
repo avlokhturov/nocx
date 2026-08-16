@@ -10,7 +10,7 @@
 
 import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
-import { BlockManager, type GetLineFn } from './blocks'
+import { BlockManager, type BlockRecord, type GetLineFn } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
@@ -29,6 +29,10 @@ export interface ScrollbackControllerOpts {
    *  chip's block went with the blocks, so the mode must close — a chip
    *  whose block no longer exists would be an invisible mode. */
   onClear?: () => void
+  /** Fired at the end of every visual freeze — the block's output rows are
+   *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
+   *  output window from the frozen block). */
+  onBlockFrozen?: (rec: BlockRecord) => void
 }
 
 export class ScrollbackController {
@@ -117,6 +121,7 @@ export class ScrollbackController {
         this.setIdle()
         this._scrollToLastBlockStart()
       },
+      onBlockFrozen: opts.onBlockFrozen,
     })
 
     // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────

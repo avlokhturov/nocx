@@ -43,6 +43,7 @@ var ingressCriticalMethods = map[string]struct{}{
 	// behind a full lane would deadlock the run. Same disposition as the
 	// two existing resolvers, for the same reason.
 	"agent.readScreenResolved": {},
+	"agent.runResolved":        {},
 }
 
 // methodSpec declares one control method at server construction: the
