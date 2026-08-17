@@ -796,7 +796,8 @@ func TestCaptureFrame_PreservesAnExistingSessionsWorkspace(t *testing.T) {
 	ctx := context.Background()
 	keyHex := hex.EncodeToString(testKey())
 
-	if err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "workspace:real", Name: "real"}); err != nil {
+	if err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "workspace:real", Name: "real"},
+		aTab("tab-real", "workspace:real"), aPane("pane-real", "tab-real", "/srv")); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	if err := led.CreateSession(ctx, content.Session{ID: "session-recorded", WorkspaceID: "workspace:real"}); err != nil {
