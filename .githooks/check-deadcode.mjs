@@ -16,13 +16,27 @@
  *     with -test), so the committed baseline includes them and they may only
  *     shrink. Do not read a green gate as proof that no dead paths exist.
  *
+ * AND — the one that changes what this gate is worth — RTA treats a method
+ * reached through an interface as reachable, so a method on a type that some
+ * live interface value can hold is never reported, whether or not any
+ * production code calls it. That is not a corner case here: it is why
+ * `deadcode -filter 'nocx/internal/content'` prints nothing and always has,
+ * including on the tree where ContentDB.Add had no caller outside its own
+ * tests (nocx-rtg0). This ratchet runs the same analysis with no filter, so it
+ * shares the blind spot exactly. It catches a dead FUNCTION and a dead method
+ * on a type nothing dispatches through; it cannot catch a dead method behind a
+ * live interface, and no configuration of deadcode makes it. For that question
+ * the tool is `deadcode -whylive <symbol>` (AGENTS.md), read by a person.
+ *
  * Policy: existing violations are baselined warnings; a function deadcode
  * reports that the baseline does not list is a new violation and fails the
- * pre-commit hook. The baseline may only shrink — removing an entry is always
- * a pass. Regenerate with `node .githooks/update-deadcode-baseline.mjs`,
- * which refuses to write a baseline that grows.
+ * job. The baseline may only shrink — removing an entry is always a pass.
+ * Regenerate with `node .githooks/update-deadcode-baseline.mjs`, which refuses
+ * to write a baseline that grows.
  *
  * Invocation: node .githooks/check-deadcode.mjs   (from the repo root)
+ *   --platform=<goos>/<goarch>  assert which platform is being analysed
+ *   --tags=<a,b>                override the build tags (default: see below)
  * NOCX_BASELINE_UPDATE=1 prints every violation without failing, the same
  * escape hatch the CSS checkers use for their fixture gates.
  */
@@ -70,30 +84,87 @@ const UNREACHABLE_RE = /^(.+?):\d+:\d+: unreachable func: (.+)$/
 const TEST_SUPPORT_PKG_RE = /(^|\/)[a-z0-9]*test\/[^/]+\.go:\d+:\d+: unreachable func:/
 
 /**
- * The platforms the baseline is defined over — the two this product ships to.
+ * ONE PLATFORM PER RUN — the host's, and that is a change with a history.
  *
  * deadcode analyses ONE GOOS at a time, so a build-tag-gated pair
  * (secretservice_linux.go / secretservice_other.go) only ever has one half
  * compiled. A baseline generated on one machine therefore listed that
  * machine's halves and nobody else's, and the other platform's halves read as
  * NEW violations — which made the ratchet unpassable on macOS while CI, which
- * never runs deadcode at all, said nothing (nocx-0odm). Regenerating on the
- * other machine only mirrored the failure.
+ * never ran deadcode at all, said nothing (nocx-0odm). The answer then was to
+ * stop asking the host: analyse darwin AND linux from wherever this ran, with
+ * CGO_ENABLED=0, and take the union.
  *
- * The answer is to stop asking the host. Both platforms are analysed from
- * wherever this runs, and the baseline is their UNION, so the gate gives the
- * same answer on every machine and the "free shrink" caveat this file used to
- * carry is gone rather than documented.
+ * Wails v3 ended that, and the option does not exist rather than being hard to
+ * find: v3 requires cgo on both targets (its own cross-platform guide — macOS
+ * "Yes / Docker with macOS SDK", Linux "Yes / Docker, or native if a C
+ * compiler is available"). Measured on the migration branch: CGO_ENABLED=1
+ * with -tags gtk3 exits 0, CGO_ENABLED=0 with the same tag fails inside wails'
+ * own package. There is no no-cgo mode left to build a cross-GOOS analysis on.
  *
- * CGO_ENABLED=0 for the same reason: cgo gates whole files, so leaving it to
- * the host would reintroduce host-dependence one layer down. It is set for
- * BOTH platforms so the two runs are comparable, and it is what makes a
- * cross-GOOS analysis possible without a cross-compiler at all.
+ * The trick existed only because a developer machine cannot be both a Mac and
+ * a Linux box. CI already has both, so each job analyses its OWN platform
+ * natively with cgo on — ci-mac for darwin, ci-linux for linux — and the
+ * baseline stays the union of the two. A single-platform run is a SUBSET of
+ * that union, so a violation the baseline does not list still fails the job;
+ * the only thing given up is that a stale entry belonging to the other
+ * platform goes unreported here. A ratchet fails on new violations; it does
+ * not need to notice shrinkage. (What must not happen is the baseline being
+ * regenerated from one platform and losing the other's entries —
+ * update-deadcode-baseline.mjs is what prevents that.)
+ *
+ * `--platform=<goos>/<goarch>` does not cross-compile; it ASSERTS. Cross-GOOS
+ * is exactly what cgo took away, so a mismatch is a job wired to the wrong
+ * runner and is reported as that rather than as a compiler error from inside
+ * wails.
  */
-const TARGET_PLATFORMS = [
-  { GOOS: 'darwin', GOARCH: 'arm64' },
-  { GOOS: 'linux', GOARCH: 'amd64' },
-]
+export function resolvePlatform(argv, hostEnv) {
+  const arg = argv.find((a) => a.startsWith('--platform='))
+  const host = { GOOS: hostEnv.GOOS, GOARCH: hostEnv.GOARCH }
+  if (!arg) return host
+
+  const [GOOS, GOARCH] = arg.slice('--platform='.length).split('/')
+  if (!GOOS || !GOARCH) {
+    throw new Error(`--platform wants <goos>/<goarch>, got "${arg}"`)
+  }
+  if (GOOS !== host.GOOS) {
+    throw new Error(
+      `--platform asks for ${GOOS} on a ${host.GOOS} host. Wails v3 needs cgo, ` +
+        `so there is no cross-GOOS analysis to fall back on: run this on a ${GOOS} ` +
+        `machine (in CI, the job for that platform) rather than here.`,
+    )
+  }
+  return { GOOS, GOARCH }
+}
+
+/**
+ * The build tags, derived the way the Makefile derives WAILS_PLATFORM_TAGS and
+ * the pre-commit hook derives golangci-lint's: `gtk3` on Linux when
+ * webkit2gtk-4.1 resolves, empty elsewhere. Wails v3 defaults to
+ * GTK4/webkitgtk-6.0, which is not the surface this product ships (ADR-0007),
+ * so without the tag the analysis fails to compile rather than reporting
+ * anything — loudly, which is the correct failure.
+ *
+ * Derived rather than passed so that a local run and the CI job agree without
+ * the caller having to remember; `--tags=` overrides for the awkward host.
+ */
+export function resolveBuildTags(argv, hostEnv) {
+  const arg = argv.find((a) => a.startsWith('--tags='))
+  if (arg) return arg.slice('--tags='.length)
+  if (hostEnv.GOOS !== 'linux') return ''
+  const probe = spawnSync('pkg-config', ['--exists', 'webkit2gtk-4.1'], { stdio: 'ignore' })
+  return probe.status === 0 ? 'gtk3' : ''
+}
+
+/** The host's own GOOS/GOARCH, asked of the toolchain rather than of node. */
+export function hostPlatform() {
+  const proc = spawnSync('go', ['env', 'GOOS', 'GOARCH'], { encoding: 'utf8' })
+  if (proc.status !== 0) {
+    throw new Error(`go env failed: ${(proc.stderr || '').trim()}`)
+  }
+  const [GOOS, GOARCH] = proc.stdout.trim().split('\n')
+  return { GOOS, GOARCH }
+}
 
 /**
  * Run deadcode from the repo root for one platform and return its raw stdout.
@@ -110,12 +181,12 @@ const TARGET_PLATFORMS = [
  * beside it, so on a small machine the OOM killer takes it (measured
  * 2026-08-14). Say so, and say to re-run rather than to edit anything.
  */
-function runDeadcode(platform) {
-  const proc = spawnSync(DEADCODE_CMD, ['./...'], {
+function runDeadcode(platform, tags) {
+  const proc = spawnSync(DEADCODE_CMD, [...(tags ? ['-tags', tags] : []), './...'], {
     cwd: PROJECT_ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, ...platform, CGO_ENABLED: '0' },
+    env: { ...process.env, ...platform, CGO_ENABLED: '1' },
   })
 
   if (proc.signal) {
@@ -138,18 +209,16 @@ function runDeadcode(platform) {
 }
 
 /**
- * Return the normalized violation list: the union across TARGET_PLATFORMS,
- * deduplicated and sorted. Deterministic, and independent of the host —
- * stdout and stderr both captured, keys sorted, and any output line the parser
- * does not understand fails loudly rather than silently passing (a format
- * change in a newer deadcode must not look like a clean tree).
+ * Return the normalized violation list for ONE platform, deduplicated and
+ * sorted. Deterministic for a given platform — keys sorted, and any output
+ * line the parser does not understand fails loudly rather than silently
+ * passing (a format change in a newer deadcode must not look like a clean
+ * tree).
  */
-export function collectDeadcodeViolations() {
+export function collectDeadcodeViolations(platform, tags) {
   const seen = new Map()
-  for (const platform of TARGET_PLATFORMS) {
-    for (const v of parseDeadcodeOutput(runDeadcode(platform))) {
-      seen.set(violationKey(v), v)
-    }
+  for (const v of parseDeadcodeOutput(runDeadcode(platform, tags))) {
+    seen.set(violationKey(v), v)
   }
   const violations = [...seen.values()]
   violations.sort((a, b) => `${a.file}:${a.func}`.localeCompare(`${b.file}:${b.func}`))
@@ -197,8 +266,16 @@ function loadBaseline() {
 // ─── CLI entry point ──────────────────────────────────────────────────────
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   let violations
+  let platform
   try {
-    violations = collectDeadcodeViolations()
+    const host = hostPlatform()
+    platform = resolvePlatform(process.argv.slice(2), host)
+    const tags = resolveBuildTags(process.argv.slice(2), host)
+    console.error(
+      `DEADCODE RATCHET: analysing ${platform.GOOS}/${platform.GOARCH}` +
+        `${tags ? ` -tags ${tags}` : ''}, CGO_ENABLED=1.`,
+    )
+    violations = collectDeadcodeViolations(platform, tags)
   } catch (err) {
     console.error(`DEADCODE RATCHET: ${err.message}`)
     process.exit(1)
@@ -208,7 +285,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const baselineMap = useBaseline ? loadBaseline() : new Map()
 
   const unbaselined = violations.filter((v) => !baselineMap.has(violationKey(v)))
-  const shrunk = baselineMap.size - [...new Set(violations.map(violationKey))].length
+
+  // NOT reported as shrinkage, deliberately. The baseline is the union over
+  // both platforms and this run saw one of them, so every entry belonging to
+  // the other platform's half of a build-tag-gated pair is "unreported here"
+  // and none of it is dead code that went away. Saying "baseline shrunk by 1"
+  // on a tree where nothing changed is how a reader learns to ignore the line.
+  const unreported =
+    baselineMap.size - violations.filter((v) => baselineMap.has(violationKey(v))).length
 
   for (const v of violations) {
     console.log(JSON.stringify(v))
@@ -216,16 +300,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 
   if (unbaselined.length > 0) {
     console.error(
-      `DEADCODE RATCHET: ${violations.length} unreachable functions (${baselineMap.size} baselined, ${shrunk > 0 ? `shrunk by ${shrunk}, ` : ''}${unbaselined.length} NEW):`,
+      `DEADCODE RATCHET: ${violations.length} unreachable functions on ${platform.GOOS}/${platform.GOARCH} (${baselineMap.size} baselined, ${unbaselined.length} NEW):`,
     )
     for (const v of unbaselined) {
       console.error(`  NEW: ${v.file}: ${v.func}`)
     }
     if (useBaseline) process.exitCode = 1
   } else {
-    const shrinkNote = shrunk > 0 ? ` (baseline shrunk by ${shrunk})` : ''
     console.error(
-      `DEADCODE RATCHET: ${violations.length} unreachable functions, all baselined${shrinkNote}.`,
+      `DEADCODE RATCHET: ${violations.length} unreachable functions on ` +
+        `${platform.GOOS}/${platform.GOARCH}, all baselined ` +
+        `(${unreported} of ${baselineMap.size} baselined entries are not compiled here or are gone).`,
     )
   }
 }

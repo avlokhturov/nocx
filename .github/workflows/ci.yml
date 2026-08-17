@@ -50,6 +50,17 @@
 # not the shell. OS_EXEMPT in the Makefile carries only internal/pty and
 # internal/storage, each with its own reason.
 #
+# THE DEAD-CODE RATCHET LIVES HERE NOW, one half in ci-mac and one in
+# ci-linux, and it is the only gate in this file with no local target at all.
+# That is deliberate twice over: it ran in the pre-commit hook and nowhere
+# else, which meant it never ran on the platform a developer was not sitting
+# at; and Wails v3 removed the CGO_ENABLED=0 cross-GOOS analysis that let one
+# machine answer for both, so between the migration and nocx-re6gk it ran in
+# no place whatsoever. A commit does not pay for it, and neither does
+# `make ci-full` — a Mac cannot compute the linux answer and a Linux box
+# cannot compute the darwin one, so a local composite could only ever be half
+# of it and would read as the whole.
+#
 # `make ci` alone is the host-side half only. The Makefile used to be described
 # here as mirroring "this same set of checks so green is identical locally and
 # in CI"; it covered one of the four jobs, and a release attempt and its
@@ -119,14 +130,28 @@ jobs:
       - name: Lint
         run: golangci-lint run ./...
 
-      # The Wails v3 module compiles cgo against WebKitGTK; the gtk3 tag
-      # selects the 4.1 surface this product ships (ADR-0007). Without the
-      # libraries the portable set cannot build.
-      - name: Install WebKitGTK build dependencies
-        run: sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
-
       - name: Build
         run: go build -tags gtk3 ./...
+
+      # THE DEAD-CODE RATCHET, darwin half. It ran in the pre-commit hook and
+      # nowhere else until Wails v3 took away the CGO_ENABLED=0 cross-GOOS
+      # analysis the hook version was built on, at which point it ran nowhere
+      # at all (nocx-re6gk). Each platform now analyses itself, natively, with
+      # cgo on; .githooks/check-deadcode.mjs carries the whole argument and
+      # --platform asserts this job is the runner it thinks it is.
+      #
+      # The baseline is the union of the two platforms, so this job sees a
+      # subset of it: a NEW violation still fails, and a stale entry belonging
+      # to linux simply goes unmentioned here.
+      #
+      # Pinned like golangci-lint and not floating like gofumpt, because the
+      # checker fails loudly on an output line it cannot parse — a newer
+      # deadcode changing its format would read as a broken gate rather than
+      # as a tool upgrade.
+      - name: Install deadcode
+        run: go install golang.org/x/tools/cmd/deadcode@v0.49.0
+      - name: Dead-code ratchet (darwin)
+        run: node .githooks/check-deadcode.mjs --platform=darwin/arm64
 
       # THE OS-SPECIFIC PACKAGES ONLY, and the list comes from the Makefile
       # (`make ci-mac` runs the same set locally, in a disposable root).
@@ -328,6 +353,26 @@ jobs:
 
       - name: Build
         run: go build -tags gtk3 ./...
+
+      # THE DEAD-CODE RATCHET, linux half — the darwin half is in ci-mac, and
+      # the comment there carries the argument for why there are two.
+      #
+      # ONE MATRIX LEG, and not because it would be slow twice (it is four
+      # seconds). deadcode is static analysis of the module: the keyring axis
+      # is a runtime FIXTURE dimension, so both legs would compute a byte-
+      # identical answer and a red gate would print itself twice with no way
+      # to tell the two reports apart. no-secret-service is the leg that needs
+      # no dbus, so it is the one that carries it.
+      #
+      # This job rather than ci-backend: the two partition the TEST package
+      # set, while deadcode analyses ./... whole and belongs to neither half.
+      # It goes with the job whose name says which platform is being analysed.
+      - name: Install deadcode
+        if: matrix.keyring == 'no-secret-service'
+        run: go install golang.org/x/tools/cmd/deadcode@v0.49.0
+      - name: Dead-code ratchet (linux)
+        if: matrix.keyring == 'no-secret-service'
+        run: node .githooks/check-deadcode.mjs --platform=linux/amd64
 
       - name: Test (with Secret Service)
         if: matrix.keyring == 'with-secret-service'
