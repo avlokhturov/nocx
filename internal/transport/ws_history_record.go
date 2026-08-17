@@ -36,11 +36,11 @@ import (
 // completes. It mirrors the ledger's CommandRecord minus the fields that
 // never cross (the session-local id, the live marker-line accessor, the
 // disposed flag) and minus the output, which is never retained (ADR-0008).
-// TabID is the ONE deliberate exception to "the renderer's session-local ids
-// never cross the wire" (nocx-tsajw): the renderer-minted per-tab identity
+// PaneID is the ONE deliberate exception to "the renderer's session-local ids
+// never cross the wire" (nocx-tsajw): the renderer-minted per-pane identity
 // that scopes the pending-capture registry. It is opaque to the backend —
 // minted as a UUID, never reused, and destruction is bound to the connection
-// it arrives on, so a tab id from one connection cannot reach another's
+// it arrives on, so a pane id from one connection cannot reach another's
 // captures. The scope's generation stays a backend fact (the connection's
 // own submission counter).
 type historyRecordParams struct {
@@ -52,7 +52,7 @@ type historyRecordParams struct {
 	StartedAt *int64 `json:"startedAt"`
 	EndedAt   *int64 `json:"endedAt"`
 	Trusted   bool   `json:"trusted"`
-	TabID     string `json:"tabId"`
+	PaneID    string `json:"paneId"`
 }
 
 // redactionWire is one redaction segment on the wire: kind and span in
@@ -114,7 +114,7 @@ const epochFloor int64 = 1_577_836_800_000 // 2020-01-01T00:00:00Z
 // (nil → content store not wired), the transport-owned capture registry and
 // discovery seams, and the Responder; never the *WSServer (migration map,
 // "history.* — the content domain": the capture registry stays in the
-// handler, connection-scoped in-memory). The tab id comes per call, from the
+// handler, connection-scoped in-memory). The pane id comes per call, from the
 // connection identity.
 type historyRecordHandlers struct {
 	op       capability.ContentOperation // nil → content store not wired
@@ -139,7 +139,7 @@ type historyMachine interface {
 // outputEnabled policy governs a capture path that does not exist yet.
 //
 // Detection fails closed here: a masking failure refuses the write (never
-// the raw command), destroys the tab's pending captures, and errors the
+// the raw command), destroys the pane's pending captures, and errors the
 // ack. The command itself already ran — refusing the record fails nothing
 // the user did.
 func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
@@ -168,12 +168,12 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	masked, findings, segs, err := maskCommandSafe(p.Command)
 	if err != nil {
 		// Fail closed: the raw command must not reach the row, and the
-		// tab's pending captures die with the failed record.
+		// pane's pending captures die with the failed record.
 		if h.captures != nil {
-			// The failing TAB's captures die — the tab id on this record,
-			// bound to this connection. A masking failure in one tab never
-			// touches another tab's offers on the same socket.
-			h.captures.DestroyTab(connectionID(wconn), p.TabID)
+			// The failing PANE's captures die — the pane id on this record,
+			// bound to this connection. A masking failure in one pane never
+			// touches another pane's offers on the same socket.
+			h.captures.DestroyPane(connectionID(wconn), p.PaneID)
 		}
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: detection failed; command not recorded"})
 		return
@@ -290,13 +290,13 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		return nil
 	})
 	if runErr != nil {
-		// History-record failure destroys the tab's pending captures: the
+		// History-record failure destroys the pane's pending captures: the
 		// record that was to carry the offer's row never landed (capture
 		// contract). A gate refusal is the saturation error; anything else
 		// keeps the store-failure answer unchanged from the pre-capability
 		// handler.
 		if h.captures != nil {
-			h.captures.DestroyTab(connectionID(wconn), p.TabID)
+			h.captures.DestroyPane(connectionID(wconn), p.PaneID)
 		}
 		var rej *capability.RefusedError
 		if errors.As(runErr, &rej) {
@@ -315,14 +315,14 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	// Gating the whole call on len(creds) > 0 is fine for offers — a
 	// keyless command has nothing to offer — and Submit's suppression
 	// rules (already saved, already dismissed) apply on every record
-	// regardless. A new submission deliberately does NOT destroy the tab's
+	// regardless. A new submission deliberately does NOT destroy the pane's
 	// older pending captures (the supersede rule was removed, capture.go
 	// header); with no credentials Submit returns nothing, which is
 	// exactly what is wanted here.
 	if h.captures != nil {
 		scope := credential.CaptureScope{
 			Connection: connectionID(wconn),
-			Tab:        p.TabID,
+			Pane:       p.PaneID,
 			SessionIDs: sessionIDsOf(state),
 			EntryID:    entryID,
 			Generation: state.nextGeneration(),
@@ -352,7 +352,7 @@ func connectionID(wconn *wsConn) string {
 }
 
 // sessionIDsOf is the snapshot of the connection's sessions at record time
-// — informational scope (a tab can hold several sessions; ambiguous
+// — informational scope (a pane can hold several sessions; ambiguous
 // ownership falls back rather than guessing).
 func sessionIDsOf(state *connState) []string {
 	state.mu.Lock()
@@ -402,8 +402,8 @@ func validateHistoryRecord(p historyRecordParams) string {
 	if p.Command == "" || strings.TrimSpace(p.Command) == "" {
 		return "command is required and must not be empty"
 	}
-	if strings.TrimSpace(p.TabID) == "" {
-		return "tabId is required"
+	if strings.TrimSpace(p.PaneID) == "" {
+		return "paneId is required"
 	}
 	switch content.CommandStatus(p.Status) {
 	case content.StatusRunning, content.StatusSuccess, content.StatusFailure,

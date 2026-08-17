@@ -1921,8 +1921,8 @@ func desiredModeForAck(remote *ssh.ConnectConfig) string {
 // slow connector acquire cannot delay the ack.
 //
 // Every result with a tunnel record is registered in the transport ledger
-// WITHOUT a tab owner (spec §7.3): stored forwards are connection-owned
-// and must survive tab close. A row that failed to start is still
+// WITHOUT a pane owner (spec §7.3): stored forwards are connection-owned
+// and must survive pane close. A row that failed to start is still
 // registered so ports.status shows it — the panel must not contradict a
 // forward the backend knows failed (AGENTS.md: a soft degrade must be
 // visible in the product, not only in a log). One row's failure never
@@ -2506,13 +2506,13 @@ func (s *WSServer) registerConn(wc *wsConn) {
 
 // unregisterConn removes a connection from the broadcast set and destroys
 // every pending capture it owns: a transport disconnect is on the capture
-// contract's destruction list, and one WebSocket carries every tab in a
+// contract's destruction list, and one WebSocket carries every pane in a
 // window, so the connection's death takes all of them (DestroyConnection —
-// tab closure is a separate, per-tab trigger the renderer fires through
-// tab.close). It also stops the tunnels the
-// tab opened — tab-scoped teardown (spec §7.3): each forward holds its OWN
-// pooled reference, so stopping this tab's forwards never touches another
-// tab's on the same shared connection.
+// pane closure is a separate, per-pane trigger the renderer fires through
+// pane.close). It also stops the tunnels the
+// pane opened — pane-scoped teardown (spec §7.3): each forward holds its OWN
+// pooled reference, so stopping this pane's forwards never touches another
+// pane's on the same shared connection.
 func (s *WSServer) unregisterConn(wc *wsConn) {
 	s.connsMu.Lock()
 	delete(s.conns, wc)

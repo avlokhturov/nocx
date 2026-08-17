@@ -2,7 +2,7 @@ import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
-import type { TabClose } from './generated/tab.close'
+import type { PaneClose } from './generated/pane.close'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -416,15 +416,15 @@ export class WSClient {
     return this.dispatcher.call<T>(method, params)
   }
 
-  /** Tell the backend a tab closed, so its pending captures die with it
-   *  (nocx-tsajw). The tabId is the renderer-minted per-tab identity — the
+  /** Tell the backend a pane closed, so its pending captures die with it
+   *  (nocx-tsajw). The paneId is the renderer-minted per-pane identity — the
    *  one wire exception to "session-local ids never cross" — declared once
-   *  in contracts/tab.close.schema.json (TabClose is generated from it).
+   *  in contracts/pane.close.schema.json (PaneClose is generated from it).
    *  Fire-and-forget: a lost notification is covered by the transport
-   *  disconnect, which is the same destruction the tab's death implies. */
-  notifyTabClosed(tabId: string): void {
-    const params: TabClose = { tabId }
-    this.dispatcher.notify('tab.close', params)
+   *  disconnect, which is the same destruction the pane's death implies. */
+  notifyPaneClosed(paneId: string): void {
+    const params: PaneClose = { paneId }
+    this.dispatcher.notify('pane.close', params)
   }
 
   // --- ack plumbing -------------------------------------------------------

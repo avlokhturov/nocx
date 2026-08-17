@@ -309,9 +309,9 @@ export interface ClientFake {
    *  default — the no-store state, which the recall overlay labels
    *  source=session. */
   call: ReturnType<typeof vi.fn>
-  /** The tab.close notification (nocx-tsajw): records the wire identity of
-   *  the closed tab so tests can assert the backend was told. */
-  notifyTabClosed: ReturnType<typeof vi.fn>
+  /** The pane.close notification (nocx-tsajw): records the wire identity of
+   *  the closed pane so tests can assert the backend was told. */
+  notifyPaneClosed: ReturnType<typeof vi.fn>
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
@@ -379,7 +379,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
-    notifyTabClosed: vi.fn(),
+    notifyPaneClosed: vi.fn(),
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),
       // A live prompt opens the attempt before the pty write; the default

@@ -742,7 +742,7 @@ export class TabManager {
     // backend destroys them (nocx-tsajw). Sent before the DOM teardown —
     // a dropped notification is covered by the transport-disconnect
     // trigger, which is the same destruction.
-    this.client.notifyTabClosed(tab.wireId)
+    this.client.notifyPaneClosed(tab.wireId)
 
     const wasActive = tab === this.activeTab
     this.removeFromRecent(tab.id)

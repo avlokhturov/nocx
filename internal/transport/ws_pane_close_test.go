@@ -1,14 +1,14 @@
 package transport
 
-// tab.close and the capture scope (nocx-tsajw): a closed tab's pending
-// credential dies with it, and only it. Every test here runs TWO tabs on ONE
+// pane.close and the capture scope (nocx-tsajw): a closed pane's pending
+// credential dies with it, and only it. Every test here runs TWO panes on ONE
 // connection, because that is the arrangement the defect lives in — the old
-// connection-keyed destroy could not express "one of two tabs closed" (it
-// killed both) and could not express a history-record failure in one tab
+// connection-keyed destroy could not express "one of two panes closed" (it
+// killed both) and could not express a history-record failure in one pane
 // without killing the other's offers.
 //
-// The destruction key is (connection, tab): the tab id is renderer-minted
-// and opaque, so a tab id from one connection must never reach another
+// The destruction key is (connection, pane): the pane id is renderer-minted
+// and opaque, so a pane id from one connection must never reach another
 // connection's captures — asserted over the real socket below, not only in
 // the registry unit tests.
 
@@ -26,17 +26,17 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 )
 
-// recordOnTab records one command from one tab over the socket and decodes
-// the ack — the "one tab submits" half of the two-tabs-one-connection
+// recordOnPane records one command from one pane over the socket and decodes
+// the ack — the "one pane submits" half of the two-panes-one-connection
 // arrangement.
-func recordOnTab(t *testing.T, conn *websocket.Conn, line, tabID string, id int) recordAck {
+func recordOnPane(t *testing.T, conn *websocket.Conn, line, paneID string, id int) recordAck {
 	t.Helper()
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
 		"command": line,
-		"tabId":   tabID,
+		"paneId":  paneID,
 	}), id)
 	if resp.Error != nil {
-		t.Fatalf("history.record (tab %s) error: %+v", tabID, resp.Error)
+		t.Fatalf("history.record (pane %s) error: %+v", paneID, resp.Error)
 	}
 	var ack recordAck
 	if err := json.Unmarshal(resp.Result, &ack); err != nil {
@@ -45,25 +45,25 @@ func recordOnTab(t *testing.T, conn *websocket.Conn, line, tabID string, id int)
 	return ack
 }
 
-// sendTabClose sends the tab.close notification the renderer sends when a tab
+// sendPaneClose sends the pane.close notification the renderer sends when a pane
 // closes. The params are marshaled from the transport's own struct so the
 // behavior test doubles as the over-the-wire conformance check: the shape the
 // Go side declares is the shape the server acts on.
-func sendTabClose(t *testing.T, conn *websocket.Conn, tabID string) {
+func sendPaneClose(t *testing.T, conn *websocket.Conn, paneID string) {
 	t.Helper()
-	payload, err := json.Marshal(tabCloseParams{TabID: tabID})
+	payload, err := json.Marshal(paneCloseParams{PaneID: paneID})
 	if err != nil {
-		t.Fatalf("marshal tab.close params: %v", err)
+		t.Fatalf("marshal pane.close params: %v", err)
 	}
-	frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"tab.close","params":%s}`, payload)
+	frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"pane.close","params":%s}`, payload)
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
-		t.Fatalf("write tab.close: %v", err)
+		t.Fatalf("write pane.close: %v", err)
 	}
 }
 
 // failOnCommandDB is a captureFakeDB whose Add refuses one marker command —
-// the history-record failure trigger, scoped to one tab's record so the other
-// tab's record still lands. CommandHistory is overridden because the
+// the history-record failure trigger, scoped to one pane's record so the other
+// pane's record still lands. CommandHistory is overridden because the
 // promoted one would answer the EMBEDDED fake, routing every record past this
 // override.
 type failOnCommandDB struct {
@@ -91,11 +91,11 @@ func saveCapture(t *testing.T, conn *websocket.Conn, captureID string, id int) i
 	return resp.Error.Code
 }
 
-// TestTabClose_DestroysOnlyThatTabsCaptures: closing the first of two tabs on
+// TestPaneClose_DestroysOnlyThatPanesCaptures: closing the first of two panes on
 // one connection destroys ITS pending capture and leaves the second's intact —
-// and a capture that was never saved or dismissed does not outlive its tab
+// and a capture that was never saved or dismissed does not outlive its pane
 // (the offer exists at the ack; the save after the close is refused).
-func TestTabClose_DestroysOnlyThatTabsCaptures(t *testing.T) {
+func TestPaneClose_DestroysOnlyThatPanesCaptures(t *testing.T) {
 	clock := time.Unix(1_750_000_000, 0)
 	db := newCaptureFakeDB()
 	ws, _, stop := newCaptureWSServer(t, db, &clock)
@@ -103,29 +103,29 @@ func TestTabClose_DestroysOnlyThatTabsCaptures(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	ackA := recordOnTab(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-111", "tab-a", 1)
-	ackB := recordOnTab(t, conn, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-222", "tab-b", 2)
+	ackA := recordOnPane(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-111", "pane-a", 1)
+	ackB := recordOnPane(t, conn, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-222", "pane-b", 2)
 	if len(ackA.Captures) != 1 || len(ackB.Captures) != 1 {
-		t.Fatalf("captures = %d/%d, want one offer per tab", len(ackA.Captures), len(ackB.Captures))
+		t.Fatalf("captures = %d/%d, want one offer per pane", len(ackA.Captures), len(ackB.Captures))
 	}
 	captureA, captureB := ackA.Captures[0].ID, ackB.Captures[0].ID
 
-	// The closing event: tab-a dies, tab-b does not.
-	sendTabClose(t, conn, "tab-a")
+	// The closing event: pane-a dies, pane-b does not.
+	sendPaneClose(t, conn, "pane-a")
 
 	if code := saveCapture(t, conn, captureA, 3); code != -32010 {
-		t.Fatalf("save of tab-a's capture after its tab closed = code %d, want -32010 (capture unknown)", code)
+		t.Fatalf("save of pane-a's capture after its pane closed = code %d, want -32010 (capture unknown)", code)
 	}
 	if code := saveCapture(t, conn, captureB, 4); code != 0 {
-		t.Fatalf("save of tab-b's capture after tab-a closed = code %d, want success", code)
+		t.Fatalf("save of pane-b's capture after pane-a closed = code %d, want success", code)
 	}
 }
 
-// TestTabClose_OtherConnectionsTabIdIsUntouchable: the tab identity is
-// renderer-minted and opaque, so a tab.close from ONE connection must not
-// destroy the same-named tab's captures on ANOTHER connection — the pair key
-// (connection, tab) is the authorization boundary, not the id.
-func TestTabClose_OtherConnectionsTabIdIsUntouchable(t *testing.T) {
+// TestPaneClose_OtherConnectionsPaneIdIsUntouchable: the pane identity is
+// renderer-minted and opaque, so a pane.close from ONE connection must not
+// destroy the same-named pane's captures on ANOTHER connection — the pair key
+// (connection, pane) is the authorization boundary, not the id.
+func TestPaneClose_OtherConnectionsPaneIdIsUntouchable(t *testing.T) {
 	clock := time.Unix(1_750_000_000, 0)
 	db := newCaptureFakeDB()
 	ws, _, stop := newCaptureWSServer(t, db, &clock)
@@ -136,28 +136,28 @@ func TestTabClose_OtherConnectionsTabIdIsUntouchable(t *testing.T) {
 	connB := connectWS(t, ws)
 	defer func() { _ = connB.Close() }()
 
-	// Both connections hold a tab that calls itself "tab-1" — each renderer
+	// Both connections hold a pane that calls itself "pane-1" — each renderer
 	// mints its own ids, so this collision is exactly what the pair key
 	// exists for.
-	ackA := recordOnTab(t, connA, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-333", "tab-1", 1)
-	ackB := recordOnTab(t, connB, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-444", "tab-1", 2)
+	ackA := recordOnPane(t, connA, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-333", "pane-1", 1)
+	ackB := recordOnPane(t, connB, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-444", "pane-1", 2)
 
-	// connA closes ITS tab-1: connB's tab-1 must be untouched.
-	sendTabClose(t, connA, "tab-1")
+	// connA closes ITS pane-1: connB's pane-1 must be untouched.
+	sendPaneClose(t, connA, "pane-1")
 
 	if code := saveCapture(t, connA, ackA.Captures[0].ID, 3); code != -32010 {
-		t.Fatalf("connA's capture after its own tab.close = code %d, want -32010", code)
+		t.Fatalf("connA's capture after its own pane.close = code %d, want -32010", code)
 	}
 	if code := saveCapture(t, connB, ackB.Captures[0].ID, 4); code != 0 {
-		t.Fatalf("connB's same-named capture after connA's tab.close = code %d, want success", code)
+		t.Fatalf("connB's same-named capture after connA's pane.close = code %d, want success", code)
 	}
 }
 
-// TestHistoryRecordFailure_DestroysOnlyThatTabsCaptures: a history-record
-// failure in ONE tab destroys only that tab's pending captures — the other
-// tab's offer on the same connection survives (the old connection-keyed
+// TestHistoryRecordFailure_DestroysOnlyThatPanesCaptures: a history-record
+// failure in ONE pane destroys only that pane's pending captures — the other
+// pane's offer on the same connection survives (the old connection-keyed
 // destroy took both).
-func TestHistoryRecordFailure_DestroysOnlyThatTabsCaptures(t *testing.T) {
+func TestHistoryRecordFailure_DestroysOnlyThatPanesCaptures(t *testing.T) {
 	clock := time.Unix(1_750_000_000, 0)
 	db := &failOnCommandDB{captureFakeDB: newCaptureFakeDB(), failOn: "sudo rm -rf /"}
 	ws, _, stop := newCaptureWSServer(t, db, &clock)
@@ -165,29 +165,29 @@ func TestHistoryRecordFailure_DestroysOnlyThatTabsCaptures(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	ackA := recordOnTab(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-555", "tab-a", 1)
-	ackB := recordOnTab(t, conn, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-666", "tab-b", 2)
+	ackA := recordOnPane(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-555", "pane-a", 1)
+	ackB := recordOnPane(t, conn, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-666", "pane-b", 2)
 	captureA, captureB := ackA.Captures[0].ID, ackB.Captures[0].ID
 
-	// tab-a's record fails at the store; tab-a's offer dies with it.
+	// pane-a's record fails at the store; pane-a's offer dies with it.
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
 		"command": "sudo rm -rf /", // the marker the failing store refuses
-		"tabId":   "tab-a",
+		"paneId":  "pane-a",
 	}), 3)
 	if resp.Error == nil || resp.Error.Code != -32603 {
 		t.Fatalf("failing record error = %+v, want -32603", resp.Error)
 	}
 
 	if code := saveCapture(t, conn, captureA, 4); code != -32010 {
-		t.Fatalf("tab-a's capture after its record failed = code %d, want -32010", code)
+		t.Fatalf("pane-a's capture after its record failed = code %d, want -32010", code)
 	}
 	if code := saveCapture(t, conn, captureB, 5); code != 0 {
-		t.Fatalf("tab-b's capture after tab-a's record failed = code %d, want success", code)
+		t.Fatalf("pane-b's capture after pane-a's record failed = code %d, want success", code)
 	}
 }
 
 // TestTransportDisconnect_DestroysEverythingOnTheConnection: the one
-// destruction event that is genuinely connection-scoped. Both tabs' captures
+// destruction event that is genuinely connection-scoped. Both panes' captures
 // die on the disconnect — asserted deliberately, not left to omission — and
 // the assertion is on the registry (the socket is gone, so there is no wire
 // to ask).
@@ -197,8 +197,8 @@ func TestTransportDisconnect_DestroysEverythingOnTheConnection(t *testing.T) {
 	ws, caps, stop := newCaptureWSServerWithRegistry(t, db, &clock)
 	defer stop()
 	conn := connectWS(t, ws)
-	ackA := recordOnTab(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-777", "tab-a", 1)
-	ackB := recordOnTab(t, conn, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-888", "tab-b", 2)
+	ackA := recordOnPane(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-777", "pane-a", 1)
+	ackB := recordOnPane(t, conn, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-888", "pane-b", 2)
 	captureA, captureB := ackA.Captures[0].ID, ackB.Captures[0].ID
 
 	// The offers existed (the opening end of the invariant); the disconnect
@@ -227,8 +227,8 @@ func TestTransportDisconnect_DestroysEverythingOnTheConnection(t *testing.T) {
 		id   string
 		name string
 	}{
-		{captureA, "tab-a's capture"},
-		{captureB, "tab-b's capture"},
+		{captureA, "pane-a's capture"},
+		{captureB, "pane-b's capture"},
 	} {
 		if _, err := caps.Reserve(credential.CaptureID(c.id)); !errors.Is(err, credential.ErrCaptureUnknown) {
 			t.Fatalf("%s after transport disconnect = %v, want unknown", c.name, err)
@@ -236,11 +236,11 @@ func TestTransportDisconnect_DestroysEverythingOnTheConnection(t *testing.T) {
 	}
 }
 
-// TestTabClose_RejectsMalformedNotification: a tab.close with no tabId or a
+// TestPaneClose_RejectsMalformedNotification: a pane.close with no paneId or a
 // non-object payload is refused by the validator before the handler; the
 // capture stays pending (a notification has no response, so the assertion is
 // that nothing was destroyed).
-func TestTabClose_RejectsMalformedNotification(t *testing.T) {
+func TestPaneClose_RejectsMalformedNotification(t *testing.T) {
 	clock := time.Unix(1_750_000_000, 0)
 	db := newCaptureFakeDB()
 	ws, _, stop := newCaptureWSServer(t, db, &clock)
@@ -248,32 +248,32 @@ func TestTabClose_RejectsMalformedNotification(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
-	ack := recordOnTab(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-999", "tab-a", 1)
+	ack := recordOnPane(t, conn, "TOKEN=aaa-bbb-ccc-ddd-eee-fff-999", "pane-a", 1)
 	capture := ack.Captures[0].ID
 
 	for _, frame := range []string{
-		`{"jsonrpc":"2.0","method":"tab.close","params":{}}`,
-		`{"jsonrpc":"2.0","method":"tab.close","params":"not-an-object"}`,
+		`{"jsonrpc":"2.0","method":"pane.close","params":{}}`,
+		`{"jsonrpc":"2.0","method":"pane.close","params":"not-an-object"}`,
 	} {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
-			t.Fatalf("write malformed tab.close: %v", err)
+			t.Fatalf("write malformed pane.close: %v", err)
 		}
 	}
 
 	if code := saveCapture(t, conn, capture, 2); code != 0 {
-		t.Fatalf("capture after malformed tab.close = code %d, want success", code)
+		t.Fatalf("capture after malformed pane.close = code %d, want success", code)
 	}
 }
 
-// TestTabClose_DTOConformsToContract pins the Go side of the wire shape: the
-// struct the handler parses marshals to exactly what contracts/tab.close
-// declares (additionalProperties false, tabId required).
-func TestTabClose_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "tab.close.schema.json")
-	cases := map[string]tabCloseParams{
-		"typical tab": {TabID: "3f2a5c1e-8b0d-4e6a-9f2c-1d0b3e4a5f6a"},
-		"minimal tab": {TabID: "1"},
-		"long tab id": {TabID: strings.Repeat("x", 128)},
+// TestPaneClose_DTOConformsToContract pins the Go side of the wire shape: the
+// struct the handler parses marshals to exactly what contracts/pane.close
+// declares (additionalProperties false, paneId required).
+func TestPaneClose_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "pane.close.schema.json")
+	cases := map[string]paneCloseParams{
+		"typical pane": {PaneID: "3f2a5c1e-8b0d-4e6a-9f2c-1d0b3e4a5f6a"},
+		"minimal pane": {PaneID: "1"},
+		"long pane id": {PaneID: strings.Repeat("x", 128)},
 	}
 	for name, params := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -281,7 +281,7 @@ func TestTabClose_DTOConformsToContract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			validateJSON(t, schema, raw, "tab.close params DTO")
+			validateJSON(t, schema, raw, "pane.close params DTO")
 		})
 	}
 }

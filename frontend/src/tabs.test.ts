@@ -643,9 +643,9 @@ describe('TabManager', () => {
         .querySelectorAll('.nocx-tab')[0]
         .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
       await vi.waitFor(() => {
-        expect(client.notifyTabClosed).toHaveBeenCalledWith('tab-wire-one')
+        expect(client.notifyPaneClosed).toHaveBeenCalledWith('tab-wire-one')
       })
-      expect(client.notifyTabClosed).not.toHaveBeenCalledWith('tab-wire-two')
+      expect(client.notifyPaneClosed).not.toHaveBeenCalledWith('tab-wire-two')
 
       // Close the remaining tab: its own id is announced. The automatic
       // replacement tab mints a NEW id — a closed tab's identity is never
@@ -654,9 +654,9 @@ describe('TabManager', () => {
         .querySelectorAll('.nocx-tab')[0]
         .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
       await vi.waitFor(() => {
-        expect(client.notifyTabClosed).toHaveBeenCalledWith('tab-wire-two')
+        expect(client.notifyPaneClosed).toHaveBeenCalledWith('tab-wire-two')
       })
-      expect(client.notifyTabClosed).not.toHaveBeenCalledWith('tab-wire-spare')
+      expect(client.notifyPaneClosed).not.toHaveBeenCalledWith('tab-wire-spare')
     } finally {
       uuidSpy.mockRestore()
     }

@@ -87,12 +87,12 @@ type CaptureID string
 // SessionIDs are the terminal sessions the tab held at record time
 // (informational: a tab can hold several sessions, and ambiguous ownership
 // falls back rather than guessing); EntryID is the store row the capture
-// first attached to ("" when no row was written); Generation is the tab's
+// first attached to ("" when no row was written); Generation is the pane's
 // submission counter, which is what makes "the next submission from that
-// tab" a fact instead of a guess.
+// pane" a fact instead of a guess.
 type CaptureScope struct {
 	Connection string
-	Tab        string
+	Pane       string
 	SessionIDs []string
 	EntryID    string
 	Generation uint64
@@ -457,29 +457,29 @@ func (r *CaptureRegistry) Dismiss(id CaptureID) error {
 	}
 }
 
-// DestroyTab destroys every pending capture originating from a tab: tab
-// closure (the renderer's tab.close notification) and history-record failure.
-// The connection is part of the key: the tab identity is renderer-minted and
-// opaque, so a tab id from one connection must never destroy another
+// DestroyPane destroys every pending capture originating from a pane: pane
+// closure (the renderer's pane.close notification) and history-record failure.
+// The connection is part of the key: the pane identity is renderer-minted and
+// opaque, so a pane id from one connection must never destroy another
 // connection's captures. A capture whose save is in flight is left to settle
 // — its outcome is already decided and a seal or disconnect must not make it
 // create a secret it was entitled to.
-func (r *CaptureRegistry) DestroyTab(conn, tab string) {
+func (r *CaptureRegistry) DestroyPane(conn, pane string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, c := range r.byID {
-		if c.scope.Connection == conn && c.scope.Tab == tab && c.state == statePending {
+		if c.scope.Connection == conn && c.scope.Pane == pane && c.state == statePending {
 			r.destroyLocked(c)
 		}
 	}
 }
 
 // DestroyConnection destroys every pending capture from one connection:
-// transport disconnect. One WebSocket carries every tab in a window, so the
-// connection's death takes all of them — the per-tab destroy (DestroyTab)
+// transport disconnect. One WebSocket carries every pane in a window, so the
+// connection's death takes all of them — the per-pane destroy (DestroyPane)
 // cannot express "the connection is gone", and a disconnect is the one
 // destruction event that is genuinely connection-scoped. Settling saves are
-// left to finish, exactly as DestroyTab leaves them.
+// left to finish, exactly as DestroyPane leaves them.
 func (r *CaptureRegistry) DestroyConnection(conn string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

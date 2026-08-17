@@ -49,7 +49,7 @@ export interface TunnelOpenResult {
    */
   destination: string
   /**
-   * Owner label the renderer attached at open (tab id or profile id). The backend tears the forward down when the tab that opened it disconnects, not by this label.
+   * Owner label the renderer attached at open (pane id or profile id). The backend tears the forward down when the pane that opened it disconnects, not by this label.
    */
   scope: string
   /**
