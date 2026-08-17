@@ -660,6 +660,28 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
+  /** What is LIVE in this pane right now, for the prompts that name what a
+   *  close would destroy (nocx-isoph.6, design D6): the command running in
+   *  the foreground, and the machine the ACTIVE domain is talking to — so a
+   *  hand-typed `ssh` names the machine the person is actually on, which is
+   *  the whole reason this does not route through activeOrigin.
+   *
+   *  Null once the shell has exited, unlike `lineage`: that tab is still on
+   *  screen and its provenance is still true, but nothing in it is running,
+   *  and a close prompt that named it would be describing a loss that has
+   *  already happened.
+   *
+   *  A running command whose program cleared its own title is still named
+   *  here, which is where this parts company with `runningCommandTitle`: a
+   *  cleared title is a statement about what to CALL the pane, and a person
+   *  being asked whether to kill the work is owed the command either way. */
+  liveWork(): { command: string | null; host: string | null } | null {
+    if (this.session === null || this._sessionExited) return null
+    const running = this.latestRunningRecord()
+    const command = running === null ? null : running.command.trim()
+    return { command: command === '' ? null : command, host: this.hostLabel() || null }
+  }
+
   /** The active pane's raw env-view facts for the snippet provider (design
    *  §7.4): cwd, host and user of the ACTIVE domain, with the view's ''
    *  unknown-marker left intact — session-facts.ts maps that marker to
@@ -718,8 +740,17 @@ export class TerminalContent extends BasePaneContent {
    *  environment is a place with no directory until it tells us otherwise
    *  (nocx-695k.2). */
   private locationLine(): string {
-    if (this._host) return this._user ? `${this._user}@${this._host}` : this._host
-    return this._cwd
+    return this.hostLabel() || this._cwd
+  }
+
+  /** The ACTIVE domain's machine as a person names it — `user@host`, or the
+   *  bare host when no user is known, and '' for a local shell. Extracted
+   *  from `locationLine` rather than copied into `liveWork`: which machine we
+   *  are on has one derivation, and a second one would agree everywhere
+   *  anyone looked and disagree in the nested case both of these exist for. */
+  private hostLabel(): string {
+    if (!this._host) return ''
+    return this._user ? `${this._user}@${this._host}` : this._host
   }
 
   /** Copy the environment projection's current view into the fields every

@@ -27,6 +27,8 @@
 // act may close a tab, which is why this module produces a QUESTION and never
 // a decision.
 
+import { nameAtMost } from './live-work'
+
 /** One live tab, as far as lineage is concerned: the session it holds, the
  *  session that opened that one, and what the person calls it. */
 export interface LineageNode {
@@ -82,11 +84,6 @@ export function liveDescendants(sessionId: string, nodes: readonly LineageNode[]
   return found
 }
 
-/** How many descendants a prompt names before it starts counting. Past this
- *  the list stops being a list and becomes a wall, and the person can no
- *  longer read what they are being asked about. */
-const NAMED_LIMIT = 5
-
 /**
  * The question put to the person closing a tab that has live descendants. It
  * NAMES them, because "some other tabs" is not something anyone can decide
@@ -95,11 +92,13 @@ const NAMED_LIMIT = 5
  * The answer this asks for is only ever about the tab being closed. Offering
  * to close the descendants too would make the parent's end decide theirs,
  * which is the rule this whole module exists to keep (design D6).
+ *
+ * How many it names before it starts counting is `nameAtMost`'s, shared with
+ * the workspace close (live-work.ts): "past five the list becomes a wall" is
+ * one rule about a person reading a prompt, not one rule per prompt.
  */
 export function leftRunningMessage(descendants: readonly LineageNode[]): string {
-  const named = descendants.slice(0, NAMED_LIMIT).map((d) => `“${d.label}”`)
-  const rest = descendants.length - named.length
-  const list = rest > 0 ? `${named.join(', ')} and ${rest} more` : named.join(', ')
+  const list = nameAtMost(descendants.map((d) => `“${d.label}”`))
   const subject = descendants.length === 1 ? '1 tab' : `${descendants.length} tabs`
   return `This tab opened ${subject} still running: ${list}. Closing it leaves them running — they are not closed with it.`
 }

@@ -155,6 +155,34 @@ export interface PaneContent {
    * tab may do to another; see lineage.ts.
    */
   lineage?(): { sessionId: string; parentSessionId: string | null } | null
+
+  /**
+   * Optional capability: what is LIVE in this content right now — the command
+   * running in the foreground, and the machine the content is talking to.
+   * Read by the close prompts, which name what dies before it dies
+   * (nocx-isoph.6, design D6). `label` is deliberately absent for the same
+   * reason it is absent above: the content does not know what the strip calls
+   * its tab, and the layer that owns the strip composes the two.
+   *
+   * Returns null when the content holds no live session — a settings or
+   * viewer tab, a terminal whose open has not answered yet, or one whose
+   * shell has exited. Both fields null is a DIFFERENT answer and an honest
+   * one: a session sitting at a local prompt, which closes without losing
+   * anything (live-work.ts says why that does not count as live).
+   *
+   * NOT `activeOrigin` and NOT `lineage`, for two different reasons.
+   * `activeOrigin` answers which MACHINE a tab speaks for, for surfaces that
+   * follow the active tab — so it is deliberately frozen on a viewer and
+   * deliberately silent where it cannot speak for the machine in front of the
+   * user, and a close prompt built on it would both name a machine nothing is
+   * running on and go quiet exactly where it most needs to speak. That is the
+   * same trap `lineage` refused to walk into; read its note above first.
+   * `lineage` itself answers what is OPEN — it speaks for
+   * a tab whose shell has already exited, because that tab is still on screen
+   * and its owner is owed the truth about it — where this answers what is
+   * RUNNING, and an exited shell is not.
+   */
+  liveWork?(): { command: string | null; host: string | null } | null
 }
 
 /**

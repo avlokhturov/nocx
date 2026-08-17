@@ -4822,3 +4822,111 @@ describe('the reachability axis', () => {
     }
   })
 })
+
+// ── liveWork: what is RUNNING in this pane (nocx-isoph.6, design D6) ───────
+//
+// The close prompts name what dies before it dies, and this is where the
+// naming gets its facts. It is deliberately a third answer beside
+// activeOrigin and lineage — see the capability's own comment in
+// pane-content.ts for why merging any two of them loses a case.
+describe('liveWork — what a close would destroy in this pane (nocx-isoph.6)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the seam a live prompt arrives through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    return lifecycleHandler(client)
+  }
+
+  it('a local shell at a prompt holds a session and is running nothing', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // Not null — the pane holds a live session — and not live either:
+      // closing an idle local shell loses nothing (live-work.ts).
+      expect(content.liveWork()).toEqual({ command: null, host: null })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the command while it is running', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      factHandler(client)({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('ansible-playbook deploy.yml')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      expect(content.liveWork()?.command).toBe('ansible-playbook deploy.yml')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('names the machine a hand-typed ssh walked onto, with nothing running on it', async () => {
+    // The case the capability exists for: a session on another machine is
+    // live AT ITS PROMPT — the connection, and whatever state it is holding
+    // open, is what the close destroys — and nobody opened it through a
+    // profile, so the only record of it is the authenticated domain the pane
+    // walked into (nocx-u7uh.11).
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(content.liveWork()).toEqual({ command: null, host: null })
+
+      // The parent suspends as the child establishes (protocol §9), then the
+      // hand-typed `ssh deploy@prod-01`.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: 'prod-01', user: 'deploy' },
+      })
+
+      expect(content.liveWork()).toEqual({ command: null, host: 'deploy@prod-01' })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('answers null once the shell has exited, where lineage still speaks for the tab', async () => {
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (exit: {
+        sessionId: string
+        cause: 'exited' | 'interrupted'
+      }) => void
+      exitCb({ sessionId: session.sessionId, cause: 'exited' })
+
+      // Nothing is running: the loss already happened, and a prompt naming
+      // it would be describing a tab it cannot save.
+      expect(content.liveWork()).toBeNull()
+      // The tab is still on screen, so its provenance is still true. The two
+      // answers differ on purpose.
+      expect(content.lineage()?.sessionId).toBe(session.sessionId)
+    } finally {
+      teardown()
+    }
+  })
+})
