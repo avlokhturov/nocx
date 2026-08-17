@@ -1,5 +1,5 @@
 import { For, Show, createSignal } from 'solid-js'
-import { Tab } from './pane'
+import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
 import { ChevronDownIcon, KeyIcon, PlusIcon, TextQuoteIcon } from './ui/icons'

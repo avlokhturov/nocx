@@ -5,6 +5,13 @@ import type { AgentStatus } from './agent-status'
 /**
  * Tab — a feature component for a terminal tab button.
  *
+ * KEEPS THE WORD, deliberately (nocx-ehkvy). The rename moved "tab" to "pane"
+ * everywhere the symbol holds the durable thing — the pipe, the cwd, the
+ * blocks. This is not that thing. It is the STRIP ENTRY: a `role="tab"` button
+ * consumed only by TabStrip, which is exactly what the design reserves the word
+ * for. The file was briefly renamed to pane.tsx and moved back, so if you are
+ * about to rename it again, this paragraph is the reason not to.
+ *
  * Renders a `<div role="tab">` with `class="nocx-tab"` and `data-*` / `aria-*`
  * for variance. Tab carries drag/reorder, middle-click close, an activity
  * indicator, an agent-status indicator, and `aria-controls`.
