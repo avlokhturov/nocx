@@ -735,5 +735,17 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, req) }
 		}),
+		// The read path (nocx-rtg0.20). It takes no connection and no
+		// connState: recall is a question about the ledger, not about this
+		// tab — an entry outlives its session (ADR-0019 §5) and sessionId is
+		// never a recall key.
+		regResponder(contentSub, "ledger.query", params(validateLedgerQueryRaw), func(r Responder) handlerFunc {
+			h := ledgerReadHandlers{op: op, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleQuery(ctx, req) }
+		}),
+		regResponder(contentSub, "ledger.get", params(validateLedgerGetRaw), func(r Responder) handlerFunc {
+			h := ledgerReadHandlers{op: op, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleGet(ctx, req) }
+		}),
 	}
 }

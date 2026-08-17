@@ -156,6 +156,11 @@ func (s *ledgerStub) ListEntries(_ context.Context, limit int) ([]LedgerEntrySum
 	return nil, ErrNotImplemented
 }
 
+func (s *ledgerStub) QueryEntries(_ context.Context, q LedgerQuery) (LedgerPage, error) {
+	s.log.Info("content stub: LedgerRepository.QueryEntries", "scope", q.Scope, "limit", q.Limit)
+	return LedgerPage{Entries: []LedgerEntrySummary{}}, ErrNotImplemented
+}
+
 func (s *ledgerStub) RewriteRedaction(_ context.Context, entryID string, span Redaction, reference string) error {
 	s.log.Info("content stub: LedgerRepository.RewriteRedaction", "entry", entryID, "span", span, "reference", reference)
 	return ErrNotImplemented

@@ -44,6 +44,15 @@ type LedgerService interface {
 	StartExecution(ctx context.Context, in content.StartExecution) (int64, error)
 	// FinishExecution closes the run and the entry with it.
 	FinishExecution(ctx context.Context, executionID int64, end content.FinishExecution) error
+	// QueryEntries serves ledger.query: one page of the recall ladder's
+	// rung, newest first by the ledger's own total order, with the page's
+	// exhaustion, whether the ledger holds any row at all, and the
+	// store-wide retention horizon.
+	QueryEntries(ctx context.Context, q content.LedgerQuery) (content.LedgerPage, error)
+	// Edges serves the detail read's relations: every edge touching an
+	// entry, in either direction. It is what makes the ledger a memory
+	// rather than a log (design §3.4).
+	Edges(ctx context.Context, entryID string) ([]content.Edge, error)
 }
 
 // LedgerOperation is the typed operation for the ledger domain. Its gate is
@@ -108,4 +117,18 @@ func (s *ledgerService) FinishExecution(ctx context.Context, executionID int64, 
 		return err
 	}
 	return s.ledger.FinishExecution(ctx, executionID, end)
+}
+
+func (s *ledgerService) QueryEntries(ctx context.Context, q content.LedgerQuery) (content.LedgerPage, error) {
+	if err := s.guard.check(); err != nil {
+		return content.LedgerPage{}, err
+	}
+	return s.ledger.QueryEntries(ctx, q)
+}
+
+func (s *ledgerService) Edges(ctx context.Context, entryID string) ([]content.Edge, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.ledger.Edges(ctx, entryID)
 }

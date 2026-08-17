@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -289,26 +290,42 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 	return e, nil
 }
 
-// ListEntries returns the limit newest entries, newest first, ordered by
-// ingest_seq — commit order, never by wall clock (two entries in the same
-// millisecond still have an order). Each row carries its environment, joined
-// in this one statement: a page costs one query whatever its length and
-// however many hosts it spans.
-func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.ingest_seq, e.environment_id, e.cwd,
-		e.kind, e.intent, e.phase, e.status, e.submitted_at, `+environmentColumns+`
-		FROM entries e `+environmentJoin+` ORDER BY e.ingest_seq DESC LIMIT ?`, limit)
+// ── the recall read (nocx-rtg0.20) ───────────────────────────────────────
+
+// entryPageColumns is the timeline row: the entry's own facts plus the
+// environment half of the join. One const, so ListEntries and QueryEntries
+// cannot drift into two row shapes.
+const entryPageColumns = `e.id, e.ingest_seq, e.environment_id, e.cwd, e.kind, e.intent,
+	e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms, e.payload, ` +
+	environmentColumns
+
+// rowQuerier is the read seam both the pool and a transaction satisfy, so
+// the page statement is written once and runs in either — ListEntries reads
+// straight off the pool, QueryEntries reads inside the transaction that also
+// carries HasRows and the horizon.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// entryPage runs the ONE page statement: the filter, the order and the join,
+// in a single query however many rows and however many hosts it spans. cond
+// is built by ledgerWhere out of package constants — never out of user text.
+func entryPage(ctx context.Context, q rowQuerier, cond string, args []any, limit int) ([]LedgerEntrySummary, error) {
+	rows, err := q.QueryContext(ctx, //nolint:gosec // constant fragments; every value is bound
+		`SELECT `+entryPageColumns+` FROM entries e `+environmentJoin+cond+
+			` ORDER BY e.ingest_seq DESC LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var out []LedgerEntrySummary
+	out := []LedgerEntrySummary{}
 	for rows.Next() {
 		var e LedgerEntrySummary
 		var env environmentScan
 		dest := []any{
 			&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind,
 			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
+			&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Payload,
 		}
 		if err := rows.Scan(append(dest, env.dest()...)...); err != nil {
 			return nil, err
@@ -317,6 +334,153 @@ func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEnt
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ledgerWhere is the rung and the filters, in SQL. It is the counterpart of
+// scopeWhere on the interim table (sqlite.go) and obeys the same rule: the
+// server answers from the rung it was asked for and never silently widens.
+// The rung's coordinates are the environment identity and the directory —
+// which is what entries_by_env(environment_id, cwd, ingest_seq DESC) is for.
+func ledgerWhere(q LedgerQuery) (string, []any) {
+	var conds []string
+	var args []any
+	switch q.Scope {
+	case ScopeDirectory:
+		conds = append(conds, "e.environment_id = ?", "e.cwd = ?")
+		args = append(args, q.EnvironmentID, q.Cwd)
+	case ScopeHost:
+		conds = append(conds, "e.environment_id = ?")
+		args = append(args, q.EnvironmentID)
+	case ScopeEverywhere:
+		// No rung filter. environmentId and cwd are the rung's own
+		// coordinates, so they are not applied here — the rung is echoed
+		// back to the caller, which is how "everywhere" stays visible.
+	}
+	if q.Kind != "" {
+		conds = append(conds, "e.kind = ?")
+		args = append(args, string(q.Kind))
+	}
+	if q.Status != "" {
+		conds = append(conds, "e.status = ?")
+		args = append(args, string(q.Status))
+	}
+	if q.Since != nil {
+		conds = append(conds, "e.submitted_at >= ?")
+		args = append(args, *q.Since)
+	}
+	if q.Before != nil {
+		conds = append(conds, "e.ingest_seq < ?")
+		args = append(args, *q.Before)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// validateLedgerQuery refuses what the store cannot answer honestly. Every
+// one of these would otherwise come back as an empty page, and an empty page
+// is the answer most likely to be believed: "nothing ever failed on this
+// host" is indistinguishable from "you misspelled the status".
+func validateLedgerQuery(q LedgerQuery) error {
+	switch q.Scope {
+	case ScopeDirectory, ScopeHost:
+		if q.EnvironmentID == "" {
+			return fmt.Errorf("content: query: scope %q needs an environment id — a rung with no coordinates matches nothing", q.Scope)
+		}
+	case ScopeEverywhere:
+	default:
+		return fmt.Errorf("content: query: unknown scope %q", q.Scope)
+	}
+	switch q.Kind {
+	case "", EntryShell, EntryAgent, EntryAction:
+	default:
+		return fmt.Errorf("content: query: unknown kind %q", q.Kind)
+	}
+	switch q.Status {
+	case "", EntryPending, EntryRunning, EntrySuccess, EntryFailure, EntryInterrupted, EntryUnknown:
+	default:
+		return fmt.Errorf("content: query: unknown status %q", q.Status)
+	}
+	if q.Limit < 1 || q.Limit > MaxLedgerPageLimit {
+		return fmt.Errorf("content: query: limit %d is outside [1, %d]", q.Limit, MaxLedgerPageLimit)
+	}
+	if q.Before != nil && *q.Before < 1 {
+		return fmt.Errorf("content: query: before %d is not an ingest_seq", *q.Before)
+	}
+	if q.Since != nil && *q.Since < 0 {
+		return fmt.Errorf("content: query: since %d is not a wall clock", *q.Since)
+	}
+	return nil
+}
+
+// QueryEntries is the recall read and the only ordering implementation
+// (design §6.2). One page of the rung asked for, newest first by ingest_seq
+// — the backend-assigned total order, so two entries submitted in the same
+// millisecond still have one — plus the three facts that keep the answer
+// honest.
+//
+// The page, HasRows and the horizon are read in ONE read transaction, for
+// the reason the interim Query states and this one inherits: a HasRows taken
+// after the page could report a store that emptied or filled in between, and
+// a horizon that disagrees with its page is worse than no horizon.
+//
+// limit+1 rows are fetched and the extra one is dropped: the row that is not
+// returned is what proves the rung is not exhausted, and it costs one row
+// rather than a second count over the same predicate.
+func (s *sqliteContent) QueryEntries(ctx context.Context, q LedgerQuery) (LedgerPage, error) {
+	if err := validateLedgerQuery(q); err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	cond, args := ledgerWhere(q)
+	entries, err := entryPage(ctx, tx, cond, args, q.Limit+1)
+	if err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	exhausted := len(entries) <= q.Limit
+	if !exhausted {
+		entries = entries[:q.Limit]
+	}
+
+	// HasRows is EXISTS rather than a count: the question is whether the
+	// ledger has anything to answer from, and a count would read every row
+	// to answer a yes/no.
+	var hasRows bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM entries)`).Scan(&hasRows); err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	// MIN ignores NULL ended_at (entries still running), so a ledger holding
+	// nothing but live commands reports no horizon rather than a misleading
+	// one. No rung and no filter appear here: retention is store-wide, so
+	// the horizon it leaves is store-wide too (§5.4).
+	var coverage *int64
+	if err := tx.QueryRowContext(ctx, `SELECT MIN(ended_at) FROM entries`).Scan(&coverage); err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	return LedgerPage{Entries: entries, Exhausted: exhausted, HasRows: hasRows, Coverage: coverage}, nil
+}
+
+// ListEntries returns the limit newest entries, newest first, ordered by
+// ingest_seq — commit order, never by wall clock (two entries in the same
+// millisecond still have an order). Each row carries its environment, joined
+// in this one statement: a page costs one query whatever its length and
+// however many hosts it spans.
+//
+// It runs QueryEntries' page statement with no rung and no filter, so the
+// ordering has ONE implementation; it stops there because the timeline read
+// has no honesty facts to state — a caller that needs the horizon or wants
+// to know whether the store holds anything asks the query for them.
+func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error) {
+	return entryPage(ctx, s.db, "", nil, limit)
 }
 
 // RewriteRedaction turns one masked span on a ledger row into a vault

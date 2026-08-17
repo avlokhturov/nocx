@@ -100,47 +100,8 @@
       }
     },
     "redaction": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["kind", "start", "end", "prefix", "suffix"],
-      "properties": {
-        "kind": {
-          "description": "The closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy.",
-          "type": "string",
-          "enum": [
-            "openai",
-            "github-pat",
-            "slack",
-            "aws-access-key",
-            "gitlab",
-            "jwt",
-            "private-key",
-            "url-userinfo",
-            "db-connstring",
-            "auth-header",
-            "env-assignment",
-            "high-entropy"
-          ]
-        },
-        "start": {
-          "description": "Inclusive UTF-16 code-unit offset into command.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "end": {
-          "description": "Exclusive UTF-16 code-unit offset into command.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "prefix": {
-          "description": "The head of the value the mask shows (the first 4 characters), or \"\" when the mask shows no material. Exactly the text already visible in the masked command.",
-          "type": "string"
-        },
-        "suffix": {
-          "description": "The tail of the value the mask shows (the last 4 characters), or \"\" when the mask shows no material. Exactly the text already visible in the masked command.",
-          "type": "string"
-        }
-      }
+      "description": "One structured redaction segment. Declared once, by the ledger's own contract — this table and that one hold the same product object masked by the same owner, and two declarations of it would drift the moment either changed. When nocx-rtg0.19 removes command_history, the declaration is already where it survives.",
+      "$ref": "ledger.query.schema.json#/$defs/redaction"
     }
   }
 }
