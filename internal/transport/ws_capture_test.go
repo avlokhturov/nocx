@@ -42,6 +42,7 @@ func (f *captureFakeDB) RestorePrivate(_ context.Context, _ []content.Conversati
 	return content.ErrNotImplemented
 }
 func (f *captureFakeDB) Ledger() content.LedgerRepository { return nil }
+func (f *captureFakeDB) Layout() content.LayoutRepository { return nil }
 
 func (f *captureFakeDB) Add(_ context.Context, record content.CommandRecord) (int64, error) {
 	f.mu.Lock()

@@ -11,6 +11,13 @@ package session
 // decide whether an operation is allowed, and nothing later may make it,
 // because the answer would then have two owners (AD-8).
 //
+// The SHAPE of the edge — no self-parent, no cycle, no chain past the bound —
+// lives in internal/lineage since nocx-isoph.1, because a tab records its
+// parent the same way and one rule may not have two implementations. What is
+// still this file's is everything about what a SESSION is: a live incarnation
+// of this backend instance, which is a question nothing outside this package
+// can answer.
+//
 // Why the full identity rather than a bare parentId: the identity is what
 // tells a record from a previous backend instance, or a previous incarnation
 // of the same id, from the session in front of you (nocx-3oupk). A bare id
@@ -21,6 +28,8 @@ package session
 import (
 	"errors"
 	"fmt"
+
+	"github.com/shady2k/nocx/internal/lineage"
 )
 
 // Ref names one session incarnation completely: which session, and which
@@ -49,25 +58,26 @@ var (
 	// so admitting it would record a provenance that cannot be true here.
 	ErrParentForeignInstance = errors.New("parent names a different backend instance")
 	// ErrParentSelf: a session cannot be its own parent.
-	ErrParentSelf = errors.New("a session cannot be its own parent")
+	ErrParentSelf = lineage.ErrSelf
 	// ErrParentCycle: the proposed parent's own ancestry reaches the child.
-	ErrParentCycle = errors.New("parent edge would close a cycle")
+	ErrParentCycle = lineage.ErrCycle
 	// ErrTooDeep: the chain the edge would join is longer than the bound.
-	ErrTooDeep = errors.New("lineage is deeper than the bound")
+	ErrTooDeep = lineage.ErrTooDeep
 )
 
-// maxLineageDepth bounds how many ancestors a session may have. Chosen, not
-// inherited: the edge is immutable, so every walk anything ever does over an
-// ancestry — the strip's grouping, a later delegation check, a projection —
-// pays for the depth admitted here, on input a caller chooses. 64 is far past
-// any chain a person opens by hand (the deepest the product can produce today
-// is one tab opening the next), and it is the same order as writeQueueDepth:
-// a bound that only a machine can reach.
-//
-// It is a refusal rather than a truncation on purpose. A truncated edge would
-// record a parent that is not the parent, which is the one thing a provenance
-// record may never do.
-const maxLineageDepth = 64
+// The three sentinels above are internal/lineage's own, re-exported under this
+// package's names rather than restated: they are verdicts about the SHAPE of
+// an ancestry, which is the thing that package owns, and a second errors.New
+// with the same sentence would be two values a caller has to know to check
+// both of. The two above them stay here because they are verdicts about what a
+// SESSION is — a live incarnation of this backend instance — and nothing
+// outside this package can reach that question (nocx-isoph.1).
+
+// maxLineageDepth bounds how many ancestors a session may have. The bound is
+// internal/lineage's, and the reasoning for its value lives there; it is
+// named here because this package's tests build a chain of exactly that
+// length.
+const maxLineageDepth = lineage.MaxDepth
 
 // validateParent decides whether child may record parent as its edge. It is
 // the single owner of that question: Open calls it before anything is spawned,
@@ -99,28 +109,21 @@ func (r *Reg) validateParentLocked(child ID, parent Ref) error {
 	if parent.Identity.InstanceID != r.instanceID {
 		return fmt.Errorf("%w: %s", ErrParentForeignInstance, parent.Identity.InstanceID)
 	}
-	if parent.ID == child {
-		return ErrParentSelf
-	}
-
-	at := parent
-	for depth := 1; depth <= maxLineageDepth; depth++ {
-		s, ok := r.sessions[at.ID]
-		// SameIncarnation is the single owner of "does this record name this
-		// session" (nocx-3oupk); the id, the instance and the epoch must all
-		// agree, and asking it here rather than comparing fields is what keeps
-		// one answer to that question.
-		if !ok || !at.Identity.SameIncarnation(at.ID, s) {
-			return fmt.Errorf("%w: %s", ErrParentUnknown, at.ID)
-		}
-		next, has := s.Parent()
-		if !has {
-			return nil
-		}
-		if next.ID == child {
-			return fmt.Errorf("%w: through %s", ErrParentCycle, at.ID)
-		}
-		at = next
-	}
-	return fmt.Errorf("%w of %d", ErrTooDeep, maxLineageDepth)
+	// Self, cycle and depth belong to internal/lineage — the same three rules
+	// a tab's parent edge is admitted by (nocx-isoph.1). What stays here is
+	// the resolver, because only this registry can answer "does this record
+	// name a session I hold": SameIncarnation is the single owner of that
+	// question (nocx-3oupk), and the id, the instance and the epoch must all
+	// agree. The walk is over Refs rather than ids for the same reason — a
+	// bare id re-resolves to whatever holds it NOW.
+	return lineage.Validate(parent,
+		func(at Ref) bool { return at.ID == child },
+		func(at Ref) (Ref, bool, error) {
+			s, ok := r.sessions[at.ID]
+			if !ok || !at.Identity.SameIncarnation(at.ID, s) {
+				return Ref{}, false, fmt.Errorf("%w: %s", ErrParentUnknown, at.ID)
+			}
+			next, has := s.Parent()
+			return next, has, nil
+		})
 }

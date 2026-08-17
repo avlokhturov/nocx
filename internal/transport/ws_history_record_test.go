@@ -44,6 +44,7 @@ func (f *fakeRecordHistoryDB) RestorePrivate(_ context.Context, _ []content.Conv
 	return content.ErrNotImplemented
 }
 func (f *fakeRecordHistoryDB) Ledger() content.LedgerRepository { return nil }
+func (f *fakeRecordHistoryDB) Layout() content.LayoutRepository { return nil }
 
 func (f *fakeRecordHistoryDB) Add(_ context.Context, record content.CommandRecord) (int64, error) {
 	f.mu.Lock()

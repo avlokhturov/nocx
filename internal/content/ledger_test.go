@@ -631,10 +631,12 @@ func TestReopenClosesOpenAndBoundEntriesAsUnknown(t *testing.T) {
 // ── sessions: restore key, never recall filter (ADR-0019 §5) ─────────────
 
 func TestDeleteSessionSetsEntrySessionNull(t *testing.T) {
-	_, led := newLedger(t)
+	db, led := newLedger(t)
 	ctx := context.Background()
 
-	if err := led.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "work"}); err != nil {
+	// The workspace is LayoutRepository's (nocx-isoph.1); the ledger only
+	// references it.
+	if err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "work"}); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	if err := led.CreateSession(ctx, content.Session{ID: "sess-1", WorkspaceID: "ws-1"}); err != nil {
@@ -677,13 +679,13 @@ func entrySession(e *content.LedgerEntry) any {
 
 // A session needs its workspace; the FK is the check.
 func TestCreateSessionRequiresWorkspace(t *testing.T) {
-	_, led := newLedger(t)
+	db, led := newLedger(t)
 	ctx := context.Background()
 	err := led.CreateSession(ctx, content.Session{ID: "sess-orphan", WorkspaceID: "no-workspace"})
 	if err == nil {
 		t.Fatal("session under a missing workspace succeeded")
 	}
-	if err := led.CreateWorkspace(ctx, content.Workspace{ID: "ws-2", Name: "work"}); err != nil {
+	if err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-2", Name: "work"}); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	if err := led.CreateSession(ctx, content.Session{ID: "sess-2", WorkspaceID: "ws-2"}); err != nil {
@@ -1439,9 +1441,6 @@ func TestLedgerRejectsAllWritesAfterClose(t *testing.T) {
 		name string
 		do   func() error
 	}{
-		{"CreateWorkspace", func() error {
-			return led.CreateWorkspace(ctx, content.Workspace{ID: "w", Name: "n"})
-		}},
 		{"CreateSession", func() error {
 			return led.CreateSession(ctx, content.Session{ID: "s", WorkspaceID: "w"})
 		}},

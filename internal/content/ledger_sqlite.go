@@ -30,14 +30,11 @@ import (
 
 // ── identity and narrative scope ─────────────────────────────────────────
 
-func (s *sqliteContent) CreateWorkspace(ctx context.Context, ws Workspace) error {
-	return s.run(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)`,
-			ws.ID, ws.Name, time.Now().UnixMilli())
-		return err
-	})
-}
+// CreateWorkspace moved to layout_sqlite.go with nocx-isoph.1: the workspace
+// is the head of the layout chain the backend now owns, and one table with two
+// repository owners is the defect that design exists to avoid. What the ledger
+// keeps is the reference — sessions.workspace_id — and the fallback default
+// row ensureSessionRecorded writes for a session nobody has recorded yet.
 
 func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 	return s.run(ctx, func(ctx context.Context) error {

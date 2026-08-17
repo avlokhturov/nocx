@@ -565,6 +565,10 @@ func (f *fakeContentDB) RestorePrivate(context.Context, []content.Conversation, 
 }
 func (f *fakeContentDB) Ledger() content.LedgerRepository { return f.ledger }
 
+// Layout is unused by these tests: the fake predates the layout chain and no
+// capability reaches it (nocx-isoph.1).
+func (f *fakeContentDB) Layout() content.LayoutRepository { return nil }
+
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {
 	mu      sync.Mutex

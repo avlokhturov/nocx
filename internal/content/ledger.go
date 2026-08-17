@@ -16,8 +16,9 @@ package content
 // Entry plus Edges (ws_ledger_query.go), and the query's `host` field is
 // what finally asks a resolved environment row for its host — so
 // Environment.Host has a renderer. What is still test-reachable only:
-// CreateWorkspace, CreateSession, DeleteSession, ListEntries, DeleteEntry,
-// AppendArtifact and AddEdge.
+// CreateSession, DeleteSession, ListEntries, DeleteEntry, AppendArtifact and
+// AddEdge — plus the whole of LayoutRepository (layout.go), which keeps the
+// same statement in its own header.
 //
 // RewriteRedaction is the awkward third case and is written down rather than
 // rounded to one of the other two: it is WIRED — secrets.captureSave reaches
@@ -214,13 +215,12 @@ const (
 
 // ── records ───────────────────────────────────────────────────────────────
 
-// Workspace is narrative and presentation scope (ADR-0020 §5): which
-// sessions read as one story. It mints default grants from its policy; it is
-// never the enforcement object.
-type Workspace struct {
-	ID   string
-	Name string
-}
+// Workspace — narrative and presentation scope (ADR-0020 §5): which sessions
+// read as one story — is declared in layout.go, together with the tab and the
+// pane. It moved there with nocx-isoph.1: the backend now owns the whole
+// chain workspace → tab → pane, and a table with two repository owners is
+// the defect the design spends most of its length avoiding. The ledger still
+// reads it through sessions.workspace_id; it no longer writes it.
 
 // Session is a restore key, never a recall filter (ADR-0019 §5): it names
 // "that tab". An entry outlives its session (ON DELETE SET NULL).
@@ -938,9 +938,8 @@ type Artifact struct {
 // write both. The header above keeps the by-hand list of which methods have
 // a production caller and which do not.
 type LedgerRepository interface {
-	// CreateWorkspace records a narrative scope.
-	CreateWorkspace(ctx context.Context, ws Workspace) error
-	// CreateSession records a restore key under a workspace.
+	// CreateSession records a restore key under a workspace. The workspace
+	// itself belongs to LayoutRepository (layout.go).
 	CreateSession(ctx context.Context, sess Session) error
 	// DeleteSession removes a restore key; entries keep their rows and
 	// lose the reference (ON DELETE SET NULL — an entry outlives its

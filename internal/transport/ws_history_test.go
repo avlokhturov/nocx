@@ -36,6 +36,7 @@ func (f *fakeHistoryDB) RestorePrivate(_ context.Context, _ []content.Conversati
 	return content.ErrNotImplemented
 }
 func (f *fakeHistoryDB) Ledger() content.LedgerRepository { return nil }
+func (f *fakeHistoryDB) Layout() content.LayoutRepository { return nil }
 
 func (f *fakeHistoryDB) Add(_ context.Context, _ content.CommandRecord) (int64, error) {
 	return 0, content.ErrNotImplemented
