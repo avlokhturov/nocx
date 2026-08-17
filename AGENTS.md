@@ -161,6 +161,19 @@ deadcode -tags gtk3 -whylive '…/internal/content.sqliteContent.AddEdge' ./...
 > difference. That is the check; note the `-tags gtk3` too, without which cgo fails on Linux
 > before `deadcode` reaches our code at all.
 
+**And the blind spot is not `-filter`'s — it is RTA's, so the ratchet has it too.** Later
+the same day `nocx-re6gk` measured it directly, with three probes in one run: a plain
+unwired function **is** reported; the same shape **wired** from one call site is not; and a
+dead **method on a type reached only through an interface** is **not reported either**.
+That third case is exactly the shape `ContentDB.Add` had. So the gate catches a dead
+function, and cannot catch a dead method behind a live interface — which is most of this
+codebase, since AD-8 puts every module behind one.
+
+**Therefore: `deadcode` can tell you a symbol is dead. It can never tell you a feature is
+wired.** For that, name the seam and ask `-whylive` for it, or write the test that watches
+a user do the thing. Rule 2's "every epic proves its happy path" is not a supplement to the
+ratchet; on an interface-first codebase it is the only check that works.
+
 **3. Test the failure paths, and state invariants as intervals.** For every external call
 your code makes, there is a test where that call fails — mechanical, cheap, and the single
 highest-yield check we have. For a procedure touching several stores, enumerate the partial
