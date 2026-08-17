@@ -794,9 +794,13 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 
 // openAttempt writes the durable attempt BEFORE the call: the environment,
 // the action entry (the audit row — kind='action', design §3.2) and the
-// execution that records the grant. The grant recorded is the run's grant:
-// "what was this allowed to do" is a query over the record, not a
-// reconstruction (ADR-0020 decision 5).
+// execution that records the grant. The entry's payload names the tool, the
+// effect and the arguments, and — when the middleware holds a run id (the
+// transport's ask always does) — the run id, so a granted call's attempt
+// joins its run's thread exactly as an escalated call's approval block does
+// (nocx-dw3.4). The grant recorded is the run's grant: "what was this
+// allowed to do" is a query over the record, not a reconstruction
+// (ADR-0020 decision 5).
 //
 // An APPROVED call does not create a new intent: it runs as its own
 // SUBSEQUENT attempt of the proposal's own entry (ADR-0020 decision 4,
@@ -832,11 +836,21 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 			"effect": decl.Effect,
 			"args":   json.RawMessage(rawArgs),
 		}
+		// The run id joins the attempt to its run (nocx-dw3.4). Where the
+		// grant permits the call and nobody is asked, the ledger is the
+		// ONLY account of what happened — so the attempt carries the run it
+		// happened in, and a reader joins question, run, attempt and answer
+		// into one thread exactly as the approval block does for an
+		// escalated call. Empty (the un-bound caller shape, AskParams) is
+		// recorded as no link rather than a misleading empty one.
+		if m.runID != "" {
+			payloadBody["runId"] = m.runID
+		}
 		// The classifier block (bead nocx-kpy23, criterion 6): when the
 		// classifier was consulted and cleared the call, the attempt's own
 		// record carries the verdict and the model, so the audit shows
 		// which model saw the call and said clear. Without a classifier the
-		// payload is exactly what it was before this bead.
+		// payload is tool, effect, args and the run id — nothing else.
 		if classifierFact != nil {
 			payloadBody["classifier"] = classifierFact
 		}

@@ -737,7 +737,10 @@ func TestAsk_PermittedReadRecordsTheAttempt(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(string) error { return nil }); err != nil {
+	p := askParams(srv.URL, &grant, ledger, nil)
+	p.RunID = "run-1"
+	p.Attempt = 1
+	if err := cl.Ask(context.Background(), p, func(string) error { return nil }); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 
@@ -768,6 +771,20 @@ func TestAsk_PermittedReadRecordsTheAttempt(t *testing.T) {
 	}
 	if len(ex.Grant.Scopes) != 1 || ex.Grant.Scopes[0].Kind != content.ResourcePath {
 		t.Fatalf("recorded grant scopes = %+v, want the dir's path scope", ex.Grant.Scopes)
+	}
+
+	// The attempt carries the run id it happened in (nocx-dw3.4): a granted
+	// call's audit row joins its run's thread exactly as an escalated call's
+	// approval block does — where the grant permitted and nobody was asked,
+	// the ledger is the only account of what happened.
+	var payload struct {
+		RunID string `json:"runId"`
+	}
+	if err := json.Unmarshal([]byte(entry.Payload), &payload); err != nil {
+		t.Fatalf("attempt payload: %v", err)
+	}
+	if payload.RunID != "run-1" {
+		t.Fatalf("attempt payload runId = %q, want run-1 — the granted attempt must carry its run", payload.RunID)
 	}
 	if ex.TerminationReason == nil || *ex.TerminationReason != content.TermCompleted {
 		t.Fatalf("termination = %v, want completed — the outcome must be recorded on the attempt", ex.TerminationReason)
