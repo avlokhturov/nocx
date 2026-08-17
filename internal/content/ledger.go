@@ -13,7 +13,11 @@ package content
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
 // SubmitAgentAsk, TransitionRun and FinishAgentRun. What is still
 // test-reachable only: CreateWorkspace, CreateSession, DeleteSession,
-// ListEntries, DeleteEntry, AppendArtifact, AddEdge and Edges.
+// ListEntries, DeleteEntry, AppendArtifact, AddEdge and Edges — and
+// Environment.Host, whose renderer is history.query answering from the
+// ledger (nocx-rtg0.19 on nocx-rtg0.20's query). The environment is
+// RESOLVED on a production path already — Entry runs the join for every
+// ledger.close — but nothing yet asks the resolved row for its host.
 //
 // Read that list rather than a deadcode run. `deadcode -filter
 // 'nocx/internal/content'` prints nothing for this package and always has —
@@ -225,6 +229,24 @@ type Environment struct {
 	Endpoint  *string // canonical user@host:port; nil for local
 	ProfileID *string
 	Payload   string // identity facets JSON (sparse extension only)
+}
+
+// Host is the environment's host as the ledger stored it: the endpoint for
+// a remote environment, "" for the local machine — the same string
+// command_history's host column held and the same one history.query's
+// contract calls host.
+//
+// It is a READ of the facet environmentForSession wrote, never a second
+// derivation of it: nothing here asks a session where it is and nothing
+// re-hashes an id, so the one owner of "where is this session" (AD-8) is
+// still the only thing that decides. When the endpoint facet is refined to
+// the canonical user@host:port, THIS is where the host is taken out of it —
+// a caller that splits an endpoint itself would be the second owner.
+func (e Environment) Host() string {
+	if e.Endpoint == nil {
+		return ""
+	}
+	return *e.Endpoint
 }
 
 // EnvironmentIDFor derives the environment id from its facets (design §3.1:
@@ -681,22 +703,32 @@ type LedgerEntrySummary struct {
 	ID            string
 	IngestSeq     int64
 	EnvironmentID string
-	Cwd           string
-	Kind          EntryKind
-	Intent        string
-	Phase         Phase
-	Status        EntryStatus
-	SubmittedAt   int64
+	// Environment is the row EnvironmentID names, resolved by the SAME
+	// statement that read the entry — never a lookup per row. It is what
+	// lets a row say which host it ran on (Environment.Host()); nil when no
+	// environment row carries the id, which is "unknown", never "local".
+	Environment *Environment
+	Cwd         string
+	Kind        EntryKind
+	Intent      string
+	Phase       Phase
+	Status      EntryStatus
+	SubmittedAt int64
 }
 
 // LedgerEntry is the recall-shaped read: the entry with every execution and
 // each execution's pinned observation, grant and artifacts.
 type LedgerEntry struct {
-	ID             string
-	IngestSeq      int64
-	Client         string
-	Digest         string
-	EnvironmentID  string
+	ID            string
+	IngestSeq     int64
+	Client        string
+	Digest        string
+	EnvironmentID string
+	// Environment is the resolved environment row (see
+	// LedgerEntrySummary.Environment): the entry's host, kind and profile,
+	// read back in the same statement as the entry. Nil when the
+	// environment row is gone.
+	Environment    *Environment
 	SessionID      *string
 	Cwd            string
 	Kind           EntryKind
@@ -799,12 +831,15 @@ type LedgerRepository interface {
 	// Idempotent for (id, client, digest): a replay returns the original
 	// row; the same id with different content is ErrIDConflict.
 	Submit(ctx context.Context, in SubmitEntry) (SubmitResult, error)
-	// Entry is the recall read: the entry, its executions, each
+	// Entry is the recall read: the entry, its resolved environment (which
+	// is how the row says what host it ran on), its executions, each
 	// execution's pinned observation and grant, and its artifacts
 	// (metadata only — no chunk bodies). Nil when no row carries id.
 	Entry(ctx context.Context, id string) (*LedgerEntry, error)
 	// ListEntries returns the limit newest entries, newest first, ordered
-	// by ingest_seq — commit order, never by wall clock.
+	// by ingest_seq — commit order, never by wall clock. Each row carries
+	// its resolved environment, joined in the one statement: the page costs
+	// a single query however many rows and however many hosts it spans.
 	ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error)
 	// DeleteEntry removes an entry; edges referencing it and its
 	// executions (and their artifacts, chunks and grant) cascade. A pin

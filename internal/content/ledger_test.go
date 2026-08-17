@@ -1591,3 +1591,191 @@ func TestTwoStoresSubmitConcurrentlyWithoutLoss(t *testing.T) {
 		}
 	}
 }
+
+// ── acceptance: an entry says which host it ran on (nocx-rtg0.25) ─────────
+
+// history.query's contract declares host on every entry; command_history
+// held it as a column and the ledger holds entries.environment_id instead —
+// the id environmentForSession derives from the session. FINDING rows for a
+// host has always worked (EnvironmentIDFor hashes a host forward), and
+// SAYING which host a found row ran on did not exist at all.
+//
+// Both a local and an ssh entry are asserted here because either one alone
+// passes while the other is wrong: local's host IS the empty string, so a
+// read that answers "" for everything is green on the local entry and
+// silently empty on every remote one.
+func TestAnEntrySaysWhichHostItRanOn(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+
+	const remoteHost = "build.example.com"
+	localEnv := content.EnvironmentIDFor(content.EnvLocal, "")
+	sshEnv := content.EnvironmentIDFor(content.EnvSSH, remoteHost)
+
+	// The two environments exactly as environmentForSession mints them: a
+	// local session carries no endpoint, an ssh session carries its host.
+	if err := led.EnsureEnvironment(ctx, content.Environment{
+		ID: localEnv, Kind: content.EnvLocal,
+	}); err != nil {
+		t.Fatalf("EnsureEnvironment local: %v", err)
+	}
+	if err := led.EnsureEnvironment(ctx, content.Environment{
+		ID: sshEnv, Kind: content.EnvSSH, Endpoint: strPtr(remoteHost),
+	}); err != nil {
+		t.Fatalf("EnsureEnvironment ssh: %v", err)
+	}
+
+	localID := "00000000-0000-7000-8000-000000000101"
+	sshID := "00000000-0000-7000-8000-000000000102"
+	for _, s := range []content.SubmitEntry{
+		{
+			ID: localID, Client: "c", EnvironmentID: localEnv, Cwd: "/repo",
+			Kind: content.EntryShell, Intent: "make test",
+		},
+		{
+			ID: sshID, Client: "c", EnvironmentID: sshEnv, Cwd: "/srv",
+			Kind: content.EntryShell, Intent: "systemctl restart nocx",
+		},
+	} {
+		if _, err := led.Submit(ctx, s); err != nil {
+			t.Fatalf("Submit %q: %v", s.Intent, err)
+		}
+	}
+
+	want := map[string]string{localID: "", sshID: remoteHost}
+	wantKind := map[string]content.EnvironmentKind{
+		localID: content.EnvLocal, sshID: content.EnvSSH,
+	}
+
+	// The recall read answers it.
+	for id, host := range want {
+		e, err := led.Entry(ctx, id)
+		if err != nil || e == nil {
+			t.Fatalf("Entry(%q): %v (nil=%v)", id, err, e == nil)
+		}
+		if e.Environment == nil {
+			t.Fatalf("Entry(%q) resolved no environment — the row cannot say which host it ran on", id)
+		}
+		if got := e.Environment.Host(); got != host {
+			t.Fatalf("Entry(%q) host = %q, want %q", id, got, host)
+		}
+		if e.Environment.Kind != wantKind[id] {
+			t.Fatalf("Entry(%q) kind = %q, want %q", id, e.Environment.Kind, wantKind[id])
+		}
+		if e.Environment.ID != e.EnvironmentID {
+			t.Fatalf("Entry(%q) resolved environment %q for environment_id %q",
+				id, e.Environment.ID, e.EnvironmentID)
+		}
+	}
+
+	// And so does the timeline read the query in nocx-rtg0.20 is built on.
+	page, err := led.ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(page) != 2 {
+		t.Fatalf("ListEntries = %d rows, want 2", len(page))
+	}
+	for _, row := range page {
+		host, ok := want[row.ID]
+		if !ok {
+			t.Fatalf("unexpected row %q", row.ID)
+		}
+		if row.Environment == nil {
+			t.Fatalf("ListEntries row %q resolved no environment", row.ID)
+		}
+		if got := row.Environment.Host(); got != host {
+			t.Fatalf("ListEntries row %q host = %q, want %q", row.ID, got, host)
+		}
+	}
+}
+
+// An entry whose environment row is gone answers "unknown", never "local".
+// The FK on entries.environment_id makes this state unreachable through the
+// seam, so the row is removed the only way it can be — on a connection with
+// foreign_keys OFF, the way a hand-edited or half-restored file would arrive
+// — and the read must not invent the empty string, which is a real answer
+// meaning "the local machine".
+func TestEntryWithNoEnvironmentRowSaysUnknownRatherThanLocal(t *testing.T) {
+	db, led, path := newLedgerAt(t)
+	ctx := context.Background()
+	envReady(t, led, "local")
+
+	id := "00000000-0000-7000-8000-000000000110"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "c", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "make test",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// One statement, so the pragma and the delete cannot land on two
+	// different pooled connections: foreign_keys is per connection.
+	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
+		`PRAGMA foreign_keys=OFF; DELETE FROM environments WHERE id = 'local';`); err != nil {
+		t.Fatalf("delete the environment row: %v", err)
+	}
+
+	again, err := content.Open(ctx, content.Config{Path: path, Key: testKey(), Budget: testBudget})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+
+	e, err := again.Ledger().Entry(ctx, id)
+	if err != nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	if e == nil {
+		t.Fatal("the entry itself vanished — a missing environment must not drop the row")
+	}
+	if e.EnvironmentID != "local" {
+		t.Fatalf("EnvironmentID = %q, want the id the row still carries", e.EnvironmentID)
+	}
+	if e.Environment != nil {
+		t.Fatalf("Entry resolved %+v for an environment row that is gone — want nil (unknown)", e.Environment)
+	}
+
+	page, err := again.Ledger().ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(page) != 1 {
+		t.Fatalf("ListEntries = %d rows, want the 1 row whose environment is gone", len(page))
+	}
+	if page[0].Environment != nil {
+		t.Fatalf("ListEntries resolved %+v for an environment row that is gone — want nil", page[0].Environment)
+	}
+}
+
+// The read path's one external call is the query itself, and a closed store
+// is how it fails: both reads report the failure rather than answering with
+// an empty page (a page that cannot be told from "no history").
+func TestLedgerReadsAfterCloseReportTheFailure(t *testing.T) {
+	db, led := newLedger(t)
+	ctx := context.Background()
+	envReady(t, led, "local")
+	id := "00000000-0000-7000-8000-000000000120"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "c", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "make test",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if e, err := led.Entry(ctx, id); err == nil {
+		t.Fatalf("Entry after Close = (%v, nil), want an error", e)
+	}
+	page, err := led.ListEntries(ctx, 10)
+	if err == nil {
+		t.Fatalf("ListEntries after Close = (%v, nil), want an error", page)
+	}
+	if page != nil {
+		t.Fatalf("ListEntries after Close returned %d rows alongside its error", len(page))
+	}
+}
