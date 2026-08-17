@@ -139,6 +139,28 @@ missing — only that written code is used.**
 > the key is obtainable on an ordinary machine — where it never was. **For every "returns
 > an error when…" there is a paired "and on a normal machine it succeeds".**
 
+**Ask `deadcode -whylive <symbol>`, not `deadcode -filter <package>`.** The filter form is
+worse than a weak check on the packages we most want to check: `deadcode`'s RTA marks every
+method reached through an interface as reflection-reachable, so for `internal/content` the
+filter has **always** printed nothing and cannot be made to print anything. An acceptance
+criterion written on it is not merely satisfiable while the write path is dead — it is
+unfalsifiable. `-whylive` answers the question actually being asked, and the contrast is
+what makes it evidence:
+
+```
+deadcode -tags gtk3 -whylive '…/internal/content.sqliteContent.Submit' ./...
+  → main → App.Run → … → sqliteContent.Submit        # wired
+deadcode -tags gtk3 -whylive '…/internal/content.sqliteContent.AddEdge' ./...
+  → "reachable only through reflection"              # not wired
+```
+
+> 2026-08-17, `nocx-rtg0.3`: the brief demanded the `-filter` run and the worker ran it,
+> got the empty output the brief predicted, and then said so plainly — that the same empty
+> output appeared before its commit and on a clean tree, so it was evidence of nothing. It
+> used `-whylive` on a wired method and an unwired one in the same package to show the
+> difference. That is the check; note the `-tags gtk3` too, without which cgo fails on Linux
+> before `deadcode` reaches our code at all.
+
 **3. Test the failure paths, and state invariants as intervals.** For every external call
 your code makes, there is a test where that call fails — mechanical, cheap, and the single
 highest-yield check we have. For a procedure touching several stores, enumerate the partial

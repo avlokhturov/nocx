@@ -793,6 +793,24 @@ envelope = { id, environment, cwd, kind, intent, sensitivity, clientSeq }
 - `ledger.bind   { envelope, facts }`
 - `ledger.close  { envelope, status, facts, durationMs }`
 
+> **Amended 2026-08-17 by `nocx-rtg0.3`, which shipped this.** The envelope carries
+> `sessionId`, not `environment`. The backend derives the environment from the session
+> through `environmentForSession`, which is already this repo's one derivation of where a
+> session is and whose own comment says the backend never trusts the renderer's idea of
+> where it is. Putting the environment facets on the wire would be a second derivation of
+> one fact, which is the AD-8 defect this design invokes elsewhere. **The envelope's stated
+> purpose survives whole**: the session yields `environment_id` and the other three NOT NULL
+> columns still ride the envelope, so a `close` for an unknown id still creates its row.
+> What it does not serve is an outbox replay arriving after the session is gone — §6.4's
+> problem, named in `ws_ledger.go`'s header and carried by `nocx-rtg0.4`. Reversing this is
+> a deliberate reversal of `environmentForSession`'s rule and must be decided as one.
+>
+> The same bead found a gap this section cannot see from here: **`FinishExecution` has
+> nowhere to put an exit code or a duration for a row that already exists**, so a `close`
+> that creates its own row records more than a `close` on an open one. `nocx-rtg0.23` is
+> that defect and it blocks the cutover, because the ledger currently records strictly less
+> than `command_history` does.
+
 v2 sent `{id, status, facts, durationMs}` on close and claimed it could upsert a missing row
 — impossible, since the row needs `environment_id`, `cwd`, `kind` and `intent`, all NOT NULL,
 and "create it with empty intent" supplies one of four. Repeating the envelope costs a few
