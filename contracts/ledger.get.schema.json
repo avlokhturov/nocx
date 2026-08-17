@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ledger.get.schema.json",
+  "title": "LedgerGet",
+  "description": "Result of the ledger.get JSON-RPC method (nocx-rtg0.20, design §6.2) — one entry with its relations and the METADATA of what its runs captured. The bodies are deliberately absent: the recall read must not haul bytes (ADR-0019 §6), so an artifact's content is fetched one artifact at a time by whoever actually wants it. The entry is the same shape a ledger.query page row has, declared once there.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entry", "edges", "artifacts"],
+  "properties": {
+    "entry": { "$ref": "ledger.query.schema.json#/$defs/entry" },
+    "edges": {
+      "description": "Every edge touching this entry, in either direction — the difference between a log and a memory (design §3.4). Never null: no relation is [].",
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    },
+    "artifacts": {
+      "description": "The metadata of every artifact of every execution of this entry, in execution order. Never null: no capture is [].",
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    }
+  },
+  "$defs": {
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "rel", "payload"],
+      "properties": {
+        "from": {
+          "description": "The entry id the relation points from.",
+          "type": "string"
+        },
+        "to": {
+          "description": "The entry id the relation points to.",
+          "type": "string"
+        },
+        "rel": {
+          "description": "The edge vocabulary (design §3.4). Closed set, mirroring the store's CHECK constraint.",
+          "enum": ["rerun-of", "supersedes", "caused-by", "cites", "in-span", "references"]
+        },
+        "payload": {
+          "description": "The edge's sparse extension — for a `references` edge, the region inside the frame it points at. The store never interprets it; an edge that carries none is {}.",
+          "type": "object"
+        }
+      }
+    },
+    "artifact": {
+      "description": "One capture of one execution, with the provenance ADR-0019 §6 requires: how the text was taken, at which version, from what geometry and stream position, and what is missing from it. There is no field for the content, and that absence is the contract.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "executionId",
+        "mediaType",
+        "derivedFrom",
+        "state",
+        "byteLen",
+        "chunkCount",
+        "pinned",
+        "truncated",
+        "captureMethod",
+        "captureVersion",
+        "terminalCols",
+        "terminalRows",
+        "stream",
+        "byteOffset",
+        "byteEnd",
+        "encoding",
+        "gaps",
+        "payload"
+      ],
+      "properties": {
+        "id": {
+          "description": "The artifact's id — the address the content read takes.",
+          "type": "string"
+        },
+        "executionId": {
+          "description": "The run this artifact belongs to. Artifacts attach to the execution, never to the intent (ADR-0020 §4): a rerun and a retry are executions of one entry and each captured its own output.",
+          "type": "integer"
+        },
+        "mediaType": {
+          "description": "What the content is.",
+          "enum": ["application/vt", "text/plain", "text/markdown", "application/json"]
+        },
+        "derivedFrom": {
+          "description": "The artifact this one was derived from, or null when it is the original capture.",
+          "type": ["string", "null"]
+        },
+        "state": {
+          "description": "open while the capture may still grow, sealed once it cannot.",
+          "enum": ["open", "sealed"]
+        },
+        "byteLen": {
+          "description": "Logical content bytes — the retention budget's unit (§5.4), not the physical size on disk.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "chunkCount": {
+          "description": "How many chunks the content arrived in. An artifact is never one BLOB.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "pinned": {
+          "description": "Whether retention's background eviction is forbidden to take this artifact. A pin does not protect against an explicit delete.",
+          "type": "boolean"
+        },
+        "truncated": {
+          "description": "Why this artifact does not hold the whole stream: a cap dropped the middle, a gap lost a range, or capture was refused by policy. Null when nothing was lost.",
+          "enum": ["cap", "gap", "suppressed", null]
+        },
+        "captureMethod": {
+          "description": "Where the text came from — terminal cells, raw output, serialized block HTML, or nothing at all. Derived text must be able to say how it was taken.",
+          "enum": ["terminal-cells", "raw-output", "serialized-html", "none"]
+        },
+        "captureVersion": {
+          "description": "The version of the capture method, so text taken by an older serializer is not read as though it were today's.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminalCols": {
+          "description": "Terminal width at capture time, or null when the capture had no geometry.",
+          "type": ["integer", "null"]
+        },
+        "terminalRows": {
+          "description": "Terminal height at capture time, or null when the capture had no geometry.",
+          "type": ["integer", "null"]
+        },
+        "stream": {
+          "description": "Which stream was captured, or null when the capture does not distinguish them.",
+          "enum": ["stdout", "stderr", "combined", null]
+        },
+        "byteOffset": {
+          "description": "Where this capture starts in the run's byte stream, or null when it is not positioned in one.",
+          "type": ["integer", "null"]
+        },
+        "byteEnd": {
+          "description": "Where this capture ends in the run's byte stream, or null when it is not positioned in one.",
+          "type": ["integer", "null"]
+        },
+        "encoding": {
+          "description": "The content's encoding, so bytes are never decoded by guess.",
+          "type": "string"
+        },
+        "gaps": {
+          "description": "The dropped byte ranges of the captured stream. Never null: no gap is [].",
+          "type": "array",
+          "items": { "$ref": "#/$defs/gap" }
+        },
+        "payload": {
+          "description": "The artifact's sparse extension. The store never interprets it; an artifact that carries none is {}.",
+          "type": "object"
+        }
+      }
+    },
+    "gap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "reason"],
+      "properties": {
+        "start": {
+          "description": "First dropped byte offset.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "end": {
+          "description": "Offset just past the last dropped byte.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Why the range is missing.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

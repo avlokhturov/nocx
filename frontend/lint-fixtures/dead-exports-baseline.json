@@ -260,6 +260,16 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/ledger.get.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/ledger.query.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/ledger.open.ts",
       "symbol": ""
     },

@@ -80,9 +80,12 @@ export interface HistoryEntry {
    */
   redactions?: Redaction[]
 }
+/**
+ * One structured redaction segment. Declared once, by the ledger's own contract — this table and that one hold the same product object masked by the same owner, and two declarations of it would drift the moment either changed. When nocx-rtg0.19 removes command_history, the declaration is already where it survives.
+ */
 export interface Redaction {
   /**
-   * The closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy.
+   * The closed vocabulary of internal/secrets.
    */
   kind:
     | 'openai'
@@ -98,19 +101,19 @@ export interface Redaction {
     | 'env-assignment'
     | 'high-entropy'
   /**
-   * Inclusive UTF-16 code-unit offset into command.
+   * Inclusive UTF-16 code-unit offset into the recorded text.
    */
   start: number
   /**
-   * Exclusive UTF-16 code-unit offset into command.
+   * Exclusive UTF-16 code-unit offset into the recorded text.
    */
   end: number
   /**
-   * The head of the value the mask shows (the first 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   * The head of the value the mask shows (the first 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked text.
    */
   prefix: string
   /**
-   * The tail of the value the mask shows (the last 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   * The tail of the value the mask shows (the last 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked text.
    */
   suffix: string
 }

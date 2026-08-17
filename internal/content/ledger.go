@@ -11,13 +11,13 @@ package content
 // ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
 // StartExecution and FinishExecution through capability.LedgerService, and
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
-// SubmitAgentAsk, TransitionRun and FinishAgentRun. What is still
-// test-reachable only: CreateWorkspace, CreateSession, DeleteSession,
-// ListEntries, DeleteEntry, AppendArtifact, AddEdge and Edges — and
-// Environment.Host, whose renderer is history.query answering from the
-// ledger (nocx-rtg0.19 on nocx-rtg0.20's query). The environment is
-// RESOLVED on a production path already — Entry runs the join for every
-// ledger.close — but nothing yet asks the resolved row for its host.
+// SubmitAgentAsk, TransitionRun and FinishAgentRun. The READ path is wired
+// as of nocx-rtg0.20: ledger.query drives QueryEntries and ledger.get drives
+// Entry plus Edges (ws_ledger_query.go), and the query's `host` field is
+// what finally asks a resolved environment row for its host — so
+// Environment.Host has a renderer. What is still test-reachable only:
+// CreateWorkspace, CreateSession, DeleteSession, ListEntries, DeleteEntry,
+// AppendArtifact and AddEdge.
 //
 // RewriteRedaction is the awkward third case and is written down rather than
 // rounded to one of the other two: it is WIRED — secrets.captureSave reaches
@@ -43,6 +43,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // ── closed enums; each mirrors a CHECK constraint in schemaV1 ─────────────
@@ -390,6 +391,43 @@ func ShellPayloadJSON(exitCode *int) string {
 	return string(b)
 }
 
+// ShellExitCodeOf reads the exit code back out of an entry payload — the
+// counterpart of ShellPayloadJSON, and the ONE reader of that key, so a
+// recall read never re-derives an exit code from anything else.
+//
+// nil means the row has no exit code, which is a real state and not a zero:
+// a command that is still running has none, an interrupted one has none, and
+// a non-shell entry never had one. The arm is only read when the payload
+// says it is a shell arm, because the key belongs to that arm — the payload
+// is a shared object whose other keys have their own owners (the redaction
+// receipt in redaction.go).
+func ShellExitCodeOf(payload string) (*int, error) {
+	obj, err := decodePayloadObject(payload)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := obj["kind"]
+	if !ok {
+		return nil, nil
+	}
+	var kind EntryKind
+	if err := json.Unmarshal(raw, &kind); err != nil {
+		return nil, fmt.Errorf("content: entry payload kind is not a string: %w", err)
+	}
+	if kind != EntryShell {
+		return nil, nil
+	}
+	code, ok := obj["exitCode"]
+	if !ok {
+		return nil, nil
+	}
+	var out *int
+	if err := json.Unmarshal(code, &out); err != nil {
+		return nil, fmt.Errorf("content: entry payload exitCode is not a number: %w", err)
+	}
+	return out, nil
+}
+
 // FinishAgentRun is the terminal close of an assistant run (the state
 // machine this slice's driver persists: prepared → streaming → completed |
 // failed | cancelled | interrupted). The run's terminal state and the
@@ -723,6 +761,87 @@ type LedgerEntrySummary struct {
 	Phase       Phase
 	Status      EntryStatus
 	SubmittedAt int64
+	// The terminal facts, and the column the two sparse readers live in.
+	// They are on the SUMMARY rather than only on LedgerEntry because a page
+	// of recall renders all four — the relative time, the duration, the exit
+	// code and the redaction receipt — and a page that had to fetch them per
+	// row would be the N+1 the environment join exists to prevent.
+	StartedAt  *int64
+	EndedAt    *int64
+	DurationMs *int64
+	// Payload is the entry's kind payload column, raw. Two readers own its
+	// keys and neither is the store: ShellExitCodeOf for the shell arm and
+	// EntryMaskingOf for the redaction receipt (nocx-rtg0.24). The store
+	// hands the column over rather than decoding it, so there is exactly one
+	// decoder per key and it is the one that already exists.
+	Payload string
+}
+
+// Summary is the timeline row of a recall-shaped entry — a projection, never
+// a second read. It exists so the entry a detail read returns and the rows a
+// page returns reach the wire through ONE mapping: two mappers of one shape
+// disagree the first time either grows a field.
+func (e LedgerEntry) Summary() LedgerEntrySummary {
+	return LedgerEntrySummary{
+		ID: e.ID, IngestSeq: e.IngestSeq, EnvironmentID: e.EnvironmentID,
+		Environment: e.Environment, Cwd: e.Cwd, Kind: e.Kind, Intent: e.Intent,
+		Phase: e.Phase, Status: e.Status, SubmittedAt: e.SubmittedAt,
+		StartedAt: e.StartedAt, EndedAt: e.EndedAt, DurationMs: e.DurationMs,
+		Payload: e.Payload,
+	}
+}
+
+// MaxLedgerPageLimit is the ceiling on one page of recall. An unbounded
+// limit is a denial of service the renderer can trigger by accident — one
+// mistyped page size and the store reads years of history into memory.
+const MaxLedgerPageLimit = 200
+
+// LedgerQuery is one recall query over the ledger (design §6.2). Scope is
+// the ladder's rung (§10.6) and EnvironmentID/Cwd are its coordinates: the
+// server answers from the rung it was asked for and never silently widens,
+// because a ladder whose rung you cannot see is a filter. Kind and Status
+// are the closed enums the CHECK constraints name — a value they do not name
+// is a refused request, never an empty result set.
+//
+// The two bounds read DIFFERENT columns, deliberately:
+//
+//   - Before is the paging cursor and reads ingest_seq, the design's total
+//     order (§6.3). The page holds entries strictly earlier in that order.
+//     The interim command_history path pages on its rowid; the two are never
+//     mixed, because a rowid is not this design's order.
+//   - Since is a wall-clock floor and reads submitted_at, the store's own
+//     stamp. It is a question about time, and seq cannot answer one. It is
+//     deliberately not ended_at, which is NULL while a command runs and
+//     would silently drop every running entry from a time window.
+type LedgerQuery struct {
+	Scope         Scope
+	EnvironmentID string
+	Cwd           string
+	Kind          EntryKind
+	Status        EntryStatus
+	Since         *int64
+	Before        *int64
+	Limit         int
+}
+
+// LedgerPage is one page of recall, newest first, plus the three facts that
+// keep it honest.
+type LedgerPage struct {
+	// Entries is the page. Never nil: no matches is an empty slice.
+	Entries []LedgerEntrySummary
+	// Exhausted is true when no further entries exist beyond this page.
+	Exhausted bool
+	// HasRows reports whether the ledger holds any entry at all, read in the
+	// same transaction as the page. It is what separates "the store answered
+	// and had nothing" from "the store has nothing to answer from": an empty
+	// answer and an unanswerable question must not look alike, and a reader
+	// that cannot tell them apart renders "no history" for "history is off".
+	HasRows bool
+	// Coverage is the store-wide horizon: the oldest retained entry's
+	// ended_at in Unix milliseconds, independent of the rung and of every
+	// filter, because retention is store-wide so the horizon is too. Nil
+	// when nothing has completed — there is no horizon to state.
+	Coverage *int64
 }
 
 // LedgerEntry is the recall-shaped read: the entry with every execution and
@@ -816,7 +935,8 @@ type Artifact struct {
 // LedgerRepository is the typed repository for schema v1 (ADR-0019,
 // ADR-0020, design §5.2). It is the ONLY writer of the v1 tables; the
 // interim CommandHistoryRepository writes command_history, and nothing may
-// write both. The write path has no production caller until nocx-rtg0.3.
+// write both. The header above keeps the by-hand list of which methods have
+// a production caller and which do not.
 type LedgerRepository interface {
 	// CreateWorkspace records a narrative scope.
 	CreateWorkspace(ctx context.Context, ws Workspace) error
@@ -850,6 +970,16 @@ type LedgerRepository interface {
 	// its resolved environment, joined in the one statement: the page costs
 	// a single query however many rows and however many hosts it spans.
 	ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error)
+	// QueryEntries is the recall read and the ONE ordering implementation
+	// (design §6.2): one page of the rung the caller asked for, newest first
+	// by ingest_seq, with the page's exhaustion, whether the ledger holds
+	// any row at all, and the store-wide retention horizon — all read in one
+	// transaction, so the page and the facts about it cannot disagree about
+	// the store's state. Every row carries its resolved environment from the
+	// same statement. A request the closed enums cannot express, or a limit
+	// outside [1, MaxLedgerPageLimit], is refused rather than answered with
+	// an empty page that reads as "nothing ever matched".
+	QueryEntries(ctx context.Context, q LedgerQuery) (LedgerPage, error)
 	// RewriteRedaction replaces the redaction segment at span in the
 	// entry's stored intent with reference (a vault reference), removing the
 	// segment from the entry's receipt (EntryMasking, in entries.payload).
