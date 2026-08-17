@@ -174,6 +174,31 @@ async function backToTerminal(page: Page): Promise<void> {
   await expect(input).toBeFocused({ timeout: 10_000 })
 }
 
+/** Assign the answering role to one endpoint's model — Settings → Roles,
+ *  the surface the model-roles epic (nocx-e6kn2) gave the ask path: the
+ *  ask resolves the ANSWERING ROLE to its assigned (endpoint, model) pair,
+ *  so creating an endpoint never makes it askable and an unassigned role
+ *  refuses with "no model assigned" before any request reaches the model.
+ *  The two selects are the kit's native `<select>`s (ADR-0014): the first
+ *  picks the endpoint, the second completes the pair and writes it — a
+ *  half-pair is never written. */
+async function assignAnsweringRole(page: Page, endpointName: string, model: string): Promise<void> {
+  await page.keyboard.press('Meta+,')
+  await page.locator('.ui-grouped-nav__item[data-item="roles"]').click()
+  const answering = page.locator('.roles-role').filter({ hasText: 'Answering' })
+  await expect(answering).toBeVisible({ timeout: 10_000 })
+  await answering.locator('select').first().selectOption({ label: endpointName })
+  const modelSelect = answering.locator('select').nth(1)
+  await expect(modelSelect).toBeEnabled()
+  await modelSelect.selectOption({ label: model })
+  // The row's own word for the assignment: the state sentence names the
+  // assigned endpoint and model (roleStateLine), never a toast.
+  await expect(answering.locator('.roles-role__state')).toContainText(endpointName, {
+    timeout: 10_000,
+  })
+  await expect(answering.locator('.roles-role__state')).toContainText(model)
+}
+
 /** Run one command and wait for its finished (frozen) block. */
 async function runCommand(
   page: Page,
@@ -230,7 +255,7 @@ async function askFromPrompt(page: Page, question: string): Promise<void> {
   // `:visible` on purpose: CM6 keeps a hidden measurement spacer beside the
   // real marker, carrying an identical button. The visible one is the
   // person's.
-  const indicator = page.locator('.pane.active .nocx-editor-target-indicator:visible')
+  const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
   if ((await indicator.getAttribute('data-target')) !== 'agent') {
     await page.keyboard.press('ControlOrMeta+Enter')
     await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
@@ -269,10 +294,17 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // names the problem and the Endpoints page opens with the editor up on
     // a blank endpoint. A sentence with nowhere to go is how a person
     // concludes the feature is broken rather than unconfigured.
+    // The sentence is the answering ROLE's refusal (nocx-e6kn2): the ask
+    // resolves the role to its assigned (endpoint, model) pair, so the
+    // first dev-stand state refuses with "no model assigned" and points at
+    // Settings → Roles, not with the pre-roles "no endpoint configured".
     await askFromPrompt(page, 'What did this print?')
-    await expect(page.locator('.ui-toast')).toContainText('no endpoint configured', {
-      timeout: 15_000,
-    })
+    await expect(page.locator('.ui-toast')).toContainText(
+      'the answering role has no model assigned — assign one in Settings → Roles',
+      {
+        timeout: 15_000,
+      },
+    )
     await expect(page.locator('.ep-root')).toBeVisible({ timeout: 15_000 })
     await expect(page.getByRole('dialog').filter({ hasText: 'New Endpoint' })).toBeVisible({
       timeout: 15_000,
@@ -341,6 +373,13 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // contains would then pass on the wrong row.
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
     await expect(savedRow).toContainText('Key saved', { timeout: 10_000 })
+
+    // ── The answering role (nocx-e6kn2): the ask resolves the role to
+    // its assigned (endpoint, model) pair, so the fresh endpoint is not
+    // askable until the role names it — the refusal for an unassigned
+    // role is "no model assigned", and the ask would never reach the
+    // fake. The assignment goes through the surface a person uses.
+    await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
 
     // ── Two finished blocks with output that cannot be confused ──────────
     await backToTerminal(page)
