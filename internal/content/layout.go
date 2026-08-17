@@ -25,14 +25,18 @@ package content
 // dragged elsewhere. What is genuinely the tab's own is "I have seen this",
 // which duplicates nothing.
 //
-// PRODUCTION CALLERS: none yet. nocx-isoph.2 puts create/move on the wire and
-// nocx-isoph.3 adds the container lifecycle; until then this surface is
-// reachable only from its own tests. That sentence is here rather than in a
-// deadcode run because `deadcode -filter 'nocx/internal/content'` prints
-// nothing for this package and always has — RTA reports every method here
-// reachable only through reflection, so the tool cannot tell a wired write
-// path from an unwired one (ledger.go's header says the same, for the same
-// reason). This is exactly the shape that shipped once before under a green
+// PRODUCTION CALLERS: none yet. The container lifecycle landed with
+// nocx-isoph.3 — creation-with-content, the dissolution of a container with
+// its last member, the move and the replacement tab — and nocx-isoph.2 is
+// what puts those calls on the wire; until then this surface is reachable
+// only from its own tests, and `deadcode -whylive
+// github.com/shady2k/nocx/internal/content.sqliteContent.MovePane` answers
+// "reachable only through reflection", the same as every other method here.
+// That answer is the tool's limit rather than a finding: RTA counts a method
+// a live interface value can hold as reachable, so it cannot tell a wired
+// write path from an unwired one, and `deadcode -filter
+// 'nocx/internal/content'` has always printed nothing for this package
+// (ledger.go's header says the same, for the same reason). This is exactly the shape that shipped once before under a green
 // "deadcode is empty" (nocx-rtg0), so the honest statement lives next to the
 // seam and is kept current by hand.
 
@@ -153,8 +157,37 @@ type Pane struct {
 	SizeShare float64
 }
 
+// Replacement is the identity of the tab that appears when the last tab in
+// the APPLICATION closes (nocx-isoph.3, §4.4 of the workspaces UX design). It
+// is a parameter rather than something the backend invents for two reasons,
+// and both are §7: a tab and a pane id are minted by the frontend, and they
+// must survive a restart, so they cannot come from a backend instance.
+//
+// It is consulted ONLY when the close would otherwise leave no tab anywhere.
+// Every other close ignores it, so a caller that always passes one is not
+// asking for a tab it will not get.
+type Replacement struct {
+	// TabID and PaneID are client-minted UUIDv7, like every other id here,
+	// and equally untrusted: an id already taken fails the whole close.
+	TabID  string
+	PaneID string
+	// Cwd is where the replacement pane opens. Empty is legal and means the
+	// backend process's own directory, which is what an unconfigured local
+	// shell already inherits.
+	Cwd string
+}
+
 // LayoutRepository is the typed repository for the layout chain (ADR-0011 §1:
 // each entity declares its own typed repository, no generic Repository[T]).
+//
+// THE LIFECYCLE IS THE SIGNATURE, not a sweep (nocx-isoph.3, design §4.1 and
+// §4.4). A workspace exists only while it holds at least one tab; a tab only
+// while it holds at least one pane. Neither rule needs lifecycle code because
+// neither empty state is reachable: creation is always creation-with-content
+// — which is why CreateWorkspace takes a first tab and CreateTab a first pane
+// — and the container's row goes in the SAME TRANSACTION that removes its
+// last member. There is no reaper, no periodic check and no "empty" flag,
+// because there is no interval in which an empty container exists to find.
 //
 // There is no method that changes a tab's parent, and that absence is load
 // bearing: the lineage edge is verified at ADMISSION and never revisited,
@@ -162,20 +195,40 @@ type Pane struct {
 // also what makes a cycle unreachable through this seam — a parent must
 // already exist, and a new id cannot already be an ancestor — so the walk
 // internal/lineage runs at CreateTab is there for the depth bound and for the
-// day a mover is added.
+// day a mover is added. MovePane moves a pane between TABS and is not that
+// mover: it touches panes.tab_id and nothing on tabs.
 type LayoutRepository interface {
-	// CreateWorkspace records one workspace. An id already taken FAILS; it
-	// never overwrites (§7).
-	CreateWorkspace(ctx context.Context, ws Workspace) error
+	// CreateWorkspace records one workspace TOGETHER WITH its first tab and
+	// that tab's first pane, in one transaction. A call with no first tab is
+	// ErrNoFirstTab and a call with no first pane ErrNoFirstPane: an empty
+	// workspace was proposed and rejected by the owner — it has no meaning,
+	// and refusing it also removes the "open a tab somewhere it does not
+	// belong, then move it out" path. An id already taken FAILS; it never
+	// overwrites (§7).
+	//
+	// The first tab's WorkspaceID and the first pane's TabID may be left
+	// empty: this call is what creates those containers. Naming a DIFFERENT
+	// one is ErrMismatchedContainer rather than a silent re-parent.
+	CreateWorkspace(ctx context.Context, ws Workspace, firstTab Tab, firstPane Pane) error
 	// Workspaces returns every workspace in position order.
 	Workspaces(ctx context.Context) ([]Workspace, error)
 	// DeleteWorkspace removes a workspace; its tabs, and their panes, go with
-	// it (ON DELETE CASCADE — a tab has no meaning outside a workspace).
-	DeleteWorkspace(ctx context.Context, id string) error
-	// CreateTab records one tab under an existing workspace. A lineage parent
-	// that names no tab, that names the tab itself, or that would join a
-	// chain longer than lineage.MaxDepth is refused and nothing is written.
-	CreateTab(ctx context.Context, tab Tab) error
+	// it (ON DELETE CASCADE — a tab has no meaning outside a workspace), and
+	// so do the sessions recorded under it. If it held the last tabs in the
+	// application, the replacement is minted in the same transaction.
+	//
+	// The DEFAULT workspace is refused with ErrDefaultWorkspace. It never
+	// renders, so nothing can offer the affordance, and its row is where the
+	// replacement tab goes and where the ledger records every session nobody
+	// named a workspace for.
+	DeleteWorkspace(ctx context.Context, id string, next Replacement) error
+	// CreateTab records one tab under an existing workspace TOGETHER WITH its
+	// first pane. This is §4.4's "dragging a pane out of a tab mints a tab
+	// for it" — the pane is what the tab is minted around, so a tab with no
+	// pane is ErrNoFirstPane. A lineage parent that names no tab, that names
+	// the tab itself, or that would join a chain longer than lineage.MaxDepth
+	// is refused and nothing is written.
+	CreateTab(ctx context.Context, tab Tab, firstPane Pane) error
 	// Tabs returns one workspace's tabs in position order.
 	Tabs(ctx context.Context, workspaceID string) ([]Tab, error)
 	// DeleteTab removes a tab; its panes go with it, and any tab that records
@@ -184,9 +237,28 @@ type LayoutRepository interface {
 	// artifacts.derived_from makes and for the same reason). Cascading would
 	// delete a tab the user still has open; RESTRICT would make a tab that
 	// ever spawned another undeletable, and §4.4 removes tabs automatically.
-	DeleteTab(ctx context.Context, id string) error
-	// CreatePane records one pane under an existing tab.
+	//
+	// If it was its workspace's last tab the workspace goes with it, and if
+	// it was the application's last the replacement is minted — all in the
+	// one transaction.
+	DeleteTab(ctx context.Context, id string, next Replacement) error
+	// CreatePane records one pane under an existing tab: a SPLIT, the one
+	// creation that adds a member to a container that already exists. The
+	// first pane of a tab arrives with the tab, through CreateTab.
 	CreatePane(ctx context.Context, pane Pane) error
+	// MovePane changes which tab a pane is in — §4.4's other direction —
+	// and removes the tab it leaves empty, in the same transaction. The
+	// pane's identity, its cwd, its blocks and its live pipe are untouched,
+	// because only a reference moved: this is an UPDATE of one column on the
+	// row that was already there, never a delete and an insert.
+	//
+	// A move whose destination tab is in ANOTHER WORKSPACE is refused with
+	// ErrCrossWorkspaceMove. Whether that is allowed is open (§12 q. 5, and
+	// §4.4 of the workspaces design), the atomicity model for a subtree move
+	// is undesigned, and the inherited requirement is that a partial move
+	// FAILS CLOSED. Refusing the whole move is the form of failing closed
+	// that leaves the pane in exactly one place.
+	MovePane(ctx context.Context, paneID, tabID string) error
 	// Panes returns one tab's panes in id order. A pane has no stored
 	// position: §5 gives the member a SHARE and the set a direction, and
 	// nothing else. Ordering within a tab becomes a user-visible operation
@@ -194,6 +266,9 @@ type LayoutRepository interface {
 	// turns out to be needed — inventing it here would put it in the wire
 	// contract and the whole chain before anything can say what it means.
 	Panes(ctx context.Context, tabID string) ([]Pane, error)
-	// DeletePane removes a pane.
-	DeletePane(ctx context.Context, id string) error
+	// DeletePane removes a pane — and with it the tab it was the last pane
+	// of, the workspace that tab was the last tab of, and, if that emptied
+	// the application, mints the replacement. One transaction, whichever of
+	// those rungs it reaches.
+	DeletePane(ctx context.Context, id string, next Replacement) error
 }
