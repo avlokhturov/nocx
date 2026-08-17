@@ -10,14 +10,15 @@ package transport
 // the ask's own model execution (the question entry's execution row), the
 // ANSWER is an entry joined by a caused-by edge, and "each tool call — an
 // attempt, with its grant, its policy decision, its result and its
-// termination reason". The design's primary shape (§1) authorises each tool
-// at the moment it is called, so criterion 1's "proposes a tool call, is
-// authorised, runs and completes" is the APPROVAL exchange: the proposal is
-// recorded as an action entry whose payload carries the run id
-// (approval.runId), the person's yes resumes it, and the approved call runs
-// as attempt 2 of that same entry. That is the exchange where all four
-// pieces are linked — by the run id (question → run, run → attempt) and by
-// the caused-by edge (answer → question).
+// termination reason". Both ways a tool is authorised, the attempt carries
+// the run id so the thread joins: an escalated call's proposal records it
+// in the approval block (approval.runId, and the approved call runs as
+// attempt 2 of that same entry), and — since nocx-dw3.4 — a GRANTED call's
+// attempt payload carries it too (runId), because where the grant permitted
+// and nobody was asked, the ledger is the only account of what happened.
+// The four pieces of either exchange are linked — question → run and run →
+// attempt by the run id, answer → question by the caused-by edge — and this
+// file reads them back in the order the exchange happened in.
 //
 // The thread lives in the TRANSPORT, not in a content test, on purpose:
 // the rows the readback walks are written by the PRODUCT's own path — the
@@ -176,13 +177,25 @@ func driveOneCompletedRun(t *testing.T) (*askHarness, askWireResult, string) {
 	return h, res, answer
 }
 
+// approvalBinding is the five-field binding the policy asked a person about:
+// what the agent.approvalRequested notification carried and the approve
+// echoed back. The authorised readback asserts the recorded proposal
+// carries exactly this binding.
+type approvalBinding struct {
+	RunID   string
+	Attempt int
+	Tool    string
+	CallID  string
+	ArgHash string
+}
+
 // driveOneAuthorisedRun performs one AUTHORISED exchange over the real
 // socket: the ask streams, the model proposes the run tool, the policy asks
 // a person, the person approves the exact proposal over the wire, the
 // approved call runs through the broker (the renderer resolves it), the
 // answer streams, and the run completes. Returns the harness, the ask
 // result and the streamed answer text.
-func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string) {
+func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, approvalBinding) {
 	t.Helper()
 	client, err := assistant.NewClient(nil)
 	if err != nil {
@@ -210,13 +223,7 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string) {
 	if raw == nil {
 		t.Fatalf("no approvalRequested within 10s; provider requests=%d", fake.requests.Load())
 	}
-	var ap struct {
-		RunID   string `json:"runId"`
-		Attempt int    `json:"attempt"`
-		Tool    string `json:"tool"`
-		CallID  string `json:"callId"`
-		ArgHash string `json:"argHash"`
-	}
+	var ap approvalBinding
 	if err := json.Unmarshal(raw, &ap); err != nil {
 		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", err, raw)
 	}
@@ -298,13 +305,12 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string) {
 	if fake.requests.Load() < 3 {
 		t.Fatalf("provider received %d requests, want >= 3 — escalate, resume-call, answer", fake.requests.Load())
 	}
-	return h, res, answer
+	return h, res, answer, ap
 }
 
 // findRunActionEntry returns the run tool's action entry (the audit row the
 // middleware opens for the tool call), or fails the test.
 func findRunActionEntry(t *testing.T, led content.LedgerRepository) *content.LedgerEntry {
-	t.Helper()
 	summaries, err := led.ListEntries(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("ListEntries: %v", err)
@@ -332,7 +338,7 @@ func findRunActionEntry(t *testing.T, led content.LedgerRepository) *content.Led
 // caused-by edge, and the order the test walks is the order the exchange
 // happened in.
 func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
-	h, res, answer := driveOneAuthorisedRun(t)
+	h, res, answer, binding := driveOneAuthorisedRun(t)
 	ctx := context.Background()
 	led := h.db.Ledger()
 
@@ -376,15 +382,26 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	}
 	var proposal struct {
 		Approval struct {
-			RunID string `json:"runId"`
+			RunID   string `json:"runId"`
+			Attempt int    `json:"attempt"`
+			Tool    string `json:"tool"`
+			CallID  string `json:"callId"`
+			ArgHash string `json:"argHash"`
 		} `json:"approval"`
 	}
 	if umErr := json.Unmarshal([]byte(action.Payload), &proposal); umErr != nil {
 		t.Fatalf("action payload = %q, want the proposal JSON: %v", action.Payload, umErr)
 	}
-	if proposal.Approval.RunID != strconv.FormatInt(res.RunID, 10) {
-		t.Errorf("attempt payload run id = %q, want %d — the tool attempt is linked to the run by the run id",
-			proposal.Approval.RunID, res.RunID)
+	// The approval block carries the exact binding the person was asked
+	// about and approved — run id, attempt, tool, call id, argument hash.
+	if proposal.Approval.RunID != binding.RunID || proposal.Approval.RunID != strconv.FormatInt(res.RunID, 10) {
+		t.Errorf("attempt payload run id = %q, want %q (%d) — the tool attempt is linked to the run by the run id",
+			proposal.Approval.RunID, binding.RunID, res.RunID)
+	}
+	if proposal.Approval.Attempt != binding.Attempt || proposal.Approval.Tool != binding.Tool ||
+		proposal.Approval.CallID != binding.CallID || proposal.Approval.ArgHash != binding.ArgHash {
+		t.Errorf("attempt approval block = %+v, want the binding the person approved %+v",
+			proposal.Approval, binding)
 	}
 	if len(action.Executions) != 2 {
 		t.Fatalf("attempt executions = %d, want exactly two — the escalation and the authorised call", len(action.Executions))
@@ -500,51 +517,52 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	}
 }
 
-// TestRun_GrantedPathToolAuditCarriesNoRunIdLink is the finding asserted:
-// in the GRANTED exchange (the autonomous preset — the grant permits the
-// call, nobody is asked), the question/run/answer thread still reads back
-// linked, and the tool's audit row is present with its grant, its commit
-// order and its span inside the run — but it carries NO run id: the
-// granted-path attempt payload has no approval block. The run-id link
-// exists in the authorised path (TestRun_AuthorisedThreadReadsBackFromTheLedger)
-// and does not here; a surface that walks tool audit rows inside a granted
-// thread would need that seam (an edge or a run id on the attempt payload).
-func TestRun_GrantedPathToolAuditCarriesNoRunIdLink(t *testing.T) {
-	h, res, _ := driveOneCompletedRun(t)
+// TestRun_GrantedPathThreadReadsBackFromTheLedger is the granted end of
+// criterion 1 (nocx-dw3.4): in the GRANTED exchange (the autonomous preset
+// — the grant permits the call, nobody is asked), the four rows read back
+// as ONE thread exactly as they do in the authorised one — question and run
+// linked by the run id, the tool attempt carrying the run id in its own
+// payload, the answer linked by its caused-by edge. Where nobody was asked,
+// the ledger is the ONLY account of what happened, so the attempt must join
+// its run; this test is the inverted form of the gap that used to exist
+// (the audit row carrying no run id), so the gap cannot come back
+// unnoticed.
+func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
+	h, res, answer := driveOneCompletedRun(t)
 	ctx := context.Background()
 	led := h.db.Ledger()
 
+	// ── the question entry ──────────────────────────────────────────────
 	q, err := led.Entry(ctx, res.QuestionID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
 	}
-	if len(q.Executions) != 1 || q.Executions[0].ID != res.RunID {
-		t.Fatalf("run = %+v, want the question's execution with id %d", q.Executions, res.RunID)
+	if q.Kind != content.EntryAgent || q.Intent != "list the files" {
+		t.Errorf("question kind/intent = %q/%q, want agent/%q", q.Kind, q.Intent, "list the files")
+	}
+	if q.Phase != content.PhaseClosed || q.Status != content.EntrySuccess {
+		t.Errorf("question phase/status = %q/%q, want closed/success", q.Phase, q.Status)
+	}
+
+	// ── the run, linked by the run id ───────────────────────────────────
+	if len(q.Executions) != 1 {
+		t.Fatalf("question executions = %d, want exactly one run", len(q.Executions))
 	}
 	run := q.Executions[0]
+	if run.ID != res.RunID {
+		t.Errorf("run id = %d, want %d — the run id links the thread to the question", run.ID, res.RunID)
+	}
 	if run.State == nil || *run.State != content.RunCompleted {
-		t.Fatalf("run state = %v, want completed", run.State)
+		t.Errorf("run state = %v, want completed", run.State)
 	}
-	if run.StartedAt == nil || run.EndedAt == nil {
-		t.Fatalf("run span = %v..%v, want both ends", run.StartedAt, run.EndedAt)
+	if run.TerminationReason == nil || *run.TerminationReason != content.TermCompleted {
+		t.Errorf("run termination = %v, want completed", run.TerminationReason)
 	}
-
-	edges, err := led.Edges(ctx, res.QuestionID)
-	if err != nil {
-		t.Fatalf("Edges: %v", err)
-	}
-	var caused bool
-	for _, e := range edges {
-		if e.Rel == content.RelCausedBy && e.From == res.AnswerEntryID && e.To == res.QuestionID {
-			caused = true
-		}
-	}
-	if !caused {
-		t.Fatalf("edges = %+v, want the caused-by edge from the answer", edges)
+	if run.StartedAt == nil || run.EndedAt == nil || *run.StartedAt > *run.EndedAt {
+		t.Errorf("run span = %v..%v, want started <= ended", run.StartedAt, run.EndedAt)
 	}
 
-	// The tool's audit row exists — the attempt, with its grant — but the
-	// granted path records no run-id link on it.
+	// ── the tool attempt, linked by the run id it carries ───────────────
 	action := findRunActionEntry(t, led)
 	if action.Status != content.EntrySuccess {
 		t.Errorf("action entry status = %q, want success", action.Status)
@@ -557,7 +575,7 @@ func TestRun_GrantedPathToolAuditCarriesNoRunIdLink(t *testing.T) {
 		t.Errorf("attempt/executor = %d/%v, want 1/agent", attempt.Attempt, attempt.Executor)
 	}
 	if attempt.Grant == nil || attempt.Grant.Version != 1 {
-		t.Errorf("recorded grant = %+v, want the version-1 grant minted at the ask — the attempt carries the run's authority", attempt.Grant)
+		t.Errorf("recorded grant = %+v, want the version-1 grant minted at the ask", attempt.Grant)
 	}
 	if attempt.TerminationReason == nil || *attempt.TerminationReason != content.TermCompleted {
 		t.Errorf("attempt termination = %v, want completed", attempt.TerminationReason)
@@ -565,15 +583,70 @@ func TestRun_GrantedPathToolAuditCarriesNoRunIdLink(t *testing.T) {
 	if attempt.StartedAt == nil || attempt.EndedAt == nil {
 		t.Fatalf("attempt span = %v..%v, want both ends", attempt.StartedAt, attempt.EndedAt)
 	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(action.Payload), &payload); err != nil {
-		t.Fatalf("action payload = %q: %v", action.Payload, err)
+	var payload struct {
+		RunID string `json:"runId"`
 	}
-	if _, ok := payload["approval"]; ok {
-		t.Errorf("granted-path attempt payload = %s, want no approval block — the granted path persists no run-id link", action.Payload)
+	if umErr := json.Unmarshal([]byte(action.Payload), &payload); umErr != nil {
+		t.Fatalf("action payload = %q: %v", action.Payload, umErr)
 	}
-	if q.IngestSeq >= action.IngestSeq {
-		t.Errorf("commit order = question %d, action %d, want the proposal after the ask", q.IngestSeq, action.IngestSeq)
+	if payload.RunID != strconv.FormatInt(res.RunID, 10) {
+		t.Errorf("attempt payload run id = %q, want %d — a granted call's attempt must carry its run",
+			payload.RunID, res.RunID)
+	}
+
+	// ── the answer, joined by its caused-by edge ────────────────────────
+	edges, err := led.Edges(ctx, res.QuestionID)
+	if err != nil {
+		t.Fatalf("Edges: %v", err)
+	}
+	var caused *content.Edge
+	for i := range edges {
+		if edges[i].Rel == content.RelCausedBy {
+			caused = &edges[i]
+		}
+	}
+	if caused == nil {
+		t.Fatalf("edges = %+v, want a caused-by edge from the answer", edges)
+	}
+	if caused.From != res.AnswerEntryID || caused.To != res.QuestionID {
+		t.Errorf("caused-by edge = %+v, want answer %q → question %q", caused, res.AnswerEntryID, res.QuestionID)
+	}
+	ans, err := led.Entry(ctx, res.AnswerEntryID)
+	if err != nil || ans == nil {
+		t.Fatalf("answer entry: %v (nil=%v)", err, ans == nil)
+	}
+	if ans.Kind != content.EntryAgent || ans.Intent != content.AnswerIntent {
+		t.Errorf("answer kind/intent = %q/%q, want agent/answer", ans.Kind, ans.Intent)
+	}
+	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
+		t.Errorf("answer phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
+	}
+	if len(ans.Executions) != 1 {
+		t.Fatalf("answer executions = %d, want exactly 1", len(ans.Executions))
+	}
+	if len(ans.Executions[0].Artifacts) != 1 {
+		t.Fatalf("answer artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
+	}
+	a := ans.Executions[0].Artifacts[0]
+	if a.State != content.ArtifactSealed {
+		t.Errorf("answer artifact state = %q, want sealed", a.State)
+	}
+	art, err := led.Artifact(ctx, a.ID)
+	if err != nil {
+		t.Fatalf("Artifact: %v", err)
+	}
+	body := ""
+	for _, c := range art.Chunks {
+		body += string(c)
+	}
+	if body != answer {
+		t.Errorf("answer artifact body = %q, want %q — the durable answer is exactly what streamed", body, answer)
+	}
+
+	// ── the order they happened in ──────────────────────────────────────
+	if q.IngestSeq >= ans.IngestSeq || ans.IngestSeq >= action.IngestSeq {
+		t.Errorf("commit order = question %d, answer %d, action %d, want strictly increasing",
+			q.IngestSeq, ans.IngestSeq, action.IngestSeq)
 	}
 	if *run.StartedAt > *attempt.StartedAt || *attempt.EndedAt > *run.EndedAt {
 		t.Errorf("attempt span %v..%v outside the run span %v..%v — the tool ran inside the run's lifetime",
