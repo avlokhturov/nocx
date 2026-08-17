@@ -77,9 +77,10 @@ type ContentDB interface {
 	// Ledger returns the schema-v1 ledger repository (ADR-0019, ADR-0020,
 	// design §5.2): entries, edges, executions, artifacts, environments
 	// with their versioned observations, sessions and workspaces. The
-	// ledger.* wire methods (nocx-rtg0.3) will drive this surface; until
-	// that cutover its only callers are tests, and command_history remains
-	// the live history path. Nothing may write both (ADR-0019 §4).
+	// ledger.* wire methods (nocx-rtg0.3) drive this surface's entry
+	// lifecycle, and the ask transaction drives its agent half.
+	// command_history remains the live history path until nocx-rtg0.19
+	// removes it. Nothing may write both (ADR-0019 §4).
 	Ledger() LedgerRepository
 }
 

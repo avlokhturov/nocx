@@ -5,10 +5,13 @@ package content
 // §5.2. Every mutation goes through the single writer goroutine (run in
 // sqlite.go — design §5.3); every read goes through the pool directly.
 //
-// The v1 write path has NO PRODUCTION CALLER until nocx-rtg0.3 cuts the wire
-// over to ledger.* — only tests exercise these methods today. Stated loudly
-// because the same shape shipped once before (a reachable read path hid an
-// unreachable write path in the same package).
+// The entry lifecycle — Submit, StartExecution, FinishExecution — is driven
+// in production by the ledger.* control methods (nocx-rtg0.3,
+// internal/transport/ws_ledger.go); the ask transaction drives CaptureFrame,
+// SubmitAgentAsk, TransitionRun and FinishAgentRun. The methods with no
+// production caller yet are named in ledger.go's header, which is where that
+// list is kept — deadcode cannot answer the question for this package, since
+// RTA calls every method here reflection-reachable.
 
 import (
 	"context"

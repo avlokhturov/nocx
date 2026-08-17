@@ -4,16 +4,25 @@ package content
 // ADR-0020 and design §5.2. The types here are the public repository seam:
 // ContentDB.Ledger() returns a LedgerRepository, the only writer of the v1
 // tables. The interim command_history table and CommandHistoryRepository are
-// untouched by this surface — they are the live path until nocx-rtg0.3 cuts
-// the wire protocol over to ledger.* (design §6.2), and nothing may write
-// both (ADR-0019 §4).
+// untouched by this surface — they remain the live history path until
+// nocx-rtg0.19 removes them, and nothing may write both (ADR-0019 §4).
 //
-// Until that cutover the v1 write path has NO PRODUCTION CALLER — only
-// tests. Stated loudly because the same shape shipped once before
-// (nocx-rtg0: ContentDB.Add reachable only from its own tests while a
-// reachable read path hid the unreachable write): the v1 tables are
-// schema-complete and test-proven, and deliberately not wired into the
-// transport until nocx-rtg0.3.
+// The entry lifecycle IS wired as of nocx-rtg0.3: internal/transport's
+// ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
+// StartExecution and FinishExecution through capability.LedgerService, and
+// the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
+// SubmitAgentAsk, TransitionRun and FinishAgentRun. What is still
+// test-reachable only: CreateWorkspace, CreateSession, DeleteSession,
+// ListEntries, DeleteEntry, AppendArtifact, AddEdge and Edges.
+//
+// Read that list rather than a deadcode run. `deadcode -filter
+// 'nocx/internal/content'` prints nothing for this package and always has —
+// RTA reports every method here "reachable only through reflection", so the
+// tool cannot tell a wired write path from an unwired one. This is exactly
+// the shape that shipped once before (nocx-rtg0: ContentDB.Add reachable
+// only from its own tests while a reachable read path hid the unreachable
+// write, under a green "deadcode is empty"), so the honest statement lives
+// here, next to the seam, and is kept current by hand.
 
 import (
 	"context"

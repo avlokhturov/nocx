@@ -1,0 +1,111 @@
+package capability
+
+// The ledger domain (nocx-rtg0.3): ledger.open, ledger.bind and ledger.close
+// — the write path of schema v1 (ADR-0019, ADR-0020, design §6.2). One
+// operation, one gate: the content gate, because the ledger IS content's
+// schema v1 and the ask transaction, the recall read and this write path are
+// one database.
+//
+// It is a separate service from AgentService deliberately. What a handler may
+// touch is exactly the methods its own surface declares, and the ledger's
+// lifecycle writes (Submit / StartExecution / FinishExecution) and the ask
+// transaction are different jobs with different failure modes; widening
+// AgentService would hand the ask handler a phase machine it has no business
+// reaching, and this handler the frame capture.
+
+import (
+	"context"
+
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/transport/control"
+)
+
+// LedgerService is the ledger domain surface: the entry lifecycle, plus the
+// environment identity an entry's execution pins. Read and write both
+// participate in the content gate — the phase decision is a read-modify-write
+// over the same rows the write touches.
+type LedgerService interface {
+	// Entry reads one entry with its executions — how the handler learns the
+	// row's current phase before deciding whether an event may be applied.
+	// Nil when no row carries id.
+	Entry(ctx context.Context, id string) (*content.LedgerEntry, error)
+	// EnsureEnvironment records the durable identity of where work happens;
+	// the first write wins.
+	EnsureEnvironment(ctx context.Context, env content.Environment) error
+	// RecordObservation appends one versioned snapshot of the environment's
+	// mutable facts and returns its row identity — what an execution pins.
+	// StartExecution refuses an environment with no observation, so this is
+	// not optional bookkeeping: it is what makes a run pinnable.
+	RecordObservation(ctx context.Context, obs content.Observation) (int64, error)
+	// Submit accepts an intent as an open entry and returns the
+	// backend-assigned ingest_seq — the ledger's only total order.
+	Submit(ctx context.Context, in content.SubmitEntry) (content.SubmitResult, error)
+	// StartExecution begins one run of an entry and moves the entry to bound.
+	StartExecution(ctx context.Context, in content.StartExecution) (int64, error)
+	// FinishExecution closes the run and the entry with it.
+	FinishExecution(ctx context.Context, executionID int64, end content.FinishExecution) error
+}
+
+// LedgerOperation is the typed operation for the ledger domain. Its gate is
+// [content].
+type LedgerOperation interface {
+	Run(context.Context, func(context.Context, LedgerService) error) error
+}
+
+// NewLedgerOperation builds a LedgerOperation that acquires the content gate
+// before the execution lane.
+func NewLedgerOperation(contentGate, lane control.Admission, db content.ContentDB) LedgerOperation {
+	g := &guard{}
+	return newOperation[LedgerService](control.NewComposite(contentGate, lane), g, newLedgerService(g, db))
+}
+
+func newLedgerService(g *guard, db content.ContentDB) *ledgerService {
+	return &ledgerService{guard: g, ledger: db.Ledger()}
+}
+
+type ledgerService struct {
+	guard  *guard
+	ledger content.LedgerRepository
+}
+
+func (s *ledgerService) Entry(ctx context.Context, id string) (*content.LedgerEntry, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.ledger.Entry(ctx, id)
+}
+
+func (s *ledgerService) EnsureEnvironment(ctx context.Context, env content.Environment) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.ledger.EnsureEnvironment(ctx, env)
+}
+
+func (s *ledgerService) RecordObservation(ctx context.Context, obs content.Observation) (int64, error) {
+	if err := s.guard.check(); err != nil {
+		return 0, err
+	}
+	return s.ledger.RecordObservation(ctx, obs)
+}
+
+func (s *ledgerService) Submit(ctx context.Context, in content.SubmitEntry) (content.SubmitResult, error) {
+	if err := s.guard.check(); err != nil {
+		return content.SubmitResult{}, err
+	}
+	return s.ledger.Submit(ctx, in)
+}
+
+func (s *ledgerService) StartExecution(ctx context.Context, in content.StartExecution) (int64, error) {
+	if err := s.guard.check(); err != nil {
+		return 0, err
+	}
+	return s.ledger.StartExecution(ctx, in)
+}
+
+func (s *ledgerService) FinishExecution(ctx context.Context, executionID int64, end content.FinishExecution) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.ledger.FinishExecution(ctx, executionID, end)
+}

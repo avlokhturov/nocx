@@ -250,6 +250,21 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/ledger.bind.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/ledger.close.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/ledger.open.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/notify.raise.ts",
       "symbol": ""
     },
