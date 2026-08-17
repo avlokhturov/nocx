@@ -500,6 +500,15 @@ export class CommandEditor {
     this.actions.onDocCleared?.()
   }
 
+  /** Clear the document through the same seam a submit uses: programmatic,
+   *  firing no input events, but announcing the clear (onDocCleared) so
+   *  the host's floating surfaces hold no stale findings over the empty
+   *  line. The per-target draft swap uses this for a target with no saved
+   *  draft (nocx-4ff.7) — the incoming mode's line is genuinely empty. */
+  clear(): void {
+    this.clearDoc()
+  }
+
   /** True while a beforeSubmit verdict is in flight: a second Enter in that
    *  window must not start a second resolve (each would commit a duplicate
    *  ledger record on success). Cleared when the verdict lands. */
