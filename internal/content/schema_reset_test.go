@@ -353,3 +353,62 @@ func TestRebuildRefusesAFileWithTablesItDoesNotKnow(t *testing.T) {
 		t.Fatalf("the refusal logged %d warnings — nothing was discarded", warned)
 	}
 }
+
+// The rebuild survives the layout chain (nocx-isoph.1), with the shape that
+// could plausibly have broken it: tabs.parent_id references tabs, so the
+// implicit DELETE FROM behind DROP TABLE meets the table's own rows on the way
+// out. A DROP that failed there would leave the file half destroyed — the
+// exact state TestRebuildFailureMidwayLeavesTheOldFileWhole exists to
+// prevent — so it is exercised rather than reasoned about. (The cascades
+// happen to make the order of panes and tabs within rebuildDropOrder
+// immaterial; they are listed children-first anyway, because that is the
+// property the list claims and the next table added may not cascade.)
+//
+// The discard itself is deliberate and accepted: nocx is greenfield, no
+// migration is written, and the warning stays loud because "your history was
+// discarded" is a fact the user is entitled to.
+func TestRebuildDropsTheLayoutChainIncludingSelfReferencingTabs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	db := openStore(t, path)
+	ctx := context.Background()
+	layout := db.Layout()
+	if err := layout.CreateWorkspace(ctx, Workspace{ID: "ws-1", Name: "work"}); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	if err := layout.CreateTab(ctx, Tab{ID: "tab-1", WorkspaceID: "ws-1", Layout: LayoutRow}); err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+	parent := "tab-1"
+	if err := layout.CreateTab(ctx, Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: &parent, Layout: LayoutRow}); err != nil {
+		t.Fatalf("CreateTab child: %v", err)
+	}
+	if err := layout.CreatePane(ctx, Pane{ID: "pane-1", TabID: "tab-2", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
+		t.Fatalf("CreatePane: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Stamp the file as an earlier schema: the next Open must rebuild it.
+	rawExec(t, path, "PRAGMA user_version=4")
+
+	again := openStore(t, path)
+	if got := rawUserVersion(t, path); got != schemaVersion {
+		t.Fatalf("user_version = %d, want %d — the rebuild did not complete", got, schemaVersion)
+	}
+	spaces, err := again.Layout().Workspaces(ctx)
+	if err != nil {
+		t.Fatalf("Workspaces after the rebuild: %v", err)
+	}
+	if len(spaces) != 0 {
+		t.Fatalf("workspaces after the rebuild = %+v, want none — the file was discarded", spaces)
+	}
+	// And the tables are back, empty rather than missing: a rebuild that
+	// dropped without recreating opens perfectly and fails every statement.
+	if _, err := again.Layout().Tabs(ctx, "ws-1"); err != nil {
+		t.Fatalf("Tabs after the rebuild: %v", err)
+	}
+	if _, err := again.Layout().Panes(ctx, "tab-1"); err != nil {
+		t.Fatalf("Panes after the rebuild: %v", err)
+	}
+}

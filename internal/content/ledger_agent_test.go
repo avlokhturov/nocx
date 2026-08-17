@@ -792,11 +792,11 @@ func sessionWorkspace(t *testing.T, path, keyHex, sessionID string) (string, str
 // existing restore key. The pre-cutover default workspace only ever
 // receives sessions nobody recorded yet.
 func TestCaptureFrame_PreservesAnExistingSessionsWorkspace(t *testing.T) {
-	_, led, path := newLedgerAt(t)
+	db, led, path := newLedgerAt(t)
 	ctx := context.Background()
 	keyHex := hex.EncodeToString(testKey())
 
-	if err := led.CreateWorkspace(ctx, content.Workspace{ID: "workspace:real", Name: "real"}); err != nil {
+	if err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "workspace:real", Name: "real"}); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	if err := led.CreateSession(ctx, content.Session{ID: "session-recorded", WorkspaceID: "workspace:real"}); err != nil {

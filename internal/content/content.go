@@ -82,6 +82,12 @@ type ContentDB interface {
 	// command_history remains the live history path until nocx-rtg0.19
 	// removes it. Nothing may write both (ADR-0019 §4).
 	Ledger() LedgerRepository
+	// Layout returns the durable layout chain (nocx-isoph.1, design §3):
+	// workspace → tab → pane, the three objects the backend owns and the
+	// frontend asks it to create, move and destroy. It is the only writer of
+	// those tables — the workspace included, which is why CreateWorkspace is
+	// not on LedgerRepository: one table, one repository owner.
+	Layout() LayoutRepository
 }
 
 // CommandStatus is the execution status of a command. It mirrors the closed

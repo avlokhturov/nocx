@@ -91,6 +91,12 @@ func (s *Stub) Ledger() LedgerRepository {
 	return &ledgerStub{log: s.log}
 }
 
+// Layout returns a stub LayoutRepository.
+func (s *Stub) Layout() LayoutRepository {
+	s.log.Info("content stub: Layout called (no-op)")
+	return &layoutStub{log: s.log}
+}
+
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {
 	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)
@@ -114,11 +120,6 @@ var _ LedgerRepository = (*ledgerStub)(nil)
 // ledgerStub implements LedgerRepository for the stub.
 type ledgerStub struct {
 	log log.Logger
-}
-
-func (s *ledgerStub) CreateWorkspace(_ context.Context, ws Workspace) error {
-	s.log.Info("content stub: LedgerRepository.CreateWorkspace", "id", ws.ID)
-	return ErrNotImplemented
 }
 
 func (s *ledgerStub) CreateSession(_ context.Context, sess Session) error {
@@ -228,5 +229,57 @@ func (s *ledgerStub) TransitionRun(_ context.Context, runID int64, to RunState) 
 
 func (s *ledgerStub) FinishAgentRun(_ context.Context, runID int64, in FinishAgentRun) error {
 	s.log.Info("content stub: LedgerRepository.FinishAgentRun", "run", runID, "state", string(in.State))
+	return ErrNotImplemented
+}
+
+var _ LayoutRepository = (*layoutStub)(nil)
+
+// layoutStub implements LayoutRepository for the stub.
+type layoutStub struct {
+	log log.Logger
+}
+
+func (s *layoutStub) CreateWorkspace(_ context.Context, ws Workspace) error {
+	s.log.Info("content stub: LayoutRepository.CreateWorkspace", "id", ws.ID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) Workspaces(_ context.Context) ([]Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.Workspaces")
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) DeleteWorkspace(_ context.Context, id string) error {
+	s.log.Info("content stub: LayoutRepository.DeleteWorkspace", "id", id)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) CreateTab(_ context.Context, tab Tab) error {
+	s.log.Info("content stub: LayoutRepository.CreateTab", "id", tab.ID, "workspace", tab.WorkspaceID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) Tabs(_ context.Context, workspaceID string) ([]Tab, error) {
+	s.log.Info("content stub: LayoutRepository.Tabs", "workspace", workspaceID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) DeleteTab(_ context.Context, id string) error {
+	s.log.Info("content stub: LayoutRepository.DeleteTab", "id", id)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) CreatePane(_ context.Context, pane Pane) error {
+	s.log.Info("content stub: LayoutRepository.CreatePane", "id", pane.ID, "tab", pane.TabID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) Panes(_ context.Context, tabID string) ([]Pane, error) {
+	s.log.Info("content stub: LayoutRepository.Panes", "tab", tabID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) DeletePane(_ context.Context, id string) error {
+	s.log.Info("content stub: LayoutRepository.DeletePane", "id", id)
 	return ErrNotImplemented
 }

@@ -364,7 +364,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 4
+const schemaVersion = 5
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -375,6 +375,7 @@ const schemaVersion = 4
 var rebuildDropOrder = []string{
 	"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
+	"panes", "tabs",
 	"sessions", "environments", "workspaces", "ledger_sequence",
 	"command_history",
 }
@@ -537,11 +538,65 @@ CREATE INDEX IF NOT EXISTS command_history_by_scope ON command_history (cwd, hos
 CREATE INDEX IF NOT EXISTS command_history_by_host  ON command_history (host, id DESC);
 CREATE INDEX IF NOT EXISTS command_history_by_ended ON command_history (ended_at);
 
+-- The layout chain (nocx-isoph.1, tabs-panes-and-blocks §3): workspace → tab
+-- → pane. A workspace is FLAT — it has no column naming another workspace, so
+-- nesting is unrepresentable rather than merely unused; depth comes from
+-- lineage, which lives on the tab.
 CREATE TABLE IF NOT EXISTS workspaces (
   id           TEXT PRIMARY KEY,           -- client-minted UUIDv7
   name         TEXT NOT NULL,
+  position     INTEGER NOT NULL DEFAULT 0, -- switcher order
   created_at   INTEGER NOT NULL,           -- backend wall clock, display only
   payload      TEXT NOT NULL DEFAULT '{}'  -- sparse extension only
+) STRICT;
+
+-- A tab is the strip entry and what the user decorates (§4.5). What is here
+-- is what the tab OWNS; the activity indicator, the attention indicator and
+-- the label are computed from its panes and are deliberately absent — a
+-- column for any of them would give one fact two owners, and they diverge the
+-- first time a pane is dragged elsewhere.
+--
+-- parent_id is the LINEAGE edge and only that (§4.2): who spawned whom,
+-- provenance, immutable, never set by hand, admitted by internal/lineage. The
+-- display grouping — "A, B and C are shown together" — is the tab's other
+-- edge; it is symmetric, has no host and therefore no row (§4.3), and it
+-- arrives with drag (nocx-8m2x6). It must never be folded onto this column.
+--
+-- ON DELETE SET NULL on parent_id, matching artifacts.derived_from and for
+-- the same reason: the link going null is the honest "provenance lost" state.
+-- CASCADE would delete an independent tab the user still has open; RESTRICT
+-- would make a tab that ever spawned another undeletable, and §4.4 removes
+-- tabs automatically the moment their last pane leaves.
+CREATE TABLE IF NOT EXISTS tabs (
+  id           TEXT PRIMARY KEY,           -- client-minted UUIDv7: UNTRUSTED
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  parent_id    TEXT REFERENCES tabs(id) ON DELETE SET NULL
+               CHECK (parent_id IS NULL OR parent_id != id), -- no self-parent
+  name         TEXT,                       -- NULL: nobody named it (§4.5)
+  colour       TEXT,                       -- NULL: never decorated
+  position     INTEGER NOT NULL DEFAULT 0, -- strip order
+  pinned       INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
+  layout       TEXT NOT NULL DEFAULT 'row' CHECK (layout IN ('row','column')),
+  seen_at      INTEGER                     -- the seen-mark; NULL = never seen
+) STRICT;
+
+-- A pane is the DURABLE IDENTITY (§5): it outlives its shell, its tab and the
+-- application, and its blocks are found by its id after a restart.
+--
+-- PANES DO NOT NEST. tab_id is the pane's only edge, so a pane whose parent is
+-- a pane cannot be written down at all. The cost is stated rather than hidden:
+-- no asymmetric layouts, ever, until §5's decision is revisited deliberately.
+--
+-- size_share is the MEMBER's property; the direction is the SET's and lives on
+-- the tab. That split is why the tab needed a row and the display group did
+-- not.
+CREATE TABLE IF NOT EXISTS panes (
+  id         TEXT PRIMARY KEY,             -- client-minted UUIDv7: UNTRUSTED
+  tab_id     TEXT NOT NULL REFERENCES tabs(id) ON DELETE CASCADE,
+  cwd        TEXT NOT NULL,
+  kind       TEXT NOT NULL CHECK (kind IN ('local','ssh')),
+  endpoint   TEXT,                         -- canonical user@host:port; NULL local
+  size_share REAL NOT NULL DEFAULT 1.0 CHECK (size_share > 0)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -693,6 +748,12 @@ CREATE TABLE IF NOT EXISTS ledger_sequence (
 INSERT INTO ledger_sequence (id, next) VALUES (1, 0)
   ON CONFLICT(id) DO NOTHING;  -- schemaV1 re-runs on every open; the seed must be idempotent.
                                -- next=0: the first Submit increments to ingest_seq 1.
+-- The layout chain is read by parent: a workspace's tabs in strip order, a
+-- tab's panes. tabs_by_parent is what keeps ON DELETE SET NULL — and the
+-- lineage walk — from scanning the strip.
+CREATE INDEX IF NOT EXISTS tabs_by_workspace     ON tabs(workspace_id, position);
+CREATE INDEX IF NOT EXISTS tabs_by_parent        ON tabs(parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS panes_by_tab          ON panes(tab_id);
 CREATE INDEX IF NOT EXISTS entries_by_env        ON entries(environment_id, cwd, ingest_seq DESC);
 CREATE INDEX IF NOT EXISTS entries_by_status     ON entries(status, ingest_seq DESC);
 CREATE INDEX IF NOT EXISTS entries_open          ON entries(phase) WHERE phase != 'closed';
@@ -1253,6 +1314,15 @@ var _ LedgerRepository = ledgerRepo{}
 // only, because `deadcode` cannot tell the two apart in this package.
 func (s *sqliteContent) Ledger() LedgerRepository {
 	return ledgerRepo{s}
+}
+
+// Layout returns the workspace → tab → pane repository (layout.go). No
+// production caller yet — nocx-isoph.2 puts it on the wire — and layout.go's
+// header is where that statement is kept current, for the same reason
+// ledger.go's is: `deadcode` cannot tell a wired write path from an unwired
+// one in this package.
+func (s *sqliteContent) Layout() LayoutRepository {
+	return s
 }
 
 // Close stops the writer goroutine and closes the pool. Idempotent; later
