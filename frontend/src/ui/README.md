@@ -111,6 +111,14 @@ provenance label, a row's second line. Not for a sentence.
 field confirms rather than doing nothing. It is opt-in: Enter must not fire a
 destructive confirmation, and a dialog whose body is a message has nothing to submit.
 
+Two imperative helpers are built on it, and a surface uses them rather than assembling
+its own modal: **`showConfirm(message, ok, cancel)`** answers `true`/`false`, and
+**`showPrompt(title, label, initial)`** asks for ONE line and answers the string — or
+`null` when the user cancelled. Null and `''` are different answers on purpose: clearing
+a tab's name is a real operation, so its caller must be able to tell "cleared" from
+"changed their mind". Both own no markup of their own: a Dialog, a TextField and the two
+kit Buttons.
+
 ## Vertical rhythm: Stack
 
 **Stack** (`stack.tsx`) is the only source of vertical spacing between kit components.
@@ -277,9 +285,13 @@ once.** Switching a surface between a Prompt and a Dialog on state is a
 branch and the second can never appear.
 
 **`Tab` is not a kit primitive either.** It carries `role=tab`, drag and reorder,
-middle-click close, activity indicators, `aria-controls` and two orientations: a
-behavioural unit, not a styled button. Feature components like it are declared in
-`feature-components.json` rather than inferred from a directory.
+middle-click close, activity indicators, `aria-controls`, two orientations, and the
+decoration the backend stores for a tab — `data-colour` (a key from the closed set in
+`layout/tab-colours.ts`, drawn as a stripe on the leading edge, never as a repaint of the
+row) and `data-pinned` (the kit's `PinIcon` beside the title, so the reason a tab sits at
+the head of the strip is visible). A behavioural unit, not a styled button. Feature
+components like it are declared in `feature-components.json` rather than inferred from a
+directory.
 
 ### Platform primitives (no wrapper needed per ADR-0014)
 

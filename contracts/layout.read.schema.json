@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/layout.read.schema.json",
+  "title": "LayoutReadResult",
+  "description": "Result of the layout.read JSON-RPC method (nocx-isoph.4, design .internal/specs/2026-08-16-tabs-panes-and-blocks-design.md §4.1 and §4.5): the WHOLE durable chain — every workspace, every tab and every pane — as one snapshot. This is the read the twelve write methods of nocx-isoph.2 were missing, and without it 'order, activation and decoration come from the backend' could not be true: a renderer that cannot read the layout back has to remember it, and a fact the renderer remembers is a fact the renderer owns. Reloading the renderer alone, without restarting the backend, is what this answers — the colours, the names, the order and the pinning come back because they were never in the renderer to begin with. ONE call rather than a list method per rung: the three collections are read under the content domain's single operation lane, so they are one consistent picture rather than three that a mutation can interleave with, and the renderer's first draw is one round trip rather than 1 + N + N·M. FLAT LISTS rather than a nested tree, for the same reason there is no third word between workspace and pane: the workspace, tab and pane shapes are each declared exactly once (workspaces.create, tabs.create, panes.create) and are referenced here, so a nested copy would be a second declaration of all three; the edges are already on the rows (a tab names its workspace, a pane names its tab).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["defaultWorkspaceId", "workspaces", "tabs", "panes"],
+  "properties": {
+    "defaultWorkspaceId": {
+      "description": "The id of the workspace every tab belongs to until something puts it somewhere else (internal/workspace.Default). It is on the wire rather than compiled into the renderer because the backend is its single owner (AD-8, §7): the default is PERMANENT and NEVER RENDERS — no header, no name, no colour — so the renderer has no name for it and must not acquire one, and a constant copied into the frontend would be a second owner of an id whose whole purpose is having one. A renderer with nowhere else to put a tab puts it here.",
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaces": {
+      "description": "Every workspace, in the order the switcher shows them. Never null; an empty array is a real answer and the ordinary one on a fresh profile — the default workspace's row is not created until something needs it.",
+      "type": "array",
+      "items": {
+        "$ref": "workspaces.create.schema.json#/$defs/workspace"
+      }
+    },
+    "tabs": {
+      "description": "Every tab in the application, across all workspaces, in (workspace, position) order. Not scoped to one workspace, unlike tabs.reorder: a reorder is an operation on one strip, while this is the picture a renderer draws itself from — and a renderer that had to ask per workspace would be deciding which ones to ask about. Each tab names its own workspace, so the grouping is in the data. What is NOT here is what §4.5 refuses to store: the activity indicator, the attention indicator and the label are computed from a tab's panes, because attention arrives at a PANE and a copy on the tab would give one fact two owners.",
+      "type": "array",
+      "items": {
+        "$ref": "tabs.create.schema.json#/$defs/tab"
+      }
+    },
+    "panes": {
+      "description": "Every pane in the application, grouped by tab in the order Panes returns them. The pane is the durable identity (§5) and this is where a reloaded renderer finds the set it must draw: a tab is labelled by its panes' titles, so a strip cannot be drawn from the tabs alone.",
+      "type": "array",
+      "items": {
+        "$ref": "panes.create.schema.json#/$defs/pane"
+      }
+    }
+  }
+}

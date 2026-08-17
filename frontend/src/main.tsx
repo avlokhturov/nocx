@@ -11,6 +11,8 @@ import App from './App'
 import { log } from './log'
 import { installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
+import { LayoutStore } from './layout/layout-store'
+import { LayoutClient } from './layout/layout-client'
 import { PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
@@ -272,6 +274,13 @@ async function main() {
   }
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
 
+  // The layout chain, which the backend owns and the renderer renders
+  // (nocx-isoph.4). Constructed here, beside every other wire client, and
+  // read by PaneManager on boot — before it opens anything, so a reload finds
+  // the tabs it left rather than deciding what the window looks like and
+  // asking afterwards.
+  const layout = new LayoutStore(new LayoutClient(dispatcher))
+
   const tm = new PaneManager(
     bar,
     verticalStripHost,
@@ -282,6 +291,7 @@ async function main() {
     banner,
     profileClient,
     tabStrip,
+    layout,
   )
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)

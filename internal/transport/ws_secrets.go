@@ -505,7 +505,7 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 	contentWired := s.contentDB != nil
 	secretSub := s.operationQueue("secrets")
 	// captureSub is ORDERED, not the ordinary bounded queue: captureSave and
-	// pane.close share it, and their arrival order is load-bearing. A pane's
+	// secrets.paneClosed share it, and their arrival order is load-bearing. A pane's
 	// destruction is the same registry operation family as a save, and a
 	// save submitted after the pane's close must observe the destruction
 	// (nocx-tsajw) — the single FIFO worker guarantees it, where a bounded
@@ -540,7 +540,7 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 			h := captureDismissHandlers{captures: s.captures, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureDismiss(ctx, req) }
 		}),
-		// pane.close is the renderer's announcement that a pane died
+		// secrets.paneClosed is the renderer's announcement that a pane died
 		// (nocx-tsajw): its pending captures die with it, keyed on
 		// (connection, pane). reg rather than regResponder — the handler
 		// needs the connection as the destruction key's other half. It
@@ -549,9 +549,9 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 		// connection settles: a save in flight when the pane dies is left
 		// to settle (capture contract), but a save submitted after the
 		// close must see the destruction.
-		reg(captureSub, "pane.close", params(validatePaneCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := paneCloseHandlers{captures: s.captures, log: s.log}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handlePaneClose(ctx, w, req) }
+		reg(captureSub, "secrets.paneClosed", params(validatePaneClosedRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := paneClosedHandlers{captures: s.captures, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePaneClosed(ctx, w, req) }
 		}),
 	}
 }

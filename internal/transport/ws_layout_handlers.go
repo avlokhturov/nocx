@@ -120,9 +120,9 @@ func wirePane(p content.Pane) paneWire {
 	}
 }
 
-// wireWorkspaces and wireTabs force the slice to be non-nil: an empty
-// collection must marshal as [] and never null — the renderer's first .map
-// assumes it, and a null there is the nocx-25k9.14 class of defect.
+// wireWorkspaces, wireTabs and wirePanes force the slice to be non-nil: an
+// empty collection must marshal as [] and never null — the renderer's first
+// .map assumes it, and a null there is the nocx-25k9.14 class of defect.
 func wireWorkspaces(all []content.Workspace) []workspaceWire {
 	out := make([]workspaceWire, 0, len(all))
 	for _, ws := range all {
@@ -135,6 +135,14 @@ func wireTabs(all []content.Tab) []tabWire {
 	out := make([]tabWire, 0, len(all))
 	for _, t := range all {
 		out = append(out, wireTab(t))
+	}
+	return out
+}
+
+func wirePanes(all []content.Pane) []paneWire {
+	out := make([]paneWire, 0, len(all))
+	for _, p := range all {
+		out = append(out, wirePane(p))
 	}
 	return out
 }
@@ -179,6 +187,24 @@ type paneCreateResponse struct {
 
 type paneResponse struct {
 	Pane paneWire `json:"pane"`
+}
+
+// layoutReadResponse is the whole chain, and the answer to the one question
+// nocx-isoph.2 left the renderer unable to ask (nocx-isoph.4): what is there.
+// Every other method here changes one thing and answers about that thing; a
+// renderer that could only do that would have to remember the rest, and what
+// it remembers it owns — which is the invariant §4.1 moved into this process
+// to give an owner.
+//
+// The three collections are FLAT and the tabs are not scoped to a workspace,
+// unlike tabs.reorder's: a reorder is an operation on one strip, while this
+// is the picture the renderer draws itself from, and a renderer that had to
+// ask per workspace would be deciding which ones to ask about.
+type layoutReadResponse struct {
+	DefaultWorkspaceID string          `json:"defaultWorkspaceId"`
+	Workspaces         []workspaceWire `json:"workspaces"`
+	Tabs               []tabWire       `json:"tabs"`
+	Panes              []paneWire      `json:"panes"`
 }
 
 // closedResponse is the answer to a close. The id and nothing else: there is
@@ -634,8 +660,15 @@ func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare flo
 	if prefix != "" {
 		prefix += "."
 	}
-	if strings.TrimSpace(cwd) == "" || utf8.RuneCountInString(cwd) > maxCwdRunes {
-		return prefix + "cwd is required and bounded"
+	// An EMPTY cwd is legal and means the backend process's own directory,
+	// which is what an unconfigured local shell already inherits — the same
+	// value replacement.cwd has always taken, and now for the same reason.
+	// A renderer opening a tab does not yet know where the shell will land:
+	// the cwd arrives from the session a round trip after the pane exists, so
+	// requiring one here would only buy a path the renderer invented. What is
+	// still refused is an unbounded one.
+	if utf8.RuneCountInString(cwd) > maxCwdRunes {
+		return prefix + "cwd is bounded"
 	}
 	if msg := nullableBounded(prefix+"endpoint", endpoint, maxLayoutEndpointRunes); msg != "" {
 		return msg
@@ -693,6 +726,16 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 	}
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.LayoutService) error {
 		switch req.Method {
+		case "layout.read":
+			snap, err := svc.Snapshot(ctx)
+			h.answer(req, err, func() any {
+				return layoutReadResponse{
+					DefaultWorkspaceID: snap.DefaultWorkspaceID,
+					Workspaces:         wireWorkspaces(snap.Workspaces),
+					Tabs:               wireTabs(snap.Tabs),
+					Panes:              wirePanes(snap.Panes),
+				}
+			})
 		case "workspaces.create":
 			var p workspaceCreateParams
 			if !h.decode(req, &p) {
@@ -802,6 +845,13 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			}
 			pane, err := svc.MovePane(ctx, p.ID, p.TabID)
 			h.answer(req, err, func() any { return paneResponse{Pane: wirePane(pane)} })
+		case "panes.close":
+			var p layoutCloseParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			err := svc.DeletePane(ctx, p.ID, p.replacement())
+			h.answer(req, err, func() any { return closedResponse{ID: p.ID} })
 		}
 		return nil
 	})
@@ -886,9 +936,14 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 		return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 	}
 	specs := []struct {
-		method   string
+		method string
+		// validate is nil for the ONE method that takes no params: the read.
+		// noParams() is an assertion rather than an omission — a caller that
+		// sends some is refused, so "layout.read takes nothing" is checked
+		// rather than merely intended.
 		validate func(json.RawMessage) string
 	}{
+		{"layout.read", nil},
 		{"workspaces.create", validateWorkspaceCreateRaw},
 		{"workspaces.rename", validateWorkspaceRenameRaw},
 		{"workspaces.reorder", validateWorkspaceReorderRaw},
@@ -901,10 +956,20 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 		{"tabs.close", validateLayoutCloseRaw},
 		{"panes.create", validatePaneCreateRaw},
 		{"panes.move", validatePaneMoveRaw},
+		// panes.close is DeletePane's wire caller, and it takes the same
+		// close params as tabs.close and workspaces.close because it is the
+		// same act one rung down: removing the last pane takes its tab, that
+		// tab's workspace if it was the last, and mints the replacement if
+		// the application is left with nothing.
+		{"panes.close", validateLayoutCloseRaw},
 	}
 	out := make([]methodSpec, 0, len(specs))
 	for _, spec := range specs {
-		out = append(out, regResponder(contentSub, spec.method, params(spec.validate), build))
+		validator := noParams()
+		if spec.validate != nil {
+			validator = params(spec.validate)
+		}
+		out = append(out, regResponder(contentSub, spec.method, validator, build))
 	}
 	return out
 }

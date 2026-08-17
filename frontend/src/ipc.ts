@@ -3,7 +3,7 @@ import { Dispatcher } from './dispatcher'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
 import type { SessionLiveness } from './generated/session.liveness'
-import type { PaneClose } from './generated/pane.close'
+import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -491,15 +491,21 @@ export class WSClient {
     return this.dispatcher.call<T>(method, params)
   }
 
-  /** Tell the backend a pane closed, so its pending captures die with it
-   *  (nocx-tsajw). The paneId is the renderer-minted per-pane identity — the
-   *  one wire exception to "session-local ids never cross" — declared once
-   *  in contracts/pane.close.schema.json (PaneClose is generated from it).
-   *  Fire-and-forget: a lost notification is covered by the transport
-   *  disconnect, which is the same destruction the pane's death implies. */
+  /** Tell the backend a pane closed, so its PENDING CAPTURES die with it
+   *  (nocx-tsajw). The paneId is the pane's one identity — the same UUIDv7
+   *  the layout chain stores and history.record carries — declared once in
+   *  contracts/secrets.paneClosed.schema.json (SecretsPaneClosed is generated
+   *  from it). Fire-and-forget: a lost notification is covered by the
+   *  transport disconnect, which is the same destruction the pane's death
+   *  implies.
+   *
+   *  NOT the same act as panes.close, and the method was renamed to say so
+   *  (nocx-isoph.4): this closes a capture scope and touches no store, while
+   *  panes.close removes the pane from the durable chain and can mint a
+   *  replacement tab. A pane the user closes sends both. */
   notifyPaneClosed(paneId: string): void {
-    const params: PaneClose = { paneId }
-    this.dispatcher.notify('pane.close', params)
+    const params: SecretsPaneClosed = { paneId }
+    this.dispatcher.notify('secrets.paneClosed', params)
   }
 
   // --- ack plumbing -------------------------------------------------------

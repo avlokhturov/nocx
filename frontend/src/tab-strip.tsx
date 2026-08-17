@@ -1,6 +1,8 @@
 import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
+import { ContextMenu } from './ui/context-menu'
+import { TAB_COLOURS } from './layout/tab-colours'
 import { SearchField } from './ui/search-field'
 import { ChevronDownIcon, KeyIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
 import type { Setter } from 'solid-js'
@@ -32,6 +34,12 @@ export interface PaneView {
   readonly warning?: boolean
   /** What the mark means (nocx-5uu5). */
   readonly warningLabel?: string
+  /** The tab's colour as the BACKEND stores it, or null for an undecorated
+   *  tab (nocx-isoph.4, §4.5). The strip renders it and never chooses it. */
+  readonly colour?: string | null
+  /** Whether the backend has this tab pinned. The strip draws the mark and
+   *  places the tab (layout/strip-order.ts); the flag is stored. */
+  readonly pinned?: boolean
   readonly paneId: string
   onDisplayChange: (() => void) | null
 }
@@ -51,6 +59,8 @@ interface PaneDisplayRecord {
   warningLabel: string
   hasActivity: boolean
   agentStatus: AgentStatus | null
+  colour: string | null
+  pinned: boolean
 }
 
 /** Presentation port for tab chrome. */
@@ -65,6 +75,15 @@ export interface TabStrip {
   onClose: ((paneId: number) => void) | null
   onNewPane: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
+  /** The tab's decoration, asked for from its context menu (nocx-isoph.4).
+   *  Three intents rather than one "update": a patch where a missing field
+   *  and a null field mean different things is how "what changed" stops
+   *  being answerable, which is the same reason the wire has three methods.
+   *  The strip raises them; the backend decides and the strip re-renders. */
+  onRename: ((paneId: number) => void) | null
+  /** null clears the colour, which is a real operation and not a no-op. */
+  onRecolour: ((paneId: number, colour: string | null) => void) | null
+  onPin: ((paneId: number, pinned: boolean) => void) | null
   onQuickConnect: (() => void) | null
   onInsertSecret: (() => void) | null
   /** The snippets action was pressed. Shaped exactly like onQuickConnect
@@ -106,6 +125,9 @@ abstract class TabStripBase implements TabStrip {
   onClose: ((paneId: number) => void) | null = null
   onNewPane: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
+  onRename: ((paneId: number) => void) | null = null
+  onRecolour: ((paneId: number, colour: string | null) => void) | null = null
+  onPin: ((paneId: number, pinned: boolean) => void) | null = null
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
   onSnippets: (() => void) | null = null
@@ -127,10 +149,45 @@ abstract class TabStripBase implements TabStrip {
         activeId: number
       }>({ records: {}, activeId: -1 })
       const [searchQuery, setSearchQuery] = createSignal('')
+      // The tab menu: which tab it belongs to and where it was opened. One
+      // menu for the whole strip rather than one per row — a menu is a
+      // singleton on screen, and a component per tab would be N listeners
+      // for a thing at most one of which can be open.
+      const [menu, setMenu] = createSignal<{ paneId: number; x: number; y: number } | null>(null)
 
       this._getPaneViews = paneViews
       this._setPaneViews = setPaneViews
       this._setDisplay = setDisplay
+
+      /** The actions a tab offers, in the order they are reached for. The
+       *  strip builds the rows; every one of them raises an intent and
+       *  decides nothing — the answer comes back through the store. */
+      const menuItems = (paneId: number) => {
+        const record = display.records[paneId]
+        const pinned = record?.pinned === true
+        const items = [
+          { id: 'rename', label: 'Rename…', onSelect: () => this.onRename?.(paneId) },
+          {
+            id: 'pin',
+            label: pinned ? 'Unpin' : 'Pin',
+            onSelect: () => this.onPin?.(paneId, !pinned),
+          },
+          ...TAB_COLOURS.map((c) => ({
+            id: `colour-${c.key}`,
+            label: c.label,
+            onSelect: () => this.onRecolour?.(paneId, c.key),
+          })),
+        ]
+        if (record?.colour) {
+          items.push({
+            id: 'colour-none',
+            label: 'No colour',
+            onSelect: () => this.onRecolour?.(paneId, null),
+          })
+        }
+        items.push({ id: 'close', label: 'Close', onSelect: () => this.onClose?.(paneId) })
+        return items
+      }
 
       return (
         <>
@@ -208,13 +265,28 @@ abstract class TabStripBase implements TabStrip {
                       !(r?.tooltip ?? '').toLowerCase().includes(q)
                     )
                   })()}
+                  colour={display.records[tab.id]?.colour ?? undefined}
+                  pinned={display.records[tab.id]?.pinned === true}
                   onActivate={() => this.onActivate?.(tab.id)}
                   onClose={(id) => this.onClose?.(id)}
                   onReorder={(fromId, toId) => this.onReorder?.(fromId, toId)}
+                  onMenu={(paneId, x, y) => setMenu({ paneId, x, y })}
                 />
               )}
             </For>
           </div>
+          <Show when={menu()} keyed>
+            {(open) => (
+              <ContextMenu
+                open
+                x={open.x}
+                y={open.y}
+                items={menuItems(open.paneId)}
+                onClose={() => setMenu(null)}
+                data-testid="tab-menu"
+              />
+            )}
+          </Show>
           <Show when={this.orientation === 'horizontal'}>
             {/* The strip's actions, as one group. They were two loose siblings of
                 the tab list, which the vertical strip then spread down the whole
@@ -270,6 +342,8 @@ abstract class TabStripBase implements TabStrip {
         warningLabel: tab.warningLabel ?? '',
         hasActivity: tab.hasActivity,
         agentStatus: tab.agentStatus,
+        colour: tab.colour ?? null,
+        pinned: tab.pinned === true,
       })
     }
 
@@ -285,6 +359,8 @@ abstract class TabStripBase implements TabStrip {
       warningLabel: tab.warningLabel ?? '',
       hasActivity: tab.hasActivity,
       agentStatus: tab.agentStatus,
+      colour: tab.colour ?? null,
+      pinned: tab.pinned === true,
     })
 
     // Link pane to button (aria-labelledby)

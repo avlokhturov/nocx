@@ -26,7 +26,7 @@ package content
 // which duplicates nothing.
 //
 // PRODUCTION CALLERS, and they are real ones since nocx-isoph.2: the
-// workspaces.*, tabs.* and panes.* JSON-RPC methods
+// layout.read, workspaces.*, tabs.* and panes.* JSON-RPC methods
 // (internal/transport/ws_layout_handlers.go, through capability.LayoutService)
 // and the open ack's derived workspaceId, which reaches WorkspaceForPane from
 // the session plane. The container lifecycle those calls drive is
@@ -34,21 +34,30 @@ package content
 // its last member, the move and the replacement tab.
 //
 // `deadcode -whylive
-// github.com/shady2k/nocx/internal/content.sqliteContent.MovePane` now prints
-// a path from main() through the control frame, the layout method spec and
-// the operation's callback — which it could not before, and which is the only
-// form of that answer worth anything: RTA counts a method a live interface
-// value can hold as reachable, so a `deadcode` run that says nothing about
-// this package says nothing either way. That is exactly the shape that
-// shipped once before under a green "deadcode is empty" (nocx-rtg0), so what
-// is reachable is written down next to the seam and kept current by hand.
+// github.com/shady2k/nocx/internal/content.sqliteContent.MovePane` prints a
+// path from main() through the control frame, the layout method spec and the
+// operation's callback — and so, since nocx-isoph.4, do Snapshot and
+// DeletePane. That is the only form of the answer worth anything: RTA counts
+// a method a live interface value can hold as reachable, so a `deadcode` run
+// that says nothing about this package says nothing either way. That is
+// exactly the shape that shipped once before under a green "deadcode is
+// empty" (nocx-rtg0), so what is reachable is written down next to the seam
+// and kept current by hand.
 //
-// One method here still has no production caller and it is named rather than
-// left to be discovered: DeletePane. Removing a pane through the wire needs a
-// method the renderer can call, and the name it wants — pane.close — is
-// already taken by the capture-scoping notification (ws_pane_close.go), which
-// is a different act under the same word. Resolving that is nocx-isoph.4's,
-// with the renderer that mints one pane identity for both.
+// DELETEPANE'S CALLER IS panes.close, and the delay in giving it one was a
+// NAME rather than an omission (nocx-isoph.4). The word the renderer wanted,
+// pane.close, was already the capture-scoping notification — a different act
+// under the same word. Both were named here: this one is panes.close, in the
+// plural layout family beside panes.create and panes.move and taking the same
+// close params as tabs.close and workspaces.close; the notification became
+// secrets.paneClosed, in the domain that already owns a pending capture. The
+// renderer mints ONE UUIDv7 per pane and sends it to both, so a pane has one
+// identity and not one per seam.
+//
+// Snapshot is the other thing nocx-isoph.2 left out, and the larger one: with
+// twelve writes and no read, the renderer had to remember what it had asked
+// for, and what it remembers it owns — which is the invariant §4.1 moved into
+// this process precisely to give an owner. Its wire method is layout.read.
 
 import "context"
 
@@ -187,6 +196,40 @@ type Replacement struct {
 	Cwd string
 }
 
+// LayoutSnapshot is the whole chain in one answer (nocx-isoph.4): every
+// workspace, every tab and every pane, each collection in its stored order.
+//
+// IT IS FLAT, and that is the same decision §4.3 makes about the display
+// group: the edges are already on the rows — a tab names its workspace, a
+// pane names its tab — so a nested tree would be a second encoding of what
+// the rows already say, and the two would drift the first time one of them
+// was built by hand. It also keeps the wire shape referencing the three
+// object declarations rather than restating them.
+//
+// WHY A SNAPSHOT RATHER THAN THE THREE READERS. Workspaces, Tabs and Panes
+// each answer one question and are kept; this composes them, so there is no
+// second SQL statement asking anything they already ask. What it adds is that
+// the composition happens on ONE side of the seam: a caller doing it itself
+// would interleave its 1 + N + N·M calls with whatever else is writing, and
+// draw a strip that never existed.
+type LayoutSnapshot struct {
+	// DefaultWorkspaceID is the workspace a tab belongs to until something
+	// puts it somewhere else. It rides on the snapshot because the backend is
+	// its single owner (AD-8): the default never renders and never acquires a
+	// name, so a renderer cannot be expected to recognise it by sight, and a
+	// copy of the constant on the other side of the wire would be a second
+	// owner of the one id that exists to have exactly one.
+	DefaultWorkspaceID string
+	// Workspaces is every workspace in position order; Tabs is every tab in
+	// the application grouped by workspace, each strip in its own order; Panes
+	// is every pane grouped by tab. All three are non-nil, including when
+	// empty — a fresh profile has no rows at all and that is an answer, not a
+	// failure.
+	Workspaces []Workspace
+	Tabs       []Tab
+	Panes      []Pane
+}
+
 // Created is what a create answers: the stored object, and whether this call
 // found the work already done.
 //
@@ -252,6 +295,14 @@ type LayoutRepository interface {
 	// writes none the second time, and the same id asking for something else
 	// is ErrIDConflict with nothing changed.
 	CreateWorkspace(ctx context.Context, ws Workspace, firstTab Tab, firstPane Pane) (Created[NewWorkspace], error)
+	// Snapshot returns the whole chain: what a renderer draws itself from,
+	// and the read this repository shipped without (nocx-isoph.4). Every
+	// other method here changes one thing and answers about that thing; this
+	// is the only one that answers "what is there", which is what makes
+	// "order and decoration come from the backend" a fact rather than a
+	// slogan — a renderer that cannot ask has to remember, and what it
+	// remembers it owns.
+	Snapshot(ctx context.Context) (LayoutSnapshot, error)
 	// Workspaces returns every workspace in position order.
 	Workspaces(ctx context.Context) ([]Workspace, error)
 	// RenameWorkspace gives one workspace a new name and returns the stored

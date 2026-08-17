@@ -1,0 +1,20 @@
+/**
+ * GENERATED FILE — do not edit.
+ *
+ * Source: contracts/panes.close.schema.json
+ * Regenerate: cd frontend && npm run contracts
+ *
+ * Editing this file is editing the wrong end of the contract. If the renderer
+ * needs a field the wire does not carry, the schema is what has to change, and
+ * then the Go transport has to satisfy it.
+ */
+
+/**
+ * Result of the panes.close JSON-RPC method: the id of the pane that is gone. It is the wire caller DeletePane was left without by nocx-isoph.2, and the reason it had none was a NAME rather than an omission — the renderer's word for this, pane.close, was already taken by the capture-scoping notification, a different act under the same word (nocx-isoph.4 decided both: this method is panes.close, in the plural layout family beside panes.create and panes.move, and the notification became secrets.paneClosed, in the domain that already owns a pending capture). Removing a pane takes with it the tab it was the last pane of, the workspace that tab was the last tab of, and, if that emptied the application, mints the replacement — one transaction, whichever of those rungs it reaches. The result carries the id and nothing else, like every other close here: there is no object left to describe, and a copy of the row as it was would be a fact about a thing that no longer exists. What was minted or dissolved on the way is read back with layout.read, which is the one owner of what the chain now looks like.
+ */
+export interface PanesCloseResult {
+  /**
+   * The closed pane's id.
+   */
+  id: string
+}

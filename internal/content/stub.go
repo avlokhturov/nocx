@@ -245,6 +245,11 @@ func (s *layoutStub) CreateWorkspace(_ context.Context, ws Workspace, firstTab T
 	return Created[NewWorkspace]{}, ErrNotImplemented
 }
 
+func (s *layoutStub) Snapshot(_ context.Context) (LayoutSnapshot, error) {
+	s.log.Info("content stub: LayoutRepository.Snapshot")
+	return LayoutSnapshot{}, ErrNotImplemented
+}
+
 func (s *layoutStub) Workspaces(_ context.Context) ([]Workspace, error) {
 	s.log.Info("content stub: LayoutRepository.Workspaces")
 	return nil, ErrNotImplemented

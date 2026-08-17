@@ -18,6 +18,9 @@ import type {
   TerminalRenderer,
 } from '../renderers/types'
 import { CommandSnapshotStore } from '../command-snapshot'
+import { LayoutStore } from '../layout/layout-store'
+import type { LayoutClientLike } from '../layout/layout-client'
+import type { Tab as LayoutTab, Pane as LayoutPane } from '../generated/layout.read'
 import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
@@ -497,6 +500,153 @@ export function makeBanner(overrides?: Partial<BannerFake>): BannerFake {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// The layout chain, in memory
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * A LayoutClientLike backed by three arrays, standing in for the backend that
+ * owns the chain (nocx-isoph.4).
+ *
+ * It implements the RULES, not just the calls, because the rules are what the
+ * renderer is now built on: a create with content, positions written from the
+ * order a reorder was given, a tab dissolved with its last pane, and the
+ * replacement minted when a close would leave the application with nothing.
+ * A fake that only recorded calls would let a test pass while the renderer
+ * assumed a lifecycle the backend does not have.
+ */
+export function makeLayoutBackend(): LayoutClientLike & {
+  rows: () => { tabs: LayoutTab[]; panes: LayoutPane[] }
+  fail: (method: keyof LayoutClientLike, err: Error) => void
+} {
+  const DEFAULT_WS = 'workspace:default'
+  let tabs: LayoutTab[] = []
+  let panes: LayoutPane[] = []
+  const failures = new Map<string, Error>()
+
+  const refuse = <T>(method: string): Promise<T> | null => {
+    const err = failures.get(method)
+    return err ? Promise.reject(err) : null
+  }
+  const tabRow = (id: string, over: Partial<LayoutTab> = {}): LayoutTab => ({
+    id,
+    workspaceId: DEFAULT_WS,
+    parentId: null,
+    name: null,
+    colour: null,
+    position: tabs.length,
+    pinned: false,
+    layout: 'row',
+    seenAt: null,
+    ...over,
+  })
+  const paneRow = (id: string, tabId: string, over: Partial<LayoutPane> = {}): LayoutPane => ({
+    id,
+    tabId,
+    cwd: '',
+    kind: 'local',
+    endpoint: null,
+    sizeShare: 1,
+    ...over,
+  })
+  const patch = (id: string, over: Partial<LayoutTab>): LayoutTab => {
+    const next = { ...tabs.find((t) => t.id === id)!, ...over }
+    tabs = tabs.map((t) => (t.id === id ? next : t))
+    return next
+  }
+
+  return {
+    rows: () => ({ tabs: [...tabs], panes: [...panes] }),
+    fail: (method, err) => failures.set(method, err),
+
+    read: () =>
+      refuse('read') ??
+      Promise.resolve({
+        defaultWorkspaceId: DEFAULT_WS,
+        workspaces: tabs.length ? [{ id: DEFAULT_WS, name: 'default', position: 0 }] : [],
+        tabs: [...tabs],
+        panes: [...panes],
+      }),
+
+    createTab: (t) => {
+      const refused = refuse<never>('createTab')
+      if (refused) return refused
+      const tab = tabRow(t.id, { position: t.position, workspaceId: t.workspaceId })
+      const first = paneRow(t.firstPane.id, t.id, {
+        cwd: t.firstPane.cwd,
+        kind: t.firstPane.kind,
+        endpoint: t.firstPane.endpoint,
+      })
+      tabs = [...tabs, tab]
+      panes = [...panes, first]
+      return Promise.resolve({ tab, firstPane: first, replayed: false })
+    },
+
+    createPane: (p) => {
+      const row = paneRow(p.id, p.tabId, { cwd: p.cwd, kind: p.kind, endpoint: p.endpoint })
+      panes = [...panes, row]
+      return Promise.resolve({ pane: row, replayed: false })
+    },
+
+    renameTab: (id, name) =>
+      refuse<never>('renameTab') ?? Promise.resolve({ tab: patch(id, { name }) }),
+    recolourTab: (id, colour) =>
+      refuse<never>('recolourTab') ?? Promise.resolve({ tab: patch(id, { colour }) }),
+    pinTab: (id, pinned) =>
+      refuse<never>('pinTab') ?? Promise.resolve({ tab: patch(id, { pinned }) }),
+
+    reorderTabs: (workspaceId, ids) => {
+      const refused = refuse<never>('reorderTabs')
+      if (refused) return refused
+      // A permutation of that workspace's tabs, or nothing moves — the same
+      // refusal the store makes, because a test about a refused reorder must
+      // be refused for the real reason.
+      const members = tabs.filter((t) => t.workspaceId === workspaceId).map((t) => t.id)
+      if (ids.length !== members.length || !ids.every((id) => members.includes(id))) {
+        return Promise.reject(new Error('ids must be a permutation of the workspace tabs'))
+      }
+      const reordered = ids.map((id, position) => patch(id, { position }))
+      tabs = [...reordered, ...tabs.filter((t) => t.workspaceId !== workspaceId)]
+      return Promise.resolve({ tabs: reordered })
+    },
+
+    closeTab: (id, replacement) => {
+      tabs = tabs.filter((t) => t.id !== id)
+      panes = panes.filter((p) => p.tabId !== id)
+      mintIfEmpty(replacement)
+      return Promise.resolve({ id })
+    },
+
+    closePane: (id, replacement) => {
+      const refused = refuse<never>('closePane')
+      if (refused) return refused
+      const gone = panes.find((p) => p.id === id)
+      panes = panes.filter((p) => p.id !== id)
+      if (gone && !panes.some((p) => p.tabId === gone.tabId)) {
+        tabs = tabs.filter((t) => t.id !== gone.tabId)
+      }
+      mintIfEmpty(replacement)
+      return Promise.resolve({ id })
+    },
+  }
+
+  function mintIfEmpty(replacement: { tabId: string; paneId: string; cwd: string }): void {
+    if (tabs.length > 0) return
+    tabs = [tabRow(replacement.tabId, { position: 0 })]
+    panes = [paneRow(replacement.paneId, replacement.tabId, { cwd: replacement.cwd })]
+  }
+}
+
+/** A real LayoutStore over the in-memory backend: the tests exercise the
+ *  store's own rules, and only the socket is faked. */
+export function makeLayoutStore(backend?: ReturnType<typeof makeLayoutBackend>): {
+  store: LayoutStore
+  backend: ReturnType<typeof makeLayoutBackend>
+} {
+  const b = backend ?? makeLayoutBackend()
+  return { store: new LayoutStore(b), backend: b }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // DOM setup helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -518,6 +668,7 @@ export async function mountPaneManager(
   clipboard?: ClipboardFake,
   gate?: ClipboardGate,
   banner?: BannerFake,
+  layout?: ReturnType<typeof makeLayoutStore>,
 ): Promise<{
   bar: HTMLElement
   panes: HTMLElement
@@ -527,6 +678,8 @@ export async function mountPaneManager(
   gate: ClipboardGate
   banner: BannerFake
   tabStrip: import('../tab-strip').TabStrip
+  layout: LayoutStore
+  backend: ReturnType<typeof makeLayoutBackend>
 }> {
   const { bar, panes } = setupTabBarDOM()
   const c = client ?? makeClient()
@@ -537,6 +690,7 @@ export async function mountPaneManager(
     listProfiles: vi.fn().mockResolvedValue([]),
     listGroups: vi.fn().mockResolvedValue([]),
   }
+  const l = layout ?? makeLayoutStore()
   const { PaneManager } = await import('../panes')
   const { HorizontalTabStrip } = await import('../tab-strip')
   const tabStrip = new HorizontalTabStrip()
@@ -550,8 +704,20 @@ export async function mountPaneManager(
     bn,
     pc as unknown as import('../profiles').ProfileClient,
     tabStrip,
+    l.store,
   )
   // Open the initial tab explicitly — the constructor mounts nothing.
   await manager.openInitialPane()
-  return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn, tabStrip }
+  return {
+    bar,
+    panes,
+    manager,
+    client: c,
+    clipboard: cb,
+    gate: g,
+    banner: bn,
+    tabStrip,
+    layout: l.store,
+    backend: l.backend,
+  }
 }

@@ -458,7 +458,7 @@ func (r *CaptureRegistry) Dismiss(id CaptureID) error {
 }
 
 // DestroyPane destroys every pending capture originating from a pane: pane
-// closure (the renderer's pane.close notification) and history-record failure.
+// closure (the renderer's secrets.paneClosed notification) and history-record failure.
 // The connection is part of the key: the pane identity is renderer-minted and
 // opaque, so a pane id from one connection must never destroy another
 // connection's captures. A capture whose save is in flight is left to settle

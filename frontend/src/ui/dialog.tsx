@@ -47,6 +47,7 @@ import {
 import { render } from 'solid-js/web'
 import { pushOverlay, popOverlay, restoreFocus, topOverlay } from './overlay/stack'
 import { Button } from './button'
+import { TextField } from './text-field'
 
 export interface DialogProps {
   /** Whether the dialog is open. */
@@ -401,6 +402,98 @@ export const Dialog: Component<DialogProps> = (props) => {
       </div>
     </dialog>
   )
+}
+
+/** The prompt body, so its imperative helper owns no markup of its own
+ *  either: a title, ONE kit TextField, and the two kit Buttons. */
+const PromptDialog: Component<{
+  title: string
+  label: string
+  initial: string
+  okLabel: string
+  cancelLabel: string
+  onResolve: (value: string | null) => void
+}> = (props) => {
+  const [value, setValue] = createSignal(props.initial)
+  const submit = () => props.onResolve(value())
+  return (
+    <Dialog
+      open
+      title={props.title}
+      onClose={() => props.onResolve(null)}
+      onSubmit={submit}
+      footer={
+        <>
+          <Button variant="default" onClick={() => props.onResolve(null)}>
+            {props.cancelLabel}
+          </Button>
+          <Button variant="primary" onClick={submit}>
+            {props.okLabel}
+          </Button>
+        </>
+      }
+    >
+      <TextField label={props.label} value={value()} onInput={setValue} autoFocus />
+    </Dialog>
+  )
+}
+
+/**
+ * Imperative prompt dialog — one line of text, or null when the user
+ * cancelled.
+ *
+ * The sibling of showConfirm, and it exists for the same reason: "ask the
+ * user for one thing" is a shape several surfaces need — the first is
+ * renaming a tab (nocx-isoph.4) — and each of them assembling its own Dialog
+ * around a TextField is how a second look appears. The kit grows by variants;
+ * a surface places this and never repaints it.
+ *
+ * Enter submits, through Dialog's opt-in onSubmit: a single-line field has one
+ * obvious yes. Escape cancels and resolves NULL, which is different from an
+ * empty string — clearing a tab's name is a real operation (§4.5), so the
+ * caller must be able to tell "the user cleared it" from "the user changed
+ * their mind".
+ */
+export function showPrompt(
+  title: string,
+  label: string,
+  initial = '',
+  okLabel = 'Save',
+  cancelLabel = 'Cancel',
+): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+
+    let dispose: (() => void) | null = null
+    let settled = false
+
+    const finish = (result: string | null) => {
+      if (settled) return
+      settled = true
+      // Deferred for the same reason showConfirm defers: Dialog's own cleanup
+      // — popOverlay and the focus restore — must run against a live root.
+      queueMicrotask(() => {
+        dispose?.()
+        host.remove()
+      })
+      resolve(result)
+    }
+
+    dispose = render(
+      () => (
+        <PromptDialog
+          title={title}
+          label={label}
+          initial={initial}
+          okLabel={okLabel}
+          cancelLabel={cancelLabel}
+          onResolve={finish}
+        />
+      ),
+      host,
+    )
+  })
 }
 
 /** The confirm body, so the imperative helper below owns no markup of its own. */
