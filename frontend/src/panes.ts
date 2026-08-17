@@ -18,6 +18,7 @@ import { adoptAliasProfile } from './profiles'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
 import { leftRunningMessage, liveDescendants, type LineageNode } from './lineage'
+import { closingWorkspaceMessage, type WorkspaceMember } from './live-work'
 import { log } from './log'
 import type { TabStrip } from './tab-strip'
 import type {
@@ -763,6 +764,73 @@ export class PaneManager {
       if (this.panes.indexOf(pane) === -1) return
     }
     this.commitClosePane(pane)
+  }
+
+  /**
+   * Close a workspace: every tab it holds goes, and the question that
+   * precedes them NAMES what is live among them (nocx-isoph.6, design §4.1
+   * and D6). "Close 4 tabs?" is a number nobody can weigh; that one of them
+   * is a running deploy and another an ssh session into production is what
+   * the answer actually turns on.
+   *
+   * The SAME ask as `closePane`'s, deliberately — one confirm path for
+   * closes, one place where the renderer stops and asks. What differs is the
+   * sentence, because the rule differs: closing a tab LEAVES its descendants
+   * running (D6), and closing a workspace takes its members with it.
+   *
+   * `members` are the workspace's tabs, resolved by the caller: membership is
+   * a fact the BACKEND owns (§4.4 — the session registry is the lifecycle
+   * authority) and the renderer's cache of it arrives with nocx-isoph.4. This
+   * method owns the ask and the close, and deliberately not the lookup.
+   *
+   * Returns whether the person said yes — a caller that must also tell the
+   * backend (`workspaces.close`) needs to know, and must never send it before
+   * the answer.
+   *
+   * NOTHING IS TORN DOWN BEFORE THE ANSWER. The close begins after the await
+   * and not one step of it before, so cancelling leaves every tab, pane and
+   * live session exactly as it was.
+   */
+  async closeWorkspace(name: string, members: readonly Pane[]): Promise<boolean> {
+    const open = members.filter((pane) => this.panes.indexOf(pane) !== -1)
+    const proceed = await showConfirm(
+      closingWorkspaceMessage(
+        name,
+        open.map((pane) => this.liveWorkOf(pane)),
+      ),
+      'Close workspace',
+      'Cancel',
+    )
+    if (!proceed) return false
+    for (const pane of open) {
+      // The world moved while the modal was open: a member may already be
+      // gone, and closing it twice would take a pane that has since been
+      // recycled under the same index. Re-checked per member, not once for
+      // the set — they close one at a time.
+      if (this.panes.indexOf(pane) === -1) continue
+      // commitClosePane, not closePane: the person has just been asked about
+      // this whole set, and asking again per member — once for the workspace
+      // and once for every tab in it that opened another — is how a prompt
+      // that matters gets dismissed by reflex. The prohibition it enforces is
+      // untouched: a descendant OUTSIDE this workspace is not a member and is
+      // not closed here.
+      this.commitClosePane(pane)
+    }
+    return true
+  }
+
+  /** What one member tab of a workspace is doing, for the sentence that names
+   *  it. Composed here for the same reason the lineage node is: live-work.ts
+   *  owns the naming, the content answers for itself, and only the pane layer
+   *  knows what the strip calls the tab. A content with no such capability —
+   *  Settings, a viewer — is a tab that closes and is running nothing. */
+  private liveWorkOf(pane: Pane): WorkspaceMember {
+    const work = pane.content.liveWork?.() ?? null
+    return {
+      label: pane.displayTitle,
+      command: work?.command ?? null,
+      host: work?.host ?? null,
+    }
   }
 
   /**

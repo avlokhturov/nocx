@@ -1996,3 +1996,162 @@ describe('closing a tab that opened other tabs', () => {
     expect(showConfirmMock).not.toHaveBeenCalled()
   })
 })
+
+// ── Closing a workspace (nocx-isoph.6, design §4.1 and D6) ────────────────
+//
+// A workspace close takes every one of its tabs, so it asks first and the
+// question NAMES what is live. Membership itself is the backend's and arrives
+// with nocx-isoph.4: the caller hands the members it resolved, and this layer
+// owns the ask and the close — the two things that must not be duplicated.
+describe('closing a workspace names what is live before anything dies (nocx-isoph.6)', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+  })
+
+  /** The lifecycle.changed handlers, one per mounted content, in the order
+   *  the panes were created — so a fact can be delivered to the SECOND
+   *  pane's kernel through the real subscription seam. */
+  function lifecycleHandlers(client: ReturnType<typeof makeClient>): Array<(p: unknown) => void> {
+    return client.dispatcher.subscribe.mock.calls
+      .filter((c: unknown[]) => c[0] === 'lifecycle.changed')
+      .map((c: unknown[]) => c[1] as (p: unknown) => void)
+  }
+
+  /**
+   * Three real terminal panes over three real sessions. `members` are the two
+   * the workspace holds; the first pane stands for a tab somewhere else, and
+   * exists so every assertion below can say what the close did NOT touch.
+   */
+  async function aWorkspaceOfTwo(): Promise<{
+    manager: PaneManager
+    client: ReturnType<typeof makeClient>
+    bar: HTMLElement
+    members: Pane[]
+  }> {
+    const client = makeClient()
+    const { bar, manager } = await mountPaneManager(client)
+    const first = manager.newPane()
+    const second = manager.newPane()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(3)
+    })
+    // The contents must hold their sessions before anything is asked of
+    // them: a pane whose open has not answered reports nothing live, and
+    // every assertion here would pass for the wrong reason.
+    await vi.waitFor(() => {
+      expect(manager.paneCount).toBe(3)
+      expect(lifecycleHandlers(client).length).toBe(3)
+    })
+    return { manager, client, bar, members: [first, second] }
+  }
+
+  /** Walk one pane's kernel onto a remote host, the way a hand-typed `ssh`
+   *  does: the parent domain suspends, and the child establishes with the
+   *  destination the backend authenticated (protocol §9, nocx-u7uh.11). */
+  function walkOntoHost(
+    client: ReturnType<typeof makeClient>,
+    paneIndex: number,
+    destination: { host: string; user: string },
+  ): void {
+    const deliver = lifecycleHandlers(client)[paneIndex]
+    const sessionId = client._sessions[paneIndex].sessionId
+    deliver({ sessionId, lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    deliver({ sessionId, lane: 'lane-1', lifecycle: 'native' })
+    deliver({
+      sessionId,
+      lane: 'lane-1',
+      lifecycle: 'prompt_ready',
+      domain: 'd2',
+      epoch: 1,
+      destination,
+    })
+  }
+
+  it('asks, and the question names the live session rather than counting tabs', async () => {
+    showConfirmMock.mockResolvedValue(false)
+    const { manager, client, members } = await aWorkspaceOfTwo()
+    walkOntoHost(client, 2, { host: 'prod-01', user: 'deploy' })
+
+    await manager.closeWorkspace('ansible-rollout', members)
+
+    expect(showConfirmMock).toHaveBeenCalled()
+    const message = String(showConfirmMock.mock.calls[0][0])
+    expect(message).toContain('deploy@prod-01')
+    expect(message).toContain('ansible-rollout')
+    // The count may be there; it may not be the only thing there.
+    expect(message).toContain('2 tabs')
+  })
+
+  it('cancelling leaves every tab, pane and live session exactly as it was', async () => {
+    showConfirmMock.mockResolvedValue(false)
+    const { manager, client, members } = await aWorkspaceOfTwo()
+
+    const answered = await manager.closeWorkspace('ansible-rollout', members)
+
+    expect(answered).toBe(false)
+    // Asserted on the SESSIONS, not on the DOM: nothing may be torn down
+    // before the answer, and a strip that still shows three tabs would say
+    // nothing about whether the sessions behind them were closed.
+    for (const session of client._sessions) {
+      expect(session.close).not.toHaveBeenCalled()
+    }
+    expect(client.notifyPaneClosed).not.toHaveBeenCalled()
+    expect(manager.paneCount).toBe(3)
+    expect(members.every((p) => p.pane.isConnected)).toBe(true)
+  })
+
+  it('confirming closes every tab it holds, and nothing outside it', async () => {
+    showConfirmMock.mockResolvedValue(true)
+    const { manager, client, members } = await aWorkspaceOfTwo()
+
+    await manager.closeWorkspace('ansible-rollout', members)
+
+    expect(client._sessions[1].close).toHaveBeenCalled()
+    expect(client._sessions[2].close).toHaveBeenCalled()
+    // The tab in another workspace is untouched — the close takes the
+    // workspace's members and never a neighbour's.
+    expect(client._sessions[0].close).not.toHaveBeenCalled()
+    expect(manager.paneCount).toBe(1)
+    // The backend is told about each pane that went, so its captures die
+    // with them (nocx-tsajw).
+    expect(client.notifyPaneClosed).toHaveBeenCalledTimes(2)
+  })
+
+  it('closing the last workspace leaves the application a tab, and it is not one of the closed ones', async () => {
+    showConfirmMock.mockResolvedValue(true)
+    const { manager, client, bar, members } = await aWorkspaceOfTwo()
+    // Close the tab standing in for another workspace, so the two members
+    // are the whole application.
+    const closeButtons = bar.querySelectorAll('[aria-label="Close tab"]')
+    closeButtons[0].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await vi.waitFor(() => {
+      expect(manager.paneCount).toBe(2)
+    })
+
+    await manager.closeWorkspace('ansible-rollout', members)
+
+    // The application is never left with no tab at all: a replacement is
+    // opened, and it is a fourth session rather than one of the members
+    // brought back. Which WORKSPACE that replacement belongs to is the
+    // backend's answer and nocx-isoph.3's rule — it goes to the default,
+    // never to the one just closed, asserted there by its workspace_id.
+    expect(manager.paneCount).toBe(1)
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(4)
+    })
+    expect(members.every((p) => !p.pane.isConnected)).toBe(true)
+  })
+
+  it('a workspace with nothing running still asks, and says so rather than naming nothing', async () => {
+    showConfirmMock.mockResolvedValue(false)
+    const { manager, members } = await aWorkspaceOfTwo()
+
+    await manager.closeWorkspace('reading', members)
+
+    expect(showConfirmMock).toHaveBeenCalled()
+    const message = String(showConfirmMock.mock.calls[0][0])
+    expect(message).toMatch(/[Nn]othing is running/)
+    expect(message).not.toContain('Still running')
+  })
+})

@@ -354,6 +354,18 @@ func TestTheReplacementArrivesWhicheverDoorEmptiedTheApplication(t *testing.T) {
 			if len(tabs) != 1 || tabs[0].ID != "tab-replacement" {
 				t.Fatalf("tabs in the default workspace = %+v, want the replacement", tabs)
 			}
+			// By its workspace_id, and not merely by which list it came back
+			// in: closing a WORKSPACE that held every tab must not put the
+			// replacement in the workspace it just deleted, or the close
+			// resurrects what it removed (nocx-isoph.6's dialog is the ask in
+			// front of exactly this act).
+			if tabs[0].WorkspaceID != content.DefaultWorkspaceID {
+				t.Fatalf("replacement tab workspace_id = %q, want %q",
+					tabs[0].WorkspaceID, content.DefaultWorkspaceID)
+			}
+			if got := workspaceIDs(t, layout); len(got) != 1 || got[0] != content.DefaultWorkspaceID {
+				t.Fatalf("workspaces = %v, want the default alone — ws-1 is gone", got)
+			}
 		})
 	}
 }
