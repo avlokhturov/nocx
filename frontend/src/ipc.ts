@@ -22,6 +22,12 @@ type OpenResult = {
   sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
+  /** The opener the backend ADMITTED, or null for a root session
+   *  (nocx-9hu9d). Read rather than dropped because it is the only place the
+   *  renderer ever learns it: the edge is written once, at open, and the ack
+   *  is the one message that carries it. PROVENANCE ONLY — see
+   *  SessionHandle.parent. */
+  parent?: Open['parent']
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -221,6 +227,18 @@ export class SessionHandle {
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
     readonly desiredMode: Open['desiredMode'] = 'script',
+    /** The session that opened this one, as the backend ADMITTED it, or null
+     *  for a root session (nocx-9hu9d). The full identity, never a bare id:
+     *  an id alone re-resolves to whatever holds it now.
+     *
+     *  PROVENANCE ONLY (nocx-wtv3p, ADR-0020 §5). It says "A created B" and
+     *  confers nothing: no surface may read it to decide that one tab may
+     *  observe, drive or close another, and the backend refuses such an
+     *  attempt whatever the renderer believes
+     *  (internal/transport/ws_lineage_prohibitions_test.go). The one thing it
+     *  is read for is the ASK in PaneManager.closePane — naming what a close
+     *  would leave running, which is the opposite of acting on them. */
+    readonly parent: Open['parent'] = null,
   ) {}
 
   send(data: string): void {
@@ -609,7 +627,13 @@ export class WSClient {
       instanceId,
       sessionEpoch,
     })
-    return new SessionHandle(this, sid, result?.cwd ?? '', result?.desiredMode ?? 'script')
+    return new SessionHandle(
+      this,
+      sid,
+      result?.cwd ?? '',
+      result?.desiredMode ?? 'script',
+      result?.parent ?? null,
+    )
   }
 
   // --- reattach -----------------------------------------------------------

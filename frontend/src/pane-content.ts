@@ -132,6 +132,29 @@ export interface PaneContent {
    * one machine's files while the user acts on another's, §0).
    */
   activeOrigin?(): Omit<ActiveOrigin, 'paneId'> | null
+
+  /**
+   * Optional capability: the session this content holds and the session that
+   * opened it, as the backend ADMITTED the edge (nocx-9hu9d). `label` is
+   * deliberately absent — the content does not know what the strip calls its
+   * tab; PaneManager adds it when it composes the `LineageNode`.
+   *
+   * Returns null when the content holds no session — a settings or viewer
+   * tab, or a terminal whose open has not answered yet.
+   *
+   * This is NOT `activeOrigin` under another name, and the two must not be
+   * merged. `activeOrigin` answers "which machine does this tab speak for",
+   * and answers null in cases where the tab plainly holds a session — a
+   * hand-typed `ssh` inside a local tab is the documented one. That silence
+   * is right for a Files panel and wrong here: a tab left running is left
+   * running whichever machine it is talking to, and a lineage question that
+   * inherited that null would under-report exactly the sessions a person
+   * most needs to be told about.
+   *
+   * PROVENANCE ONLY (ADR-0020 §5). Nothing may read this to decide what one
+   * tab may do to another; see lineage.ts.
+   */
+  lineage?(): { sessionId: string; parentSessionId: string | null } | null
 }
 
 /**

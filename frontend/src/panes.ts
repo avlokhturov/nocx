@@ -16,6 +16,8 @@ import type { ClipboardBanner } from './banner'
 import type { ProfileClient } from './profiles'
 import { adoptAliasProfile } from './profiles'
 import { showToast } from './ui/toast'
+import { showConfirm } from './ui/dialog'
+import { leftRunningMessage, liveDescendants, type LineageNode } from './lineage'
 import { log } from './log'
 import type { TabStrip } from './tab-strip'
 import type {
@@ -663,7 +665,7 @@ export class PaneManager {
     // B.5: start observing pane geometry once it's in the DOM.
     pane.setupViewportObserver()
 
-    pane.onCloseRequested = () => this.closePane(pane)
+    pane.onCloseRequested = () => void this.closePane(pane)
     this.tabStrip.addPane(pane)
     void this.activate(pane)
     return pane
@@ -725,7 +727,7 @@ export class PaneManager {
     }
     strip.onClose = (id) => {
       const pane = this.panes.find((t) => t.id === id)
-      if (pane) this.closePane(pane)
+      if (pane) void this.closePane(pane)
     }
     strip.onNewPane = () => this.newPane()
     strip.onReorder = (fromId, toId) => this.reorderPane(fromId, toId)
@@ -735,8 +737,60 @@ export class PaneManager {
    * Close a pane. If it was the active pane, activates the MRU pane.
    * Closing the last pane opens a fresh terminal — view panes have no
    * restoreDescriptor and are never the automatic replacement.
+   *
+   * A pane with LIVE DESCENDANTS asks first (nocx-wtv3p, design D6): the
+   * prompt names the tabs this one opened that are still running, and says
+   * that closing leaves them running. It asks rather than decides because a
+   * parent's end carries no information about whether its children's work is
+   * still wanted — and it never offers to close them, because that would make
+   * the parent's end decide theirs, which is the rule itself.
+   *
+   * Async, and synchronous where it matters: with no descendants nothing is
+   * awaited, so the ordinary close still completes within the caller's turn.
+   * The ask is the ONE gap, and the pane is re-checked across it — a tab can
+   * be closed by something else while a modal is open.
    */
-  closePane(pane: Pane): void {
+  async closePane(pane: Pane): Promise<void> {
+    if (this.panes.indexOf(pane) === -1) return
+
+    const descendants = this.liveDescendantsOf(pane)
+    if (descendants.length > 0) {
+      const proceed = await showConfirm(leftRunningMessage(descendants), 'Close tab', 'Cancel')
+      if (!proceed) return
+      // The world moved while the modal was open: this pane may already be
+      // gone, and closing it twice would take a tab that has since been
+      // recycled under the same index.
+      if (this.panes.indexOf(pane) === -1) return
+    }
+    this.commitClosePane(pane)
+  }
+
+  /**
+   * The live tabs this pane opened, at any depth, as the BACKEND admitted the
+   * edges (nocx-9hu9d). Composed here because lineage.ts owns the walk and
+   * the pane layer owns the labels: a content knows its session, never what
+   * the strip calls its tab.
+   *
+   * Provenance only (ADR-0020 §5). It is read to describe what a close leaves
+   * behind and for nothing else — never to decide that one tab may act on
+   * another, which the backend refuses in any case
+   * (internal/transport/ws_lineage_prohibitions_test.go).
+   */
+  private liveDescendantsOf(pane: Pane): LineageNode[] {
+    const nodes: LineageNode[] = []
+    let root: string | null = null
+    for (const p of this.panes) {
+      const edge = p.content.lineage?.()
+      if (!edge) continue
+      nodes.push({ ...edge, label: p.displayTitle })
+      if (p === pane) root = edge.sessionId
+    }
+    if (root === null) return []
+    return liveDescendants(root, nodes)
+  }
+
+  /** The close itself, once it is settled that it happens. */
+  private commitClosePane(pane: Pane): void {
     const index = this.panes.indexOf(pane)
     if (index === -1) return
 
@@ -803,7 +857,7 @@ export class PaneManager {
   }
 
   closeActivePane(): void {
-    if (this.activePane) this.closePane(this.activePane)
+    if (this.activePane) void this.closePane(this.activePane)
   }
 
   /** The active pane's terminal content, when the active pane is a terminal.

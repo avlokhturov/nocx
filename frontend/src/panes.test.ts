@@ -6,6 +6,7 @@ import {
   mountPaneManager,
   makeClient,
   makeSession,
+  childOf,
   makeClipboard,
   makeBanner,
   setupTabBarDOM,
@@ -1864,5 +1865,134 @@ describe('Tab agent-status channel (nocx-n8n82)', () => {
     // string) reaches this channel too and resets the status.
     tab.updateProgramTitle('')
     expect(tab.agentStatus).toBeNull()
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// D6 — closing a tab with live descendants ASKS rather than decides
+// (nocx-wtv3p, design §8 item 6).
+//
+// A parent's death never closes its children: three of the four ways to lose
+// a parent are FAILURES, and a failure carries no information about whether
+// the work is still wanted. The backend refuses to cascade whatever it is
+// asked (internal/transport/ws_lineage_prohibitions_test.go); this is the
+// half in front of the person — the one act that IS a decision still only
+// decides about the tab it was aimed at, and the person is told what it
+// leaves behind.
+//
+// Driven through the seam a person reaches: the close button on the tab.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('closing a tab that opened other tabs', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+  })
+
+  /** The child tab's cwd, so its label is distinguishable from its parent's
+   *  in the prompt. */
+  const CHILD_CWD = '~/work/deploy-web'
+
+  /**
+   * Two tabs, where the second holds a session the backend admitted as a
+   * CHILD of the first's — the edge riding the open ack, exactly as
+   * nocx-9hu9d delivers it.
+   */
+  async function twoTabsInLineage(): Promise<{
+    bar: HTMLElement
+    manager: PaneManager
+    opened: ReturnType<typeof makeSession>[]
+  }> {
+    const opened: ReturnType<typeof makeSession>[] = []
+    const client = makeClient({
+      openSession: vi.fn(() => {
+        const session =
+          opened.length === 0
+            ? makeSession()
+            : makeSession({ cwd: CHILD_CWD, parent: childOf(opened[0]) })
+        opened.push(session)
+        return Promise.resolve(session)
+      }),
+    })
+    const { bar, manager } = await mountPaneManager(client)
+    manager.newPane()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+    })
+    // The child's content must actually hold its session before the parent
+    // is closed: an edge the renderer has not received yet would make every
+    // assertion below pass for the wrong reason.
+    await vi.waitFor(() => {
+      expect(bar.textContent).toContain('deploy-web')
+    })
+    return { bar, manager, opened }
+  }
+
+  function clickClose(bar: HTMLElement, index: number): void {
+    const buttons = bar.querySelectorAll('[aria-label="Close tab"]')
+    buttons[index].dispatchEvent(new MouseEvent('click', { bubbles: true }))
+  }
+
+  it('asks, and the question names the tabs that would be left running', async () => {
+    showConfirmMock.mockResolvedValue(false)
+    const { bar } = await twoTabsInLineage()
+
+    clickClose(bar, 0)
+
+    await vi.waitFor(() => {
+      expect(showConfirmMock).toHaveBeenCalled()
+    })
+    const message = String(showConfirmMock.mock.calls[0][0])
+    expect(message).toContain('deploy-web')
+    expect(message).toMatch(/leaves them running/)
+  })
+
+  it('cancelling leaves every tab exactly where it was', async () => {
+    showConfirmMock.mockResolvedValue(false)
+    const { bar, opened } = await twoTabsInLineage()
+
+    clickClose(bar, 0)
+    await vi.waitFor(() => {
+      expect(showConfirmMock).toHaveBeenCalled()
+    })
+    // Settle the promise chain the click started.
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(2)
+    expect(opened[0].close).not.toHaveBeenCalled()
+    expect(opened[1].close).not.toHaveBeenCalled()
+  })
+
+  // The prohibition itself, as the violating act: the person says yes, and
+  // the tab they aimed at closes. The tab it opened does not — no close is
+  // sent for it, and it is still on screen.
+  it('confirming closes that tab and never the ones it opened', async () => {
+    showConfirmMock.mockResolvedValue(true)
+    const { bar, opened } = await twoTabsInLineage()
+
+    clickClose(bar, 0)
+
+    await vi.waitFor(() => {
+      expect(opened[0].close).toHaveBeenCalled()
+    })
+    expect(opened[1].close).not.toHaveBeenCalled()
+    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    expect(bar.textContent).toContain('deploy-web')
+  })
+
+  // The control: without a descendant there is nothing to say, and a prompt
+  // on every close would train the person to dismiss the one that matters.
+  it('does not ask when the tab opened nothing', async () => {
+    showConfirmMock.mockResolvedValue(true)
+    const { bar, opened } = await twoTabsInLineage()
+
+    // The CHILD opened nothing.
+    clickClose(bar, 1)
+
+    await vi.waitFor(() => {
+      expect(opened[1].close).toHaveBeenCalled()
+    })
+    expect(showConfirmMock).not.toHaveBeenCalled()
   })
 })
