@@ -7,6 +7,7 @@ import {
   makeLayoutBackend,
   makeLayoutStore,
 } from './test-support/panes-fixtures'
+import { BasePaneContent, type ContentDescriptor, type ContentViewport } from './pane-content'
 
 // The terminal renderer is mocked exactly as panes.test.ts mocks it: these
 // tests are about the strip and the chain, and a real xterm in jsdom is
@@ -64,6 +65,20 @@ async function seededBackend({ decorate = true } = {}): Promise<
     await backend.pinTab('tab-b', true)
   }
   return backend
+}
+
+/** The smallest PaneContent that is not a terminal: a view pane, which the
+ *  chain never holds — Settings and the file viewer are surfaces the window
+ *  shows, not durable panes with a cwd and a pipe. */
+class ViewContent extends BasePaneContent {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  mount(_t: HTMLElement, _h: unknown, _s: AbortSignal): Promise<void> {
+    return Promise.resolve()
+  }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  viewportChanged(_v: ContentViewport): void {}
+  focus(): void {}
+  dispose(): void {}
 }
 
 function stripTabs(bar: HTMLElement): HTMLElement[] {
@@ -284,5 +299,143 @@ describe('the renderer draws the chain the backend holds', () => {
     // And nothing was written: a renderer that cannot read the chain does not
     // half-write it either.
     expect(backend.rows().tabs).toHaveLength(0)
+  })
+})
+
+// ── the chain can hold a row the renderer cannot draw ─────────────────
+//
+// An ssh pane is restored into the chain and NOT reopened: reconnecting needs
+// the profile it was opened from and the chain stores an endpoint. That row is
+// real, it occupies a position, and the renderer has no chrome for it — which
+// is a state every one of these tests is about.
+
+/** A chain holding one local tab the renderer can draw and one ssh tab it
+ *  cannot, plus however many more local ones are asked for. */
+async function backendWithAnSSHRow(locals = 2): Promise<ReturnType<typeof makeLayoutBackend>> {
+  const backend = makeLayoutBackend()
+  await backend.createTab({
+    id: 'tab-ssh',
+    workspaceId: 'workspace:default',
+    position: 0,
+    firstPane: {
+      id: 'pane-ssh',
+      cwd: '/srv',
+      kind: 'ssh',
+      endpoint: 'deploy@srv-01:22',
+      sizeShare: 1,
+    },
+  })
+  for (let i = 0; i < locals; i++) {
+    await backend.createTab({
+      id: `tab-${i}`,
+      workspaceId: 'workspace:default',
+      position: i + 1,
+      firstPane: { id: `pane-${i}`, cwd: '/', kind: 'local', endpoint: null, sizeShare: 1 },
+    })
+  }
+  return backend
+}
+
+describe('a row the renderer cannot draw', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+  })
+
+  it('is still named in a reorder, so the backend does not refuse the whole thing', async () => {
+    const backend = await backendWithAnSSHRow()
+    const { bar, manager } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+    // Two of the three tabs are drawn; the ssh one is not.
+    expect(stripTabs(bar)).toHaveLength(2)
+
+    const [first, second] = stripTabs(bar).map((t) => Number(t.getAttribute('data-pane-id')))
+    manager.reorderPane(second, first)
+
+    // THE DEFECT THIS PINS: a request naming only the tabs on screen is not a
+    // permutation of the workspace's tabs, and the backend refuses the whole
+    // reorder — which is what shipped, and what the e2e gate found once a spec
+    // had opened an ssh tab earlier in the run. The strip must move.
+    await vi.waitFor(() => {
+      expect(stripTabs(bar).map((t) => Number(t.getAttribute('data-pane-id')))).toEqual([
+        second,
+        first,
+      ])
+    })
+    expect(showToastMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ level: 'danger' as const }),
+    )
+    // The undrawn row kept its place among the others rather than being
+    // dropped from the order: it is a row the renderer cannot show, not a row
+    // that stopped existing.
+    expect(backend.rows().tabs.map((t) => t.id)).toContain('tab-ssh')
+    expect(backend.rows().tabs).toHaveLength(3)
+  })
+
+  it('is reported once, however many of them there are', async () => {
+    const backend = await backendWithAnSSHRow(1)
+    await backend.createTab({
+      id: 'tab-ssh-2',
+      workspaceId: 'workspace:default',
+      position: 9,
+      firstPane: {
+        id: 'pane-ssh-2',
+        cwd: '/srv',
+        kind: 'ssh',
+        endpoint: 'deploy@srv-02:22',
+        sizeShare: 1,
+      },
+    })
+    await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+
+    // One warning naming the count, not one per pane: four ssh tabs used to
+    // mean four toasts on every load, and in the gate a leftover one sat
+    // beside the toast another spec was asserting on.
+    const warnings = showToastMock.mock.calls.filter(
+      ([t]) => (t as { level?: string }).level === 'warning',
+    )
+    expect(warnings).toHaveLength(1)
+    expect(String((warnings[0][0] as { message: string }).message)).toContain(
+      '2 connections were not reopened',
+    )
+  })
+
+  it('leaves a pane the chain does not hold where it already was', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const { bar, manager } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+    await vi.waitFor(() => expect(stripTabs(bar)).toHaveLength(2))
+
+    // A view pane — Settings, a file viewer — is chrome the window shows and
+    // is not in the chain at all.
+    const view = manager.openPane(new ViewContent(), {
+      surfaceType: 'nocx.settings' as ContentDescriptor['surfaceType'],
+      singletonKey: null,
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Settings',
+    })
+    await vi.waitFor(() => expect(stripTabs(bar)).toHaveLength(3))
+
+    // Now open a tab the chain DOES hold. It is the newest, so it belongs at
+    // the end — and the view pane must not be swept past it.
+    //
+    // "The last tab is the one that just opened" is a promise four specs make
+    // (connections-settings, vault ×2, vault-settings ×2, each asserting the
+    // last tab is not called Settings), and sweeping view panes to the end
+    // broke all of them: the connection they had just opened appeared BEFORE
+    // Settings.
+    manager.newPane()
+    await vi.waitFor(() => expect(stripTabs(bar)).toHaveLength(4))
+    const order = stripTabs(bar).map((t) => Number(t.getAttribute('data-pane-id')))
+    expect(order[2]).toBe(view.id)
+    expect(order[3]).not.toBe(view.id)
   })
 })

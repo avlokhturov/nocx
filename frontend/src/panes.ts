@@ -469,8 +469,9 @@ export class PaneManager {
    *  the chain at all. */
   private readonly registered = new Set<string>()
   /** ssh panes already reported as not reopened, so a redraw does not raise
-   *  the same toast again. */
+   *  the same toast again, and the endpoints one redraw has yet to report. */
   private readonly reportedSSH = new Set<string>()
+  private readonly pendingSSHReport = new Set<string>()
   private readonly bar: HTMLElement
   private readonly verticalHost: HTMLElement
   /** MRU stack: most-recently-activated pane ids. */
@@ -1283,20 +1284,39 @@ export class PaneManager {
       return
     }
 
-    const asked = [...this.panes]
-    const [moved] = asked.splice(draggedIndex, 1)
-    asked.splice(draggedIndex < targetIndex ? targetIndex - 1 : targetIndex, 0, moved)
-    // The request names TABS, because a strip entry is a tab: the ids must be
-    // a permutation of the workspace's tabs or the backend refuses the whole
-    // reorder — reordering a strip never changes membership.
-    const tabIds: string[] = []
-    for (const pane of asked) {
-      const tab = this.layout.tabOf(pane.wireId)
-      if (tab && !tabIds.includes(tab.id)) tabIds.push(tab.id)
-    }
-    if (tabIds.length === 0) return
+    const draggedTab = this.layout.tabOf(this.panes[draggedIndex].wireId)
+    const targetTab = this.layout.tabOf(this.panes[targetIndex].wireId)
+    // A pane the chain does not hold — Settings, a file viewer — has no
+    // position to change and cannot be dropped on one: nothing in the backend
+    // has an opinion about where those sit.
+    if (!draggedTab || !targetTab || draggedTab.id === targetTab.id) return
+
+    // THE REQUEST NAMES THE WHOLE WORKSPACE, NOT THE STRIP.
+    //
+    // The ids must be a permutation of that workspace's tabs or the backend
+    // refuses the whole reorder — membership never changes through a reorder.
+    // Deriving the request from the panes ON SCREEN was therefore wrong the
+    // moment the chain could hold a tab the renderer does not draw, which it
+    // can: an ssh pane is restored into the chain and not reopened
+    // (see adopt), so after one reload every reorder was refused with "not a
+    // permutation" and the strip never moved. Found by the e2e gate, in
+    // specs that had opened an ssh tab earlier in the run.
+    //
+    // So the order comes from the CACHE — every tab the workspace holds, in
+    // the order they are drawn in — and the dragged one is moved to the
+    // target's slot within it. A tab with no chrome keeps its place among the
+    // others; it is a row the renderer cannot show, not a row that stopped
+    // existing.
+    const order = stripOrder(
+      this.layout.tabs().filter((t) => t.workspaceId === draggedTab.workspaceId),
+    ).map((t) => t.id)
+    const from = order.indexOf(draggedTab.id)
+    const to = order.indexOf(targetTab.id)
+    if (from === -1 || to === -1) return
+    order.splice(from, 1)
+    order.splice(from < to ? to - 1 : to, 0, draggedTab.id)
     void this.ask(
-      () => this.layout.reorder(this.layout.defaultWorkspaceId(), tabIds),
+      () => this.layout.reorder(draggedTab.workspaceId, order),
       'Could not reorder the tabs',
     )
   }
@@ -1332,6 +1352,7 @@ export class PaneManager {
     }
     this.applyDecoration()
     this.syncStripOrder()
+    this.reportUnreopened()
   }
 
   /**
@@ -1355,14 +1376,34 @@ export class PaneManager {
       if (this.reportedSSH.has(row.id)) return
       this.reportedSSH.add(row.id)
       log.warn('nocx: an ssh pane was not reopened', { pane: row.id, endpoint: row.endpoint })
-      showToast({
-        level: 'warning',
-        message: `A connection to ${row.endpoint ?? 'a host'} was not reopened — open it again to reconnect`,
-      })
+      this.pendingSSHReport.add(row.endpoint ?? 'a host')
       return
     }
     this.registered.add(row.id)
     this.buildLocalPane(row.id)
+  }
+
+  /**
+   * Say ONCE that connections were not reopened, however many there were.
+   *
+   * One toast per pane was the first version and it was wrong twice over: a
+   * user with four ssh tabs got four warnings on every load, and in the e2e
+   * gate a warning left over from an earlier spec sat beside the toast a
+   * later spec was asserting on, which is a strict-mode locator resolving to
+   * two elements (git-panel, three specs). A count is the honest summary, and
+   * the pane ids are in the log for whoever needs them.
+   */
+  private reportUnreopened(): void {
+    const hosts = [...this.pendingSSHReport]
+    this.pendingSSHReport.clear()
+    if (hosts.length === 0) return
+    showToast({
+      level: 'warning',
+      message:
+        hosts.length === 1
+          ? `A connection to ${hosts[0]} was not reopened — open it again to reconnect`
+          : `${hosts.length} connections were not reopened — open them again to reconnect`,
+    })
   }
 
   /** Remove chrome without touching the chain: the row is already gone. */
@@ -1397,22 +1438,37 @@ export class PaneManager {
     }
   }
 
-  /** Order the strip the way the backend's positions and pins say. */
+  /**
+   * Order the strip the way the backend's positions and pins say.
+   *
+   * ONLY THE CHAIN'S PANES MOVE. A pane the chain does not hold — Settings, a
+   * file viewer — keeps the slot it already occupies, and the backend's order
+   * is dealt into the slots that are left. Sweeping them to the end instead
+   * was wrong and the e2e gate said so in four specs: opening Settings and
+   * then a connection put the new tab BEFORE Settings, so "the last tab is
+   * the one that just opened" stopped being true. Nothing in the backend has
+   * an opinion about where a view pane sits, and a renderer that moves one on
+   * the backend's behalf is inventing an opinion for it.
+   */
   private syncStripOrder(): void {
-    const ordered: Pane[] = []
+    const fromChain: Pane[] = []
     for (const tab of stripOrder(this.layout.tabs())) {
       for (const row of this.layout.panesOf(tab.id)) {
         const chrome = this.panes.find((p) => p.wireId === row.id)
-        if (chrome && !ordered.includes(chrome)) ordered.push(chrome)
+        if (chrome && !fromChain.includes(chrome)) fromChain.push(chrome)
       }
     }
-    // Panes the chain does not hold — a Settings pane, a file viewer — keep
-    // their relative order after the ones it does. They are chrome the window
-    // shows, so nothing in the backend has an opinion about where they sit.
-    for (const pane of this.panes) {
-      if (!ordered.includes(pane)) ordered.push(pane)
+    const next = [...this.panes]
+    let taken = 0
+    for (let slot = 0; slot < next.length; slot++) {
+      // The slots the chain's panes already occupy, filled in the chain's
+      // order. Every such pane is in fromChain by construction, so the two
+      // counts agree and the guard is a statement rather than a fallback.
+      if (!fromChain.includes(next[slot])) continue
+      if (taken >= fromChain.length) break
+      next[slot] = fromChain[taken++]
     }
-    this.panes.splice(0, this.panes.length, ...ordered)
+    this.panes.splice(0, this.panes.length, ...next)
     this.tabStrip.reorder(this.panes)
   }
 

@@ -121,6 +121,13 @@ test.describe('a saved snippet reaches a running program', () => {
 
   test.afterEach(async ({ page }) => {
     await page.goto('/')
+    // The chord removeSnippet presses goes to a page that has just loaded, so
+    // wait for the app to be up before pressing it. On webkit it was landing
+    // before the shortcut was wired: Settings never opened, the click on its
+    // rail waited on an element that was never going to appear, and the whole
+    // test failed in its own cleanup. Waiting on the observable state — the
+    // prompt owning input — is the fix; a bigger budget only moves it.
+    await promptReady(page)
     await removeSnippet(page, 'e2e fill')
     await removeSnippet(page, 'e2e two lines')
   })

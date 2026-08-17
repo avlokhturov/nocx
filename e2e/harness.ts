@@ -127,14 +127,19 @@ export const test = base.extend<object, { appReady: void }>({
   ],
 
   page: async ({ page }, use) => {
+    // BEFORE the test, not after it. A teardown answers for the test that has
+    // just run and is skipped when that test dies badly; a setup answers for
+    // the test that is about to run, which is the one whose result depends on
+    // it. Whatever the last spec left — including a page that crashed with
+    // eight tabs open — this is what the next one starts from.
+    await resetLayout()
     await injectWailsShim(page)
     await use(page)
-    await resetLayout(page)
   },
 })
 
 /**
- * Leave the stand with exactly one undecorated tab.
+ * Leave the backend holding exactly one undecorated tab.
  *
  * THE PRODUCT NOW REMEMBERS TABS (nocx-isoph.4): the backend owns the
  * workspace → tab → pane chain, and a renderer that goes away leaves the rows
@@ -142,37 +147,110 @@ export const test = base.extend<object, { appReady: void }>({
  * brings back. The suite runs ONE stand for the entire run
  * (playwright.config.ts globalSetup), so without this every spec would inherit
  * the tabs the previous one opened, and the `toHaveCount(1)` every spec opens
- * with would start failing in file order.
+ * with would fail in file order.
  *
- * Closing is done through the product's own control rather than by reaching
- * into a store: closing the last tab mints a replacement, so this ends on one
- * tab nobody has named, coloured or pinned — the state a fresh profile is in.
+ * IT TALKS TO THE BACKEND, NOT TO THE PAGE, and the first version did the
+ * opposite: it clicked the close control on every tab, swallowed its own
+ * failures, and therefore had two ways of quietly doing nothing. The gate
+ * found both. A click cannot reach an SSH pane, because the renderer restores
+ * that row into the chain and does not draw it (PaneManager.adopt) — so those
+ * rows accumulated all run, and the specs that later reordered a strip were
+ * refused with "not a permutation" while the ones asserting on a toast found
+ * a leftover "connection was not reopened" warning beside their own.
  *
- * Failures here are swallowed on purpose. This is cleanup, not an assertion:
- * a page already closing, or a confirmation this teardown must not answer for
- * the user, must not turn a passing test red.
+ * So it opens the control plane the way the renderer does — same URL, same
+ * token subprotocol — reads the chain and closes every pane in it. Node's
+ * WebSocket sends no Origin, which LoopbackOriginPolicy admits precisely
+ * because a non-browser caller still has to present the token.
+ *
+ * Closing the last pane makes the backend mint a replacement, so this ends on
+ * one tab nobody has named, coloured or pinned — the state a fresh profile is
+ * in, and the state every spec's first assertion describes.
+ *
+ * IT THROWS. This is the precondition of every test in the suite, not a
+ * tidy-up: a reset that failed silently is how a spec inherits state, and
+ * "one spec is red for a reason it states" beats "twenty are red for a reason
+ * none of them mention".
  */
-async function resetLayout(page: Page): Promise<void> {
-  const CLOSE = '.nocx-tab [aria-label="Close tab"]'
+async function resetLayout(): Promise<void> {
+  const stand = readStand()
+  const wire = await openControlPlane(stand.port, stand.token)
   try {
-    if (page.isClosed()) return
-    // Bounded rather than "until it is done": a loop that trusts the product
-    // to shrink is a loop that hangs when the product is broken, and the
-    // broken product is exactly when this runs.
-    for (let i = 0; i < 16; i++) {
-      const tabs = await page.locator('.nocx-tab').count()
-      if (tabs === 0) return
-      await page.locator(CLOSE).first().click({ timeout: 2_000 })
-      if (tabs === 1) {
-        // That was the last one; the backend mints its replacement.
-        await baseExpect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 5_000 })
-        return
-      }
-      await baseExpect(page.locator('.nocx-tab')).toHaveCount(tabs - 1, { timeout: 5_000 })
+    const layout = (await wire.call('layout.read', {})) as { panes: { id: string }[] }
+    for (const pane of layout.panes) {
+      await wire.call('panes.close', {
+        id: pane.id,
+        // The replacement is consulted only if this close would leave the
+        // application with no tab at all — which the last one does. Its ids
+        // are durable and therefore the caller's to mint (§7), exactly as
+        // they are for the renderer.
+        replacement: { tabId: uuidv7(), paneId: uuidv7(), cwd: '' },
+      })
     }
-  } catch {
-    // Cleanup is best effort — see above.
+  } finally {
+    wire.close()
   }
+}
+
+/** One JSON-RPC call at a time over a socket opened for this purpose. The
+ *  data plane is not touched: every frame here is text. */
+async function openControlPlane(
+  port: number,
+  token: string,
+): Promise<{ call: (method: string, params: unknown) => Promise<unknown>; close: () => void }> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, `nocx.token.${token}`)
+  await new Promise<void>((resolve, reject) => {
+    const failed = (): void => reject(new Error(`e2e: control plane refused on port ${port}`))
+    ws.addEventListener('open', () => resolve(), { once: true })
+    ws.addEventListener('error', failed, { once: true })
+    ws.addEventListener('close', failed, { once: true })
+  })
+  let nextId = 0
+  const call = (method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const id = ++nextId
+      const onMessage = (ev: MessageEvent): void => {
+        if (typeof ev.data !== 'string') return
+        const msg = JSON.parse(ev.data) as {
+          id?: number
+          result?: unknown
+          error?: { message?: string }
+        }
+        if (msg.id !== id) return
+        ws.removeEventListener('message', onMessage)
+        if (msg.error) reject(new Error(`e2e: ${method} refused: ${msg.error.message ?? ''}`))
+        else resolve(msg.result)
+      }
+      ws.addEventListener('message', onMessage)
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+    })
+  return { call, close: () => ws.close() }
+}
+
+/**
+ * A UUIDv7, because the layout wire validates the version nibble and the
+ * variant and refuses anything else — crypto.randomUUID is a v4.
+ *
+ * A second implementation of frontend/src/layout/uuid7.ts, and deliberately
+ * so: importing renderer source into the harness would pull Solid and the
+ * frontend's module graph into Playwright's Node process for four lines of
+ * bit-twiddling. This one needs no monotonicity — the ids it mints are for a
+ * replacement tab nobody sorts.
+ */
+function uuidv7(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  const now = Date.now()
+  bytes[0] = Math.floor(now / 2 ** 40) & 0xff
+  bytes[1] = Math.floor(now / 2 ** 32) & 0xff
+  bytes[2] = Math.floor(now / 2 ** 24) & 0xff
+  bytes[3] = Math.floor(now / 2 ** 16) & 0xff
+  bytes[4] = Math.floor(now / 2 ** 8) & 0xff
+  bytes[5] = now & 0xff
+  bytes[6] = 0x70 | (bytes[6] & 0x0f)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
 // ── Vault e2e helper: managed devharness lifecycle ───────────────────
