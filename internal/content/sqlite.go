@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -999,29 +1000,18 @@ func (s *sqliteContent) doRewrite(ctx context.Context, rr rewriteRequest) error 
 	if uerr := json.Unmarshal([]byte(redactionsJSON), &redactions); uerr != nil {
 		return uerr
 	}
-	// The span is byte offsets into the stored command. A span that no
-	// longer fits means the row changed shape underneath this caller —
-	// refuse rather than corrupt.
-	if rr.span.Start < 0 || rr.span.End > len(command) || rr.span.Start > rr.span.End {
-		return fmt.Errorf("content: redaction span [%d:%d] out of range for row %d", rr.span.Start, rr.span.End, rr.id)
-	}
-	// Idempotency: the span must be one of the row's CURRENT redactions.
-	// A retried save (a lost response) re-sends the span it captured at
-	// record time; the first attempt already removed it, so the retry is a
-	// no-op instead of replacing text at stale offsets.
-	matched := false
-	kept := make([]Redaction, 0, len(redactions))
-	for _, r := range redactions {
-		if r.Start == rr.span.Start && r.End == rr.span.End && r.Kind == rr.span.Kind {
-			matched = true
-			continue
-		}
-		kept = append(kept, r)
+	// The span check and the idempotency rule are ONE decision and live in
+	// one place (applyRedactionRewrite): the ledger's RewriteRedaction makes
+	// the same one on the other table, and two copies of it would be two
+	// answers to "may this span be replaced".
+	newCommand, kept, matched, err := applyRedactionRewrite(
+		command, redactions, rr.span, rr.reference, strconv.FormatInt(rr.id, 10))
+	if err != nil {
+		return err
 	}
 	if !matched {
 		return nil
 	}
-	newCommand := command[:rr.span.Start] + rr.reference + command[rr.span.End:]
 	keptJSON, err := json.Marshal(kept)
 	if err != nil {
 		return err
@@ -1245,12 +1235,24 @@ func (s *sqliteContent) CommandHistory() CommandHistoryRepository {
 	return s
 }
 
-// Ledger returns the schema-v1 repository (ledger.go). Until nocx-rtg0.3
-// wires the ledger.* wire methods to this surface, its only callers are
-// tests — the v1 write path has no production caller yet (stated loudly in
-// the task report: the same shape shipped once before as a silent dead path).
+// ledgerRepo is the schema-v1 repository's own receiver. It exists because
+// the two repositories genuinely disagree about one method: rewriting a
+// redaction addresses command_history by its autoincrement rowid and an entry
+// by its client-minted UUIDv7, and one Go type cannot carry both signatures
+// under one name. The disagreement is the point — each repository writes its
+// own rows, keyed the way its own table is keyed — so the boundary is made
+// real here rather than papered over with a second method name on one struct.
+// Everything else is promoted unchanged from the embedded store.
+type ledgerRepo struct{ *sqliteContent }
+
+var _ LedgerRepository = ledgerRepo{}
+
+// Ledger returns the schema-v1 repository (ledger.go). Its wire callers are
+// ledger.open / ledger.bind / ledger.close and the agent ask transaction;
+// ledger.go's header keeps the by-hand list of what is still test-reachable
+// only, because `deadcode` cannot tell the two apart in this package.
 func (s *sqliteContent) Ledger() LedgerRepository {
-	return s
+	return ledgerRepo{s}
 }
 
 // Close stops the writer goroutine and closes the pool. Idempotent; later

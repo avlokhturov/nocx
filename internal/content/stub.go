@@ -156,6 +156,11 @@ func (s *ledgerStub) ListEntries(_ context.Context, limit int) ([]LedgerEntrySum
 	return nil, ErrNotImplemented
 }
 
+func (s *ledgerStub) RewriteRedaction(_ context.Context, entryID string, span Redaction, reference string) error {
+	s.log.Info("content stub: LedgerRepository.RewriteRedaction", "entry", entryID, "span", span, "reference", reference)
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) DeleteEntry(_ context.Context, id string) error {
 	s.log.Info("content stub: LedgerRepository.DeleteEntry", "id", id)
 	return ErrNotImplemented

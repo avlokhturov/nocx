@@ -2,6 +2,7 @@ package capability
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -25,9 +26,16 @@ type CaptureSaveService interface {
 	// and atomic name-collision resolution; the name ACTUALLY used comes
 	// back (the renderer must never predict that a suffixed name is free).
 	CreateSecret(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error)
-	// RewriteRedaction replaces one history row's redaction segment with a
+	// RewriteRedaction replaces one recorded row's redaction segment with a
 	// vault reference. A row the retention sweep removed is ErrNotFound.
-	RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error
+	//
+	// The row is named by the capture link's entry id, which is a STRING
+	// because two tables hold masked command text for exactly one more bead:
+	// the interim command_history keys rows by an autoincrement rowid, and
+	// the ledger's entries by the client-minted UUIDv7 the renderer sent.
+	// The string is what both fit in; which store answers is decided in one
+	// place, below.
+	RewriteRedaction(ctx context.Context, entryID string, span content.Redaction, reference string) error
 }
 
 // CaptureSaveOperation is the typed operation for secrets.captureSave. Its
@@ -71,11 +79,35 @@ func (s *captureSaveService) CreateSecret(ctx context.Context, value credential.
 	return s.vault.CreateNamedResolved(ctx, value, meta)
 }
 
-func (s *captureSaveService) RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error {
+// RewriteRedaction routes one link to the store that minted its id. This is
+// the ONE place that knows two tables hold masked command text, and it is
+// here rather than in the transport because this is the only object holding
+// both repositories — a handler that picked the store would be a second
+// place to keep in step.
+//
+// The two key spaces are disjoint by construction, which is what makes the
+// discrimination a fact rather than a heuristic: command_history's id is an
+// SQLite AUTOINCREMENT rowid, so it is decimal digits and nothing else, and
+// an entry id is a client-minted UUIDv7, which is not. Anything that is not
+// a rowid goes to the ledger and, if no such entry exists, comes back
+// ErrNotFound — the same answer a swept row gives, which the caller already
+// treats as "nothing to rewrite".
+//
+// nocx-rtg0.19 deletes command_history and with it this branch: the ledger
+// becomes the only store, and the parse below is the whole of what has to go.
+// Until then, nothing on the wire mints a ledger-keyed link — history.record
+// is what mints links, and it writes command_history rows — so the ledger arm
+// is reachable and correct rather than exercised in production. That is
+// stated here because a reachable branch nobody takes is exactly how an
+// unwired write path once shipped behind a green deadcode run (nocx-rtg0).
+func (s *captureSaveService) RewriteRedaction(ctx context.Context, entryID string, span content.Redaction, reference string) error {
 	if err := s.guard.check(); err != nil {
 		return err
 	}
-	return s.contentDB.CommandHistory().RewriteRedaction(ctx, id, span, reference)
+	if rowID, err := strconv.ParseInt(entryID, 10, 64); err == nil {
+		return s.contentDB.CommandHistory().RewriteRedaction(ctx, rowID, span, reference)
+	}
+	return s.contentDB.Ledger().RewriteRedaction(ctx, entryID, span, reference)
 }
 
 // ---------------------------------------------------------------------------

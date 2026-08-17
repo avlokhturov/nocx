@@ -19,6 +19,15 @@ package content
 // RESOLVED on a production path already — Entry runs the join for every
 // ledger.close — but nothing yet asks the resolved row for its host.
 //
+// RewriteRedaction is the awkward third case and is written down rather than
+// rounded to one of the other two: it is WIRED — secrets.captureSave reaches
+// it through capability.CaptureSaveService, which routes a link by the id it
+// carries — but no production caller mints a link keyed by an entry id yet.
+// history.record is what mints links, and it writes command_history rows. So
+// the path is live and correct, and in production the router always takes the
+// other arm until nocx-rtg0.19 replaces history.record's writer
+// (nocx-rtg0.24).
+//
 // Read that list rather than a deadcode run. `deadcode -filter
 // 'nocx/internal/content'` prints nothing for this package and always has —
 // RTA reports every method here "reachable only through reflection", so the
@@ -841,6 +850,20 @@ type LedgerRepository interface {
 	// its resolved environment, joined in the one statement: the page costs
 	// a single query however many rows and however many hosts it spans.
 	ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error)
+	// RewriteRedaction replaces the redaction segment at span in the
+	// entry's stored intent with reference (a vault reference), removing the
+	// segment from the entry's receipt (EntryMasking, in entries.payload).
+	// The row is addressed by its client-minted UUIDv7 — the ledger's own
+	// key, which is what makes this method exist rather than widening
+	// CommandHistoryRepository's rowid-keyed one.
+	//
+	// Idempotent: a span that is not among the row's CURRENT redactions is a
+	// no-op, so a retried save after a lost response cannot replace text at
+	// stale offsets. Returns ErrNotFound when no entry carries id, and an
+	// error when the span no longer fits the stored intent — the row changed
+	// shape underneath the caller, and refusing is the only answer that is
+	// not corruption.
+	RewriteRedaction(ctx context.Context, entryID string, span Redaction, reference string) error
 	// DeleteEntry removes an entry; edges referencing it and its
 	// executions (and their artifacts, chunks and grant) cascade. A pin
 	// protects against background eviction, not against this.

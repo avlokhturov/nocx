@@ -19,10 +19,11 @@ type ContentService interface {
 	// policy is off, Add succeeds and returns (0, nil) — a command runs
 	// and no row appears, never an error.
 	RecordCommand(ctx context.Context, rec content.CommandRecord) (int64, error)
-	// RewriteRedaction replaces one row's redaction segment with a vault
-	// reference — the capture-save link rewrite. The row is addressed by
-	// its stable id; a row the retention sweep removed is ErrNotFound.
-	RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error
+	// The capture-save link rewrite is NOT here. It is one behaviour with
+	// one seam — CaptureSaveService.RewriteRedaction, which is the only
+	// thing secrets.captureSave ever reached — and the copy that used to sit
+	// on this interface had no caller at all (AD-8: a second surface for one
+	// behaviour goes out of step with the first the moment either changes).
 }
 
 // ContentOperation is the typed operation for the content domain. Its gate
@@ -60,11 +61,4 @@ func (s *contentService) RecordCommand(ctx context.Context, rec content.CommandR
 		return 0, err
 	}
 	return s.db.CommandHistory().Add(ctx, rec)
-}
-
-func (s *contentService) RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error {
-	if err := s.guard.check(); err != nil {
-		return err
-	}
-	return s.db.CommandHistory().RewriteRedaction(ctx, id, span, reference)
 }
