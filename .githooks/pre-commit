@@ -134,7 +134,8 @@ fi
 # shellcheck disable=SC2086 # GOLANGCI_TAGS must word-split away when empty.
 host_gate "golangci-lint" golangci-lint run $GOLANGCI_TAGS ./...
 
-# --- 3b. deadcode ratchet: MOVED TO CI (nocx-re6gk) --------------------
+# --- 3b. deadcode ratchet: RUNS IN CI, in ci.yml's ci-mac and ci-linux jobs
+# (nocx-re6gk) ----------------------------------------------------------------
 # It used to run in this hook. Wails v3 ended that, and not by accident: the ratchet
 # analysed darwin AND linux from whatever machine it ran on, which was only
 # possible with CGO_ENABLED=0 — and v3 requires cgo for both targets (its own
@@ -153,6 +154,10 @@ host_gate "golangci-lint" golangci-lint run $GOLANGCI_TAGS ./...
 # Removing it from here is deliberate and is NOT a downgrade to nothing: this
 # repo has nocx-rtg0, where a write path with no caller shipped behind a green
 # "deadcode is empty". The ratchet keeps its teeth; it changes address.
+#
+# To run it by hand on THIS platform: node .githooks/check-deadcode.mjs
+# (~4 s here). It answers for the host and only the host, which is the whole
+# reason the address changed.
 
 # --- 3c. control goroutine ratchet (Go changes only, same reasoning as the
 # deadcode ratchet: ~10ms, and the committed baseline is what makes a NEW
@@ -263,6 +268,7 @@ printf "\nAll checks passed.\n"
 # and -count=1. A release attempt and its follow-up PR both came back red from a
 # job this hook had just called green (nocx-cn86). The e2e suite is not run here
 # at all; only its types are checked.
-printf "  NOT covered here: macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`backend\` job\n"
+printf "  NOT covered here: macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`ci-mac\` job\n"
 printf "                    Ubuntu + both keyring variants — scripts/ci-linux.sh\n"
 printf "                    the e2e suite itself           — e2e/run-in-container.sh\n"
+printf "                    the dead-code ratchet          — CI's \`ci-mac\` and \`ci-linux\` jobs\n"
