@@ -372,13 +372,13 @@ func TestRebuildDropsTheLayoutChainIncludingSelfReferencingTabs(t *testing.T) {
 	db := openStore(t, path)
 	ctx := context.Background()
 	layout := db.Layout()
-	if err := layout.CreateWorkspace(ctx, Workspace{ID: "ws-1", Name: "work"},
+	if _, err := layout.CreateWorkspace(ctx, Workspace{ID: "ws-1", Name: "work"},
 		Tab{ID: "tab-1", WorkspaceID: "ws-1", Layout: LayoutRow},
 		Pane{ID: "pane-0", TabID: "tab-1", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	parent := "tab-1"
-	if err := layout.CreateTab(ctx, Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: &parent, Layout: LayoutRow},
+	if _, err := layout.CreateTab(ctx, Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: &parent, Layout: LayoutRow},
 		Pane{ID: "pane-1", TabID: "tab-2", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
 		t.Fatalf("CreateTab child: %v", err)
 	}

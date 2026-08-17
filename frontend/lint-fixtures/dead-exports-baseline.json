@@ -449,6 +449,66 @@
       "symbol": "ShellEntry"
     },
     {
+      "kind": "files",
+      "file": "src/generated/panes.create.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/panes.move.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/tabs.close.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/tabs.create.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/tabs.pin.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/tabs.recolour.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/tabs.rename.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/tabs.reorder.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/workspaces.close.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/workspaces.create.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/workspaces.rename.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/workspaces.reorder.ts",
+      "symbol": ""
+    },
+    {
       "kind": "types",
       "file": "src/history-client.ts",
       "symbol": "HistoryRecordParams"

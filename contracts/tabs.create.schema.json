@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.create.schema.json",
+  "title": "TabsCreateResult",
+  "description": "Result of the tabs.create JSON-RPC method (nocx-isoph.2, design §4.1, §4.5 and §7): the tab, THE FIRST PANE it was created with, and whether this call was a retry of one already made. A tab is what a pane is dragged out INTO (§4.4), so the pane comes with it and a tab with no pane never exists. This file is also the single declaration of the tab shape; the other tabs.* results reference it cross-file. What is NOT here is as deliberate as what is: the activity indicator, the attention indicator and the label are computed from the tab's panes (§4.5) and have no field, because attention arrives at a PANE and a copy on the tab would give one fact two owners.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tab", "firstPane", "replayed"],
+  "properties": {
+    "tab": {
+      "$ref": "#/$defs/tab"
+    },
+    "firstPane": {
+      "description": "The pane this tab was created around, as stored, with the tabId the backend filled in.",
+      "$ref": "panes.create.schema.json#/$defs/pane"
+    },
+    "replayed": {
+      "description": "Whether this call found the work already done. A create whose answer was lost is retried — AD-9 exists because the socket drops — and the retry returns the FIRST object rather than minting a second one. true says so out loud, so the renderer can tell 'I made this' from 'this was already made' without comparing rows, and so the property is assertable over the wire instead of inferred from the absence of an error. A repeat asking for something DIFFERENT under the same id is not a replay: it is refused with -32602.",
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "tab": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "workspaceId",
+        "parentId",
+        "name",
+        "colour",
+        "position",
+        "pinned",
+        "layout",
+        "seenAt"
+      ],
+      "properties": {
+        "id": {
+          "description": "The tab's id. Client-minted UUIDv7 and therefore UNTRUSTED INPUT (design .internal/specs/2026-08-16-tabs-panes-and-blocks-design.md §7): the shape is validated and never believed, an insert on an id that already means something else FAILS rather than overwriting, and knowing an id confers NO RIGHT to use it — a UUIDv7 embeds a timestamp and is guessable by construction, so nothing anywhere may treat possession of one as evidence.",
+          "type": "string",
+          "minLength": 1
+        },
+        "workspaceId": {
+          "description": "The workspace this tab is in. NEVER empty and never absent: a tab is always in exactly one workspace and there is no null (workspaces-ux §4.2). This is where workspaceId LIVES since §4.5 — it moved off the session, because the backend now owns the whole chain and resolves pane → tab → workspace itself.",
+          "type": "string",
+          "minLength": 1
+        },
+        "parentId": {
+          "description": "The LINEAGE edge and nothing else (§4.2): who spawned whom, provenance, immutable, never set by hand. null for a tab nobody spawned, and null rather than absent so 'no parent' is distinguishable from 'this backend does not say'. It goes null if the parent is closed — the honest 'provenance lost' state. The DISPLAY grouping ('A, B and C are shown together') is the tab's other edge; it is symmetric, has no host and therefore no row (§4.3), and it must never be read off this field.",
+          "type": ["string", "null"]
+        },
+        "name": {
+          "description": "The name the user typed, or null. null is the NORMAL case and not a defect: a tab created by a drag was never named by anybody (§4.5), so its label is derived from its panes' titles and is COMPUTED, never carried here. A name the user does type is stored and wins.",
+          "type": ["string", "null"]
+        },
+        "colour": {
+          "description": "The colour the user chose, or null for a tab that was never decorated.",
+          "type": ["string", "null"]
+        },
+        "position": {
+          "description": "Where it sits in the strip. Written by the backend from the order tabs.reorder was given.",
+          "type": "integer"
+        },
+        "pinned": {
+          "description": "Whether the tab is kept at the head of the strip.",
+          "type": "boolean"
+        },
+        "layout": {
+          "description": "The direction this tab arranges its panes in. Direction is a property of the SET and size a property of the member (§5), which is why the tab needed a row and the display group did not. Two values, and the cost is stated rather than hidden: panes do not nest, so no asymmetric layout is expressible.",
+          "type": "string",
+          "enum": ["row", "column"]
+        },
+        "seenAt": {
+          "description": "When the user last looked at this tab, in Unix milliseconds, or null for a tab never seen. A MARK rather than a verdict: the unseen indicator is computed from it, and storing the verdict would be the duplication §4.5 refuses. The activity and attention indicators are absent for the same reason — attention arrives at a PANE, so a copy on the tab would give one fact two owners.",
+          "type": ["integer", "null"]
+        }
+      }
+    }
+  }
+}

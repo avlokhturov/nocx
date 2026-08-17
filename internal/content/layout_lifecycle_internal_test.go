@@ -70,7 +70,7 @@ func countRows(t *testing.T, s *sqliteContent, query string, args ...any) int {
 
 func seedChainInternal(t *testing.T, layout LayoutRepository, wsID, tabID, paneID string) {
 	t.Helper()
-	if err := layout.CreateWorkspace(context.Background(),
+	if _, err := layout.CreateWorkspace(context.Background(),
 		Workspace{ID: wsID, Name: wsID},
 		Tab{ID: tabID, WorkspaceID: wsID, Layout: LayoutRow},
 		Pane{ID: paneID, TabID: tabID, Cwd: "/srv", Kind: PaneLocal, SizeShare: 1},
@@ -196,7 +196,7 @@ func TestMovingAPaneKeepsTheSameRowNotAnEqualOne(t *testing.T) {
 	_, s, layout := lifecycleStore(t)
 	ctx := context.Background()
 	seedChainInternal(t, layout, "ws-1", "tab-1", "pane-1")
-	if err := layout.CreateTab(ctx,
+	if _, err := layout.CreateTab(ctx,
 		Tab{ID: "tab-2", WorkspaceID: "ws-1", Layout: LayoutRow},
 		Pane{ID: "pane-2", TabID: "tab-2", Cwd: "/var", Kind: PaneLocal, SizeShare: 1}); err != nil {
 		t.Fatalf("CreateTab: %v", err)
@@ -215,7 +215,7 @@ func TestMovingAPaneKeepsTheSameRowNotAnEqualOne(t *testing.T) {
 	}
 
 	before := rowidOf("pane-1")
-	if err := layout.MovePane(ctx, "pane-1", "tab-2"); err != nil {
+	if _, err := layout.MovePane(ctx, "pane-1", "tab-2"); err != nil {
 		t.Fatalf("MovePane: %v", err)
 	}
 	if after := rowidOf("pane-1"); after != before {

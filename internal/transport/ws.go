@@ -955,6 +955,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
 	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
+	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
@@ -1440,6 +1441,19 @@ type openParams struct {
 	// gates or lanes reads it — the parent gains no right over the child by
 	// being named here (ADR-0020 §5).
 	Parent *openParentParams `json:"parent,omitempty"`
+	// PaneID names the PANE this session is the pipe of (nocx-isoph.2). It
+	// is the durable identity — client-minted, UUIDv7, and UNTRUSTED like
+	// every other id in the layout chain (design §7) — and it is what the
+	// backend walks pane → tab → workspace to answer the ack's workspaceId
+	// with. A pane and its session are two objects because D5 says so: the
+	// process dies with the backend and the pane does not, so the session id
+	// is minted here (AD-7) and the pane id can only come from the renderer.
+	//
+	// Absent means "this session is not attached to a recorded pane", which
+	// is every open until the renderer starts minting them (nocx-isoph.4),
+	// and the workspace is then the default. Present but naming no pane is
+	// refused: the two are different facts.
+	PaneID string `json:"paneId,omitempty"`
 }
 
 // openParentParams is the claimed parent edge: the FULL identity of the

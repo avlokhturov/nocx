@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/panes.move.schema.json",
+  "title": "PanesMoveResult",
+  "description": "Result of the panes.move JSON-RPC method: the pane after its tab changed, and NOTHING else about it changed (§4.4). The identity, the cwd, the blocks and the live pipe are untouched because only a reference moved — that the round trip is lossless by construction is why the durable object is the pane and the tab is the cheap wrapper. The tab left with no panes is removed by nocx-isoph.3, which owns the container lifecycle whole.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pane"],
+  "properties": {
+    "pane": {
+      "$ref": "panes.create.schema.json#/$defs/pane"
+    }
+  }
+}

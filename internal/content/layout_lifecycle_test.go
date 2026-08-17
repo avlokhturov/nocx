@@ -31,7 +31,6 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // ── fixtures ─────────────────────────────────────────────────────────────
@@ -55,7 +54,7 @@ func aReplacement() content.Replacement {
 // minted: workspace, its first tab, that tab's first pane.
 func seedWorkspace(t *testing.T, layout content.LayoutRepository, wsID, tabID, paneID string) {
 	t.Helper()
-	if err := layout.CreateWorkspace(context.Background(),
+	if _, err := layout.CreateWorkspace(context.Background(),
 		content.Workspace{ID: wsID, Name: wsID},
 		aTab(tabID, wsID),
 		aPane(paneID, tabID, "/srv"),
@@ -109,7 +108,7 @@ func TestAWorkspaceCannotBeCreatedWithoutAFirstTab(t *testing.T) {
 	_, layout := newLayout(t)
 	ctx := context.Background()
 
-	err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "release"},
+	_, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "release"},
 		content.Tab{}, aPane("pane-1", "tab-1", "/srv"))
 	if !errors.Is(err, content.ErrNoFirstTab) {
 		t.Fatalf("CreateWorkspace with no first tab: err = %v, want content.ErrNoFirstTab", err)
@@ -129,7 +128,7 @@ func TestATabCannotBeCreatedWithoutAFirstPane(t *testing.T) {
 	ctx := context.Background()
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
 
-	err := layout.CreateTab(ctx, aTab("tab-2", "ws-1"), content.Pane{})
+	_, err := layout.CreateTab(ctx, aTab("tab-2", "ws-1"), content.Pane{})
 	if !errors.Is(err, content.ErrNoFirstPane) {
 		t.Fatalf("CreateTab with no first pane: err = %v, want content.ErrNoFirstPane", err)
 	}
@@ -154,7 +153,7 @@ func TestCreatingAWorkspaceMintsItsFirstTabAndThatTabsFirstPane(t *testing.T) {
 	// The tab's workspace and the pane's tab are left EMPTY on purpose: the
 	// containers are what this call is creating, so naming them again is a
 	// second place for the answer to be wrong.
-	if err := layout.CreateWorkspace(ctx, ws, tab, pane); err != nil {
+	if _, err := layout.CreateWorkspace(ctx, ws, tab, pane); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 
@@ -188,13 +187,13 @@ func TestCreationRefusesAMemberThatNamesAnotherContainer(t *testing.T) {
 	_, layout := newLayout(t)
 	ctx := context.Background()
 
-	err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "release"},
+	_, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "release"},
 		aTab("tab-1", "ws-other"), aPane("pane-1", "tab-1", "/srv"))
 	if !errors.Is(err, content.ErrMismatchedContainer) {
 		t.Fatalf("first tab naming another workspace: err = %v, want content.ErrMismatchedContainer", err)
 	}
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
-	err = layout.CreateTab(ctx, aTab("tab-2", "ws-1"), aPane("pane-2", "tab-other", "/srv"))
+	_, err = layout.CreateTab(ctx, aTab("tab-2", "ws-1"), aPane("pane-2", "tab-other", "/srv"))
 	if !errors.Is(err, content.ErrMismatchedContainer) {
 		t.Fatalf("first pane naming another tab: err = %v, want content.ErrMismatchedContainer", err)
 	}
@@ -209,7 +208,7 @@ func TestRemovingTheLastPaneRemovesItsTab(t *testing.T) {
 	_, layout := newLayout(t)
 	ctx := context.Background()
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
-	if err := layout.CreateTab(ctx, aTab("tab-2", "ws-1"), aPane("pane-2", "tab-2", "/var")); err != nil {
+	if _, err := layout.CreateTab(ctx, aTab("tab-2", "ws-1"), aPane("pane-2", "tab-2", "/var")); err != nil {
 		t.Fatalf("CreateTab: %v", err)
 	}
 
@@ -231,7 +230,7 @@ func TestRemovingAPaneWithASiblingLeavesTheTab(t *testing.T) {
 	_, layout := newLayout(t)
 	ctx := context.Background()
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
-	if err := layout.CreatePane(ctx, aPane("pane-2", "tab-1", "/var")); err != nil {
+	if _, err := layout.CreatePane(ctx, aPane("pane-2", "tab-1", "/var")); err != nil {
 		t.Fatalf("CreatePane: %v", err)
 	}
 
@@ -426,20 +425,24 @@ func TestAPaneMovedBetweenTabsKeepsItsIdentityItsCwdAndItsLiveSession(t *testing
 	db, layout, path := newLayoutAt(t)
 	ctx := context.Background()
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
-	if err := layout.CreateTab(ctx, aTab("tab-2", "ws-1"), aPane("pane-2", "tab-2", "/var")); err != nil {
+	if _, err := layout.CreateTab(ctx, aTab("tab-2", "ws-1"), aPane("pane-2", "tab-2", "/var")); err != nil {
 		t.Fatalf("CreateTab: %v", err)
 	}
 
-	// A live session, in the workspace the pane is in. The pipe is a
-	// loopback rather than a real pty: what is asserted is that the session
-	// the backend holds is the same one afterwards, and an OS pty would add
-	// a dependency this question does not have.
+	// A live session. The pipe is a loopback rather than a real pty: what is
+	// asserted is that the session the backend holds is the same one
+	// afterwards, and an OS pty would add a dependency this question does
+	// not have.
+	//
+	// It carries no workspace of its own (nocx-isoph.2): the workspace is
+	// the TAB's column and the backend resolves pane → tab → workspace, so
+	// the only durable link between this session and a workspace is the
+	// ledger record written below.
 	reg := session.New(log.NewSlogAdapter(nil), &loopbackFactory{})
 	sess, openErr := reg.Open(ctx, session.Config{
-		Kind:        session.KindLocal,
-		Cwd:         "/srv",
-		WorkspaceID: workspace.ID("ws-1"),
-		Cols:        80, Rows: 24,
+		Kind: session.KindLocal,
+		Cwd:  "/srv",
+		Cols: 80, Rows: 24,
 	})
 	if openErr != nil {
 		t.Fatalf("session Open: %v", openErr)
@@ -463,7 +466,7 @@ func TestAPaneMovedBetweenTabsKeepsItsIdentityItsCwdAndItsLiveSession(t *testing
 	}
 	before := sess.Identity()
 
-	if err := layout.MovePane(ctx, "pane-1", "tab-2"); err != nil {
+	if _, err := layout.MovePane(ctx, "pane-1", "tab-2"); err != nil {
 		t.Fatalf("MovePane: %v", err)
 	}
 
@@ -535,7 +538,7 @@ func TestMovingAPaneIntoItsOwnTabChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
 
-	if err := layout.MovePane(ctx, "pane-1", "tab-1"); err != nil {
+	if _, err := layout.MovePane(ctx, "pane-1", "tab-1"); err != nil {
 		t.Fatalf("MovePane onto itself: %v", err)
 	}
 	if got := tabIDs(t, layout, "ws-1"); len(got) != 1 || got[0] != "tab-1" {
@@ -554,10 +557,10 @@ func TestAMoveNamingSomethingThatDoesNotExistIsRefused(t *testing.T) {
 	ctx := context.Background()
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
 
-	if err := layout.MovePane(ctx, "pane-nobody", "tab-1"); !errors.Is(err, content.ErrNoSuchPane) {
+	if _, err := layout.MovePane(ctx, "pane-nobody", "tab-1"); !errors.Is(err, content.ErrNoSuchPane) {
 		t.Fatalf("moving an absent pane: err = %v, want content.ErrNoSuchPane", err)
 	}
-	if err := layout.MovePane(ctx, "pane-1", "tab-nobody"); !errors.Is(err, content.ErrNoSuchTab) {
+	if _, err := layout.MovePane(ctx, "pane-1", "tab-nobody"); !errors.Is(err, content.ErrNoSuchTab) {
 		t.Fatalf("moving into an absent tab: err = %v, want content.ErrNoSuchTab", err)
 	}
 	if panes, err := layout.Panes(ctx, "tab-1"); err != nil || len(panes) != 1 || panes[0].ID != "pane-1" {
@@ -578,7 +581,7 @@ func TestMovingAPaneIntoAnotherWorkspaceIsRefusedUntilTheAtomicityModelExists(t 
 	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
 	seedWorkspace(t, layout, "ws-2", "tab-2", "pane-2")
 
-	err := layout.MovePane(ctx, "pane-1", "tab-2")
+	_, err := layout.MovePane(ctx, "pane-1", "tab-2")
 	if !errors.Is(err, content.ErrCrossWorkspaceMove) {
 		t.Fatalf("cross-workspace move: err = %v, want content.ErrCrossWorkspaceMove", err)
 	}
@@ -609,13 +612,20 @@ func TestLifecycleOnAClosedStore(t *testing.T) {
 		call func() error
 	}{
 		{"CreateWorkspace", func() error {
-			return layout.CreateWorkspace(ctx, content.Workspace{ID: "w", Name: "n"}, aTab("t", "w"), aPane("p", "t", "/"))
+			_, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "w", Name: "n"}, aTab("t", "w"), aPane("p", "t", "/"))
+			return err
 		}},
-		{"CreateTab", func() error { return layout.CreateTab(ctx, aTab("t", "w"), aPane("p", "t", "/")) }},
+		{"CreateTab", func() error {
+			_, err := layout.CreateTab(ctx, aTab("t", "w"), aPane("p", "t", "/"))
+			return err
+		}},
 		{"DeletePane", func() error { return layout.DeletePane(ctx, "p", aReplacement()) }},
 		{"DeleteTab", func() error { return layout.DeleteTab(ctx, "t", aReplacement()) }},
 		{"DeleteWorkspace", func() error { return layout.DeleteWorkspace(ctx, "w", aReplacement()) }},
-		{"MovePane", func() error { return layout.MovePane(ctx, "p", "t") }},
+		{"MovePane", func() error {
+			_, err := layout.MovePane(ctx, "p", "t")
+			return err
+		}},
 	} {
 		if err := c.call(); err == nil {
 			t.Fatalf("%s on a closed store: err = nil, want a refusal", c.name)

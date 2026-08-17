@@ -300,8 +300,15 @@ const entryPageColumns = `e.id, e.ingest_seq, e.environment_id, e.cwd, e.kind, e
 // the page statement is written once and runs in either — ListEntries reads
 // straight off the pool, QueryEntries reads inside the transaction that also
 // carries HasRows and the horizon.
+//
+// QueryRowContext is on it for the same reason: the layout chain's single-row
+// reads (layout_sqlite.go) run standalone and inside the transaction that
+// wrote the row. One seam for "something rows can be read through" is the
+// point of the type; a second interface with one method would be a second
+// name for one concept.
 type rowQuerier interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // entryPage runs the ONE page statement: the filter, the order and the join,

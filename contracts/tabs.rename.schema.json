@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.rename.schema.json",
+  "title": "TabsRenameResult",
+  "description": "Result of the tabs.rename JSON-RPC method: the tab as stored after the change, read back rather than echoed. It sets the name the user typed. Sending null CLEARS it, which is a real operation and not a no-op: the tab goes back to the label derived from its panes (§4.5). Three narrow methods rather than one sparse update: a patch where a missing field and a null field mean different things is how 'what changed' stops being answerable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tab"],
+  "properties": {
+    "tab": {
+      "$ref": "tabs.create.schema.json#/$defs/tab"
+    }
+  }
+}
