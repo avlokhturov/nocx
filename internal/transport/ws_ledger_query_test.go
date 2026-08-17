@@ -229,6 +229,11 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 	conn := connectWS(t, ws)
 	sid := openLocalSession(t, conn)
 
+	// The two literal rows go in FIRST so the newest entry — which the limit
+	// and paging subtests below name — stays the one it was.
+	openEntryIn(t, conn, sid, "literal-shell", "/repo", "shell", "grep '100%_done'", 20)
+	// A LIKE pattern of "100%_done" matches this row and instr() does not.
+	openEntryIn(t, conn, sid, "decoy-shell", "/repo", "shell", "1000-and-done", 21)
 	openEntryIn(t, conn, sid, "here-shell", "/repo", "shell", "make test", 2)
 	openEntryIn(t, conn, sid, "there-shell", "/other", "shell", "make lint", 3)
 	openEntryIn(t, conn, sid, "here-agent", "/repo", "agent", "why did it fail", 4)
@@ -247,6 +252,16 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 	t.Run("status excludes another status", func(t *testing.T) {
 		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "status": "failure"}, 12)
 		wantQueried(t, page, "here-shell")
+	})
+	t.Run("text excludes every intent that does not contain it", func(t *testing.T) {
+		// Case-insensitive, and it reaches the store: a filter dropped on the
+		// way would answer with the whole ledger and look like it worked.
+		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "text": "LINT"}, 18)
+		wantQueried(t, page, "there-shell")
+	})
+	t.Run("text is a substring, not a LIKE pattern", func(t *testing.T) {
+		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "text": "100%_done"}, 19)
+		wantQueried(t, page, "literal-shell")
 	})
 	t.Run("limit bounds the page and says it is not exhausted", func(t *testing.T) {
 		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "limit": 1}, 13)

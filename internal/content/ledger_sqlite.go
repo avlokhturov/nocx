@@ -364,6 +364,18 @@ func ledgerWhere(q LedgerQuery) (string, []any) {
 		conds = append(conds, "e.status = ?")
 		args = append(args, string(q.Status))
 	}
+	// The search box, and it is the SAME predicate the interim path answers
+	// (sqlite.go's Query, nocx-ms7v) — one matching semantics for one product
+	// object, extended to the ledger's column rather than reinvented beside
+	// it. instr() over lower(), not LIKE: there is no wildcard grammar, so a
+	// search for "100%_done" matches that literal intent and nothing else.
+	// lower(?) is bound once; lower(e.intent) is computed per row, since no
+	// index can serve a substring anyway. Empty is no filter, the state an
+	// absent field arrives as.
+	if q.Text != "" {
+		conds = append(conds, "instr(lower(e.intent), lower(?)) > 0")
+		args = append(args, q.Text)
+	}
 	if q.Since != nil {
 		conds = append(conds, "e.submitted_at >= ?")
 		args = append(args, *q.Since)
