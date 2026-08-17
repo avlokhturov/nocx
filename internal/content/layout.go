@@ -25,16 +25,16 @@ package content
 // dragged elsewhere. What is genuinely the tab's own is "I have seen this",
 // which duplicates nothing.
 //
-// PRODUCTION CALLERS: none yet. nocx-isoph.2 puts create/move on the wire and
-// nocx-isoph.3 adds the container lifecycle; until then this surface is
-// reachable only from its own tests. That sentence is here rather than in a
-// deadcode run because `deadcode -filter 'nocx/internal/content'` prints
-// nothing for this package and always has — RTA reports every method here
-// reachable only through reflection, so the tool cannot tell a wired write
-// path from an unwired one (ledger.go's header says the same, for the same
-// reason). This is exactly the shape that shipped once before under a green
-// "deadcode is empty" (nocx-rtg0), so the honest statement lives next to the
-// seam and is kept current by hand.
+// PRODUCTION CALLERS: the layout.* JSON-RPC methods (nocx-isoph.2,
+// internal/transport/ws_layout_handlers.go, through capability.LayoutService)
+// and the open ack's derived workspaceId. nocx-isoph.3 adds the container
+// lifecycle on top. That sentence is here rather than in a deadcode run
+// because `deadcode` prints nothing for this package and always has — RTA
+// reports every method here reachable only through reflection, so the tool
+// cannot tell a wired write path from an unwired one (ledger.go's header says
+// the same, for the same reason). This is exactly the shape that shipped once
+// before under a green "deadcode is empty" (nocx-rtg0), so the honest
+// statement lives next to the seam and is kept current by hand.
 
 import "context"
 
@@ -153,6 +153,19 @@ type Pane struct {
 	SizeShare float64
 }
 
+// Created is what a create answers: the stored object, and whether this call
+// found the work already done.
+//
+// Replayed is the visible half of §7's idempotency rule. A create whose
+// answer was lost is retried — AD-9 exists because the socket drops — and the
+// retry must return the FIRST object rather than mint a second one. Reporting
+// which of the two happened is what lets a test assert the property over the
+// wire instead of inferring it from the absence of an error.
+type Created[T any] struct {
+	Object   T
+	Replayed bool
+}
+
 // LayoutRepository is the typed repository for the layout chain (ADR-0011 §1:
 // each entity declares its own typed repository, no generic Repository[T]).
 //
@@ -164,20 +177,45 @@ type Pane struct {
 // internal/lineage runs at CreateTab is there for the depth bound and for the
 // day a mover is added.
 type LayoutRepository interface {
-	// CreateWorkspace records one workspace. An id already taken FAILS; it
+	// CreateWorkspace records one workspace. An id already taken by the SAME
+	// request is a replay and answers with the row that is already there; an
+	// id already taken by a DIFFERENT request is ErrIDConflict. A create
 	// never overwrites (§7).
-	CreateWorkspace(ctx context.Context, ws Workspace) error
+	CreateWorkspace(ctx context.Context, ws Workspace) (Created[Workspace], error)
 	// Workspaces returns every workspace in position order.
 	Workspaces(ctx context.Context) ([]Workspace, error)
+	// RenameWorkspace gives one workspace a new name and returns the stored
+	// row. ErrNoSuchWorkspace when the id names none — a rename never
+	// creates, because a create is the only thing that may fix an id.
+	RenameWorkspace(ctx context.Context, id, name string) (Workspace, error)
+	// ReorderWorkspaces takes the WHOLE switcher order and writes positions
+	// 0..n-1 from it, in one transaction. ids must be a permutation of every
+	// workspace; anything else is ErrNotAPermutation and nothing moves.
+	ReorderWorkspaces(ctx context.Context, ids []string) ([]Workspace, error)
 	// DeleteWorkspace removes a workspace; its tabs, and their panes, go with
 	// it (ON DELETE CASCADE — a tab has no meaning outside a workspace).
 	DeleteWorkspace(ctx context.Context, id string) error
-	// CreateTab records one tab under an existing workspace. A lineage parent
-	// that names no tab, that names the tab itself, or that would join a
-	// chain longer than lineage.MaxDepth is refused and nothing is written.
-	CreateTab(ctx context.Context, tab Tab) error
+	// CreateTab records one tab under an existing workspace, with the same
+	// three answers CreateWorkspace gives. A workspace that does not exist is
+	// ErrNoSuchWorkspace. A lineage parent that names no tab, that names the
+	// tab itself, or that would join a chain longer than lineage.MaxDepth is
+	// refused and nothing is written.
+	CreateTab(ctx context.Context, tab Tab) (Created[Tab], error)
 	// Tabs returns one workspace's tabs in position order.
 	Tabs(ctx context.Context, workspaceID string) ([]Tab, error)
+	// RenameTab sets or CLEARS the name the user typed. nil is not "no
+	// change": it is the tab going back to the label derived from its panes
+	// (§4.5), which is a real product state and the normal one.
+	RenameTab(ctx context.Context, id string, name *string) (Tab, error)
+	// RecolourTab sets or clears the tab's colour; nil is an undecorated tab.
+	RecolourTab(ctx context.Context, id string, colour *string) (Tab, error)
+	// PinTab keeps a tab at the head of the strip, or stops doing so.
+	PinTab(ctx context.Context, id string, pinned bool) (Tab, error)
+	// ReorderTabs takes the whole strip order for ONE workspace. ids must be
+	// a permutation of that workspace's tabs — a tab belonging to another
+	// workspace is not a member, so naming one is ErrNotAPermutation and not
+	// a move: reordering a strip never changes membership.
+	ReorderTabs(ctx context.Context, workspaceID string, ids []string) ([]Tab, error)
 	// DeleteTab removes a tab; its panes go with it, and any tab that records
 	// it as its lineage parent keeps its row with a null parent — the honest
 	// "provenance lost" state (ON DELETE SET NULL, the same choice
@@ -185,8 +223,26 @@ type LayoutRepository interface {
 	// delete a tab the user still has open; RESTRICT would make a tab that
 	// ever spawned another undeletable, and §4.4 removes tabs automatically.
 	DeleteTab(ctx context.Context, id string) error
-	// CreatePane records one pane under an existing tab.
-	CreatePane(ctx context.Context, pane Pane) error
+	// CreatePane records one pane under an existing tab, with the same three
+	// answers the other two creates give. A tab that does not exist is
+	// ErrNoSuchTab.
+	CreatePane(ctx context.Context, pane Pane) (Created[Pane], error)
+	// MovePane changes a pane's tab and NOTHING else (§4.4): the identity,
+	// the cwd, the blocks and the live pipe are untouched, because only a
+	// reference moved. That the round trip is lossless by construction is why
+	// the durable object is the pane and the tab is the cheap wrapper.
+	//
+	// The tab left with no panes is NOT removed here. The container lifecycle
+	// — the row going in the same transaction as its last member — is
+	// nocx-isoph.3, and splitting it across two beads would give one rule two
+	// owners.
+	MovePane(ctx context.Context, id, tabID string) (Pane, error)
+	// WorkspaceForPane walks pane → tab → workspace. This is what §4.5 means
+	// by workspaceId moving off the session: the backend owns the whole chain
+	// and RESOLVES the answer rather than being told it, so there is one
+	// owner of "which workspace is this in" and it cannot go out of step with
+	// a pane that was dragged elsewhere.
+	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
 	// Panes returns one tab's panes in id order. A pane has no stored
 	// position: §5 gives the member a SHARE and the set a direction, and
 	// nothing else. Ordering within a tab becomes a user-visible operation

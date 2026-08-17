@@ -364,7 +364,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -542,12 +542,25 @@ CREATE INDEX IF NOT EXISTS command_history_by_ended ON command_history (ended_at
 -- → pane. A workspace is FLAT — it has no column naming another workspace, so
 -- nesting is unrepresentable rather than merely unused; depth comes from
 -- lineage, which lives on the tab.
+--
+-- EVERY ID HERE IS MINTED BY THE FRONTEND AND IS UNTRUSTED (§7), so all three
+-- tables carry a digest: the store's own hash of what the create asked for,
+-- bound to the id (nocx-isoph.2). It is what tells a RETRY of a create — the
+-- socket dropped and the answer was lost, which is why AD-9 exists — from an
+-- id being reused for something else. The first replays and returns the row
+-- that is already there; the second is refused. The client never sends it and
+-- never sees it: a value the client could supply would bind nothing.
+--
+-- The default value is for the rows the BACKEND mints — the fallback
+-- workspace the ledger ensures for a session nobody recorded, which no
+-- frontend create ever asked for and which therefore matches no digest.
 CREATE TABLE IF NOT EXISTS workspaces (
   id           TEXT PRIMARY KEY,           -- client-minted UUIDv7
   name         TEXT NOT NULL,
   position     INTEGER NOT NULL DEFAULT 0, -- switcher order
   created_at   INTEGER NOT NULL,           -- backend wall clock, display only
-  payload      TEXT NOT NULL DEFAULT '{}'  -- sparse extension only
+  payload      TEXT NOT NULL DEFAULT '{}', -- sparse extension only
+  digest       TEXT NOT NULL DEFAULT ''    -- the create key's content binding
 ) STRICT;
 
 -- A tab is the strip entry and what the user decorates (§4.5). What is here
@@ -577,7 +590,8 @@ CREATE TABLE IF NOT EXISTS tabs (
   position     INTEGER NOT NULL DEFAULT 0, -- strip order
   pinned       INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
   layout       TEXT NOT NULL DEFAULT 'row' CHECK (layout IN ('row','column')),
-  seen_at      INTEGER                     -- the seen-mark; NULL = never seen
+  seen_at      INTEGER,                    -- the seen-mark; NULL = never seen
+  digest       TEXT NOT NULL DEFAULT ''    -- the create key's content binding
 ) STRICT;
 
 -- A pane is the DURABLE IDENTITY (§5): it outlives its shell, its tab and the
@@ -596,7 +610,8 @@ CREATE TABLE IF NOT EXISTS panes (
   cwd        TEXT NOT NULL,
   kind       TEXT NOT NULL CHECK (kind IN ('local','ssh')),
   endpoint   TEXT,                         -- canonical user@host:port; NULL local
-  size_share REAL NOT NULL DEFAULT 1.0 CHECK (size_share > 0)
+  size_share REAL NOT NULL DEFAULT 1.0 CHECK (size_share > 0),
+  digest     TEXT NOT NULL DEFAULT ''      -- the create key's content binding
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS sessions (

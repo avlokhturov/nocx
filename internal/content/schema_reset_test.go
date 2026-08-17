@@ -372,17 +372,17 @@ func TestRebuildDropsTheLayoutChainIncludingSelfReferencingTabs(t *testing.T) {
 	db := openStore(t, path)
 	ctx := context.Background()
 	layout := db.Layout()
-	if err := layout.CreateWorkspace(ctx, Workspace{ID: "ws-1", Name: "work"}); err != nil {
+	if _, err := layout.CreateWorkspace(ctx, Workspace{ID: "ws-1", Name: "work"}); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
-	if err := layout.CreateTab(ctx, Tab{ID: "tab-1", WorkspaceID: "ws-1", Layout: LayoutRow}); err != nil {
+	if _, err := layout.CreateTab(ctx, Tab{ID: "tab-1", WorkspaceID: "ws-1", Layout: LayoutRow}); err != nil {
 		t.Fatalf("CreateTab: %v", err)
 	}
 	parent := "tab-1"
-	if err := layout.CreateTab(ctx, Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: &parent, Layout: LayoutRow}); err != nil {
+	if _, err := layout.CreateTab(ctx, Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: &parent, Layout: LayoutRow}); err != nil {
 		t.Fatalf("CreateTab child: %v", err)
 	}
-	if err := layout.CreatePane(ctx, Pane{ID: "pane-1", TabID: "tab-2", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
+	if _, err := layout.CreatePane(ctx, Pane{ID: "pane-1", TabID: "tab-2", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
 		t.Fatalf("CreatePane: %v", err)
 	}
 	if err := db.Close(); err != nil {

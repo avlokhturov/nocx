@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // sessionMachine is the transport-owned session lifecycle surface the
@@ -91,7 +92,50 @@ type openHandlers struct {
 	// over a channel that is not the terminal. An explicit seam, not the
 	// whole server.
 	lifecycle ssh.RemoteLifecycle
-	log       log.Logger
+	// panes resolves pane → tab → workspace for the open ack's workspaceId
+	// (nocx-isoph.2). nil when the content store is not wired, which is the
+	// honest state and not a degrade to hide: with no layout store there is
+	// no chain to walk and every session is in the default workspace.
+	//
+	// It is the store's READ seam and not the gated LayoutOperation, and the
+	// reason is a deadlock rather than a convenience. This handler already
+	// runs inside the open operation, which holds [config, session] and then
+	// the execution lane; acquiring the content operation inside it would
+	// take a second lane permit while holding one, and with every lane permit
+	// held by an open the whole control plane would stop. The read itself
+	// needs no gate: layout reads go straight to the pool and never through
+	// the single writer goroutine.
+	panes paneWorkspaces
+	log   log.Logger
+}
+
+// paneWorkspaces answers "which workspace is this pane in" — the one
+// derivation §4.5 leaves in the backend, satisfied by
+// content.LayoutRepository. Declared here as the narrow seam this handler
+// needs rather than taken as the whole repository: an open may resolve a
+// workspace and may not write a layout row.
+type paneWorkspaces interface {
+	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
+}
+
+// workspaceForOpen derives the workspace this session's ack will carry.
+//
+// THE CHAIN IS THE ANSWER, never a value the renderer sent: the renderer
+// names a PANE — the durable identity it already owns — and the backend walks
+// pane → tab → workspace itself. A paneId naming no pane is refused rather
+// than defaulted, because "the pane you named does not exist" and "you named
+// no pane" are different facts and answering both with the default would hide
+// the first.
+//
+// No paneId is the second fact, and it is the ordinary one until the renderer
+// starts minting panes (nocx-isoph.4): the session is in the default
+// workspace, resolved through internal/workspace.Default, which is the single
+// owner of that decision (AD-7).
+func (h openHandlers) workspaceForOpen(ctx context.Context, paneID string) (string, error) {
+	if paneID == "" || h.panes == nil {
+		return string(workspace.Default), nil
+	}
+	return h.panes.WorkspaceForPane(ctx, paneID)
 }
 
 // openResult is the open ack payload, declared once (contracts/open.schema
@@ -168,6 +212,16 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
 		_ = respond(r, resp)
+		return
+	}
+
+	// The workspace is resolved BEFORE anything is spawned or dialed, for
+	// the reason the parent claim is: a request that cannot be satisfied must
+	// not cost the user a shell or an ssh handshake, and a refused open must
+	// leave nothing behind.
+	workspaceID, wsErr := h.workspaceForOpen(ctx, params.PaneID)
+	if wsErr != nil {
+		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+wsErr.Error()))
 		return
 	}
 
@@ -450,7 +504,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		SessionID:    string(sess.ID()),
 		InstanceID:   string(ident.InstanceID),
 		SessionEpoch: ident.Epoch,
-		WorkspaceID:  string(sess.WorkspaceID()),
+		WorkspaceID:  workspaceID,
 		Cwd:          sess.Cwd(),
 		DesiredMode:  desiredModeForAck(cfg.Remote),
 		Parent:       parentResultFor(sess),
@@ -824,7 +878,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

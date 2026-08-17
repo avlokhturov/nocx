@@ -239,13 +239,23 @@ type layoutStub struct {
 	log log.Logger
 }
 
-func (s *layoutStub) CreateWorkspace(_ context.Context, ws Workspace) error {
+func (s *layoutStub) CreateWorkspace(_ context.Context, ws Workspace) (Created[Workspace], error) {
 	s.log.Info("content stub: LayoutRepository.CreateWorkspace", "id", ws.ID)
-	return ErrNotImplemented
+	return Created[Workspace]{}, ErrNotImplemented
 }
 
 func (s *layoutStub) Workspaces(_ context.Context) ([]Workspace, error) {
 	s.log.Info("content stub: LayoutRepository.Workspaces")
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) RenameWorkspace(_ context.Context, id, name string) (Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.RenameWorkspace", "id", id, "name", name)
+	return Workspace{}, ErrNotImplemented
+}
+
+func (s *layoutStub) ReorderWorkspaces(_ context.Context, ids []string) ([]Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.ReorderWorkspaces", "count", len(ids))
 	return nil, ErrNotImplemented
 }
 
@@ -254,13 +264,33 @@ func (s *layoutStub) DeleteWorkspace(_ context.Context, id string) error {
 	return ErrNotImplemented
 }
 
-func (s *layoutStub) CreateTab(_ context.Context, tab Tab) error {
+func (s *layoutStub) CreateTab(_ context.Context, tab Tab) (Created[Tab], error) {
 	s.log.Info("content stub: LayoutRepository.CreateTab", "id", tab.ID, "workspace", tab.WorkspaceID)
-	return ErrNotImplemented
+	return Created[Tab]{}, ErrNotImplemented
 }
 
 func (s *layoutStub) Tabs(_ context.Context, workspaceID string) ([]Tab, error) {
 	s.log.Info("content stub: LayoutRepository.Tabs", "workspace", workspaceID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) RenameTab(_ context.Context, id string, _ *string) (Tab, error) {
+	s.log.Info("content stub: LayoutRepository.RenameTab", "id", id)
+	return Tab{}, ErrNotImplemented
+}
+
+func (s *layoutStub) RecolourTab(_ context.Context, id string, _ *string) (Tab, error) {
+	s.log.Info("content stub: LayoutRepository.RecolourTab", "id", id)
+	return Tab{}, ErrNotImplemented
+}
+
+func (s *layoutStub) PinTab(_ context.Context, id string, pinned bool) (Tab, error) {
+	s.log.Info("content stub: LayoutRepository.PinTab", "id", id, "pinned", pinned)
+	return Tab{}, ErrNotImplemented
+}
+
+func (s *layoutStub) ReorderTabs(_ context.Context, workspaceID string, ids []string) ([]Tab, error) {
+	s.log.Info("content stub: LayoutRepository.ReorderTabs", "workspace", workspaceID, "count", len(ids))
 	return nil, ErrNotImplemented
 }
 
@@ -269,9 +299,19 @@ func (s *layoutStub) DeleteTab(_ context.Context, id string) error {
 	return ErrNotImplemented
 }
 
-func (s *layoutStub) CreatePane(_ context.Context, pane Pane) error {
+func (s *layoutStub) CreatePane(_ context.Context, pane Pane) (Created[Pane], error) {
 	s.log.Info("content stub: LayoutRepository.CreatePane", "id", pane.ID, "tab", pane.TabID)
-	return ErrNotImplemented
+	return Created[Pane]{}, ErrNotImplemented
+}
+
+func (s *layoutStub) MovePane(_ context.Context, id, tabID string) (Pane, error) {
+	s.log.Info("content stub: LayoutRepository.MovePane", "id", id, "tab", tabID)
+	return Pane{}, ErrNotImplemented
+}
+
+func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string, error) {
+	s.log.Info("content stub: LayoutRepository.WorkspaceForPane", "pane", paneID)
+	return "", ErrNotImplemented
 }
 
 func (s *layoutStub) Panes(_ context.Context, tabID string) ([]Pane, error) {

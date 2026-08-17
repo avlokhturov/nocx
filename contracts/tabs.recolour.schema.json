@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.recolour.schema.json",
+  "title": "TabsRecolourResult",
+  "description": "Result of the tabs.recolour JSON-RPC method: the tab as stored after the change, read back rather than echoed. It sets the tab's colour. Sending null clears it, leaving an undecorated tab. Three narrow methods rather than one sparse update: a patch where a missing field and a null field mean different things is how 'what changed' stops being answerable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tab"],
+  "properties": {
+    "tab": {
+      "$ref": "tabs.create.schema.json#/$defs/tab"
+    }
+  }
+}
