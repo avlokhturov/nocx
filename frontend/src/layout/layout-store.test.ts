@@ -91,6 +91,22 @@ function fakeClient(over: Partial<LayoutClientLike> = {}): LayoutClientLike & {
       calls.push(['panes.close', { id, replacement }])
       return Promise.resolve({ id })
     },
+    createWorkspace: (ws) => {
+      calls.push(['workspaces.create', ws])
+      return Promise.resolve({
+        workspace: { id: ws.id, name: ws.name, position: ws.position },
+        firstTab: tab(ws.firstTab.id, { workspaceId: ws.id }),
+        firstPane: pane(ws.firstPane.id, ws.firstTab.id, {
+          cwd: ws.firstPane.cwd,
+          kind: ws.firstPane.kind,
+        }),
+        replayed: false,
+      })
+    },
+    closeWorkspace: (id, replacement: Replacement) => {
+      calls.push(['workspaces.close', { id, replacement }])
+      return Promise.resolve({ id })
+    },
   }
   return Object.assign({ calls }, base, over)
 }
@@ -139,6 +155,23 @@ describe('LayoutStore', () => {
     })
     expect(store.tabs().map((t) => t.id)).toEqual([opened.tabId])
     expect(store.tabOf(opened.paneId)?.id).toBe(opened.tabId)
+  })
+
+  it('opens a tab in the workspace the caller names, and in the default when it names none', async () => {
+    // The window shows ONE workspace (§4.3), so a new tab belongs to the one
+    // in front of the person who asked for it. The store does not know which
+    // that is and must not guess: the caller says, and says the default when
+    // that is the answer.
+    const client = fakeClient()
+    const store = new LayoutStore(client)
+    await store.load()
+
+    await store.openTab({ kind: 'local', endpoint: null, cwd: '' }, 'ws-1').created
+    await store.openTab({ kind: 'local', endpoint: null, cwd: '' }).created
+
+    const creates = client.calls.filter(([m]) => m === 'tabs.create').map(([, p]) => p)
+    expect(creates[0]).toMatchObject({ workspaceId: 'ws-1' })
+    expect(creates[1]).toMatchObject({ workspaceId: DEFAULT_WS })
   })
 
   it('refuses to open a tab before it has been told where tabs go', () => {
@@ -245,6 +278,120 @@ describe('LayoutStore', () => {
     // The read after the close is not an optimisation to remove: without it
     // the renderer would have to reconstruct a transaction it did not run.
     expect(calls).toEqual(['layout.read', 'panes.close', 'layout.read'])
+  })
+
+  it('creates a workspace together with its first tab and that tab s first pane', async () => {
+    // §4.1: creation is always creation-with-content. There is no moment at
+    // which an empty workspace exists, so the store cannot offer one either.
+    const client = fakeClient()
+    const store = new LayoutStore(client)
+    await store.load()
+
+    const made = store.createWorkspace('refactor-auth', { kind: 'local', endpoint: null, cwd: '' })
+    await made.created
+
+    expect(isUuidv7(made.workspaceId)).toBe(true)
+    expect(isUuidv7(made.tabId)).toBe(true)
+    expect(isUuidv7(made.paneId)).toBe(true)
+    const [, params] = client.calls.find(([m]) => m === 'workspaces.create')!
+    expect(params).toMatchObject({
+      id: made.workspaceId,
+      name: 'refactor-auth',
+      firstTab: { id: made.tabId },
+      firstPane: { id: made.paneId, kind: 'local', endpoint: null, sizeShare: 1 },
+    })
+    expect(store.workspaces().map((w) => w.id)).toContain(made.workspaceId)
+    expect(store.tab(made.tabId)?.workspaceId).toBe(made.workspaceId)
+    expect(store.panesOf(made.tabId).map((p) => p.id)).toEqual([made.paneId])
+  })
+
+  it('leaves the cache untouched when a workspace create is refused', async () => {
+    const store = new LayoutStore(
+      fakeClient({ createWorkspace: () => Promise.reject(new Error('name is required')) }),
+    )
+    await store.load()
+    const changes = vi.fn()
+    store.onChange(changes)
+
+    const made = store.createWorkspace('', { kind: 'local', endpoint: null, cwd: '' })
+
+    await expect(made.created).rejects.toThrow('name is required')
+    expect(store.workspaces().map((w) => w.id)).toEqual([DEFAULT_WS])
+    expect(changes).not.toHaveBeenCalled()
+  })
+
+  it('closes a workspace with a minted replacement and re-reads what is left', async () => {
+    let read = snapshot({
+      workspaces: [
+        { id: DEFAULT_WS, name: 'default', position: 0 },
+        { id: 'ws-1', name: 'refactor-auth', position: 1 },
+      ],
+      tabs: [tab('t1', { workspaceId: 'ws-1' })],
+      panes: [pane('p1', 't1')],
+    })
+    const calls: string[] = []
+    const client = fakeClient({
+      read: () => {
+        calls.push('layout.read')
+        return Promise.resolve(read)
+      },
+      closeWorkspace: (id, replacement) => {
+        calls.push('workspaces.close')
+        // One transaction on the other side: the workspace, its tabs and
+        // their panes go together, and the replacement is minted because the
+        // close emptied the application.
+        read = snapshot({
+          tabs: [tab(replacement.tabId)],
+          panes: [pane(replacement.paneId, replacement.tabId)],
+        })
+        return Promise.resolve({ id })
+      },
+    })
+    const store = new LayoutStore(client)
+    await store.load()
+
+    const replacement = await store.closeWorkspace('ws-1')
+
+    expect(isUuidv7(replacement.tabId)).toBe(true)
+    expect(isUuidv7(replacement.paneId)).toBe(true)
+    expect(store.workspaces().map((w) => w.id)).toEqual([DEFAULT_WS])
+    expect(store.tabs().map((t) => t.id)).toEqual([replacement.tabId])
+    expect(calls).toEqual(['layout.read', 'workspaces.close', 'layout.read'])
+  })
+
+  it('resolves which panes a workspace holds, including the rows nobody drew', async () => {
+    // MEMBERSHIP IS RESOLVED HERE, and this test is the reason: the chain is
+    // the only thing that knows an ssh row the renderer never drew is still a
+    // member. A caller resolving membership from what is on screen would
+    // close a workspace and leave part of it behind.
+    const store = new LayoutStore(
+      fakeClient({
+        read: () =>
+          Promise.resolve(
+            snapshot({
+              workspaces: [
+                { id: DEFAULT_WS, name: 'default', position: 0 },
+                { id: 'ws-1', name: 'refactor-auth', position: 1 },
+              ],
+              tabs: [
+                tab('t1', { workspaceId: 'ws-1' }),
+                tab('t2', { workspaceId: 'ws-1' }),
+                tab('t3'),
+              ],
+              panes: [
+                pane('p1', 't1'),
+                pane('p2', 't2', { kind: 'ssh', endpoint: 'deploy@srv-01:22' }),
+                pane('p3', 't3'),
+              ],
+            }),
+          ),
+      }),
+    )
+    await store.load()
+
+    expect(store.panesOfWorkspace('ws-1').map((p) => p.id)).toEqual(['p1', 'p2'])
+    expect(store.tabsOfWorkspace('ws-1').map((t) => t.id)).toEqual(['t1', 't2'])
+    expect(store.panesOfWorkspace('nothing-here')).toEqual([])
   })
 
   it('notifies its listeners once per accepted change', async () => {

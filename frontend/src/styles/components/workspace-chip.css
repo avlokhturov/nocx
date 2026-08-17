@@ -1,0 +1,35 @@
+/* WorkspaceChip — how the horizontal strip says which workspace it is showing
+   (nocx-isoph.5, workspaces UX design §4.3).
+
+   PLACEMENT ONLY. Everything that carries appearance here is the kit's: the
+   control is a ghost Button and the switcher is a ContextMenu, and a surface
+   may place a kit component and may never repaint it. What this file owns is
+   where the chip sits in the row (first, before the tabs, not stretching) and
+   how long a workspace name may get before it ellipses — a name is the user's
+   and can be any length, and a chip that grows without a bound pushes the
+   tabs out of the row it exists to make room in.
+
+   No colour, no badge, no glyph of its own: this epic ships membership, not a
+   fence (§5.5), so there is nothing here to paint a status with. */
+
+.nocx-workspace-chip {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding-left: var(--space-1);
+  padding-right: var(--space-1);
+  border-right: 1px solid var(--color-divider);
+}
+
+.nocx-workspace-chip > .ui-button {
+  max-width: 180px;
+  gap: var(--space-1);
+}
+
+/* The name, and the only thing here that can be long. It ellipses rather than
+   wrapping: the strip is one row tall. */
+.nocx-workspace-chip__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

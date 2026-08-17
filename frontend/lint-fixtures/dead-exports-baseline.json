@@ -275,16 +275,6 @@
     },
     {
       "kind": "files",
-      "file": "src/generated/workspaces.close.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/workspaces.create.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
       "file": "src/generated/workspaces.rename.ts",
       "symbol": ""
     },
@@ -437,6 +427,21 @@
       "kind": "types",
       "file": "src/generated/tabs.reorder.ts",
       "symbol": "Tab"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/workspaces.create.ts",
+      "symbol": "Pane"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/workspaces.create.ts",
+      "symbol": "Tab"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/workspaces.create.ts",
+      "symbol": "Workspace"
     },
     {
       "kind": "types",

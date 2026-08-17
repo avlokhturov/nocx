@@ -19,6 +19,8 @@ import type { TabsReorderResult } from '../generated/tabs.reorder'
 import type { TabsCloseResult } from '../generated/tabs.close'
 import type { PanesCreateResult } from '../generated/panes.create'
 import type { PanesCloseResult } from '../generated/panes.close'
+import type { WorkspacesCreateResult } from '../generated/workspaces.create'
+import type { WorkspacesCloseResult } from '../generated/workspaces.close'
 
 /** The identity a close carries in case it empties the application: the
  *  backend mints the replacement tab, but its ids are DURABLE and therefore
@@ -42,10 +44,23 @@ export interface PaneFacts {
   sizeShare: number
 }
 
+/** A workspace and the tab and pane it is minted around. Creation is always
+ *  creation-with-content (§4.1), so there is no shape here for a workspace on
+ *  its own — the wire has none either. */
+export interface WorkspaceFacts {
+  id: string
+  name: string
+  position: number
+  firstTab: { id: string }
+  firstPane: PaneFacts
+}
+
 /** The subset the store needs, declared so a test can substitute a fake
  *  without a WebSocket. */
 export interface LayoutClientLike {
   read(): Promise<LayoutReadResult>
+  createWorkspace(workspace: WorkspaceFacts): Promise<WorkspacesCreateResult>
+  closeWorkspace(id: string, replacement: Replacement): Promise<WorkspacesCloseResult>
   createTab(tab: {
     id: string
     workspaceId: string
@@ -69,6 +84,38 @@ export class LayoutClient implements LayoutClientLike {
    *  interleave with a write and produce a strip that never existed. */
   read(): Promise<LayoutReadResult> {
     return this.dispatcher.call<LayoutReadResult>('layout.read', {})
+  }
+
+  /** A workspace arrives with its first tab and that tab's first pane, for
+   *  the same reason a tab arrives with a pane: an empty container may not
+   *  exist even for the length of a statement (§4.1). The tab carries no
+   *  decoration — a workspace's first tab was never named by anybody, and its
+   *  label is derived from its pane. */
+  createWorkspace(workspace: WorkspaceFacts): Promise<WorkspacesCreateResult> {
+    return this.dispatcher.call<WorkspacesCreateResult>('workspaces.create', {
+      id: workspace.id,
+      name: workspace.name,
+      position: workspace.position,
+      firstTab: {
+        id: workspace.firstTab.id,
+        name: null,
+        colour: null,
+        position: 0,
+        pinned: false,
+        layout: 'row',
+      },
+      firstPane: workspace.firstPane,
+    })
+  }
+
+  /** The whole container in ONE call, and that is the point: the backend
+   *  takes the workspace, its tabs and their panes in a single transaction,
+   *  so there is no half-closed workspace to recover from. It also reaches
+   *  the rows the renderer never drew — a restored ssh pane has no chrome to
+   *  close, and closing only what is on screen would leave the workspace
+   *  standing with its invisible members inside it. */
+  closeWorkspace(id: string, replacement: Replacement): Promise<WorkspacesCloseResult> {
+    return this.dispatcher.call<WorkspacesCloseResult>('workspaces.close', { id, replacement })
   }
 
   /** Creation is always creation-with-content: a tab arrives with the pane it

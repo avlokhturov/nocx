@@ -73,6 +73,16 @@ export interface TabProps {
    *  keeping (layout/strip-order.ts); this only draws the mark that says why
    *  a tab is where it is. */
   pinned?: boolean
+  /** How far in the row is drawn: 0 for a top-level row, +1 per LINEAGE
+   *  generation (nocx-isoph.5, layout/strip-tree.ts). Indentation is driven
+   *  by the number and never by nested DOM — the same technique the kit's
+   *  TreeRow uses — so a row is one row at any depth: it keeps its drag, its
+   *  keyboard place and its close. The vertical strip is where the tree is
+   *  drawn (§4.3); the horizontal one passes 0 and the attribute is absent.
+   *
+   *  It is provenance and nothing else. A child is drawn under its parent and
+   *  no authority follows from that (ADR-0020 §5). */
+  depth?: number
   /** Called when the tab is right-clicked, with the viewport coordinates the
    *  menu should open at. The strip owns the menu; a tab knows only that it
    *  was asked for one. */
@@ -98,6 +108,7 @@ export function Tab(props: TabProps) {
       data-colour={props.colour || undefined}
       data-pinned={props.pinned === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
+      data-depth={(props.depth ?? 0) > 0 ? String(props.depth) : undefined}
       // Kept in BOTH orientations. The vertical row shows the same text as a
       // subtitle, but that line ellipses — so dropping the native tooltip there
       // took away the only way to read a long path in full.

@@ -14,6 +14,7 @@
 // give one fact two owners that diverge the first time a pane is dragged.
 import type { LayoutReadResult, Tab, Pane, Workspace } from '../generated/layout.read'
 import type { LayoutClientLike, PaneFacts, Replacement } from './layout-client'
+import { stripOrder } from './strip-order'
 import { uuidv7 } from './uuid7'
 
 /** An empty chain: what a fresh profile has, and what the store holds before
@@ -58,6 +59,12 @@ export interface OpenedTab {
   created: Promise<void>
 }
 
+/** What createWorkspace minted, and when the backend agreed. The three ids
+ *  come back synchronously for the same §7 reason a tab's two do. */
+export interface OpenedWorkspace extends OpenedTab {
+  workspaceId: string
+}
+
 export class LayoutStore {
   private state: LayoutReadResult = EMPTY
   private readonly listeners = new Set<() => void>()
@@ -100,6 +107,32 @@ export class LayoutStore {
     return this.state.defaultWorkspaceId
   }
 
+  /**
+   * WHAT A WORKSPACE HOLDS, RESOLVED HERE AND NOWHERE ELSE.
+   *
+   * nocx-isoph.6 left `PaneManager.closeWorkspace` taking its members as a
+   * parameter and named the question this answers: membership is a fact the
+   * BACKEND owns (§4.4), and the renderer's cache of it is this object — so
+   * the cache is where the lookup belongs, and the pane layer's job is to map
+   * the rows onto the chrome it happens to have.
+   *
+   * That split matters for one case in particular: an ssh pane is restored
+   * into the chain and NOT drawn (PaneManager.adopt). It is a member. A
+   * caller that resolved membership from what is on screen would close a
+   * workspace and leave part of it behind — which is exactly the defect the
+   * whole-container `workspaces.close` exists to avoid.
+   *
+   * In strip order, so a caller naming the members in a question names them
+   * in the order the person sees them.
+   */
+  tabsOfWorkspace(workspaceId: string): readonly Tab[] {
+    return stripOrder(this.state.tabs.filter((t) => t.workspaceId === workspaceId))
+  }
+
+  panesOfWorkspace(workspaceId: string): readonly Pane[] {
+    return this.tabsOfWorkspace(workspaceId).flatMap((t) => this.panesOf(t.id))
+  }
+
   /** Notified after every change to the cache, and only after: a listener
    *  that runs on a call that FAILED would be rendering a state that does
    *  not exist. */
@@ -128,11 +161,16 @@ export class LayoutStore {
    * The answer, not the request, is what lands in the cache: a create reads
    * back what the store holds, including the containers it filled in.
    */
-  openTab(pane: NewPane): OpenedTab {
+  openTab(pane: NewPane, intoWorkspace?: string): OpenedTab {
     const tabId = uuidv7()
     const paneId = uuidv7()
-    const workspaceId = this.state.defaultWorkspaceId
-    if (workspaceId === '') {
+    // WHERE A NEW TAB GOES IS THE CALLER'S ANSWER, not this module's. A window
+    // shows one workspace at a time (§4.3), so a tab the person opens belongs
+    // to the one in front of them — and only the layer holding the viewport
+    // knows which that is. The default is what "nowhere else was said" means,
+    // and it is still the backend's id rather than a constant spelled here.
+    const workspaceId = intoWorkspace ?? this.state.defaultWorkspaceId
+    if (this.state.defaultWorkspaceId === '') {
       throw new Error('layout: openTab before the first read; the workspace is the backend to name')
     }
     const created = this.client
@@ -151,6 +189,67 @@ export class LayoutStore {
         this.changed()
       })
     return { tabId, paneId, created }
+  }
+
+  /**
+   * Create a workspace around a new pane — three ids, one call.
+   *
+   * CREATION IS ALWAYS CREATION-WITH-CONTENT (§4.1). "New workspace" mints
+   * the workspace together with its first tab and that tab's first pane,
+   * because a workspace with no tabs has no meaning and the empty state that
+   * would need a rule is simply never reachable.
+   *
+   * The name is REQUIRED and comes from the person: a workspace, unlike a
+   * tab, is always created deliberately (the backend refuses a blank one).
+   * The default workspace is the exception that proves it, and nothing here
+   * can create that — it is the backend's row and this method never names it.
+   */
+  createWorkspace(name: string, pane: NewPane): OpenedWorkspace {
+    const workspaceId = uuidv7()
+    const tabId = uuidv7()
+    const paneId = uuidv7()
+    const created = this.client
+      .createWorkspace({
+        id: workspaceId,
+        name,
+        position: this.state.workspaces.length,
+        firstTab: { id: tabId },
+        firstPane: paneFacts(paneId, pane),
+      })
+      .then((made) => {
+        this.state = {
+          ...this.state,
+          workspaces: [
+            ...this.state.workspaces.filter((w) => w.id !== made.workspace.id),
+            made.workspace,
+          ],
+          tabs: [...this.state.tabs.filter((t) => t.id !== made.firstTab.id), made.firstTab],
+          panes: [...this.state.panes.filter((p) => p.id !== made.firstPane.id), made.firstPane],
+        }
+        this.changed()
+      })
+    return { workspaceId, tabId, paneId, created }
+  }
+
+  /**
+   * Close a workspace: the container, its tabs and their panes, in the
+   * backend's one transaction, and then a re-read.
+   *
+   * The re-read is the point rather than a nicety, exactly as it is in
+   * closePane: this close can also mint the replacement tab that keeps the
+   * application from being left with none, and reconstructing that here would
+   * be the renderer deciding what the chain now looks like. It asks.
+   *
+   * WHAT THIS METHOD IS NOT: the question. Whether the person wants this is
+   * `PaneManager.closeWorkspace`'s (nocx-isoph.6) — it names what is live
+   * before anything dies, and it must have been answered before this is
+   * called. Nothing here asks anything.
+   */
+  async closeWorkspace(workspaceId: string): Promise<Replacement> {
+    const replacement: Replacement = { tabId: uuidv7(), paneId: uuidv7(), cwd: '' }
+    await this.client.closeWorkspace(workspaceId, replacement)
+    await this.load()
+    return replacement
   }
 
   /** The name the user typed, or null to go back to the label its panes
