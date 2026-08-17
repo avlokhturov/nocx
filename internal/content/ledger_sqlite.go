@@ -360,11 +360,28 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 
 // FinishExecution closes the run with its termination reason (the five
 // outcomes one status plus exit code cannot separate — ADR-0020 §4) and
-// closes the entry with its final status. For an agent run (state IS NOT
-// NULL) it also maps the termination to the terminal run state the renderer
-// draws — completed | cancelled | failed | interrupted — in the SAME
-// update, so the run is never reported terminal in one vocabulary and not
-// the other. Executions without a state (a frame capture) are untouched.
+// closes the entry with its final status AND its terminal facts: the start
+// if this is what learns it, the end, the measured duration and the kind
+// payload. For an agent run (state IS NOT NULL) it also maps the termination
+// to the terminal run state the renderer draws — completed | cancelled |
+// failed | interrupted — in the SAME update, so the run is never reported
+// terminal in one vocabulary and not the other. Executions without a state
+// (a frame capture) are untouched.
+//
+// The entry's facts are written HERE, inside the run's own transaction,
+// rather than through Submit (nocx-rtg0.23). Two reasons, and the second is
+// the one that decided it. Submit is write-once: its id is an idempotency
+// key bound to a digest of the submitted content, so a later fact routed
+// through it would change the digest and make every replay of the original
+// open an ErrIDConflict. And a close is one commit or none: a crash between
+// the run's end and the entry's payload would leave a closed entry with no
+// exit code, which is exactly the state a reader cannot tell from "the
+// command produced none".
+//
+// COALESCE is the "fills what is missing, overwrites nothing" rule in SQL:
+// started_at keeps a start the row already knew, duration_ms and payload
+// keep what they hold when the close carries none. ended_at is assigned
+// outright because a close always knows when it ended.
 func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -390,8 +407,14 @@ func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE entries SET phase = 'closed', status = ? WHERE id = ?`,
-			string(end.Status), entryID); err != nil {
+			`UPDATE entries SET phase = 'closed', status = ?,
+			   started_at = COALESCE(started_at, ?),
+			   ended_at = ?,
+			   duration_ms = COALESCE(?, duration_ms),
+			   payload = COALESCE(?, payload)
+			 WHERE id = ?`,
+			string(end.Status), end.StartedAt, end.EndedAt, end.DurationMs,
+			end.Payload, entryID); err != nil {
 			return err
 		}
 		// An ASK run (an entry with a caused-by answer) closes its answer

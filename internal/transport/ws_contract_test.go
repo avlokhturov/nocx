@@ -4814,12 +4814,15 @@ func TestLedgerEvents_OverTheWireConformToContract(t *testing.T) {
 	bindSchema := loadSchema(t, "ledger.bind.schema.json")
 	closeSchema := loadSchema(t, "ledger.close.schema.json")
 
+	// The close carries every fact it may (nocx-rtg0.23), so the ack that is
+	// validated is the one the widened method actually answers with.
 	closeParams := func(id string, seq int) map[string]any {
 		return map[string]any{
 			"envelope":   ledgerEnv(sid, id, "make", seq),
 			"status":     "success",
-			"facts":      map[string]any{"terminationReason": "completed"},
+			"facts":      map[string]any{"terminationReason": "completed", "exitCode": 0},
 			"durationMs": 42,
+			"startedAt":  1_750_000_000_000,
 		}
 	}
 

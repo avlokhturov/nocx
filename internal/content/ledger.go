@@ -28,6 +28,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 )
 
@@ -305,11 +306,57 @@ type StartExecution struct {
 }
 
 // FinishExecution closes one run and the entry with it: the termination
-// reason is the execution's fact, the status is the entry's final one.
+// reason is the execution's fact, the status is the entry's final one, and
+// the remaining three are the ENTRY's terminal facts — what a close learns
+// that only the close can know.
+//
+// Those three are here rather than on SubmitEntry because Submit is
+// write-once by construction: the client-minted id is an idempotency key
+// bound to a digest of the submitted content, so routing a later fact
+// through Submit would change the digest and turn every outbox replay of the
+// original open into ErrIDConflict (nocx-rtg0.23). A close is the second
+// event on one row, never a second submission of one intent.
 type FinishExecution struct {
 	EndedAt           int64
 	TerminationReason TerminationReason
 	Status            EntryStatus
+	// StartedAt fills entries.started_at when the close is what learns it: a
+	// close whose open was lost carries the start the renderer measured. A
+	// row that already knows its start keeps it — the close never overwrites
+	// a fact the ledger already held.
+	StartedAt *int64
+	// DurationMs is the renderer's measured duration. Nil leaves whatever the
+	// row already carries: a close with no measurement erases nothing.
+	DurationMs *int64
+	// Payload is the entry's kind payload (design §3.3) — for a shell entry
+	// the exit code. Nil leaves the column untouched, which is what a close
+	// on a kind with no terminal payload wants.
+	Payload *string
+}
+
+// ShellPayload is the `shell` arm of the kind payload (design §3.3), the
+// durable form of the facts that are shell-specific and therefore NOT
+// top-level entry columns — hoisting them would make every other kind carry
+// nulls.
+//
+// The arm carries exactly one field today. `trusted` and `markers` are in
+// the design's version of this type and are deliberately absent: ADR-0024
+// deleted the `trusted` boolean, its laundering rule and the anonymous
+// marker cycle it was derived from, so neither has a source in the renderer
+// any more. A field the wire could only fill with a guess is worse than one
+// that is not there.
+type ShellPayload struct {
+	Kind     EntryKind `json:"kind"`
+	V        int       `json:"v"`
+	ExitCode *int      `json:"exitCode"`
+}
+
+// ShellPayloadJSON renders the shell arm for storage. The error json.Marshal
+// declares cannot happen for three primitive fields, and a branch no test
+// could reach is worse than none.
+func ShellPayloadJSON(exitCode *int) string {
+	b, _ := json.Marshal(ShellPayload{Kind: EntryShell, V: 1, ExitCode: exitCode})
+	return string(b)
 }
 
 // FinishAgentRun is the terminal close of an assistant run (the state

@@ -11,8 +11,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -252,6 +255,235 @@ func TestLedgerClose_ForAnIdNeverOpened_CreatesExactlyOneClosedRow(t *testing.T)
 	}
 }
 
+// ── the two close paths record the same facts (nocx-rtg0.23) ──────────────
+
+// closedFacts is everything a close is supposed to leave on the entry. ended
+// is a presence flag, not a value: the store stamps the execution's end from
+// its OWN wall clock, so two closes a few milliseconds apart legitimately
+// differ there and nowhere else.
+type closedFacts struct {
+	Phase      content.Phase
+	Status     content.EntryStatus
+	Cwd        string
+	Kind       content.EntryKind
+	Intent     string
+	StartedAt  *int64
+	DurationMs *int64
+	Payload    string
+	Executions int
+	Ended      bool
+}
+
+func factsOf(t *testing.T, db content.ContentDB, id string) closedFacts {
+	t.Helper()
+	row := mustEntry(t, db, id)
+	return closedFacts{
+		Phase: row.Phase, Status: row.Status, Cwd: row.Cwd, Kind: row.Kind,
+		Intent: row.Intent, StartedAt: row.StartedAt, DurationMs: row.DurationMs,
+		Payload: row.Payload, Executions: len(row.Executions), Ended: row.EndedAt != nil,
+	}
+}
+
+// The defect this bead fixes, stated as the user's outcome: whether the open
+// arrived or was lost, the closed row says the same thing. Both paths are
+// asserted against ONE expected row, because a test that exercised only one
+// of them could not have reported that they differed.
+func TestLedgerClose_BothPathsRecordTheSameFacts(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	closeParams := func(id string, clientSeq int) map[string]any {
+		return map[string]any{
+			"envelope":   ledgerEnv(sid, id, "make test", clientSeq),
+			"status":     "failure",
+			"facts":      map[string]any{"terminationReason": "failed", "exitCode": 2},
+			"durationMs": 2300,
+			"startedAt":  1_750_000_047_700,
+		}
+	}
+
+	// Path 1: the open arrived, so the row already exists when the close lands.
+	if _, errObj := ledgerCall(t, conn, "ledger.open",
+		map[string]any{"envelope": ledgerEnv(sid, "twin-open", "make test", 1)}, 2); errObj != nil {
+		t.Fatalf("ledger.open error: %+v", errObj)
+	}
+	if _, errObj := ledgerCall(t, conn, "ledger.close", closeParams("twin-open", 2), 3); errObj != nil {
+		t.Fatalf("ledger.close on the open row: %+v", errObj)
+	}
+
+	// Path 2: the open was lost, so the close creates its own row.
+	if _, errObj := ledgerCall(t, conn, "ledger.close", closeParams("twin-orphan", 1), 4); errObj != nil {
+		t.Fatalf("ledger.close creating its row: %+v", errObj)
+	}
+
+	want := closedFacts{
+		Phase: content.PhaseClosed, Status: content.EntryFailure, Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "make test",
+		StartedAt: i64(1_750_000_047_700), DurationMs: i64(2300),
+		Payload: `{"kind":"shell","v":1,"exitCode":2}`, Executions: 1, Ended: true,
+	}
+	for _, id := range []string{"twin-open", "twin-orphan"} {
+		got := factsOf(t, db, id)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s:\n got  %s\n want %s", id, showFacts(got), showFacts(want))
+		}
+	}
+}
+
+func i64(n int64) *int64 { return &n }
+
+func showFacts(f closedFacts) string {
+	started, duration := "nil", "nil"
+	if f.StartedAt != nil {
+		started = strconv.FormatInt(*f.StartedAt, 10)
+	}
+	if f.DurationMs != nil {
+		duration = strconv.FormatInt(*f.DurationMs, 10)
+	}
+	return fmt.Sprintf("phase=%s status=%s cwd=%s kind=%s intent=%q startedAt=%s durationMs=%s payload=%s execs=%d ended=%v",
+		f.Phase, f.Status, f.Cwd, f.Kind, f.Intent, started, duration, f.Payload, f.Executions, f.Ended)
+}
+
+// Re-delivery of a close is a no-op, and now that a close carries facts, "no
+// op" has to mean the facts too: counted rows and executions, and the stored
+// facts identical before and after the second delivery.
+func TestLedgerCloseSentTwice_ChangesNothing(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	params := map[string]any{
+		"envelope":   ledgerEnv(sid, "twice-1", "make test", 1),
+		"status":     "success",
+		"facts":      map[string]any{"terminationReason": "completed", "exitCode": 0},
+		"durationMs": 700,
+		"startedAt":  1_750_000_047_700,
+	}
+	if _, errObj := ledgerCall(t, conn, "ledger.close", params, 2); errObj != nil {
+		t.Fatalf("first close: %+v", errObj)
+	}
+	first := factsOf(t, db, "twice-1")
+
+	ack, errObj := ledgerCall(t, conn, "ledger.close", params, 3)
+	if errObj != nil {
+		t.Fatalf("second close: %+v", errObj)
+	}
+	if ack.Outcome != "replay" {
+		t.Fatalf("second close outcome = %q, want replay", ack.Outcome)
+	}
+	if n := entryCount(t, db); n != 1 {
+		t.Fatalf("two closes produced %d rows, want exactly 1", n)
+	}
+	if got := factsOf(t, db, "twice-1"); !reflect.DeepEqual(got, first) {
+		t.Fatalf("the re-delivery rewrote the row:\n got  %s\n was  %s", showFacts(got), showFacts(first))
+	}
+	if first.Executions != 1 {
+		t.Fatalf("%d executions, want exactly 1", first.Executions)
+	}
+}
+
+// ── the cutover checklist: what command_history answers today ─────────────
+
+// nocx-rtg0.19 deletes command_history and makes history.query answer from the
+// ledger. That is only safe if the ledger can answer what the interim table's
+// read path returns (sqlite.go's recordCols). This test walks those twelve
+// columns one by one against a real closed row. Four of them it cannot answer,
+// and each says so here rather than being discovered during the cutover.
+func TestLedgerAnswers_TheCommandHistoryReadPath(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	const secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ" //nolint:gosec // a synthetic detector fixture
+	intent := "deploy --token=" + secret
+	if _, errObj := ledgerCall(t, conn, "ledger.open",
+		map[string]any{"envelope": ledgerEnv(sid, "cutover-1", intent, 1)}, 2); errObj != nil {
+		t.Fatalf("ledger.open error: %+v", errObj)
+	}
+	if _, errObj := ledgerCall(t, conn, "ledger.close", map[string]any{
+		"envelope":   ledgerEnv(sid, "cutover-1", intent, 2),
+		"status":     "failure",
+		"facts":      map[string]any{"terminationReason": "failed", "exitCode": 127},
+		"durationMs": 4200,
+		"startedAt":  1_750_000_047_700,
+	}, 3); errObj != nil {
+		t.Fatalf("ledger.close error: %+v", errObj)
+	}
+	row := mustEntry(t, db, "cutover-1")
+
+	// 1. id — the row's stable handle. command_history's is an INTEGER rowid;
+	//    the ledger's is the client-minted entry id, with ingest_seq as the
+	//    total order a page is cut on.
+	if row.ID != "cutover-1" || row.IngestSeq <= 0 {
+		t.Fatalf("id/ingest_seq = %q/%d", row.ID, row.IngestSeq)
+	}
+	// 2. command — entries.intent, masked by the same owner history.record uses.
+	if row.Intent == "" || strings.Contains(row.Intent, secret) {
+		t.Fatalf("intent = %q, want the masked command text", row.Intent)
+	}
+	// 3. cwd — entries.cwd.
+	if row.Cwd != "/repo" {
+		t.Fatalf("cwd = %q", row.Cwd)
+	}
+	// 4. host — NOT a column here. The ledger names WHERE as an environment
+	//    identity, and environmentForSession derives that identity from
+	//    session.Host() — the same string command_history stores ("" for
+	//    local). So the fact is present and the mapping is deterministic…
+	if row.EnvironmentID != content.EnvironmentIDFor(content.EnvLocal, "") {
+		t.Fatalf("environmentId = %q, want the id derived from the session's host", row.EnvironmentID)
+	}
+	// …but resolving an environment id BACK to its endpoint has no seam:
+	// LedgerRepository exposes no environment read. A host rung can be
+	// answered by hashing the host into an id (as above); rendering a row's
+	// host cannot. FINDING for nocx-rtg0.19.
+	// 5. status — entries.status, a superset of command_history's vocabulary.
+	if row.Status != content.EntryFailure {
+		t.Fatalf("status = %q", row.Status)
+	}
+	// 6. exit_code — the shell arm of the kind payload (design §3.3).
+	var payload struct {
+		Kind     string `json:"kind"`
+		V        int    `json:"v"`
+		ExitCode *int   `json:"exitCode"`
+	}
+	if err := json.Unmarshal([]byte(row.Payload), &payload); err != nil {
+		t.Fatalf("payload %q is not JSON: %v", row.Payload, err)
+	}
+	if payload.Kind != "shell" || payload.V != 1 || payload.ExitCode == nil || *payload.ExitCode != 127 {
+		t.Fatalf("payload = %s, want the shell arm carrying exit code 127", row.Payload)
+	}
+	// 7. started_at — entries.started_at, the wall clock the close carried.
+	if row.StartedAt == nil || *row.StartedAt != 1_750_000_047_700 {
+		t.Fatalf("started_at = %v", row.StartedAt)
+	}
+	// 8. ended_at — entries.ended_at, the store's own stamp at the close.
+	if row.EndedAt == nil || *row.EndedAt < epochFloor {
+		t.Fatalf("ended_at = %v, want the store's wall clock", row.EndedAt)
+	}
+	// 9. trusted — deliberately absent, and NOT a gap. ADR-0024 deleted
+	//    `trusted` as a field crossing to history.record; command_history's
+	//    column has been written 0 ever since, because the renderer stopped
+	//    sending it. The ledger does not resurrect the laundering.
+	// 10-12. masked_count / masked_kinds / redactions — NOT answerable. The
+	//    ledger masks the intent through maskCommandSafe and discards the
+	//    findings and the segments (ws_ledger.go's `masked, _, _, err`), and
+	//    no column holds them. Everything built on them — the "3 secrets
+	//    masked" receipt, the recall overlay's unresolved chips, and
+	//    RewriteRedaction's vault-capture flow, which addresses a
+	//    command_history row by id — has no ledger counterpart. FINDING for
+	//    nocx-rtg0.19: three columns and one write path, not one field.
+	if len(row.Executions) != 1 {
+		t.Fatalf("%d executions, want 1", len(row.Executions))
+	}
+}
+
 // ── §6.3 rule 2: phase is monotonic ───────────────────────────────────────
 
 // A bind that arrives after the close (the outbox replayed out of order)
@@ -291,6 +523,45 @@ func TestLedgerBindAfterClose_IsDroppedAndLogged(t *testing.T) {
 	if logged := buf.String(); !strings.Contains(logged, "late-1") ||
 		!strings.Contains(strings.ToLower(logged), "phase") {
 		t.Fatalf("the dropped event was not logged:\n%s", logged)
+	}
+}
+
+// The outbox's worst case, and the one the rejected workaround would have
+// broken: the original open, replayed after the row is already closed. It is
+// answered `dropped` — never ErrIDConflict, which is invalid-params and would
+// have the outbox discarding an entry it was right to retry — and the close's
+// facts survive it untouched.
+func TestLedgerOpenReplayedAfterClose_IsDroppedNotAConflict(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	open := map[string]any{"envelope": ledgerEnv(sid, "replay-1", "make test", 1)}
+	if _, errObj := ledgerCall(t, conn, "ledger.open", open, 2); errObj != nil {
+		t.Fatalf("ledger.open error: %+v", errObj)
+	}
+	if _, errObj := ledgerCall(t, conn, "ledger.close", map[string]any{
+		"envelope":   ledgerEnv(sid, "replay-1", "make test", 2),
+		"status":     "success",
+		"facts":      map[string]any{"terminationReason": "completed", "exitCode": 0},
+		"durationMs": 1200,
+		"startedAt":  1_750_000_047_700,
+	}, 3); errObj != nil {
+		t.Fatalf("ledger.close error: %+v", errObj)
+	}
+	closed := factsOf(t, db, "replay-1")
+
+	ack, errObj := ledgerCall(t, conn, "ledger.open", open, 4)
+	if errObj != nil {
+		t.Fatalf("the replayed open was refused: %+v", errObj)
+	}
+	if ack.Outcome != "dropped" || ack.Phase != "closed" {
+		t.Fatalf("replayed open ack = %+v, want dropped/closed", ack)
+	}
+	if got := factsOf(t, db, "replay-1"); !reflect.DeepEqual(got, closed) {
+		t.Fatalf("the replayed open rewrote the closed row:\n got  %s\n was  %s", showFacts(got), showFacts(closed))
 	}
 }
 
@@ -505,6 +776,27 @@ func TestLedgerEvents_RefuseUnusableParams(t *testing.T) {
 			"facts":      map[string]any{"terminationReason": "completed"},
 			"durationMs": -5,
 		}},
+		// The wrong clock, refused at the wire by the same floor
+		// history.record uses: a performance.now() reading lands in 1970 and
+		// the row is swept microseconds after it is written (nocx-rtg0.16).
+		{"startedAt from the wrong clock", "ledger.close", map[string]any{
+			"envelope":  ledgerEnv(sid, "k-12", "ls", 1),
+			"status":    "success",
+			"facts":     map[string]any{"terminationReason": "completed"},
+			"startedAt": 1200,
+		}},
+		// An exit code is a SHELL fact (design §3.2: it is not hoisted to the
+		// top level precisely so other kinds do not carry nulls). Refused on
+		// another kind rather than accepted and dropped.
+		{"exitCode on a non-shell kind", "ledger.close", map[string]any{
+			"envelope": func() map[string]any {
+				e := ledgerEnv(sid, "k-13", "fix the deploy", 1)
+				e["kind"] = "agent"
+				return e
+			}(),
+			"status": "success",
+			"facts":  map[string]any{"terminationReason": "completed", "exitCode": 0},
+		}},
 	}
 
 	id := 2
@@ -709,9 +1001,11 @@ func TestLedgerEvents_EveryStoreCallFails(t *testing.T) {
 			}
 		}
 		_, errObj := ledgerCall(t, conn, "ledger.close", map[string]any{
-			"envelope": ledgerEnv(sid, "fail-3", "ls", 3),
-			"status":   "success",
-			"facts":    map[string]any{"terminationReason": "completed"},
+			"envelope":   ledgerEnv(sid, "fail-3", "ls", 3),
+			"status":     "success",
+			"facts":      map[string]any{"terminationReason": "completed", "exitCode": 0},
+			"durationMs": 900,
+			"startedAt":  1_750_000_047_700,
 		}, 4)
 		if errObj == nil {
 			t.Fatal("ledger.close succeeded with FinishExecution failing")
@@ -722,6 +1016,13 @@ func TestLedgerEvents_EveryStoreCallFails(t *testing.T) {
 		}
 		if row.Status == content.EntrySuccess {
 			t.Fatal("the entry took the close's status while the close failed")
+		}
+		// And none of the close's facts leaked past the failure: a closed
+		// entry with a half-written payload is the state nothing could
+		// recover from, because it looks exactly like a finished one.
+		if row.Payload != "{}" || row.DurationMs != nil || row.StartedAt != nil || row.EndedAt != nil {
+			t.Fatalf("a failed close left facts behind: payload=%s duration=%v started=%v ended=%v",
+				row.Payload, row.DurationMs, row.StartedAt, row.EndedAt)
 		}
 	})
 }
