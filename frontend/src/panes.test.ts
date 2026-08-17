@@ -107,7 +107,7 @@ describe('PaneManager', () => {
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(0)
 
     // Model state is also empty — no tabs registered.
-    expect(manager.tabCount).toBe(0)
+    expect(manager.paneCount).toBe(0)
     expect(panes.querySelectorAll('.pane').length).toBe(0)
     expect(c.openSession).not.toHaveBeenCalled()
     // Strip is not yet mounted — no DOM children in the bar.
@@ -209,8 +209,8 @@ describe('PaneManager', () => {
     manager.activateByIndex(1) // tab2
 
     // Tab2 is active.
-    const beforeTabs = bar.querySelectorAll('.nocx-tab')
-    expect(beforeTabs[1].getAttribute('aria-selected') === 'true').toBe(true)
+    const beforePanes = bar.querySelectorAll('.nocx-tab')
+    expect(beforePanes[1].getAttribute('aria-selected') === 'true').toBe(true)
 
     // Close tab2. MRU says tab3 should activate, not tab1 (visual neighbour).
     manager.closeActivePane()
@@ -677,14 +677,14 @@ describe('PaneManager', () => {
 
     const { bar } = await mountPaneManager()
 
-    const tabsContainer = bar.querySelector('.tabs-container') as HTMLElement
-    expect(tabsContainer).not.toBeNull()
+    const panesContainer = bar.querySelector('.tabs-container') as HTMLElement
+    expect(panesContainer).not.toBeNull()
 
     const tab = bar.querySelector('.nocx-tab') as HTMLElement
     expect(tab).not.toBeNull()
 
     // The tabs container itself must not grow.
-    expect(getComputedStyle(tabsContainer).flexGrow).toBe('0')
+    expect(getComputedStyle(panesContainer).flexGrow).toBe('0')
 
     // The tab must not have a stretching flex-grow.
     expect(getComputedStyle(tab).flexGrow).toBe('0')
@@ -1162,7 +1162,7 @@ describe('PaneManager', () => {
     // initialPaneReady must reject — a genuinely broken tab is not "ready".
     // expect().rejects attaches the handler synchronously, so the rejection
     // that fires in a microtask is already handled; no unhandled-rejection.
-    await expect(manager.initialPaneReady).rejects.toThrow('initial tab failed to start')
+    await expect(manager.initialPaneReady).rejects.toThrow('initial pane failed to start')
 
     // openSession was called (the rejection proves it — start() reached the call).
     expect(client.openSession).toHaveBeenCalled()
@@ -1824,7 +1824,7 @@ describe('PaneManager', () => {
 // arrives separately (updateProgramTitle) and is the classifier's only
 // input, so a path or command line can never masquerade as agent state.
 describe('Tab agent-status channel (nocx-n8n82)', () => {
-  function bareTab(): Pane {
+  function barePane(): Pane {
     const content = new CountingTestContent()
     return new Pane(
       content,
@@ -1841,7 +1841,7 @@ describe('Tab agent-status channel (nocx-n8n82)', () => {
   }
 
   it('classifies the program title, never the composed display title', () => {
-    const tab = bareTab()
+    const tab = barePane()
 
     // The composed title is usually a path or a command line. A directory
     // named with a braille glyph must not light the tab as a working

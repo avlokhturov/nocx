@@ -31,7 +31,7 @@ const TERMINAL_DESC: PaneDescriptor = {
 describe('createAppStore initial state', () => {
   it('starts empty with no tabs', () => {
     withStore(([state]) => {
-      expect(state.paneModel.tabs).toHaveLength(0)
+      expect(state.paneModel.panes).toHaveLength(0)
       expect(state.paneModel.activePaneId).toBeNull()
       expect(state.sidebar.collapsed).toBe(false)
       expect(state.settings.values).toEqual({})
@@ -47,9 +47,9 @@ describe('tab actions', () => {
   it('addPane adds a tab and activates it', () => {
     withStore(([state, actions]) => {
       actions.addPane(TERMINAL_DESC)
-      expect(state.paneModel.tabs).toHaveLength(1)
+      expect(state.paneModel.panes).toHaveLength(1)
       expect(state.paneModel.activePaneId).toBe(1)
-      expect(state.paneModel.tabs[0].title).toBe('Terminal')
+      expect(state.paneModel.panes[0].title).toBe('Terminal')
     })
   })
 
@@ -66,12 +66,12 @@ describe('tab actions', () => {
   it('closePane removes a tab', () => {
     withStore(([state, actions]) => {
       actions.addPane(TERMINAL_DESC)
-      expect(state.paneModel.tabs).toHaveLength(1)
+      expect(state.paneModel.panes).toHaveLength(1)
       expect(state.paneModel.activePaneId).toBe(1)
       actions.closePane(1)
       // Last tab creates a replacement.
-      expect(state.paneModel.tabs).toHaveLength(1)
-      expect(state.paneModel.tabs[0].descriptor.surfaceType).toBe('nocx.terminal')
+      expect(state.paneModel.panes).toHaveLength(1)
+      expect(state.paneModel.panes[0].descriptor.surfaceType).toBe('nocx.terminal')
     })
   })
 
@@ -81,7 +81,7 @@ describe('tab actions', () => {
       actions.addPane({ ...TERMINAL_DESC, defaultTitle: 'B' })
       actions.addPane({ ...TERMINAL_DESC, defaultTitle: 'C' })
       actions.reorderPane(1, 3)
-      expect(state.paneModel.tabs.map((t) => t.title)).toEqual(['B', 'A', 'C'])
+      expect(state.paneModel.panes.map((t) => t.title)).toEqual(['B', 'A', 'C'])
     })
   })
 
@@ -89,16 +89,16 @@ describe('tab actions', () => {
     withStore(([state, actions]) => {
       actions.addPane(TERMINAL_DESC)
       actions.updatePaneTitle(1, 'Work')
-      expect(state.paneModel.tabs[0].title).toBe('Work')
+      expect(state.paneModel.panes[0].title).toBe('Work')
     })
   })
 
   it('updatePaneActivity sets activity', () => {
     withStore(([state, actions]) => {
       actions.addPane(TERMINAL_DESC)
-      expect(state.paneModel.tabs[0].hasActivity).toBe(false)
+      expect(state.paneModel.panes[0].hasActivity).toBe(false)
       actions.updatePaneActivity(1, true)
-      expect(state.paneModel.tabs[0].hasActivity).toBe(true)
+      expect(state.paneModel.panes[0].hasActivity).toBe(true)
     })
   })
 
@@ -106,7 +106,7 @@ describe('tab actions', () => {
     withStore(([state, actions]) => {
       actions.addPane(TERMINAL_DESC)
       actions.updatePaneAgentStatus(1, 'working')
-      expect(state.paneModel.tabs[0].agentStatus).toBe('working')
+      expect(state.paneModel.panes[0].agentStatus).toBe('working')
     })
   })
 })
@@ -202,11 +202,11 @@ describe('reset', () => {
       actions.setActiveView('files')
       actions.showBanner()
       actions.setSettingsValues({ theme: 'dark' })
-      expect(state.paneModel.tabs).not.toHaveLength(0)
+      expect(state.paneModel.panes).not.toHaveLength(0)
       expect(state.banner.shown).toBe(true)
 
       actions.reset()
-      expect(state.paneModel.tabs).toHaveLength(0)
+      expect(state.paneModel.panes).toHaveLength(0)
       expect(state.paneModel.activePaneId).toBeNull()
       expect(state.sidebar.collapsed).toBe(false)
       expect(state.sidebar.activeViewId).toBe('')

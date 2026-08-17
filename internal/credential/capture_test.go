@@ -257,7 +257,7 @@ func TestTypingNextCommandDoesNotDestroy(t *testing.T) {
 	}
 }
 
-func TestDestroyTabAndDestroyAll(t *testing.T) {
+func TestDestroyPaneAndDestroyAll(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
 	res1 := r.Submit(scope("c1", "pane1", 1), []PendingCredential{cred("sk-proj-dt-a-1234567890123456", "a.ai")})

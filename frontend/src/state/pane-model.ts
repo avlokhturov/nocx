@@ -1,14 +1,14 @@
 /**
- * tab-model — framework‑neutral tab model with named transitions.
+ * pane-model — framework‑neutral pane model with named transitions.
  *
- * Derived from: frontend/src/tabs.ts
- *   - Tab.id, Tab.descriptor, Tab._title, Tab._hasActivity, Tab._agentStatus,
- *     Tab._disposed  (Tab class, lines 27-258)
- *   - PaneManager.tabs, PaneManager.activePane, PaneManager.nextPaneId,
+ * Derived from: frontend/src/panes.ts
+ *   - Pane.id, Pane.descriptor, Pane._title, Pane._hasActivity, Pane._agentStatus,
+ *     Pane._disposed  (Pane class, lines 27-258)
+ *   - PaneManager.panes, PaneManager.activePane, PaneManager.nextPaneId,
  *     PaneManager.recentPaneIds  (PaneManager class, lines 264-598)
  *
  * Authority:
- *   Tab creation  → composition root (via PaneManager equivalent)
+ *   Pane creation  → composition root (via PaneManager)
  *   Activation    → tab strip / keyboard shortcuts
  *   Title         → content (via PaneHost.setTitle)
  *   Activity      → content (via PaneHost.requestAttention)
@@ -24,19 +24,19 @@ import type { AgentStatus } from '../agent-status'
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /**
- * Per-tab model data.
+ * Per-pane model data.
  *
  * Only model-level fields are present.  Render state (pane, viewport observer,
- * mount lifecycle) stays imperative in Tab / PaneManager and is NOT reflected
+ * mount lifecycle) stays imperative in Pane / PaneManager and is NOT reflected
  * here (AD-6).
  *
- * Derived from: `Tab` class (tabs.ts:27-258)
- *   Tab.id → .id
- *   Tab.descriptor → .descriptor
- *   Tab._title → .title
- *   Tab._hasActivity → .hasActivity
- *   Tab._agentStatus → .agentStatus
- *   Tab._disposed → .disposed
+ * Derived from: `Pane` class (panes.ts:27-258)
+ *   Pane.id → .id
+ *   Pane.descriptor → .descriptor
+ *   Pane._title → .title
+ *   Pane._hasActivity → .hasActivity
+ *   Pane._agentStatus → .agentStatus
+ *   Pane._disposed → .disposed
  */
 export interface PaneData {
   readonly id: number
@@ -48,7 +48,7 @@ export interface PaneData {
 }
 
 /**
- * Serializable tab descriptor — mirrors ContentDescriptor (tab-content.ts:127-142)
+ * Serializable pane descriptor — mirrors ContentDescriptor (pane-content.ts:127-142)
  * minus the SurfaceType/SingletonKey branded types (kept as string | null for
  * framework‑neutrality).
  */
@@ -61,16 +61,16 @@ export interface PaneDescriptor {
 }
 
 /**
- * The aggregate tab model.
+ * The aggregate pane model.
  *
- * Derived from: `PaneManager` class (tabs.ts:264-598)
- *   PaneManager.tabs → .tabs
- *   PaneManager.activePane → .activePaneId (flattened to the tab id)
+ * Derived from: `PaneManager` class (panes.ts:264-598)
+ *   PaneManager.panes → .panes
+ *   PaneManager.activePane → .activePaneId (flattened to the pane id)
  *   PaneManager.nextPaneId → .nextPaneId
  *   PaneManager.recentPaneIds → .recentPaneIds
  */
 export interface PaneModel {
-  readonly tabs: readonly PaneData[]
+  readonly panes: readonly PaneData[]
   readonly activePaneId: number | null
   readonly nextPaneId: number
   readonly recentPaneIds: readonly number[]
@@ -78,10 +78,10 @@ export interface PaneModel {
 
 // ── Factory ─────────────────────────────────────────────────────────────────
 
-/** Create an empty tab model with no tabs and a fresh id counter. */
+/** Create an empty pane model with no panes and a fresh id counter. */
 export function createPaneModel(): PaneModel {
   return {
-    tabs: [],
+    panes: [],
     activePaneId: null,
     nextPaneId: 1,
     recentPaneIds: [],
@@ -91,15 +91,15 @@ export function createPaneModel(): PaneModel {
 // ── Pure transition functions ──────────────────────────────────────────────
 
 /**
- * Add a tab to the model and activate it.
+ * Add a pane to the model and activate it.
  *
  * Authority: composition root (PaneManager.newPane, PaneManager.newSSHPane).
  *
- * Derived from: PaneManager.addPane (tabs.ts:403-415)
+ * Derived from: PaneManager.addPane (panes.ts:403-415)
  */
 export function addPane(model: PaneModel, descriptor: PaneDescriptor): PaneModel {
   const id = model.nextPaneId
-  const tab: PaneData = {
+  const pane: PaneData = {
     id,
     descriptor,
     title: descriptor.defaultTitle,
@@ -110,55 +110,55 @@ export function addPane(model: PaneModel, descriptor: PaneDescriptor): PaneModel
 
   return {
     ...model,
-    tabs: [...model.tabs, tab],
+    panes: [...model.panes, pane],
     nextPaneId: id + 1,
     activePaneId: id,
-    recentPaneIds: updateRecentTabIds(id, model.activePaneId, model.recentPaneIds),
+    recentPaneIds: updateRecentPaneIds(id, model.activePaneId, model.recentPaneIds),
   }
 }
 
 /**
- * Activate a tab by id.  If the tab is already active, the model is returned
- * unchanged.  The previously-active tab is pushed onto the MRU stack.
+ * Activate a pane by id.  If the pane is already active, the model is returned
+ * unchanged.  The previously-active pane is pushed onto the MRU stack.
  *
  * Authority: tab strip, keyboard shortcuts (Cmd+1..9, Cmd+W).
  *
- * Derived from: PaneManager.activate (tabs.ts:499-526)
+ * Derived from: PaneManager.activate (panes.ts:499-526)
  */
 export function activatePane(model: PaneModel, paneId: number): PaneModel {
   if (model.activePaneId === paneId) return model
-  if (!model.tabs.some((t) => t.id === paneId && !t.disposed)) return model
+  if (!model.panes.some((t) => t.id === paneId && !t.disposed)) return model
 
   return {
     ...model,
     activePaneId: paneId,
-    recentPaneIds: updateRecentTabIds(paneId, model.activePaneId, model.recentPaneIds),
+    recentPaneIds: updateRecentPaneIds(paneId, model.activePaneId, model.recentPaneIds),
   }
 }
 
 /**
- * Close a tab.  If it was the active tab, the MRU stack is popped to
- * determine the next activation.  Closing the last tab opens a fresh one
+ * Close a pane.  If it was the active pane, the MRU stack is popped to
+ * determine the next activation.  Closing the last pane opens a fresh one
  * (the window is never empty).
  *
  * Authority: PaneManager (keyboard shortcut, tab strip close button).
  *
- * Derived from: PaneManager.closePane (tabs.ts:473-496)
+ * Derived from: PaneManager.closePane (panes.ts:473-496)
  */
 export function closePane(model: PaneModel, paneId: number): PaneModel {
-  const index = model.tabs.findIndex((t) => t.id === paneId)
+  const index = model.panes.findIndex((t) => t.id === paneId)
   if (index === -1) return model
 
   const wasActive = model.activePaneId === paneId
   const nextRecent = model.recentPaneIds.filter((id) => id !== paneId)
-  const nextPanes = model.tabs.filter((t) => t.id !== paneId)
+  const nextPanes = model.panes.filter((t) => t.id !== paneId)
 
   if (nextPanes.length === 0) {
-    // Last tab closed — create a fresh terminal tab.
+    // Last pane closed — create a fresh terminal pane.
     return addPane(
       {
         ...model,
-        tabs: [],
+        panes: [],
         activePaneId: null,
         recentPaneIds: nextRecent,
       },
@@ -168,7 +168,7 @@ export function closePane(model: PaneModel, paneId: number): PaneModel {
 
   let activePaneId = model.activePaneId
   if (wasActive) {
-    // Pop the MRU stack until we find a live tab.
+    // Pop the MRU stack until we find a live pane.
     const mruCandidates = [...nextRecent].reverse()
     activePaneId = null
     for (const mruId of mruCandidates) {
@@ -184,71 +184,71 @@ export function closePane(model: PaneModel, paneId: number): PaneModel {
 
   return {
     ...model,
-    tabs: nextPanes,
+    panes: nextPanes,
     activePaneId,
     recentPaneIds: nextRecent,
   }
 }
 
 /**
- * Reorder a tab from its current position to the position of another tab.
+ * Reorder a pane from its current position to the position of another pane.
  *
  * Authority: tab strip (drag-and-drop reorder).
  *
- * Derived from: PaneManager.reorderPane (tabs.ts:537-547)
+ * Derived from: PaneManager.reorderPane (panes.ts:537-547)
  */
 export function reorderPane(model: PaneModel, draggedId: number, targetId: number): PaneModel {
-  const draggedIndex = model.tabs.findIndex((t) => t.id === draggedId)
-  const targetIndex = model.tabs.findIndex((t) => t.id === targetId)
+  const draggedIndex = model.panes.findIndex((t) => t.id === draggedId)
+  const targetIndex = model.panes.findIndex((t) => t.id === targetId)
   if (draggedIndex === -1 || targetIndex === -1) return model
 
-  const nextPanes = [...model.tabs]
-  const [draggedTab] = nextPanes.splice(draggedIndex, 1)
+  const nextPanes = [...model.panes]
+  const [draggedPane] = nextPanes.splice(draggedIndex, 1)
   const adjustedTarget = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex
-  nextPanes.splice(adjustedTarget, 0, draggedTab)
+  nextPanes.splice(adjustedTarget, 0, draggedPane)
 
-  return { ...model, tabs: nextPanes }
+  return { ...model, panes: nextPanes }
 }
 
 /**
- * Update a tab's display title.
+ * Update a pane's display title.
  *
  * Authority: content (via PaneHost.setTitle).
  *
- * Derived from: Pane.setTitle → Tab._title (tabs.ts:27-258)
+ * Derived from: Pane.setTitle → Pane._title (panes.ts:27-258)
  */
 export function updatePaneTitle(model: PaneModel, paneId: number, title: string): PaneModel {
-  return updateTab(model, paneId, (tab) => ({ ...tab, title }))
+  return updatePane(model, paneId, (pane) => ({ ...pane, title }))
 }
 
 /**
- * Set a tab's activity indicator.
+ * Set a pane's activity indicator.
  *
  * Authority: content (via PaneHost.requestAttention).
  *
- * Derived from: Pane.requestAttention → Tab._hasActivity (tabs.ts:27-258)
+ * Derived from: Pane.requestAttention → Pane._hasActivity (panes.ts:27-258)
  */
 export function updatePaneActivity(
   model: PaneModel,
   paneId: number,
   hasActivity: boolean,
 ): PaneModel {
-  return updateTab(model, paneId, (tab) => ({ ...tab, hasActivity }))
+  return updatePane(model, paneId, (pane) => ({ ...pane, hasActivity }))
 }
 
 /**
- * Set a tab's agent status.
+ * Set a pane's agent status.
  *
  * Authority: terminal renderer (via TerminalRenderer.onTitle).
  *
- * Derived from: Pane._agentStatus (tabs.ts:27-258)
+ * Derived from: Pane._agentStatus (panes.ts:27-258)
  */
 export function updatePaneAgentStatus(
   model: PaneModel,
   paneId: number,
   status: AgentStatus | null,
 ): PaneModel {
-  return updateTab(model, paneId, (tab) => ({ ...tab, agentStatus: status }))
+  return updatePane(model, paneId, (pane) => ({ ...pane, agentStatus: status }))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -265,7 +265,7 @@ const DEFAULT_TERMINAL_DESCRIPTOR: PaneDescriptor = {
  * Push `activatedId` onto the MRU stack, replacing any prior entry and
  * removing `previouslyActive` from the stack bottom (it just moved up).
  */
-function updateRecentTabIds(
+function updateRecentPaneIds(
   activatedId: number,
   previouslyActive: number | null,
   recent: readonly number[],
@@ -275,15 +275,15 @@ function updateRecentTabIds(
   return next
 }
 
-/** Helper: apply a per-tab updater to the matching tab. */
-function updateTab(
+/** Helper: apply a per-pane updater to the matching pane. */
+function updatePane(
   model: PaneModel,
   paneId: number,
-  updater: (tab: PaneData) => PaneData,
+  updater: (pane: PaneData) => PaneData,
 ): PaneModel {
-  const index = model.tabs.findIndex((t) => t.id === paneId)
+  const index = model.panes.findIndex((t) => t.id === paneId)
   if (index === -1) return model
-  const nextPanes = [...model.tabs]
+  const nextPanes = [...model.panes]
   nextPanes[index] = updater(nextPanes[index])
-  return { ...model, tabs: nextPanes }
+  return { ...model, panes: nextPanes }
 }

@@ -159,9 +159,9 @@ describe('openGitDiff — the frozen origin survives activation (design §5.4)',
     // object literal: that helper is typed `any`, and spreading it here trips
     // no-unsafe-assignment for a shape the test already knows exactly.
     expect(typeof diffOrigin?.paneId).toBe('number')
-    const withoutTabId = { ...diffOrigin }
-    delete (withoutTabId as { paneId?: number }).paneId
-    expect(withoutTabId).toEqual({
+    const withoutPaneId = { ...diffOrigin }
+    delete (withoutPaneId as { paneId?: number }).paneId
+    expect(withoutPaneId).toEqual({
       ...FROZEN_ORIGIN,
       sessionId: terminalOrigin!.sessionId,
     })

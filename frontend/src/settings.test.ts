@@ -147,7 +147,7 @@ function mockReady(
     }
   }
 }
-function mockTabHost(): PaneHost {
+function mockPaneHost(): PaneHost {
   return {
     setTitle: vi.fn(),
     requestAttention: vi.fn(),
@@ -176,7 +176,7 @@ describe('SettingsContent', () => {
     document.body.append(target)
     client = new ProfileClient(new Dispatcher())
     content = new SettingsContent(client)
-    host = mockTabHost()
+    host = mockPaneHost()
     signal = new AbortController().signal
   })
 
@@ -883,7 +883,7 @@ describe('horizontal Field gate — every settings row must use primary label', 
     document.body.append(target)
     client = new ProfileClient(new Dispatcher())
     content = new SettingsContent(client)
-    host = mockTabHost()
+    host = mockPaneHost()
     signal = new AbortController().signal
   })
 

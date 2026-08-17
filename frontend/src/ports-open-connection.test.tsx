@@ -207,7 +207,7 @@ describe('PortsPanel — open as connection (W2)', () => {
     })
     // Nothing opened: the user is still on the hand-typed tab, whose ports
     // target stays the reserved local one.
-    expect(manager.tabCount).toBe(1)
+    expect(manager.paneCount).toBe(1)
     expect(manager.portsTargetId()).toBe(LOCAL_TARGET_ID)
   })
 })

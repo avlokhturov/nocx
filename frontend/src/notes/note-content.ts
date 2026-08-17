@@ -47,7 +47,7 @@ export class NoteContent extends BasePaneContent {
   private timer: ReturnType<typeof setTimeout> | null = null
   private saving = false
   private disposed = false
-  private tabHost: PaneHost | null = null
+  private paneHost: PaneHost | null = null
 
   constructor(
     private readonly noteId: string,
@@ -60,7 +60,7 @@ export class NoteContent extends BasePaneContent {
 
   async mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this.disposed || signal.aborted) return
-    this.tabHost = host
+    this.paneHost = host
 
     this.root = document.createElement('div')
     this.root.className = 'note-tab'
@@ -199,7 +199,7 @@ export class NoteContent extends BasePaneContent {
    *  in the store. */
   private pushTitle(): void {
     const shown = this.title !== '' ? this.title : untitledName()
-    this.tabHost?.setTitle(shown)
+    this.paneHost?.setTitle(shown)
   }
 
   private showNotice(text: string): void {

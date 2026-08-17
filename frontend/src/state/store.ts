@@ -29,13 +29,13 @@ import {
 import { createSidebarState, type SidebarState } from './sidebar-model'
 import {
   addPane,
-  activatePane as activateTabModel,
-  closePane as closeTabModel,
+  activatePane as activatePaneModel,
+  closePane as closePaneModel,
   createPaneModel,
-  reorderPane as reorderTabModel,
-  updatePaneActivity as updateTabActivityModel,
-  updatePaneAgentStatus as updateTabAgentStatusModel,
-  updatePaneTitle as updateTabTitleModel,
+  reorderPane as reorderPaneModel,
+  updatePaneActivity as updatePaneActivityModel,
+  updatePaneAgentStatus as updatePaneAgentStatusModel,
+  updatePaneTitle as updatePaneTitleModel,
   type PaneDescriptor,
   type PaneModel,
 } from './pane-model'
@@ -79,27 +79,27 @@ export function createAppStore(): [AppState, AppActions] {
     },
 
     activatePane: (paneId: number) => {
-      setState('paneModel', (prev) => activateTabModel(prev, paneId))
+      setState('paneModel', (prev) => activatePaneModel(prev, paneId))
     },
 
     closePane: (paneId: number) => {
-      setState('paneModel', (prev) => closeTabModel(prev, paneId))
+      setState('paneModel', (prev) => closePaneModel(prev, paneId))
     },
 
     reorderPane: (draggedId: number, targetId: number) => {
-      setState('paneModel', (prev) => reorderTabModel(prev, draggedId, targetId))
+      setState('paneModel', (prev) => reorderPaneModel(prev, draggedId, targetId))
     },
 
     updatePaneTitle: (paneId: number, title: string) => {
-      setState('paneModel', (prev) => updateTabTitleModel(prev, paneId, title))
+      setState('paneModel', (prev) => updatePaneTitleModel(prev, paneId, title))
     },
 
     updatePaneActivity: (paneId: number, hasActivity: boolean) => {
-      setState('paneModel', (prev) => updateTabActivityModel(prev, paneId, hasActivity))
+      setState('paneModel', (prev) => updatePaneActivityModel(prev, paneId, hasActivity))
     },
 
     updatePaneAgentStatus: (paneId: number, status: AgentStatus | null) => {
-      setState('paneModel', (prev) => updateTabAgentStatusModel(prev, paneId, status))
+      setState('paneModel', (prev) => updatePaneAgentStatusModel(prev, paneId, status))
     },
 
     // ── Sidebar transitions ──────────────────────────────────────────────

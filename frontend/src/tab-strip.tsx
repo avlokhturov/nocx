@@ -42,7 +42,7 @@ export interface PaneView {
  * their own reactive computation) are fine-grained reactive.
  * Uses displayTitle when the content has not published a dynamic title yet.
  */
-interface TabDisplayRecord {
+interface PaneDisplayRecord {
   title: string
   tooltip: string
   subtitle: string
@@ -58,7 +58,7 @@ export interface TabStrip {
   readonly orientation: Orientation
   mount(container: HTMLElement): void
   addPane(tab: PaneView): void
-  removeTab(paneId: number): void
+  removePane(paneId: number): void
   setActive(paneId: number): void
   reorder(tabs: readonly PaneView[]): void
   onActivate: ((paneId: number) => void) | null
@@ -121,15 +121,15 @@ abstract class TabStripBase implements TabStrip {
     this.setupContainer(container)
     container.addEventListener('keydown', this.onTablistKeydown)
     this.dispose = render(() => {
-      const [tabViews, setTabViews] = createSignal<PaneView[]>([])
+      const [paneViews, setPaneViews] = createSignal<PaneView[]>([])
       const [display, setDisplay] = createStore<{
-        records: Record<number, TabDisplayRecord>
+        records: Record<number, PaneDisplayRecord>
         activeId: number
       }>({ records: {}, activeId: -1 })
       const [searchQuery, setSearchQuery] = createSignal('')
 
-      this._getPaneViews = tabViews
-      this._setPaneViews = setTabViews
+      this._getPaneViews = paneViews
+      this._setPaneViews = setPaneViews
       this._setDisplay = setDisplay
 
       return (
@@ -180,7 +180,7 @@ abstract class TabStripBase implements TabStrip {
             </div>
           </Show>
           <div class="tabs-container">
-            <For each={tabViews()}>
+            <For each={paneViews()}>
               {(tab, index) => (
                 <Tab
                   id={`tab-btn-${tab.id}`}
@@ -292,7 +292,7 @@ abstract class TabStripBase implements TabStrip {
     if (pane) pane.setAttribute('aria-labelledby', `tab-btn-${tab.id}`)
   }
 
-  removeTab(paneId: number): void {
+  removePane(paneId: number): void {
     if (!this.mounted) return
     this._setPaneViews((prev) => {
       const removed = prev.find((t) => t.id === paneId)
@@ -300,7 +300,7 @@ abstract class TabStripBase implements TabStrip {
       return prev.filter((t) => t.id !== paneId)
     })
     // Delete store entry — functional update avoids referencing current state.
-    this._setDisplay('records', (prev: Record<number, TabDisplayRecord>) => {
+    this._setDisplay('records', (prev: Record<number, PaneDisplayRecord>) => {
       const next = { ...prev }
       delete next[paneId]
       return next
@@ -369,9 +369,9 @@ abstract class TabStripBase implements TabStrip {
         return
     }
 
-    const nextTab = tabs[nextIdx]
-    if (nextTab) {
-      const nextBtn = document.getElementById(`tab-btn-${nextTab.id}`)
+    const nextPane = tabs[nextIdx]
+    if (nextPane) {
+      const nextBtn = document.getElementById(`tab-btn-${nextPane.id}`)
       nextBtn?.focus()
     }
   }

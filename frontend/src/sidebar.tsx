@@ -465,7 +465,7 @@ export function mountSidebar(
   const safeStorage = storage ?? safeLocalStorage()
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
-  const activeTabIsSettings = getActivePaneIsSettings ?? (() => false)
+  const activePaneIsSettings = getActivePaneIsSettings ?? (() => false)
 
   const [state, storeActions] = createAppStore()
 
@@ -496,7 +496,7 @@ export function mountSidebar(
         storage={safeStorage}
         state={state}
         storeActions={storeActions}
-        getActivePaneIsSettings={activeTabIsSettings}
+        getActivePaneIsSettings={activePaneIsSettings}
       />
     ),
     bar,

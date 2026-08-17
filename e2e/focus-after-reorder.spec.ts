@@ -39,7 +39,7 @@ async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Pr
  * all and the drag was never attempted (nocx-z9s9.11). Letting the app finish
  * first makes the test's own focus the last word.
  */
-async function settleNewTab(page: Page): Promise<void> {
+async function settleNewPane(page: Page): Promise<void> {
   await promptReady(page)
 }
 
@@ -57,8 +57,8 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
   const secondTab = page.locator('.nocx-tab').nth(1)
   const firstPane = page.locator('.nocx-tab').first()
   const paneIdSecond = await secondTab.getAttribute('data-pane-id')
-  const tabIdFirst = await firstPane.getAttribute('data-pane-id')
-  expect(tabIdFirst).not.toBeNull()
+  const paneIdFirst = await firstPane.getAttribute('data-pane-id')
+  expect(paneIdFirst).not.toBeNull()
   expect(paneIdSecond).not.toBeNull()
 
   // Focus the SECOND tab button (we'll drag it onto the first).
@@ -93,7 +93,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
     const tabs = document.querySelectorAll('.nocx-tab')
     return Array.from(tabs).map((t) => t.getAttribute('data-pane-id'))
   })
-  expect(preOrder).toEqual([tabIdFirst, paneIdSecond])
+  expect(preOrder).toEqual([paneIdFirst, paneIdSecond])
 
   // Dispatch native HTML5 DragEvent sequence: dragstart → dragover → drop → dragend
   // Dragging the SECOND tab onto the FIRST tab triggers a real reorder
@@ -138,7 +138,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
         ),
       { timeout: 5000, message: 'tab order did not settle after the drag' },
     )
-    .toEqual([paneIdSecond, tabIdFirst])
+    .toEqual([paneIdSecond, paneIdFirst])
 
   // Assert 1: the exact same DOM node (JSHandle identity) is still activeElement
   const sameNode = await page.evaluate((handle) => document.activeElement === handle, focusedHandle)
@@ -168,7 +168,7 @@ test.describe('focus survives tab reorder', () => {
     // Add a second tab so there is something to reorder.
     await page.locator('[aria-label="New tab"]').click()
     await expect(page.locator('.nocx-tab')).toHaveCount(2)
-    await settleNewTab(page)
+    await settleNewPane(page)
 
     await assertFocusSurvivesReorder(page)
   })
@@ -180,7 +180,7 @@ test.describe('focus survives tab reorder', () => {
     // Add a second tab in the vertical strip.
     await page.locator('[aria-label="New tab"]').click()
     await expect(page.locator('.nocx-tab')).toHaveCount(2)
-    await settleNewTab(page)
+    await settleNewPane(page)
 
     await assertFocusSurvivesReorder(page)
   })
