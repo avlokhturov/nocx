@@ -4754,3 +4754,103 @@ func TestExit_DTOStatusRulesAreExact(t *testing.T) {
 		})
 	}
 }
+
+// ── ledger.open / ledger.bind / ledger.close ─────────────────────────────
+
+// The DTO's own conformance: one case per interesting shape of the ack the
+// three lifecycle methods share — the applied event, the replay and the
+// drop. Enum spelling and the integer types are what this catches.
+func TestLedgerEvents_DTOsConformToContract(t *testing.T) {
+	cases := map[string]struct {
+		schema string
+		dto    ledgerEventResponse
+	}{
+		"open applied": {"ledger.open.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000001", ClientSeq: 0, Seq: 1,
+			SubmittedAt: 1_750_000_000_000, Phase: "open", Outcome: ledgerApplied,
+		}},
+		"open replay": {"ledger.open.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000001", ClientSeq: 4, Seq: 12,
+			SubmittedAt: 1_750_000_000_000, Phase: "open", Outcome: ledgerReplay,
+		}},
+		"bind applied": {"ledger.bind.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000002", ClientSeq: 5, Seq: 13,
+			SubmittedAt: 1_750_000_000_000, Phase: "bound", Outcome: ledgerApplied,
+		}},
+		"bind dropped after close": {"ledger.bind.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000002", ClientSeq: 5, Seq: 13,
+			SubmittedAt: 1_750_000_000_000, Phase: "closed", Outcome: ledgerDropped,
+		}},
+		"close applied": {"ledger.close.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000003", ClientSeq: 6, Seq: 14,
+			SubmittedAt: 1_750_000_000_000, Phase: "closed", Outcome: ledgerApplied,
+		}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			schema := loadSchema(t, c.schema)
+			raw, err := json.Marshal(c.dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, name+" DTO")
+		})
+	}
+}
+
+// The real methods through the real socket, into the real store. Nothing here
+// names a field, so nothing here can omit one; additionalProperties:false plus
+// required makes the key set exact in both directions. Every state the ack has
+// is driven off the socket: applied on a created row, applied on an advance,
+// replay on a re-delivery, and dropped on a bind that arrives after the close.
+func TestLedgerEvents_OverTheWireConformToContract(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	openSchema := loadSchema(t, "ledger.open.schema.json")
+	bindSchema := loadSchema(t, "ledger.bind.schema.json")
+	closeSchema := loadSchema(t, "ledger.close.schema.json")
+
+	closeParams := func(id string, seq int) map[string]any {
+		return map[string]any{
+			"envelope":   ledgerEnv(sid, id, "make", seq),
+			"status":     "success",
+			"facts":      map[string]any{"terminationReason": "completed"},
+			"durationMs": 42,
+		}
+	}
+
+	steps := []struct {
+		name   string
+		method string
+		schema *jsonschema.Schema
+		params map[string]any
+	}{
+		{"open creates", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
+		{"open replayed", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
+		{"bind advances", "ledger.bind", bindSchema, map[string]any{
+			"envelope": ledgerEnv(sid, "wire-1", "make", 2),
+			"facts":    map[string]any{"interactivity": "tty", "executor": "zsh"},
+		}},
+		{"close advances", "ledger.close", closeSchema, closeParams("wire-1", 3)},
+		{"bind dropped after close", "ledger.bind", bindSchema, map[string]any{
+			"envelope": ledgerEnv(sid, "wire-1", "make", 4),
+		}},
+		{"close creates a row nobody opened", "ledger.close", closeSchema, closeParams("wire-2", 1)},
+	}
+
+	id := 2
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			resp := vaultCall(t, conn, step.method, step.params, id)
+			id++
+			if resp.Error != nil {
+				t.Fatalf("%s: unexpected error: %+v", step.method, resp.Error)
+			}
+			validateJSON(t, step.schema, resp.Result, step.method+" result ("+step.name+")")
+		})
+	}
+}
