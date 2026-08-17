@@ -2,6 +2,7 @@ import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
+import type { SessionLiveness } from './generated/session.liveness'
 import type { PaneClose } from './generated/pane.close'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
@@ -186,6 +187,19 @@ interface SessionState {
   // a frame — the channel has stopped accepting bytes and the keystrokes
   // are being dropped. Once per stall, not once per key.
   inputStalledCallback: (() => void) | null
+
+  // Fires when the backend revises what it believes about REACHING this
+  // session: alive, or unknown when the host has stopped answering and
+  // nothing has ended (contracts/session.liveness.schema.json). The
+  // terminal half of that vocabulary never arrives here — a session that
+  // ended is the exit notification's news.
+  livenessCallback: ((liveness: SessionLiveness) => void) | null
+
+  // The livenessEpoch of the last observation applied to this session. An
+  // observation whose epoch is not GREATER describes an older moment,
+  // whatever order it arrived in, and is dropped — the receiving half of
+  // the rule the backend's record keeps (nocx-iarf9).
+  livenessEpoch: number
 }
 
 // Per-session ack throttle state, tracked outside SessionState so the timer
@@ -240,6 +254,14 @@ export class SessionHandle {
   // session is dropping the input sent to it.
   onInputStalled(cb: () => void): void {
     this.client.onSessionInputStalled(this.sessionId, cb)
+  }
+
+  /** Registers a callback for the backend's revised belief about reaching
+   *  this session (nocx-iarf9). Fires on a CHANGE — the backend publishes
+   *  when the value changes, not once per probe — so a handler may treat
+   *  every call as news. */
+  onLiveness(cb: (liveness: SessionLiveness) => void): void {
+    this.client.onSessionLiveness(this.sessionId, cb)
   }
 }
 
@@ -377,6 +399,41 @@ export class WSClient {
       this._flushAck(sid)
       state?.exitCallback?.(exit)
       this.sessions.delete(sid)
+    })
+
+    // The backend revised what it believes about reaching a session
+    // (nocx-iarf9). Two refusals before anything is delivered, and both are
+    // the point rather than defensiveness:
+    //
+    //   - the incarnation must be the one this tab opened. A report naming
+    //     another backend instance, or another epoch of this session id, is
+    //     about a different session that merely shares the id (nocx-3oupk).
+    //   - the observation must be NEWER than the last one applied. A report
+    //     delayed behind a faster path would otherwise revive a belief the
+    //     backend has already moved on from, purely by arriving last.
+    this.dispatcher.subscribe('session.liveness', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      if (!state) return
+      if (raw.instanceId !== state.instanceId || raw.sessionEpoch !== state.sessionEpoch) return
+      const epoch = raw.livenessEpoch
+      if (typeof epoch !== 'number' || epoch <= state.livenessEpoch) return
+      const value = raw.liveness
+      if (value !== 'alive' && value !== 'unknown') return
+      const observedAt = raw.observedAt
+      if (typeof observedAt !== 'string') return
+      state.livenessEpoch = epoch
+      state.livenessCallback?.({
+        sessionId: sid,
+        instanceId: state.instanceId,
+        sessionEpoch: state.sessionEpoch,
+        liveness: value,
+        livenessEpoch: epoch,
+        observedAt,
+      })
     })
 
     // The backend dropped input for a session: its write queue is full,
@@ -547,6 +604,8 @@ export class WSClient {
       exitCallback: null,
       resetCallback: null,
       inputStalledCallback: null,
+      livenessCallback: null,
+      livenessEpoch: 0,
       instanceId,
       sessionEpoch,
     })
@@ -627,6 +686,13 @@ export class WSClient {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.inputStalledCallback = cb
+    }
+  }
+
+  onSessionLiveness(sessionId: string, cb: (liveness: SessionLiveness) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.livenessCallback = cb
     }
   }
 

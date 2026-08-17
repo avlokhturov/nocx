@@ -23,6 +23,7 @@ import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
+import type { SessionLiveness } from '../generated/session.liveness'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -245,8 +246,13 @@ export interface SessionFake {
   onExit: ReturnType<typeof vi.fn>
   onReset: ReturnType<typeof vi.fn>
   onInputStalled: ReturnType<typeof vi.fn>
+  /** The reachability axis (nocx-iarf9): the backend's revised belief about
+   *  reaching this session. */
+  onLiveness: ReturnType<typeof vi.fn>
   /** Fire the registered data callback. */
   fireData(data: string): void
+  /** Fire the registered liveness callback with one observation. */
+  fireLiveness(liveness: 'alive' | 'unknown', livenessEpoch?: number): void
 }
 
 /**
@@ -258,8 +264,10 @@ export interface SessionFake {
  */
 export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let dataCb: ((data: string) => void) | null = null
+  let livenessCb: ((l: SessionLiveness) => void) | null = null
+  const sessionId = `mock-sid-${++sessionCounter}`
   return {
-    sessionId: `mock-sid-${++sessionCounter}`,
+    sessionId,
     cwd: FIXTURE_CWD,
     desiredMode: 'script',
     send: vi.fn(),
@@ -271,8 +279,21 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     onExit: vi.fn(),
     onReset: vi.fn(),
     onInputStalled: vi.fn(),
+    onLiveness: vi.fn((cb: (l: SessionLiveness) => void) => {
+      livenessCb = cb
+    }),
     fireData: (data: string) => {
       dataCb?.(data)
+    },
+    fireLiveness: (liveness: 'alive' | 'unknown', livenessEpoch = 2) => {
+      livenessCb?.({
+        sessionId,
+        instanceId: 'fedcba9876543210fedcba9876543210',
+        sessionEpoch: 1,
+        liveness,
+        livenessEpoch,
+        observedAt: '2026-08-17T10:00:00Z',
+      })
     },
     ...overrides,
   }

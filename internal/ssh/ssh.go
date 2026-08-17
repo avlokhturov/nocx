@@ -335,6 +335,13 @@ type ConnectConfig struct {
 	// closes the connection.
 	KeepaliveCountMax int
 
+	// Liveness receives what the keepalive prober learns about the far end
+	// (nocx-iarf9): a probe that failed while retries remain, and the probe
+	// that answers again afterwards. Nil disables the reporting without
+	// changing anything else the prober does. Only meaningful when
+	// KeepaliveInterval > 0 — with no prober there is nothing observing.
+	Liveness LivenessObserver
+
 	// ReadyTimeout is the maximum time to wait for the SSH TCP dial and
 	// handshake to complete. Zero means use the default of 30 seconds.
 	ReadyTimeout time.Duration
@@ -388,6 +395,14 @@ func WithKeepalive(interval time.Duration, countMax int) ConnectOption {
 		c.KeepaliveInterval = interval
 		c.KeepaliveCountMax = countMax
 	}
+}
+
+// WithLivenessObserver routes the keepalive prober's findings to obs
+// (nocx-iarf9). The session registry sets this on every remote open, so a host
+// that stops answering marks its sessions unknown instead of leaving them
+// looking alive until the connection finally dies.
+func WithLivenessObserver(obs LivenessObserver) ConnectOption {
+	return func(c *ConnectConfig) { c.Liveness = obs }
 }
 
 // WithTimeout sets the connect timeout for the TCP dial and SSH handshake.

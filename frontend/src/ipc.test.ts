@@ -1168,3 +1168,86 @@ describe('reconnect and reattach', () => {
     expect(reports).toEqual([{ resumed: 1, lost: 1 }])
   })
 })
+
+// The reachability axis (nocx-iarf9). The renderer's half of the rule the
+// backend's record keeps: an observation is about one incarnation, and only a
+// newer one may replace what is already believed.
+describe('session.liveness notification', () => {
+  const liveness = (over: Record<string, unknown> = {}) => ({
+    jsonrpc: '2.0',
+    method: 'session.liveness',
+    params: {
+      sessionId: SID,
+      ...OPEN_IDENTITY,
+      liveness: 'unknown',
+      livenessEpoch: 2,
+      observedAt: '2026-08-17T10:00:00Z',
+      ...over,
+    },
+  })
+
+  it('delivers unknown for a session whose host stopped answering', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onLiveness((l) => seen.push(`${l.liveness}@${l.livenessEpoch}`))
+
+    ws.deliverText(liveness())
+
+    expect(seen).toEqual(['unknown@2'])
+  })
+
+  it('delivers the return to alive', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onLiveness((l) => seen.push(l.liveness))
+
+    ws.deliverText(liveness())
+    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 3 }))
+
+    expect(seen).toEqual(['unknown', 'alive'])
+  })
+
+  // The epoch's whole job, on this side of the wire: a report that arrives
+  // late describes an older moment, and applying it would revive a belief the
+  // backend has already moved on from.
+  it('drops an observation that is not newer than the last applied', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onLiveness((l) => seen.push(`${l.liveness}@${l.livenessEpoch}`))
+
+    ws.deliverText(liveness({ livenessEpoch: 5 }))
+    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 4 }))
+    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 5 }))
+
+    expect(seen).toEqual(['unknown@5'])
+  })
+
+  // A report naming another incarnation is about a different session that
+  // merely shares the id (nocx-3oupk), and a report for another session is not
+  // ours at all.
+  it('refuses a report from another incarnation or another session', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onLiveness((l) => seen.push(l.liveness))
+
+    ws.deliverText(liveness({ instanceId: '00000000000000000000000000000000' }))
+    ws.deliverText(liveness({ sessionEpoch: 99 }))
+    ws.deliverText(liveness({ sessionId: OTHER_SID }))
+
+    expect(seen).toEqual([])
+  })
+
+  // The terminal half of the record never rides this axis — the exit
+  // notification owns it — so a payload carrying one is refused rather than
+  // handed to a tab that would then have two sources for "did it end".
+  it('refuses a terminal value on the reachability axis', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onLiveness((l) => seen.push(l.liveness))
+
+    ws.deliverText(liveness({ liveness: 'dead', livenessEpoch: 6 }))
+    ws.deliverText(liveness({ liveness: 'interrupted', livenessEpoch: 7 }))
+
+    expect(seen).toEqual([])
+  })
+})

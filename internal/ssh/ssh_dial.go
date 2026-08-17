@@ -214,7 +214,7 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 		if err != nil {
 			return nil, err
 		}
-		stopKA, _ := startKeepalive(gclient, cfg.KeepaliveInterval, cfg.KeepaliveCountMax)
+		stopKA, _ := startKeepalive(gclient, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
 		return &pooledSSHConn{
 			client:        gclient,
 			stopKeepalive: stopKA,
@@ -409,7 +409,7 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 		// refcount drops to zero and the bastion connection closes. The bastion
 		// handle is released exactly once because pooledSSHConn.Close is guarded
 		// by its own sync.Once.
-		stop, _ := startKeepalive(target, cfg.KeepaliveInterval, cfg.KeepaliveCountMax)
+		stop, _ := startKeepalive(target, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
 		return &pooledSSHConn{
 			client:        target,
 			release:       func() { d.client.pool.Release(jumpHandle) },

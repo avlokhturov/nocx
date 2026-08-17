@@ -1427,6 +1427,30 @@ type openParams struct {
 	// meaningless pin, and the launcher refuses unmapped kinds rather
 	// than guessing if one slips past).
 	Shell string `json:"shell,omitempty"`
+	// Parent names the session this one is being opened FROM (nocx-9hu9d):
+	// the tab the user was in when they asked for another one. Absent for a
+	// root session, which is every session the product opens today.
+	//
+	// It is a CLAIM, not a fact: the renderer says where the open came from,
+	// and the session registry decides whether that could be true (a live
+	// session of this backend instance, at that epoch, whose own ancestry
+	// does not reach the new session). A refused claim opens nothing.
+	//
+	// It carries provenance only. Nothing about this session's capabilities,
+	// gates or lanes reads it — the parent gains no right over the child by
+	// being named here (ADR-0020 §5).
+	Parent *openParentParams `json:"parent,omitempty"`
+}
+
+// openParentParams is the claimed parent edge: the FULL identity of the
+// opener, never a bare session id. The id alone re-resolves to whatever holds
+// it now, which is exactly the ambiguity (instanceId, sessionEpoch) exists to
+// remove (nocx-3oupk) — and the edge is written once and never revisited, so
+// an ambiguity admitted here is permanent.
+type openParentParams struct {
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.

@@ -948,6 +948,14 @@ func New(opts ...Option) (*App, error) {
 	// session can have spawned a shell yet).
 	lifecyclePub.SetEmitter(tp)
 
+	// The liveness projection's watcher (nocx-iarf9), bound here for the same
+	// reason as the emitter above. The registry decides WHEN a session's
+	// belief changed — the keepalive prober's findings arrive there — and the
+	// transport decides who is told; without this line the ssh prober's
+	// knowledge that a host stopped answering would stop at the record, and
+	// the tab would go on looking alive until the connection finally died.
+	sess.SetLivenessObserver(tp.PublishLiveness)
+
 	// The vault's prompt carrier, bound post-construction for the same
 	// reason as the emitter above: the server is built here. The vault
 	// owns "I am sealed and one unlock is already pending" (nocx-o9jdu) and
