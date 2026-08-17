@@ -4279,7 +4279,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
    *  deliberately NOT its contentDOM: the token is beside the document and
    *  never in it (see the gutter test below for what that buys). */
   function indicatorOf(ed: CommandEditor): HTMLElement | null {
-    return viewOf(ed).dom.querySelector<HTMLElement>('.nocx-editor-target-indicator')
+    return viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
   }
 
   /** The reference chip strip inside the editor. */
@@ -4298,12 +4298,14 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     )
   }
 
-  /** Ask through the REAL gesture: ⌘Enter flips the active target to Ask
-   *  and sends NOTHING, then plain Enter — the one send key — delivers the
-   *  question. The flip is skipped when Ask is already active, exactly as
-   *  a person experiences it: the target stays where they put it. */
-  function askKey(ed: CommandEditor, content: TerminalContent): void {
+  /** Type a question at Ask through the REAL gestures, in the order a
+   *  person reaches them since per-target drafts landed (nocx-4ff.7): the
+   *  ⌘Enter flip FIRST — it swaps the editor to the Ask draft, so text
+   *  typed before the flip belongs to the mode it was typed in — then the
+   *  typing, then plain Enter, the one send key. */
+  function typeAndAsk(ed: CommandEditor, content: TerminalContent, text: string): void {
     if (activeLabel(content) !== 'Agent') submitKey(ed, { metaKey: true })
+    ed.insertText(text)
     submitKey(ed)
   }
 
@@ -4377,8 +4379,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       expect(indicatorOf(ed)?.textContent).toBe('Run')
       const sentAfterShell = sessionOf(content).send.mock.calls.length
-      ed.insertText('what does docs mean?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what does docs mean?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -4617,8 +4618,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(chipsIn(ed)).toHaveLength(2)
 
       const sentBefore = sessionOf(content).send.mock.calls.length
-      ed.insertText('how are these related?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'how are these related?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
       })
@@ -4672,8 +4672,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       chipA.querySelector<HTMLButtonElement>('.nocx-editor-reference-chip__drop')?.click()
       expect(chipsIn(ed)).toHaveLength(1)
 
-      ed.insertText('what is left?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what is left?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -4701,8 +4700,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // Question one, through the REAL gesture: ⌘Enter to Ask, then Enter.
       selectRows(blockA, 0, 2)
-      ed.insertText('what does docs mean?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what does docs mean?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
       })
@@ -4711,8 +4709,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // While the first answer streams, point at block B and ask again.
       selectRows(blockB, 0, 1)
-      ed.insertText('what did it fix?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'what did it fix?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(2)
       })
@@ -4796,8 +4793,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       selectRows(block, 0, 2)
 
-      ed.insertText('why did it fail?')
-      askKey(ed, content)
+      typeAndAsk(ed, content, 'why did it fail?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -4828,8 +4824,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // check that reads the prompt got `Run` glued to the command. The
       // gutter is outside the document, so the text is the text.
       const view = viewOf(ed)
-      expect(view.dom.querySelector('.nocx-editor-target-indicator')).not.toBeNull()
-      expect(view.contentDOM.querySelector('.nocx-editor-target-indicator')).toBeNull()
+      expect(view.dom.querySelector('.ui-mode-indicator')).not.toBeNull()
+      expect(view.contentDOM.querySelector('.ui-mode-indicator')).toBeNull()
       expect(view.contentDOM.textContent).toBe('')
 
       ed.insertText('ls -la')
@@ -4837,7 +4833,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(view.state.selection.main.head).toBe('ls -la'.length)
       // Still there while typing, and still outside the text.
       expect(indicatorOf(ed)?.textContent).toBe('Run')
-      expect(view.contentDOM.querySelector('.nocx-editor-target-indicator')).toBeNull()
+      expect(view.contentDOM.querySelector('.ui-mode-indicator')).toBeNull()
 
       // A real selection in the draft does not hide it: a person selecting
       // part of their command still wants to know where Enter goes.
@@ -4869,7 +4865,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // what matters is that the lines have their cells and only the first
       // carries the token.
       expect(cells.length).toBeGreaterThanOrEqual(2)
-      const withToken = cells.filter((c) => c.querySelector('.nocx-editor-target-indicator'))
+      const withToken = cells.filter((c) => c.querySelector('.ui-mode-indicator'))
       expect(withToken.length).toBeGreaterThanOrEqual(1)
       expect(view.contentDOM.textContent).toBe('onetwo')
     } finally {
@@ -4898,6 +4894,107 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       submitKey(ed, { metaKey: true })
       expect(activeLabel(content)).toBe('Shell')
       expect(indicatorOf(ed)?.textContent).toBe('Run')
+    } finally {
+      teardown()
+    }
+  })
+  it('each mode keeps its own draft — the same text, caret and scroll survive a switch away and back, and the indicator tone follows (nocx-4ff.7)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const view = viewOf(ed)
+
+      // Shell: a half-typed command with the caret mid-line and the
+      // editor scrolled — the state a person is in when they pause.
+      ed.insertText('git status --short')
+      view.dispatch({ selection: { anchor: 4, head: 8 } })
+      view.scrollDOM.scrollTop = 7
+
+      // Flip to Ask: the shell draft is saved, the line is cleared (the
+      // agent has never been edited), and the indicator wears the agent
+      // register — the kit's ModeIndicator, never a hand-rolled token.
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(ed.getDoc()).toBe('')
+      expect(indicatorOf(ed)?.textContent).toBe('Ask')
+      expect(indicatorOf(ed)?.dataset.tone).toBe('info')
+      expect(indicatorOf(ed)?.classList.contains('ui-mode-indicator')).toBe(true)
+
+      // Type a question at Ask, then flip back to the shell.
+      ed.insertText('what does status mean?')
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Shell')
+      // The half-typed command is still there — the same text, the same
+      // caret, the same scroll: nothing shared was disturbed (criterion
+      // 4), and the shell draft survived the round trip (criterion 1).
+      expect(ed.getDoc()).toBe('git status --short')
+      expect(ed.getSelection()).toEqual({ from: 4, to: 8 })
+      expect(ed.getScrollTop()).toBe(7)
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      expect(indicatorOf(ed)?.dataset.tone).toBe('neutral')
+
+      // And the agent's own draft survives the round trip in the other
+      // direction (criterion 1's other end).
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(ed.getDoc()).toBe('what does status mean?')
+      expect(ed.getSelection()).toEqual({
+        from: 'what does status mean?'.length,
+        to: 'what does status mean?'.length,
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('recall in each mode yields only that mode’s corpus — submit in both, walk back in Ask (nocx-4ff.7)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const view = viewOf(ed)
+
+      // A shell command — the shell's corpus (the store), never a
+      // question's.
+      ed.insertText('echo shell-only')
+      submitKey(ed)
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      await vi.waitFor(() => {
+        expect(ledger?.records().some((r) => r.command === 'echo shell-only')).toBe(true)
+      })
+      // The handoff hid the editor; the next prompt re-shows it, as the
+      // lifecycle would.
+      ed.show()
+
+      // A question at Ask — the agent's corpus, recorded editor-side.
+      typeAndAsk(ed, content, 'what is the answer?')
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
+      })
+
+      // Walk back in Ask: Up opens recall, which serves the AGENT's
+      // corpus — the question is there, the shell command is not. The
+      // shell's own Up still walks shell commands (the store path); the
+      // corpora never interleave.
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(recallOf(content).isOpen).toBe(true))
+      await vi.waitFor(() => {
+        const rows = Array.from(ed.root.querySelectorAll<HTMLElement>('.ui-floating-panel__row'))
+        const texts = rows.map((r) => r.textContent ?? '')
+        expect(texts.some((t) => t.includes('what is the answer?'))).toBe(true)
+        expect(texts.some((t) => t.includes('echo shell-only'))).toBe(false)
+      })
     } finally {
       teardown()
     }

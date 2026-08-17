@@ -419,6 +419,25 @@ describe('CommandEditor', () => {
     expect(onInputChange).not.toHaveBeenCalled()
   })
 
+  it('clear() empties the document through the submit seam — fires no input, announces the clear (nocx-4ff.7)', () => {
+    const onInputChange = vi.fn()
+    const onDocCleared = vi.fn()
+    const { ed, view } = setup({ onInputChange, onDocCleared })
+    ed.show()
+    ed.insertText('git status --short')
+    ed.clear()
+    expect(ed.getDoc()).toBe('')
+    // Programmatic, like a submit's clear: no input event, but the
+    // cleared-line announcement is the whole point of the seam — the
+    // host's floating surfaces must not hold stale findings over the
+    // empty line.
+    expect(onInputChange).not.toHaveBeenCalled()
+    expect(onDocCleared).toHaveBeenCalledTimes(1)
+    // And the editor still works afterwards.
+    ed.insertText('fresh')
+    expect(view.state.doc.toString()).toBe('fresh')
+  })
+
   it('constructor extensions reach the CM6 view', () => {
     const ran: string[] = []
     const ext = keymap.of([{ key: 'F8', run: () => (ran.push('F8'), true) }])

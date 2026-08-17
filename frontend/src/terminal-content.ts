@@ -14,7 +14,7 @@ import {
 import { LifecycleProjections } from './lifecycle/projections'
 import { CommandEditor } from './editor'
 import { shellExtensions } from './shell-highlight'
-import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
+import { RecallOverlay, queryLedgerHistory, withSessionText, type RecallQuery } from './recall'
 import { CompletionController } from './suggest/controller'
 import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
@@ -22,6 +22,7 @@ import type { FsComplete } from './generated/fs.complete'
 import type { ShellComplete } from './generated/shell.complete'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
 import { AgentInputTarget } from './agent-ask'
+import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
 import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
@@ -322,6 +323,22 @@ export class TerminalContent extends BaseTabContent {
    *  target and sends nothing (nocx-4wtlh). Registration and routing ARE
    *  this slice. */
   private inputTargets: InputTargetRegistry | null = null
+  /** The editor-side per-target store (ADR-0004 §3, nocx-4ff.7): drafts
+   *  and session history keyed by the REGISTRY's target id. The draft
+   *  swap below reads and writes it on every switch; the per-target
+   *  recall corpus serves from it. A third target gets both by
+   *  registering — nothing here names a target. */
+  private targetState = new TargetState()
+  /** Per-target recall queries, keyed by target id — the same keyed-lookup
+   *  seam as the registry, never a branch on the id. The SHELL's corpus is
+   *  the persistent store (with the ledger fallback); a question is not a
+   *  command and never enters the store, so the agent — and any target
+   *  without a registration — recalls its own recorded corpus. */
+  private targetRecall = new Map<string, RecallQuery>()
+  /** The id of the target the editor currently wears — the OUTGOING side
+   *  of a switch, tracked here because the registry's change notification
+   *  names only the incoming target. */
+  private activeTargetId: string | null = null
   private agentTarget: AgentInputTarget | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
@@ -941,6 +958,34 @@ export class TerminalContent extends BaseTabContent {
       // the session id is read per submit (a reconnect mints a new
       // session — the target must never capture against a stale one).
       this.inputTargets = createRegistry((target) => {
+        // The per-target draft swap (nocx-4ff.7): snapshot the editor
+        // under the OUTGOING target's id, restore the INCOMING target's
+        // draft — text, selection (anchor/head) and scroll — so a round
+        // trip returns exactly what was being edited and the other mode's
+        // draft survives untouched. The editor stays passive: the host
+        // drives the store, keyed by the registry's id; a third target
+        // gets its own draft by registering.
+        const prevId = this.activeTargetId
+        if (this.editor && prevId !== null && prevId !== target.id) {
+          const sel = this.editor.getSelection()
+          this.targetState.saveDraft(prevId, {
+            text: this.editor.getDoc(),
+            from: sel.from,
+            to: sel.to,
+            scrollTop: this.editor.getScrollTop(),
+          })
+          const draft = this.targetState.draft(target.id)
+          if (draft) {
+            this.editor.replaceDoc(draft.text, draft.from, draft.to)
+            this.editor.setScrollTop(draft.scrollTop)
+          } else {
+            // No draft under the incoming id: the line is genuinely
+            // cleared — the same seam a submit uses, so the vault
+            // surfaces hold no stale findings from the other mode.
+            this.editor.clear()
+          }
+        }
+        this.activeTargetId = target.id
         // The line-start indicator renders the registry's active target
         // and nothing else repaints it: this notification IS its refresh
         // signal (ask-entry.ts). The indicator derives its own WORD from
@@ -1008,6 +1053,10 @@ export class TerminalContent extends BaseTabContent {
         editorExtensions: () => documentLayer,
       })
       this.inputTargets.register(this.agentTarget)
+      // The registry's active target is settled (the first registered —
+      // shell). Track the id the editor wears so the next switch knows the
+      // OUTGOING side of the draft swap.
+      this.activeTargetId = this.inputTargets.active().id
       // The caret indicator + its toggle: the person's one explicit
       // switch. Clicking the chip (or ⌘/Ctrl+Enter) flips the active target;
       // the registry's notification repaints the label. Ordinary use
@@ -1064,6 +1113,18 @@ export class TerminalContent extends BaseTabContent {
             // keys, the flow gains no phantom running block, and no
             // attempt is opened for prose (nocx-x8s2.2).
             const active = this.inputTargets!.active()
+            // The per-target corpus (nocx-4ff.7): every submission is
+            // recorded under the ACTIVE target's id, so the shell's
+            // commands and the agent's questions never interleave. The
+            // shell's recall reads the store, not this; the agent's (and
+            // any future target's) recall serves from it. The id is the
+            // registry's own — the same seam that routed the submit.
+            this.targetState.record(active.id, {
+              doc,
+              cwd: this._cwd,
+              host: this._host,
+              at: Date.now(),
+            })
             if (!active.routesToShell) {
               // The target surfaces its own refusal (onRefusal → the
               // toast); the rethrow is for programmatic callers, so the
@@ -1216,19 +1277,47 @@ export class TerminalContent extends BaseTabContent {
       // first refusal while it is open; navigating previews into the
       // editor, and Enter executes through the editor's own submit path
       // (nocx-w7h.5).
+      // The SHELL's recall corpus is the persistent store — cross-session,
+      // with rungs and coverage; a question is not a command and never
+      // enters the store, so the agent recalls its own recorded corpus by
+      // default (the lookup above). Registered per target id beside the
+      // registry, exactly as the targets themselves are.
+      this.targetRecall.set('shell', async (scope, text) => {
+        try {
+          const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
+          // A command run in THIS session comes back as it was run, not as
+          // the store had to keep it (nocx-xkve.4). Recall only — the
+          // completion provider above keeps reading the store, so ghost
+          // text and candidates stay masked.
+          return withSessionText(page, this.ledger)
+        } catch {
+          return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
+        }
+      })
+
       this.recall = new RecallOverlay({
         editor: this.editor,
-        query: async (scope, text) => {
-          try {
-            const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
-            // A command run in THIS session comes back as it was run, not as
-            // the store had to keep it (nocx-xkve.4). Recall only — the
-            // completion provider above keeps reading the store, so ghost
-            // text and candidates stay masked.
-            return withSessionText(page, this.ledger)
-          } catch {
-            return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
-          }
+        // The recall corpus is the ACTIVE target's (nocx-4ff.7): the
+        // shell's commands and the agent's questions are different corpora
+        // and must not interleave. The shell's is the persistent store
+        // (with the ledger fallback), registered below; a question never
+        // enters the store, so the agent — and any target without a
+        // registration — recalls its own recorded corpus (target-state).
+        // The lookup is keyed by the registry's id, never a branch on it.
+        query: (scope, text) => {
+          const active = this.inputTargets!.active()
+          const corpus = this.targetRecall.get(active.id)
+          return corpus
+            ? corpus(scope, text)
+            : Promise.resolve(
+                queryTargetHistory(
+                  this.targetState.history(active.id),
+                  scope,
+                  this._cwd,
+                  this._host,
+                  text,
+                ),
+              )
         },
         // A recalled masked row cannot run as written (ADR-0021): the
         // overlay reports the row's redaction spans every time it places

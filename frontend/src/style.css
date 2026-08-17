@@ -40,6 +40,7 @@
 @import './styles/components/section.css';
 @import './styles/components/badge.css';
 @import './styles/components/secret-chip.css';
+@import './styles/components/mode-indicator.css';
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
@@ -358,21 +359,12 @@
    reference chips a selection raises live in their own strip between the
    chrome and the input: "if you ask, this comes with you". */
 
-.nocx-editor-target-indicator {
-  /* A control, never text — and now structurally so: it is not in the
-     document at all. */
-  padding: 1px 7px;
-  font-size: var(--font-size-2xs);
-  line-height: 1.4;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  border: 1px solid var(--color-surface-raised);
-}
-
 /* The gutter the token lives in: a column beside the content, never inside
    it. CM6's default gutter paints a panel and a divider — the chrome of a
    line-number rail — and this one is a sigil in the prompt, so all of it is
-   cleared and only the trailing gap remains. */
+   cleared and only the trailing gap remains. The token itself is the kit's
+   ModeIndicator (ui/mode-indicator.ts, styles/components/mode-indicator.css)
+   — placed here, never repainted. */
 .nocx-editor .cm-gutters {
   background: transparent;
   border-right: none;
@@ -383,16 +375,6 @@
   display: flex;
   align-items: center;
   padding: 0 6px 0 0;
-}
-
-.nocx-editor-target-indicator:hover {
-  color: var(--color-text);
-}
-
-/* The switched state is information, not alarm: the person chose it. */
-.nocx-editor-target-indicator[data-target='agent'] {
-  color: var(--color-accent-secondary);
-  border-color: var(--color-accent-secondary);
 }
 
 .nocx-editor-references {
