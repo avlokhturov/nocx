@@ -117,7 +117,19 @@ export const test = base.extend<object, { appReady: void }>({
       try {
         await injectWailsShim(page)
         await page.goto('/')
-        await baseExpect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 90_000 })
+        // AT LEAST ONE, not exactly one. This is a readiness probe — the
+        // question it asks is "can the backend serve a session yet", and a tab
+        // is the observable proof. It is not an assertion about how many tabs
+        // there are, and it never could be from here: this fixture is
+        // worker-scoped, so it runs BEFORE the first test and therefore before
+        // the layout reset that establishes that precondition.
+        //
+        // toHaveCount(1) held only while a fresh renderer always drew exactly
+        // one tab. Since nocx-isoph.4 the strip is restored from the backend
+        // and the stand keeps one home for the whole run, so webkit's worker
+        // opens on whatever chromium's left behind — "Received: 2", 182 polls,
+        // ninety seconds, every webkit test failing at 0ms behind it.
+        await baseExpect(page.locator('.nocx-tab').first()).toBeVisible({ timeout: 90_000 })
       } finally {
         await context.close()
       }
