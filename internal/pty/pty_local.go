@@ -224,7 +224,6 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 	// child to exit before PreparedCommand.Close releases its runtime tree;
 	// Close itself remains the kill-and-cleanup path for startup failures.
 	go func() {
-<<<<<<< HEAD
 		waitErr := cmd.Wait()
 		// Record BEFORE close(done): the transport's exit monitor wakes on
 		// Done and reads WaitErr to classify how the session ended — a
@@ -234,12 +233,9 @@ func NewLocal(logger log.Logger, cfg Config, opts ...Option) (*LocalPty, error) 
 		lp.waitErr = waitErr
 		lp.waitSet = true
 		lp.mu.Unlock()
-=======
-		_ = cmd.Wait()
 		if prepared != nil {
 			prepared.Close()
 		}
->>>>>>> e5d404a9 (feat(sandbox): enforce per-tab filesystem isolation)
 		close(lp.done)
 	}()
 

@@ -110,11 +110,11 @@ type openHandlers struct {
 // (AD-7), never here or on the renderer, and every later observation of
 // this session is compared against the pair this ack carried.
 type openResult struct {
-	SessionID    string `json:"sessionId"`
-	InstanceID   string `json:"instanceId"`
-	SessionEpoch uint64 `json:"sessionEpoch"`
-	Cwd          string `json:"cwd"`
-	DesiredMode  string `json:"desiredMode"`
+	SessionID    string               `json:"sessionId"`
+	InstanceID   string               `json:"instanceId"`
+	SessionEpoch uint64               `json:"sessionEpoch"`
+	Cwd          string               `json:"cwd"`
+	DesiredMode  string               `json:"desiredMode"`
 	Sandbox      *sandbox.SessionInfo `json:"sandbox,omitempty"`
 }
 

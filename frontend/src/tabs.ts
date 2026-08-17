@@ -548,9 +548,11 @@ export class TabManager {
       addReadOnly: [...launch.addReadOnly],
       removeReadOnly: [...launch.removeReadOnly],
     }
+    const wireId = crypto.randomUUID()
     const tabRef = { current: undefined as Tab | undefined }
     const content = new TerminalContent(
       this.client,
+      wireId,
       this.clipboard,
       this.gate,
       this.banner,
@@ -575,7 +577,7 @@ export class TabManager {
       supportsAttention: true,
       defaultTitle: '',
     }
-    const tab = this.addTab(content, descriptor)
+    const tab = this.addTab(content, descriptor, wireId)
     tabRef.current = tab
     return tab
   }
