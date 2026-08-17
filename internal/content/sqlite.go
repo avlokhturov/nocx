@@ -478,6 +478,18 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 // path until nocx-rtg0.3 cuts the wire over to ledger.*; nothing writes both
 // (ADR-0019 §4). The engine posture is fixed here: STRICT, auto_vacuum, WAL.
 //
+// entries' two clocks, because the column comments have room for the answer
+// and not the reason (nocx-rtg0.23). started_at is the RENDERER's wall clock
+// at submit — the same Date.now reading history.record already takes and
+// floor-checks — because a start that renders as "3 days ago" after a restart
+// can only be a wall clock; the monotonic reading design §3.2 first specified
+// here is precisely the nocx-rtg0.16 defect, where a presentation clock in a
+// field the store judged by deleted every row microseconds after it landed.
+// ended_at is the BACKEND's own wall clock at the close, on ADR-0019's rule
+// that what the store judges by, the store must own. duration_ms is the
+// renderer's measurement and is never the difference of the two: two clocks,
+// deliberately, and a duration is asked of the one that measured it.
+//
 // The six open review questions, decided conservatively:
 //
 //  1. CHECK constraints on the closed enums — YES, on every one. The reason
@@ -573,9 +585,11 @@ CREATE TABLE IF NOT EXISTS entries (
   status          TEXT NOT NULL CHECK (status IN ('pending','running','success','failure','interrupted','unknown')),
   conversation_id TEXT,
   submitted_at    INTEGER NOT NULL,        -- backend wall clock, display only
-  started_at      INTEGER,                 -- frontend monotonic clock — durations only
-  ended_at        INTEGER,
-  duration_ms     INTEGER,
+  -- The terminal facts, written by FinishExecution — see the header note on
+  -- the two clocks (nocx-rtg0.23).
+  started_at      INTEGER,                 -- renderer wall clock at submit
+  ended_at        INTEGER,                 -- backend wall clock at the close
+  duration_ms     INTEGER,                 -- the renderer's measurement
   sensitivity     TEXT NOT NULL DEFAULT 'normal' CHECK (sensitivity IN ('normal','sensitive')),
   reviewed_at     INTEGER,
   -- capture_key is the renderer's idempotency key for a FRAME capture

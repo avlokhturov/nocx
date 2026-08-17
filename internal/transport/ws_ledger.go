@@ -12,6 +12,12 @@ package transport
 // events. The backend RECORDS these; it never infers them, and not one ledger
 // byte goes on the binary data plane.
 //
+// The close's exit code is the same permission one step stricter: since
+// ADR-0024 it is not read out of the stream at all but taken from the
+// authenticated execution attempt, which is the only thing allowed to
+// complete a record. So the backend records a fact the renderer holds under
+// authentication — it does not sniff, and it does not second-guess.
+//
 // WHAT DOES NOT CROSS. The environment. AD-7 makes session identity
 // server-authoritative, and environmentForSession (ws_agent.go) is already
 // this repo's one derivation of "where is this session" — the backend never
@@ -94,19 +100,40 @@ type ledgerBindParams struct {
 	Facts    ledgerBindFacts    `json:"facts"`
 }
 
-// ledgerCloseFacts is the execution's own terminal fact: which of the five
-// outcomes a status plus an exit code cannot separate (ADR-0020 §4) this run
-// had. Required — the column's CHECK names a closed set and there is no
-// honest default.
+// ledgerCloseFacts is what the renderer knows when a command ends.
+//
+// terminationReason is the execution's own fact: which of the five outcomes a
+// status plus an exit code cannot separate (ADR-0020 §4) this run had.
+// Required — the column's CHECK names a closed set and there is no honest
+// default.
+//
+// exitCode is the SHELL fact, and it lands in the entry's kind payload rather
+// than a column of its own (design §3.2: hoisting it would make every other
+// kind carry nulls). Null is a real value — an interrupted command has no exit
+// code — so absent and null mean the same thing and both are recorded.
+//
+// `trusted` and `markers`, which design §3.3 puts beside exitCode in the shell
+// arm, are NOT here. ADR-0024 deleted the trusted boolean, its laundering rule
+// and trusted as a field crossing to history.record, and with it the anonymous
+// marker cycle a MarkerTrace was read from. Neither has a source in the
+// renderer any more, so accepting them would be asking for a guess.
 type ledgerCloseFacts struct {
 	TerminationReason string `json:"terminationReason"`
+	ExitCode          *int   `json:"exitCode"`
 }
 
+// ledgerCloseParams is the close event. startedAt and durationMs are the
+// entry's terminal facts the store had nowhere to put until nocx-rtg0.23:
+// startedAt is the renderer's wall clock at submit, carried so a close whose
+// open was lost still lands a row with a start; durationMs is the renderer's
+// own measurement of how long the command took, which is never derived from
+// the difference of two clocks.
 type ledgerCloseParams struct {
 	Envelope   ledgerEnvelopeWire `json:"envelope"`
 	Status     string             `json:"status"`
 	Facts      ledgerCloseFacts   `json:"facts"`
 	DurationMs *int64             `json:"durationMs"`
+	StartedAt  *int64             `json:"startedAt"`
 }
 
 // ledgerEventResponse is the ack all three methods answer with. It is one
@@ -260,14 +287,28 @@ func (h ledgerHandlers) handleClose(ctx context.Context, req jsonrpcRequest) {
 		h.invalid(req, msg)
 		return
 	}
-	cmd.entry.DurationMs = p.DurationMs
+	// The entry's terminal facts ride FinishExecution and NOT the submitted
+	// entry, so the two close paths — one on a row that exists, one creating
+	// its own — write the same columns through the same statement. Putting a
+	// copy on cmd.entry would give the created row a second writer, and two
+	// writers of one fact go out of step the moment one of them changes.
 	cmd.finish = content.FinishExecution{
-		// The execution's end is the BACKEND wall clock, like every other
-		// stamp the store writes. durationMs is the frontend's monotonic
-		// clock and the two are never mixed (design §3.2).
+		// The end is the BACKEND wall clock, like every other stamp the store
+		// writes: retention judges by it, and what the store judges by the
+		// store owns (ADR-0019). durationMs is the renderer's measurement and
+		// the two are never mixed into one number (design §3.2).
 		EndedAt:           time.Now().UnixMilli(),
 		TerminationReason: content.TerminationReason(p.Facts.TerminationReason),
 		Status:            content.EntryStatus(p.Status),
+		StartedAt:         p.StartedAt,
+		DurationMs:        p.DurationMs,
+	}
+	// The kind payload. Only the shell arm exists (design §3.3), and a close
+	// on any other kind leaves the column alone rather than writing an empty
+	// arm that claims to be a shell fact.
+	if content.EntryKind(p.Envelope.Kind) == content.EntryShell {
+		payload := content.ShellPayloadJSON(p.Facts.ExitCode)
+		cmd.finish.Payload = &payload
 	}
 	h.apply(ctx, req, cmd)
 }
@@ -598,11 +639,23 @@ func validateLedgerCloseRaw(raw json.RawMessage) string {
 	default:
 		return "facts.terminationReason must be one of completed, failed, timeout, transport-gone, user-killed, agent-declined, interrupted"
 	}
-	// The frontend's monotonic clock produces durations, never wall times
-	// (design §3.2), so a negative one is a broken clock rather than a long
-	// command.
+	// A duration is measured, never a difference of wall times (design §3.2),
+	// so a negative one is a broken clock rather than a long command.
 	if p.DurationMs != nil && *p.DurationMs < 0 {
 		return "durationMs must not be negative"
+	}
+	// startedAt is a WALL clock and is checked by the floor history.record
+	// already uses, because it is the same product fact reaching the same
+	// database: a performance.now() reading lands in January 1970, and there
+	// the retention sweep deletes the row microseconds after it is written
+	// (nocx-rtg0.16). One owner for "is this a wall clock", not two.
+	if p.StartedAt != nil && *p.StartedAt < epochFloor {
+		return fmt.Sprintf("startedAt must be epoch milliseconds on or after 2020-01-01 (got %d)", *p.StartedAt)
+	}
+	// An exit code is a shell fact. On any other kind it would be accepted and
+	// then dropped, since only the shell arm of the kind payload holds one.
+	if p.Facts.ExitCode != nil && content.EntryKind(p.Envelope.Kind) != content.EntryShell {
+		return "facts.exitCode is a shell fact and is only accepted on envelope.kind = shell"
 	}
 	return ""
 }

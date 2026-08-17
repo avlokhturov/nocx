@@ -11,6 +11,7 @@ package content_test
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -780,6 +781,283 @@ func execCount(e *content.LedgerEntry) int {
 		return -1
 	}
 	return len(e.Executions)
+}
+
+// ── a close records the entry's terminal facts (nocx-rtg0.23) ────────────
+
+// openBoundEntry submits one entry and starts its run, returning the entry id
+// and the execution id — the state a close on an ALREADY-OPEN row starts from,
+// which is the state that had nowhere to put an exit code or a duration.
+func openBoundEntry(t *testing.T, led content.LedgerRepository, id string) (string, int64) {
+	t.Helper()
+	ctx := context.Background()
+	envReady(t, led, "local")
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "c", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "make test", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: id})
+	if err != nil {
+		t.Fatalf("StartExecution: %v", err)
+	}
+	return id, execID
+}
+
+// The defect this bead fixes: for an entry whose row already exists, a close
+// had nowhere to put the shell payload or the duration. FinishExecution now
+// writes the entry's terminal facts in the same transaction as the run's.
+func TestFinishExecutionPersistsTheEntrysTerminalFacts(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	entryID, execID := openBoundEntry(t, led, "00000000-0000-7000-8000-000000000110")
+
+	before, err := led.Entry(ctx, entryID)
+	if err != nil || before == nil {
+		t.Fatalf("Entry before close: %v (nil=%v)", err, before == nil)
+	}
+	if before.DurationMs != nil || before.EndedAt != nil {
+		t.Fatalf("an open row already carries terminal facts: duration=%v ended=%v", before.DurationMs, before.EndedAt)
+	}
+
+	if err = led.FinishExecution(ctx, execID, content.FinishExecution{
+		EndedAt: 1_750_000_050_000, TerminationReason: content.TermFailed,
+		Status: content.EntryFailure, StartedAt: i64Ptr(1_750_000_047_700),
+		DurationMs: i64Ptr(2300), Payload: strPtr(content.ShellPayloadJSON(intPtr(2))),
+	}); err != nil {
+		t.Fatalf("FinishExecution: %v", err)
+	}
+
+	e, err := led.Entry(ctx, entryID)
+	if err != nil || e == nil {
+		t.Fatalf("Entry: %v (nil=%v)", err, e == nil)
+	}
+	if e.DurationMs == nil || *e.DurationMs != 2300 {
+		t.Fatalf("duration_ms = %v, want 2300 — the close's measured duration", e.DurationMs)
+	}
+	if e.EndedAt == nil || *e.EndedAt != 1_750_000_050_000 {
+		t.Fatalf("ended_at = %v, want the close's end", e.EndedAt)
+	}
+	if e.StartedAt == nil || *e.StartedAt != 1_750_000_047_700 {
+		t.Fatalf("started_at = %v, want the start the close carried", e.StartedAt)
+	}
+	if code := shellExitCode(t, e.Payload); code == nil || *code != 2 {
+		t.Fatalf("payload = %s, want the shell arm carrying exitCode 2", e.Payload)
+	}
+}
+
+// A close that carries no start does not erase one the row already knew, and
+// a close that carries no duration does not erase one either: the close fills
+// what is missing, it never overwrites what is known.
+func TestFinishExecutionKeepsFactsTheRowAlreadyHeld(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	envReady(t, led, "local")
+	entryID := "00000000-0000-7000-8000-000000000111"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: entryID, Client: "c", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "make test",
+		StartedAt: i64Ptr(1_750_000_000_000), DurationMs: i64Ptr(99), Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: entryID})
+	if err != nil {
+		t.Fatalf("StartExecution: %v", err)
+	}
+	if err = led.FinishExecution(ctx, execID, content.FinishExecution{
+		EndedAt: 1_750_000_050_000, TerminationReason: content.TermCompleted,
+		Status: content.EntrySuccess,
+	}); err != nil {
+		t.Fatalf("FinishExecution: %v", err)
+	}
+	e, err := led.Entry(ctx, entryID)
+	if err != nil || e == nil {
+		t.Fatalf("Entry: %v (nil=%v)", err, e == nil)
+	}
+	if e.StartedAt == nil || *e.StartedAt != 1_750_000_000_000 {
+		t.Fatalf("started_at = %v, want the start the row already held", e.StartedAt)
+	}
+	if e.DurationMs == nil || *e.DurationMs != 99 {
+		t.Fatalf("duration_ms = %v, want the duration the row already held", e.DurationMs)
+	}
+	if e.Payload != "{}" {
+		t.Fatalf("payload = %s, want the untouched default — a close with no payload writes none", e.Payload)
+	}
+}
+
+// The interval, both ends named: an entry has a duration FROM its close UNTIL
+// it is deleted. Before the close there is none; after it there is one, and it
+// survives a restart; the only event that removes it is DeleteEntry — the same
+// "no fourth exit" the phase has (design §4.3).
+func TestEntryHasADurationFromItsCloseUntilItIsDeleted(t *testing.T) {
+	db, led, path := newLedgerAt(t)
+	ctx := context.Background()
+	entryID, execID := openBoundEntry(t, led, "00000000-0000-7000-8000-000000000112")
+
+	for _, when := range []string{"after submit", "after bind"} {
+		e, err := led.Entry(ctx, entryID)
+		if err != nil || e == nil {
+			t.Fatalf("Entry %s: %v (nil=%v)", when, err, e == nil)
+		}
+		if e.DurationMs != nil {
+			t.Fatalf("%s: the row already has a duration %d — the interval opened early", when, *e.DurationMs)
+		}
+	}
+
+	// The opening event.
+	if err := led.FinishExecution(ctx, execID, content.FinishExecution{
+		EndedAt: 1_750_000_050_000, TerminationReason: content.TermCompleted,
+		Status: content.EntrySuccess, DurationMs: i64Ptr(1500),
+		Payload: strPtr(content.ShellPayloadJSON(intPtr(0))),
+	}); err != nil {
+		t.Fatalf("FinishExecution: %v", err)
+	}
+	e, err := led.Entry(ctx, entryID)
+	if err != nil || e == nil || e.DurationMs == nil || *e.DurationMs != 1500 {
+		t.Fatalf("after close: duration = %v, want 1500", entryDuration(e))
+	}
+
+	// Inside the interval: a restart does not lose it.
+	if err = db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	again, err := content.Open(ctx, content.Config{Path: path, Key: testKey(), Budget: testBudget})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+	led2 := again.Ledger()
+	e, err = led2.Entry(ctx, entryID)
+	if err != nil || e == nil || e.DurationMs == nil || *e.DurationMs != 1500 {
+		t.Fatalf("after reopen: duration = %v, want the durable 1500", entryDuration(e))
+	}
+
+	// The closing event, and the only one.
+	if err = led2.DeleteEntry(ctx, entryID); err != nil {
+		t.Fatalf("DeleteEntry: %v", err)
+	}
+	gone, err := led2.Entry(ctx, entryID)
+	if err != nil {
+		t.Fatalf("Entry after delete: %v", err)
+	}
+	if gone != nil {
+		t.Fatal("the row survived its deletion, so the duration did too")
+	}
+}
+
+func entryDuration(e *content.LedgerEntry) any {
+	if e == nil || e.DurationMs == nil {
+		return nil
+	}
+	return *e.DurationMs
+}
+
+// The entry's UPDATE is the one new external call a close makes, and it can
+// fail: a status outside the CHECK is exactly what a caller bypassing the
+// wire's validation would write. When it does, NOTHING of the close survives —
+// not a half-written payload, not an ended run, not a moved phase. The close
+// is one transaction or it is a lie.
+func TestFinishExecutionFailingLeavesNoHalfWrittenClose(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	entryID, execID := openBoundEntry(t, led, "00000000-0000-7000-8000-000000000113")
+
+	err := led.FinishExecution(ctx, execID, content.FinishExecution{
+		EndedAt: 1_750_000_050_000, TerminationReason: content.TermCompleted,
+		Status: "cromulent", DurationMs: i64Ptr(4200),
+		Payload: strPtr(content.ShellPayloadJSON(intPtr(0))),
+	})
+	if err == nil {
+		t.Fatal("a close with a status outside the CHECK succeeded")
+	}
+
+	e, entryErr := led.Entry(ctx, entryID)
+	if entryErr != nil || e == nil {
+		t.Fatalf("Entry after the failed close: %v (nil=%v)", entryErr, e == nil)
+	}
+	if e.Phase != content.PhaseBound || e.Status != content.EntryPending {
+		t.Fatalf("entry = %s/%s, want the unchanged bound/pending", e.Phase, e.Status)
+	}
+	if e.Payload != "{}" {
+		t.Fatalf("payload = %s after a failed close — half of the close is durable", e.Payload)
+	}
+	if e.DurationMs != nil || e.EndedAt != nil {
+		t.Fatalf("duration=%v ended=%v after a failed close, want neither", e.DurationMs, e.EndedAt)
+	}
+	if len(e.Executions) != 1 {
+		t.Fatalf("%d executions, want 1", len(e.Executions))
+	}
+	if ex := e.Executions[0]; ex.EndedAt != nil || ex.TerminationReason != nil {
+		t.Fatalf("the run was ended by a close that failed: ended=%v reason=%v", ex.EndedAt, ex.TerminationReason)
+	}
+}
+
+// The property the rejected workaround would have broken. Routing the exit
+// code and the duration through Submit on a LATER event would change the
+// content digest the idempotency key is bound to, so every outbox replay of
+// the original open would come back ErrIDConflict. The facts go through
+// FinishExecution precisely so this stays true.
+func TestSubmitReplayAfterACloseIsStillAReplay(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	entryID, execID := openBoundEntry(t, led, "00000000-0000-7000-8000-000000000114")
+	first, err := led.Entry(ctx, entryID)
+	if err != nil || first == nil {
+		t.Fatalf("Entry: %v (nil=%v)", err, first == nil)
+	}
+
+	if err = led.FinishExecution(ctx, execID, content.FinishExecution{
+		EndedAt: 1_750_000_050_000, TerminationReason: content.TermCompleted,
+		Status: content.EntrySuccess, StartedAt: i64Ptr(1_750_000_047_700),
+		DurationMs: i64Ptr(2300), Payload: strPtr(content.ShellPayloadJSON(intPtr(0))),
+	}); err != nil {
+		t.Fatalf("FinishExecution: %v", err)
+	}
+
+	// The very submission that opened the row, re-delivered after the close.
+	res, err := led.Submit(ctx, content.SubmitEntry{
+		ID: entryID, Client: "c", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "make test", Payload: "{}",
+	})
+	if errors.Is(err, content.ErrIDConflict) {
+		t.Fatal("the close changed the idempotency digest: a replay of the open is now a conflict")
+	}
+	if err != nil {
+		t.Fatalf("Submit replay: %v", err)
+	}
+	if !res.Replayed {
+		t.Fatal("the replay was not reported as one")
+	}
+	if res.IngestSeq != first.IngestSeq {
+		t.Fatalf("replay ingest_seq = %d, want the original %d", res.IngestSeq, first.IngestSeq)
+	}
+	// And the close's facts are still there — the replay changed nothing.
+	e, err := led.Entry(ctx, entryID)
+	if err != nil || e == nil || e.DurationMs == nil || *e.DurationMs != 2300 {
+		t.Fatalf("after the replay: duration = %v, want the close's 2300", entryDuration(e))
+	}
+}
+
+func intPtr(n int) *int { return &n }
+
+// shellExitCode reads the exit code out of an entry's kind payload the way
+// nocx-rtg0.19's read path will have to: the shell arm of design §3.3.
+func shellExitCode(t *testing.T, payload string) *int {
+	t.Helper()
+	var p struct {
+		Kind     string `json:"kind"`
+		V        int    `json:"v"`
+		ExitCode *int   `json:"exitCode"`
+	}
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		t.Fatalf("payload %q is not JSON: %v", payload, err)
+	}
+	if p.Kind != "shell" || p.V != 1 {
+		t.Fatalf("payload = %s, want the versioned shell arm", payload)
+	}
+	return p.ExitCode
 }
 
 // ── authority grant recorded on the run (ADR-0020 §5) ────────────────────
