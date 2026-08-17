@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // fakeProfileRepo is an in-memory profile.ProfileRepository that also
@@ -464,6 +465,11 @@ func (f *fakeSession) Parent() (session.Ref, bool) {
 func (f *fakeSession) Liveness() session.LivenessState {
 	return session.LivenessState{Liveness: session.LivenessAlive, Epoch: 1}
 }
+
+// WorkspaceID reports the default: this fake stands in for a session in
+// tests that are about capability, and membership carries no behaviour
+// (nocx-fraus), so there is nothing here for a workspace to change.
+func (f *fakeSession) WorkspaceID() workspace.ID { return workspace.Default }
 func (f *fakeSession) Kind() session.Kind        { return f.kind }
 func (f *fakeSession) Host() string              { return f.host }
 func (f *fakeSession) Cwd() string               { return "/home/test" }

@@ -224,8 +224,11 @@ func TestOpenParent_DTOConformsToContract(t *testing.T) {
 		SessionID:    "0123456789abcdef0123456789abcdef",
 		InstanceID:   "fedcba9876543210fedcba9876543210",
 		SessionEpoch: 2,
-		Cwd:          "~/work",
-		DesiredMode:  "script",
+		// workspaceId became required with a minLength of 1 when nocx-fraus
+		// merged; a session is always in a workspace and there is no null.
+		WorkspaceID: "workspace:default",
+		Cwd:         "~/work",
+		DesiredMode: "script",
 		Parent: &openParentResult{
 			SessionID:    "00000000000000000000000000000001",
 			InstanceID:   "fedcba9876543210fedcba9876543210",

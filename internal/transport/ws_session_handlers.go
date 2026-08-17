@@ -104,8 +104,13 @@ type openResult struct {
 	SessionID    string `json:"sessionId"`
 	InstanceID   string `json:"instanceId"`
 	SessionEpoch uint64 `json:"sessionEpoch"`
-	Cwd          string `json:"cwd"`
-	DesiredMode  string `json:"desiredMode"`
+	// WorkspaceID is never empty and has no omitempty: a tab is always
+	// in a workspace and there is no null (design §4.2). The renderer
+	// reads it from here rather than assuming a default, because the
+	// default never renders and so the renderer has no name for it.
+	WorkspaceID string `json:"workspaceId"`
+	Cwd         string `json:"cwd"`
+	DesiredMode string `json:"desiredMode"`
 	// Parent is the edge the backend RECORDED, echoed back so the renderer
 	// stores what was admitted rather than what it asked for (nocx-9hu9d).
 	// Null for a root session — and null rather than absent, because the
@@ -445,6 +450,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		SessionID:    string(sess.ID()),
 		InstanceID:   string(ident.InstanceID),
 		SessionEpoch: ident.Epoch,
+		WorkspaceID:  string(sess.WorkspaceID()),
 		Cwd:          sess.Cwd(),
 		DesiredMode:  desiredModeForAck(cfg.Remote),
 		Parent:       parentResultFor(sess),

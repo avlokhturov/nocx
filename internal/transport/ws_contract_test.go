@@ -36,6 +36,7 @@ import (
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // contractDir holds the wire schemas. Deliberately not under internal/: the
@@ -1599,6 +1600,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 			SessionID:    "0123456789abcdef0123456789abcdef",
 			InstanceID:   "fedcba9876543210fedcba9876543210",
 			SessionEpoch: 1,
+			WorkspaceID:  string(workspace.Default),
 			Cwd:          "~/work",
 			DesiredMode:  mode,
 		})
