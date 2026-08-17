@@ -2119,6 +2119,33 @@ export class TerminalContent extends BasePaneContent {
           message: 'This connection has stopped accepting input — keystrokes are being dropped.',
         })
       })
+      session.onLiveness((liveness) => {
+        // The backend cannot currently reach this session's host, and
+        // NOTHING HAS ENDED — so the tab is neither dead nor trustworthy,
+        // and saying nothing would leave it looking perfectly alive
+        // (nocx-iarf9). Reported the way an input stall is: a toast, from
+        // the kit, once per change rather than once per probe.
+        //
+        // Deliberately NOT the tab's warning mark: that mark has an owner
+        // already — the integration axis, and the lost state above it — and
+        // a second writer would be the two-surfaces-one-input defect
+        // AGENTS.md names. A tab whose session is already lost says nothing
+        // here either; the loss is terminal and has had its say.
+        if (this._sessionLost) return
+        if (liveness.liveness === 'unknown') {
+          log.warn('nocx: session unreachable', {
+            sid: session.sessionId,
+            observedAt: liveness.observedAt,
+          })
+          showToast({
+            level: 'warning',
+            message:
+              'This connection has stopped responding — the session may still be running on the host.',
+          })
+          return
+        }
+        showToast({ level: 'info', message: 'This connection is responding again.' })
+      })
       session.onReset(() => {
         renderer.reset()
         this.lifecycle.reset()

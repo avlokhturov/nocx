@@ -460,6 +460,10 @@ func (f *fakeSession) Identity() session.Identity { return f.identity }
 func (f *fakeSession) Parent() (session.Ref, bool) {
 	return f.parent, !f.parent.Zero()
 }
+
+func (f *fakeSession) Liveness() session.LivenessState {
+	return session.LivenessState{Liveness: session.LivenessAlive, Epoch: 1}
+}
 func (f *fakeSession) Kind() session.Kind        { return f.kind }
 func (f *fakeSession) Host() string              { return f.host }
 func (f *fakeSession) Cwd() string               { return "/home/test" }

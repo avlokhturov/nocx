@@ -4791,3 +4791,34 @@ describe('the running command names the tab (nocx-n8n82)', () => {
     }
   })
 })
+
+// A session the backend cannot currently reach (nocx-iarf9). Nothing has
+// ended, so the tab stays exactly as it is — and the user is told, because a
+// terminal that has silently stopped being connected to anything looks
+// identical to one that is simply quiet.
+describe('the reachability axis', () => {
+  it('says so when the connection stops responding, and again when it returns', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const session = client._sessions[0]
+      expect(session.onLiveness).toHaveBeenCalled()
+
+      session.fireLiveness('unknown')
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'warning',
+        message:
+          'This connection has stopped responding — the session may still be running on the host.',
+      })
+
+      session.fireLiveness('alive', 3)
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'info',
+        message: 'This connection is responding again.',
+      })
+    } finally {
+      teardown()
+    }
+  })
+})

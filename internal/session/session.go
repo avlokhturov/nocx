@@ -189,6 +189,13 @@ type Session interface {
 	// deciding an authority question from this value is the defect ADR-0020 §5
 	// names; the revocable delegation that does answer it is a later epic.
 	Parent() (Ref, bool)
+	// Liveness returns what the backend currently believes about this
+	// session: {liveness, livenessEpoch, observedAt} over alive | dead |
+	// unknown | interrupted (nocx-iarf9). See liveness.go — in particular
+	// that a terminal value is derived from this session's own end and can
+	// be asserted by nobody, and that `unknown` is what a session on an
+	// unreachable host reads as, because both other renderings would lie.
+	Liveness() LivenessState
 	// Host returns the session's remote hostname. Empty for a local session.
 	Host() string
 	// Cwd is where the session's shell was started. It is the tab's name
@@ -310,6 +317,11 @@ type Reg struct {
 	// every session it opens. A record from a previous backend instance
 	// carries a different one, which is what the refusal compares.
 	instanceID InstanceID
+	// livenessObserver is told (by Ref) when a session's liveness value
+	// changes, so the transport can publish it (nocx-iarf9). Set at the
+	// composition root after the transport exists; nil until then, and nil
+	// forever in any build that does not publish it. Guarded by mu.
+	livenessObserver func(Ref)
 	// epochCounter mints the per-session epoch: atomic because Open is
 	// called concurrently (one per tab) and the counter has no other lock
 	// of its own — the sessions-map insert takes r.mu, but the mint must be
@@ -401,6 +413,13 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		}
 		opts = sshOptionsFromConfig(cfg.Remote)
 		opts = append(opts, ssh.WithSessionID(string(id)))
+		// The keepalive prober's findings come back here (nocx-iarf9): it is
+		// the one mechanism that already notices a host has stopped answering
+		// while the session is still open, and without this the knowledge was
+		// spent entirely on the decision to close the connection. Bound to
+		// the host name THIS open used, because the connection underneath is
+		// pooled and belongs to no single session.
+		opts = append(opts, ssh.WithLivenessObserver(r.hostLivenessObserver(cfg.Host)))
 		if cfg.Enhanced {
 			opts = append(opts, ssh.WithEnhanced())
 		}
@@ -644,6 +663,16 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
+
+	// The liveness projection (nocx-iarf9). livenessMu guards the record;
+	// livenessEpochs is this session's own monotonic source of observation
+	// epochs, so any two observations of THIS session are ordered without a
+	// shared clock (an observation of another incarnation is refused by
+	// identity, never by number). The zero record means "not observed yet",
+	// which livenessLocked resolves on the first read.
+	livenessMu     sync.Mutex
+	liveness       LivenessState
+	livenessEpochs atomic.Uint64
 
 	// writeCh feeds a single write goroutine that serialises every write in
 	// arrival order. The readLoop hands frames over without waiting, so

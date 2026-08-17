@@ -18,7 +18,7 @@ func TestKeepaliveTickerStopsViaStopFn(t *testing.T) {
 	defer func() { _ = client.Close() }()
 
 	// Start keepalive with a short interval so the ticker fires if it leaks.
-	stop, done := startKeepalive(client, 10*time.Millisecond, 3)
+	stop, done := startKeepalive(client, 10*time.Millisecond, 3, nil)
 	if stop == nil {
 		t.Fatal("startKeepalive returned nil stop for non-zero interval")
 	}
@@ -45,7 +45,7 @@ func TestKeepaliveTickerStopsOnClientClose(t *testing.T) {
 
 	client := dialTestClient(t, srv)
 
-	stop, done := startKeepalive(client, 10*time.Millisecond, 3)
+	stop, done := startKeepalive(client, 10*time.Millisecond, 3, nil)
 	if stop == nil {
 		t.Fatal("startKeepalive returned nil stop for non-zero interval")
 	}
@@ -65,7 +65,7 @@ func TestKeepaliveTickerStopsOnClientClose(t *testing.T) {
 // TestKeepaliveDisabledNilStop verifies that a zero interval returns nil stop
 // and nil done, so the caller can safely branch on stop == nil.
 func TestKeepaliveDisabledNilStop(t *testing.T) {
-	stop, done := startKeepalive(nil, 0, 3)
+	stop, done := startKeepalive(nil, 0, 3, nil)
 	if stop != nil {
 		t.Fatal("expected nil stop for zero interval")
 	}
