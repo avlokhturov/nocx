@@ -11,7 +11,7 @@
 //    from the root down to the new cwd, expand, select — never collapse).
 //    Only a different tab or a dead binding re-opens.
 // 2. STALE RESPONSES ARE DROPPED, AND NOTHING CLIENT-MINTED GOES ON THE
-//    WIRE. Every request captures the {tabId, generation, bindingId} triple
+//    WIRE. Every request captures the {paneId, generation, bindingId} triple
 //    it was issued for; a response applies only if that triple still matches
 //    the view's current state (the tab switch guard — a files.list for tab A,
 //    still in flight when the user activates tab B, must never paint A's
@@ -39,7 +39,7 @@ import { createMemo, createSignal, untrack } from 'solid-js'
 import type { FilesListResult, FilesListEntry } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesPanelServices } from './files-client'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import { isExpandable, type TreeRowKind } from '../ui/tree-row-kind'
 
 /** The watch set for a tree: the successfully listed root plus every
@@ -237,7 +237,7 @@ export interface FilesTreeStore {
 }
 
 interface ListCtx {
-  tabId: number
+  paneId: number
   generation: number
   bindingId: string | null
 }
@@ -346,7 +346,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (closed) return false
     const o = untrack(origin)
     const b = untrack(binding)
-    if (o === null || ctx.tabId !== o.tabId) return false
+    if (o === null || ctx.paneId !== o.paneId) return false
     if (ctx.bindingId !== null && (b === null || ctx.bindingId !== b.bindingId)) return false
     return true
   }
@@ -355,10 +355,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  request: the open that establishes a binding wins by generation. Same
    *  untracked read as scopeCurrent — a one-shot guard, never a reactive
    *  derivation. */
-  function openCurrent(ctx: { tabId: number; generation: number }): boolean {
+  function openCurrent(ctx: { paneId: number; generation: number }): boolean {
     if (closed) return false
     const o = untrack(origin)
-    return o !== null && ctx.tabId === o.tabId && ctx.generation === generation
+    return o !== null && ctx.paneId === o.paneId && ctx.generation === generation
   }
 
   function messageOf(e: unknown): string {
@@ -542,7 +542,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const o = untrack(origin)
     const b = untrack(binding)
     if (o === null || b === null) return null
-    return { tabId: o.tabId, generation, bindingId: b.bindingId }
+    return { paneId: o.paneId, generation, bindingId: b.bindingId }
   }
 
   function issueList(
@@ -700,7 +700,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // instead), and the provider's fallback machinery is not reachable
     // from the panel — the panel is a file manager from / whether or not
     // the shell reports where it is.
-    const ctx = { tabId: o.tabId, generation }
+    const ctx = { paneId: o.paneId, generation }
     const opening = services.open(o.sessionId, '/')
     opening
       .then((res) => {
@@ -724,7 +724,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         const b = untrack(binding)
         const r = untrack(root)
         if (b !== null && r !== null) {
-          const listCtx: ListCtx = { tabId: o.tabId, generation, bindingId: b.bindingId }
+          const listCtx: ListCtx = { paneId: o.paneId, generation, bindingId: b.bindingId }
           void issueList(r, 0, FILES_PAGE_SIZE, listCtx).then(async () => {
             if (!scopeCurrent(listCtx) || r.state !== 'ok') return
             await syncWatchSet()
@@ -752,7 +752,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // Rule 1: the same session scope keeps its binding and its tree — a
     // later OSC 7 cwd must not re-root the tree, and neither may a viewer
     // tab that answers the origin it was opened from (design §5.4): the
-    // viewer is the same machine with a different tabId, and re-opening
+    // viewer is the same machine with a different paneId, and re-opening
     // there would close the very binding the viewer is reading through.
     // Only a different session, a different kind, or a dead binding
     // (dispose, or an origin that went null and came back) re-opens.
@@ -853,7 +853,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  was expanded left expanded and the level's state row rendered —
    *  the reveal did not reach the target and the tree says so where it
    *  stopped. Idempotent: the path already revealed (or a reveal to it
-   *  in flight) is a no-op. Every step rides the {tabId, generation,
+   *  in flight) is a no-op. Every step rides the {paneId, generation,
    *  bindingId} discipline (rules 2 and 3): a reveal in flight when the
    *  origin changes must drop, never paint. */
   function revealPath(targetPath: string): void {

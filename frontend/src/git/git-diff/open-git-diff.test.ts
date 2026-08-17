@@ -3,15 +3,15 @@
 // openGitDiff tests: one tab per {toplevel, side, path} — the same triple
 // focuses one tab while the staged and unstaged diffs of one file are two
 // tabs, and two worktrees of one repository are two tabs — plus the
-// frozen-origin contract through a REAL TabManager: activating a diff tab
+// frozen-origin contract through a REAL PaneManager: activating a diff tab
 // answers the click-time origin (never null), which is what keeps an
-// origin-following panel's binding alive. A real TabManager is used — the
-// dedup lives in TabManager.openTab, and asserting it through a fake would
+// origin-following panel's binding alive. A real PaneManager is used — the
+// dedup lives in PaneManager.openPane, and asserting it through a fake would
 // test the fake.
 import { describe, expect, it, vi } from 'vitest'
-import { createRendererMock, mountTabManager } from '../../test-support/tabs-fixtures'
+import { createRendererMock, mountPaneManager } from '../../test-support/panes-fixtures'
 import { SurfaceRegistry } from '../../surface-registry'
-import type { ActiveOrigin } from '../../tab-content'
+import type { ActiveOrigin } from '../../pane-content'
 import {
   registerGitDiffSurface,
   openGitDiff,
@@ -52,7 +52,7 @@ class FakeBinding {
   }
 }
 
-const FROZEN_ORIGIN: Omit<ActiveOrigin, 'tabId'> = {
+const FROZEN_ORIGIN: Omit<ActiveOrigin, 'paneId'> = {
   sessionId: 'sess-1',
   kind: 'local',
   cwd: '/repo',
@@ -73,7 +73,7 @@ function target(overrides: Partial<GitDiffTarget>): GitDiffTarget {
 }
 
 async function setup(): Promise<{ binding: FakeBinding; titles: () => string[] }> {
-  const { manager, bar } = await mountTabManager()
+  const { manager, bar } = await mountPaneManager()
   const binding = new FakeBinding()
   registerGitDiffSurface(new SurfaceRegistry(), manager, binding.deps)
   const titles = (): string[] =>
@@ -136,7 +136,7 @@ describe('openGitDiff — one tab per {toplevel, side, path}', () => {
 
 describe('openGitDiff — the frozen origin survives activation (design §5.4)', () => {
   it('a diff tab in front answers the click-time origin, never null', async () => {
-    const { manager } = await mountTabManager()
+    const { manager } = await mountPaneManager()
     const binding = new FakeBinding()
     registerGitDiffSurface(new SurfaceRegistry(), manager, binding.deps)
 
@@ -149,18 +149,18 @@ describe('openGitDiff — the frozen origin survives activation (design §5.4)',
     await Promise.resolve()
 
     // The active tab is the diff tab and it answers the frozen origin with
-    // the tab id TabManager adds. If it answered null instead, the
+    // the tab id PaneManager adds. If it answered null instead, the
     // origin-following panels would drop to their empty state and close the
     // very binding this tab reads through (the singletonKey would then focus
     // a dead tab forever).
     const diffOrigin = manager.activeOrigin()
     expect(diffOrigin).not.toBeNull()
-    // tabId is asserted separately rather than through expect.any inside the
+    // paneId is asserted separately rather than through expect.any inside the
     // object literal: that helper is typed `any`, and spreading it here trips
     // no-unsafe-assignment for a shape the test already knows exactly.
-    expect(typeof diffOrigin?.tabId).toBe('number')
+    expect(typeof diffOrigin?.paneId).toBe('number')
     const withoutTabId = { ...diffOrigin }
-    delete (withoutTabId as { tabId?: number }).tabId
+    delete (withoutTabId as { paneId?: number }).paneId
     expect(withoutTabId).toEqual({
       ...FROZEN_ORIGIN,
       sessionId: terminalOrigin!.sessionId,

@@ -4,16 +4,16 @@
  * Derived from: frontend/src/tabs.ts
  *   - Tab.id, Tab.descriptor, Tab._title, Tab._hasActivity, Tab._agentStatus,
  *     Tab._disposed  (Tab class, lines 27-258)
- *   - TabManager.tabs, TabManager.activeTab, TabManager.nextTabId,
- *     TabManager.recentTabIds  (TabManager class, lines 264-598)
+ *   - PaneManager.tabs, PaneManager.activePane, PaneManager.nextPaneId,
+ *     PaneManager.recentPaneIds  (PaneManager class, lines 264-598)
  *
  * Authority:
- *   Tab creation  → composition root (via TabManager equivalent)
+ *   Tab creation  → composition root (via PaneManager equivalent)
  *   Activation    → tab strip / keyboard shortcuts
- *   Title         → content (via TabHost.setTitle)
- *   Activity      → content (via TabHost.requestAttention)
+ *   Title         → content (via PaneHost.setTitle)
+ *   Activity      → content (via PaneHost.requestAttention)
  *   Agent status  → terminal renderer (via TerminalRenderer.onTitle)
- *   Disposal      → TabManager (on close)
+ *   Disposal      → PaneManager (on close)
  *
  * Terminal render state (grid, scrollback, selection, per-cell data) is NOT
  * modeled here — it stays inside the terminal controller per AD-6.
@@ -27,7 +27,7 @@ import type { AgentStatus } from '../agent-status'
  * Per-tab model data.
  *
  * Only model-level fields are present.  Render state (pane, viewport observer,
- * mount lifecycle) stays imperative in Tab / TabManager and is NOT reflected
+ * mount lifecycle) stays imperative in Tab / PaneManager and is NOT reflected
  * here (AD-6).
  *
  * Derived from: `Tab` class (tabs.ts:27-258)
@@ -38,9 +38,9 @@ import type { AgentStatus } from '../agent-status'
  *   Tab._agentStatus → .agentStatus
  *   Tab._disposed → .disposed
  */
-export interface TabData {
+export interface PaneData {
   readonly id: number
-  readonly descriptor: TabDescriptor
+  readonly descriptor: PaneDescriptor
   title: string
   hasActivity: boolean
   agentStatus: AgentStatus | null
@@ -52,7 +52,7 @@ export interface TabData {
  * minus the SurfaceType/SingletonKey branded types (kept as string | null for
  * framework‑neutrality).
  */
-export interface TabDescriptor {
+export interface PaneDescriptor {
   readonly surfaceType: string
   readonly singletonKey: string | null
   readonly restoreDescriptor: unknown
@@ -63,28 +63,28 @@ export interface TabDescriptor {
 /**
  * The aggregate tab model.
  *
- * Derived from: `TabManager` class (tabs.ts:264-598)
- *   TabManager.tabs → .tabs
- *   TabManager.activeTab → .activeTabId (flattened to the tab id)
- *   TabManager.nextTabId → .nextTabId
- *   TabManager.recentTabIds → .recentTabIds
+ * Derived from: `PaneManager` class (tabs.ts:264-598)
+ *   PaneManager.tabs → .tabs
+ *   PaneManager.activePane → .activePaneId (flattened to the tab id)
+ *   PaneManager.nextPaneId → .nextPaneId
+ *   PaneManager.recentPaneIds → .recentPaneIds
  */
-export interface TabModel {
-  readonly tabs: readonly TabData[]
-  readonly activeTabId: number | null
-  readonly nextTabId: number
-  readonly recentTabIds: readonly number[]
+export interface PaneModel {
+  readonly tabs: readonly PaneData[]
+  readonly activePaneId: number | null
+  readonly nextPaneId: number
+  readonly recentPaneIds: readonly number[]
 }
 
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 /** Create an empty tab model with no tabs and a fresh id counter. */
-export function createTabModel(): TabModel {
+export function createPaneModel(): PaneModel {
   return {
     tabs: [],
-    activeTabId: null,
-    nextTabId: 1,
-    recentTabIds: [],
+    activePaneId: null,
+    nextPaneId: 1,
+    recentPaneIds: [],
   }
 }
 
@@ -93,13 +93,13 @@ export function createTabModel(): TabModel {
 /**
  * Add a tab to the model and activate it.
  *
- * Authority: composition root (TabManager.newTab, TabManager.newSSHTab).
+ * Authority: composition root (PaneManager.newPane, PaneManager.newSSHPane).
  *
- * Derived from: TabManager.addTab (tabs.ts:403-415)
+ * Derived from: PaneManager.addPane (tabs.ts:403-415)
  */
-export function addTab(model: TabModel, descriptor: TabDescriptor): TabModel {
-  const id = model.nextTabId
-  const tab: TabData = {
+export function addPane(model: PaneModel, descriptor: PaneDescriptor): PaneModel {
+  const id = model.nextPaneId
+  const tab: PaneData = {
     id,
     descriptor,
     title: descriptor.defaultTitle,
@@ -111,9 +111,9 @@ export function addTab(model: TabModel, descriptor: TabDescriptor): TabModel {
   return {
     ...model,
     tabs: [...model.tabs, tab],
-    nextTabId: id + 1,
-    activeTabId: id,
-    recentTabIds: updateRecentTabIds(id, model.activeTabId, model.recentTabIds),
+    nextPaneId: id + 1,
+    activePaneId: id,
+    recentPaneIds: updateRecentTabIds(id, model.activePaneId, model.recentPaneIds),
   }
 }
 
@@ -123,16 +123,16 @@ export function addTab(model: TabModel, descriptor: TabDescriptor): TabModel {
  *
  * Authority: tab strip, keyboard shortcuts (Cmd+1..9, Cmd+W).
  *
- * Derived from: TabManager.activate (tabs.ts:499-526)
+ * Derived from: PaneManager.activate (tabs.ts:499-526)
  */
-export function activateTab(model: TabModel, tabId: number): TabModel {
-  if (model.activeTabId === tabId) return model
-  if (!model.tabs.some((t) => t.id === tabId && !t.disposed)) return model
+export function activatePane(model: PaneModel, paneId: number): PaneModel {
+  if (model.activePaneId === paneId) return model
+  if (!model.tabs.some((t) => t.id === paneId && !t.disposed)) return model
 
   return {
     ...model,
-    activeTabId: tabId,
-    recentTabIds: updateRecentTabIds(tabId, model.activeTabId, model.recentTabIds),
+    activePaneId: paneId,
+    recentPaneIds: updateRecentTabIds(paneId, model.activePaneId, model.recentPaneIds),
   }
 }
 
@@ -141,52 +141,52 @@ export function activateTab(model: TabModel, tabId: number): TabModel {
  * determine the next activation.  Closing the last tab opens a fresh one
  * (the window is never empty).
  *
- * Authority: TabManager (keyboard shortcut, tab strip close button).
+ * Authority: PaneManager (keyboard shortcut, tab strip close button).
  *
- * Derived from: TabManager.closeTab (tabs.ts:473-496)
+ * Derived from: PaneManager.closePane (tabs.ts:473-496)
  */
-export function closeTab(model: TabModel, tabId: number): TabModel {
-  const index = model.tabs.findIndex((t) => t.id === tabId)
+export function closePane(model: PaneModel, paneId: number): PaneModel {
+  const index = model.tabs.findIndex((t) => t.id === paneId)
   if (index === -1) return model
 
-  const wasActive = model.activeTabId === tabId
-  const nextRecent = model.recentTabIds.filter((id) => id !== tabId)
-  const nextTabs = model.tabs.filter((t) => t.id !== tabId)
+  const wasActive = model.activePaneId === paneId
+  const nextRecent = model.recentPaneIds.filter((id) => id !== paneId)
+  const nextPanes = model.tabs.filter((t) => t.id !== paneId)
 
-  if (nextTabs.length === 0) {
+  if (nextPanes.length === 0) {
     // Last tab closed — create a fresh terminal tab.
-    return addTab(
+    return addPane(
       {
         ...model,
         tabs: [],
-        activeTabId: null,
-        recentTabIds: nextRecent,
+        activePaneId: null,
+        recentPaneIds: nextRecent,
       },
       DEFAULT_TERMINAL_DESCRIPTOR,
     )
   }
 
-  let activeTabId = model.activeTabId
+  let activePaneId = model.activePaneId
   if (wasActive) {
     // Pop the MRU stack until we find a live tab.
     const mruCandidates = [...nextRecent].reverse()
-    activeTabId = null
+    activePaneId = null
     for (const mruId of mruCandidates) {
-      if (nextTabs.some((t) => t.id === mruId && !t.disposed)) {
-        activeTabId = mruId
+      if (nextPanes.some((t) => t.id === mruId && !t.disposed)) {
+        activePaneId = mruId
         break
       }
     }
-    if (activeTabId === null && nextTabs.length > 0) {
-      activeTabId = nextTabs[0].id
+    if (activePaneId === null && nextPanes.length > 0) {
+      activePaneId = nextPanes[0].id
     }
   }
 
   return {
     ...model,
-    tabs: nextTabs,
-    activeTabId,
-    recentTabIds: nextRecent,
+    tabs: nextPanes,
+    activePaneId,
+    recentPaneIds: nextRecent,
   }
 }
 
@@ -195,41 +195,45 @@ export function closeTab(model: TabModel, tabId: number): TabModel {
  *
  * Authority: tab strip (drag-and-drop reorder).
  *
- * Derived from: TabManager.reorderTab (tabs.ts:537-547)
+ * Derived from: PaneManager.reorderPane (tabs.ts:537-547)
  */
-export function reorderTab(model: TabModel, draggedId: number, targetId: number): TabModel {
+export function reorderPane(model: PaneModel, draggedId: number, targetId: number): PaneModel {
   const draggedIndex = model.tabs.findIndex((t) => t.id === draggedId)
   const targetIndex = model.tabs.findIndex((t) => t.id === targetId)
   if (draggedIndex === -1 || targetIndex === -1) return model
 
-  const nextTabs = [...model.tabs]
-  const [draggedTab] = nextTabs.splice(draggedIndex, 1)
+  const nextPanes = [...model.tabs]
+  const [draggedTab] = nextPanes.splice(draggedIndex, 1)
   const adjustedTarget = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex
-  nextTabs.splice(adjustedTarget, 0, draggedTab)
+  nextPanes.splice(adjustedTarget, 0, draggedTab)
 
-  return { ...model, tabs: nextTabs }
+  return { ...model, tabs: nextPanes }
 }
 
 /**
  * Update a tab's display title.
  *
- * Authority: content (via TabHost.setTitle).
+ * Authority: content (via PaneHost.setTitle).
  *
- * Derived from: Tab.setTitle → Tab._title (tabs.ts:27-258)
+ * Derived from: Pane.setTitle → Tab._title (tabs.ts:27-258)
  */
-export function updateTabTitle(model: TabModel, tabId: number, title: string): TabModel {
-  return updateTab(model, tabId, (tab) => ({ ...tab, title }))
+export function updatePaneTitle(model: PaneModel, paneId: number, title: string): PaneModel {
+  return updateTab(model, paneId, (tab) => ({ ...tab, title }))
 }
 
 /**
  * Set a tab's activity indicator.
  *
- * Authority: content (via TabHost.requestAttention).
+ * Authority: content (via PaneHost.requestAttention).
  *
- * Derived from: Tab.requestAttention → Tab._hasActivity (tabs.ts:27-258)
+ * Derived from: Pane.requestAttention → Tab._hasActivity (tabs.ts:27-258)
  */
-export function updateTabActivity(model: TabModel, tabId: number, hasActivity: boolean): TabModel {
-  return updateTab(model, tabId, (tab) => ({ ...tab, hasActivity }))
+export function updatePaneActivity(
+  model: PaneModel,
+  paneId: number,
+  hasActivity: boolean,
+): PaneModel {
+  return updateTab(model, paneId, (tab) => ({ ...tab, hasActivity }))
 }
 
 /**
@@ -237,19 +241,19 @@ export function updateTabActivity(model: TabModel, tabId: number, hasActivity: b
  *
  * Authority: terminal renderer (via TerminalRenderer.onTitle).
  *
- * Derived from: Tab._agentStatus (tabs.ts:27-258)
+ * Derived from: Pane._agentStatus (tabs.ts:27-258)
  */
-export function updateTabAgentStatus(
-  model: TabModel,
-  tabId: number,
+export function updatePaneAgentStatus(
+  model: PaneModel,
+  paneId: number,
   status: AgentStatus | null,
-): TabModel {
-  return updateTab(model, tabId, (tab) => ({ ...tab, agentStatus: status }))
+): PaneModel {
+  return updateTab(model, paneId, (tab) => ({ ...tab, agentStatus: status }))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-const DEFAULT_TERMINAL_DESCRIPTOR: TabDescriptor = {
+const DEFAULT_TERMINAL_DESCRIPTOR: PaneDescriptor = {
   surfaceType: 'nocx.terminal',
   singletonKey: null,
   restoreDescriptor: { type: 'local' },
@@ -272,10 +276,14 @@ function updateRecentTabIds(
 }
 
 /** Helper: apply a per-tab updater to the matching tab. */
-function updateTab(model: TabModel, tabId: number, updater: (tab: TabData) => TabData): TabModel {
-  const index = model.tabs.findIndex((t) => t.id === tabId)
+function updateTab(
+  model: PaneModel,
+  paneId: number,
+  updater: (tab: PaneData) => PaneData,
+): PaneModel {
+  const index = model.tabs.findIndex((t) => t.id === paneId)
   if (index === -1) return model
-  const nextTabs = [...model.tabs]
-  nextTabs[index] = updater(nextTabs[index])
-  return { ...model, tabs: nextTabs }
+  const nextPanes = [...model.tabs]
+  nextPanes[index] = updater(nextPanes[index])
+  return { ...model, tabs: nextPanes }
 }

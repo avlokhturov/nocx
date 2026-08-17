@@ -1,5 +1,5 @@
 import { For, Show, createSignal } from 'solid-js'
-import { Tab } from './tab'
+import { Tab } from './pane'
 import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
 import { ChevronDownIcon, KeyIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
@@ -13,7 +13,7 @@ import type { AgentStatus } from './agent-status'
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** The display state a TabStrip reads from each tab. */
-export interface TabView {
+export interface PaneView {
   readonly id: number
   readonly title: string
   /** Title shown before content publishes its first dynamic title. */
@@ -57,12 +57,12 @@ interface TabDisplayRecord {
 export interface TabStrip {
   readonly orientation: Orientation
   mount(container: HTMLElement): void
-  addTab(tab: TabView): void
-  removeTab(tabId: number): void
-  setActive(tabId: number): void
-  reorder(tabs: readonly TabView[]): void
-  onActivate: ((tabId: number) => void) | null
-  onClose: ((tabId: number) => void) | null
+  addPane(tab: PaneView): void
+  removeTab(paneId: number): void
+  setActive(paneId: number): void
+  reorder(tabs: readonly PaneView[]): void
+  onActivate: ((paneId: number) => void) | null
+  onClose: ((paneId: number) => void) | null
   onNewTab: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
   onQuickConnect: (() => void) | null
@@ -95,15 +95,15 @@ abstract class TabStripBase implements TabStrip {
   private mounted = false
 
   // Solid stores/signals — set during mount(), used by imperative API
-  private _setTabViews!: Setter<TabView[]>
-  private _getTabViews!: () => TabView[]
+  private _setTabViews!: Setter<PaneView[]>
+  private _getTabViews!: () => PaneView[]
   private _setDisplay!: (...args: unknown[]) => void
 
   public abstract readonly orientation: Orientation
 
   // Intent callbacks
-  onActivate: ((tabId: number) => void) | null = null
-  onClose: ((tabId: number) => void) | null = null
+  onActivate: ((paneId: number) => void) | null = null
+  onClose: ((paneId: number) => void) | null = null
   onNewTab: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
@@ -121,7 +121,7 @@ abstract class TabStripBase implements TabStrip {
     this.setupContainer(container)
     container.addEventListener('keydown', this.onTablistKeydown)
     this.dispose = render(() => {
-      const [tabViews, setTabViews] = createSignal<TabView[]>([])
+      const [tabViews, setTabViews] = createSignal<PaneView[]>([])
       const [display, setDisplay] = createStore<{
         records: Record<number, TabDisplayRecord>
         activeId: number
@@ -184,8 +184,8 @@ abstract class TabStripBase implements TabStrip {
               {(tab, index) => (
                 <Tab
                   id={`tab-btn-${tab.id}`}
-                  tabId={tab.id}
-                  paneId={tab.paneId}
+                  paneId={tab.id}
+                  controlledPaneId={tab.paneId}
                   index={index()}
                   active={display.activeId === tab.id}
                   agentStatus={display.records[tab.id]?.agentStatus ?? null}
@@ -256,7 +256,7 @@ abstract class TabStripBase implements TabStrip {
     }, container)
   }
 
-  addTab(tab: TabView): void {
+  addPane(tab: PaneView): void {
     if (!this.mounted) return
 
     // Wire display-change notification to write changed fields into the store.
@@ -292,27 +292,27 @@ abstract class TabStripBase implements TabStrip {
     if (pane) pane.setAttribute('aria-labelledby', `tab-btn-${tab.id}`)
   }
 
-  removeTab(tabId: number): void {
+  removeTab(paneId: number): void {
     if (!this.mounted) return
     this._setTabViews((prev) => {
-      const removed = prev.find((t) => t.id === tabId)
+      const removed = prev.find((t) => t.id === paneId)
       if (removed) removed.onDisplayChange = null
-      return prev.filter((t) => t.id !== tabId)
+      return prev.filter((t) => t.id !== paneId)
     })
     // Delete store entry — functional update avoids referencing current state.
     this._setDisplay('records', (prev: Record<number, TabDisplayRecord>) => {
       const next = { ...prev }
-      delete next[tabId]
+      delete next[paneId]
       return next
     })
   }
 
-  setActive(tabId: number): void {
+  setActive(paneId: number): void {
     if (!this.mounted) return
-    this._setDisplay('activeId', tabId)
+    this._setDisplay('activeId', paneId)
   }
 
-  reorder(tabs: readonly TabView[]): void {
+  reorder(tabs: readonly PaneView[]): void {
     if (!this.mounted) return
     // Solid's <For> reconciliation clears focus when it moves a node with
     // insertBefore, even though the node itself survives — keyed identity is
@@ -341,11 +341,11 @@ abstract class TabStripBase implements TabStrip {
     e.preventDefault()
     e.stopPropagation()
 
-    const tabId = Number(button.getAttribute('data-tab-id'))
-    if (Number.isNaN(tabId)) return
+    const paneId = Number(button.getAttribute('data-pane-id'))
+    if (Number.isNaN(paneId)) return
 
     const tabs = this._getTabViews()
-    const idx = tabs.findIndex((t) => t.id === tabId)
+    const idx = tabs.findIndex((t) => t.id === paneId)
     if (idx === -1) return
 
     const len = tabs.length

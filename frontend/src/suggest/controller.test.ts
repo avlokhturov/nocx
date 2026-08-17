@@ -614,7 +614,7 @@ describe('keyboard', () => {
     expect(selectedRow(dropdown)?.textContent).toContain('a2')
     expect(editor.doc).toBe('git sta')
     expect(dropdown.isOpen).toBe(true)
-    // Wrap: Tab past the last row returns to the first.
+    // Wrap: Pane past the last row returns to the first.
     expect(controller.handleKey(key('Tab'))).toBe(true)
     expect(selectedRow(dropdown)?.textContent).toContain('a3')
     expect(controller.handleKey(key('Tab'))).toBe(true)
@@ -630,7 +630,7 @@ describe('keyboard', () => {
   // is pinned here at the seam that was in doubt — Tab on an open panel
   // NEVER closes it, and with ONE candidate (nowhere to move) the selection
   // stays put. Closing on a key that means "next" is never right.
-  it('report 1: Tab on an open panel never closes it — cd + Tab + Tab, command position', async () => {
+  it('report 1: Pane on an open panel never closes it — cd + Tab + Tab, command position', async () => {
     const { editor, dropdown, controller } = rig({
       providers: [
         // The command snapshot answers `cd`; history answers one whole-line

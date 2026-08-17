@@ -35,7 +35,7 @@ async function switchPlacement(page: Page, value: 'horizontal' | 'vertical'): Pr
  * A test that puts focus somewhere deliberately before that has landed is
  * racing the app for the same resource and will sometimes lose. It did, on CI:
  * the poll below saw the tab button focused, and by the next evaluate the
- * editor had taken focus, so document.activeElement carried no data-tab-id at
+ * editor had taken focus, so document.activeElement carried no data-pane-id at
  * all and the drag was never attempted (nocx-z9s9.11). Letting the app finish
  * first makes the test's own focus the last word.
  */
@@ -45,7 +45,7 @@ async function settleNewTab(page: Page): Promise<void> {
 
 /**
  * Drag the second tab onto the first tab to trigger a real reorder
- * (reorderTab with the dragged tab after the target index moves it forward).
+ * (reorderPane with the dragged tab after the target index moves it forward).
  * Assert the same DOM node is still document.activeElement after the reorder.
  *
  * Also confirms the tab order actually changed, so a silently-dropped drag
@@ -55,11 +55,11 @@ async function settleNewTab(page: Page): Promise<void> {
  */
 async function assertFocusSurvivesReorder(page: Page): Promise<void> {
   const secondTab = page.locator('.nocx-tab').nth(1)
-  const firstTab = page.locator('.nocx-tab').first()
-  const tabIdSecond = await secondTab.getAttribute('data-tab-id')
-  const tabIdFirst = await firstTab.getAttribute('data-tab-id')
+  const firstPane = page.locator('.nocx-tab').first()
+  const paneIdSecond = await secondTab.getAttribute('data-pane-id')
+  const tabIdFirst = await firstPane.getAttribute('data-pane-id')
   expect(tabIdFirst).not.toBeNull()
-  expect(tabIdSecond).not.toBeNull()
+  expect(paneIdSecond).not.toBeNull()
 
   // Focus the SECOND tab button (we'll drag it onto the first).
   //
@@ -81,26 +81,26 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
 
   // Capture a JSHandle to the focused element so we can compare identity
   // after the reorder (proves the DOM node itself survived, not merely
-  // that a node with the same data-tab-id is focused).
+  // that a node with the same data-pane-id is focused).
   const focusedHandle = await page.evaluateHandle(() => document.activeElement)
 
-  // Snapshot the active element's data-tab-id before the drag
-  const preId = await page.evaluate(() => document.activeElement?.getAttribute('data-tab-id'))
-  expect(preId).toBe(tabIdSecond)
+  // Snapshot the active element's data-pane-id before the drag
+  const preId = await page.evaluate(() => document.activeElement?.getAttribute('data-pane-id'))
+  expect(preId).toBe(paneIdSecond)
 
   // Snapshot pre-reorder tab order for post-reorder comparison
   const preOrder = await page.evaluate(() => {
     const tabs = document.querySelectorAll('.nocx-tab')
-    return Array.from(tabs).map((t) => t.getAttribute('data-tab-id'))
+    return Array.from(tabs).map((t) => t.getAttribute('data-pane-id'))
   })
-  expect(preOrder).toEqual([tabIdFirst, tabIdSecond])
+  expect(preOrder).toEqual([tabIdFirst, paneIdSecond])
 
   // Dispatch native HTML5 DragEvent sequence: dragstart → dragover → drop → dragend
   // Dragging the SECOND tab onto the FIRST tab triggers a real reorder
-  // (reorderTab moves the dragged tab before the target tab).
+  // (reorderPane moves the dragged tab before the target tab).
   await page.evaluate(
     ({ draggedId }: { draggedId: string }) => {
-      const src = document.querySelector(`[data-tab-id="${draggedId}"]`) as HTMLElement | null
+      const src = document.querySelector(`[data-pane-id="${draggedId}"]`) as HTMLElement | null
       const targets = document.querySelectorAll('.nocx-tab')
       const tgt = targets[0] as HTMLElement | null // drop on FIRST tab
       if (!src || !tgt) throw new Error('Source or target tab not found')
@@ -121,7 +121,7 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
       src.dispatchEvent(new DragEvent('dragend', { dataTransfer: dt, bubbles: true }))
       src.classList.remove('dragging')
     },
-    { draggedId: tabIdSecond! },
+    { draggedId: paneIdSecond! },
   )
 
   // Wait for the reorder to be observable rather than sleeping for it. A fixed
@@ -133,23 +133,23 @@ async function assertFocusSurvivesReorder(page: Page): Promise<void> {
       () =>
         page.evaluate(() =>
           Array.from(document.querySelectorAll('.nocx-tab')).map((t) =>
-            t.getAttribute('data-tab-id'),
+            t.getAttribute('data-pane-id'),
           ),
         ),
       { timeout: 5000, message: 'tab order did not settle after the drag' },
     )
-    .toEqual([tabIdSecond, tabIdFirst])
+    .toEqual([paneIdSecond, tabIdFirst])
 
   // Assert 1: the exact same DOM node (JSHandle identity) is still activeElement
   const sameNode = await page.evaluate((handle) => document.activeElement === handle, focusedHandle)
   expect(sameNode).toBe(true)
 
-  // Assert 2: document.activeElement still has the original data-tab-id
-  const postId = await page.evaluate(() => document.activeElement?.getAttribute('data-tab-id'))
-  expect(postId).toBe(tabIdSecond)
+  // Assert 2: document.activeElement still has the original data-pane-id
+  const postId = await page.evaluate(() => document.activeElement?.getAttribute('data-pane-id'))
+  expect(postId).toBe(paneIdSecond)
 
   // Assert 3: the locator chain agrees
-  await expect(page.locator(`[data-tab-id="${tabIdSecond}"]`)).toBeFocused()
+  await expect(page.locator(`[data-pane-id="${paneIdSecond}"]`)).toBeFocused()
 }
 
 // ── Specs ───────────────────────────────────────────────────────────────

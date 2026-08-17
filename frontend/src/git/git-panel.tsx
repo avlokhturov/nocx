@@ -35,7 +35,7 @@
 // (design §5.5).
 
 import { createEffect, createMemo, For, Match, on, onCleanup, Show, Switch } from 'solid-js'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import { relativeTime } from '../recall'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
@@ -509,7 +509,7 @@ export function GitPanel(props: GitPanelProps) {
             />
           </div>
         </Match>
-        <Match when={props.store.state() === 'noTab'}>
+        <Match when={props.store.state() === 'noPane'}>
           <EmptyState
             title="No repository to show"
             description="Focus a terminal tab to see the repository your shell is standing in."

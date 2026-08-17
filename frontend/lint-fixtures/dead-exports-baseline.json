@@ -121,12 +121,12 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "activateTab"
+      "symbol": "activatePane"
     },
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "addTab"
+      "symbol": "addPane"
     },
     {
       "kind": "exports",
@@ -141,7 +141,7 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "closeTab"
+      "symbol": "closePane"
     },
     {
       "kind": "exports",
@@ -166,7 +166,7 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "createTabModel"
+      "symbol": "createPaneModel"
     },
     {
       "kind": "exports",
@@ -186,7 +186,7 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "reorderTab"
+      "symbol": "reorderPane"
     },
     {
       "kind": "exports",
@@ -196,17 +196,17 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "updateTabActivity"
+      "symbol": "updatePaneActivity"
     },
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "updateTabAgentStatus"
+      "symbol": "updatePaneAgentStatus"
     },
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "updateTabTitle"
+      "symbol": "updatePaneTitle"
     },
     {
       "kind": "exports",
@@ -616,17 +616,17 @@
     {
       "kind": "types",
       "file": "src/state/index.ts",
-      "symbol": "TabData"
+      "symbol": "PaneData"
     },
     {
       "kind": "types",
       "file": "src/state/index.ts",
-      "symbol": "TabDescriptor"
+      "symbol": "PaneDescriptor"
     },
     {
       "kind": "types",
       "file": "src/state/index.ts",
-      "symbol": "TabModel"
+      "symbol": "PaneModel"
     },
     {
       "kind": "types",
@@ -665,8 +665,8 @@
     },
     {
       "kind": "types",
-      "file": "src/state/tab-model.ts",
-      "symbol": "TabData"
+      "file": "src/state/pane-model.ts",
+      "symbol": "PaneData"
     },
     {
       "kind": "types",

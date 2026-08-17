@@ -523,7 +523,7 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
       }),
   })
 
-  it('under ssh the completion dropdown gets the keys its footer advertises: Tab opens it, ArrowDown moves its selection, Enter accepts, Escape dismisses', async () => {
+  it('under ssh the completion dropdown gets the keys its footer advertises: Pane opens it, ArrowDown moves its selection, Enter accepts, Escape dismisses', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)
     const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
@@ -547,7 +547,7 @@ describe('ssh key ownership: the completion dropdown owns the keys (nocx-fijh)',
     ed.show()
     ed.insertText('ssh ')
     const view = viewOf(ed)
-    // The user's path to the surface: Tab opens the dropdown with hosts.
+    // The user's path to the surface: Pane opens the dropdown with hosts.
     key(view, { key: 'Tab' })
     // Flush the provider's already-resolved promise through the controller's
     // .then chain — microtasks only, never a wall-clock timer.

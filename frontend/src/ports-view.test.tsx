@@ -6,7 +6,7 @@
 // tab never shows a stale host; collapsing the sidebar pauses sampling;
 // Ctrl/Cmd+Shift+O reveals-or-focuses instead of opening another tab.
 //
-// These start from a real TabManager and the real mountSidebar — the panel
+// These start from a real PaneManager and the real mountSidebar — the panel
 // never mounts in a vacuum.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
@@ -19,8 +19,8 @@ import {
   createRendererMock,
   makeClient,
   makeSession,
-  mountTabManager,
-} from './test-support/tabs-fixtures'
+  mountPaneManager,
+} from './test-support/panes-fixtures'
 import type { PortsStatusResult } from './generated/ports.status'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { LOCAL_TARGET_ID } from './ports-client'
@@ -126,7 +126,7 @@ function portsView(
 
 const liveHandles: SidebarHandle[] = []
 
-/** Full composition: a real TabManager (with or without an SSH tab in
+/** Full composition: a real PaneManager (with or without an SSH tab in
  *  front), the reactive active-profile signal main.tsx wires, and the
  *  real sidebar mounting the ports view. */
 async function mountApp(
@@ -138,8 +138,8 @@ async function mountApp(
     openSSHSession: vi.fn(() => Promise.resolve(makeSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(makeSession())),
   })
-  const { manager } = await mountTabManager(client)
-  if (profileId !== null) manager.newSSHTab(profileId, 'host.example', 'alice')
+  const { manager } = await mountPaneManager(client)
+  if (profileId !== null) manager.newSSHPane(profileId, 'host.example', 'alice')
 
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(manager.portsTargetId())
   manager.onActiveTabChange = () => setPortsTargetId(manager.portsTargetId())
@@ -218,7 +218,7 @@ describe('ports sidebar view', () => {
     const { manager } = await mountApp(services)
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
 
-    manager.newSSHTab('ssh:p2:2', 'other.example', 'bob')
+    manager.newSSHPane('ssh:p2:2', 'other.example', 'bob')
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
   })
   it('switching SSH tabs clears the filter — one host query never carries over', async () => {
@@ -243,7 +243,7 @@ describe('ports sidebar view', () => {
 
     // The filter is part of the re-scoped state (decision 4): a query typed
     // for host A's ports must not meet host B's list already half-filtered.
-    manager.newSSHTab('ssh:p2:2', 'other.example', 'bob')
+    manager.newSSHPane('ssh:p2:2', 'other.example', 'bob')
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p2:2'))
     await vi.waitFor(() =>
       expect(panel.querySelectorAll('[data-testid="detected-row"]')).toHaveLength(1),
@@ -280,7 +280,7 @@ describe('ports sidebar view', () => {
     const { manager } = await mountApp(services, null)
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith(LOCAL_TARGET_ID))
 
-    manager.newSSHTab('ssh:p1:1', 'host.example', 'alice')
+    manager.newSSHPane('ssh:p1:1', 'host.example', 'alice')
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
 
     // Back to the local tab (index 0): the panel re-scopes to 'local' — the
@@ -297,7 +297,7 @@ describe('ports sidebar view', () => {
     await vi.waitFor(() => expect(status).toHaveBeenCalledWith('ssh:p1:1'))
 
     // Alias: an SSH session with no profile id — no ports scope at all.
-    manager.newSSHTab('', 'alias.example', 'bob')
+    manager.newSSHPane('', 'alias.example', 'bob')
     await vi.waitFor(() => expect(panel.textContent).toContain('No active connection'))
     expect(status).toHaveBeenCalledTimes(1)
   })

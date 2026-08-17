@@ -8,7 +8,7 @@
 // The rules that make it correct, each with the failure it stops:
 //
 // 1. RESPONSES CARRY THE SCOPE THEY WERE ISSUED FOR, PLUS AN EPOCH (D17).
-//    Every request captures {tabId, generation, bindingId, epoch}; a
+//    Every request captures {paneId, generation, bindingId, epoch}; a
 //    response applies only if the first three still match the store AND its
 //    epoch is not older than the newest already applied for its class.
 //    generation bumps on every re-scope; epoch bumps before EVERY
@@ -72,7 +72,7 @@
 import { createMemo, createSignal, untrack } from 'solid-js'
 import { RpcError } from '../dispatcher'
 import { POLL_INTERVAL_MS } from '../ports'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import type { GitPanelServices, GitDiffSide } from './git-client'
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitCommitResult } from '../generated/git.commit'
@@ -87,7 +87,7 @@ type GitPanelPhase = 'no-origin' | 'opening' | 'ready' | 'failed'
 
 /** Exactly one of these renders (design §5.4). */
 type GitPanelState =
-  | 'noTab'
+  | 'noPane'
   | 'remote'
   | 'noCwd'
   | 'notARepository'
@@ -252,7 +252,7 @@ function sideState(st: Status | null, path: string, side: GitDiffSide): string |
 
 /** The scope a response was issued for (rule 1). */
 interface ScopeCtx {
-  tabId: number
+  paneId: number
   generation: number
   bindingId: string | null
   epoch: number
@@ -346,7 +346,7 @@ export function createGitStore(
   // truncation boolean and not on the lists' length (D9).
   const state = createMemo<GitPanelState>(() => {
     const o = origin()
-    if (o === null) return 'noTab'
+    if (o === null) return 'noPane'
     if (o.kind === 'ssh') return 'remote'
     if (!o.cwdVerified || o.cwd === null) return 'noCwd'
     const os = openState()
@@ -377,7 +377,7 @@ export function createGitStore(
     if (closed) return false
     const o = untrack(origin)
     const b = untrack(binding)
-    if (o === null || ctx.tabId !== o.tabId) return false
+    if (o === null || ctx.paneId !== o.paneId) return false
     if (ctx.generation !== generation) return false
     if (ctx.bindingId !== null && (b === null || ctx.bindingId !== b.bindingId)) return false
     return true
@@ -385,10 +385,10 @@ export function createGitStore(
 
   /** A git.open response applies only if it is still the newest scope
    *  request: the open that establishes a binding wins by generation. */
-  function openCurrent(ctx: { tabId: number; generation: number }): boolean {
+  function openCurrent(ctx: { paneId: number; generation: number }): boolean {
     if (closed) return false
     const o = untrack(origin)
-    return o !== null && ctx.tabId === o.tabId && ctx.generation === generation
+    return o !== null && ctx.paneId === o.paneId && ctx.generation === generation
   }
 
   function messageOf(e: unknown): string {
@@ -440,7 +440,7 @@ export function createGitStore(
     const b = untrack(binding)
     if (o === null || b === null) return
     epoch++
-    const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
     pollInFlight = true
     services.status(b.bindingId).then(
       (res) => {
@@ -515,7 +515,7 @@ export function createGitStore(
     const b = untrack(binding)
     if (o === null || b === null) return
     epoch++
-    const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
     setRemoteState('loading')
     services.remote(b.bindingId).then(
       (res) => {
@@ -563,7 +563,7 @@ export function createGitStore(
     const b = untrack(binding)
     if (o === null || b === null) return
     epoch++
-    const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
     setLogState('loading')
     services.log(b.bindingId).then(
       (res) => {
@@ -606,7 +606,7 @@ export function createGitStore(
     epoch++ // the open's inline status is a status-producing response too
     // bindingId null: the open is not scoped to a binding — its response
     // either establishes one or is stale by generation (rule 1, open half).
-    const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: null, epoch }
+    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: null, epoch }
     resetLog()
     resetRemote()
     services
@@ -759,7 +759,7 @@ export function createGitStore(
       return
     }
     // Same session AND same verified cwd AND a live binding: nothing moved —
-    // record the newer origin (the tabId may differ) and keep everything,
+    // record the newer origin (the paneId may differ) and keep everything,
     // including the commit form, which survives a view switch.
     const b = untrack(binding)
     if (
@@ -841,7 +841,7 @@ export function createGitStore(
     const b = untrack(binding)
     if (o === null || b === null) return null
     epoch++
-    const ctx: ScopeCtx = { tabId: o.tabId, generation, bindingId: b.bindingId, epoch }
+    const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
     setMutationInFlight(true)
     setMutationError(null)
     return { ctx, b }
@@ -1010,7 +1010,7 @@ export function createGitStore(
   const unsubChanged = services.subscribeGitChanged((p) => {
     const b = untrack(binding)
     if (b === null || p.bindingId !== b.bindingId) return
-    // The session that owned the binding closed. The panel drops to noTab:
+    // The session that owned the binding closed. The panel drops to noPane:
     // the active-origin accessor follows the tab change, and the next
     // rescope re-opens against whatever is in front.
     setPhase('no-origin')

@@ -13,7 +13,7 @@
 // stays) and is fresh the moment it is seen again.
 
 import type { Component } from 'solid-js'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import type { SidebarViewDescriptor } from '../sidebar'
 import { IconButton } from '../ui/icon-button'
 import { RefreshIcon } from '../ui/icons'
@@ -69,7 +69,7 @@ export interface GitViewDeps {
    *  substitute a recorder. */
   urlOpener?: UrlOpener
   /** Reactive accessor for the ACTIVE tab's origin — the coordinator wires
-   *  it to TabManager.activeOrigin() through onActiveTabChange, exactly
+   *  it to PaneManager.activeOrigin() through onActiveTabChange, exactly
    *  like the files view. */
   activeOrigin: () => ActiveOrigin | null
 }

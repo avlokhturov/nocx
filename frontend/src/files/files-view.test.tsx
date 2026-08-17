@@ -7,9 +7,9 @@
 // paints one machine's listing into another's tree; a symlink cycle renders
 // cyclic; tooLarge and timedOut each render their own state.
 //
-// These start from a real TabManager and the real mountSidebar — the panel
+// These start from a real PaneManager and the real mountSidebar — the panel
 // never mounts in a vacuum. The ACTIVE ORIGIN values come from a fixture map
-// keyed by tab: the TabContent capability that terminal content will answer
+// keyed by tab: the PaneContent capability that terminal content will answer
 // (design §5.4) is the one wire this wave cannot exercise, so the tests fake
 // its VALUES while the whole mechanism around them — tab switch, signal,
 // re-scope, staleness guard — is real.
@@ -19,12 +19,12 @@ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { FILES_VIEW_ID, FILES_VIEW_ORDER, createFilesView } from './files-view'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from '../sidebar'
 import { PlugIcon } from '../ui/icons'
-import { createRendererMock, makeClient, mountTabManager } from '../test-support/tabs-fixtures'
+import { createRendererMock, makeClient, mountPaneManager } from '../test-support/panes-fixtures'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesPanelServices } from './files-client'
-import type { ActiveOrigin, TabContent } from '../tab-content'
+import type { ActiveOrigin, PaneContent } from '../pane-content'
 import { ToastHost, clearToasts } from '../ui/toast'
 import type { ClipboardAccess } from '../clipboard'
 
@@ -104,12 +104,12 @@ function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
   }
 }
 
-// Fixture origins stand in for the TabContent capability (design §5.4) —
+// Fixture origins stand in for the PaneContent capability (design §5.4) —
 // the one wire this wave cannot exercise, because terminal content's
-// implementation is the coordinator's to assign. The tabId values are
+// implementation is the coordinator's to assign. The paneId values are
 // fixtures too: the guard only needs them to differ between tabs.
 const LOCAL_ORIGIN: ActiveOrigin = {
-  tabId: 1,
+  paneId: 1,
   sessionId: 's-local',
   kind: 'local',
   cwd: '/',
@@ -119,7 +119,7 @@ const LOCAL_ORIGIN: ActiveOrigin = {
 }
 
 const SSH_ORIGIN: ActiveOrigin = {
-  tabId: 2,
+  paneId: 2,
   sessionId: 's-ssh',
   kind: 'ssh',
   cwd: '/home/alice',
@@ -132,12 +132,12 @@ const liveHandles: SidebarHandle[] = []
 
 async function mountApp(services: FilesPanelServices, clipboard?: ClipboardAccess) {
   const client = makeClient()
-  const { manager } = await mountTabManager(client)
+  const { manager } = await mountPaneManager(client)
 
-  // Keyed by CONTENT, not tab: TabManager keeps its active tab private, and
+  // Keyed by CONTENT, not tab: PaneManager keeps its active tab private, and
   // the seam's polymorphism means the map must not care which content class
-  // is in front. newSSHTab returns its Tab, whose content is public.
-  const originFor = new Map<TabContent, ActiveOrigin>()
+  // is in front. newSSHPane returns its Tab, whose content is public.
+  const originFor = new Map<PaneContent, ActiveOrigin>()
   const initial = manager.activeTerminalContent()
   if (!initial) throw new Error('no initial tab')
   originFor.set(initial, LOCAL_ORIGIN)
@@ -392,7 +392,7 @@ describe('files sidebar view', () => {
     // A viewer answers the same session with NO opinion (cwdFollow false):
     // the panel keeps its tree and binding, and nothing moves — not even
     // towards the viewer's frozen cwd.
-    setActiveOrigin({ ...LOCAL_ORIGIN, tabId: 99, cwd: '/elsewhere', cwdFollow: false })
+    setActiveOrigin({ ...LOCAL_ORIGIN, paneId: 99, cwd: '/elsewhere', cwdFollow: false })
     await new Promise((r) => setTimeout(r, 20))
 
     expect(panel.querySelector('[data-selected="true"]')?.textContent).toContain('docs')
@@ -476,7 +476,7 @@ describe('files sidebar view', () => {
       canonical: 'C:/notes.md',
       displayHost: null,
       name: 'notes.md',
-      // The click-time scope minus the tabId — the viewer's activeOrigin
+      // The click-time scope minus the paneId — the viewer's activeOrigin
       // answer, which keeps the panel on this machine while the viewer tab
       // is in front (design §5.4).
       origin: {
@@ -515,7 +515,7 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1))
 
     // The user activates an SSH tab while A's listing is unresolved.
-    const sshTab = manager.newSSHTab('p1', 'host.example', 'alice')
+    const sshTab = manager.newSSHPane('p1', 'host.example', 'alice')
     originFor.set(sshTab.content, SSH_ORIGIN)
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
     await vi.waitFor(() => expect(rowNamed(panel, 'b-only.txt')).not.toBeUndefined())
@@ -779,7 +779,7 @@ describe('files sidebar view', () => {
     // Remote: the item is ABSENT — not disabled. Assert the absence
     // explicitly; a test that only checks presence cannot catch the item
     // leaking onto SSH tabs.
-    const sshTab = manager.newSSHTab('p1', 'host.example', 'alice')
+    const sshTab = manager.newSSHPane('p1', 'host.example', 'alice')
     originFor.set(sshTab.content, SSH_ORIGIN)
     await vi.waitFor(() => expect(rowNamed(panel, 'remote.md')).not.toBeUndefined())
     fireEvent.contextMenu(rowNamed(panel, 'remote.md'), { clientX: 10, clientY: 10 })
@@ -866,7 +866,7 @@ describe('files sidebar view', () => {
 
     // Remote + polling (even WITH a reason — the kind check is the guard):
     // nothing. The remote half is what stops the badge becoming wallpaper.
-    const sshTab = manager.newSSHTab('p1', 'host.example', 'alice')
+    const sshTab = manager.newSSHPane('p1', 'host.example', 'alice')
     originFor.set(sshTab.content, SSH_ORIGIN)
     await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
     await vi.waitFor(() =>

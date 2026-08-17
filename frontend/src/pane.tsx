@@ -19,9 +19,9 @@ export interface TabProps {
   /** Element id, used for aria-labelledby from the pane. */
   id: string
   /** The tab's numeric id, used in callsite identity and data transfer. */
-  tabId: number
+  paneId: number
   /** The pane this tab controls (aria-controls). */
-  paneId: string
+  controlledPaneId: string
   /** 1-based index display. */
   index: number
   /** Whether this tab is active/selected. */
@@ -58,7 +58,7 @@ export interface TabProps {
   /** Called when the tab is clicked. */
   onActivate: () => void
   /** Called with the tab id when the tab is closed (middle-click or close button). */
-  onClose: (tabId: number) => void
+  onClose: (paneId: number) => void
   /** Called when a tab is dropped onto this one: (fromId, toId). */
   onReorder: (fromId: number, toId: number) => void
 }
@@ -69,9 +69,9 @@ export function Tab(props: TabProps) {
       id={props.id}
       class="nocx-tab"
       role="tab"
-      aria-controls={props.paneId}
+      aria-controls={props.controlledPaneId}
       aria-selected={props.active}
-      data-tab-id={String(props.tabId)}
+      data-pane-id={String(props.paneId)}
       data-agent-status={props.agentStatus ?? undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       // Kept in BOTH orientations. The vertical row shows the same text as a
@@ -84,11 +84,11 @@ export function Tab(props: TabProps) {
       onMouseDown={(e: MouseEvent) => {
         if (e.button === 1) {
           e.preventDefault()
-          props.onClose(props.tabId)
+          props.onClose(props.paneId)
         }
       }}
       onDragStart={(e: DragEvent) => {
-        e.dataTransfer?.setData('text/plain', String(props.tabId))
+        e.dataTransfer?.setData('text/plain', String(props.paneId))
         if (e.currentTarget instanceof HTMLElement) {
           e.currentTarget.classList.add('dragging')
         }
@@ -104,8 +104,8 @@ export function Tab(props: TabProps) {
       onDrop={(e: DragEvent) => {
         e.preventDefault()
         const draggedId = Number(e.dataTransfer?.getData('text/plain'))
-        if (!Number.isNaN(draggedId) && draggedId !== props.tabId) {
-          props.onReorder(draggedId, props.tabId)
+        if (!Number.isNaN(draggedId) && draggedId !== props.paneId) {
+          props.onReorder(draggedId, props.paneId)
         }
       }}
     >
@@ -149,7 +149,7 @@ export function Tab(props: TabProps) {
         ariaLabel="Close tab"
         onClick={(e: MouseEvent) => {
           e.stopPropagation()
-          props.onClose(props.tabId)
+          props.onClose(props.paneId)
         }}
       >
         {'\u00d7'}

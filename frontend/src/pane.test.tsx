@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
-import { Tab, type TabProps } from './tab'
+import { Tab, type TabProps } from './pane'
 
 afterEach(() => cleanup())
 
 const defaults: TabProps = {
   id: 'tab-btn-42',
-  tabId: 42,
-  paneId: 'pane-42',
+  paneId: 42,
+  controlledPaneId: 'pane-42',
   index: 0,
   active: false,
   agentStatus: null,
@@ -46,7 +46,7 @@ describe('Tab', () => {
   })
 
   it('sets aria-controls from paneId', () => {
-    subject({ paneId: 'pane-99' })
+    subject({ controlledPaneId: 'pane-99' })
     const tab = screen.getByRole('tab')
     expect(tab.getAttribute('aria-controls')).toBe('pane-99')
   })
@@ -63,10 +63,10 @@ describe('Tab', () => {
     expect(tab.getAttribute('aria-selected')).toBe('false')
   })
 
-  it('sets data-tab-id', () => {
-    subject({ tabId: 99 })
+  it('sets data-pane-id', () => {
+    subject({ paneId: 99 })
     const tab = screen.getByRole('tab')
-    expect(tab.getAttribute('data-tab-id')).toBe('99')
+    expect(tab.getAttribute('data-pane-id')).toBe('99')
   })
 
   it('sets id from prop', () => {

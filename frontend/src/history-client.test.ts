@@ -69,7 +69,7 @@ describe('recordCommand', () => {
       // store persists int64.
       startedAt: 1000,
       endedAt: 1201,
-      tabId: 'tab-1',
+      paneId: 'tab-1',
     })
   })
 
@@ -92,9 +92,9 @@ describe('recordCommand', () => {
       'endedAt',
       'exitCode',
       'host',
+      'paneId',
       'startedAt',
       'status',
-      'tabId',
     ])
   })
 

@@ -14,7 +14,7 @@
  */
 import { EditableHost } from '../cm-host'
 import { markdownLanguage, viewerHighlighting } from '../file-viewer/language-registry'
-import { BaseTabContent, type TabHost } from '../tab-content'
+import { BasePaneContent, type PaneHost } from '../pane-content'
 import { log } from '../log'
 import { showToast } from '../ui/toast'
 import type { Note, NotesStore } from './notes-store'
@@ -33,7 +33,7 @@ export interface NoteContentDeps {
   idleMs?: number
 }
 
-export class NoteContent extends BaseTabContent {
+export class NoteContent extends BasePaneContent {
   private root: HTMLElement | null = null
   private noticeEl: HTMLElement | null = null
   private readonly host = new EditableHost()
@@ -47,7 +47,7 @@ export class NoteContent extends BaseTabContent {
   private timer: ReturnType<typeof setTimeout> | null = null
   private saving = false
   private disposed = false
-  private tabHost: TabHost | null = null
+  private tabHost: PaneHost | null = null
 
   constructor(
     private readonly noteId: string,
@@ -56,9 +56,9 @@ export class NoteContent extends BaseTabContent {
     super()
   }
 
-  // ── TabContent ─────────────────────────────────────────────────────────
+  // ── PaneContent ─────────────────────────────────────────────────────────
 
-  async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
+  async mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this.disposed || signal.aborted) return
     this.tabHost = host
 

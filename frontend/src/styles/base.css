@@ -140,7 +140,7 @@ select:focus-visible {
    sizes — a single missing min-height: 0 in the chain causes the scroll
    container to never receive a bounded block size.
 
-   The surface-host class is applied by SolidTabContent to the mount root
+   The surface-host class is applied by SolidPaneContent to the mount root
    element.  The .ui-page chain is the contract for the Page component
    (nocx-imkb.1); the selectors below land the CSS before the component
    exists. */
@@ -393,7 +393,7 @@ select:focus-visible {
    The 10px on `.pane` is breathing room around terminal text — it must not
    apply to a surface, where it shows up as a 10px strip of canvas between the
    activity bar and the surface's own chrome, reading as a gap in the layout.
-   Keyed off the surface host that SolidTabContent creates rather than off a
+   Keyed off the surface host that SolidPaneContent creates rather than off a
    flag the pane would have to be told, so nothing can forget to set it. */
 .pane:has(> .surface-host) {
   padding: 0;

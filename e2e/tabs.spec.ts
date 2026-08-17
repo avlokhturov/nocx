@@ -112,7 +112,7 @@ test.describe('vertical tab placement', () => {
    * nocx-zudj: with two tabs open, switching to vertical left the strip listing no tabs
    * at all — the swap mounted the new strip without repopulating its display records.
    * The test above cannot catch it: it switches with ONE tab and adds the second while
-   * already vertical, so the populate path it exercises is addTab and not replaceStrip.
+   * already vertical, so the populate path it exercises is addPane and not replaceStrip.
    *
    * Asserted by measured geometry rather than by presence: a strip with rows that exist
    * at zero height would satisfy any assertion about the DOM while showing nothing (the
@@ -226,13 +226,13 @@ test.describe('vertical tab placement', () => {
 
     const tab = page.locator(TAB).first()
     const title = tab.locator('.nocx-tab-title')
-    const tabBox = await tab.boundingBox()
+    const paneBox = await tab.boundingBox()
     const titleBox = await title.boundingBox()
 
     // Title's left edge should be near the tab's left content edge:
     // 10px tab padding + 10px pill left + 22px pill width + 10px gap = 52px.
     // This is well left of centre (which would be ~80+ px for a 240px strip).
-    expect(titleBox!.x - tabBox!.x).toBeLessThan(60)
+    expect(titleBox!.x - paneBox!.x).toBeLessThan(60)
   })
 
   test('horizontal label text is centred (not near the left edge)', async ({ page }) => {
@@ -241,12 +241,12 @@ test.describe('vertical tab placement', () => {
 
     const tab = page.locator(TAB).first()
     const title = tab.locator('.nocx-tab-title')
-    const tabBox = await tab.boundingBox()
+    const paneBox = await tab.boundingBox()
     const titleBox = await title.boundingBox()
 
     // In horizontal with centering, the title's left edge should be well
     // past 40px from the tab's left edge (centered text in a 200px tab).
-    expect(titleBox!.x - tabBox!.x).toBeGreaterThan(40)
+    expect(titleBox!.x - paneBox!.x).toBeGreaterThan(40)
   })
 
   // Reset placement to horizontal after each vertical test so the

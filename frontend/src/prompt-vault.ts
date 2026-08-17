@@ -66,7 +66,7 @@ export interface PromptVaultDeps {
   report(level: 'info' | 'success' | 'warning' | 'danger', message: string): void
   /** The picker's setup offer was activated and the machine has no OS key:
    *  the vault layer owns the setup dialog, so this hook raises it. Wired
-   *  by the host through TabManager to vaultController.openSetup. */
+   *  by the host through PaneManager to vaultController.openSetup. */
   requestSetupDialog?: () => void
   /** "Add a secret…" was activated: the host opens the vault's own create
    *  dialog (Settings → Secrets), which owns the surface from there. A

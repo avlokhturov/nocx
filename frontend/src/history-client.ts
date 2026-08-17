@@ -25,7 +25,7 @@ import type { RecallScope } from './recall'
 
 /** The history.record request — the ledger's facts minus what never crosses
  *  (the session-local id, the live marker-line accessor, the disposed flag)
- *  and minus the output, which is never retained (ADR-0008). tabId is the
+ *  and minus the output, which is never retained (ADR-0008). paneId is the
  *  ONE deliberate exception to "session-local ids never cross the wire"
  *  (nocx-tsajw): the renderer-minted per-tab identity that scopes the
  *  pending-capture registry. It is opaque to the backend — minted once per
@@ -38,7 +38,7 @@ export interface HistoryRecordParams {
   exitCode: number | null
   startedAt: number | null
   endedAt: number | null
-  tabId: string
+  paneId: string
 }
 
 /** Send one completed command's facts to the store, authorized by the
@@ -61,7 +61,7 @@ export interface HistoryRecordParams {
  *  error, so the caller treats null exactly like "nothing to show". */
 export function recordCommand(
   client: WSClient,
-  tabId: string,
+  paneId: string,
   rec: CommandRecord,
   attempt: ExecutionAttempt,
 ): Promise<HistoryRecord | null> {
@@ -78,7 +78,7 @@ export function recordCommand(
     // in tests — the schema says integer, so the wire copy rounds.
     startedAt: rec.startedAt === null ? null : Math.round(rec.startedAt),
     endedAt: rec.endedAt === null ? null : Math.round(rec.endedAt),
-    tabId,
+    paneId,
   }
   return client
     .call<HistoryRecord>('history.record', params)

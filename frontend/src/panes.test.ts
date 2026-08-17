@@ -3,7 +3,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import {
   createRendererMock,
   resetSessionCounter,
-  mountTabManager,
+  mountPaneManager,
   makeClient,
   makeSession,
   makeClipboard,
@@ -11,18 +11,18 @@ import {
   setupTabBarDOM,
   FIXTURE_DIRECTORY_LABEL,
   type RendererMock,
-} from './test-support/tabs-fixtures'
-import { Tab, TabManager } from './tabs'
+} from './test-support/panes-fixtures'
+import { Pane, PaneManager } from './panes'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
 import {
-  BaseTabContent,
+  BasePaneContent,
   SURFACE_TERMINAL,
   type ContentDescriptor,
-  type TabHost,
+  type PaneHost,
   type ContentViewport,
   type SurfaceType,
-} from './tab-content'
+} from './pane-content'
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -41,11 +41,11 @@ async function getRendererMocks(): Promise<RendererMock[]> {
   return vi.mocked(XtermRenderer).mock.results.map((r) => r.value as unknown as RendererMock)
 }
 
-// ── Second TabContent implementation for mount-once proof ─────────────
+// ── Second PaneContent implementation for mount-once proof ─────────────
 // This class MUST NOT carry a private mount guard — the seam enforces
 // mount-once, not the implementation. If mount() is called more than once,
 // the seam is broken.
-class CountingTestContent extends BaseTabContent {
+class CountingTestContent extends BasePaneContent {
   mountCount = 0
   /** Tracks every setVisible call for test assertions. */
   visibleCalls: boolean[] = []
@@ -53,7 +53,7 @@ class CountingTestContent extends BaseTabContent {
   callLog: string[] = []
 
   // eslint-disable-next-line @typescript-eslint/require-await, @typescript-eslint/no-unused-vars
-  async mount(_target: HTMLElement, _host: TabHost, _signal: AbortSignal): Promise<void> {
+  async mount(_target: HTMLElement, _host: PaneHost, _signal: AbortSignal): Promise<void> {
     this.mountCount++
     this.callLog.push('mount')
   }
@@ -82,7 +82,7 @@ vi.mock('./ui/dialog', () => ({
   showConfirm: (...args: unknown[]) => showConfirmMock(...args) as Promise<boolean>,
 }))
 
-describe('TabManager', () => {
+describe('PaneManager', () => {
   beforeEach(() => {
     resetSessionCounter()
     vi.clearAllMocks()
@@ -90,7 +90,7 @@ describe('TabManager', () => {
 
   // ── opening a tab creates a session and a pane ────────────────────────
 
-  it('constructing a TabManager creates no tab and mounts nothing', async () => {
+  it('constructing a PaneManager creates no tab and mounts nothing', async () => {
     const { bar, panes } = setupTabBarDOM()
     const c = makeClient()
     const cb = makeClipboard()
@@ -102,7 +102,7 @@ describe('TabManager', () => {
     }
     const { HorizontalTabStrip } = await import('./tab-strip')
     const tabStrip = new HorizontalTabStrip()
-    const manager = new TabManager(bar, bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
+    const manager = new PaneManager(bar, bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
 
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(0)
 
@@ -114,7 +114,7 @@ describe('TabManager', () => {
     expect(bar.children.length).toBe(0)
   })
   it('opens a session when a tab is created and activated', async () => {
-    const { client, bar, panes } = await mountTabManager()
+    const { client, bar, panes } = await mountPaneManager()
 
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
     expect(panes.querySelectorAll('.pane').length).toBe(1)
@@ -122,9 +122,9 @@ describe('TabManager', () => {
   })
 
   it('creates a session for each new tab', async () => {
-    const { client, manager, bar, panes } = await mountTabManager()
+    const { client, manager, bar, panes } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -134,7 +134,7 @@ describe('TabManager', () => {
   })
 
   it('forwards every SSH recovery hook without replacing its siblings', async () => {
-    const { manager } = await mountTabManager()
+    const { manager } = await mountPaneManager()
     const onVaultSealed = vi.fn()
     const onHostKeyError = vi.fn().mockResolvedValue(true)
     const onSetupVault = vi.fn()
@@ -142,7 +142,7 @@ describe('TabManager', () => {
     manager.onHostKeyError = onHostKeyError
     manager.onSetupVault = onSetupVault
 
-    manager.newSSHTab('ssh:test:1', 'host.example.com')
+    manager.newSSHPane('ssh:test:1', 'host.example.com')
     const content: unknown = manager.activeTerminalContent()
     expect(content).not.toBeNull()
     if (!content || typeof content !== 'object' || !('hooks' in content)) {
@@ -160,20 +160,20 @@ describe('TabManager', () => {
   // ── closing closes the session and activates a neighbour ──────────────
 
   it('closes the session when the active tab is closed', async () => {
-    const { client, manager } = await mountTabManager()
+    const { client, manager } = await mountPaneManager()
 
     const session = client._sessions[0]
-    manager.closeActiveTab()
+    manager.closeActivePane()
 
     // The session should have been closed, but a new one created for the replacement
     expect(session.close).toHaveBeenCalled()
   })
 
   it('activates a neighbour tab when the active tab is closed', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
-    manager.newTab()
+    manager.newPane()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(3)
     })
@@ -184,7 +184,7 @@ describe('TabManager', () => {
     expect(tabs[2].getAttribute('aria-selected') === 'true').toBe(true)
 
     // Close the active tab (tab3)
-    manager.closeActiveTab()
+    manager.closeActivePane()
 
     // Two tabs remain; the neighbour (tab2 at original index 1) is now active
     const remainingTabs = bar.querySelectorAll('.nocx-tab')
@@ -194,10 +194,10 @@ describe('TabManager', () => {
   })
 
   it('closing the active tab activates the previously-active tab (MRU), not the visual neighbour', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
-    manager.newTab()
+    manager.newPane()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(3)
     })
@@ -213,7 +213,7 @@ describe('TabManager', () => {
     expect(beforeTabs[1].getAttribute('aria-selected') === 'true').toBe(true)
 
     // Close tab2. MRU says tab3 should activate, not tab1 (visual neighbour).
-    manager.closeActiveTab()
+    manager.closeActivePane()
 
     const remainingTabs = bar.querySelectorAll('.nocx-tab')
     expect(remainingTabs.length).toBe(2)
@@ -224,10 +224,10 @@ describe('TabManager', () => {
   // ── closing the last tab leaves exactly one fresh tab ─────────────────
 
   it('closing the last tab opens a fresh tab immediately', async () => {
-    const { client, manager, bar, panes } = await mountTabManager()
+    const { client, manager, bar, panes } = await mountPaneManager()
 
     // Close the only tab
-    manager.closeActiveTab()
+    manager.closeActivePane()
 
     // A new tab replaces it (window never empty)
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
@@ -241,12 +241,12 @@ describe('TabManager', () => {
   // ── fallback title consistency (badge vs title after close) ───────────
 
   it('fallback title is the directory, not a number that would disagree with the badge', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
     // Open tabs until the badge says 4.
-    manager.newTab()
-    manager.newTab()
-    manager.newTab()
+    manager.newPane()
+    manager.newPane()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(4)
     })
@@ -263,9 +263,9 @@ describe('TabManager', () => {
 
     // Close the first two tabs via public API: activate then close.
     manager.activateByIndex(0)
-    manager.closeActiveTab()
+    manager.closeActivePane()
     manager.activateByIndex(0)
-    manager.closeActiveTab()
+    manager.closeActivePane()
 
     // Re-query after DOM mutations; stale references reflect removed elements.
     const afterLabels = bar.querySelectorAll('.nocx-tab-index')
@@ -279,9 +279,9 @@ describe('TabManager', () => {
   // ── switching focuses the right renderer ──────────────────────────────
 
   it('switches between tabs on activateByIndex', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -306,9 +306,9 @@ describe('TabManager', () => {
   // ── a title event updates that tab's label and no other ───────────────
 
   it('updates the title of the correct tab when onTitle fires', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -338,7 +338,7 @@ describe('TabManager', () => {
   // ── empty / whitespace title is ignored ──────────────────────────────
 
   it('falls back to the directory when the shell clears the title', async () => {
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     await Promise.resolve()
 
@@ -363,9 +363,9 @@ describe('TabManager', () => {
   // ── activity indicator ────────────────────────────────────────────────
 
   it('shows activity indicator on a background tab receiving output', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -386,9 +386,9 @@ describe('TabManager', () => {
   })
 
   it('clears activity indicator when activated', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -405,9 +405,9 @@ describe('TabManager', () => {
   // ── activity indicator: alternate-buffer suppression ─────────────────
 
   it('does not mark activity for alternate-buffer output on a background tab', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -429,9 +429,9 @@ describe('TabManager', () => {
   })
 
   it('marks activity for normal-buffer output on a background tab', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -447,9 +447,9 @@ describe('TabManager', () => {
   })
 
   it('marks activity on bell in the alternate buffer', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -469,7 +469,7 @@ describe('TabManager', () => {
   })
 
   it('does not mark activity on bell for the active tab', async () => {
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     // Only one tab, and it is active. Fire bell on it.
     const renderers = await getRendererMocks()
@@ -482,7 +482,7 @@ describe('TabManager', () => {
   // ── keyboard shortcuts ────────────────────────────────────────────────
 
   it('opens a new tab on Cmd+T', async () => {
-    const { client, bar } = await mountTabManager()
+    const { client, bar } = await mountPaneManager()
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 't', metaKey: true, bubbles: true }))
 
@@ -493,7 +493,7 @@ describe('TabManager', () => {
   })
 
   it('opens a new tab on Ctrl+T', async () => {
-    const { client } = await mountTabManager()
+    const { client } = await mountPaneManager()
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 't', ctrlKey: true, bubbles: true }))
 
@@ -503,7 +503,7 @@ describe('TabManager', () => {
   })
 
   it('closes the active tab on Cmd+W', async () => {
-    const { client, bar } = await mountTabManager()
+    const { client, bar } = await mountPaneManager()
 
     const session = client._sessions[0]
 
@@ -515,10 +515,10 @@ describe('TabManager', () => {
   })
 
   it('switches tabs on Cmd+1..9', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
-    manager.newTab()
+    manager.newPane()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(3)
     })
@@ -543,7 +543,7 @@ describe('TabManager', () => {
   })
 
   it('ignores keyboard shortcuts when alt is held', async () => {
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     window.dispatchEvent(
       new KeyboardEvent('keydown', { key: 't', metaKey: true, altKey: true, bubbles: true }),
@@ -553,10 +553,10 @@ describe('TabManager', () => {
   })
 
   it('ignores Cmd+0 (not a valid tab index)', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
-    manager.newTab()
+    manager.newPane()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(3)
     })
@@ -572,7 +572,7 @@ describe('TabManager', () => {
   // ── activity signal — terminal output vs user input ─────────────────
 
   it('terminal output alone does not fire vault onActivity', async () => {
-    const { client, manager } = await mountTabManager()
+    const { client, manager } = await mountPaneManager()
     const activity = vi.fn()
     manager.onActivity = activity
 
@@ -598,9 +598,9 @@ describe('TabManager', () => {
   // ── close by middle-click ─────────────────────────────────────────────
 
   it('closes a tab on middle-click', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -631,9 +631,9 @@ describe('TabManager', () => {
       .spyOn(crypto, 'randomUUID')
       .mockImplementation(() => uuids.shift() ?? uuids[uuids.length - 1])
     try {
-      const { client, manager, bar } = await mountTabManager()
+      const { client, manager, bar } = await mountPaneManager()
 
-      manager.newTab()
+      manager.newPane()
       await vi.waitFor(() => {
         expect(client.openSession).toHaveBeenCalledTimes(2)
       })
@@ -675,7 +675,7 @@ describe('TabManager', () => {
     `
     document.head.appendChild(style)
 
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     const tabsContainer = bar.querySelector('.tabs-container') as HTMLElement
     expect(tabsContainer).not.toBeNull()
@@ -709,7 +709,7 @@ describe('TabManager', () => {
     `
     document.head.appendChild(style)
 
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     const tab = bar.querySelector('.nocx-tab') as HTMLElement
     expect(tab).not.toBeNull()
@@ -726,7 +726,7 @@ describe('TabManager', () => {
   // ── OSC 7: cwd follows cd ───────────────────────────────────────────
 
   it('updates tab title when OSC 7 fires (cwd follows cd)', async () => {
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     await Promise.resolve()
 
@@ -750,7 +750,7 @@ describe('TabManager', () => {
   })
 
   it('updates tooltip when OSC 7 fires', async () => {
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     await Promise.resolve()
 
@@ -767,7 +767,7 @@ describe('TabManager', () => {
   })
 
   it('program title overrides cwd-based title, but cwd updates the fallback', async () => {
-    const { bar } = await mountTabManager()
+    const { bar } = await mountPaneManager()
 
     await Promise.resolve()
 
@@ -788,9 +788,9 @@ describe('TabManager', () => {
   })
 
   it('cwd only affects its own tab', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -815,9 +815,9 @@ describe('TabManager', () => {
   })
 
   it('initial tooltip marks cwd as stale before first OSC 7', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -842,7 +842,7 @@ describe('TabManager', () => {
 
   it('writes selection to the clipboard when non-empty', async () => {
     const cb = makeClipboard()
-    await mountTabManager(undefined, cb)
+    await mountPaneManager(undefined, cb)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -854,7 +854,7 @@ describe('TabManager', () => {
 
   it('does not write whitespace-only selection to the clipboard', async () => {
     const cb = makeClipboard()
-    await mountTabManager(undefined, cb)
+    await mountPaneManager(undefined, cb)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -866,7 +866,7 @@ describe('TabManager', () => {
 
   it('does not write empty selection to the clipboard', async () => {
     const cb = makeClipboard()
-    await mountTabManager(undefined, cb)
+    await mountPaneManager(undefined, cb)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -881,7 +881,7 @@ describe('TabManager', () => {
     const gate = new ClipboardGate()
     gate.allow()
 
-    await mountTabManager(undefined, cb, gate)
+    await mountPaneManager(undefined, cb, gate)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -895,7 +895,7 @@ describe('TabManager', () => {
     const cb = makeClipboard({
       readText: vi.fn().mockResolvedValue('right-click text'),
     })
-    const { bar } = await mountTabManager(undefined, cb)
+    const { bar } = await mountPaneManager(undefined, cb)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -913,7 +913,7 @@ describe('TabManager', () => {
     const cb = makeClipboard({
       readText: vi.fn().mockResolvedValue('middle-click text'),
     })
-    const { bar } = await mountTabManager(undefined, cb)
+    const { bar } = await mountPaneManager(undefined, cb)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -934,7 +934,7 @@ describe('TabManager', () => {
     const confirm = showConfirmMock
     confirm.mockReset()
 
-    const { bar } = await mountTabManager(undefined, cb)
+    const { bar } = await mountPaneManager(undefined, cb)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -965,7 +965,7 @@ describe('TabManager', () => {
     const confirm = showConfirmMock
     confirm.mockReset()
 
-    const { bar } = await mountTabManager(undefined, cb)
+    const { bar } = await mountPaneManager(undefined, cb)
 
     await Promise.resolve()
     const renderers = await getRendererMocks()
@@ -991,7 +991,7 @@ describe('TabManager', () => {
     const gate = new ClipboardGate()
     const banner = makeBanner()
 
-    await mountTabManager(undefined, cb, gate, banner)
+    await mountPaneManager(undefined, cb, gate, banner)
     await Promise.resolve()
     const renderers = await getRendererMocks()
 
@@ -1011,7 +1011,7 @@ describe('TabManager', () => {
     // Banner already shown — simulate the first write having raised it.
     const banner = makeBanner({ shown: true })
 
-    await mountTabManager(undefined, cb, gate, banner)
+    await mountPaneManager(undefined, cb, gate, banner)
     await Promise.resolve()
     const renderers = await getRendererMocks()
 
@@ -1035,7 +1035,7 @@ describe('TabManager', () => {
       }),
     })
 
-    await mountTabManager(undefined, cb, gate, banner)
+    await mountPaneManager(undefined, cb, gate, banner)
     await Promise.resolve()
     const renderers = await getRendererMocks()
 
@@ -1068,7 +1068,7 @@ describe('TabManager', () => {
       }),
     })
 
-    await mountTabManager(undefined, cb, gate, banner)
+    await mountPaneManager(undefined, cb, gate, banner)
     await Promise.resolve()
     const renderers = await getRendererMocks()
 
@@ -1094,8 +1094,8 @@ describe('TabManager', () => {
     gate.suppress()
     const banner = makeBanner()
 
-    const { manager, client } = await mountTabManager(undefined, cb, gate, banner)
-    manager.newTab()
+    const { manager, client } = await mountPaneManager(undefined, cb, gate, banner)
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
@@ -1114,15 +1114,15 @@ describe('TabManager', () => {
 
   // ── readiness signal ───────────────────────────────────────────────
 
-  it('initialTabReady resolves when the initial tab starts successfully', async () => {
-    const { manager } = await mountTabManager()
+  it('initialPaneReady resolves when the initial tab starts successfully', async () => {
+    const { manager } = await mountPaneManager()
 
-    // The initial tab was created and started by mountTabManager.
-    // initialTabReady must resolve (not hang, not reject).
-    await expect(manager.initialTabReady).resolves.toBeUndefined()
+    // The initial tab was created and started by mountPaneManager.
+    // initialPaneReady must resolve (not hang, not reject).
+    await expect(manager.initialPaneReady).resolves.toBeUndefined()
   })
 
-  it('initialTabReady rejects when the initial tab start() throws', async () => {
+  it('initialPaneReady rejects when the initial tab start() throws', async () => {
     const client = makeClient({
       openSession: vi.fn(() => Promise.reject(new Error('session failed'))),
     })
@@ -1132,7 +1132,7 @@ describe('TabManager', () => {
     const gate = new ClipboardGate()
     const banner = makeBanner()
 
-    const { TabManager } = await import('./tabs')
+    const { PaneManager } = await import('./panes')
     const { HorizontalTabStrip } = await import('./tab-strip')
     const tabStrip = new HorizontalTabStrip()
     const profileClient = {
@@ -1143,7 +1143,7 @@ describe('TabManager', () => {
       delete: () => Promise.resolve(),
       connect: () => Promise.resolve(''),
     } as unknown as import('./profiles').ProfileClient
-    const manager = new TabManager(
+    const manager = new PaneManager(
       bar,
       bar,
       panes,
@@ -1155,14 +1155,14 @@ describe('TabManager', () => {
       tabStrip,
     )
     // Open the initial tab explicitly — the constructor mounts nothing.
-    // Don't await: openInitialTab returns the _initialTabReady promise;
+    // Don't await: openInitialPane returns the _initialTabReady promise;
     // we assert the rejection through that same promise below.
-    void manager.openInitialTab()
+    void manager.openInitialPane()
 
-    // initialTabReady must reject — a genuinely broken tab is not "ready".
+    // initialPaneReady must reject — a genuinely broken tab is not "ready".
     // expect().rejects attaches the handler synchronously, so the rejection
     // that fires in a microtask is already handled; no unhandled-rejection.
-    await expect(manager.initialTabReady).rejects.toThrow('initial tab failed to start')
+    await expect(manager.initialPaneReady).rejects.toThrow('initial tab failed to start')
 
     // openSession was called (the rejection proves it — start() reached the call).
     expect(client.openSession).toHaveBeenCalled()
@@ -1176,14 +1176,14 @@ describe('TabManager', () => {
   })
 
   it('Tab.ready resolves true for a genuinely started tab', async () => {
-    // initialTabReady resolved above, proving the content-level signal resolved true.
+    // initialPaneReady resolved above, proving the content-level signal resolved true.
     //
     // For a direct content.ready assertion, construct TerminalContent + Tab manually.
     const client = makeClient()
     const wsClient = client as unknown as import('./ipc').WSClient
-    const { Tab } = await import('./tabs')
+    const { Pane } = await import('./panes')
     const { TerminalContent } = await import('./terminal-content')
-    const { SURFACE_TERMINAL } = await import('./tab-content')
+    const { SURFACE_TERMINAL } = await import('./pane-content')
 
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
@@ -1197,7 +1197,7 @@ describe('TabManager', () => {
       null,
       () => {},
     )
-    const tab = new Tab(
+    const tab = new Pane(
       content,
       {
         surfaceType: SURFACE_TERMINAL,
@@ -1234,9 +1234,9 @@ describe('TabManager', () => {
     })
 
     const wsClient = client as unknown as import('./ipc').WSClient
-    const { Tab } = await import('./tabs')
+    const { Pane } = await import('./panes')
     const { TerminalContent } = await import('./terminal-content')
-    const { SURFACE_TERMINAL } = await import('./tab-content')
+    const { SURFACE_TERMINAL } = await import('./pane-content')
 
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
@@ -1250,7 +1250,7 @@ describe('TabManager', () => {
       null,
       () => {},
     )
-    const tab = new Tab(
+    const tab = new Pane(
       content,
       {
         surfaceType: SURFACE_TERMINAL,
@@ -1292,9 +1292,9 @@ describe('TabManager', () => {
     })
 
     const wsClient = client as unknown as import('./ipc').WSClient
-    const { Tab } = await import('./tabs')
+    const { Pane } = await import('./panes')
     const { TerminalContent } = await import('./terminal-content')
-    const { SURFACE_TERMINAL } = await import('./tab-content')
+    const { SURFACE_TERMINAL } = await import('./pane-content')
 
     const clipboard = makeClipboard()
     const gate = new ClipboardGate()
@@ -1308,7 +1308,7 @@ describe('TabManager', () => {
       null,
       () => {},
     )
-    const tab = new Tab(
+    const tab = new Pane(
       content,
       {
         surfaceType: SURFACE_TERMINAL,
@@ -1354,8 +1354,8 @@ describe('TabManager', () => {
   // ═════════════════════════════════════════════════════════════════════════
 
   it('activeSurfaceType answers the ACTIVE tab descriptor, and follows activation both ways', async () => {
-    const { manager } = await mountTabManager()
-    const { SURFACE_TERMINAL } = await import('./tab-content')
+    const { manager } = await mountPaneManager()
+    const { SURFACE_TERMINAL } = await import('./pane-content')
 
     // The mounted tab is a terminal, and the descriptor is what answers —
     // not an instanceof test and not an inference from the session (B.8).
@@ -1369,7 +1369,7 @@ describe('TabManager', () => {
       supportsAttention: false,
       defaultTitle: 'Test',
     }
-    manager.openTab(content, descriptor)
+    manager.openPane(content, descriptor)
     expect(manager.activeSurfaceType()).toBe('test.mock')
 
     // And back: a one-way assertion cannot report an answer that latches,
@@ -1379,7 +1379,7 @@ describe('TabManager', () => {
   })
 
   it('mounts content exactly once when activated repeatedly — seam guard, not TerminalContent private flag', async () => {
-    const { manager } = await mountTabManager()
+    const { manager } = await mountPaneManager()
 
     const content = new CountingTestContent()
     const descriptor: ContentDescriptor = {
@@ -1389,8 +1389,8 @@ describe('TabManager', () => {
       supportsAttention: false,
       defaultTitle: 'Test',
     }
-    // openTab creates a tab via addTab → activate → start → mount.
-    manager.openTab(content, descriptor)
+    // openPane creates a tab via addPane → activate → start → mount.
+    manager.openPane(content, descriptor)
 
     // Activate the terminal tab, then activate our tab again.
     // Mount must only fire once (seam guard in Tab.start()).
@@ -1405,7 +1405,7 @@ describe('TabManager', () => {
   })
 
   it('calling setVisible through the content boundary drives visibility, not a CSS class toggle in tabs.ts', async () => {
-    const { manager } = await mountTabManager()
+    const { manager } = await mountPaneManager()
     const content = new CountingTestContent()
     const descriptor: ContentDescriptor = {
       surfaceType: 'test.mock' as unknown as SurfaceType,
@@ -1415,7 +1415,7 @@ describe('TabManager', () => {
       defaultTitle: 'Test',
     }
 
-    manager.openTab(content, descriptor)
+    manager.openPane(content, descriptor)
 
     // setVisible(true) should have been called when the tab was activated.
     // (The first call is for tab 0 being deactivated, the second is our tab activated.)
@@ -1432,7 +1432,7 @@ describe('TabManager', () => {
   })
 
   it('pane is visible before mount when activated — pre-mount target makes setVisible meaningful from first activation', async () => {
-    const { manager } = await mountTabManager()
+    const { manager } = await mountPaneManager()
     const content = new CountingTestContent()
     const descriptor: ContentDescriptor = {
       surfaceType: 'test.mock' as unknown as SurfaceType,
@@ -1442,11 +1442,11 @@ describe('TabManager', () => {
       defaultTitle: 'Test',
     }
 
-    // addTab fires void this.activate(tab) — mount is async even for
+    // addPane fires void this.activate(tab) — mount is async even for
     // CountingTestContent's sync body. With pre-mount target set in the
     // Tab constructor, setActive(true) already toggles the 'active' class
     // before mount() resolves.
-    const tab = manager.openTab(content, descriptor)
+    const tab = manager.openPane(content, descriptor)
     await Promise.resolve()
     await Promise.resolve()
 
@@ -1458,9 +1458,9 @@ describe('TabManager', () => {
   })
 
   it('ordering: setVisible(true) fires before mount, and first viewport gets non-zero rectangle when pane is visible', async () => {
-    // Construct a Tab directly (not through TabManager) so we control
+    // Construct a Tab directly (not through PaneManager) so we control
     // the activation order and can inspect the call log precisely.
-    const { Tab } = await import('./tabs')
+    const { Pane } = await import('./panes')
     const content = new CountingTestContent()
     const descriptor: ContentDescriptor = {
       surfaceType: 'test.mock' as unknown as SurfaceType,
@@ -1472,7 +1472,7 @@ describe('TabManager', () => {
 
     // Tab constructor calls content.setTarget(this.pane) — _target is
     // set before any activation.
-    const tab = new Tab(content, descriptor, 99, 'tab-wire-1')
+    const tab = new Pane(content, descriptor, 99, 'tab-wire-1')
     expect(content.callLog).toEqual([]) // no lifecycle calls yet
 
     // Append pane to DOM and stub getBoundingClientRect to return non-zero,
@@ -1531,12 +1531,12 @@ describe('TabManager', () => {
   // B.5 Geometry authority — presentation layer owns the viewport
   // ═════════════════════════════════════════════════════════════════════════
 
-  it('refuses a second openInitialTab — the guard is at the seam, not in a comment', async () => {
-    const { manager } = await mountTabManager()
-    // mountTabManager already opened the initial tab, which is the point:
+  it('refuses a second openInitialPane — the guard is at the seam, not in a comment', async () => {
+    const { manager } = await mountPaneManager()
+    // mountPaneManager already opened the initial tab, which is the point:
     // the composition root calls this exactly once and a second call must
     // fail loudly rather than mount a second strip and a second first tab.
-    expect(() => manager.openInitialTab()).toThrow(/openInitialTab called twice/)
+    expect(() => manager.openInitialPane()).toThrow(/openInitialPane called twice/)
   })
 
   describe('B.5 geometry authority', () => {
@@ -1595,8 +1595,8 @@ describe('TabManager', () => {
       // Acceptance test: WHO calls viewportChanged? The presentation layer.
       // This test fails if setupViewportObserver is removed or if
       // viewportChanged is only called by content measuring itself.
-      const { manager, client } = await mountTabManager()
-      const tab = manager.newTab()
+      const { manager, client } = await mountPaneManager()
+      const tab = manager.newPane()
       await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
       const renderers = await getRendererMocks()
       const renderer = renderers[renderers.length - 1]
@@ -1621,7 +1621,7 @@ describe('TabManager', () => {
       })
 
       // Simulate a pane resize through the ResizeObserver (which Tab created
-      // when the pane entered the DOM via addTab).
+      // when the pane entered the DOM via addPane).
       await fireResize(tab.pane, 1024, 768)
 
       // The presentation layer's observer must have delivered the viewport
@@ -1633,15 +1633,15 @@ describe('TabManager', () => {
     })
 
     it('no viewport callback before mount starts', async () => {
-      // Create a Tab directly without TabManager so it is NOT auto-activated.
+      // Create a Tab directly without PaneManager so it is NOT auto-activated.
       // This lets us add the pane to DOM and fire the observer before start().
-      const { Tab } = await vi.importActual<typeof import('./tabs')>('./tabs')
+      const { Pane } = await vi.importActual<typeof import('./panes')>('./panes')
       const { TerminalContent } =
         await vi.importActual<typeof import('./terminal-content')>('./terminal-content')
       const { SURFACE_TERMINAL } =
-        await vi.importActual<typeof import('./tab-content')>('./tab-content')
+        await vi.importActual<typeof import('./pane-content')>('./pane-content')
 
-      const { client } = await mountTabManager()
+      const { client } = await mountPaneManager()
       const wsClient = client as unknown as import('./ipc').WSClient
       const content = new TerminalContent(
         wsClient,
@@ -1653,7 +1653,7 @@ describe('TabManager', () => {
         () => {},
         undefined,
       )
-      const tab = new Tab(
+      const tab = new Pane(
         content,
         {
           surfaceType: SURFACE_TERMINAL,
@@ -1698,8 +1698,8 @@ describe('TabManager', () => {
     })
 
     it('equal consecutive rectangles are suppressed', async () => {
-      const { manager, client } = await mountTabManager()
-      const tab = manager.newTab()
+      const { manager, client } = await mountPaneManager()
+      const tab = manager.newPane()
       await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
 
       Object.defineProperty(tab.pane, 'getBoundingClientRect', {
@@ -1726,8 +1726,8 @@ describe('TabManager', () => {
     })
 
     it('no callbacks after dispose', async () => {
-      const { manager, client } = await mountTabManager()
-      const tab = manager.newTab()
+      const { manager, client } = await mountPaneManager()
+      const tab = manager.newPane()
       await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
       const renderers = await getRendererMocks()
 
@@ -1748,8 +1748,8 @@ describe('TabManager', () => {
     })
 
     it('hidden tab is not sent a misleading zero rectangle', async () => {
-      const { manager, client } = await mountTabManager()
-      const tab = manager.newTab()
+      const { manager, client } = await mountPaneManager()
+      const tab = manager.newPane()
       await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
       const renderers = await getRendererMocks()
 
@@ -1779,10 +1779,10 @@ describe('TabManager', () => {
   // ── Node identity across reorder (ADR-0012 §1) ──────────────────────
 
   it('tab node identity and focus survive reorder', async () => {
-    const { client, manager, bar } = await mountTabManager()
+    const { client, manager, bar } = await mountPaneManager()
 
-    manager.newTab()
-    manager.newTab()
+    manager.newPane()
+    manager.newPane()
     await vi.waitFor(() => {
       expect(client.openSession).toHaveBeenCalledTimes(3)
     })
@@ -1796,7 +1796,7 @@ describe('TabManager', () => {
     expect(document.activeElement).toBe(tab1)
 
     // Reorder: move tab 1 to position 3 (after tab 3).
-    manager.reorderTab(1, 3)
+    manager.reorderPane(1, 3)
 
     // The same DOM node should still be in the DOM, just moved.
     const tab1After = document.getElementById('tab-btn-1')
@@ -1810,23 +1810,23 @@ describe('TabManager', () => {
     // Tab order should be [2, 1, 3] — tab 1 moved to tab 3's position.
     const tabs = bar.querySelectorAll('.nocx-tab')
     expect(tabs.length).toBe(3)
-    expect(tabs[0].getAttribute('data-tab-id')).toBe('2')
-    expect(tabs[1].getAttribute('data-tab-id')).toBe('1')
-    expect(tabs[2].getAttribute('data-tab-id')).toBe('3')
+    expect(tabs[0].getAttribute('data-pane-id')).toBe('2')
+    expect(tabs[1].getAttribute('data-pane-id')).toBe('1')
+    expect(tabs[2].getAttribute('data-pane-id')).toBe('3')
   })
 })
 
 // ── Agent status keys on the program title, never the composed title ────
 //
-// nocx-n8n82: Tab._programTitle held the COMPOSED title (program || cwd),
+// nocx-n8n82: Pane._programTitle held the COMPOSED title (program || cwd),
 // and the agent-state classifier was fed that same value — a string that
 // is usually a filesystem path. The program's own OSC 0/2 title now
 // arrives separately (updateProgramTitle) and is the classifier's only
 // input, so a path or command line can never masquerade as agent state.
 describe('Tab agent-status channel (nocx-n8n82)', () => {
-  function bareTab(): Tab {
+  function bareTab(): Pane {
     const content = new CountingTestContent()
-    return new Tab(
+    return new Pane(
       content,
       {
         surfaceType: SURFACE_TERMINAL,

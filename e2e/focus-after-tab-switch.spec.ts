@@ -126,7 +126,7 @@ test.describe('focus after switching back to a tab (nocx-4ff.29)', () => {
 
   /**
    * The bead names three ways to arrive at a tab, and only the click was
-   * watched. The other two reach `TabManager.activate()` through their own
+   * watched. The other two reach `PaneManager.activate()` through their own
    * callers — `Cmd/Ctrl+1..9` through `activateByIndex`, a close through
    * whatever the MRU stack pops (tabs.ts:830-857) — so "the click path is
    * green" is a statement about one caller, not about activation. Each is

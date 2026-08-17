@@ -142,9 +142,9 @@ test.describe('Connections inside Settings', () => {
 
     // Opening a connection needs somewhere to keep secrets, so the product asks
     // for it before it opens anything: vaultController.ensureBeforeSave defers
-    // newSSHTab behind setup while the vault is uninitialized (vault.tsx:255).
+    // newSSHPane behind setup while the vault is uninitialized (vault.tsx:255).
     // This spec used to click Connect and wait for a tab that was never coming —
-    // the console said "connect from Settings" and never "newSSHTab called",
+    // the console said "connect from Settings" and never "newSSHPane called",
     // because the deferred callback was sitting behind this dialog (nocx-z9s9.4).
     // Asked for only while the vault is uninitialized, so this is conditional
     // rather than asserted: the two browser projects share one backend and one
@@ -171,7 +171,7 @@ test.describe('Connections inside Settings', () => {
     })
 
     // Verify the new tab is not called "Settings".
-    const newTab = page.locator('.nocx-tab-title').last()
-    await expect(newTab).not.toHaveText('Settings')
+    const newPane = page.locator('.nocx-tab-title').last()
+    await expect(newPane).not.toHaveText('Settings')
   })
 })

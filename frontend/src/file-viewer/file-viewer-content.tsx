@@ -19,7 +19,7 @@ import { ReadOnlyHost } from '../cm-host'
 import { render } from 'solid-js/web'
 import { Button } from '../ui'
 import type { FilesReadResult } from '../generated/files.read'
-import { BaseTabContent, type ActiveOrigin, type TabHost } from '../tab-content'
+import { BasePaneContent, type ActiveOrigin, type PaneHost } from '../pane-content'
 import { languageForPath, viewerHighlighting } from './language-registry'
 
 // ── The seam (injected at registration; never imported) ────────────────────
@@ -42,9 +42,9 @@ export interface FileViewerTarget {
    *  scoped to when the row was clicked (design §5.4). The viewer answers
    *  `activeOrigin()` with it, so the origin-following panel treats a
    *  viewer tab as the same machine and keeps its binding — and the
-   *  viewer's read — alive. `tabId` is deliberately absent: the viewer
-   *  does not know its tab; TabManager adds it. */
-  readonly origin: Omit<ActiveOrigin, 'tabId'> | null
+   *  viewer's read — alive. `paneId` is deliberately absent: the viewer
+   *  does not know its tab; PaneManager adds it. */
+  readonly origin: Omit<ActiveOrigin, 'paneId'> | null
 }
 
 /**
@@ -119,7 +119,7 @@ function linesForResult(result: FilesReadResult): NoticeLine[] {
 
 // ── Content ────────────────────────────────────────────────────────────────
 
-export class FileViewerContent extends BaseTabContent {
+export class FileViewerContent extends BasePaneContent {
   private root: HTMLElement | null = null
   private noticeEl: HTMLElement | null = null
   private readonly host = new ReadOnlyHost()
@@ -142,9 +142,9 @@ export class FileViewerContent extends BaseTabContent {
     super()
   }
 
-  // ── TabContent ──────────────────────────────────────────────────────────
+  // ── PaneContent ──────────────────────────────────────────────────────────
 
-  mount(target: HTMLElement, _host: TabHost, signal: AbortSignal): Promise<void> {
+  mount(target: HTMLElement, _host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this.disposed) return Promise.resolve()
 
     this.root = document.createElement('div')
@@ -174,7 +174,7 @@ export class FileViewerContent extends BaseTabContent {
    *  closed out from under it by the tab activation it caused. Null only
    *  when the opener had no origin to hand over (nothing should open a
    *  viewer without one). */
-  activeOrigin(): Omit<ActiveOrigin, 'tabId'> | null {
+  activeOrigin(): Omit<ActiveOrigin, 'paneId'> | null {
     return this.target.origin
   }
   viewportChanged(): void {

@@ -29,7 +29,7 @@ import { SidebarView } from './ui/sidebar-view'
 import { ResizeHandle } from './ui/resize-handle'
 import { createAppStore, type AppActions, type AppState } from './state'
 import { IconButton } from './ui/icon-button'
-import type { ActiveOrigin } from './tab-content'
+import type { ActiveOrigin } from './pane-content'
 import {
   SIDEBAR_WIDTH_MAX,
   SIDEBAR_WIDTH_MIN,
