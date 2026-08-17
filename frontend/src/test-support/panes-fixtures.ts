@@ -24,6 +24,7 @@ import type { ClipboardBanner } from '../banner'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
 import type { SessionLiveness } from '../generated/session.liveness'
+import type { Open } from '../generated/open'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants — every assertion must derive from these, never repeat the literal.
@@ -239,6 +240,13 @@ export interface SessionFake {
   cwd: string
   /** The resolved destination mode from the open ack (nocx-mlm7). */
   desiredMode: DesiredMode
+  /** The opener the backend ADMITTED on the open ack, or null for a root
+   *  session (nocx-9hu9d). Null by default: the product opens no session with
+   *  a parent yet, so a fixture that claimed one would describe a tree the
+   *  renderer cannot currently produce. A test that needs an edge sets it —
+   *  `childOf(parent)` builds the whole value from the parent's own fake, so
+   *  no test spells the identity by hand. */
+  parent: Open['parent']
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
@@ -270,6 +278,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     sessionId,
     cwd: FIXTURE_CWD,
     desiredMode: 'script',
+    parent: null,
     send: vi.fn(),
     sendResize: vi.fn(),
     close: vi.fn(),
@@ -298,6 +307,25 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     ...overrides,
   }
 }
+
+/**
+ * The `parent` value a session opened BY `opener` would carry back on its ack
+ * (nocx-9hu9d): the opener's full identity, never a bare id. Built from the
+ * opener's own fake so the two agree by construction — an edge naming an id
+ * the test invented would exercise a tree the backend would have refused.
+ */
+export function childOf(opener: SessionFake): Open['parent'] {
+  return {
+    sessionId: opener.sessionId,
+    instanceId: FIXTURE_INSTANCE_ID,
+    sessionEpoch: 1,
+  }
+}
+
+/** The backend instance every fixture session belongs to. One value, because
+ *  a lineage edge may only name the instance that minted it. Not exported:
+ *  no test needs to spell it, and childOf is the only thing that should. */
+const FIXTURE_INSTANCE_ID = 'fedcba9876543210fedcba9876543210'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WSClient fake

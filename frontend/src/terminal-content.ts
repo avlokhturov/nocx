@@ -642,6 +642,24 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
+  /** This tab's session and the session that opened it, as the backend
+   *  ADMITTED the edge at open (nocx-9hu9d). Answered while the tab holds a
+   *  session — including one whose shell has exited, because that tab is
+   *  still open and a person closing its parent is still owed the truth
+   *  about what is on their screen.
+   *
+   *  Deliberately NOT answered through activeOrigin: that one asks which
+   *  MACHINE the tab speaks for and goes silent inside a hand-typed `ssh`,
+   *  which would hide exactly the tabs a close prompt most needs to name.
+   *  PROVENANCE ONLY (ADR-0020 §5) — see lineage.ts. */
+  lineage(): { sessionId: string; parentSessionId: string | null } | null {
+    if (this.session === null) return null
+    return {
+      sessionId: this.session.sessionId,
+      parentSessionId: this.session.parent?.sessionId ?? null,
+    }
+  }
+
   /** The active pane's raw env-view facts for the snippet provider (design
    *  §7.4): cwd, host and user of the ACTIVE domain, with the view's ''
    *  unknown-marker left intact — session-facts.ts maps that marker to

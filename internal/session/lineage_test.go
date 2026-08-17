@@ -240,3 +240,104 @@ func TestOpen_RefusedParentLeavesNoSession(t *testing.T) {
 		t.Errorf("registry holds %d sessions after a refused open, want %d", got, before)
 	}
 }
+
+// ── D6, the third way a parent is lost: the backend restarts ──────────────
+//
+// A parent's death never closes its children (nocx-wtv3p, design D6). Two of
+// the three failures are driven over the real socket in
+// internal/transport/ws_lineage_prohibitions_test.go — the parent's shell
+// exits, and the link carrying it drops — because those are transport events
+// and the assertion is about what the descendants can still do afterwards.
+//
+// The third, a backend restart, has no such seam and cannot be given one
+// honestly: nothing in this product survives a restart. There is no session
+// store (design D5 defers the daemon), so a restart takes the parent and the
+// child alike, and a test claiming "the child was still alive afterwards"
+// would be asserting a persistence that does not exist.
+//
+// What a restart DOES leave, and what the rule is therefore held to here, is
+// the state every record naming that parent is in from then on: the parent's
+// incarnation is unresolvable, permanently, because the restarted backend
+// mints a new instance id and no edge from the previous one can ever resolve
+// again. The prohibition in that state is the one a later epic could actually
+// break — an unresolvable parent is never a reason to close, end or degrade a
+// child — and it is what a restore path will walk into the moment it exists,
+// holding records whose openers belong to a backend that is gone.
+func TestParentIncarnationGone_IsNeverAReasonToEndTheChild(t *testing.T) {
+	// A channel per session: the shared stub would close every session at
+	// once, which is the very thing under test and would hide it.
+	r := New(log.NewSlogAdapter(nil), &freshStubFactory{})
+	parent := openRoot(t, r)
+	child, err := r.Open(context.Background(), Config{Cols: 80, Rows: 24, Parent: refOf(parent)})
+	if err != nil {
+		t.Fatalf("open child: %v", err)
+	}
+	grandchild, err := r.Open(context.Background(), Config{Cols: 80, Rows: 24, Parent: refOf(child)})
+	if err != nil {
+		t.Fatalf("open grandchild: %v", err)
+	}
+	parentRef := refOf(parent)
+	wantChildEdge, _ := child.Parent()
+	wantGrandEdge, _ := grandchild.Parent()
+
+	// The parent's incarnation ceases to exist here. Whatever removed it —
+	// its shell exiting, the person closing its tab, or the process it lived
+	// in being restarted underneath it — every record naming it is now in the
+	// same state, and none of them was asked about.
+	if err := r.Close(parent.ID()); err != nil {
+		t.Fatalf("close parent: %v", err)
+	}
+
+	// It really is unresolvable now: no new edge could be admitted naming it.
+	// Without this the rest of the test could pass against a parent that was
+	// merely idle.
+	if err := r.validateParent(NewID(), parentRef); !errors.Is(err, ErrParentUnknown) {
+		t.Fatalf("the parent still resolves after being dropped (err = %v): the state under test was never reached", err)
+	}
+	// And after a restart it is unresolvable for a second, permanent reason:
+	// a fresh backend mints a fresh instance id, so nothing minted by the
+	// previous one can name a session here ever again.
+	restarted := New(log.NewSlogAdapter(nil), &freshStubFactory{})
+	if err := restarted.validateParent(NewID(), parentRef); !errors.Is(err, ErrParentForeignInstance) {
+		t.Fatalf("a restarted backend answered the old edge with %v, want ErrParentForeignInstance", err)
+	}
+
+	// The descendants are untouched: still held, still not ended, still
+	// carrying the provenance they were opened with, and still usable.
+	for _, c := range []struct {
+		what string
+		sess Session
+		want Ref
+	}{
+		{"the child", child, wantChildEdge},
+		{"the grandchild", grandchild, wantGrandEdge},
+	} {
+		if _, err := r.Get(c.sess.ID()); err != nil {
+			t.Errorf("%s is gone from the registry: %v", c.what, err)
+			continue
+		}
+		if state := c.sess.Liveness(); state.Liveness.Terminal() {
+			t.Errorf("%s reads as %q: an unresolvable parent is not an end", c.what, state.Liveness)
+		}
+		got, has := c.sess.Parent()
+		if !has || got != c.want {
+			t.Errorf("%s edge = %+v (has=%v), want %+v: the record outlives its subject", c.what, got, has, c.want)
+		}
+		if n, err := c.sess.Write([]byte("still working\n")); err != nil || n == 0 {
+			t.Errorf("%s no longer takes input (n=%d, err=%v): it was alive in the map and dead in every way that matters", c.what, n, err)
+		}
+	}
+	if got := len(r.List()); got != 2 {
+		t.Errorf("registry holds %d sessions, want the 2 descendants", got)
+	}
+}
+
+// freshStubFactory hands every session its own pty.Stub. stubPTYFactory
+// shares one across the whole registry, so closing any session closes the
+// channel under all of them — invisible to a test that only reads records,
+// and fatal to one that asks whether a survivor still works.
+type freshStubFactory struct{}
+
+func (f *freshStubFactory) NewPTY(context.Context, pty.Config) (pty.Pty, error) {
+	return pty.NewStub(log.NewSlogAdapter(nil)), nil
+}
