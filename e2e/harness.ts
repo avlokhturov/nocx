@@ -123,7 +123,20 @@ export const test = base.extend<object, { appReady: void }>({
       }
       await use()
     },
-    { scope: 'worker', auto: true },
+    // THE FIXTURE NEEDS ITS OWN BUDGET, and this line is why. Without an
+    // explicit timeout Playwright caps a fixture's setup at the TEST timeout —
+    // so the 90 seconds asked for above were silently whatever `timeout:` in
+    // playwright.config.ts happened to be. That was invisible while the test
+    // ceiling was 60s and the cold start usually finished sooner; lowering the
+    // ceiling to 30s cut this fixture in half and every webkit test in the run
+    // failed at 0ms with "Fixture appReady timeout of 30000ms exceeded during
+    // setup" (2026-08-18).
+    //
+    // A test ceiling and a cold start are different measurements and must not
+    // share a number. The ceiling is short on purpose — nothing in this suite
+    // legitimately takes thirty seconds — while this runs ONCE per worker and
+    // is waiting on a process to boot.
+    { scope: 'worker', auto: true, timeout: 120_000 },
   ],
 
   page: async ({ page }, use) => {
