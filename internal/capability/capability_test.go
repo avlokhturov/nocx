@@ -449,6 +449,7 @@ func (f *fakeSessionRegistry) List() []session.Session {
 type fakeSession struct {
 	id       session.ID
 	identity session.Identity
+	parent   session.Ref
 	kind     session.Kind
 	host     string
 	sshOpts  []ssh.ConnectOption
@@ -456,13 +457,16 @@ type fakeSession struct {
 
 func (f *fakeSession) ID() session.ID             { return f.id }
 func (f *fakeSession) Identity() session.Identity { return f.identity }
-func (f *fakeSession) Kind() session.Kind         { return f.kind }
-func (f *fakeSession) Host() string               { return f.host }
-func (f *fakeSession) Cwd() string                { return "/home/test" }
-func (f *fakeSession) ProfileID() string          { return "" }
-func (f *fakeSession) CredentialID() string       { return "" }
-func (f *fakeSession) Write([]byte) (int, error)  { return 0, nil }
-func (f *fakeSession) EnqueueWrite([]byte) bool   { return true }
+func (f *fakeSession) Parent() (session.Ref, bool) {
+	return f.parent, !f.parent.Zero()
+}
+func (f *fakeSession) Kind() session.Kind        { return f.kind }
+func (f *fakeSession) Host() string              { return f.host }
+func (f *fakeSession) Cwd() string               { return "/home/test" }
+func (f *fakeSession) ProfileID() string         { return "" }
+func (f *fakeSession) CredentialID() string      { return "" }
+func (f *fakeSession) Write([]byte) (int, error) { return 0, nil }
+func (f *fakeSession) EnqueueWrite([]byte) bool  { return true }
 func (f *fakeSession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
 	return nil
 }

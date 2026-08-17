@@ -5,7 +5,7 @@
   "description": "Result of the open JSON-RPC method: a session is created and acknowledged (AD-7 — the server assigns the authoritative session id, so the id is minted by the backend, never the renderer). cwd is the session's starting directory, the tab's name until a program sets a title. instanceId + sessionEpoch (nocx-3oupk) name the session's incarnation: the renderer learns them here and compares every later observation of this session against them, so a record or message from a previous backend instance is told from this one. shellIntegrationReason is deliberately NOT here (nocx-dvql): it could only answer at open time, and the two integration failures that matter most arrive later — a handshake that expires ten seconds in, and a channel lost mid-session. That question is answered by the session.integrationChanged notification, as a state the backend keeps revising, and keeping a second answer in this ack is the defect AD-8 names.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "instanceId", "sessionEpoch", "cwd", "desiredMode"],
+  "required": ["sessionId", "instanceId", "sessionEpoch", "cwd", "desiredMode", "parent"],
   "properties": {
     "sessionId": {
       "description": "Backend-assigned session id (AD-7).",
@@ -28,6 +28,27 @@
       "description": "The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. script (the default — N3) wraps and installs automatically, raw adds nothing, relay is consent-gated (inert until the relay lands). The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.",
       "type": "string",
       "enum": ["raw", "script", "relay"]
+    },
+    "parent": {
+      "description": "The session that opened this one (nocx-9hu9d), or null for a root session. Always present: null is the answer for a root, and a missing key would make \"this session has no parent\" indistinguishable from \"this backend does not say\". It is the edge the backend RECORDED — the renderer's claim in the open params is checked against the live registry and refused (-32602) if it cannot be true, so what comes back here is an admitted fact, not an echo. The full identity is carried, never a bare sessionId: an id alone re-resolves to whatever holds it now, which is the ambiguity instanceId + sessionEpoch exist to remove (nocx-3oupk), and this edge is written once and never revisited. PROVENANCE ONLY — it says \"A created B\" and confers nothing: the parent gains no right to observe or control the child by appearing here, and continuing authority is a separate, revocable object (ADR-0020 §5). The edge outlives its subject: a parent that exits leaves this value exactly as it was, because a parent's death never closes or rewrites its children (design D6).",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["sessionId", "instanceId", "sessionEpoch"],
+      "properties": {
+        "sessionId": {
+          "description": "The opener's session id.",
+          "type": "string"
+        },
+        "instanceId": {
+          "description": "The backend instance that minted the opener. Equal to this session's own instanceId for every edge the backend will admit — a claim naming another instance is refused, because a record out of a previous backend can never resolve to a session here.",
+          "type": "string"
+        },
+        "sessionEpoch": {
+          "description": "The opener's epoch within that instance: which incarnation of that session id created this one. A later session reusing the id is a different incarnation and is not this parent.",
+          "type": "integer",
+          "minimum": 1
+        }
+      }
     }
   }
 }

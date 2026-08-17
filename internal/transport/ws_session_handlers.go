@@ -106,6 +106,50 @@ type openResult struct {
 	SessionEpoch uint64 `json:"sessionEpoch"`
 	Cwd          string `json:"cwd"`
 	DesiredMode  string `json:"desiredMode"`
+	// Parent is the edge the backend RECORDED, echoed back so the renderer
+	// stores what was admitted rather than what it asked for (nocx-9hu9d).
+	// Null for a root session — and null rather than absent, because the
+	// schema requires the key: an omitempty here would drop it for every root
+	// session and leave "no parent" indistinguishable from "an old backend".
+	Parent *openParentResult `json:"parent"`
+}
+
+// openParentResult is the recorded parent edge on the wire: the full identity
+// of the session that opened this one, in the same three words the open params
+// and every later observation use.
+type openParentResult struct {
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
+}
+
+// parentResultFor renders a session's recorded parent edge onto the wire, or
+// nil for a root session. One place converts the record into the wire shape,
+// so a later reader of this edge cannot spell it differently (AD-8).
+func parentResultFor(sess session.Session) *openParentResult {
+	edge, has := sess.Parent()
+	if !has {
+		return nil
+	}
+	return &openParentResult{
+		SessionID:    string(edge.ID),
+		InstanceID:   string(edge.Identity.InstanceID),
+		SessionEpoch: edge.Identity.Epoch,
+	}
+}
+
+// isLineageRefusal reports whether err is the session registry refusing a
+// parent claim. It decides one thing: whether the renderer sent something that
+// can never work (-32602, the caller's fault) or the open failed for a reason
+// retrying might survive (-32603). Every lineage sentinel is named here rather
+// than matched on a message, so adding one without deciding its wire answer is
+// a compile-visible omission rather than a silent -32603.
+func isLineageRefusal(err error) bool {
+	return errors.Is(err, session.ErrParentUnknown) ||
+		errors.Is(err, session.ErrParentForeignInstance) ||
+		errors.Is(err, session.ErrParentSelf) ||
+		errors.Is(err, session.ErrParentCycle) ||
+		errors.Is(err, session.ErrTooDeep)
 }
 
 // handleOpen creates a new session and output ring.
@@ -140,6 +184,18 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		// direction and forgetting to ask is the one that shipped a tab
 		// with no blocks and no diagnostic.
 		Enhanced: true,
+	}
+	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a
+	// claim; the registry is the single owner of whether it may be recorded,
+	// and it refuses before anything is spawned. Absent means a root session.
+	if params.Parent != nil {
+		cfg.Parent = session.Ref{
+			ID: session.ID(params.Parent.SessionID),
+			Identity: session.Identity{
+				InstanceID: session.InstanceID(params.Parent.InstanceID),
+				Epoch:      params.Parent.SessionEpoch,
+			},
+		}
 	}
 	// ProfileID is deliberately NOT set here. It is recorded below, only once
 	// the resolver has accepted it, because a local PTY has no profile and
@@ -291,6 +347,14 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
 			return
 		}
+		// A refused parent edge is a bad claim in the params, not a server
+		// fault: nothing the renderer can retry will make it true, and
+		// answering -32603 would invite exactly that retry (nocx-9hu9d).
+		if isLineageRefusal(err) {
+			h.log.Warn("open refused: parent edge", "error", err)
+			_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
+			return
+		}
 		h.log.Error("failed to open session", "error", err)
 		// A sealed vault surfaces here for EVERY connection that needs it —
 		// this is still a vault access, and the renderer must get the reason
@@ -372,6 +436,10 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// starts from — script wraps and installs automatically, raw adds
 	// nothing, relay is consent-gated. It is the mode, never proof
 	// integration succeeded.
+	// parent rides the ack as the edge the REGISTRY recorded, read back off
+	// the session rather than echoed from the params: the two agree only
+	// because the claim was admitted, and reading the record is what makes the
+	// ack an answer instead of a repetition (nocx-9hu9d).
 	ident := sess.Identity()
 	result := openResult{
 		SessionID:    string(sess.ID()),
@@ -379,6 +447,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		SessionEpoch: ident.Epoch,
 		Cwd:          sess.Cwd(),
 		DesiredMode:  desiredModeForAck(cfg.Remote),
+		Parent:       parentResultFor(sess),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
@@ -839,6 +908,24 @@ func validateOpenRaw(raw json.RawMessage) string {
 	}
 	if utf8.RuneCountInString(p.Shell) > maxShellPinRunes {
 		return fmt.Sprintf("shell exceeds %d characters", maxShellPinRunes)
+	}
+	// The parent edge (nocx-9hu9d) is optional — a root session carries none —
+	// but a present one must be COMPLETE and well-shaped. Half an identity is
+	// the bare parentId the full identity exists to replace, and it is refused
+	// here rather than left for the registry, because a shape that cannot name
+	// a session should never reach it. Both ids are server-minted 32-hex
+	// (session.IDToBytes owns that shape for both), and the epoch is minted
+	// from 1, so zero names no incarnation.
+	if p.Parent != nil {
+		if msg := validateSessionIDShape(p.Parent.SessionID); msg != "" {
+			return "parent.sessionId " + msg
+		}
+		if msg := validateSessionIDShape(p.Parent.InstanceID); msg != "" {
+			return "parent.instanceId " + msg
+		}
+		if p.Parent.SessionEpoch == 0 {
+			return "parent.sessionEpoch is required and starts at 1"
+		}
 	}
 	return ""
 }
