@@ -386,7 +386,7 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	cmd.ExtraFiles = []*os.File{shellFile} // fd 3, exactly as pty.WithExtraFiles
 	cmd.Env = append(
 		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
+		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000", "NOCX_SNAPSHOT_WAIT_MS=15000")...,
 	)
 
 	k := newFakeKernel(t, testCap)

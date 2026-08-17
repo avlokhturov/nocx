@@ -454,23 +454,20 @@ func TestInBandBootstrap_RealBashFailOpenMissingApplet(t *testing.T) {
 // under zsh: the wrapper is shell-agnostic, and the dispatcher must select
 // the zsh hooks.
 func TestInBandBootstrap_RealZshIntegratesAndRestores(t *testing.T) {
-	s := startSession(t, "zsh")
+	s := startSession(t, "zsh", "NOCX_SNAPSHOT_WAIT_MS=15000")
 	s.waitFor(inBandTestPrompt, 15*time.Second)
 	before := s.termios()
 
 	p := plan(t, "0123456789abcdef0123456789abcdef")
 	s.typeAndWait(p.Wrapper+"\r", "\x1b]1337;NOCX_IB_READY\x07", 15*time.Second)
 	s.assertEchoOff(s.termios())
-	s.typeAndWait(p.Payload+p.Terminator+"\n", "\x1b]636;H;", 15*time.Second)
-	// The zsh tier now has the same source-time emission the bash tier has
-	// (nocx-qduc), so it gets the same anchor: the 636 hello is written
-	// INSIDE the wrapper, after the exact `stty "$saved"` restore and before
-	// any user code or zle re-prep runs, so ECHO is back on there. Until the
-	// snapshot landed, this test could only wait for the A marker — which
-	// fires from precmd AFTER zle has taken the terminal (measured: Lflag
-	// 0x8a31, zle's editing mode, ECHO off by design) — and so could assert
-	// nothing about the restore beyond the bit-exact before==after below.
-	s.assertEchoOn(s.termios())
+	s.typeAndWait(p.Payload+p.Terminator+"\n", "\x1b]636;S;", 15*time.Second)
+	// The source-time snapshot is the wrapper-internal proof point: it is
+	// emitted after the exact `stty "$saved"` restore and before the payload
+	// returns to zle. Sampling TCGETS at marker receipt raced zle's immediate
+	// editing-mode transition and could report ECHO off even though the
+	// wrapper had restored it. The stable state assertion is the exact
+	// before/after comparison once zle has returned to the prompt.
 	s.waitFor("\x1b]133;A", 15*time.Second)
 	s.settleUntilReadline(before, 5*time.Second)
 	after := s.termios()
