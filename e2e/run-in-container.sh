@@ -54,6 +54,16 @@ FENODE_VOL="nocx-e2e-fenode-${WORKTREE_KEY}"
 docker volume create "$NODE_VOL" >/dev/null
 docker volume create "$FENODE_VOL" >/dev/null
 docker volume create nocx-e2e-gocache >/dev/null
+# AND THE MODULE CACHE, which was missing and made every run need the network.
+# globalSetup builds cmd/devharness before a single spec runs, so with no
+# /root/go/pkg/mod the build re-downloads the whole module graph each time and
+# the suite dies in globalSetup when DNS blinks — three times on 2026-08-18,
+# each one indistinguishable at a glance from a real failure:
+#   proxy.golang.org ... server misbehaving
+#   Error: Command failed: go build -o /work/.e2e/devharness ./cmd/devharness
+# Content-addressed like the build cache, so it is shared across worktrees on
+# purpose (nocx-x6z3 keyed the install trees, not the caches).
+docker volume create nocx-e2e-gomod >/dev/null
 
 # -t only when there is a terminal to attach: the same script runs from a
 # scripted context, where docker refuses "the input device is not a TTY".
@@ -147,6 +157,7 @@ exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   -v "$NODE_VOL":/work/node_modules \
   -v "$FENODE_VOL":/work/frontend/node_modules \
   -v nocx-e2e-gocache:/root/.cache/go-build \
+  -v nocx-e2e-gomod:/root/go/pkg/mod \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \
   -e PW_WORKERS="${PW_WORKERS:-}" \
   -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \
