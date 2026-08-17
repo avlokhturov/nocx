@@ -519,3 +519,41 @@
 .nocx-tab[aria-selected='true'] .nocx-tab-pin {
   color: var(--color-text);
 }
+
+/* ── Lineage depth (nocx-isoph.5) ─────────────────────────────────────────
+
+   A tab spawned by another is drawn UNDER it in the vertical strip, indented
+   one step per generation (layout/strip-tree.ts). The indent is added to the
+   row's own 10px padding, so a top-level row is exactly where it always was
+   and `data-depth` is absent on it — an indent nobody asked for is not
+   something a strip full of unrelated tabs should pay for.
+
+   Enumerated rather than computed from the number: a surface may not set an
+   inline style (nocx/no-inline-markup), and the strip clamps what it draws at
+   six generations, so six rules is the whole of it. Deeper rows share the
+   sixth indent — a 240px column cannot indent forever, and a label squeezed
+   to nothing is worse than a generation drawn beside its parent's. */
+
+.tabstrip-vertical .nocx-tab[data-depth='1'] {
+  padding-left: calc(10px + 1 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='2'] {
+  padding-left: calc(10px + 2 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='3'] {
+  padding-left: calc(10px + 3 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='4'] {
+  padding-left: calc(10px + 4 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='5'] {
+  padding-left: calc(10px + 5 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='6'] {
+  padding-left: calc(10px + 6 * var(--space-3));
+}

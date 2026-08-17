@@ -20,7 +20,11 @@ import type {
 import { CommandSnapshotStore } from '../command-snapshot'
 import { LayoutStore } from '../layout/layout-store'
 import type { LayoutClientLike } from '../layout/layout-client'
-import type { Tab as LayoutTab, Pane as LayoutPane } from '../generated/layout.read'
+import type {
+  Tab as LayoutTab,
+  Pane as LayoutPane,
+  Workspace as LayoutWorkspace,
+} from '../generated/layout.read'
 import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
@@ -515,12 +519,16 @@ export function makeBanner(overrides?: Partial<BannerFake>): BannerFake {
  * assumed a lifecycle the backend does not have.
  */
 export function makeLayoutBackend(): LayoutClientLike & {
-  rows: () => { tabs: LayoutTab[]; panes: LayoutPane[] }
+  rows: () => { tabs: LayoutTab[]; panes: LayoutPane[]; workspaces: LayoutWorkspace[] }
   fail: (method: keyof LayoutClientLike, err: Error) => void
 } {
   const DEFAULT_WS = 'workspace:default'
   let tabs: LayoutTab[] = []
   let panes: LayoutPane[] = []
+  /** The workspaces the user made. The DEFAULT is not in here: it is written
+   *  when something first needs it, exactly as ensureDefaultWorkspace does,
+   *  and `read` supplies it whenever a tab is in it. */
+  let made: LayoutWorkspace[] = []
   const failures = new Map<string, Error>()
 
   const refuse = <T>(method: string): Promise<T> | null => {
@@ -554,18 +562,62 @@ export function makeLayoutBackend(): LayoutClientLike & {
     return next
   }
 
+  /** Every workspace a read would answer with: the default when a tab is in
+   *  it, then the ones the user made, in position order. */
+  const allWorkspaces = (): LayoutWorkspace[] => {
+    const rows = [...made].sort((a, b) => a.position - b.position)
+    return tabs.some((t) => t.workspaceId === DEFAULT_WS)
+      ? [{ id: DEFAULT_WS, name: 'default', position: 0 }, ...rows]
+      : rows
+  }
+
   return {
-    rows: () => ({ tabs: [...tabs], panes: [...panes] }),
+    rows: () => ({ tabs: [...tabs], panes: [...panes], workspaces: allWorkspaces() }),
     fail: (method, err) => failures.set(method, err),
 
     read: () =>
       refuse('read') ??
       Promise.resolve({
         defaultWorkspaceId: DEFAULT_WS,
-        workspaces: tabs.length ? [{ id: DEFAULT_WS, name: 'default', position: 0 }] : [],
+        workspaces: allWorkspaces(),
         tabs: [...tabs],
         panes: [...panes],
       }),
+
+    createWorkspace: (ws) => {
+      const refused = refuse<never>('createWorkspace')
+      if (refused) return refused
+      // The backend refuses a workspace with no name, and so does this: a
+      // fake that accepted one would let the renderer ship a blank workspace
+      // and stay green.
+      if (ws.name.trim() === '') return Promise.reject(new Error('name is required'))
+      const workspace = { id: ws.id, name: ws.name, position: ws.position }
+      const tab = tabRow(ws.firstTab.id, { workspaceId: ws.id, position: 0 })
+      const first = paneRow(ws.firstPane.id, ws.firstTab.id, {
+        cwd: ws.firstPane.cwd,
+        kind: ws.firstPane.kind,
+        endpoint: ws.firstPane.endpoint,
+      })
+      made = [...made, workspace]
+      tabs = [...tabs, tab]
+      panes = [...panes, first]
+      return Promise.resolve({ workspace, firstTab: tab, firstPane: first, replayed: false })
+    },
+
+    closeWorkspace: (id, replacement) => {
+      const refused = refuse<never>('closeWorkspace')
+      if (refused) return refused
+      // ONE transaction, cascading: the workspace, its tabs, their panes —
+      // and the replacement when that leaves the application with no tab.
+      // The default workspace is refused, as it is in the store.
+      if (id === DEFAULT_WS) return Promise.reject(new Error('the default workspace is permanent'))
+      const doomed = tabs.filter((t) => t.workspaceId === id).map((t) => t.id)
+      tabs = tabs.filter((t) => t.workspaceId !== id)
+      panes = panes.filter((p) => !doomed.includes(p.tabId))
+      made = made.filter((w) => w.id !== id)
+      mintIfEmpty(replacement)
+      return Promise.resolve({ id })
+    },
 
     createTab: (t) => {
       const refused = refuse<never>('createTab')
@@ -622,7 +674,18 @@ export function makeLayoutBackend(): LayoutClientLike & {
       const gone = panes.find((p) => p.id === id)
       panes = panes.filter((p) => p.id !== id)
       if (gone && !panes.some((p) => p.tabId === gone.tabId)) {
+        const emptied = tabs.find((t) => t.id === gone.tabId)
         tabs = tabs.filter((t) => t.id !== gone.tabId)
+        // A container exists only while it holds a member: the tab went with
+        // its last pane, and its workspace goes with its last tab — except
+        // the default, which is permanent.
+        if (
+          emptied &&
+          emptied.workspaceId !== DEFAULT_WS &&
+          !tabs.some((t) => t.workspaceId === emptied.workspaceId)
+        ) {
+          made = made.filter((w) => w.id !== emptied.workspaceId)
+        }
       }
       mintIfEmpty(replacement)
       return Promise.resolve({ id })

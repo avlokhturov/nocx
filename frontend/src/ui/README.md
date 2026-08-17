@@ -288,10 +288,23 @@ branch and the second can never appear.
 middle-click close, activity indicators, `aria-controls`, two orientations, and the
 decoration the backend stores for a tab — `data-colour` (a key from the closed set in
 `layout/tab-colours.ts`, drawn as a stripe on the leading edge, never as a repaint of the
-row) and `data-pinned` (the kit's `PinIcon` beside the title, so the reason a tab sits at
-the head of the strip is visible). A behavioural unit, not a styled button. Feature
+row), `data-pinned` (the kit's `PinIcon` beside the title, so the reason a tab sits at
+the head of the strip is visible) and `data-depth` (how far in the row is drawn, one step
+per lineage generation — indentation driven by the number, the same technique `TreeRow`
+uses, never by nested DOM). A behavioural unit, not a styled button. Feature
 components like it are declared in `feature-components.json` rather than inferred from a
 directory.
+
+**`WorkspaceChip` is the other one** (`workspace-chip.tsx`, nocx-isoph.5): how the
+horizontal strip says which workspace the window is showing, and how you reach another.
+It owns no appearance at all — the control is a ghost `Button`, the switcher is the kit's
+`ContextMenu`, and its own class positions them in the row and bounds how long a
+workspace name may get. Two rules it exists to hold, both from the workspaces UX design:
+in the default workspace it is the same chip with **no label** (§4.2 — never a different
+control, and never a label that appears once a second workspace exists), and it carries
+**no shield, no lock and no fence vocabulary** (§5.5 — this epic ships membership, and a
+badge would advertise machinery that is absent). `workspace-vocabulary.test.ts` greps the
+shipped strings for both.
 
 ### Platform primitives (no wrapper needed per ADR-0014)
 

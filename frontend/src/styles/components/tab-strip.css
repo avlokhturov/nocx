@@ -133,3 +133,20 @@
   width: 24px;
   height: 24px;
 }
+
+/* ── Group headings (nocx-isoph.5) ────────────────────────────────────────
+
+   The vertical strip cuts its rows into groups and writes a heading over each
+   one that has a name (tab-strip.tsx). What the heading IS belongs to the kit
+   — it is the Caption, the one owner of the group-caption register — and this
+   rule only positions it in the column: the padding a caption needs inside
+   its rail is the caller's wrapper, never the caption itself.
+
+   A group with NO heading draws no element at all, so there is nothing here
+   for the default workspace to match: its tabs are top-level rows (§4.2), and
+   the absence is in the markup rather than in a rule that hides something. */
+
+.tabstrip-group-heading {
+  flex: none;
+  padding: var(--space-2) 10px var(--space-1);
+}

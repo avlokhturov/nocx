@@ -2,10 +2,13 @@ import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
 import { ContextMenu } from './ui/context-menu'
+import { Caption } from './ui/caption'
 import { TAB_COLOURS } from './layout/tab-colours'
+import { groupStrip } from './layout/strip-groups'
 import { SearchField } from './ui/search-field'
+import { WorkspaceChip, type WorkspaceChipView } from './workspace-chip'
 import { ChevronDownIcon, KeyIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
-import type { Setter } from 'solid-js'
+import type { JSX, Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { AgentStatus } from './agent-status'
@@ -41,6 +44,17 @@ export interface PaneView {
    *  places the tab (layout/strip-order.ts); the flag is stored. */
   readonly pinned?: boolean
   readonly paneId: string
+  /** Which group this row is drawn under (nocx-isoph.5). The AXIS is the
+   *  caller's — workspace here, `descriptor.surfaceType` in nocx-jv3q.1,
+   *  project/host/worktree/branch in design §9 — and the strip only cuts the
+   *  list where the key changes. Absent means "not grouped", which is one
+   *  anonymous group and exactly what an ungrouped strip already looked
+   *  like. */
+  readonly groupKey?: string
+  /** How far in the row is drawn: 0 for a top-level row, +1 per lineage
+   *  generation (layout/strip-tree.ts). The horizontal strip is flat — the
+   *  tree stays in the vertical one (§4.3). */
+  readonly depth?: number
   onDisplayChange: (() => void) | null
 }
 
@@ -61,7 +75,35 @@ interface PaneDisplayRecord {
   agentStatus: AgentStatus | null
   colour: string | null
   pinned: boolean
+  groupKey: string
+  depth: number
 }
+
+/** What stands above one group of rows, or null for a group that draws no
+ *  heading — the default workspace's, which is top-level rows and nothing
+ *  else (§4.2). The strip is TOLD these; deciding one is the axis's job
+ *  (layout/strip-groups.ts). */
+interface StripGroupHeading {
+  readonly key: string
+  readonly heading: string | null
+}
+
+/** A heading in the strip's flat list of things to draw. An object rather
+ *  than a bare string so it is told apart from a row by shape, and so it can
+ *  keep a stable identity across redraws. */
+interface StripHeadingItem {
+  readonly heading: string
+}
+
+function isHeading(item: StripHeadingItem | PaneView): item is StripHeadingItem {
+  return 'heading' in item
+}
+
+/** How deep a row is drawn before the indent stops growing. A 240px column
+ *  cannot indent forever, and a label squeezed to nothing is worse than a
+ *  generation that shares its neighbour's indent. The DEPTH is unbounded; the
+ *  drawing of it is not. */
+const MAX_DRAWN_DEPTH = 6
 
 /** Presentation port for tab chrome. */
 export interface TabStrip {
@@ -71,6 +113,22 @@ export interface TabStrip {
   removePane(paneId: number): void
   setActive(paneId: number): void
   reorder(tabs: readonly PaneView[]): void
+  /** What to write above each group. The strip cuts its rows by the key each
+   *  row carries and looks the heading up here, so a group nobody named draws
+   *  none — and no row can go missing for want of a heading. */
+  setGroupHeadings(headings: readonly StripGroupHeading[]): void
+  /** Which workspace this window is showing, and what else it could show.
+   *  Null while there is no chain to draw it from. Only the horizontal strip
+   *  renders it: the vertical one shows every workspace at once, so a chip
+   *  there would be a second answer to a question it already answers. */
+  setWorkspaceChip(chip: WorkspaceChipView | null): void
+  onSwitchWorkspace: ((workspaceId: string) => void) | null
+  onNewWorkspace: (() => void) | null
+  /** The CURRENT workspace was asked to close. The strip names no workspace
+   *  in this intent — it shows one at a time, so "the current one" is the
+   *  only thing it can mean, and the ask and the close belong to
+   *  PaneManager.closeWorkspace (nocx-isoph.6). */
+  onCloseWorkspace: (() => void) | null
   onActivate: ((paneId: number) => void) | null
   onClose: ((paneId: number) => void) | null
   onNewPane: (() => void) | null
@@ -117,6 +175,14 @@ abstract class TabStripBase implements TabStrip {
   private _setPaneViews!: Setter<PaneView[]>
   private _getPaneViews!: () => PaneView[]
   private _setDisplay!: (...args: unknown[]) => void
+  private _setGroupHeadings!: Setter<StripGroupHeading[]>
+  private _setChip!: Setter<WorkspaceChipView | null>
+  /** What the strip was told before it was mounted. A caller that sets the
+   *  chip or the headings first and mounts second must not lose them — the
+   *  composition root replaces the whole strip when the placement setting
+   *  changes, and the order of those two calls is not its business. */
+  private pendingHeadings: StripGroupHeading[] = []
+  private pendingChip: WorkspaceChipView | null = null
 
   public abstract readonly orientation: Orientation
 
@@ -131,6 +197,9 @@ abstract class TabStripBase implements TabStrip {
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
   onSnippets: (() => void) | null = null
+  onSwitchWorkspace: ((workspaceId: string) => void) | null = null
+  onNewWorkspace: (() => void) | null = null
+  onCloseWorkspace: (() => void) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -154,10 +223,85 @@ abstract class TabStripBase implements TabStrip {
       // singleton on screen, and a component per tab would be N listeners
       // for a thing at most one of which can be open.
       const [menu, setMenu] = createSignal<{ paneId: number; x: number; y: number } | null>(null)
+      const [groupHeadings, setGroupHeadings] = createSignal<StripGroupHeading[]>(
+        this.pendingHeadings,
+      )
+      const [chip, setChip] = createSignal<WorkspaceChipView | null>(this.pendingChip)
 
       this._getPaneViews = paneViews
       this._setPaneViews = setPaneViews
       this._setDisplay = setDisplay
+      this._setGroupHeadings = setGroupHeadings
+      this._setChip = setChip
+
+      /**
+       * What the strip draws, top to bottom: headings and rows in one list.
+       *
+       * THE CUT IS THE SHARED MECHANISM (layout/strip-groups.ts) and the axis
+       * is an input: this strip groups by whatever key each row carries and
+       * looks the heading up in what it was told. Which axis that is — the
+       * workspace here, the surface type in nocx-jv3q.1, project or host or
+       * worktree or branch in design §9 — is decided outside, so a second
+       * axis is a different `groupKey`, never a second grouping.
+       *
+       * A HEADING GATHERS ITS ROWS; A GROUP WITH NO HEADING IS JUST ROWS, AND
+       * THEY DO NOT MOVE. That is the default workspace, whose tabs are
+       * top-level rows and nothing else (§4.2) — and it is also what keeps a
+       * pane the chain does not hold (Settings, a viewer) exactly where it
+       * already was. Sweeping those to the end broke "the last tab is the one
+       * that just opened" in four e2e specs once already.
+       *
+       * One flat list rather than a list of groups, and that is not a style
+       * choice: `<For>` reconciles by REFERENCE, so a list whose items are
+       * freshly built group objects rebuilds every row's DOM on every change —
+       * and with it focus, the drag in progress and the node identity
+       * ADR-0012 §1 depends on. The rows here are the same PaneView objects
+       * throughout, and a heading keeps its identity through `headingItems`.
+       */
+      const headingItems = new Map<string, StripHeadingItem>()
+      const headingItem = (key: string, heading: string): StripHeadingItem => {
+        const cached = headingItems.get(`${key} ${heading}`)
+        if (cached) return cached
+        const item: StripHeadingItem = { heading }
+        headingItems.set(`${key} ${heading}`, item)
+        return item
+      }
+      /** Whether a row survives the strip's filter. Rows are HIDDEN rather
+       *  than removed — a filtered row keeps its DOM, its identity and its
+       *  place — so this is also what a heading has to ask before it draws:
+       *  a heading over a group the filter has emptied reads as a broken
+       *  list. */
+      const matchesFilter = (view: PaneView): boolean => {
+        const q = searchQuery().toLowerCase().trim()
+        if (!q) return true
+        const record = display.records[view.id]
+        return (
+          (record?.title ?? '').toLowerCase().includes(q) ||
+          (record?.tooltip ?? '').toLowerCase().includes(q)
+        )
+      }
+
+      const items = (): Array<StripHeadingItem | PaneView> => {
+        const rows = paneViews()
+        const groups = groupStrip(rows, {
+          key: (view) => display.records[view.id]?.groupKey ?? '',
+          heading: (key) => groupHeadings().find((g) => g.key === key)?.heading ?? null,
+        })
+        const out: Array<StripHeadingItem | PaneView> = []
+        const gathered = new Set<string>()
+        for (const row of rows) {
+          const group = groups.find((g) => g.rows.includes(row))
+          if (!group || group.heading === null) {
+            out.push(row)
+            continue
+          }
+          if (gathered.has(group.key)) continue
+          gathered.add(group.key)
+          if (group.rows.some(matchesFilter)) out.push(headingItem(group.key, group.heading))
+          out.push(...group.rows)
+        }
+        return out
+      }
 
       /** The actions a tab offers, in the order they are reached for. The
        *  strip builds the rows; every one of them raises an intent and
@@ -187,6 +331,48 @@ abstract class TabStripBase implements TabStrip {
         }
         items.push({ id: 'close', label: 'Close', onSelect: () => this.onClose?.(paneId) })
         return items
+      }
+
+      /** One thing the strip draws: a group heading, or a tab row. Written
+       *  as a function rather than a conditional inside the list so each
+       *  branch is a plain expression — and so the Tab's props are read once,
+       *  per item, exactly as they were before headings existed. */
+      const drawItem = (item: StripHeadingItem | PaneView): JSX.Element => {
+        if (isHeading(item)) {
+          return (
+            <div class="tabstrip-group-heading">
+              <Caption size="context">{item.heading}</Caption>
+            </div>
+          )
+        }
+        return (
+          <Tab
+            id={`tab-btn-${item.id}`}
+            paneId={item.id}
+            controlledPaneId={item.paneId}
+            index={paneViews().indexOf(item)}
+            depth={Math.min(display.records[item.id]?.depth ?? 0, MAX_DRAWN_DEPTH)}
+            active={display.activeId === item.id}
+            agentStatus={display.records[item.id]?.agentStatus ?? null}
+            adoptable={display.records[item.id]?.adoptable === true}
+            warning={display.records[item.id]?.warning === true}
+            warningLabel={display.records[item.id]?.warningLabel || undefined}
+            onAdopt={item.onAdopt ?? undefined}
+            title={display.records[item.id]?.title ?? ''}
+            tooltip={display.records[item.id]?.tooltip ?? ''}
+            subtitle={display.records[item.id]?.subtitle ?? ''}
+            hasActivity={display.records[item.id]?.hasActivity === true}
+            tabIndex={display.activeId === item.id ? 0 : -1}
+            orientation={this.orientation}
+            hidden={!matchesFilter(item)}
+            colour={display.records[item.id]?.colour ?? undefined}
+            pinned={display.records[item.id]?.pinned === true}
+            onActivate={() => this.onActivate?.(item.id)}
+            onClose={(id) => this.onClose?.(id)}
+            onReorder={(fromId, toId) => this.onReorder?.(fromId, toId)}
+            onMenu={(paneId, x, y) => setMenu({ paneId, x, y })}
+          />
+        )
       }
 
       return (
@@ -236,44 +422,25 @@ abstract class TabStripBase implements TabStrip {
               </div>
             </div>
           </Show>
+          <Show when={this.orientation === 'horizontal' && chip()} keyed>
+            {(view) => (
+              <WorkspaceChip
+                name={view.name}
+                workspaces={view.workspaces}
+                closable={view.closable}
+                onSwitch={(id) => this.onSwitchWorkspace?.(id)}
+                onNew={() => this.onNewWorkspace?.()}
+                onClose={() => this.onCloseWorkspace?.()}
+              />
+            )}
+          </Show>
           <div class="tabs-container">
-            <For each={paneViews()}>
-              {(tab, index) => (
-                <Tab
-                  id={`tab-btn-${tab.id}`}
-                  paneId={tab.id}
-                  controlledPaneId={tab.paneId}
-                  index={index()}
-                  active={display.activeId === tab.id}
-                  agentStatus={display.records[tab.id]?.agentStatus ?? null}
-                  adoptable={display.records[tab.id]?.adoptable === true}
-                  warning={display.records[tab.id]?.warning === true}
-                  warningLabel={display.records[tab.id]?.warningLabel || undefined}
-                  onAdopt={tab.onAdopt ?? undefined}
-                  title={display.records[tab.id]?.title ?? ''}
-                  tooltip={display.records[tab.id]?.tooltip ?? ''}
-                  subtitle={display.records[tab.id]?.subtitle ?? ''}
-                  hasActivity={display.records[tab.id]?.hasActivity === true}
-                  tabIndex={display.activeId === tab.id ? 0 : -1}
-                  orientation={this.orientation}
-                  hidden={(() => {
-                    const q = searchQuery().toLowerCase().trim()
-                    if (!q) return false
-                    const r = display.records[tab.id]
-                    return (
-                      !(r?.title ?? '').toLowerCase().includes(q) &&
-                      !(r?.tooltip ?? '').toLowerCase().includes(q)
-                    )
-                  })()}
-                  colour={display.records[tab.id]?.colour ?? undefined}
-                  pinned={display.records[tab.id]?.pinned === true}
-                  onActivate={() => this.onActivate?.(tab.id)}
-                  onClose={(id) => this.onClose?.(id)}
-                  onReorder={(fromId, toId) => this.onReorder?.(fromId, toId)}
-                  onMenu={(paneId, x, y) => setMenu({ paneId, x, y })}
-                />
-              )}
-            </For>
+            {/* A group with no heading draws NOTHING above its rows — no
+                element, no empty caption, no wrapper. That is what makes the
+                default workspace's rows top-level rows (§4.2) rather than
+                rows under a blank header, and it is why the default's chrome
+                is identical whether or not another workspace exists. */}
+            <For each={items()}>{(item) => drawItem(item)}</For>
           </div>
           <Show when={menu()} keyed>
             {(open) => (
@@ -344,6 +511,8 @@ abstract class TabStripBase implements TabStrip {
         agentStatus: tab.agentStatus,
         colour: tab.colour ?? null,
         pinned: tab.pinned === true,
+        groupKey: tab.groupKey ?? '',
+        depth: tab.depth ?? 0,
       })
     }
 
@@ -361,6 +530,8 @@ abstract class TabStripBase implements TabStrip {
       agentStatus: tab.agentStatus,
       colour: tab.colour ?? null,
       pinned: tab.pinned === true,
+      groupKey: tab.groupKey ?? '',
+      depth: tab.depth ?? 0,
     })
 
     // Link pane to button (aria-labelledby)
@@ -386,6 +557,18 @@ abstract class TabStripBase implements TabStrip {
   setActive(paneId: number): void {
     if (!this.mounted) return
     this._setDisplay('activeId', paneId)
+  }
+
+  setGroupHeadings(headings: readonly StripGroupHeading[]): void {
+    this.pendingHeadings = [...headings]
+    if (this.mounted) this._setGroupHeadings(this.pendingHeadings)
+  }
+
+  setWorkspaceChip(chip: WorkspaceChipView | null): void {
+    this.pendingChip = chip
+    // A signal holding an object needs the functional form, or Solid takes
+    // the object for an updater and calls it.
+    if (this.mounted) this._setChip(() => chip)
   }
 
   reorder(tabs: readonly PaneView[]): void {

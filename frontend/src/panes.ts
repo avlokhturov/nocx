@@ -32,9 +32,12 @@ import { showConfirm, showPrompt } from './ui/dialog'
 import { LayoutStore } from './layout/layout-store'
 import { tabLabel } from './layout/tab-label'
 import { stripOrder } from './layout/strip-order'
+import { lineageOrder } from './layout/strip-tree'
+import { workspaceAxis, type GroupAxis } from './layout/strip-groups'
 import { isTabColour } from './layout/tab-colours'
 import { uuidv7 } from './layout/uuid7'
-import type { Pane as PaneRow } from './generated/layout.read'
+import type { Pane as PaneRow, Workspace as WorkspaceRow } from './generated/layout.read'
+import type { WorkspaceChipView } from './workspace-chip'
 import { leftRunningMessage, liveDescendants, type LineageNode } from './lineage'
 import { closingWorkspaceMessage, type WorkspaceMember } from './live-work'
 import { log } from './log'
@@ -91,6 +94,8 @@ export class Pane implements PaneHost {
   private _tabName: string | null = null
   private _colour: string | null = null
   private _pinned = false
+  private _groupKey = ''
+  private _depth = 0
   private _agentStatus: AgentStatus | null = null
   private _tooltip = ''
   private _subtitle = ''
@@ -160,6 +165,32 @@ export class Pane implements PaneHost {
     this._colour = d.colour
     this._pinned = d.pinned
     this.onDisplayChange?.()
+  }
+
+  /**
+   * WHERE THE STRIP DRAWS THIS ROW: which group it is under, and how far in
+   * (nocx-isoph.5).
+   *
+   * Pushed in for the same reason the decoration is: a Pane asks nobody
+   * anything. PaneManager reads the chain — the workspace the tab is in, and
+   * the lineage depth its parents give it — and hands the answer down. Both
+   * are projections of what the backend stores; neither is decided here or
+   * remembered anywhere else.
+   */
+  setStripPlacement(placement: { groupKey: string; depth: number }): void {
+    if (this._disposed) return
+    if (placement.groupKey === this._groupKey && placement.depth === this._depth) return
+    this._groupKey = placement.groupKey
+    this._depth = placement.depth
+    this.onDisplayChange?.()
+  }
+
+  get groupKey(): string {
+    return this._groupKey
+  }
+
+  get depth(): number {
+    return this._depth
   }
 
   get colour(): string | null {
@@ -476,6 +507,23 @@ export class PaneManager {
   private readonly verticalHost: HTMLElement
   /** MRU stack: most-recently-activated pane ids. */
   private readonly recentPaneIds: number[] = []
+  /**
+   * WHICH WORKSPACE THIS WINDOW IS SHOWING, and why it is here rather than in
+   * the chain (tabs/panes design §10).
+   *
+   * A window is a VIEWPORT, not a container: it shows one workspace at a time
+   * and owns no tabs. So "which one is in front" is a fact about a viewport,
+   * exactly like the MRU stack above it — two windows on one profile have two
+   * answers, and a stored one would be a fact with two owners the moment
+   * multi-window lands (nocx-mgbjx). §4.5's stored list agrees by omission.
+   *
+   * Null means "whatever the default is", which is also the fallback whenever
+   * this names a workspace that has since gone. It is set by switching, and
+   * by activating a pane that belongs to a different workspace — a Cmd-W that
+   * lands on the MRU pane elsewhere moves the window with it, or the person
+   * would be typing into a tab the strip is not showing.
+   */
+  private viewedWorkspaceId: string | null = null
   /** Called when an SSH connection fails because the vault is sealed. */
   onVaultSealed?: () => void
   /** Called when an SSH connection fails because the host key is unknown
@@ -649,7 +697,12 @@ export class PaneManager {
    */
   private mintPane(kind: 'local' | 'ssh', endpoint: string | null): string {
     if (!this.layoutAvailable) return uuidv7()
-    const opened = this.layout.openTab({ kind, endpoint, cwd: '' })
+    // Into the workspace the window is SHOWING, not into the default: the
+    // strip draws one workspace's tabs, so a tab that opened somewhere else
+    // would either vanish on arrival or drag the window away from where the
+    // person was working. The default is where it goes when that is where
+    // they are.
+    const opened = this.layout.openTab({ kind, endpoint, cwd: '' }, this.currentWorkspaceId())
     // ONE handler with both arms, not a .then() and a .catch(): two handlers
     // on the same promise leave the first one's rejection unhandled, which
     // surfaces as a process-level unhandled rejection rather than as the
@@ -879,6 +932,9 @@ export class PaneManager {
     old.onRename = null
     old.onRecolour = null
     old.onPin = null
+    old.onSwitchWorkspace = null
+    old.onNewWorkspace = null
+    old.onCloseWorkspace = null
 
     // Determine the old and new mount hosts based on orientation.
     // This handles both horizontal→vertical and vertical→horizontal transitions.
@@ -916,6 +972,13 @@ export class PaneManager {
     }
 
     this.tabStrip = newStrip
+    // The two strips draw DIFFERENT SETS: the vertical one shows every
+    // workspace as a tree, the horizontal one the current workspace behind a
+    // chip. So the new strip is given the chain's answer for its own
+    // orientation rather than inheriting the old one's rows — which is also
+    // what puts the headings and the chip up, since neither transferred with
+    // the panes.
+    if (this.layoutAvailable) this.syncStripOrder()
   }
 
   private wireStrip(strip: TabStrip): void {
@@ -932,6 +995,9 @@ export class PaneManager {
     strip.onRename = (id) => void this.renameTab(id)
     strip.onRecolour = (id, colour) => void this.recolourTab(id, colour)
     strip.onPin = (id, pinned) => void this.pinTab(id, pinned)
+    strip.onSwitchWorkspace = (workspaceId) => this.switchWorkspace(workspaceId)
+    strip.onNewWorkspace = () => void this.newWorkspace()
+    strip.onCloseWorkspace = () => void this.closeCurrentWorkspace()
   }
 
   // ── decoration: asked for here, decided by the backend ────────────────
@@ -1019,6 +1085,125 @@ export class PaneManager {
       if (this.panes.indexOf(pane) === -1) return
     }
     this.commitClosePane(pane)
+  }
+
+  // ── the workspace this window is showing (§4.3, §10) ─────────────────
+
+  /**
+   * The workspace whose tabs the horizontal strip is drawing.
+   *
+   * Derived, with one small piece of viewport state behind it: the workspace
+   * last put in front, falling back to the default. It falls back for two
+   * reasons and both are ordinary — nothing has been switched to yet, and the
+   * workspace that was in front has just been closed. A window is never
+   * showing a workspace that does not exist.
+   */
+  currentWorkspaceId(): string {
+    const fallback = this.layout.defaultWorkspaceId()
+    const viewed = this.viewedWorkspaceId
+    if (viewed === null) return fallback
+    return this.layout.workspaces().some((w) => w.id === viewed) ? viewed : fallback
+  }
+
+  /**
+   * Show another workspace, and put one of its tabs in front.
+   *
+   * The strip is redrawn from the chain, so this changes WHICH rows are drawn
+   * and nothing about the rows themselves. Activating a member is the other
+   * half: a window showing one workspace with the keyboard in another's pane
+   * would be typing into a tab that is not on screen.
+   *
+   * A workspace whose panes are all rows the renderer never drew (a restored
+   * ssh pane, see adopt) is still switched to — its rows exist and the person
+   * asked. The strip is then empty, which is the honest picture of it.
+   */
+  switchWorkspace(workspaceId: string): void {
+    if (!this.layoutAvailable) return
+    this.viewedWorkspaceId = workspaceId
+    this.renderFromLayout()
+    const active = this.activePane
+    const stillShown = active && this.stripRows().includes(active)
+    if (stillShown) return
+    const first = this.stripRows()[0]
+    if (first) void this.activate(first)
+  }
+
+  /**
+   * Create a workspace: ask for the name, mint it with its first tab, and
+   * show it.
+   *
+   * THE NAME IS ASKED FOR AND NEVER INVENTED. A workspace, unlike a tab, is
+   * always created deliberately (§4.1), so it always has a name the person
+   * typed — the backend refuses a blank one, and this refuses to send it.
+   * Cancelling is a different answer from an empty string and both mean
+   * nothing is created here, which is why `showPrompt` distinguishes them.
+   */
+  async newWorkspace(): Promise<void> {
+    if (!this.layoutAvailable) {
+      showToast({
+        level: 'warning',
+        message: 'Workspaces are unavailable — the layout store could not be read',
+      })
+      return
+    }
+    const typed = await showPrompt('New workspace', 'Name', '')
+    const name = typed?.trim() ?? ''
+    if (name === '') return
+
+    const made = this.layout.createWorkspace(name, { kind: 'local', endpoint: null, cwd: '' })
+    // The window follows the workspace it just made, before the answer: the
+    // chrome goes up in the same turn the person pressed the key, and a
+    // refusal takes it down again — the same shape as mintPane's.
+    this.viewedWorkspaceId = made.workspaceId
+    const pane = this.buildLocalPane(made.paneId)
+    await made.created.then(
+      () => {
+        this.registered.add(made.paneId)
+      },
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        log.error('nocx: the backend refused a workspace', { error: message })
+        showToast({ level: 'danger', message: `Could not create the workspace: ${message}` })
+        this.viewedWorkspaceId = null
+        this.dropChrome(pane)
+      },
+    )
+  }
+
+  /**
+   * Close the workspace this window is showing.
+   *
+   * TWO CALLS, AND NEITHER IS OPTIONAL. `closeWorkspace` below asks the
+   * person — naming what is live before anything dies — and tears down the
+   * chrome and the sessions of the members that are on screen. Then
+   * `workspaces.close` takes the CONTAINER on the backend, in one
+   * transaction: the workspace, its tabs and their panes, including the rows
+   * this renderer never drew. Closing only what is drawn would leave an ssh
+   * row and the workspace holding it standing.
+   *
+   * The default workspace is never closable and the affordance does not
+   * exist (§4.2), so this refuses without asking rather than asking and then
+   * refusing.
+   */
+  async closeCurrentWorkspace(): Promise<void> {
+    if (!this.layoutAvailable) return
+    const id = this.currentWorkspaceId()
+    if (id === this.layout.defaultWorkspaceId()) return
+
+    // Membership is resolved by the CACHE OF THE CHAIN (LayoutStore), and
+    // mapped onto chrome here: a row with no pane on screen has nothing to
+    // tear down and is still a member, which is what the wire call is for.
+    const members = this.layout
+      .panesOfWorkspace(id)
+      .map((row) => this.panes.find((p) => p.wireId === row.id))
+      .filter((pane): pane is Pane => pane !== undefined)
+
+    const name = this.workspaceLabel(id) ?? ''
+    if (!(await this.closeWorkspace(name, members))) return
+    await this.ask(
+      () => this.layout.closeWorkspace(id).then(() => undefined),
+      'Could not close the workspace',
+    )
   }
 
   /**
@@ -1182,6 +1367,16 @@ export class PaneManager {
     this.activePane?.setActive(false)
     this.activePane = pane
     pane.setActive(true)
+    // The window follows the tab that comes to the front, when that tab is in
+    // a workspace at all: a Cmd-W landing on the MRU pane in another
+    // workspace has to bring the strip with it, or the keyboard is in a tab
+    // the strip is not drawing. A view pane (Settings, a viewer) is in no
+    // workspace and moves the window nowhere.
+    const workspaceId = this.layout.tabOf(pane.wireId)?.workspaceId
+    if (workspaceId !== undefined && workspaceId !== this.viewedWorkspaceId) {
+      this.viewedWorkspaceId = workspaceId
+      if (this.layoutAvailable) this.syncStripOrder()
+    }
 
     this.removeFromRecent(pane.id)
     this.tabStrip.setActive(pane.id)
@@ -1194,8 +1389,18 @@ export class PaneManager {
     this.onActivePaneChange?.()
   }
 
+  /**
+   * Activate the nth tab the window is SHOWING.
+   *
+   * Cmd+1..9 is workspace-scoped since the chip (§4.3), and it has to be: the
+   * horizontal strip draws one workspace's tabs, so the third row a person
+   * counts is the third row of that set. Counting every tab in the
+   * application would select one they cannot see. nocx-jv3q.1 asserts that
+   * grouping does not change what these keys select — grouping does not; the
+   * viewport does, and that bead's assertion needs editing to say so.
+   */
   activateByIndex(index: number): void {
-    const pane = this.panes[index]
+    const pane = this.stripRows()[index]
     if (pane) void this.activate(pane)
   }
 
@@ -1452,11 +1657,15 @@ export class PaneManager {
    */
   private syncStripOrder(): void {
     const fromChain: Pane[] = []
-    for (const tab of stripOrder(this.layout.tabs())) {
-      for (const row of this.layout.panesOf(tab.id)) {
-        const chrome = this.panes.find((p) => p.wireId === row.id)
-        if (chrome && !fromChain.includes(chrome)) fromChain.push(chrome)
-      }
+    for (const { pane, groupKey, depth } of this.chainOrder()) {
+      pane.setStripPlacement({ groupKey, depth })
+      fromChain.push(pane)
+    }
+    // A pane the chain does not hold yet carries no placement at all: no
+    // group, no indent. It is on screen because the person opened it, and
+    // nothing in the backend has an opinion about where it sits.
+    for (const pane of this.panes) {
+      if (!fromChain.includes(pane)) pane.setStripPlacement({ groupKey: '', depth: 0 })
     }
     const next = [...this.panes]
     let taken = 0
@@ -1469,7 +1678,145 @@ export class PaneManager {
       next[slot] = fromChain[taken++]
     }
     this.panes.splice(0, this.panes.length, ...next)
-    this.tabStrip.reorder(this.panes)
+    this.tabStrip.setGroupHeadings(this.groupHeadings())
+    this.tabStrip.setWorkspaceChip(this.chipView())
+    this.tabStrip.reorder(this.stripRows())
+  }
+
+  /**
+   * The chain's panes, in the order and the placement the chain implies —
+   * workspace by workspace, and a lineage child under its parent
+   * (layout/strip-tree.ts).
+   *
+   * ONE ORDER FOR BOTH ORIENTATIONS, deliberately. What differs between the
+   * two strips is which of these rows is DRAWN (see stripRows), never where a
+   * row sits relative to another: a tab that moves when you change the strip's
+   * placement setting is a tab whose position two things decide.
+   *
+   * The depth is the vertical strip's alone — the tree stays there (§4.3) —
+   * so the horizontal strip's rows are flat.
+   */
+  private chainOrder(): Array<{ pane: Pane; groupKey: string; depth: number }> {
+    if (!this.layoutAvailable) return []
+    const flat = this.tabStrip.orientation === 'horizontal'
+    const rows: Array<{ pane: Pane; groupKey: string; depth: number }> = []
+    const seen = new Set<Pane>()
+    for (const workspace of this.workspaceRows()) {
+      for (const { tab, depth } of lineageOrder(this.layout.tabsOfWorkspace(workspace.id))) {
+        for (const row of this.layout.panesOf(tab.id)) {
+          const chrome = this.panes.find((p) => p.wireId === row.id)
+          if (!chrome || seen.has(chrome)) continue
+          seen.add(chrome)
+          rows.push({ pane: chrome, groupKey: workspace.id, depth: flat ? 0 : depth })
+        }
+      }
+    }
+    return rows
+  }
+
+  /**
+   * THE ROWS THE STRIP DRAWS, in the order it draws them (nocx-isoph.5).
+   *
+   * The two orientations show different sets, and the difference is the
+   * design's:
+   *
+   * - **Vertical: every workspace** (§4.3). This is the surface you look at
+   *   coming back from lunch, so hiding another workspace's finished worker
+   *   here would defeat the point.
+   * - **Horizontal: the current workspace only** (§4.3). A window is a
+   *   viewport; the chip says which workspace, and the row stops growing with
+   *   every tab in the application — twenty tabs across four workspaces is
+   *   five in the row.
+   *
+   * A PANE THE CHAIN DOES NOT HOLD IS ALWAYS DRAWN, wherever it already sits.
+   * Settings and a file viewer are in no workspace — there is no row for them
+   * — so a viewport rule about workspaces has nothing to say about them; and
+   * a pane whose create has not answered yet is on screen because the person
+   * opened it. Both keep their slot, which is why this filters `this.panes`
+   * rather than rebuilding the list: sweeping view panes elsewhere broke "the
+   * last tab is the one that just opened" in four e2e specs.
+   */
+  private stripRows(): Pane[] {
+    if (!this.layoutAvailable || this.tabStrip.orientation === 'vertical') return [...this.panes]
+    const current = this.currentWorkspaceId()
+    return this.panes.filter((pane) => {
+      const tab = this.layout.tabOf(pane.wireId)
+      return tab === undefined || tab.workspaceId === current
+    })
+  }
+
+  /**
+   * Every workspace there is, with the default among them.
+   *
+   * THE DEFAULT WORKSPACE IS PERMANENT AND ITS ROW IS LAZY. The backend
+   * writes that row when something first needs it (ensureDefaultWorkspace),
+   * so a read taken before then answers with no default row at all — while
+   * every tab in the application is in it. The renderer must not read that as
+   * "there is no default workspace": the id is on the wire and always
+   * answered, so the default is drawn from the ID and never from the presence
+   * of a row.
+   *
+   * Two things break without this, and both were found by the tests that made
+   * it: the switcher offers no way back to the default, which is the one
+   * thing §4.3 says the chip must never fail to do; and the vertical strip
+   * draws none of the default's tabs, because they belong to a workspace it
+   * is not iterating.
+   */
+  private workspaceRows(): readonly WorkspaceRow[] {
+    const known = this.layout.workspaces()
+    const id = this.layout.defaultWorkspaceId()
+    if (id === '' || known.some((w) => w.id === id)) return known
+    // Name it with the empty string rather than anything readable: nothing
+    // renders the default's name (workspaceAxis answers null for it), and a
+    // placeholder that could be rendered is a name waiting to leak.
+    return [{ id, name: '', position: -1 }, ...known]
+  }
+
+  /** What a workspace is called ON SCREEN — the axis's answer, so the rule
+   *  that the default has no name has exactly one owner
+   *  (layout/strip-groups.ts) and the chip, the heading and the switcher
+   *  cannot disagree about it. */
+  private workspaceAxis(): GroupAxis<{ groupKey: string }> {
+    return workspaceAxis(
+      this.workspaceRows(),
+      this.layout.defaultWorkspaceId(),
+      (row) => row.groupKey,
+    )
+  }
+
+  private workspaceLabel(workspaceId: string): string | null {
+    return this.workspaceAxis().heading(workspaceId)
+  }
+
+  /**
+   * One entry per workspace, so a group draws the heading its workspace has —
+   * which for the default is none, whatever else exists.
+   *
+   * HEADINGS ARE THE VERTICAL STRIP'S. The horizontal one shows a single
+   * workspace behind a chip, so a heading over its tabs would say what the
+   * chip already says, twice, in a row 38px tall. Same boundary nocx-jv3q.1
+   * draws for its own axis: groups exist only in the vertical strip, and the
+   * horizontal one stays a flat row.
+   */
+  private groupHeadings(): Array<{ key: string; heading: string | null }> {
+    if (this.tabStrip.orientation === 'horizontal') return []
+    const axis = this.workspaceAxis()
+    return this.workspaceRows().map((w) => ({ key: w.id, heading: axis.heading(w.id) }))
+  }
+
+  /** What the chip says: which workspace is in front, what else there is, and
+   *  whether this one can be closed. Null with no chain to draw it from —
+   *  a chip over a layout store that refused would be offering to switch
+   *  between workspaces nobody can read. */
+  private chipView(): WorkspaceChipView | null {
+    if (!this.layoutAvailable) return null
+    const axis = this.workspaceAxis()
+    const current = this.currentWorkspaceId()
+    return {
+      name: axis.heading(current),
+      workspaces: this.workspaceRows().map((w) => ({ id: w.id, name: axis.heading(w.id) })),
+      closable: current !== this.layout.defaultWorkspaceId(),
+    }
   }
 
   // ── MRU helpers ──────────────────────────────────────────────────────
