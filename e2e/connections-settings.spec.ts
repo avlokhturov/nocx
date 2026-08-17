@@ -49,6 +49,13 @@ test.describe('Connections inside Settings', () => {
 
   test.afterEach(async ({ page }) => {
     await page.goto('/')
+    // Wait for the app to be up before sending it a keystroke, exactly as the
+    // walk below does. Pressing the chord into a page that is still starting
+    // is waiting on nothing: on webkit the keydown landed before the shortcut
+    // was wired, Settings never opened, and the two 10s waits that follow
+    // spent the test's whole budget describing a page that was never going to
+    // change. The body already waits; the hook did not.
+    await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
     await page.keyboard.press('Meta+,')
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     // Wait for the list before reading it: count() is a one-shot read with no
