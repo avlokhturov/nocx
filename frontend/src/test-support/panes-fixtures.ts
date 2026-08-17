@@ -1,4 +1,4 @@
-// ── TabManager test fixtures ──────────────────────────────────────────────
+// ── PaneManager test fixtures ──────────────────────────────────────────────
 //
 // Centralised factories, constants and helpers so that adding a field to the
 // real SessionHandle (or changing a default title) requires editing exactly
@@ -21,7 +21,7 @@ import { CommandSnapshotStore } from '../command-snapshot'
 import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
-import type { TabManager } from '../tabs'
+import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -309,9 +309,9 @@ export interface ClientFake {
    *  default — the no-store state, which the recall overlay labels
    *  source=session. */
   call: ReturnType<typeof vi.fn>
-  /** The tab.close notification (nocx-tsajw): records the wire identity of
-   *  the closed tab so tests can assert the backend was told. */
-  notifyTabClosed: ReturnType<typeof vi.fn>
+  /** The pane.close notification (nocx-tsajw): records the wire identity of
+   *  the closed pane so tests can assert the backend was told. */
+  notifyPaneClosed: ReturnType<typeof vi.fn>
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
@@ -379,7 +379,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
-    notifyTabClosed: vi.fn(),
+    notifyPaneClosed: vi.fn(),
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),
       // A live prompt opens the attempt before the pty write; the default
@@ -406,7 +406,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Clipboard fake — injectable into TabManager for policy-layer tests.
+// Clipboard fake — injectable into PaneManager for policy-layer tests.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface ClipboardFake extends ClipboardAccess {
@@ -427,7 +427,7 @@ export function makeClipboard(overrides?: Partial<ClipboardFake>): ClipboardFake
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Banner fake — injectable into TabManager for gate-layer tests.
+// Banner fake — injectable into PaneManager for gate-layer tests.
 // ═══════════════════════════════════════════════════════════════════════════
 
 export interface BannerFake extends ClipboardBanner {
@@ -461,10 +461,10 @@ export function setupTabBarDOM(): { bar: HTMLElement; panes: HTMLElement } {
 }
 
 /**
- * Full setup: create DOM, construct TabManager, and open the initial tab.
+ * Full setup: create DOM, construct PaneManager, and open the initial tab.
  * Callers must await; the returned manager has one terminal tab active.
  */
-export async function mountTabManager(
+export async function mountPaneManager(
   client?: ClientFake,
   clipboard?: ClipboardFake,
   gate?: ClipboardGate,
@@ -472,7 +472,7 @@ export async function mountTabManager(
 ): Promise<{
   bar: HTMLElement
   panes: HTMLElement
-  manager: TabManager
+  manager: PaneManager
   client: ClientFake
   clipboard: ClipboardFake
   gate: ClipboardGate
@@ -488,10 +488,10 @@ export async function mountTabManager(
     listProfiles: vi.fn().mockResolvedValue([]),
     listGroups: vi.fn().mockResolvedValue([]),
   }
-  const { TabManager } = await import('../tabs')
+  const { PaneManager } = await import('../panes')
   const { HorizontalTabStrip } = await import('../tab-strip')
   const tabStrip = new HorizontalTabStrip()
-  const manager = new TabManager(
+  const manager = new PaneManager(
     bar,
     bar,
     panes,
@@ -503,6 +503,6 @@ export async function mountTabManager(
     tabStrip,
   )
   // Open the initial tab explicitly — the constructor mounts nothing.
-  await manager.openInitialTab()
+  await manager.openInitialPane()
   return { bar, panes, manager, client: c, clipboard: cb, gate: g, banner: bn, tabStrip }
 }

@@ -10,7 +10,7 @@
 // message.
 import { afterEach, describe, expect, it } from 'vitest'
 import type { GitDiffResult } from '../../generated/git.diff'
-import type { TabHost } from '../../tab-content'
+import type { PaneHost } from '../../pane-content'
 import { GitDiffContent, type GitDiffDeps } from './git-diff-content'
 import type { GitDiffTarget } from './open-git-diff'
 import { diffLineClass } from './diff-decoration'
@@ -122,7 +122,7 @@ async function mount(binding: FakeBinding = new FakeBinding()): Promise<Mounted>
   const host = document.createElement('div')
   document.body.append(host)
   const signal = new AbortController().signal
-  await content.mount(host, {} as TabHost, signal)
+  await content.mount(host, {} as PaneHost, signal)
   return { content, binding, host }
 }
 
@@ -480,7 +480,7 @@ describe('GitDiffContent — a dead binding is terminal for calls', () => {
 // ── The frozen origin (design §5.4) ────────────────────────────────────────
 
 describe('GitDiffContent — the activeOrigin capability (design §5.4)', () => {
-  it('answers the frozen origin it was opened with, minus the tabId', async () => {
+  it('answers the frozen origin it was opened with, minus the paneId', async () => {
     const { content } = await mount()
     expect(content.activeOrigin()).toEqual(FROZEN_ORIGIN)
     content.dispose()

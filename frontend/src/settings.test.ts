@@ -2,7 +2,7 @@
 /**
  * Characterization tests for the settings surface.
  *
- * Tests observable behaviour of SettingsContent through its TabContent seam:
+ * Tests observable behaviour of SettingsContent through its PaneContent seam:
  * mount, search, modified-only filter, section navigation, viewport, deep
  * link, and dispose.  These pass against both the old imperative
  * implementation and the new Solid rewrite.
@@ -18,7 +18,7 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
 import type { Declaration, SettingsGroup } from './settings-domain'
-import type { TabHost } from './tab-content'
+import type { PaneHost } from './pane-content'
 import { VaultSection } from './vault'
 import type { VaultClient } from './vault-client'
 import { render, cleanup, fireEvent } from '@solidjs/testing-library'
@@ -147,7 +147,7 @@ function mockReady(
     }
   }
 }
-function mockTabHost(): TabHost {
+function mockPaneHost(): PaneHost {
   return {
     setTitle: vi.fn(),
     requestAttention: vi.fn(),
@@ -161,7 +161,7 @@ describe('SettingsContent', () => {
   let target: HTMLDivElement
   let client: ProfileClient
   let content: SettingsContent
-  let host: TabHost
+  let host: PaneHost
   let signal: AbortSignal
 
   function visibleRows(): HTMLElement[] {
@@ -176,7 +176,7 @@ describe('SettingsContent', () => {
     document.body.append(target)
     client = new ProfileClient(new Dispatcher())
     content = new SettingsContent(client)
-    host = mockTabHost()
+    host = mockPaneHost()
     signal = new AbortController().signal
   })
 
@@ -874,7 +874,7 @@ describe('horizontal Field gate — every settings row must use primary label', 
   let target: HTMLDivElement
   let client: ProfileClient
   let content: SettingsContent
-  let host: TabHost
+  let host: PaneHost
   let signal: AbortSignal
 
   beforeEach(() => {
@@ -883,7 +883,7 @@ describe('horizontal Field gate — every settings row must use primary label', 
     document.body.append(target)
     client = new ProfileClient(new Dispatcher())
     content = new SettingsContent(client)
-    host = mockTabHost()
+    host = mockPaneHost()
     signal = new AbortController().signal
   })
 

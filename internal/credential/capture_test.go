@@ -26,7 +26,7 @@ func newTestRegistry(t *testing.T, start time.Time) (*CaptureRegistry, *time.Tim
 }
 
 func scope(conn, tab string, gen uint64) CaptureScope {
-	return CaptureScope{Connection: conn, Tab: tab, Generation: gen}
+	return CaptureScope{Connection: conn, Pane: tab, Generation: gen}
 }
 
 func cred(value, name string) PendingCredential {
@@ -41,7 +41,7 @@ func TestSubmitMintsAndLinks(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
 	// First submission: a capture.
-	res := r.Submit(scope("c1", "tab1", 1), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
+	res := r.Submit(scope("c1", "pane1", 1), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
 	if len(res) != 1 || res[0].Outcome != OutcomeCaptured || res[0].CaptureID == "" {
 		t.Fatalf("first submit = %+v, want one captured", res)
 	}
@@ -49,7 +49,7 @@ func TestSubmitMintsAndLinks(t *testing.T) {
 
 	// Same value again, next command: linked to the SAME capture, no second
 	// offer.
-	res = r.Submit(scope("c1", "tab1", 2), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
+	res = r.Submit(scope("c1", "pane1", 2), []PendingCredential{cred("sk-proj-key-one-1234567890", "openrouter.ai")})
 	if len(res) != 1 || res[0].Outcome != OutcomeLinked || res[0].CaptureID != id {
 		t.Fatalf("second submit = %+v, want linked to %s", res, id)
 	}
@@ -226,14 +226,14 @@ func TestDismissConsumesTheToken(t *testing.T) {
 func TestSubmissionsDoNotSupersedeOlderPending(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	resA := r.Submit(scope("c1", "tab1", 1), []PendingCredential{cred("sk-proj-super-a-1234567890123", "a.ai")})
-	resB := r.Submit(scope("c1", "tab1", 2), []PendingCredential{cred("sk-proj-super-b-1234567890123", "b.ai")})
+	resA := r.Submit(scope("c1", "pane1", 1), []PendingCredential{cred("sk-proj-super-a-1234567890123", "a.ai")})
+	resB := r.Submit(scope("c1", "pane1", 2), []PendingCredential{cred("sk-proj-super-b-1234567890123", "b.ai")})
 	idA, idB := resA[0].CaptureID, resB[0].CaptureID
 
 	// A third submission carrying its own key, and an ordinary one carrying
 	// none: neither touches what is already pending.
-	r.Submit(scope("c1", "tab1", 3), []PendingCredential{cred("sk-proj-super-c-1234567890123", "c.ai")})
-	r.Submit(scope("c1", "tab1", 4), nil)
+	r.Submit(scope("c1", "pane1", 3), []PendingCredential{cred("sk-proj-super-c-1234567890123", "c.ai")})
+	r.Submit(scope("c1", "pane1", 4), nil)
 
 	if _, err := r.Reserve(idA); err != nil {
 		t.Fatalf("capture A after later submissions = %v, want live", err)
@@ -257,40 +257,40 @@ func TestTypingNextCommandDoesNotDestroy(t *testing.T) {
 	}
 }
 
-func TestDestroyTabAndDestroyAll(t *testing.T) {
+func TestDestroyPaneAndDestroyAll(t *testing.T) {
 	r, _ := newTestRegistry(t, time.Unix(1_750_000_000, 0))
 
-	res1 := r.Submit(scope("c1", "tab1", 1), []PendingCredential{cred("sk-proj-dt-a-1234567890123456", "a.ai")})
-	res2 := r.Submit(scope("c1", "tab2", 1), []PendingCredential{cred("sk-proj-dt-b-1234567890123456", "b.ai")})
+	res1 := r.Submit(scope("c1", "pane1", 1), []PendingCredential{cred("sk-proj-dt-a-1234567890123456", "a.ai")})
+	res2 := r.Submit(scope("c1", "pane2", 1), []PendingCredential{cred("sk-proj-dt-b-1234567890123456", "b.ai")})
 	id1, id2 := res1[0].CaptureID, res2[0].CaptureID
 
-	// Tab closure destroys only that tab's pending captures — two tabs on
+	// Pane closure destroys only that pane's pending captures — two panes on
 	// ONE connection is the arrangement the scope fix exists for (the old
 	// connection-keyed destroy took both).
-	r.DestroyTab("c1", "tab1")
+	r.DestroyPane("c1", "pane1")
 	if _, err := r.Reserve(id1); !errors.Is(err, ErrCaptureUnknown) {
-		t.Fatalf("tab1 capture after DestroyTab = %v, want unknown", err)
+		t.Fatalf("pane1 capture after DestroyPane = %v, want unknown", err)
 	}
 	if _, err := r.Reserve(id2); err != nil {
-		t.Fatalf("tab2 capture after DestroyTab(tab1) = %v, want live", err)
+		t.Fatalf("pane2 capture after DestroyPane(pane1) = %v, want live", err)
 	}
 
-	// The tab identity is renderer-minted and opaque, so it is not an
-	// authorization boundary on its own: the same tab id submitted from
+	// The pane identity is renderer-minted and opaque, so it is not an
+	// authorization boundary on its own: the same pane id submitted from
 	// ANOTHER connection must not be reachable by this connection's
-	// DestroyTab. The pair key is what isolates them.
-	resOther := r.Submit(scope("c2", "tab2", 1), []PendingCredential{cred("sk-proj-dt-other-1234567890123", "o.ai")})
+	// DestroyPane. The pair key is what isolates them.
+	resOther := r.Submit(scope("c2", "pane2", 1), []PendingCredential{cred("sk-proj-dt-other-1234567890123", "o.ai")})
 	otherID := resOther[0].CaptureID
-	r.DestroyTab("c1", "tab2")
+	r.DestroyPane("c1", "pane2")
 	if _, err := r.Reserve(otherID); err != nil {
-		t.Fatalf("same tab id on another connection after DestroyTab(c1,tab2) = %v, want live", err)
+		t.Fatalf("same pane id on another connection after DestroyPane(c1,pane2) = %v, want live", err)
 	}
 
 	// Transport disconnect destroys everything ON that connection — both of
-	// c2's tabs die, and a capture on a different connection survives.
-	resOther2 := r.Submit(scope("c2", "tab3", 1), []PendingCredential{cred("sk-proj-dt-other2-12345678901", "p.ai")})
+	// c2's panes die, and a capture on a different connection survives.
+	resOther2 := r.Submit(scope("c2", "pane3", 1), []PendingCredential{cred("sk-proj-dt-other2-12345678901", "p.ai")})
 	other2ID := resOther2[0].CaptureID
-	resAlive := r.Submit(scope("c1", "tab9", 1), []PendingCredential{cred("sk-proj-dt-alive-1234567890123", "q.ai")})
+	resAlive := r.Submit(scope("c1", "pane9", 1), []PendingCredential{cred("sk-proj-dt-alive-1234567890123", "q.ai")})
 	aliveID := resAlive[0].CaptureID
 	r.DestroyConnection("c2")
 	if _, err := r.Reserve(other2ID); !errors.Is(err, ErrCaptureUnknown) {
@@ -301,7 +301,7 @@ func TestDestroyTabAndDestroyAll(t *testing.T) {
 	}
 
 	// Vault seal / app lock / shutdown destroys everything still pending.
-	res3 := r.Submit(scope("c1", "tab3", 1), []PendingCredential{cred("sk-proj-dt-c-1234567890123456", "c.ai")})
+	res3 := r.Submit(scope("c1", "pane3", 1), []PendingCredential{cred("sk-proj-dt-c-1234567890123456", "c.ai")})
 	id3 := res3[0].CaptureID
 	r.DestroyAll()
 	if _, err := r.Reserve(id3); !errors.Is(err, ErrCaptureUnknown) {

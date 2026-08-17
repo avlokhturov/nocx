@@ -112,7 +112,7 @@ const commandSnapshotReady = async (page: Page) => {
 }
 
 test.describe('tab completion', () => {
-  test('a real command completes: Tab opens the dropdown, arrows pick, Enter inserts', async ({
+  test('a real command completes: Pane opens the dropdown, arrows pick, Enter inserts', async ({
     page,
   }) => {
     await page.goto('/')
@@ -245,7 +245,7 @@ test.describe('tab completion', () => {
     }
   })
 
-  test('no candidates: Tab opens a row that says nothing matched — never silence', async ({
+  test('no candidates: Pane opens a row that says nothing matched — never silence', async ({
     page,
   }) => {
     await page.goto('/')

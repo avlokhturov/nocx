@@ -15,7 +15,7 @@ import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesPanelServices } from './files-client'
 import { createFilesTreeStore, FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -24,7 +24,7 @@ import type { ActiveOrigin } from '../tab-content'
  *  has no row) and no walk is issued. The reveal-specific tests use cwds
  *  below the root. */
 const LOCAL_A: ActiveOrigin = {
-  tabId: 1,
+  paneId: 1,
   sessionId: 'session-a',
   kind: 'local',
   cwd: '/',
@@ -34,7 +34,7 @@ const LOCAL_A: ActiveOrigin = {
 }
 
 const SSH_B: ActiveOrigin = {
-  tabId: 2,
+  paneId: 2,
   sessionId: 'session-b',
   kind: 'ssh',
   cwd: '/home/bob',
@@ -178,8 +178,8 @@ describe('files tree store', () => {
   })
 
   it('a viewer tab answering its source session keeps the binding (design §5.4)', async () => {
-    // TabManager composes the ACTIVE tab's id into the origin, so a viewer
-    // tab opened from tab A answers tab A's session with a NEW tabId. Same
+    // PaneManager composes the ACTIVE tab's id into the origin, so a viewer
+    // tab opened from tab A answers tab A's session with a NEW paneId. Same
     // machine: the binding must stay open — closing it would kill the
     // viewer's in-flight read and render "source unavailable" for a file
     // that was read successfully (the fm-w12 defect).
@@ -189,7 +189,7 @@ describe('files tree store', () => {
     store.rescope(LOCAL_A)
     await settle()
 
-    store.rescope({ ...LOCAL_A, tabId: 99 })
+    store.rescope({ ...LOCAL_A, paneId: 99 })
     await settle()
 
     expect(open).toHaveBeenCalledTimes(1)
@@ -450,7 +450,7 @@ describe('files tree store', () => {
 
     // A viewer tab answers the same session with NO opinion (cwdFollow
     // false): the panel keeps its tree and binding, and nothing reveals.
-    store.rescope({ ...LOCAL_A, tabId: 99, cwdFollow: false, cwd: '/home/alice' })
+    store.rescope({ ...LOCAL_A, paneId: 99, cwdFollow: false, cwd: '/home/alice' })
     await settle()
 
     expect(list.mock.calls.length).toBe(listsBefore)

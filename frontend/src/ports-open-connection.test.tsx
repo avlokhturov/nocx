@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
 // W2 — "Open as connection" end to end (AGENTS.md rule 1): the panel's
 // unavailable-host empty state offers the action, and activating it runs the
-// REAL TabManager path the composition root wires — adoptAliasProfile →
+// REAL PaneManager path the composition root wires — adoptAliasProfile →
 // profiles.create (the backend mints the id) → a NEW tab on the saved
 // profile, so the user lands on a tab where Ports works and Forward exists.
 // The failure path is the paired test (rule 3): profile creation rejects and
 // the user is told, on screen.
 //
-// The TabManager here is constructed with a profileClient whose
+// The PaneManager here is constructed with a profileClient whose
 // createProfile the test controls — the fixture's stub only knows
 // listProfiles/listGroups, so the manager is built directly rather than via
-// mountTabManager.
+// mountPaneManager.
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
@@ -23,8 +23,8 @@ import {
   makeClient,
   makeClipboard,
   setupTabBarDOM,
-} from './test-support/tabs-fixtures'
-import { TabManager } from './tabs'
+} from './test-support/panes-fixtures'
+import { PaneManager } from './panes'
 import { HorizontalTabStrip } from './tab-strip'
 import { ClipboardGate } from './clipboard'
 import type { ProfileClient } from './profiles'
@@ -104,7 +104,7 @@ async function mountManager(createProfile: Mock) {
     listGroups: vi.fn().mockResolvedValue([]),
     createProfile,
   } as unknown as ProfileClient
-  const manager = new TabManager(
+  const manager = new PaneManager(
     bar,
     bar,
     panes,
@@ -115,21 +115,21 @@ async function mountManager(createProfile: Mock) {
     profileClient,
     new HorizontalTabStrip(),
   )
-  await manager.openInitialTab()
+  await manager.openInitialPane()
   return manager
 }
 
 /** The panel wired as main.tsx wires it, starting in the W1 unavailable
  *  state: the ports target is null and unavailableIn names the host, and
- *  onActiveTabChange feeds later re-scopes exactly as the composition root
+ *  onActivePaneChange feeds later re-scopes exactly as the composition root
  *  does. A ToastHost makes outcomes assertable as rendered toasts. */
 function mountPanel(
-  manager: TabManager,
+  manager: PaneManager,
   services: PortsPanelServices,
   onOpenAsConnection: (host: string, user: string | undefined) => void,
 ) {
   const [pid, setPid] = createSignal<string | null>(null)
-  manager.onActiveTabChange = () => setPid(manager.portsTargetId())
+  manager.onActivePaneChange = () => setPid(manager.portsTargetId())
   const pause = createPortsPauseControl()
   render(() => (
     <>
@@ -207,7 +207,7 @@ describe('PortsPanel — open as connection (W2)', () => {
     })
     // Nothing opened: the user is still on the hand-typed tab, whose ports
     // target stays the reserved local one.
-    expect(manager.tabCount).toBe(1)
+    expect(manager.paneCount).toBe(1)
     expect(manager.portsTargetId()).toBe(LOCAL_TARGET_ID)
   })
 })

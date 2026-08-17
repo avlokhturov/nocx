@@ -87,7 +87,7 @@ func TestControlFrame_AboveReadLimit_ClosesCleanly(t *testing.T) {
 
 // TestOversizedFrame_DoesNotStallSessionInput is the user-visible point of
 // the whole task, over the real socket and modelled on
-// TestDeadSession_DoesNotFreezeAnotherTab: a control frame far above its
+// TestDeadSession_DoesNotFreezeAnotherPane: a control frame far above its
 // method's params budget arrives, and the binary input that follows it still
 // reaches the PTY of a session on the SAME connection. The frame is refused
 // by length — the read loop never parses it — and the connection survives to

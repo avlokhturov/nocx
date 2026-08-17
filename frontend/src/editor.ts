@@ -720,7 +720,7 @@ export class CommandEditor {
       this.actions.onTab?.()
       return
     }
-    // Shift+Tab with the dropdown closed: Tab opens; Shift+Tab goes BACK,
+    // Shift+Tab with the dropdown closed: Pane opens; Shift+Tab goes BACK,
     // which only means something once the dropdown is up. Closed, it is
     // swallowed all the same — never the browser's focus-move, which would
     // silently strand the next keystroke (the 2026-08-02 measurement above).

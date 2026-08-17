@@ -65,8 +65,22 @@ cpu_flag=()
 # @rollup/rollup-darwin-arm64, and `npm test` on the Mac breaks after every
 # container run. e2e/run-in-container.sh bought this rule the hard way; these
 # are its own volumes so the two runners cannot fight over one install.
-docker volume create nocx-ci-fe-root >/dev/null
-docker volume create nocx-ci-fe-frontend >/dev/null
+#
+# AND KEYED BY WORKTREE (nocx-x6z3). The paragraph above separated this runner
+# from e2e's, which was one axis short: the names were still global, so two
+# WORKTREES running this script at once shared one install. A node_modules tree
+# is not a cache — it is an install of one lockfile, and two branches need not
+# agree on that lockfile — so the second `npm ci` reinstalls under the first
+# one's running vitest and the symptom is ERR_MODULE_NOT_FOUND on a module that
+# existed a second earlier. The Go and npm-download caches in the other runners
+# are content-addressed and stay shared on purpose; only install trees are
+# keyed. cksum over the absolute path: POSIX, stable, and short enough to keep
+# `docker volume ls` readable.
+WORKTREE_KEY="$(printf '%s' "$REPO" | cksum | cut -d' ' -f1)"
+FE_ROOT_VOL="nocx-ci-fe-root-${WORKTREE_KEY}"
+FE_FRONTEND_VOL="nocx-ci-fe-frontend-${WORKTREE_KEY}"
+docker volume create "$FE_ROOT_VOL" >/dev/null
+docker volume create "$FE_FRONTEND_VOL" >/dev/null
 
 # The container runs as root on a bind mount, so anything it writes lands
 # root-owned in the developer's checkout — and that is what broke `eslint .`
@@ -129,8 +143,8 @@ exec docker run --rm -i \
     ${cpu_flag[@]+"${cpu_flag[@]}"} \
     ${git_flag[@]+"${git_flag[@]}"} \
     -v "$REPO:/work" \
-    -v nocx-ci-fe-root:/work/node_modules \
-    -v nocx-ci-fe-frontend:/work/frontend/node_modules \
+    -v "$FE_ROOT_VOL":/work/node_modules \
+    -v "$FE_FRONTEND_VOL":/work/frontend/node_modules \
     -e RUN_FRONTEND="$RUN_FRONTEND" \
     -e RUN_ROOT="$RUN_ROOT" \
     -e HOST_UID="$(id -u)" \

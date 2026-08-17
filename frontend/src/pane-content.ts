@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// TabContent seam — content types implement this interface; Tab owns the
+// PaneContent seam — content types implement this interface; Tab owns the
 // chrome and delegates lifecycle to the content. Polymorphism lives in the
 // content, not in Tab subclasses (B.2).
 // ═══════════════════════════════════════════════════════════════════════════
@@ -32,14 +32,14 @@ export interface ContentViewport {
 
 /**
  * The machine a tab's content speaks for — the scope of origin-following
- * surfaces like the Files panel (design §5.4). Composed by TabManager, which
+ * surfaces like the Files panel (design §5.4). Composed by PaneManager, which
  * owns the tab: the content answers the capability below with everything it
- * knows about itself, and `tabId` is added by the one place that knows it —
+ * knows about itself, and `paneId` is added by the one place that knows it —
  * a content instance is constructed before the Tab that numbers it exists.
  */
 export interface ActiveOrigin {
-  /** The tab that owns this origin — added by TabManager. */
-  tabId: number
+  /** The tab that owns this origin — added by PaneManager. */
+  paneId: number
   /** The backend session this origin resolves to; `files.open` is the only
    *  method that takes it, so the wrong pairing stays inexpressible (§5.2). */
   sessionId: string
@@ -78,7 +78,7 @@ export interface ActiveOrigin {
  * Scoped to one mounted tab. All methods become inert after the tab is
  * disposed, so late async callbacks cannot mutate recycled UI (B.6).
  */
-export interface TabHost {
+export interface PaneHost {
   setTitle(title: string): void
   requestAttention(): void
   requestClose(): void
@@ -86,13 +86,13 @@ export interface TabHost {
 
 // ── Content (B.4, B.6) ────────────────────────────────────────────────────
 
-export interface TabContent {
+export interface PaneContent {
   /**
    * Called at most once per content instance. `signal` is aborted when the
    * tab is disposed during mount — the implementation MUST stop and tear
    * down partial resources (B.6).
    */
-  mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void>
+  mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void>
 
   /** Delivered by the presentation layer after layout measurement.
    *  Never called before mount starts; suppressed after disposal. */
@@ -115,15 +115,15 @@ export interface TabContent {
    * mount. Called by Tab constructor before any activation. Implementations
    * that don't need a DOM target (e.g. a future Solid surface managing
    * visibility through signals) MAY implement this as a no-op. Contents
-   * extending BaseTabContent get the default impl that stores _target.
+   * extending BasePaneContent get the default impl that stores _target.
    */
   setTarget(target: HTMLElement): void
   /**
    * Optional capability: the machine this content speaks for, for surfaces
    * that follow the ACTIVE tab (the Files panel, design §5.4). Terminal
    * content answers from its session; viewer content answers from the
-   * binding it was opened with. `tabId` is deliberately absent — the
-   * content does not know its tab; TabManager adds it when it composes the
+   * binding it was opened with. `paneId` is deliberately absent — the
+   * content does not know its tab; PaneManager adds it when it composes the
    * `ActiveOrigin` for the accessor it hands the shell.
    *
    * Returns null when there is no answer: no session yet, a closed
@@ -131,22 +131,22 @@ export interface TabContent {
    * `ssh` inside a local tab — naming the local session there would show
    * one machine's files while the user acts on another's, §0).
    */
-  activeOrigin?(): Omit<ActiveOrigin, 'tabId'> | null
+  activeOrigin?(): Omit<ActiveOrigin, 'paneId'> | null
 }
 
 /**
- * Common base for DOM-based TabContent implementations. Stores the mount
+ * Common base for DOM-based PaneContent implementations. Stores the mount
  * target and implements setVisible by toggling the 'active' class on it.
  * Override setVisible only when the implementation genuinely needs
  * different visibility semantics (e.g. a future Solid surface that manages
- * visibility through signals). Every new TabContent must extend this or
+ * visibility through signals). Every new PaneContent must extend this or
  * provide its own setVisible.
  *
  * The mount target is set by setTarget() before mount, so setVisible is
  * meaningful from the first activation call. Implementations MUST NOT
- * store _target themselves — BaseTabContent owns it.
+ * store _target themselves — BasePaneContent owns it.
  */
-export abstract class BaseTabContent implements TabContent {
+export abstract class BasePaneContent implements PaneContent {
   protected _target: HTMLElement | null = null
 
   /**
@@ -171,7 +171,7 @@ export abstract class BaseTabContent implements TabContent {
     this._target = target
   }
 
-  abstract mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void>
+  abstract mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void>
   abstract viewportChanged(viewport: ContentViewport): void
   abstract focus(): void
   abstract dispose(): void
@@ -188,7 +188,7 @@ export abstract class BaseTabContent implements TabContent {
 
 /**
  * Policies that replace `kind` tests. Every tab carries a descriptor;
- * TabManager reads it to decide restore, attention, and default-title
+ * PaneManager reads it to decide restore, attention, and default-title
  * behaviour without asking what kind of content is inside.
  */
 export interface ContentDescriptor {
@@ -204,6 +204,6 @@ export interface ContentDescriptor {
   readonly supportsAttention: boolean
 
   /** Fixed title for view tabs; ignored when the title is set dynamically
-   *  through TabHost.setTitle. */
+   *  through PaneHost.setTitle. */
   readonly defaultTitle: string
 }

@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// TerminalContent — all terminal machinery behind the TabContent seam.
+// TerminalContent — all terminal machinery behind the PaneContent seam.
 // Extracted from Tab so the chrome layer never touches a session or renderer.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -70,11 +70,11 @@ import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import {
-  BaseTabContent,
-  type TabHost,
+  BasePaneContent,
+  type PaneHost,
   type ContentViewport,
   type ActiveOrigin,
-} from './tab-content'
+} from './pane-content'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { NotifyClient } from './notify-client'
@@ -314,7 +314,7 @@ type InputOwner = 'editor' | 'pty' | 'none'
  * ledger, lifecycle kernel, and PTY resize policy. It receives geometry
  * through viewportChanged() — it NEVER interprets container geometry itself.
  */
-export class TerminalContent extends BaseTabContent {
+export class TerminalContent extends BasePaneContent {
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
@@ -458,7 +458,7 @@ export class TerminalContent extends BaseTabContent {
   private resizeTimer: number | undefined
   /** Timestamp until which incoming data is the echo of a resize we sent. */
   private echoUntil = 0
-  private host: TabHost | null = null
+  private host: PaneHost | null = null
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
   /** The resolved destination mode from the open ack (raw|script|relay):
@@ -533,9 +533,9 @@ export class TerminalContent extends BaseTabContent {
   constructor(
     private readonly client: WSClient,
     /** The renderer-minted per-tab identity (nocx-tsajw): minted once per
-     *  tab by TabManager, never reused, and carried on history.record so
+     *  tab by PaneManager, never reused, and carried on history.record so
      *  the backend scopes pending captures to this tab. */
-    private readonly tabId: string,
+    private readonly paneId: string,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
@@ -628,7 +628,7 @@ export class TerminalContent extends BaseTabContent {
    *  nocx-u7uh.11). `cwd` is the verified-flag pair from _cwd /
    *  _cwdVerified: the composition layer may hand a VERIFIED cwd to
    *  files.open as rootPath (D2) and must surface an unverified one (AD-5). */
-  activeOrigin(): Omit<ActiveOrigin, 'tabId'> | null {
+  activeOrigin(): Omit<ActiveOrigin, 'paneId'> | null {
     if (this.session === null || this._sessionExited) return null
     return {
       sessionId: this.session.sessionId,
@@ -773,7 +773,7 @@ export class TerminalContent extends BaseTabContent {
   // environment-commands.ts stays as the label classifier for environments
   // nocx could not integrate — it never names an authenticated domain.
 
-  // ── TabContent ──────────────────────────────────────────────────────────
+  // ── PaneContent ──────────────────────────────────────────────────────────
 
   private openRequestedSession(): Promise<SessionHandle> {
     if (!this.sshOpts) {
@@ -810,7 +810,7 @@ export class TerminalContent extends BaseTabContent {
     }
   }
 
-  async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
+  async mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this._disposed) return
     this.host = host
     // The pane the degraded-session card overlays. Captured here because
@@ -1682,7 +1682,7 @@ export class TerminalContent extends BaseTabContent {
           },
         },
         (rec, attempt) =>
-          recordCommand(this.client, this.tabId, rec, attempt).then((ack) => {
+          recordCommand(this.client, this.paneId, rec, attempt).then((ack) => {
             if (ack) {
               const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
               this.attachRecordedAck(rec.id, block, ack)
@@ -2418,7 +2418,7 @@ export class TerminalContent extends BaseTabContent {
    *
    * This is why a freshly created tab typed fine and a tab you switched back to
    * did not: the new tab's `editor.show()` focuses its own textarea, while
-   * `TabManager.activate()` ends with `tab.focus()` and took that focus away
+   * `PaneManager.activate()` ends with `tab.focus()` and took that focus away
    * again on every return.
    */
   focus(): void {
@@ -2436,7 +2436,7 @@ export class TerminalContent extends BaseTabContent {
    * way in.
    *
    * The repaint hangs off setVisible rather than off an activation call in
-   * TabManager because visibility is owned here: the seam refactor 21fd7f6a
+   * PaneManager because visibility is owned here: the seam refactor 21fd7f6a
    * carried the method across and left `tab.refreshAtlas()` behind, and the
    * fix sat unreachable until the corruption was reported again (nocx-jfgb).
    * A caller that has to remember is a caller that forgets.

@@ -13,7 +13,7 @@ import type { AgentStatus } from './agent-status'
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** The display state a TabStrip reads from each tab. */
-export interface TabView {
+export interface PaneView {
   readonly id: number
   readonly title: string
   /** Title shown before content publishes its first dynamic title. */
@@ -42,7 +42,7 @@ export interface TabView {
  * their own reactive computation) are fine-grained reactive.
  * Uses displayTitle when the content has not published a dynamic title yet.
  */
-interface TabDisplayRecord {
+interface PaneDisplayRecord {
   title: string
   tooltip: string
   subtitle: string
@@ -57,13 +57,13 @@ interface TabDisplayRecord {
 export interface TabStrip {
   readonly orientation: Orientation
   mount(container: HTMLElement): void
-  addTab(tab: TabView): void
-  removeTab(tabId: number): void
-  setActive(tabId: number): void
-  reorder(tabs: readonly TabView[]): void
-  onActivate: ((tabId: number) => void) | null
-  onClose: ((tabId: number) => void) | null
-  onNewTab: (() => void) | null
+  addPane(tab: PaneView): void
+  removePane(paneId: number): void
+  setActive(paneId: number): void
+  reorder(tabs: readonly PaneView[]): void
+  onActivate: ((paneId: number) => void) | null
+  onClose: ((paneId: number) => void) | null
+  onNewPane: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
   onQuickConnect: (() => void) | null
   onInsertSecret: (() => void) | null
@@ -95,16 +95,16 @@ abstract class TabStripBase implements TabStrip {
   private mounted = false
 
   // Solid stores/signals — set during mount(), used by imperative API
-  private _setTabViews!: Setter<TabView[]>
-  private _getTabViews!: () => TabView[]
+  private _setPaneViews!: Setter<PaneView[]>
+  private _getPaneViews!: () => PaneView[]
   private _setDisplay!: (...args: unknown[]) => void
 
   public abstract readonly orientation: Orientation
 
   // Intent callbacks
-  onActivate: ((tabId: number) => void) | null = null
-  onClose: ((tabId: number) => void) | null = null
-  onNewTab: (() => void) | null = null
+  onActivate: ((paneId: number) => void) | null = null
+  onClose: ((paneId: number) => void) | null = null
+  onNewPane: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
@@ -121,15 +121,15 @@ abstract class TabStripBase implements TabStrip {
     this.setupContainer(container)
     container.addEventListener('keydown', this.onTablistKeydown)
     this.dispose = render(() => {
-      const [tabViews, setTabViews] = createSignal<TabView[]>([])
+      const [paneViews, setPaneViews] = createSignal<PaneView[]>([])
       const [display, setDisplay] = createStore<{
-        records: Record<number, TabDisplayRecord>
+        records: Record<number, PaneDisplayRecord>
         activeId: number
       }>({ records: {}, activeId: -1 })
       const [searchQuery, setSearchQuery] = createSignal('')
 
-      this._getTabViews = tabViews
-      this._setTabViews = setTabViews
+      this._getPaneViews = paneViews
+      this._setPaneViews = setPaneViews
       this._setDisplay = setDisplay
 
       return (
@@ -150,7 +150,7 @@ abstract class TabStripBase implements TabStrip {
                 />
               </div>
               <div class="tabstrip-actions">
-                <IconButton ariaLabel="New tab" square onClick={() => this.onNewTab?.()}>
+                <IconButton ariaLabel="New tab" square onClick={() => this.onNewPane?.()}>
                   <PlusIcon />
                 </IconButton>
                 <IconButton
@@ -180,12 +180,12 @@ abstract class TabStripBase implements TabStrip {
             </div>
           </Show>
           <div class="tabs-container">
-            <For each={tabViews()}>
+            <For each={paneViews()}>
               {(tab, index) => (
                 <Tab
                   id={`tab-btn-${tab.id}`}
-                  tabId={tab.id}
-                  paneId={tab.paneId}
+                  paneId={tab.id}
+                  controlledPaneId={tab.paneId}
                   index={index()}
                   active={display.activeId === tab.id}
                   agentStatus={display.records[tab.id]?.agentStatus ?? null}
@@ -222,7 +222,7 @@ abstract class TabStripBase implements TabStrip {
                 left the caret alone in the bottom corner. As a group they can be
                 placed once, per orientation, by the strip's own CSS. */}
             <div class="tabstrip-actions">
-              <IconButton ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
+              <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
                 <PlusIcon />
               </IconButton>
               <IconButton
@@ -256,7 +256,7 @@ abstract class TabStripBase implements TabStrip {
     }, container)
   }
 
-  addTab(tab: TabView): void {
+  addPane(tab: PaneView): void {
     if (!this.mounted) return
 
     // Wire display-change notification to write changed fields into the store.
@@ -273,7 +273,7 @@ abstract class TabStripBase implements TabStrip {
       })
     }
 
-    this._setTabViews((prev) => [...prev, tab])
+    this._setPaneViews((prev) => [...prev, tab])
 
     // Initialize store entry with current display state.
     this._setDisplay('records', tab.id, {
@@ -292,35 +292,35 @@ abstract class TabStripBase implements TabStrip {
     if (pane) pane.setAttribute('aria-labelledby', `tab-btn-${tab.id}`)
   }
 
-  removeTab(tabId: number): void {
+  removePane(paneId: number): void {
     if (!this.mounted) return
-    this._setTabViews((prev) => {
-      const removed = prev.find((t) => t.id === tabId)
+    this._setPaneViews((prev) => {
+      const removed = prev.find((t) => t.id === paneId)
       if (removed) removed.onDisplayChange = null
-      return prev.filter((t) => t.id !== tabId)
+      return prev.filter((t) => t.id !== paneId)
     })
     // Delete store entry — functional update avoids referencing current state.
-    this._setDisplay('records', (prev: Record<number, TabDisplayRecord>) => {
+    this._setDisplay('records', (prev: Record<number, PaneDisplayRecord>) => {
       const next = { ...prev }
-      delete next[tabId]
+      delete next[paneId]
       return next
     })
   }
 
-  setActive(tabId: number): void {
+  setActive(paneId: number): void {
     if (!this.mounted) return
-    this._setDisplay('activeId', tabId)
+    this._setDisplay('activeId', paneId)
   }
 
-  reorder(tabs: readonly TabView[]): void {
+  reorder(tabs: readonly PaneView[]): void {
     if (!this.mounted) return
     // Solid's <For> reconciliation clears focus when it moves a node with
     // insertBefore, even though the node itself survives — keyed identity is
     // necessary here and not sufficient (nocx-82l9.8). Signal setters run their
     // dependent effects synchronously outside a batch, so the DOM is settled by
-    // the time _setTabViews returns and restoring focus here is enough.
+    // the time _setPaneViews returns and restoring focus here is enough.
     const active = document.activeElement
-    this._setTabViews([...tabs])
+    this._setPaneViews([...tabs])
     if (active instanceof HTMLElement && this.container?.contains(active)) {
       active.focus({ preventScroll: true })
     }
@@ -341,11 +341,11 @@ abstract class TabStripBase implements TabStrip {
     e.preventDefault()
     e.stopPropagation()
 
-    const tabId = Number(button.getAttribute('data-tab-id'))
-    if (Number.isNaN(tabId)) return
+    const paneId = Number(button.getAttribute('data-pane-id'))
+    if (Number.isNaN(paneId)) return
 
-    const tabs = this._getTabViews()
-    const idx = tabs.findIndex((t) => t.id === tabId)
+    const tabs = this._getPaneViews()
+    const idx = tabs.findIndex((t) => t.id === paneId)
     if (idx === -1) return
 
     const len = tabs.length
@@ -369,9 +369,9 @@ abstract class TabStripBase implements TabStrip {
         return
     }
 
-    const nextTab = tabs[nextIdx]
-    if (nextTab) {
-      const nextBtn = document.getElementById(`tab-btn-${nextTab.id}`)
+    const nextPane = tabs[nextIdx]
+    if (nextPane) {
+      const nextBtn = document.getElementById(`tab-btn-${nextPane.id}`)
       nextBtn?.focus()
     }
   }

@@ -9,7 +9,7 @@
 // formed ContentDescriptor — there is no "type" field to branch on.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { TabContent, ContentDescriptor, SurfaceType, SingletonKey } from './tab-content'
+import type { PaneContent, ContentDescriptor, SurfaceType, SingletonKey } from './pane-content'
 
 // ── Surface ids ───────────────────────────────────────────────────────────
 // Constants rather than bare strings at the call sites: a typo should be a
@@ -27,10 +27,10 @@ export interface SurfaceRegistration {
   /** Singleton key for content types that allow at most one open tab. */
   readonly singletonKey: SingletonKey | null
 
-  /** Factory that creates a new TabContent instance. Called each time
+  /** Factory that creates a new PaneContent instance. Called each time
    *  a consumer opens the surface, so the singleton guarantee must come
-   *  from TabManager.openTab's singletonKey dedup, not from caching here. */
-  readonly factory: () => TabContent
+   *  from PaneManager.openPane's singletonKey dedup, not from caching here. */
+  readonly factory: () => PaneContent
 
   /** Descriptor fields that are not surfaceType or singletonKey — those
    *  are pulled from the registration above so they are never duplicated. */
@@ -53,7 +53,7 @@ export class SurfaceRegistry {
     return this.entries.get(id)
   }
 
-  /** Build a full ContentDescriptor and a fresh TabContent instance for
+  /** Build a full ContentDescriptor and a fresh PaneContent instance for
    *  opening a surface.
    *
    *  Throws on an unknown id rather than returning undefined. An unregistered
@@ -61,7 +61,7 @@ export class SurfaceRegistry {
    *  would put a branch in every caller and turn a typo into a keyboard
    *  shortcut that silently does nothing, which reaches the user as "it
    *  stopped working" with nothing in the log. */
-  build(id: string): { content: TabContent; descriptor: ContentDescriptor } {
+  build(id: string): { content: PaneContent; descriptor: ContentDescriptor } {
     const reg = this.entries.get(id)
     if (!reg) {
       const known = [...this.entries.keys()].join(', ') || '(none)'

@@ -2,14 +2,14 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import { cleanup } from '@solidjs/testing-library'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
-import type { TabView } from './tab-strip'
+import type { PaneView } from './tab-strip'
 
 afterEach(() => {
   cleanup()
   document.body.innerHTML = ''
 })
 
-function makeTab(id: number, title: string, tooltip: string): TabView {
+function makePane(id: number, title: string, tooltip: string): PaneView {
   return {
     id,
     title,
@@ -58,9 +58,9 @@ describe('VerticalTabStrip filtering', () => {
 
   it('filtering by title substring keeps matching rows and hides the rest', () => {
     const { strip } = setupVerticalStrip()
-    strip.addTab(makeTab(1, 'local terminal', '~/repos/nocx'))
-    strip.addTab(makeTab(2, 'SSH: server-01', 'ssh user@server-01'))
-    strip.addTab(makeTab(3, 'SSH: database', 'ssh dba@db-host'))
+    strip.addPane(makePane(1, 'local terminal', '~/repos/nocx'))
+    strip.addPane(makePane(2, 'SSH: server-01', 'ssh user@server-01'))
+    strip.addPane(makePane(3, 'SSH: database', 'ssh dba@db-host'))
 
     const input = getSearchInput()!
     expect(input).toBeTruthy()
@@ -79,8 +79,8 @@ describe('VerticalTabStrip filtering', () => {
 
   it('filtering by tooltip (cwd/host) substring matches too', () => {
     const { strip } = setupVerticalStrip()
-    strip.addTab(makeTab(1, 'local terminal', '~/repos/nocx'))
-    strip.addTab(makeTab(2, 'SSH: web', 'ssh deploy@web-01.prod'))
+    strip.addPane(makePane(1, 'local terminal', '~/repos/nocx'))
+    strip.addPane(makePane(2, 'SSH: web', 'ssh deploy@web-01.prod'))
 
     const input = getSearchInput()!
     input.value = 'deploy'
@@ -94,8 +94,8 @@ describe('VerticalTabStrip filtering', () => {
 
   it('clearing the query restores every row', () => {
     const { strip } = setupVerticalStrip()
-    strip.addTab(makeTab(1, 'local terminal', '~/repos/nocx'))
-    strip.addTab(makeTab(2, 'SSH: server', 'ssh user@server'))
+    strip.addPane(makePane(1, 'local terminal', '~/repos/nocx'))
+    strip.addPane(makePane(2, 'SSH: server', 'ssh user@server'))
 
     const input = getSearchInput()!
 
@@ -116,8 +116,8 @@ describe('VerticalTabStrip filtering', () => {
 
   it('filtering does not change which tab is active', () => {
     const { strip } = setupVerticalStrip()
-    strip.addTab(makeTab(1, 'local terminal', '~/repos/nocx'))
-    strip.addTab(makeTab(2, 'SSH: server', 'ssh user@server'))
+    strip.addPane(makePane(1, 'local terminal', '~/repos/nocx'))
+    strip.addPane(makePane(2, 'SSH: server', 'ssh user@server'))
     strip.setActive(1)
 
     // Verify tab 1 is active

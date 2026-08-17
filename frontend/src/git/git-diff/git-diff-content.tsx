@@ -22,8 +22,8 @@ import { render } from 'solid-js/web'
 import { Button } from '../../ui'
 import type { GitDiffResult } from '../../generated/git.diff'
 import type { GitDiffSide } from '../git-client'
-import type { ActiveOrigin, TabHost } from '../../tab-content'
-import { BaseTabContent } from '../../tab-content'
+import type { ActiveOrigin, PaneHost } from '../../pane-content'
+import { BasePaneContent } from '../../pane-content'
 import { ReadOnlyHost } from '../../cm-host'
 import { gitDiffDecoration } from './diff-decoration'
 import type { GitDiffTarget } from './open-git-diff'
@@ -97,7 +97,7 @@ const UNAVAILABLE_LINE =
 
 // ── Content ────────────────────────────────────────────────────────────────
 
-export class GitDiffContent extends BaseTabContent {
+export class GitDiffContent extends BasePaneContent {
   private root: HTMLElement | null = null
   private noticeEl: HTMLElement | null = null
   private readonly host = new ReadOnlyHost()
@@ -126,9 +126,9 @@ export class GitDiffContent extends BaseTabContent {
     super()
   }
 
-  // ── TabContent ──────────────────────────────────────────────────────────
+  // ── PaneContent ──────────────────────────────────────────────────────────
 
-  mount(target: HTMLElement, _host: TabHost, signal: AbortSignal): Promise<void> {
+  mount(target: HTMLElement, _host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this.disposed) return Promise.resolve()
 
     this.root = document.createElement('div')
@@ -168,7 +168,7 @@ export class GitDiffContent extends BaseTabContent {
    *  caused. `cwdFollow: false` is the whole point: a frozen cwd is a
    *  snapshot, never a claim about where we are now, so activating the tab
    *  never moves the panel. Null only when the opener had no origin. */
-  activeOrigin(): Omit<ActiveOrigin, 'tabId'> | null {
+  activeOrigin(): Omit<ActiveOrigin, 'paneId'> | null {
     return this.target.origin
   }
 

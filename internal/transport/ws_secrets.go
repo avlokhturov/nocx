@@ -505,9 +505,9 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 	contentWired := s.contentDB != nil
 	secretSub := s.operationQueue("secrets")
 	// captureSub is ORDERED, not the ordinary bounded queue: captureSave and
-	// tab.close share it, and their arrival order is load-bearing. A tab's
+	// pane.close share it, and their arrival order is load-bearing. A pane's
 	// destruction is the same registry operation family as a save, and a
-	// save submitted after the tab's close must observe the destruction
+	// save submitted after the pane's close must observe the destruction
 	// (nocx-tsajw) — the single FIFO worker guarantees it, where a bounded
 	// queue would race the two goroutines.
 	captureSub := control.NewOrderedSubmission("capture", s.domainQueueDepth)
@@ -540,18 +540,18 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 			h := captureDismissHandlers{captures: s.captures, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureDismiss(ctx, req) }
 		}),
-		// tab.close is the renderer's announcement that a tab died
+		// pane.close is the renderer's announcement that a pane died
 		// (nocx-tsajw): its pending captures die with it, keyed on
-		// (connection, tab). reg rather than regResponder — the handler
+		// (connection, pane). reg rather than regResponder — the handler
 		// needs the connection as the destruction key's other half. It
-		// shares the ORDERED capture queue with captureSave so a tab's
+		// shares the ORDERED capture queue with captureSave so a pane's
 		// destruction is applied before any later save from the same
-		// connection settles: a save in flight when the tab dies is left
+		// connection settles: a save in flight when the pane dies is left
 		// to settle (capture contract), but a save submitted after the
 		// close must see the destruction.
-		reg(captureSub, "tab.close", params(validateTabCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := tabCloseHandlers{captures: s.captures, log: s.log}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleTabClose(ctx, w, req) }
+		reg(captureSub, "pane.close", params(validatePaneCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := paneCloseHandlers{captures: s.captures, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handlePaneClose(ctx, w, req) }
 		}),
 	}
 }

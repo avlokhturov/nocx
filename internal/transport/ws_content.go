@@ -72,8 +72,8 @@ func validateHistoryRecordRaw(raw json.RawMessage) string {
 	if utf8.RuneCountInString(p.Command) > maxRecordCommandRunes {
 		return fmt.Sprintf("command exceeds %d characters", maxRecordCommandRunes)
 	}
-	if utf8.RuneCountInString(p.TabID) > maxTabIDRunes {
-		return fmt.Sprintf("tabId exceeds %d characters", maxTabIDRunes)
+	if utf8.RuneCountInString(p.PaneID) > maxPaneIDRunes {
+		return fmt.Sprintf("paneId exceeds %d characters", maxPaneIDRunes)
 	}
 	if utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
 		return "cwd exceeds the length bound"

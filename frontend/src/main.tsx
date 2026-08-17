@@ -11,7 +11,7 @@ import App from './App'
 import { log } from './log'
 import { installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
-import { TabManager } from './tabs'
+import { PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
@@ -56,7 +56,7 @@ import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
 import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
-import type { ActiveOrigin, SurfaceType } from './tab-content'
+import type { ActiveOrigin, SurfaceType } from './pane-content'
 import {
   SIDEBAR_WIDTH_KEY,
   SIDEBAR_WIDTH_DEFAULT,
@@ -272,7 +272,7 @@ async function main() {
   }
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
 
-  const tm = new TabManager(
+  const tm = new PaneManager(
     bar,
     verticalStripHost,
     panes,
@@ -286,11 +286,11 @@ async function main() {
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
-  tm.onCreateSecret = (name) => openSettingsTab().startNewSecret(name)
+  tm.onCreateSecret = (name) => openSettingsPane().startNewSecret(name)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
-  tm.onCreateEndpoint = () => openSettingsTab().startNewEndpoint()
+  tm.onCreateEndpoint = () => openSettingsPane().startNewEndpoint()
   tm.onActivity = reportActivity
 
   const observer = new SettingsObserver(dispatcher)
@@ -316,9 +316,9 @@ async function main() {
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
         // Vault preflight: if sealed, ensureBeforeSave shows UnlockDialog
-        // and defers newSSHTab until after unseal.
+        // and defers newSSHPane until after unseal.
         vaultController.ensureBeforeSave(() => {
-          void tm.newSSHTab(
+          void tm.newSSHPane(
             profile.id,
             profile.options.host,
             profile.options.user,
@@ -341,8 +341,8 @@ async function main() {
   // (Orca's PORTS panel) sits beside the terminal so a port can be watched
   // while the command that opens it is being typed; a tab replaces the
   // terminal and cannot do that. The view follows the ACTIVE tab: the
-  // target accessor below is a Solid signal fed by TabManager's
-  // onActiveTabChange, so switching SSH tabs re-scopes the panel, a local
+  // target accessor below is a Solid signal fed by PaneManager's
+  // onActivePaneChange, so switching SSH tabs re-scopes the panel, a local
   // tab scopes to the reserved "local" target and shows THIS machine's
   // listeners, and a tab with no ports scope (alias, Settings) shows the
   // no-connection state instead of a stale host's ports (nocx-wzc4.8).
@@ -355,13 +355,13 @@ async function main() {
   const [portsUnavailable, setPortsUnavailable] = createSignal<string>(tm.portsUnavailableReason())
   // The ACTIVE tab's origin for origin-following surfaces (the Files panel,
   // design §5.4): a signal fed on tab change exactly like portsTargetId —
-  // TabManager.activeOrigin() reads a plain field, so the accessor must be
+  // PaneManager.activeOrigin() reads a plain field, so the accessor must be
   // this signal, never a direct call.
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
-  tm.onActiveTabChange = () => {
+  tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
@@ -543,7 +543,7 @@ async function main() {
     // about is still there, and a toast would take the explanation away
     // from it (design §11).
     onRefused: (message) => qc.showSnippets(message),
-    onManage: () => openSettingsTab().openPage('snippets'),
+    onManage: () => openSettingsPane().openPage('snippets'),
     // A body with {{ask:…}} fields: the palette closes and the form asks
     // for all of them at once (owner review — a step that filters a list
     // cannot also be where a value is typed).
@@ -560,14 +560,14 @@ async function main() {
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
    *
-   * `openTab` deduplicates on the singleton key, so when Settings is already
+   * `openPane` deduplicates on the singleton key, so when Settings is already
    * open the content just built is discarded and the live instance is the
    * existing tab's. Talking to the one we built would have addressed a surface
    * nobody can see — silently, and only on the second invocation.
    */
-  function openSettingsTab(): SettingsContent {
+  function openSettingsPane(): SettingsContent {
     const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
-    const live = tm.openTab(content, descriptor).content
+    const live = tm.openPane(content, descriptor).content
     if (!(live instanceof SettingsContent)) {
       throw new Error('nocx: the Settings singleton is not a SettingsContent')
     }
@@ -716,7 +716,7 @@ async function main() {
         icon: SettingsIcon,
         onActivate: () => {
           log.info('nocx: opening Settings tab')
-          openSettingsTab()
+          openSettingsPane()
         },
       },
     ],
@@ -737,7 +737,7 @@ async function main() {
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
       e.preventDefault()
-      openSettingsTab()
+      openSettingsPane()
     }
   })
 
@@ -749,7 +749,7 @@ async function main() {
   document.body.append(qcContainer)
 
   const sshProvider = new SSHQuickConnectProvider(profileClient, (id, host, user) =>
-    tm.newSSHTab(id, host, user),
+    tm.newSSHPane(id, host, user),
   )
   // "Forward a port" (nocx-4t37): a command that needs a target drills in
   // INSIDE the palette — server, then port — instead of dead-ending or
@@ -868,8 +868,8 @@ async function main() {
 
   const qcProviders: QuickConnectProvider[] = [
     new ActionsQuickConnectProvider(
-      () => tm.newTab(),
-      () => openSettingsTab().startNewConnection(),
+      () => tm.newPane(),
+      () => openSettingsPane().startNewConnection(),
       forwardPortCommand,
     ),
     sshProvider,
@@ -878,12 +878,12 @@ async function main() {
     // sit in the server list or the command palette.
     snippetsProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
-      tm.newSSHTab('', host, user, port),
+      tm.newSSHPane('', host, user, port),
     ),
     // Free-form fallback: "Connect to <host>" when the typed query matches
     // neither a saved profile nor an alias. Same host path as aliases — the
     // dialog only reaches it after every real match missed.
-    new AdHocQuickConnectProvider((host, user, port) => tm.newSSHTab('', host, user, port)),
+    new AdHocQuickConnectProvider((host, user, port) => tm.newSSHPane('', host, user, port)),
     // The vault half (nocx-fk32). It contributes only to the 'secrets'
     // variant — the dialog admits one kind set per variant — so these rows
     // never appear in the server list or the palette.
@@ -894,7 +894,7 @@ async function main() {
       // The create dialog is the vault's own, and it is the SAME one the
       // prompt's '@' picker opens (nocx-fk32.1): a secret needs a name and a
       // value, and neither picker is where a value gets typed.
-      create: (name) => openSettingsTab().startNewSecret(name),
+      create: (name) => openSettingsPane().startNewSecret(name),
       // The vault layer owns both prompts (nocx-fk32.3); the picker only
       // says which one this state calls for.
       requestUnseal: () => vaultController.openUnlock('use its secrets'),
@@ -959,7 +959,7 @@ async function main() {
   }
 
   // The completion dropdown's snippet rows (design §10.2): the library the
-  // provider reads and the acceptance it delegates. Set on the TabManager,
+  // provider reads and the acceptance it delegates. Set on the PaneManager,
   // so every pane built afterwards carries them.
   tm.snippets = {
     snippets: () => {
@@ -1007,7 +1007,7 @@ async function main() {
   // mixed, each row typed on the right; target-needing commands drill in.
   // Chosen to match the command-palette convention. The tab-strip caret
   // (wireQuickConnect above) stays the plain server list. Does not collide
-  // with TabManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
+  // with PaneManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
   // CodeMirror (which does not register this binding in its keymap).
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
@@ -1028,12 +1028,12 @@ async function main() {
     }
   })
 
-  void tm.openInitialTab()
+  void tm.openInitialPane()
 
   // --- Auto-update: check on start, then every 24 h ---
 
   // Report healthy once the initial tab's renderer mounted and PTY opened.
-  tm.initialTabReady.then(
+  tm.initialPaneReady.then(
     () => {
       ReportHealthy().catch((err) => console.warn('nocx: ReportHealthy failed', err))
     },

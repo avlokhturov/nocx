@@ -1,12 +1,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// Tab and TabManager — chrome, lifecycle, and tab-model management.
+// Pane and PaneManager — chrome, lifecycle, and pane-model management.
 //
-// Tab is chrome-only: it owns the pane, display state, and delegates content
-// lifecycle to a TabContent instance. It implements TabHost so content can
+// Pane is chrome-only: it owns the pane, display state, and delegates content
+// lifecycle to a PaneContent instance. It implements PaneHost so content can
 // push title, tooltip, attention, and close requests upward.
 //
-// TabManager owns the ordered tab model, activation rules, and MRU stack.
-// It constructs content, creates tabs, and wires tab-chrome intents.
+// PaneManager owns the ordered pane model, activation rules, and MRU stack.
+// It constructs content, creates panes, and wires pane-chrome intents.
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { WSClient } from './ipc'
@@ -19,26 +19,26 @@ import { showToast } from './ui/toast'
 import { log } from './log'
 import type { TabStrip } from './tab-strip'
 import type {
-  TabHost,
-  TabContent,
+  PaneHost,
+  PaneContent,
   ContentDescriptor,
   ContentViewport,
   ActiveOrigin,
   SurfaceType,
-} from './tab-content'
-import { SURFACE_TERMINAL } from './tab-content'
+} from './pane-content'
+import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Tab — chrome and lifecycle, delegates content to TabContent
+// Pane — chrome and lifecycle, delegates content to PaneContent
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class Tab implements TabHost {
+export class Pane implements PaneHost {
   readonly id: number
   /** The renderer-minted wire identity (nocx-tsajw): a UUID minted once per
-   *  tab, never reused, and shared with the content so history.record and
-   *  tab.close address the same backend-scoped captures. Chrome keeps its
+   *  pane, never reused, and shared with the content so history.record and
+   *  pane.close address the same backend-scoped captures. Chrome keeps its
    *  own numeric id; this one is what crosses the wire. */
   readonly wireId: string
   readonly pane = document.createElement('div')
@@ -46,9 +46,9 @@ export class Tab implements TabHost {
   /** Model-level descriptor: surface type, singleton key, restore info. */
   readonly descriptor: ContentDescriptor
 
-  readonly content: TabContent
+  readonly content: PaneContent
 
-  // ── Display state (read by TabStrip via TabView) ─────────────────────
+  // ── Display state (read by TabStrip via PaneView) ─────────────────────
 
   private _active = false
   onDisplayChange: (() => void) | null = null
@@ -76,7 +76,7 @@ export class Tab implements TabHost {
   private _latestViewport: ContentViewport | null = null
   private _mountStarted = false
 
-  constructor(content: TabContent, descriptor: ContentDescriptor, id: number, wireId: string) {
+  constructor(content: PaneContent, descriptor: ContentDescriptor, id: number, wireId: string) {
     this.id = id
     this.wireId = wireId
     this.content = content
@@ -89,11 +89,11 @@ export class Tab implements TabHost {
     // ── Pre-mount target ──────────────────────────────────────────────
     // Hand the pane to the content before mount, so setVisible is
     // meaningful from the first setActive(true) call. setTarget is on the
-    // TabContent interface — every implementation must accept or no-op it.
+    // PaneContent interface — every implementation must accept or no-op it.
     content.setTarget(this.pane)
   }
 
-  // ── TabView conformance ───────────────────────────────────────────────
+  // ── PaneView conformance ───────────────────────────────────────────────
 
   get title(): string {
     return this._title
@@ -117,12 +117,12 @@ export class Tab implements TabHost {
   }
 
   /**
-   * The tab's location, for the strip's optional second line — empty when the first
+   * The pane's location, for the strip's optional second line — empty when the first
    * line already says it.
    *
    * The decision cannot be made here. TerminalContent composes the title as
    * `programTitle || runningCommandTitle || cwdTitle` and hands the RESULT to
-   * setTitle, so from the tab's side every title looks equally like a name.
+   * setTitle, so from the pane's side every title looks equally like a name.
    * Only the content knows whether a program (or a command) supplied one, so
    * the content decides and pushes the answer.
    */
@@ -142,7 +142,7 @@ export class Tab implements TabHost {
     return this._onAdopt
   }
 
-  /** Mark the tab as saveable or not, with the save action. */
+  /** Mark the pane as saveable or not, with the save action. */
   setAdoptState(adoptable: boolean, onAdopt: () => void): void {
     if (this._disposed) return
     this._adoptable = adoptable
@@ -150,8 +150,8 @@ export class Tab implements TabHost {
     this.onDisplayChange?.()
   }
 
-  /** Mark the tab's environment degraded/uncertain (nocx-4t37.2): the one
-   *  signal tab chrome may carry. It persists for as long as the session
+  /** Mark the pane's environment degraded/uncertain (nocx-4t37.2): the one
+   *  signal pane chrome may carry. It persists for as long as the session
    *  stays degraded (nocx-5uu5) — the card is the once-per-(shell, reason)
    *  event, and this is the state that outlives it. The capability
    *  statement itself lives in the rail.
@@ -186,7 +186,7 @@ export class Tab implements TabHost {
     this.onDisplayChange?.()
   }
 
-  // ── TabHost ───────────────────────────────────────────────────────────
+  // ── PaneHost ───────────────────────────────────────────────────────────
 
   setTitle(title: string): void {
     if (this._disposed) return
@@ -200,7 +200,7 @@ export class Tab implements TabHost {
   }
 
   /** Terminal-content-only: update tooltip from cwd or SSH info.
-   *  Not on TabHost — wired through TerminalContent's constructor. */
+   *  Not on PaneHost — wired through TerminalContent's constructor. */
   updateTooltip(tooltip: string): void {
     if (this._disposed) return
     this._tooltip = tooltip
@@ -239,12 +239,12 @@ export class Tab implements TabHost {
     this.updateAgentStatus(programTitle)
   }
 
-  /** Called when the content (terminal session) wants the tab closed. */
+  /** Called when the content (terminal session) wants the pane closed. */
   onCloseRequested?: () => void
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
 
-  /** Mount the content into this tab's pane. Called by TabManager on first
+  /** Mount the content into this pane. Called by PaneManager on first
    *  activation, and suppressed after that: mount-once is enforced here at
    *  the seam, not by a private flag inside one implementation (nocx-njrx.2).
    *  The pane is already visible by now — the content received it through
@@ -253,7 +253,7 @@ export class Tab implements TabHost {
   async start(): Promise<void> {
     if (this._mountStarted) return
     this._mountStarted = true
-    log.info('nocx: Tab.start() called', { id: this.id })
+    log.info('nocx: Pane.start() called', { id: this.id })
     await this.content.mount(this.pane, this, this._mountAbort.signal)
     // B.5: replay the latest buffered viewport, or measure now if none yet.
     if (this._latestViewport) {
@@ -304,7 +304,7 @@ export class Tab implements TabHost {
 
   /**
    * Start observing the pane element for resize. Called when the pane enters
-   * the DOM (TabManager.addTab). Delivery is synchronous — the browser already
+   * the DOM (PaneManager.addPane). Delivery is synchronous — the browser already
    * batches ResizeObserver entries once per frame — and suppressed after
    * disposal. See the callback for why an extra frame was the bug, not the fix.
    */
@@ -315,7 +315,7 @@ export class Tab implements TabHost {
       const entry = entries[entries.length - 1]
       if (!entry) return
       const { width, height } = entry.contentRect
-      // Never send a misleading zero rectangle for hidden/inactive tabs (B.5).
+      // Never send a misleading zero rectangle for hidden/inactive panes (B.5).
       if (width === 0 && height === 0) return
       // Deliver synchronously. ResizeObserver already fires once per frame,
       // after layout and before paint, with pending entries batched — so
@@ -363,25 +363,25 @@ export class Tab implements TabHost {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TabManager — ordered tab model, activation rules, MRU
+// PaneManager — ordered pane model, activation rules, MRU
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class TabManager {
-  private readonly tabs: Tab[] = []
-  private nextTabId = 1
-  private activeTab: Tab | null = null
-  private readonly panes: HTMLElement
+export class PaneManager {
+  private readonly panes: Pane[] = []
+  private nextPaneId = 1
+  private activePane: Pane | null = null
+  private readonly panesContainer: HTMLElement
   private readonly client: WSClient
   private readonly clipboard: ClipboardAccess
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
   private readonly profileClient: ProfileClient
-  private _initialTabReady: Promise<void> | undefined
+  private _initialPaneReady: Promise<void> | undefined
   private tabStrip: TabStrip
   private readonly bar: HTMLElement
   private readonly verticalHost: HTMLElement
-  /** MRU stack: most-recently-activated tab ids. */
-  private readonly recentTabIds: number[] = []
+  /** MRU stack: most-recently-activated pane ids. */
+  private readonly recentPaneIds: number[] = []
   /** Called when an SSH connection fails because the vault is sealed. */
   onVaultSealed?: () => void
   /** Called when an SSH connection fails because the host key is unknown
@@ -403,11 +403,11 @@ export class TabManager {
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
-  /** Called when the active tab changes — the seam for chrome that must
+  /** Called when the active pane changes — the seam for chrome that must
    *  re-scope to the tab in front. The sidebar's ports view follows the
-   *  active tab through this (nocx-wzc4.7); wired by main.tsx to a Solid
+   *  active pane through this (nocx-wzc4.7); wired by main.tsx to a Solid
    *  signal. */
-  onActiveTabChange?: () => void
+  onActivePaneChange?: () => void
   /** The snippet palette chord (⌥⌘P) was pressed in the active pane —
    *  forwarded from the pane's TerminalContent, whose xterm boundary and
    *  editor arbiter both land here. The composition root opens the
@@ -430,7 +430,7 @@ export class TabManager {
     profileClient: ProfileClient,
     tabStrip: TabStrip,
   ) {
-    this.panes = panes
+    this.panesContainer = panes
     this.client = client
     this.clipboard = clipboard
     this.gate = gate
@@ -451,44 +451,44 @@ export class TabManager {
     return strip.orientation === 'vertical' ? this.verticalHost : this.bar
   }
 
-  get tabCount(): number {
-    return this.tabs.length
+  get paneCount(): number {
+    return this.panes.length
   }
 
-  get initialTabReady(): Promise<void> {
-    if (!this._initialTabReady) {
-      throw new Error('initialTabReady accessed before openInitialTab')
+  get initialPaneReady(): Promise<void> {
+    if (!this._initialPaneReady) {
+      throw new Error('initialPaneReady accessed before openInitialPane')
     }
-    return this._initialTabReady
+    return this._initialPaneReady
   }
 
-  /** Mount the tab strip and open the initial terminal tab.
+  /** Mount the tab strip and open the initial terminal pane.
    *
    *  Callable exactly once, and that is enforced here rather than documented:
    *  a second call would mount the strip again and open a second "initial"
-   *  tab. This epic has already removed one contract that held by coincidence
-   *  (mount-once, which lived in a private flag inside one TabContent
+   *  pane. This epic has already removed one contract that held by coincidence
+   *  (mount-once, which lived in a private flag inside one PaneContent
    *  implementation instead of at the seam), so a comment is not enough.
    *
-   *  `initialTabReady` resolves only from terminal content — a non-terminal
+   *  `initialPaneReady` resolves only from terminal content — a non-terminal
    *  first tab must not be able to report the app healthy. */
-  openInitialTab(): Promise<void> {
-    if (this._initialTabReady) {
-      throw new Error('openInitialTab called twice; the composition root calls it exactly once')
+  openInitialPane(): Promise<void> {
+    if (this._initialPaneReady) {
+      throw new Error('openInitialPane called twice; the composition root calls it exactly once')
     }
     this.tabStrip.mount(this.hostFor(this.tabStrip))
-    const initialTab = this.newTab()
-    const initialContent = initialTab.content as TerminalContent
-    this._initialTabReady = initialContent.ready.then((ok) => {
-      if (!ok) throw new Error('initial tab failed to start')
+    const initialPane = this.newPane()
+    const initialContent = initialPane.content as TerminalContent
+    this._initialPaneReady = initialContent.ready.then((ok) => {
+      if (!ok) throw new Error('initial pane failed to start')
     })
-    return this._initialTabReady
+    return this._initialPaneReady
   }
   // ── Tab creation ──────────────────────────────────────────────────────
 
-  /** Create a new local terminal tab and activate it. */
-  newTab(): Tab {
-    const tabRef = { current: undefined as Tab | undefined }
+  /** Create a new local terminal pane and activate it. */
+  newPane(): Pane {
+    const paneRef = { current: undefined as Pane | undefined }
     const wireId = crypto.randomUUID()
     const content = new TerminalContent(
       this.client,
@@ -497,24 +497,24 @@ export class TabManager {
       this.gate,
       this.banner,
       this.profileClient,
-      (tooltip) => tabRef.current?.updateTooltip(tooltip),
+      (tooltip) => paneRef.current?.updateTooltip(tooltip),
       // The alt-screen callback that used to sit here is gone with the
       // parameter. It toggled `#app.alt-screen`, which emptied the tab strip so
       // a viewport-sized fullscreen xterm would not paint through it; the
       // fullscreen region lives inside its pane now (nocx-6w4z).
       undefined,
       {
-        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
-        onWarningChange: (warning, label) => tabRef.current?.setWarningState(warning, label),
-        onPortsTargetChange: () => this.onActiveTabChange?.(),
-        onActiveOriginChange: () => this.onActiveTabChange?.(),
+        onSubtitleChange: (subtitle) => paneRef.current?.updateSubtitle(subtitle),
+        onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
+        onPortsTargetChange: () => this.onActivePaneChange?.(),
+        onActiveOriginChange: () => this.onActivePaneChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
         onSnippetChord: this.onSnippetChord,
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
-        onProgramTitleChange: (programTitle) => tabRef.current?.updateProgramTitle(programTitle),
+        onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
       },
     )
     const descriptor: ContentDescriptor = {
@@ -522,23 +522,23 @@ export class TabManager {
       singletonKey: null,
       restoreDescriptor: { type: 'local' },
       supportsAttention: true,
-      // No placeholder. A terminal tab is named after where it is, and that
-      // arrives one WebSocket round-trip after the tab appears; printing
+      // No placeholder. A terminal pane is named after where it is, and that
+      // arrives one WebSocket round-trip after the pane appears; printing
       // 'Terminal' in the meantime showed a word that is never the answer and
       // then replaced it, which reads as a flicker rather than as loading
       // (nocx-83a). An empty title is honest and the strip's width is fixed, so
       // nothing moves when the real one lands.
       defaultTitle: '',
     }
-    const tab = this.addTab(content, descriptor, wireId)
-    tabRef.current = tab
-    return tab
+    const pane = this.addPane(content, descriptor, wireId)
+    paneRef.current = pane
+    return pane
   }
 
-  newSSHTab(profileId: string, host: string, user?: string, port?: number, title?: string): Tab {
-    log.info('nocx: newSSHTab called', { profileId, host, user, port, title })
+  newSSHPane(profileId: string, host: string, user?: string, port?: number, title?: string): Pane {
+    log.info('nocx: newSSHPane called', { profileId, host, user, port, title })
     const sshOpts = { profileId, host, user, port } as const
-    const tabRef = { current: undefined as Tab | undefined }
+    const paneRef = { current: undefined as Pane | undefined }
     const wireId = crypto.randomUUID()
     const content = new TerminalContent(
       this.client,
@@ -547,23 +547,23 @@ export class TabManager {
       this.gate,
       this.banner,
       this.profileClient,
-      (tooltip) => tabRef.current?.updateTooltip(tooltip),
+      (tooltip) => paneRef.current?.updateTooltip(tooltip),
       sshOpts,
       {
-        onSubtitleChange: (subtitle) => tabRef.current?.updateSubtitle(subtitle),
+        onSubtitleChange: (subtitle) => paneRef.current?.updateSubtitle(subtitle),
         onAdoptabilityChange: (adoptable: boolean) => {
-          const tab = tabRef.current
-          if (!tab) return
+          const pane = paneRef.current
+          if (!pane) return
           if (adoptable) {
-            tab.setAdoptState(true, () => this._adoptAlias(host, user, port, tab))
+            pane.setAdoptState(true, () => this._adoptAlias(host, user, port, pane))
           } else {
-            tab.setAdoptState(false, () => {})
+            pane.setAdoptState(false, () => {})
           }
         },
-        onWarningChange: (warning, label) => tabRef.current?.setWarningState(warning, label),
-        onProgramTitleChange: (programTitle) => tabRef.current?.updateProgramTitle(programTitle),
-        onActiveOriginChange: () => this.onActiveTabChange?.(),
-        onPortsTargetChange: () => this.onActiveTabChange?.(),
+        onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
+        onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
+        onActiveOriginChange: () => this.onActivePaneChange?.(),
+        onPortsTargetChange: () => this.onActivePaneChange?.(),
         onVaultSealed: this.onVaultSealed,
         onHostKeyError: this.onHostKeyError,
         onSetupVault: this.onSetupVault,
@@ -581,9 +581,9 @@ export class TabManager {
       supportsAttention: true,
       defaultTitle: title || host,
     }
-    const tab = this.addTab(content, descriptor, wireId)
-    tabRef.current = tab
-    return tab
+    const pane = this.addPane(content, descriptor, wireId)
+    paneRef.current = pane
+    return pane
   }
 
   /** Adopt an SSH alias as a saved nocx profile. Creates the profile and switches
@@ -592,7 +592,7 @@ export class TabManager {
     host: string,
     user: string | undefined,
     port: number | undefined,
-    tab: Tab,
+    tab: Pane,
   ): void {
     const profile = adoptAliasProfile(host, user, port)
 
@@ -627,7 +627,7 @@ export class TabManager {
       .createProfile(profile)
       .then((saved) => {
         log.info('nocx: opened host as a connection', { host, profileId: saved.id })
-        this.newSSHTab(saved.id, host, user)
+        this.newSSHPane(saved.id, host, user)
         showToast({ level: 'success', message: `Opened "${host}" as a connection` })
       })
       .catch((err: unknown) => {
@@ -641,9 +641,9 @@ export class TabManager {
    * Open a tab with the given content, deduplicating by singletonKey.
    * If a tab with the same singletonKey already exists, activates it.
    */
-  openTab(content: TabContent, descriptor: ContentDescriptor): Tab {
+  openPane(content: PaneContent, descriptor: ContentDescriptor): Pane {
     if (descriptor.singletonKey) {
-      const existing = this.tabs.find((t) => t.descriptor.singletonKey === descriptor.singletonKey)
+      const existing = this.panes.find((t) => t.descriptor.singletonKey === descriptor.singletonKey)
       if (existing) {
         void this.activate(existing)
         return existing
@@ -651,22 +651,22 @@ export class TabManager {
     }
     // Every tab gets a wire identity — view tabs carry no captures, but the
     // chrome must still be able to announce a close (nocx-tsajw).
-    return this.addTab(content, descriptor, crypto.randomUUID())
+    return this.addPane(content, descriptor, crypto.randomUUID())
   }
 
   /** Internal: create a Tab, wire lifecycle, add to model, activate. */
-  private addTab(content: TabContent, descriptor: ContentDescriptor, wireId: string): Tab {
-    const tab = new Tab(content, descriptor, this.nextTabId++, wireId)
+  private addPane(content: PaneContent, descriptor: ContentDescriptor, wireId: string): Pane {
+    const pane = new Pane(content, descriptor, this.nextPaneId++, wireId)
 
-    this.tabs.push(tab)
-    this.panes.append(tab.pane)
+    this.panes.push(pane)
+    this.panesContainer.append(pane.pane)
     // B.5: start observing pane geometry once it's in the DOM.
-    tab.setupViewportObserver()
+    pane.setupViewportObserver()
 
-    tab.onCloseRequested = () => this.closeTab(tab)
-    this.tabStrip.addTab(tab)
-    void this.activate(tab)
-    return tab
+    pane.onCloseRequested = () => this.closePane(pane)
+    this.tabStrip.addPane(pane)
+    void this.activate(pane)
+    return pane
   }
 
   /** Swap the TabStrip at runtime without restarting.  Transfers all
@@ -677,7 +677,7 @@ export class TabManager {
     const old = this.tabStrip
     old.onActivate = null
     old.onClose = null
-    old.onNewTab = null
+    old.onNewPane = null
     old.onReorder = null
 
     // Determine the old and new mount hosts based on orientation.
@@ -691,7 +691,9 @@ export class TabManager {
     // empty column. The ARIA attributes matter for the accessibility tree:
     // an emptied host that keeps role="tablist" is a second, empty tablist
     // sitting beside the real one, which is worse than no tablist at all.
-    oldHost.innerHTML = ''
+    while (oldHost.firstChild) {
+      oldHost.removeChild(oldHost.firstChild)
+    }
     oldHost.classList.remove('tabstrip-vertical')
     oldHost.removeAttribute('role')
     oldHost.removeAttribute('aria-label')
@@ -700,17 +702,17 @@ export class TabManager {
     // Mount the new strip on the correct host.
     newStrip.mount(newHost)
 
-    // Transfer every existing tab into the new strip.
-    for (const tab of this.tabs) {
-      newStrip.addTab(tab)
+    // Transfer every existing pane into the new strip.
+    for (const pane of this.panes) {
+      newStrip.addPane(pane)
     }
 
     // Wire new strip intents.
     this.wireStrip(newStrip)
 
-    // Restore active-tab state.
-    if (this.activeTab) {
-      newStrip.setActive(this.activeTab.id)
+    // Restore active-pane state.
+    if (this.activePane) {
+      newStrip.setActive(this.activePane.id)
     }
 
     this.tabStrip = newStrip
@@ -718,108 +720,108 @@ export class TabManager {
 
   private wireStrip(strip: TabStrip): void {
     strip.onActivate = (id) => {
-      const tab = this.tabs.find((t) => t.id === id)
-      if (tab) void this.activate(tab)
+      const pane = this.panes.find((t) => t.id === id)
+      if (pane) void this.activate(pane)
     }
     strip.onClose = (id) => {
-      const tab = this.tabs.find((t) => t.id === id)
-      if (tab) this.closeTab(tab)
+      const pane = this.panes.find((t) => t.id === id)
+      if (pane) this.closePane(pane)
     }
-    strip.onNewTab = () => this.newTab()
-    strip.onReorder = (fromId, toId) => this.reorderTab(fromId, toId)
+    strip.onNewPane = () => this.newPane()
+    strip.onReorder = (fromId, toId) => this.reorderPane(fromId, toId)
   }
 
   /**
-   * Close a tab. If it was the active tab, activates the MRU tab.
-   * Closing the last tab opens a fresh terminal — view tabs have no
+   * Close a pane. If it was the active pane, activates the MRU pane.
+   * Closing the last pane opens a fresh terminal — view panes have no
    * restoreDescriptor and are never the automatic replacement.
    */
-  closeTab(tab: Tab): void {
-    const index = this.tabs.indexOf(tab)
+  closePane(pane: Pane): void {
+    const index = this.panes.indexOf(pane)
     if (index === -1) return
 
-    // The tab's pending captures die with it: announce the close so the
+    // The pane's pending captures die with it: announce the close so the
     // backend destroys them (nocx-tsajw). Sent before the DOM teardown —
     // a dropped notification is covered by the transport-disconnect
     // trigger, which is the same destruction.
-    this.client.notifyTabClosed(tab.wireId)
+    this.client.notifyPaneClosed(pane.wireId)
 
-    const wasActive = tab === this.activeTab
-    this.removeFromRecent(tab.id)
+    const wasActive = pane === this.activePane
+    this.removeFromRecent(pane.id)
 
-    tab.close()
-    tab.pane.remove()
-    this.tabStrip.removeTab(tab.id)
-    this.tabs.splice(index, 1)
+    pane.close()
+    pane.pane.remove()
+    this.tabStrip.removePane(pane.id)
+    this.panes.splice(index, 1)
 
-    if (this.tabs.length === 0) {
-      this.newTab()
+    if (this.panes.length === 0) {
+      this.newPane()
       return
     }
 
     if (wasActive) {
-      const mruTab = this.popRecent()
-      if (mruTab) {
-        void this.activate(mruTab)
+      const mruPane = this.popRecent()
+      if (mruPane) {
+        void this.activate(mruPane)
       }
     }
   }
 
-  /** Activate a tab: show its pane, mount content, focus. */
-  async activate(tab: Tab): Promise<void> {
-    log.info('nocx: TabManager.activate() called', {
-      tabId: tab.id,
-      isActive: tab === this.activeTab,
+  /** Activate a pane: show its pane, mount content, focus. */
+  async activate(pane: Pane): Promise<void> {
+    log.info('nocx: PaneManager.activate() called', {
+      paneId: pane.id,
+      isActive: pane === this.activePane,
     })
-    if (tab === this.activeTab) {
-      tab.focus()
+    if (pane === this.activePane) {
+      pane.focus()
       return
     }
 
-    if (this.activeTab) {
-      this.pushRecent(this.activeTab.id)
+    if (this.activePane) {
+      this.pushRecent(this.activePane.id)
     }
 
-    this.activeTab?.setActive(false)
-    this.activeTab = tab
-    tab.setActive(true)
+    this.activePane?.setActive(false)
+    this.activePane = pane
+    pane.setActive(true)
 
-    this.removeFromRecent(tab.id)
-    this.tabStrip.setActive(tab.id)
+    this.removeFromRecent(pane.id)
+    this.tabStrip.setActive(pane.id)
 
-    log.info('nocx: tab.setActive(true) called', {
-      paneClasses: tab.pane.className,
+    log.info('nocx: pane.setActive(true) called', {
+      paneClasses: pane.pane.className,
     })
-    await tab.start()
-    tab.focus()
-    this.onActiveTabChange?.()
+    await pane.start()
+    pane.focus()
+    this.onActivePaneChange?.()
   }
 
   activateByIndex(index: number): void {
-    const tab = this.tabs[index]
-    if (tab) void this.activate(tab)
+    const pane = this.panes[index]
+    if (pane) void this.activate(pane)
   }
 
-  closeActiveTab(): void {
-    if (this.activeTab) this.closeTab(this.activeTab)
+  closeActivePane(): void {
+    if (this.activePane) this.closePane(this.activePane)
   }
 
-  /** The active tab's terminal content, when the active tab is a terminal.
+  /** The active pane's terminal content, when the active pane is a terminal.
    *  Global actions (the quick-connect "Integrate this shell" item,
    *  the secret picker's insert) target it because the pane's own input
    *  presentation is the only place that knows where text should go;
    *  content itself owns the PROMPT_READY && trusted && owned gate. */
   activeTerminalContent(): TerminalContent | null {
-    const content = this.activeTab?.content
+    const content = this.activePane?.content
     return content instanceof TerminalContent ? content : null
   }
 
-  /** The active tab's PANE element — the always-visible mount the snippet
+  /** The active pane's PANE element — the always-visible mount the snippet
    *  palette floats in (design §10.1: it must answer when the editor is
    *  hidden, so it cannot live inside the editor root). Null when no tab
    *  is active. */
-  activePane(): HTMLElement | null {
-    return this.activeTab?.pane ?? null
+  activePaneElement(): HTMLElement | null {
+    return this.activePane?.pane ?? null
   }
 
   /** The ports.* target the ACTIVE tab scopes to (nocx-wzc4.8): the
@@ -839,59 +841,59 @@ export class TabManager {
   /** The ACTIVE tab's origin for origin-following surfaces (the Files
    *  panel, design §5.4): the tab id from the Tab, the session and kind
    *  from the content's optional capability — never an instanceof branch,
-   *  because the seam exists so TabManager never learns which content
+   *  because the seam exists so PaneManager never learns which content
    *  class replied (terminal content answers from its session; viewer
    *  content answers from the binding it was opened with). Null when the
-   *  active tab has no origin or its content does not implement the
+   *  active pane has no origin or its content does not implement the
    *  capability. */
   activeOrigin(): ActiveOrigin | null {
-    const tab = this.activeTab
-    const origin = tab?.content.activeOrigin?.()
-    return tab && origin ? { tabId: tab.id, ...origin } : null
+    const pane = this.activePane
+    const origin = pane?.content.activeOrigin?.()
+    return pane && origin ? { paneId: pane.id, ...origin } : null
   }
 
-  /** The ACTIVE tab's surface type (B.8) — the seam chrome reads to answer
-   *  "what kind of tab is in front" without instanceof tests. The sidebar's
+  /** The ACTIVE pane's surface type (B.8) — the seam chrome reads to answer
+   *  "what kind of pane is in front" without instanceof tests. The sidebar's
    *  Settings collapse (nocx-3e3b) reads this through the composition root:
    *  the descriptor is the single owner of what a tab is, and neither
    *  activeTerminalContent() (null for viewer tabs too) nor activeOrigin()
    *  (null transiently while a session opens) can tell Settings apart.
    *  Null when no tab is active yet. */
   activeSurfaceType(): SurfaceType | null {
-    return this.activeTab?.descriptor.surfaceType ?? null
+    return this.activePane?.descriptor.surfaceType ?? null
   }
 
-  reorderTab(draggedId: number, targetId: number): void {
-    const draggedIndex = this.tabs.findIndex((t) => t.id === draggedId)
-    const targetIndex = this.tabs.findIndex((t) => t.id === targetId)
+  reorderPane(draggedId: number, targetId: number): void {
+    const draggedIndex = this.panes.findIndex((t) => t.id === draggedId)
+    const targetIndex = this.panes.findIndex((t) => t.id === targetId)
     if (draggedIndex === -1 || targetIndex === -1) return
 
-    const [draggedTab] = this.tabs.splice(draggedIndex, 1)
+    const [draggedPane] = this.panes.splice(draggedIndex, 1)
     const adjustedTarget = draggedIndex < targetIndex ? targetIndex - 1 : targetIndex
-    this.tabs.splice(adjustedTarget, 0, draggedTab)
+    this.panes.splice(adjustedTarget, 0, draggedPane)
 
-    this.tabStrip.reorder(this.tabs)
+    this.tabStrip.reorder(this.panes)
   }
 
   // ── MRU helpers ──────────────────────────────────────────────────────
 
   private pushRecent(id: number): void {
     this.removeFromRecent(id)
-    this.recentTabIds.push(id)
+    this.recentPaneIds.push(id)
   }
 
-  private popRecent(): Tab | undefined {
-    while (this.recentTabIds.length > 0) {
-      const id = this.recentTabIds.pop()!
-      const tab = this.tabs.find((t) => t.id === id)
-      if (tab) return tab
+  private popRecent(): Pane | undefined {
+    while (this.recentPaneIds.length > 0) {
+      const id = this.recentPaneIds.pop()!
+      const pane = this.panes.find((t) => t.id === id)
+      if (pane) return pane
     }
     return undefined
   }
 
   private removeFromRecent(id: number): void {
-    const idx = this.recentTabIds.indexOf(id)
-    if (idx !== -1) this.recentTabIds.splice(idx, 1)
+    const idx = this.recentPaneIds.indexOf(id)
+    if (idx !== -1) this.recentPaneIds.splice(idx, 1)
   }
 
   // ── Keyboard shortcuts ───────────────────────────────────────────────
@@ -904,7 +906,7 @@ export class TabManager {
       e.preventDefault()
       e.stopPropagation()
       this.onActivity?.()
-      this.newTab()
+      this.newPane()
       return
     }
 
@@ -912,13 +914,13 @@ export class TabManager {
       e.preventDefault()
       e.stopPropagation()
       this.onActivity?.()
-      this.closeActiveTab()
+      this.closeActivePane()
       return
     }
 
     // Cmd/Ctrl+1..9 — switch to tab by visual index (all tabs).
     const keyNum = Number(e.key)
-    if (Number.isInteger(keyNum) && keyNum >= 1 && keyNum <= 9 && keyNum <= this.tabs.length) {
+    if (Number.isInteger(keyNum) && keyNum >= 1 && keyNum <= 9 && keyNum <= this.panes.length) {
       e.preventDefault()
       e.stopPropagation()
       this.onActivity?.()

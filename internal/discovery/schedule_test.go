@@ -254,7 +254,7 @@ func TestScheduler_PromptHintsWhileSamplingCoalesceToOne(t *testing.T) {
 	}
 }
 
-func TestScheduler_HiddenTabStopsPeriodicSampling(t *testing.T) {
+func TestScheduler_HiddenPaneStopsPeriodicSampling(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())

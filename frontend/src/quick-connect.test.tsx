@@ -77,28 +77,28 @@ describe('ActionsQuickConnectProvider', () => {
     expect(items.some((i) => i.label === 'Ports')).toBe(false)
   })
 
-  it('calls newTab when the local-shell item runs', () => {
-    const newTab = vi.fn()
+  it('calls newPane when the local-shell item runs', () => {
+    const newPane = vi.fn()
     const newConnection = vi.fn()
-    const provider = new ActionsQuickConnectProvider(newTab, newConnection)
+    const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
     provider.getItems()[0].run()
 
-    expect(newTab).toHaveBeenCalledOnce()
+    expect(newPane).toHaveBeenCalledOnce()
     expect(newConnection).not.toHaveBeenCalled()
   })
 
   it('opens the connection editor when the new-connection item runs', () => {
-    const newTab = vi.fn()
+    const newPane = vi.fn()
     const newConnection = vi.fn()
-    const provider = new ActionsQuickConnectProvider(newTab, newConnection)
+    const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
     provider.getItems()[1].run()
 
     // Not a tab: this entry used to be an unconfigured profile, and running it
     // opened a terminal on an empty host that failed to start.
     expect(newConnection).toHaveBeenCalledOnce()
-    expect(newTab).not.toHaveBeenCalled()
+    expect(newPane).not.toHaveBeenCalled()
   })
 })
 
@@ -122,8 +122,8 @@ describe('SSHQuickConnectProvider', () => {
         },
       ]),
     }
-    const newSSHTab = vi.fn()
-    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHTab)
+    const newSSHPane = vi.fn()
+    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHPane)
 
     const items = await Promise.resolve(provider.getItems())
 
@@ -134,7 +134,7 @@ describe('SSHQuickConnectProvider', () => {
     expect(items[1].detail).toBe('Dev box')
   })
 
-  it('calls newSSHTab with correct args on run()', async () => {
+  it('calls newSSHPane with correct args on run()', async () => {
     const profileClient = {
       listProfiles: vi.fn().mockResolvedValue([
         {
@@ -145,21 +145,21 @@ describe('SSHQuickConnectProvider', () => {
         },
       ]),
     }
-    const newSSHTab = vi.fn()
-    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHTab)
+    const newSSHPane = vi.fn()
+    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHPane)
 
     const items = await Promise.resolve(provider.getItems())
     items[0].run()
 
-    expect(newSSHTab).toHaveBeenCalledWith('ssh:custom:x:uuid', 'x.example.com', 'me')
+    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:x:uuid', 'x.example.com', 'me')
   })
 
   it('handles empty profile list', async () => {
     const profileClient = {
       listProfiles: vi.fn().mockResolvedValue([]),
     }
-    const newSSHTab = vi.fn()
-    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHTab)
+    const newSSHPane = vi.fn()
+    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHPane)
 
     const items = await Promise.resolve(provider.getItems())
     expect(items).toHaveLength(0)
@@ -188,14 +188,14 @@ describe('SSHQuickConnectProvider', () => {
         },
       ]),
     }
-    const newSSHTab = vi.fn()
-    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHTab)
+    const newSSHPane = vi.fn()
+    const provider = new SSHQuickConnectProvider(profileClient as never, newSSHPane)
 
     const items = await Promise.resolve(provider.getItems())
 
     expect(items).toHaveLength(1)
     expect(items[0].id).toBe('ssh:c:good:uuid')
-    expect(newSSHTab).not.toHaveBeenCalled()
+    expect(newSSHPane).not.toHaveBeenCalled()
   })
 })
 
@@ -306,8 +306,8 @@ describe('QuickConnectController', () => {
 
   it('Enter on a selected item closes the dialog', async () => {
     const ctrl = makeController()
-    const newTab = vi.fn()
-    ctrl.mount(container, [new ActionsQuickConnectProvider(newTab, vi.fn())])
+    const newPane = vi.fn()
+    ctrl.mount(container, [new ActionsQuickConnectProvider(newPane, vi.fn())])
     // The only provider here is a command provider, and commands live in the
     // palette — open it (nocx-4t37).
     ctrl.showPalette()
@@ -320,7 +320,7 @@ describe('QuickConnectController', () => {
     expect(input).toBeTruthy()
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
 
-    expect(newTab).toHaveBeenCalledOnce()
+    expect(newPane).toHaveBeenCalledOnce()
     expect(dialog?.open).toBe(false)
   })
 
@@ -528,8 +528,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
 
@@ -559,8 +559,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
 
@@ -584,8 +584,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
 
@@ -593,7 +593,7 @@ describe('SSHAliasQuickConnectProvider', () => {
     expect(items).toHaveLength(0)
   })
 
-  it('calls newTabByHost with correct args on run()', async () => {
+  it('calls newPaneByHost with correct args on run()', async () => {
     const profileClient = {
       listProfiles: vi.fn().mockResolvedValue([]),
       listSSHAliases: vi.fn().mockResolvedValue({
@@ -601,13 +601,13 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
     items[0].run()
 
-    expect(newTabByHost).toHaveBeenCalledWith('myserver', 'admin', undefined)
+    expect(newPaneByHost).toHaveBeenCalledWith('myserver', 'admin', undefined)
   })
 
   it('handles degraded resolver with unavailable', async () => {
@@ -618,15 +618,15 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: { reason: 'no-ssh-binary', detail: 'ssh binary not found on PATH' },
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
 
     expect(items).toHaveLength(1)
     expect(items[0].label).toContain('no-ssh-binary')
     expect(items[0].system).toBe(true)
-    expect(newTabByHost).not.toHaveBeenCalled()
+    expect(newPaneByHost).not.toHaveBeenCalled()
   })
 
   it('handles empty aliases list', async () => {
@@ -637,8 +637,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
 
@@ -653,8 +653,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
 
@@ -663,7 +663,7 @@ describe('SSHAliasQuickConnectProvider', () => {
     expect(items[0].id).toBe('__ssh_alias:myserver')
   })
 
-  it('calls newTabByHost with port when alias has one', async () => {
+  it('calls newPaneByHost with port when alias has one', async () => {
     const profileClient = {
       listProfiles: vi.fn().mockResolvedValue([]),
       listSSHAliases: vi.fn().mockResolvedValue({
@@ -671,13 +671,13 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
     items[0].run()
 
-    expect(newTabByHost).toHaveBeenCalledWith('db-prod', 'deploy', 2222)
+    expect(newPaneByHost).toHaveBeenCalledWith('db-prod', 'deploy', 2222)
   })
 
   it('surfaces alias without user or port when config sets none', async () => {
@@ -688,14 +688,14 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
     expect(items[0].label).toBe('bare-host')
     expect(items[0].detail).toBe('10.0.0.1')
     items[0].run()
-    expect(newTabByHost).toHaveBeenCalledWith('bare-host', undefined, undefined)
+    expect(newPaneByHost).toHaveBeenCalledWith('bare-host', undefined, undefined)
   })
 
   it('suppresses alias when a saved profile matches by alias (not hostName)', async () => {
@@ -714,8 +714,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
     // 'myserver' should be suppressed because its alias matches a saved profile's host
@@ -736,8 +736,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
     // 'myserver' should NOT be suppressed — saved profile stores hostName, not alias
@@ -753,8 +753,8 @@ describe('SSHAliasQuickConnectProvider', () => {
         unavailable: null,
       }),
     }
-    const newTabByHost = vi.fn()
-    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new SSHAliasQuickConnectProvider(profileClient as never, newPaneByHost)
 
     const items = await provider.getItems()
     expect(items).toHaveLength(1)
@@ -767,8 +767,8 @@ describe('SSHAliasQuickConnectProvider', () => {
 
 describe('AdHocQuickConnectProvider', () => {
   it('offers a Connect item for a bare host', () => {
-    const newTabByHost = vi.fn()
-    const provider = new AdHocQuickConnectProvider(newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newPaneByHost)
 
     const items = provider.getQueryItems('example.com')
 
@@ -779,12 +779,12 @@ describe('AdHocQuickConnectProvider', () => {
     expect(items[0].badge).toBe('ad-hoc')
 
     items[0].run()
-    expect(newTabByHost).toHaveBeenCalledWith('example.com', undefined, 22)
+    expect(newPaneByHost).toHaveBeenCalledWith('example.com', undefined, 22)
   })
 
   it('parses user@host:port into host, user and port', () => {
-    const newTabByHost = vi.fn()
-    const provider = new AdHocQuickConnectProvider(newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newPaneByHost)
 
     const items = provider.getQueryItems('deploy@example.com:2222')
 
@@ -793,25 +793,25 @@ describe('AdHocQuickConnectProvider', () => {
     expect(items[0].detail).toBe('port 2222')
 
     items[0].run()
-    expect(newTabByHost).toHaveBeenCalledWith('example.com', 'deploy', 2222)
+    expect(newPaneByHost).toHaveBeenCalledWith('example.com', 'deploy', 2222)
   })
 
   it('accepts the ssh:// scheme', () => {
-    const newTabByHost = vi.fn()
-    const provider = new AdHocQuickConnectProvider(newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newPaneByHost)
 
     const items = provider.getQueryItems('ssh://deploy@10.0.0.1:2222')
     items[0].run()
-    expect(newTabByHost).toHaveBeenCalledWith('10.0.0.1', 'deploy', 2222)
+    expect(newPaneByHost).toHaveBeenCalledWith('10.0.0.1', 'deploy', 2222)
   })
 
   it('accepts a bracketed IPv6 literal', () => {
-    const newTabByHost = vi.fn()
-    const provider = new AdHocQuickConnectProvider(newTabByHost)
+    const newPaneByHost = vi.fn()
+    const provider = new AdHocQuickConnectProvider(newPaneByHost)
 
     const items = provider.getQueryItems('[::1]:2222')
     items[0].run()
-    expect(newTabByHost).toHaveBeenCalledWith('::1', undefined, 2222)
+    expect(newPaneByHost).toHaveBeenCalledWith('::1', undefined, 2222)
   })
 
   it('trims surrounding whitespace', () => {
@@ -867,7 +867,7 @@ describe('free-form connect entry', () => {
     input.dispatchEvent(new Event('input', { bubbles: true }))
   }
 
-  function makePicker(newTabByHost: Mock): QuickConnectController {
+  function makePicker(newPaneByHost: Mock): QuickConnectController {
     const ctrl = new QuickConnectController()
     afterEach(() => ctrl.destroy())
     const providers: QuickConnectProvider[] = [
@@ -876,16 +876,16 @@ describe('free-form connect entry', () => {
         { listProfiles: vi.fn().mockResolvedValue([]) } as never,
         vi.fn(),
       ),
-      new AdHocQuickConnectProvider(newTabByHost),
+      new AdHocQuickConnectProvider(newPaneByHost),
     ]
     ctrl.mount(container, providers)
     ctrl.show()
     return ctrl
   }
 
-  it('offers Connect for a query matching nothing and connects via newTabByHost', async () => {
-    const newTabByHost = vi.fn()
-    makePicker(newTabByHost)
+  it('offers Connect for a query matching nothing and connects via newPaneByHost', async () => {
+    const newPaneByHost = vi.fn()
+    makePicker(newPaneByHost)
     await waitForItems()
 
     const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
@@ -899,13 +899,13 @@ describe('free-form connect entry', () => {
     // Reachable by keyboard alone: the row is selected and Enter activates it.
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
 
-    expect(newTabByHost).toHaveBeenCalledWith('unknown-host', undefined, 22)
+    expect(newPaneByHost).toHaveBeenCalledWith('unknown-host', undefined, 22)
     const dialog = container.querySelector<HTMLDialogElement>('dialog.nocx-dialog')
     expect(dialog?.open).toBe(false)
 
-    // Nothing was persisted: the ad-hoc path only ever called newTabByHost —
+    // Nothing was persisted: the ad-hoc path only ever called newPaneByHost —
     // the picker's profile client has no write method on this path at all.
-    expect(newTabByHost).toHaveBeenCalledOnce()
+    expect(newPaneByHost).toHaveBeenCalledOnce()
   })
 
   it('ranks a matching saved profile above the ad-hoc entry — suppresses it', async () => {
@@ -979,8 +979,8 @@ describe('free-form connect entry', () => {
   })
 
   it('reports a malformed string instead of connecting', async () => {
-    const newTabByHost = vi.fn()
-    makePicker(newTabByHost)
+    const newPaneByHost = vi.fn()
+    makePicker(newPaneByHost)
     await waitForItems()
 
     const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
@@ -993,7 +993,7 @@ describe('free-form connect entry', () => {
     expect(empty?.textContent).toContain('user@host:port')
 
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-    expect(newTabByHost).not.toHaveBeenCalled()
+    expect(newPaneByHost).not.toHaveBeenCalled()
   })
 })
 
@@ -1024,9 +1024,9 @@ describe('palette and drill-in', () => {
   function makePicker(run = vi.fn()): {
     ctrl: QuickConnectController
     run: Mock
-    newTabByHost: Mock
+    newPaneByHost: Mock
   } {
-    const newTabByHost = vi.fn()
+    const newPaneByHost = vi.fn()
     const ctrl = new QuickConnectController()
     afterEach(() => ctrl.destroy())
     const drillCommand = {
@@ -1064,10 +1064,10 @@ describe('palette and drill-in', () => {
         } as never,
         vi.fn(),
       ),
-      new AdHocQuickConnectProvider(newTabByHost),
+      new AdHocQuickConnectProvider(newPaneByHost),
     ]
     ctrl.mount(container, providers)
-    return { ctrl, run, newTabByHost }
+    return { ctrl, run, newPaneByHost }
   }
 
   function labels(): string[] {
@@ -1107,7 +1107,7 @@ describe('palette and drill-in', () => {
   })
 
   it('ad-hoc connect still works inside the palette', async () => {
-    const { ctrl, newTabByHost } = makePicker()
+    const { ctrl, newPaneByHost } = makePicker()
     ctrl.showPalette()
     await waitForItems()
 
@@ -1119,7 +1119,7 @@ describe('palette and drill-in', () => {
     expect(items).toHaveLength(1)
     expect(items[0].textContent).toContain('Connect to unknown-host')
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
-    expect(newTabByHost).toHaveBeenCalledWith('unknown-host', undefined, 22)
+    expect(newPaneByHost).toHaveBeenCalledWith('unknown-host', undefined, 22)
   })
 
   it('a command that needs a target drills in: server, then port, then runs', async () => {
@@ -1283,7 +1283,7 @@ describe('the caret offers "New connection" (nocx-d4us)', () => {
    *  saved host), one saved profile, the drill command, ad-hoc. */
   function makeCaret(run = vi.fn()) {
     const newConnection = vi.fn()
-    const newSSHTab = vi.fn()
+    const newSSHPane = vi.fn()
     const ctrl = new QuickConnectController()
     afterEach(() => ctrl.destroy())
     const drillCommand = {
@@ -1319,12 +1319,12 @@ describe('the caret offers "New connection" (nocx-d4us)', () => {
             },
           ]),
         } as never,
-        newSSHTab,
+        newSSHPane,
       ),
       new AdHocQuickConnectProvider(vi.fn()),
     ]
     ctrl.mount(container, providers)
-    return { ctrl, newConnection, newSSHTab }
+    return { ctrl, newConnection, newSSHPane }
   }
 
   function labels(): string[] {
@@ -1368,7 +1368,7 @@ describe('the caret offers "New connection" (nocx-d4us)', () => {
   })
 
   it('Enter on an empty query in the caret still activates the first saved host', async () => {
-    const { ctrl, newSSHTab, newConnection } = makeCaret()
+    const { ctrl, newSSHPane, newConnection } = makeCaret()
     ctrl.show()
     await waitForItems()
 
@@ -1376,7 +1376,7 @@ describe('the caret offers "New connection" (nocx-d4us)', () => {
     expect(input).toBeTruthy()
     input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
 
-    expect(newSSHTab).toHaveBeenCalledWith('ssh:custom:prod:uuid', 'example.com', 'deploy')
+    expect(newSSHPane).toHaveBeenCalledWith('ssh:custom:prod:uuid', 'example.com', 'deploy')
     expect(newConnection).not.toHaveBeenCalled()
   })
 

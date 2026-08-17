@@ -43,14 +43,14 @@ import {
   type SessionFake,
   FIXTURE_CWD,
   FIXTURE_DIRECTORY_LABEL,
-} from './test-support/tabs-fixtures'
+} from './test-support/panes-fixtures'
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
 import { CommandLedger } from './command-ledger'
 import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
-import { Tab } from './tabs'
-import { SURFACE_TERMINAL } from './tab-content'
+import { Pane } from './panes'
+import { SURFACE_TERMINAL } from './pane-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
@@ -137,7 +137,7 @@ async function mountTerminal(
   ed: CommandEditor
   clipboard: ClipboardFake
   content: TerminalContent
-  tab: Tab
+  tab: Pane
   teardown: () => void
 }> {
   const clientFake = client ?? makeClient()
@@ -154,7 +154,7 @@ async function mountTerminal(
     opts.ssh,
     opts.hooks,
   )
-  const tab = new Tab(
+  const tab = new Pane(
     content,
     {
       surfaceType: SURFACE_TERMINAL,
@@ -1321,7 +1321,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
   async function mountSshTerminal(): Promise<{
     ed: CommandEditor
     content: TerminalContent
-    tab: Tab
+    tab: Pane
     teardown: () => void
   }> {
     const clientFake = makeClient({
@@ -1338,7 +1338,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
       () => {},
       { profileId: '', host: '192.168.0.57', user: 'root' },
     )
-    const tab = new Tab(
+    const tab = new Pane(
       content,
       {
         surfaceType: SURFACE_TERMINAL,
@@ -4548,8 +4548,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 // Panes are hidden with a CSS class, not unmounted, so the WebGL texture
 // atlas of a hidden pane goes stale and its glyphs come back drawn from
 // wrong coordinates. nocx-e27 fixed that with a viewport-wide repaint on
-// activation; 21fd7f6a (the TabContent seam) carried refreshAtlas() down
-// into TerminalContent and left the call behind in TabManager, so the fix
+// activation; 21fd7f6a (the PaneContent seam) carried refreshAtlas() down
+// into TerminalContent and left the call behind in PaneManager, so the fix
 // became dead code and the corruption came back.
 //
 // The repaint therefore hangs off setVisible, which is where visibility is

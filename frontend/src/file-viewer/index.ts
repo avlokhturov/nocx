@@ -4,13 +4,13 @@
 // Two exports, both wired by main.tsx:
 //
 //   registerFileViewerSurface(registry, tm, deps) — the one wiring point.
-//     Captures the TabManager and the read/liveness dependencies the content
+//     Captures the PaneManager and the read/liveness dependencies the content
 //     needs, and declares the surface id in the SurfaceRegistry. The binding
 //     registry (and its D6 endpoint-match policy) lives at the call site and
 //     is passed in as the liveness seam — this module never imports it.
 //
 //   openFileViewer(target) — what the Files panel calls. Deduplication is
-//     TabManager.openTab's singletonKey behaviour; the key is built from the
+//     PaneManager.openPane's singletonKey behaviour; the key is built from the
 //     CANONICAL path (D12), so two symlinks to one file are one tab.
 //
 // The registry's factory cannot open a viewer — a viewer has no meaning
@@ -19,9 +19,9 @@
 // content that would silently read nothing.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { TabManager } from '../tabs'
+import type { PaneManager } from '../panes'
 import type { SurfaceRegistry } from '../surface-registry'
-import type { ContentDescriptor, SingletonKey, SurfaceType } from '../tab-content'
+import type { ContentDescriptor, SingletonKey, SurfaceType } from '../pane-content'
 import {
   FileViewerContent,
   type FileViewerDeps,
@@ -39,14 +39,14 @@ const SURFACE_FILE_VIEWER: SurfaceType = 'nocx.fileViewer' as SurfaceType
 // ── Wiring (module-level, set once by the composition root) ────────────────
 
 interface Wiring {
-  readonly tm: TabManager
+  readonly tm: PaneManager
   readonly deps: FileViewerDeps
 }
 
 let wiring: Wiring | null = null
 
 /**
- * The one wiring point. Call exactly once, after the TabManager and the
+ * The one wiring point. Call exactly once, after the PaneManager and the
  * caller's binding registry exist.
  *
  * `deps.onBindingLiveness` must invoke its callback synchronously with the
@@ -55,7 +55,7 @@ let wiring: Wiring | null = null
  */
 export function registerFileViewerSurface(
   registry: SurfaceRegistry,
-  tm: TabManager,
+  tm: PaneManager,
   deps: FileViewerDeps,
 ): void {
   wiring = { tm, deps }
@@ -106,5 +106,5 @@ export function openFileViewer(target: FileViewerTarget): void {
     // spent on the local case.
     defaultTitle: target.displayHost ? `${target.displayHost} · ${target.name}` : target.name,
   }
-  wiring.tm.openTab(new FileViewerContent(target, wiring.deps), descriptor)
+  wiring.tm.openPane(new FileViewerContent(target, wiring.deps), descriptor)
 }

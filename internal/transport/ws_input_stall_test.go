@@ -136,12 +136,12 @@ func stallServer(t *testing.T, channels ...ssh.Channel) *WSServer {
 	return ws
 }
 
-// TestDeadSession_DoesNotFreezeAnotherTab is the reported bug, end to end and
+// TestDeadSession_DoesNotFreezeAnotherPane is the reported bug, end to end and
 // over the real socket: one SSH channel goes dead, and the tab NEXT to it must
 // still take input. Before the write queue both sessions shared the readLoop,
 // so the dead one's blocked Write starved every other tab on the connection —
 // including local ones with nothing wrong with them.
-func TestDeadSession_DoesNotFreezeAnotherTab(t *testing.T) {
+func TestDeadSession_DoesNotFreezeAnotherPane(t *testing.T) {
 	dead := newDeadChannel()
 	live := newLiveChannel()
 	t.Cleanup(func() { _ = dead.Close() })
@@ -174,12 +174,12 @@ func TestDeadSession_DoesNotFreezeAnotherTab(t *testing.T) {
 	}
 }
 
-// TestDeadSession_TellsTheTabItsInputIsBeingDropped pins the visible half.
+// TestDeadSession_TellsThePaneItsInputIsBeingDropped pins the visible half.
 // Dropping frames is the right call — a stalled channel must not be allowed
 // to consume memory or stall its neighbours — but a terminal that silently
 // swallows keystrokes is indistinguishable from one that ignores the person
 // at it. The backend says so on the wire, once per stall.
-func TestDeadSession_TellsTheTabItsInputIsBeingDropped(t *testing.T) {
+func TestDeadSession_TellsThePaneItsInputIsBeingDropped(t *testing.T) {
 	dead := newDeadChannel()
 	t.Cleanup(func() { _ = dead.Close() })
 

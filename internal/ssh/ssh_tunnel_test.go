@@ -77,12 +77,12 @@ func deadPort(t *testing.T) string {
 	return addr
 }
 
-// TestTunnelConn_TabTeardownDoesNotKillForward is the lifetime invariant the
+// TestTunnelConn_PaneTeardownDoesNotKillForward is the lifetime invariant the
 // whole ownership model exists for (spec §7.3): a forward holds its OWN
 // pooled reference. Closing the tab that created it must not kill it — the
 // shared connection stays up for the forward's reference, and the forward
 // keeps dialing. Only the forward's own Close releases it.
-func TestTunnelConn_TabTeardownDoesNotKillForward(t *testing.T) {
+func TestTunnelConn_PaneTeardownDoesNotKillForward(t *testing.T) {
 	srv := startTestSSHServer(t)
 	client := tunnelTestClient(t, srv)
 	opts := tunnelConnectOpts(srv)

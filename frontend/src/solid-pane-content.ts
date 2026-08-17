@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SolidTabContent — generic base for TabContent implementations that render
+// SolidPaneContent — generic base for PaneContent implementations that render
 // a Solid component into a .surface-host element.
 //
 // Creates the mount element, opens exactly one Solid root, and disposes
@@ -7,15 +7,15 @@
 // behaviour. Subclasses provide the component via renderContent().
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { BaseTabContent, type TabHost, type ContentViewport } from './tab-content'
-export type { TabHost, ContentViewport }
+import { BasePaneContent, type PaneHost, type ContentViewport } from './pane-content'
+export type { PaneHost, ContentViewport }
 
 /**
- * Base class for TabContent adapters that render a Solid component.
+ * Base class for PaneContent adapters that render a Solid component.
  * Owns the .surface-host element lifecycle — creation, root, and disposal.
  * Subclasses implement renderContent() to provide the component factory.
  */
-export abstract class SolidTabContent extends BaseTabContent {
+export abstract class SolidPaneContent extends BasePaneContent {
   protected _hostElement: HTMLElement | null = null
   private _dispose: (() => void) | null = null
   protected _disposed = false
@@ -28,10 +28,10 @@ export abstract class SolidTabContent extends BaseTabContent {
   // Not `async`: creating the host and opening a Solid root are synchronous,
   // and an async method with nothing to await is what @typescript-eslint's
   // require-await exists to catch. The signature stays Promise-returning
-  // because TabContent.mount is awaited by the caller and by subclasses that
+  // because PaneContent.mount is awaited by the caller and by subclasses that
   // do have something to wait for — SettingsContent awaits its component's
   // ready() after calling super.mount().
-  mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
+  mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this._hostElement) return Promise.resolve()
     if (signal.aborted) return Promise.resolve()
 

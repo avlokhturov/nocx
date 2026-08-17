@@ -554,13 +554,13 @@ test.describe('5. Roving tabindex', () => {
       // bug. promptReady is the app saying it is done moving focus.
       await promptReady(page)
 
-      // Read the first tab's data-tab-id from the locator, not activeElement
-      const initialId = await tabs.first().getAttribute('data-tab-id')
+      // Read the first tab's data-pane-id from the locator, not activeElement
+      const initialId = await tabs.first().getAttribute('data-pane-id')
       expect(initialId).not.toBeNull()
 
       // Put keyboard focus on the first tab. Playwright's .focus() on a
       // tabindex="-1" element may be redirected by the roving handler, so
-      // we check the active element's data-tab-id after focusing.
+      // we check the active element's data-pane-id after focusing.
       await page.evaluate(() => {
         ;(document.querySelector('[role="tab"]') as HTMLElement)?.focus()
       })
@@ -572,7 +572,7 @@ test.describe('5. Roving tabindex', () => {
 
       // The next tab should now be focused
       const focusedId = await page.evaluate(() =>
-        document.activeElement?.getAttribute('data-tab-id'),
+        document.activeElement?.getAttribute('data-pane-id'),
       )
       expect(focusedId).not.toBeNull()
       // The focused element should differ from the initial first tab
@@ -595,16 +595,16 @@ test.describe('5. Roving tabindex', () => {
 
       // Focus the active tab (tabindex="0" — the second tab). Playwright's
       // .focus() works here because tabindex >= 0.
-      const activeTab = page.locator('[role="tab"][tabindex="0"]')
-      await activeTab.focus()
-      await expect(activeTab).toBeFocused()
+      const activePane = page.locator('[role="tab"][tabindex="0"]')
+      await activePane.focus()
+      await expect(activePane).toBeFocused()
       // ArrowLeft from the second tab should move to the first
       await page.keyboard.press('ArrowLeft')
       await page.waitForTimeout(100)
 
       // Check that focus moved to the first tab
-      const firstTab = tabs.first()
-      const isFirstFocused = await firstTab.evaluate((el) => el === document.activeElement)
+      const firstPane = tabs.first()
+      const isFirstFocused = await firstPane.evaluate((el) => el === document.activeElement)
       expect(isFirstFocused).toBe(true)
     })
 

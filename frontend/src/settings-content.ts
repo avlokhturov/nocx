@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SettingsContent — wraps the Solid settings component as a TabContent.
-// Thin adapter over SolidTabContent; keeps existing public behaviour
+// SettingsContent — wraps the Solid settings component as a PaneContent.
+// Thin adapter over SolidPaneContent; keeps existing public behaviour
 // (focus, scrollToKey). Page owns the narrow breakpoint
 // (base.css @media max-width: 640px). ExportSection is rendered as a
 // child component inside SettingsComponent.
@@ -11,8 +11,8 @@ import { render } from 'solid-js/web'
 import { type ProfileClient, type SSHProfile } from './profiles'
 import type { VaultController } from './vault'
 import { type SettingsObserver } from './settings-observer'
-import { SolidTabContent, type TabHost } from './solid-tab-content'
-import type { SurfaceType, SingletonKey } from './tab-content'
+import { SolidPaneContent, type PaneHost } from './solid-pane-content'
+import type { SurfaceType, SingletonKey } from './pane-content'
 import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
@@ -25,7 +25,7 @@ export const SINGLETON_SETTINGS: SingletonKey = 'nocx.settings' as SingletonKey
 
 // ── SettingsContent ─────────────────────────────────────────────────────
 
-export class SettingsContent extends SolidTabContent {
+export class SettingsContent extends SolidPaneContent {
   private handleRef: { current: SettingsComponentHandle | null } = { current: null }
   private handle: SettingsComponentHandle | null = null
   /** Callback for when the user clicks Connect on a profile. */
@@ -67,9 +67,9 @@ export class SettingsContent extends SolidTabContent {
     )
   }
 
-  // ── TabContent ───────────────────────────────────────────────────────
+  // ── PaneContent ───────────────────────────────────────────────────────
 
-  async mount(target: HTMLElement, host: TabHost, signal: AbortSignal): Promise<void> {
+  async mount(target: HTMLElement, host: PaneHost, signal: AbortSignal): Promise<void> {
     if (this._disposed || this._hostElement) return
     if (signal.aborted) return
 
@@ -101,11 +101,11 @@ export class SettingsContent extends SolidTabContent {
     this.handle?.focus()
   }
 
-  // viewportChanged is inherited from SolidTabContent as a no-op. Page owns the
+  // viewportChanged is inherited from SolidPaneContent as a no-op. Page owns the
   // narrow breakpoint in CSS now (base.css @media max-width: 640px), so Settings
   // has nothing to do with the viewport and does not override it.
 
-  // dispose() inherited from SolidTabContent — it tears down the root
+  // dispose() inherited from SolidPaneContent — it tears down the root
   // element and Solid root. The handle reference becomes stale naturally
   // as the component disposes.
 

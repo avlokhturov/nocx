@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { NoteContent } from './note-content'
 import { NotesStore, type NotesClientLike } from './notes-store'
-import type { TabHost } from '../tab-content'
+import type { PaneHost } from '../pane-content'
 
 const NOTE = { id: 'n1', title: 'Deploy', body: 'Deploy\nkubectl', createdAt: 1, updatedAt: 1 }
 
@@ -32,7 +32,7 @@ function harness(over: Partial<NotesClientLike> = {}) {
   const content = new NoteContent('n1', { store, idleMs: 0 })
   const target = document.createElement('div')
   document.body.append(target)
-  const host: TabHost = {
+  const host: PaneHost = {
     setTitle: (t) => titles.push(t),
     requestAttention: () => {},
     requestClose: () => {},

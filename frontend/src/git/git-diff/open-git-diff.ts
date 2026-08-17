@@ -3,10 +3,10 @@
 // created by the coordinator before either started so both compile from the
 // first minute rather than waiting on each other.
 
-import type { TabManager } from '../../tabs'
+import type { PaneManager } from '../../panes'
 import type { SurfaceRegistry } from '../../surface-registry'
-import type { ContentDescriptor, SingletonKey, SurfaceType } from '../../tab-content'
-import type { ActiveOrigin } from '../../tab-content'
+import type { ContentDescriptor, SingletonKey, SurfaceType } from '../../pane-content'
+import type { ActiveOrigin } from '../../pane-content'
 import type { GitDiffSide } from '../git-client'
 import { GitDiffContent, type GitDiffDeps } from './git-diff-content'
 
@@ -21,14 +21,14 @@ const SURFACE_GIT_DIFF: SurfaceType = 'nocx.gitDiff' as SurfaceType
 // ── Wiring (module-level, set once by the composition root) ────────────────
 
 interface Wiring {
-  readonly tm: TabManager
+  readonly tm: PaneManager
   readonly deps: GitDiffDeps
 }
 
 let wiring: Wiring | null = null
 
 /**
- * The one wiring point. Call exactly once, after the TabManager and the
+ * The one wiring point. Call exactly once, after the PaneManager and the
  * caller's binding registry exist.
  *
  * `deps.onBindingLiveness` must invoke its callback synchronously with the
@@ -37,7 +37,7 @@ let wiring: Wiring | null = null
  */
 export function registerGitDiffSurface(
   registry: SurfaceRegistry,
-  tm: TabManager,
+  tm: PaneManager,
   deps: GitDiffDeps,
 ): void {
   wiring = { tm, deps }
@@ -64,7 +64,7 @@ export function registerGitDiffSurface(
  * side are part of the identity: two worktrees of one repository are
  * different tabs, and the staged and unstaged diffs of one file show
  * different things and are legitimately two tabs (design §5.4). Clicking the
- * same row twice focuses one tab — the dedup lives in TabManager.openTab.
+ * same row twice focuses one tab — the dedup lives in PaneManager.openPane.
  *
  * restoreDescriptor is deliberately null, for the reason open-file-viewer
  * states in its own comment: nothing serialises the tab list, and adding a
@@ -88,7 +88,7 @@ export function openGitDiff(target: GitDiffTarget): void {
     // files of one name.
     defaultTitle: `${target.path} (${target.side})`,
   }
-  wiring.tm.openTab(new GitDiffContent(target, wiring.deps), descriptor)
+  wiring.tm.openPane(new GitDiffContent(target, wiring.deps), descriptor)
 }
 
 /** What a diff tab is opened for. `toplevel` is the repository, not the file:
@@ -108,6 +108,6 @@ export interface GitDiffTarget {
    *  singletonKey then focuses a dead tab forever. FileViewerTarget carries
    *  the same field for the same reason (file-viewer-content.tsx:47). It
    *  carries cwdFollow:false: a frozen cwd is a snapshot, never a claim about
-   *  where we are now. `tabId` is absent — a tab does not know its own id. */
-  readonly origin: Omit<ActiveOrigin, 'tabId'> | null
+   *  where we are now. `paneId` is absent — a tab does not know its own id. */
+  readonly origin: Omit<ActiveOrigin, 'paneId'> | null
 }

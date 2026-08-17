@@ -48,25 +48,25 @@ test.describe('vertical tab placement', () => {
     // activity bar, which is app-level chrome and keeps the window edge, and
     // left of the panes it lists. It was a sibling of #body and therefore the
     // leftmost thing in the window, pushing the activity bar inward.
-    const firstTab = page.locator('.nocx-tab').first()
+    const firstPane = page.locator('.nocx-tab').first()
     const activityBar = page.locator('#activitybar')
     const panes = page.locator('#panes')
 
-    await expect(firstTab).toBeVisible()
-    const tabBox = await firstTab.boundingBox()
+    await expect(firstPane).toBeVisible()
+    const paneBox = await firstPane.boundingBox()
     const barBox = await activityBar.boundingBox()
     const panesBox = await panes.boundingBox()
 
-    expect(tabBox).not.toBeNull()
+    expect(paneBox).not.toBeNull()
     expect(barBox).not.toBeNull()
     expect(panesBox).not.toBeNull()
 
     // Right of the activity bar...
-    expect(tabBox!.x).toBeGreaterThanOrEqual(barBox!.x + barBox!.width)
+    expect(paneBox!.x).toBeGreaterThanOrEqual(barBox!.x + barBox!.width)
     // ...and left of the panes.
-    expect(tabBox!.x + tabBox!.width).toBeLessThanOrEqual(panesBox!.x + 1)
+    expect(paneBox!.x + paneBox!.width).toBeLessThanOrEqual(panesBox!.x + 1)
     // Below the drag bar (not at y=0 inside #tabbar).
-    expect(tabBox!.y).toBeGreaterThanOrEqual(30)
+    expect(paneBox!.y).toBeGreaterThanOrEqual(30)
     // #panes must keep non-zero width (not collapsed by a misplaced strip).
     expect(panesBox!.width).toBeGreaterThan(0)
   })
@@ -80,9 +80,9 @@ test.describe('vertical tab placement', () => {
     const strip = page.locator('#vertical-tabstrip')
     const plus = await strip.locator('[aria-label="New tab"]').boundingBox()
     const caret = await strip.locator('[aria-label="Quick connect"]').boundingBox()
-    const firstTab = await strip.locator('.nocx-tab').first().boundingBox()
+    const firstPane = await strip.locator('.nocx-tab').first().boundingBox()
 
-    expect(plus!.y + plus!.height).toBeLessThanOrEqual(firstTab!.y + 1)
+    expect(plus!.y + plus!.height).toBeLessThanOrEqual(firstPane!.y + 1)
     // On one line with each other, not at opposite ends of the column.
     expect(Math.abs(plus!.y - caret!.y)).toBeLessThanOrEqual(2)
   })
@@ -113,9 +113,9 @@ test.describe('vertical tab placement', () => {
     await expect(page.locator('.nocx-tab')).toHaveCount(2)
 
     // Both rows should have the same height (fixed at 52px)
-    const firstTab = page.locator('.nocx-tab').nth(0)
+    const firstPane = page.locator('.nocx-tab').nth(0)
     const secondTab = page.locator('.nocx-tab').nth(1)
-    const firstBox = await firstTab.boundingBox()
+    const firstBox = await firstPane.boundingBox()
     const secondBox = await secondTab.boundingBox()
     expect(firstBox).not.toBeNull()
     expect(secondBox).not.toBeNull()

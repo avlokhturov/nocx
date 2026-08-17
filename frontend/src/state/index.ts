@@ -13,18 +13,18 @@ export { createBannerState, type BannerState } from './banner-model'
 export { createProfileLists, setProfileLists, type ProfileLists } from './profiles-model'
 export { createSidebarState, type SidebarState } from './sidebar-model'
 export {
-  addTab,
-  activateTab,
-  closeTab,
-  createTabModel,
-  reorderTab,
-  updateTabTitle,
-  updateTabActivity,
-  updateTabAgentStatus,
-  type TabData,
-  type TabDescriptor,
-  type TabModel,
-} from './tab-model'
+  addPane,
+  activatePane,
+  closePane,
+  createPaneModel,
+  reorderPane,
+  updatePaneTitle,
+  updatePaneActivity,
+  updatePaneAgentStatus,
+  type PaneData,
+  type PaneDescriptor,
+  type PaneModel,
+} from './pane-model'
 
 // ── Settings (re‑exported from settings-domain, q.v.) ─────────────────────
 

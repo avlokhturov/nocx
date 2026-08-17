@@ -6,7 +6,7 @@
  * functions themselves (ADR-0012 §2).
  *
  * Slice ownership:
- *   tabModel   → tab-model.ts  (ordered tabs, active tab, MRU)
+ *   paneModel   → tab-model.ts  (ordered tabs, active tab, MRU)
  *   sidebar    → sidebar-model.ts  (collapsed, active view)
  *   settings   → settings-domain.ts  (mirror, revision, transitions)
  *   profiles   → profiles-model.ts  (connection profiles list)
@@ -28,22 +28,22 @@ import {
 } from './profiles-model'
 import { createSidebarState, type SidebarState } from './sidebar-model'
 import {
-  addTab,
-  activateTab as activateTabModel,
-  closeTab as closeTabModel,
-  createTabModel,
-  reorderTab as reorderTabModel,
-  updateTabActivity as updateTabActivityModel,
-  updateTabAgentStatus as updateTabAgentStatusModel,
-  updateTabTitle as updateTabTitleModel,
-  type TabDescriptor,
-  type TabModel,
-} from './tab-model'
+  addPane,
+  activatePane as activatePaneModel,
+  closePane as closePaneModel,
+  createPaneModel,
+  reorderPane as reorderPaneModel,
+  updatePaneActivity as updatePaneActivityModel,
+  updatePaneAgentStatus as updatePaneAgentStatusModel,
+  updatePaneTitle as updatePaneTitleModel,
+  type PaneDescriptor,
+  type PaneModel,
+} from './pane-model'
 
 // ── Application state tree ─────────────────────────────────────────────────
 
 export interface AppState {
-  tabModel: TabModel
+  paneModel: PaneModel
   sidebar: SidebarState
   settings: SettingsMirror
   profiles: ProfileLists
@@ -52,7 +52,7 @@ export interface AppState {
 
 function createInitialState(): AppState {
   return {
-    tabModel: createTabModel(),
+    paneModel: createPaneModel(),
     sidebar: createSidebarState(),
     settings: createMirror(),
     profiles: createProfileLists(),
@@ -67,39 +67,39 @@ function createInitialState(): AppState {
  *
  * Returns a tuple [state, actions] where `actions` are named transitions
  * that wrap the framework‑neutral transition functions.  Consumers call
- * `actions.addTab(...)`, not `setState(...)` directly.
+ * `actions.addPane(...)`, not `setState(...)` directly.
  */
 export function createAppStore(): [AppState, AppActions] {
   const [state, setState] = createStore<AppState>(createInitialState())
 
   const actions: AppActions = {
     // ── Tab transitions ──────────────────────────────────────────────────
-    addTab: (descriptor: TabDescriptor) => {
-      setState('tabModel', (prev) => addTab(prev, descriptor))
+    addPane: (descriptor: PaneDescriptor) => {
+      setState('paneModel', (prev) => addPane(prev, descriptor))
     },
 
-    activateTab: (tabId: number) => {
-      setState('tabModel', (prev) => activateTabModel(prev, tabId))
+    activatePane: (paneId: number) => {
+      setState('paneModel', (prev) => activatePaneModel(prev, paneId))
     },
 
-    closeTab: (tabId: number) => {
-      setState('tabModel', (prev) => closeTabModel(prev, tabId))
+    closePane: (paneId: number) => {
+      setState('paneModel', (prev) => closePaneModel(prev, paneId))
     },
 
-    reorderTab: (draggedId: number, targetId: number) => {
-      setState('tabModel', (prev) => reorderTabModel(prev, draggedId, targetId))
+    reorderPane: (draggedId: number, targetId: number) => {
+      setState('paneModel', (prev) => reorderPaneModel(prev, draggedId, targetId))
     },
 
-    updateTabTitle: (tabId: number, title: string) => {
-      setState('tabModel', (prev) => updateTabTitleModel(prev, tabId, title))
+    updatePaneTitle: (paneId: number, title: string) => {
+      setState('paneModel', (prev) => updatePaneTitleModel(prev, paneId, title))
     },
 
-    updateTabActivity: (tabId: number, hasActivity: boolean) => {
-      setState('tabModel', (prev) => updateTabActivityModel(prev, tabId, hasActivity))
+    updatePaneActivity: (paneId: number, hasActivity: boolean) => {
+      setState('paneModel', (prev) => updatePaneActivityModel(prev, paneId, hasActivity))
     },
 
-    updateTabAgentStatus: (tabId: number, status: AgentStatus | null) => {
-      setState('tabModel', (prev) => updateTabAgentStatusModel(prev, tabId, status))
+    updatePaneAgentStatus: (paneId: number, status: AgentStatus | null) => {
+      setState('paneModel', (prev) => updatePaneAgentStatusModel(prev, paneId, status))
     },
 
     // ── Sidebar transitions ──────────────────────────────────────────────
@@ -178,19 +178,19 @@ export function createAppStore(): [AppState, AppActions] {
 
 export interface AppActions {
   /** Add a tab to the model and activate it. */
-  addTab: (descriptor: TabDescriptor) => void
+  addPane: (descriptor: PaneDescriptor) => void
   /** Activate a tab by id (updates MRU). */
-  activateTab: (tabId: number) => void
+  activatePane: (paneId: number) => void
   /** Close a tab.  If last tab, opens a fresh terminal. */
-  closeTab: (tabId: number) => void
+  closePane: (paneId: number) => void
   /** Reorder a tab by dragging. */
-  reorderTab: (draggedId: number, targetId: number) => void
+  reorderPane: (draggedId: number, targetId: number) => void
   /** Set a tab's display title. */
-  updateTabTitle: (tabId: number, title: string) => void
+  updatePaneTitle: (paneId: number, title: string) => void
   /** Set a tab's activity indicator. */
-  updateTabActivity: (tabId: number, hasActivity: boolean) => void
+  updatePaneActivity: (paneId: number, hasActivity: boolean) => void
   /** Set a tab's agent status. */
-  updateTabAgentStatus: (tabId: number, status: AgentStatus | null) => void
+  updatePaneAgentStatus: (paneId: number, status: AgentStatus | null) => void
 
   /** Toggle sidebar collapsed state. */
   toggleSidebar: () => void

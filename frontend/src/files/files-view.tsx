@@ -18,7 +18,7 @@
 import { createEffect, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import { createClipboardAccess, type ClipboardAccess } from '../clipboard'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
@@ -44,8 +44,8 @@ import {
  *  tab itself. The canonical comes from files.read (the file's identity —
  *  what the viewer's singletonKey deduplicates on); displayHost is null for
  *  a local file. `origin` is the scope the panel held at click time (minus
- *  its tabId — a tab detail the viewer does not know): the viewer answers
- *  the TabContent `activeOrigin` capability with it, so the origin-following
+ *  its paneId — a tab detail the viewer does not know): the viewer answers
+ *  the PaneContent `activeOrigin` capability with it, so the origin-following
  *  panel keeps showing this machine — and keeps the binding the viewer is
  *  reading through — while the viewer tab is in front (design §5.4). */
 interface FileOpener {
@@ -56,7 +56,7 @@ interface FileOpener {
     canonical: string // from files.read / files.list — the identity
     displayHost: string | null // null for local
     name: string
-    origin: Omit<ActiveOrigin, 'tabId'> | null
+    origin: Omit<ActiveOrigin, 'paneId'> | null
   }): void
 }
 
@@ -441,7 +441,7 @@ export interface FilesViewDeps {
    *  owns the real one. */
   clipboard?: ClipboardAccess
   /** Reactive accessor for the ACTIVE tab's origin — the coordinator wires
-   *  it to TabManager.activeOrigin() through onActiveTabChange, exactly like
+   *  it to PaneManager.activeOrigin() through onActivePaneChange, exactly like
    *  the ports target id. */
   activeOrigin: () => ActiveOrigin | null
 }

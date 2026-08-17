@@ -62,7 +62,7 @@ import {
 } from 'solid-js'
 import { render } from 'solid-js/web'
 import { parseQuickConnect, type ProfileClient } from './profiles'
-import type { Tab } from './tabs'
+import type { Pane } from './panes'
 import { Dialog } from './ui/dialog'
 import { SearchField } from './ui/search-field'
 import { VAULT_OFFER_SETUP, VAULT_OFFER_UNSEAL, addSecretLabel } from './ui/secret-picker'
@@ -227,7 +227,7 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
   readonly kinds = ['command', 'host'] as const
 
   constructor(
-    private newTab: () => Tab,
+    private newPane: () => Pane,
     private newConnection: () => void,
     /** Optional target-needing command ("Forward a port"): activating it
      *  drills into its steps inside the palette. */
@@ -241,7 +241,7 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
         kind: 'command',
         label: 'Local shell',
         detail: 'Open a new local terminal tab',
-        run: () => void this.newTab(),
+        run: () => void this.newPane(),
       },
       {
         // The one command row the caret admits (nocx-d4us): creating a
@@ -278,7 +278,7 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
 
   constructor(
     private profileClient: ProfileClient,
-    private newSSHTab: (profileId: string, host: string, user?: string) => Tab,
+    private newSSHPane: (profileId: string, host: string, user?: string) => Pane,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -292,7 +292,7 @@ export class SSHQuickConnectProvider implements QuickConnectProvider {
       kind: 'host' as const,
       label: p.label,
       detail: p.detail,
-      run: () => void this.newSSHTab(p.id, p.host, p.user),
+      run: () => void this.newSSHPane(p.id, p.host, p.user),
     }))
   }
 }
@@ -308,7 +308,7 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
 
   constructor(
     private profileClient: ProfileClient,
-    private newTabByHost: (host: string, user?: string, port?: number) => Tab,
+    private newPaneByHost: (host: string, user?: string, port?: number) => Pane,
   ) {}
 
   async getItems(): Promise<QuickConnectItem[]> {
@@ -349,7 +349,7 @@ export class SSHAliasQuickConnectProvider implements QuickConnectProvider {
       label: a.label,
       detail: a.detail,
       system: true,
-      run: () => void this.newTabByHost(a.alias, a.user, a.port),
+      run: () => void this.newPaneByHost(a.alias, a.user, a.port),
     }))
   }
 }
@@ -491,7 +491,7 @@ const SECRET_KIND_DETAIL: Record<string, string> = {
 //
 // Contributes nothing to the static list. It answers the dialog's
 // query-dependent fallback: when the typed query parses as a host, offer a
-// Connect entry that opens the same newTabByHost path the alias provider
+// Connect entry that opens the same newPaneByHost path the alias provider
 // uses — nothing is persisted. The dialog only consults it when no saved
 // profile or alias matched, so a mistyped alias can never silently become an
 // ad-hoc connection to a host that merely shares its name.
@@ -502,7 +502,7 @@ export class AdHocQuickConnectProvider implements QuickConnectProvider {
   readonly label = 'Quick Connect'
   readonly kinds = ['host'] as const
 
-  constructor(private newTabByHost: (host: string, user?: string, port?: number) => Tab) {}
+  constructor(private newPaneByHost: (host: string, user?: string, port?: number) => Pane) {}
 
   getItems(): QuickConnectItem[] {
     return []
@@ -529,7 +529,7 @@ export class AdHocQuickConnectProvider implements QuickConnectProvider {
         detail: port != null && port !== 22 ? `port ${port}` : undefined,
         system: true,
         badge: 'ad-hoc',
-        run: () => void this.newTabByHost(host, user, port),
+        run: () => void this.newPaneByHost(host, user, port),
       },
     ]
   }

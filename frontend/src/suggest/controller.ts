@@ -481,7 +481,7 @@ export class CompletionController {
     //   - Ghost showing, dropdown CLOSED: the first Tab opens the dropdown
     //     with the ghosted candidate selected. It does not advance — what
     //     the user is looking at is what they get.
-    //   - Dropdown OPEN: Tab moves to the next candidate, Shift+Tab back.
+    //   - Dropdown OPEN: Pane moves to the next candidate, Shift+Tab back.
     //   - Accept stays Enter (and Right/End for the ghost).
     // Cycling never inserts; the preview is the ghost text.
     if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {

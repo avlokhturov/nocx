@@ -1,6 +1,6 @@
 // The snippet palette's chord: ⌥⌘P (Alt+Meta+P), design §10.1 — checked
 // against the global chords rather than assumed: ⌘, (settings), ⌘⇧P
-// (quick-connect — TAKEN), ⌘⇧O (ports), ⌘T/⌘W/⌘1-9 (TabManager). ⌥⌘P is
+// (quick-connect — TAKEN), ⌘⇧O (ports), ⌘T/⌘W/⌘1-9 (PaneManager). ⌥⌘P is
 // free and matches termic's palette.
 //
 // The predicate is ONE thing, owned here, read by both keyboard boundaries
