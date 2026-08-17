@@ -23,6 +23,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // ── harness ───────────────────────────────────────────────────────────────
@@ -1025,4 +1026,107 @@ func TestLedgerEvents_EveryStoreCallFails(t *testing.T) {
 				row.Payload, row.DurationMs, row.StartedAt, row.EndedAt)
 		}
 	})
+}
+
+// ── the host a row ran on, writer and reader together (nocx-rtg0.25) ──────
+
+// openSSHSession opens a session through the profile resolver and returns
+// its id. The resolver names the host; the stub factory answers the dial.
+func openSSHSession(t *testing.T, conn *websocket.Conn, id int) string {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"kind": "ssh", "profileId": "ssh:test:1",
+	}, id)
+	var r struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &r); err != nil {
+		t.Fatalf("open ssh unmarshal: %v\nraw: %s", err, resp)
+	}
+	if r.Error != nil || r.Result.SessionID == "" {
+		t.Fatalf("open ssh: %+v\nraw: %s", r.Error, resp)
+	}
+	return r.Result.SessionID
+}
+
+// environmentForSession decides where a session is and writes it; the
+// ledger's Environment.Host() reads it back. The two are asserted together,
+// off the real socket into the real store, because each is green alone while
+// they disagree — a read that answers "" for everything matches the local
+// row exactly, and only the ssh row can report it. This is the field
+// history.query's contract calls host, which nocx-rtg0.19 must keep
+// answering once command_history is gone.
+func TestLedgerEntry_SaysWhichHostItRanOn(t *testing.T) {
+	const sshHost = "build.example.com"
+	logger := log.NewSlogAdapter(nil)
+	db := newLedgerStore(t)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	ws := NewWSServer(logger, reg,
+		WithContentDB(db),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return sshHost, &ssh.ConnectConfig{User: "alice", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+
+	localSID := openLocalSession(t, conn)
+	sshSID := openSSHSession(t, conn, 2)
+
+	for i, c := range []struct {
+		entryID string
+		sid     string
+		want    string
+	}{
+		{"local-entry", localSID, ""},
+		{"ssh-entry", sshSID, sshHost},
+	} {
+		_, errObj := ledgerCall(t, conn, "ledger.open",
+			map[string]any{"envelope": ledgerEnv(c.sid, c.entryID, "make test", 1)}, 10+i)
+		if errObj != nil {
+			t.Fatalf("ledger.open %s: %+v", c.entryID, errObj)
+		}
+		row := mustEntry(t, db, c.entryID)
+		if row.Environment == nil {
+			t.Fatalf("%s resolved no environment — the row cannot say which host it ran on", c.entryID)
+		}
+		if got := row.Environment.Host(); got != c.want {
+			t.Fatalf("%s host = %q, want %q", c.entryID, got, c.want)
+		}
+		if row.Environment.ID != row.EnvironmentID {
+			t.Fatalf("%s resolved environment %q for environment_id %q",
+				c.entryID, row.Environment.ID, row.EnvironmentID)
+		}
+	}
+
+	// And the timeline read answers for both rows in its one query.
+	rows, err := db.Ledger().ListEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	hosts := map[string]string{}
+	for _, row := range rows {
+		if row.Environment == nil {
+			t.Fatalf("ListEntries row %q resolved no environment", row.ID)
+		}
+		hosts[row.ID] = row.Environment.Host()
+	}
+	if hosts["local-entry"] != "" || hosts["ssh-entry"] != sshHost {
+		t.Fatalf("ListEntries hosts = %v, want local %q and ssh %q", hosts, "", sshHost)
+	}
 }

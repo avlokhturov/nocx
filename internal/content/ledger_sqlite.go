@@ -206,24 +206,80 @@ func entryDigest(in SubmitEntry) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Entry is the recall read: the entry, its executions, each execution's
-// pinned observation and grant, and its artifacts (metadata only — the
-// recall read never hauls chunk bodies; Artifact fetches those).
+// ── the environment an entry ran in (nocx-rtg0.25) ───────────────────────
+
+// environmentColumns is the environment half of every entry read, LEFT
+// JOINed as `env`. It is a const so the two reads below cannot drift into
+// two shapes, and so the join stays part of the entry query rather than
+// something a caller adds per row: nocx-rtg0.20's ledger.query is built on
+// ListEntries, and one lookup per row is how a page of history becomes a
+// page of queries.
+//
+// LEFT, not INNER: entries.environment_id has a foreign key, so a missing
+// environment cannot happen through this seam — but an INNER join would
+// answer a vanished environment by dropping the entry, which is the one
+// answer worse than "unknown".
+const environmentColumns = `env.id, env.kind, env.endpoint, env.profile_id, env.payload`
+
+// environmentJoin resolves the environment for the entry table aliased `e`.
+const environmentJoin = `LEFT JOIN environments env ON env.id = e.environment_id`
+
+// environmentScan holds the joined columns. Every one is nullable here
+// because the join itself can miss, so the whole record is nil-or-present:
+// the read never fills in a default, which for `endpoint` would be the
+// empty string — a real value meaning the local machine.
+type environmentScan struct {
+	id        sql.NullString
+	kind      sql.NullString
+	endpoint  *string
+	profileID *string
+	payload   sql.NullString
+}
+
+// dest is the scan target list, in environmentColumns order.
+func (r *environmentScan) dest() []any {
+	return []any{&r.id, &r.kind, &r.endpoint, &r.profileID, &r.payload}
+}
+
+// value is the resolved environment, or nil when no environment row carries
+// the entry's environment_id.
+func (r *environmentScan) value() *Environment {
+	if !r.id.Valid {
+		return nil
+	}
+	return &Environment{
+		ID:        r.id.String,
+		Kind:      EnvironmentKind(r.kind.String),
+		Endpoint:  r.endpoint,
+		ProfileID: r.profileID,
+		Payload:   r.payload.String,
+	}
+}
+
+// Entry is the recall read: the entry, its environment, its executions, each
+// execution's pinned observation and grant, and its artifacts (metadata only
+// — the recall read never hauls chunk bodies; Artifact fetches those).
 func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, error) {
 	e := &LedgerEntry{}
-	err := s.db.QueryRowContext(ctx, `SELECT id, ingest_seq, client, digest, environment_id,
-		session_id, cwd, kind, intent, phase, status, conversation_id, submitted_at,
-		started_at, ended_at, duration_ms, sensitivity, reviewed_at, payload
-		FROM entries WHERE id = ?`, id).Scan(
+	var env environmentScan
+	dest := []any{
 		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.SessionID, &e.Cwd,
 		&e.Kind, &e.Intent, &e.Phase, &e.Status, &e.ConversationID, &e.SubmittedAt,
-		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.ReviewedAt, &e.Payload)
+		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.ReviewedAt, &e.Payload,
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.ingest_seq, e.client, e.digest,
+		e.environment_id, e.session_id, e.cwd, e.kind, e.intent, e.phase, e.status,
+		e.conversation_id, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
+		e.sensitivity, e.reviewed_at, e.payload, `+environmentColumns+`
+		FROM entries e `+environmentJoin+` WHERE e.id = ?`, id).
+		Scan(append(dest, env.dest()...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	e.Environment = env.value()
 	execs, err := s.executionsFor(ctx, id)
 	if err != nil {
 		return nil, err
@@ -234,11 +290,13 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 
 // ListEntries returns the limit newest entries, newest first, ordered by
 // ingest_seq — commit order, never by wall clock (two entries in the same
-// millisecond still have an order).
+// millisecond still have an order). Each row carries its environment, joined
+// in this one statement: a page costs one query whatever its length and
+// however many hosts it spans.
 func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, ingest_seq, environment_id, cwd, kind,
-		intent, phase, status, submitted_at
-		FROM entries ORDER BY ingest_seq DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.ingest_seq, e.environment_id, e.cwd,
+		e.kind, e.intent, e.phase, e.status, e.submitted_at, `+environmentColumns+`
+		FROM entries e `+environmentJoin+` ORDER BY e.ingest_seq DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -246,10 +304,15 @@ func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEnt
 	var out []LedgerEntrySummary
 	for rows.Next() {
 		var e LedgerEntrySummary
-		if err := rows.Scan(&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind,
-			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt); err != nil {
+		var env environmentScan
+		dest := []any{
+			&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind,
+			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
+		}
+		if err := rows.Scan(append(dest, env.dest()...)...); err != nil {
 			return nil, err
 		}
+		e.Environment = env.value()
 		out = append(out, e)
 	}
 	return out, rows.Err()
