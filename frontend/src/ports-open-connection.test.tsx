@@ -121,7 +121,7 @@ async function mountManager(createProfile: Mock) {
 
 /** The panel wired as main.tsx wires it, starting in the W1 unavailable
  *  state: the ports target is null and unavailableIn names the host, and
- *  onActiveTabChange feeds later re-scopes exactly as the composition root
+ *  onActivePaneChange feeds later re-scopes exactly as the composition root
  *  does. A ToastHost makes outcomes assertable as rendered toasts. */
 function mountPanel(
   manager: PaneManager,
@@ -129,7 +129,7 @@ function mountPanel(
   onOpenAsConnection: (host: string, user: string | undefined) => void,
 ) {
   const [pid, setPid] = createSignal<string | null>(null)
-  manager.onActiveTabChange = () => setPid(manager.portsTargetId())
+  manager.onActivePaneChange = () => setPid(manager.portsTargetId())
   const pause = createPortsPauseControl()
   render(() => (
     <>

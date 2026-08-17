@@ -143,7 +143,7 @@ async function mountApp(services: FilesPanelServices, clipboard?: ClipboardAcces
   originFor.set(initial, LOCAL_ORIGIN)
 
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(null)
-  manager.onActiveTabChange = () =>
+  manager.onActivePaneChange = () =>
     setActiveOrigin(originFor.get(manager.activeTerminalContent()!) ?? null)
   setActiveOrigin(originFor.get(manager.activeTerminalContent()!) ?? null)
 
@@ -515,8 +515,8 @@ describe('files sidebar view', () => {
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(1))
 
     // The user activates an SSH tab while A's listing is unresolved.
-    const sshTab = manager.newSSHPane('p1', 'host.example', 'alice')
-    originFor.set(sshTab.content, SSH_ORIGIN)
+    const sshPane = manager.newSSHPane('p1', 'host.example', 'alice')
+    originFor.set(sshPane.content, SSH_ORIGIN)
     await vi.waitFor(() => expect(list).toHaveBeenCalledTimes(2))
     await vi.waitFor(() => expect(rowNamed(panel, 'b-only.txt')).not.toBeUndefined())
 
@@ -779,8 +779,8 @@ describe('files sidebar view', () => {
     // Remote: the item is ABSENT — not disabled. Assert the absence
     // explicitly; a test that only checks presence cannot catch the item
     // leaking onto SSH tabs.
-    const sshTab = manager.newSSHPane('p1', 'host.example', 'alice')
-    originFor.set(sshTab.content, SSH_ORIGIN)
+    const sshPane = manager.newSSHPane('p1', 'host.example', 'alice')
+    originFor.set(sshPane.content, SSH_ORIGIN)
     await vi.waitFor(() => expect(rowNamed(panel, 'remote.md')).not.toBeUndefined())
     fireEvent.contextMenu(rowNamed(panel, 'remote.md'), { clientX: 10, clientY: 10 })
     expect(menuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path'])
@@ -866,8 +866,8 @@ describe('files sidebar view', () => {
 
     // Remote + polling (even WITH a reason — the kind check is the guard):
     // nothing. The remote half is what stops the badge becoming wallpaper.
-    const sshTab = manager.newSSHPane('p1', 'host.example', 'alice')
-    originFor.set(sshTab.content, SSH_ORIGIN)
+    const sshPane = manager.newSSHPane('p1', 'host.example', 'alice')
+    originFor.set(sshPane.content, SSH_ORIGIN)
     await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
     await vi.waitFor(() =>
       expect(panel.querySelector('[data-testid="files-polling-badge"]')).toBeNull(),

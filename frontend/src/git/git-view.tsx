@@ -69,7 +69,7 @@ export interface GitViewDeps {
    *  substitute a recorder. */
   urlOpener?: UrlOpener
   /** Reactive accessor for the ACTIVE tab's origin — the coordinator wires
-   *  it to PaneManager.activeOrigin() through onActiveTabChange, exactly
+   *  it to PaneManager.activeOrigin() through onActivePaneChange, exactly
    *  like the files view. */
   activeOrigin: () => ActiveOrigin | null
 }

@@ -63,7 +63,7 @@ export interface TabStrip {
   reorder(tabs: readonly PaneView[]): void
   onActivate: ((paneId: number) => void) | null
   onClose: ((paneId: number) => void) | null
-  onNewTab: (() => void) | null
+  onNewPane: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
   onQuickConnect: (() => void) | null
   onInsertSecret: (() => void) | null
@@ -95,8 +95,8 @@ abstract class TabStripBase implements TabStrip {
   private mounted = false
 
   // Solid stores/signals — set during mount(), used by imperative API
-  private _setTabViews!: Setter<PaneView[]>
-  private _getTabViews!: () => PaneView[]
+  private _setPaneViews!: Setter<PaneView[]>
+  private _getPaneViews!: () => PaneView[]
   private _setDisplay!: (...args: unknown[]) => void
 
   public abstract readonly orientation: Orientation
@@ -104,7 +104,7 @@ abstract class TabStripBase implements TabStrip {
   // Intent callbacks
   onActivate: ((paneId: number) => void) | null = null
   onClose: ((paneId: number) => void) | null = null
-  onNewTab: (() => void) | null = null
+  onNewPane: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
@@ -128,8 +128,8 @@ abstract class TabStripBase implements TabStrip {
       }>({ records: {}, activeId: -1 })
       const [searchQuery, setSearchQuery] = createSignal('')
 
-      this._getTabViews = tabViews
-      this._setTabViews = setTabViews
+      this._getPaneViews = tabViews
+      this._setPaneViews = setTabViews
       this._setDisplay = setDisplay
 
       return (
@@ -150,7 +150,7 @@ abstract class TabStripBase implements TabStrip {
                 />
               </div>
               <div class="tabstrip-actions">
-                <IconButton ariaLabel="New tab" square onClick={() => this.onNewTab?.()}>
+                <IconButton ariaLabel="New tab" square onClick={() => this.onNewPane?.()}>
                   <PlusIcon />
                 </IconButton>
                 <IconButton
@@ -222,7 +222,7 @@ abstract class TabStripBase implements TabStrip {
                 left the caret alone in the bottom corner. As a group they can be
                 placed once, per orientation, by the strip's own CSS. */}
             <div class="tabstrip-actions">
-              <IconButton ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
+              <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
                 <PlusIcon />
               </IconButton>
               <IconButton
@@ -273,7 +273,7 @@ abstract class TabStripBase implements TabStrip {
       })
     }
 
-    this._setTabViews((prev) => [...prev, tab])
+    this._setPaneViews((prev) => [...prev, tab])
 
     // Initialize store entry with current display state.
     this._setDisplay('records', tab.id, {
@@ -294,7 +294,7 @@ abstract class TabStripBase implements TabStrip {
 
   removeTab(paneId: number): void {
     if (!this.mounted) return
-    this._setTabViews((prev) => {
+    this._setPaneViews((prev) => {
       const removed = prev.find((t) => t.id === paneId)
       if (removed) removed.onDisplayChange = null
       return prev.filter((t) => t.id !== paneId)
@@ -318,9 +318,9 @@ abstract class TabStripBase implements TabStrip {
     // insertBefore, even though the node itself survives — keyed identity is
     // necessary here and not sufficient (nocx-82l9.8). Signal setters run their
     // dependent effects synchronously outside a batch, so the DOM is settled by
-    // the time _setTabViews returns and restoring focus here is enough.
+    // the time _setPaneViews returns and restoring focus here is enough.
     const active = document.activeElement
-    this._setTabViews([...tabs])
+    this._setPaneViews([...tabs])
     if (active instanceof HTMLElement && this.container?.contains(active)) {
       active.focus({ preventScroll: true })
     }
@@ -344,7 +344,7 @@ abstract class TabStripBase implements TabStrip {
     const paneId = Number(button.getAttribute('data-pane-id'))
     if (Number.isNaN(paneId)) return
 
-    const tabs = this._getTabViews()
+    const tabs = this._getPaneViews()
     const idx = tabs.findIndex((t) => t.id === paneId)
     if (idx === -1) return
 

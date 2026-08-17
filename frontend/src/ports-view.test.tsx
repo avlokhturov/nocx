@@ -142,7 +142,7 @@ async function mountApp(
   if (profileId !== null) manager.newSSHPane(profileId, 'host.example', 'alice')
 
   const [portsTargetId, setPortsTargetId] = createSignal<string | null>(manager.portsTargetId())
-  manager.onActiveTabChange = () => setPortsTargetId(manager.portsTargetId())
+  manager.onActivePaneChange = () => setPortsTargetId(manager.portsTargetId())
 
   const bar = document.createElement('div')
   bar.id = 'activitybar'

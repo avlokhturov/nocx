@@ -187,10 +187,10 @@ describe('PaneManager', () => {
     manager.closeActivePane()
 
     // Two tabs remain; the neighbour (tab2 at original index 1) is now active
-    const remainingTabs = bar.querySelectorAll('.nocx-tab')
-    expect(remainingTabs.length).toBe(2)
+    const remainingPanes = bar.querySelectorAll('.nocx-tab')
+    expect(remainingPanes.length).toBe(2)
     // The last remaining tab should be active (neighbour)
-    expect(remainingTabs[1].getAttribute('aria-selected') === 'true').toBe(true)
+    expect(remainingPanes[1].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
   it('closing the active tab activates the previously-active tab (MRU), not the visual neighbour', async () => {
@@ -215,10 +215,10 @@ describe('PaneManager', () => {
     // Close tab2. MRU says tab3 should activate, not tab1 (visual neighbour).
     manager.closeActivePane()
 
-    const remainingTabs = bar.querySelectorAll('.nocx-tab')
-    expect(remainingTabs.length).toBe(2)
+    const remainingPanes = bar.querySelectorAll('.nocx-tab')
+    expect(remainingPanes.length).toBe(2)
     // tab3 should now be active (id 3, original index 2)
-    expect(remainingTabs[1].getAttribute('aria-selected') === 'true').toBe(true)
+    expect(remainingPanes[1].getAttribute('aria-selected') === 'true').toBe(true)
   })
 
   // ── closing the last tab leaves exactly one fresh tab ─────────────────
@@ -1155,7 +1155,7 @@ describe('PaneManager', () => {
       tabStrip,
     )
     // Open the initial tab explicitly — the constructor mounts nothing.
-    // Don't await: openInitialPane returns the _initialTabReady promise;
+    // Don't await: openInitialPane returns the _initialPaneReady promise;
     // we assert the rejection through that same promise below.
     void manager.openInitialPane()
 

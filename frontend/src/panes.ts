@@ -376,7 +376,7 @@ export class PaneManager {
   private readonly gate: ClipboardGate
   private readonly banner: ClipboardBanner
   private readonly profileClient: ProfileClient
-  private _initialTabReady: Promise<void> | undefined
+  private _initialPaneReady: Promise<void> | undefined
   private tabStrip: TabStrip
   private readonly bar: HTMLElement
   private readonly verticalHost: HTMLElement
@@ -407,7 +407,7 @@ export class PaneManager {
    *  re-scope to the tab in front. The sidebar's ports view follows the
    *  active tab through this (nocx-wzc4.7); wired by main.tsx to a Solid
    *  signal. */
-  onActiveTabChange?: () => void
+  onActivePaneChange?: () => void
   /** The snippet palette chord (⌥⌘P) was pressed in the active pane —
    *  forwarded from the pane's TerminalContent, whose xterm boundary and
    *  editor arbiter both land here. The composition root opens the
@@ -456,10 +456,10 @@ export class PaneManager {
   }
 
   get initialPaneReady(): Promise<void> {
-    if (!this._initialTabReady) {
+    if (!this._initialPaneReady) {
       throw new Error('initialPaneReady accessed before openInitialPane')
     }
-    return this._initialTabReady
+    return this._initialPaneReady
   }
 
   /** Mount the tab strip and open the initial terminal tab.
@@ -473,16 +473,16 @@ export class PaneManager {
    *  `initialPaneReady` resolves only from terminal content — a non-terminal
    *  first tab must not be able to report the app healthy. */
   openInitialPane(): Promise<void> {
-    if (this._initialTabReady) {
+    if (this._initialPaneReady) {
       throw new Error('openInitialPane called twice; the composition root calls it exactly once')
     }
     this.tabStrip.mount(this.hostFor(this.tabStrip))
     const initialTab = this.newPane()
     const initialContent = initialTab.content as TerminalContent
-    this._initialTabReady = initialContent.ready.then((ok) => {
+    this._initialPaneReady = initialContent.ready.then((ok) => {
       if (!ok) throw new Error('initial tab failed to start')
     })
-    return this._initialTabReady
+    return this._initialPaneReady
   }
   // ── Tab creation ──────────────────────────────────────────────────────
 
@@ -506,8 +506,8 @@ export class PaneManager {
       {
         onSubtitleChange: (subtitle) => paneRef.current?.updateSubtitle(subtitle),
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
-        onPortsTargetChange: () => this.onActiveTabChange?.(),
-        onActiveOriginChange: () => this.onActiveTabChange?.(),
+        onPortsTargetChange: () => this.onActivePaneChange?.(),
+        onActiveOriginChange: () => this.onActivePaneChange?.(),
         onSetupVault: this.onSetupVault,
         onCreateSecret: this.onCreateSecret,
         onSnippetChord: this.onSnippetChord,
@@ -562,8 +562,8 @@ export class PaneManager {
         },
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
-        onActiveOriginChange: () => this.onActiveTabChange?.(),
-        onPortsTargetChange: () => this.onActiveTabChange?.(),
+        onActiveOriginChange: () => this.onActivePaneChange?.(),
+        onPortsTargetChange: () => this.onActivePaneChange?.(),
         onVaultSealed: this.onVaultSealed,
         onHostKeyError: this.onHostKeyError,
         onSetupVault: this.onSetupVault,
@@ -677,7 +677,7 @@ export class PaneManager {
     const old = this.tabStrip
     old.onActivate = null
     old.onClose = null
-    old.onNewTab = null
+    old.onNewPane = null
     old.onReorder = null
 
     // Determine the old and new mount hosts based on orientation.
@@ -727,7 +727,7 @@ export class PaneManager {
       const tab = this.tabs.find((t) => t.id === id)
       if (tab) this.closePane(tab)
     }
-    strip.onNewTab = () => this.newPane()
+    strip.onNewPane = () => this.newPane()
     strip.onReorder = (fromId, toId) => this.reorderPane(fromId, toId)
   }
 
@@ -794,7 +794,7 @@ export class PaneManager {
     })
     await tab.start()
     tab.focus()
-    this.onActiveTabChange?.()
+    this.onActivePaneChange?.()
   }
 
   activateByIndex(index: number): void {

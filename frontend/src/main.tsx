@@ -342,7 +342,7 @@ async function main() {
   // while the command that opens it is being typed; a tab replaces the
   // terminal and cannot do that. The view follows the ACTIVE tab: the
   // target accessor below is a Solid signal fed by PaneManager's
-  // onActiveTabChange, so switching SSH tabs re-scopes the panel, a local
+  // onActivePaneChange, so switching SSH tabs re-scopes the panel, a local
   // tab scopes to the reserved "local" target and shows THIS machine's
   // listeners, and a tab with no ports scope (alias, Settings) shows the
   // no-connection state instead of a stale host's ports (nocx-wzc4.8).
@@ -361,7 +361,7 @@ async function main() {
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
-  tm.onActiveTabChange = () => {
+  tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())

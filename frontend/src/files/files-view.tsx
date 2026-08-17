@@ -441,7 +441,7 @@ export interface FilesViewDeps {
    *  owns the real one. */
   clipboard?: ClipboardAccess
   /** Reactive accessor for the ACTIVE tab's origin — the coordinator wires
-   *  it to PaneManager.activeOrigin() through onActiveTabChange, exactly like
+   *  it to PaneManager.activeOrigin() through onActivePaneChange, exactly like
    *  the ports target id. */
   activeOrigin: () => ActiveOrigin | null
 }
