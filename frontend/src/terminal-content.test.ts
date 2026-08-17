@@ -199,7 +199,16 @@ describe('sandboxed session launch failure', () => {
       null,
       () => {},
       undefined,
-      { sandbox: { workspace: '/workspace', settingsRevision: 0, add: [], remove: [] } },
+      {
+        sandbox: {
+          workspace: '/workspace',
+          settingsRevision: 0,
+          addWritable: [],
+          removeWritable: [],
+          addReadOnly: [],
+          removeReadOnly: [],
+        },
+      },
     )
     const tab = new Tab(
       content,
@@ -221,8 +230,10 @@ describe('sandboxed session launch failure', () => {
     expect(client.openSandboxedSession).toHaveBeenCalledWith(80, 24, {
       workspace: '/workspace',
       settingsRevision: 0,
-      add: [],
-      remove: [],
+      addWritable: [],
+      removeWritable: [],
+      addReadOnly: [],
+      removeReadOnly: [],
     })
     expect(client.openSession).not.toHaveBeenCalled()
     expect(showToast).toHaveBeenCalledWith({
@@ -231,6 +242,50 @@ describe('sandboxed session launch failure', () => {
     })
     expect(requestClose).toHaveBeenCalledOnce()
     tab.close()
+  })
+})
+
+describe('sandboxed session tooltip (ADR-0036 §8)', () => {
+  const onSandboxedChange = vi.fn()
+  it('reports both installed root classes', async () => {
+    const client = makeClient({
+      openSandboxedSession: vi.fn(() =>
+        Promise.resolve(
+          makeSession({
+            sandbox: {
+              backend: 'landlock',
+              workspace: '/w',
+              writableRoots: ['/w', '/extra'],
+              readOnlyRoots: ['/usr', '/opt'],
+            },
+          }),
+        ),
+      ),
+    })
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        hooks: {
+          sandbox: {
+            workspace: '/w',
+            settingsRevision: 0,
+            addWritable: [],
+            removeWritable: [],
+            addReadOnly: [],
+            removeReadOnly: [],
+          },
+          onSandboxedChange,
+        },
+      },
+      client,
+    )
+    try {
+      expect(tab.tooltip).toContain('writable: /w, /extra')
+      expect(tab.tooltip).toContain('read-only: /usr, /opt')
+      expect(onSandboxedChange).toHaveBeenCalledWith(true)
+    } finally {
+      teardown()
+    }
   })
 })
 

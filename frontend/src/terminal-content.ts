@@ -1971,15 +1971,16 @@ export class TerminalContent extends BaseTabContent {
         this._applyIntegration(fact)
       })
       // Sandboxed session: flip the tab's lock/shield marker (immutable for
-      // the tab's lifetime) and name backend + writable roots in the tooltip
-      // (ADR-0033 §3.3).
+      // the tab's lifetime) and name backend + both installed root classes in
+      // the tooltip (ADR-0036 §8).
       const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
       this.hooks.onSandboxedChange?.(sandboxInfo != null)
       if (sandboxInfo) {
         const writable = sandboxInfo.writableRoots.join(', ')
+        const readOnly = sandboxInfo.readOnlyRoots.join(', ')
         this.host.setTitle(sandboxInfo.workspace || session.cwd || '')
         this.host.updateTooltip(
-          `${session.cwd ? session.cwd + ' (initial cwd)\n' : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable}`,
+          `${session.cwd ? session.cwd + ' (initial cwd)\n' : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable} — read-only: ${readOnly}`,
         )
       }
       // The statement is OBSERVED: until the first marker arrives, an auto

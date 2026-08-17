@@ -532,19 +532,21 @@ export class TabManager {
     return tab
   }
 
-  /** Create a new sandboxed local terminal tab (ADR-0034 §4.2): opens a
-   *  filesystem-isolated session in the given workspace with the permission
-   *  deltas the launch dialog confirmed. The backend canonicalizes the
-   *  workspace, reads the baseline from `settingsRevision`, and enforces the
-   *  sandbox before the session is registered; a failure rejects the open
-   *  and the tab closes. The launch object is immutable and never mutated
-   *  after the tab is created (ADR-0034 invariant 8/9). */
+  /** Create a new sandboxed local terminal tab (ADR-0036 §4): opens a
+   *  filesystem-isolated session in the given workspace with the four
+   *  class-scoped permission deltas the launch dialog confirmed. The backend
+   *  canonicalizes the workspace, reads both baselines from `settingsRevision`,
+   *  and enforces the sandbox before the session is registered; a failure
+   *  rejects the open and the tab closes. The launch object is immutable and
+   *  never mutated after the tab is created (ADR-0036 §2.9). */
   newSandboxedTab(workspace: string, launch: SandboxLaunch): Tab {
     const request: SandboxRequest = {
       workspace,
       settingsRevision: launch.settingsRevision,
-      add: [...launch.add],
-      remove: [...launch.remove],
+      addWritable: [...launch.addWritable],
+      removeWritable: [...launch.removeWritable],
+      addReadOnly: [...launch.addReadOnly],
+      removeReadOnly: [...launch.removeReadOnly],
     }
     const tabRef = { current: undefined as Tab | undefined }
     const content = new TerminalContent(
