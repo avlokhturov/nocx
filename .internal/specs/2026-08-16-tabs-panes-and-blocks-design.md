@@ -340,9 +340,7 @@ after, and this design puts it in both.
    is it still unseen on the other side?
 3. **How eviction and restore meet in the UI.** ADR-0019 §7 requires the horizon to be
    visible; what it looks like is undesigned.
-4. **The order of the cutover and this model.** `nocx-rtg0.3` makes the ledger live;
-   panes and blocks land on it. Which goes first, and what runs on `command_history` in
-   between.
+4. ~~**The order of the cutover and this model.**~~ **Answered 2026-08-17, §14.**
 5. **Whether a pane can be dragged between workspaces while a subtree move is in flight.**
    §4.4 of the workspaces design left the atomicity model undesigned and required a partial
    move to fail closed; that requirement is inherited unchanged.
@@ -360,3 +358,42 @@ after, and this design puts it in both.
 
 Out of scope: any authority behaviour, the fence, multi-window, asymmetric pane layouts,
 nested panes, and any repository registry outliving a pane.
+
+## 14. The order, and why (answers §12 question 4)
+
+Five epics, and the sequence is forced by which of them share files rather than by which
+feels more important.
+
+| #   | Epic                           | What it is                                                           |
+| --- | ------------------------------ | -------------------------------------------------------------------- |
+| 1   | `nocx-ehkvy`                   | the rename: the tree calls a pane a pane                             |
+| 2   | `nocx-rtg0.3` + `nocx-rtg0.19` | the cutover: `ledger.*` on the wire, then `command_history` **dies** |
+| 3   | `nocx-isoph`                   | the backend owns workspace → tab → pane                              |
+| 4   | `nocx-8m2x6`                   | drag: two panes in one tab, and back out                             |
+| 5   | `nocx-l21ib`                   | restore                                                              |
+
+**The rename is first because it is cheapest first.** §11 already says so; what is added
+here is that 2 and 3 are exactly the two steps that put the word into a schema and a wire
+contract, so anything after them pays a migration to move it.
+
+**The cutover comes before the model**, which is the question §12 asked. Both edit the same
+store, so they cannot run together, and the direction is decided by what the alternative
+would cost: blocks anchor on `pane_id`, `command_history` has no such column and stores no
+output at all, so writing blocks there first and moving them afterwards is precisely the
+compatibility shim AGENTS.md forbids in a greenfield tree. Nothing runs on `command_history`
+in between — it dies in step 2 and the ledger is live from that commit.
+
+**Drag and restore both come after the model** for the same one-owner reason: both are
+operations _on_ the chain, and building either against a renderer-owned tab would give the
+invariant two owners again — the defect §4.1 exists to close.
+
+`nocx-rtg0.19` was filed on 2026-08-17 because it did not exist: twenty-one beads under
+`nocx-rtg0` and not one of them deleted the table. The decision lived in §6.2 and in a
+coordinator's head, which is how AGENTS.md says an intention evaporates between rounds.
+Nothing is converted — no migration, on the owner's confirmation the same day — so the rows
+in an existing file go with the table, and the commit has to say that in words rather than
+leave it inferred from an absent function.
+
+**Only the 1 → 3 edge is recorded in the backlog as a dependency.** 2 → 3 and 3 → 4/5 are
+sequencing the coordinator holds, not blocking edges: `bd` edges mean "these touch the same
+code", and inflating them is what once made `bd ready` unusable at 68 issues.
