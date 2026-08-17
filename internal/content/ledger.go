@@ -813,12 +813,23 @@ const MaxLedgerPageLimit = 200
 //     stamp. It is a question about time, and seq cannot answer one. It is
 //     deliberately not ended_at, which is NULL while a command runs and
 //     would silently drop every running entry from a time window.
+//
+// Text is the recall overlay's search box, and it is deliberately the SAME
+// predicate the interim history path has answered since nocx-ms7v: a
+// case-insensitive substring over the recorded intent, applied WITHIN the
+// rung. Not a pattern and not full-text — a needle containing % or _ matches
+// those characters literally, because the box is a search box and never a
+// grammar the user has to learn. Empty is no filter, which is also what an
+// absent one means on the wire. Full-text search is a different question with
+// a different owner (ledger.search, nocx-rtg0.21); this field exists so the
+// cutover off command_history is like for like rather than a feature.
 type LedgerQuery struct {
 	Scope         Scope
 	EnvironmentID string
 	Cwd           string
 	Kind          EntryKind
 	Status        EntryStatus
+	Text          string
 	Since         *int64
 	Before        *int64
 	Limit         int

@@ -154,6 +154,10 @@ type ledgerGetResponse struct {
 //	environmentId — required for scope=directory and scope=host
 //	cwd           — required for scope=directory
 //	kind, status  — optional; the closed enums, refused when unknown
+//	text          — optional; the search box, a case-insensitive substring
+//	                over the intent within the rung. history.query's filter
+//	                (nocx-ms7v) over the ledger's column, so the overlay's
+//	                box means the same thing after the cutover as before it
 //	since         — optional; a wall-clock floor on submitted_at
 //	before        — optional; the paging cursor, an ingest_seq
 //	limit         — optional; <1 → 50, above the ceiling → the ceiling
@@ -163,6 +167,7 @@ type ledgerQueryParams struct {
 	Cwd           *string `json:"cwd"`
 	Kind          *string `json:"kind"`
 	Status        *string `json:"status"`
+	Text          *string `json:"text"`
 	Since         *int64  `json:"since"`
 	Before        *int64  `json:"before"`
 	Limit         *int    `json:"limit"`
@@ -451,6 +456,15 @@ func ledgerQueryOf(p ledgerQueryParams) (content.LedgerQuery, string) {
 		default:
 			return q, "status must be one of pending, running, success, failure, interrupted, unknown"
 		}
+	}
+	// Absent and empty are the same state on the wire — no filter — exactly
+	// as history.query treats them: the client omits the field when the search
+	// box is empty, and clearing the box sends "". The needle crosses
+	// VERBATIM: it is bound as a parameter, never spliced into SQL, and it is
+	// not trimmed or case-folded here, because the store owns the matching
+	// rule and a second owner would be a second semantics.
+	if p.Text != nil {
+		q.Text = *p.Text
 	}
 	if p.Since != nil {
 		if *p.Since < 0 {

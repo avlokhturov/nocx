@@ -252,6 +252,74 @@ func TestQueryEntriesStatusExcludesEveryOtherStatus(t *testing.T) {
 	wantOnly(t, page, bad)
 }
 
+// text is the recall overlay's search box, and it is the SAME predicate
+// history.query has answered from command_history since nocx-ms7v: a
+// case-insensitive substring over the recorded intent, applied WITHIN the
+// rung. It is instr(), not LIKE, so "%" and "_" in the needle are literal
+// characters and there is no wildcard grammar to learn — a search box that
+// meant one thing before the cutover and another after it is a regression
+// the user would meet as "my search stopped working" (nocx-rtg0.26).
+func TestQueryEntriesTextExcludesEveryOtherIntent(t *testing.T) {
+	_, led := newLedger(t)
+	envReady(t, led, "local")
+	envReadyHost(t, led, "remote", "deploy@prod.example.com")
+
+	here := entryID(1)
+	upper := entryID(2)
+	unrelated := entryID(3)
+	elsewhere := entryID(4)
+	remote := entryID(5)
+	decoy := entryID(6)
+	literal := entryID(7)
+	submitAt(t, led, here, "local", "/repo", content.EntryShell, "make deploy")
+	submitAt(t, led, upper, "local", "/repo", content.EntryShell, "Make Deploy PROD")
+	submitAt(t, led, unrelated, "local", "/repo", content.EntryShell, "rm -rf build")
+	submitAt(t, led, elsewhere, "local", "/other", content.EntryShell, "make deploy")
+	submitAt(t, led, remote, "remote", "/repo", content.EntryShell, "make deploy")
+	// A LIKE pattern of "100%_done" matches this one — % any run, _ any one
+	// character — and instr() does not. It is here so the literal case is
+	// proved by exclusion rather than by the survivor alone.
+	submitAt(t, led, decoy, "local", "/repo", content.EntryShell, "1000-and-done")
+	submitAt(t, led, literal, "local", "/repo", content.EntryShell, "grep '100%_done'")
+
+	t.Run("case-insensitive, and every intent that does not contain it is out", func(t *testing.T) {
+		page := queryOK(t, led, content.LedgerQuery{
+			Scope: content.ScopeEverywhere, Text: "DEPLOY", Limit: 10,
+		})
+		wantOnly(t, page, remote, elsewhere, upper, here)
+	})
+	t.Run("the filter is applied within the rung, never instead of it", func(t *testing.T) {
+		page := queryOK(t, led, content.LedgerQuery{
+			Scope: content.ScopeDirectory, EnvironmentID: "local", Cwd: "/repo",
+			Text: "deploy", Limit: 10,
+		})
+		wantOnly(t, page, upper, here)
+	})
+	t.Run("percent and underscore are literal characters, not wildcards", func(t *testing.T) {
+		page := queryOK(t, led, content.LedgerQuery{
+			Scope: content.ScopeEverywhere, Text: "100%_done", Limit: 10,
+		})
+		wantOnly(t, page, literal)
+	})
+	t.Run("the empty needle is no filter at all", func(t *testing.T) {
+		page := queryOK(t, led, content.LedgerQuery{
+			Scope: content.ScopeEverywhere, Text: "", Limit: 10,
+		})
+		wantOnly(t, page, literal, decoy, remote, elsewhere, unrelated, upper, here)
+	})
+	t.Run("a needle nothing matches is an empty page from a store that has rows", func(t *testing.T) {
+		page := queryOK(t, led, content.LedgerQuery{
+			Scope: content.ScopeEverywhere, Text: "zzz-no-such-command", Limit: 10,
+		})
+		wantOnly(t, page)
+		// The distinction the overlay renders as source=store rather than
+		// source=session: the search found nothing, the ledger is not empty.
+		if !page.HasRows {
+			t.Fatal("hasRows is false while the ledger holds every row the needle missed")
+		}
+	})
+}
+
 // before is the PAGING cursor and it reads ingest_seq — the design's total
 // order — never a wall clock and never the old path's rowid.
 func TestQueryEntriesBeforePagesOnSeqAndExcludesTheRowsAlreadySeen(t *testing.T) {
@@ -356,7 +424,7 @@ func TestQueryEntriesHasRowsSeparatesEmptyAnswerFromEmptyStore(t *testing.T) {
 // of the rung and of every filter, because retention is store-wide. It
 // exists so a search under retention does not present a partial history as
 // the whole one (§5.4).
-func TestQueryEntriesCoverageIsStoreWideAndIndependentOfTheRung(t *testing.T) {
+func TestQueryEntriesCoverageIsStoreWideAndIndependentOfEveryFilter(t *testing.T) {
 	_, led := newLedger(t)
 	ctx := context.Background()
 	envReady(t, led, "local")
@@ -385,6 +453,31 @@ func TestQueryEntriesCoverageIsStoreWideAndIndependentOfTheRung(t *testing.T) {
 	}
 	if *page.Coverage != *row.EndedAt {
 		t.Fatalf("Coverage = %d, want the store-wide oldest ended_at %d", *page.Coverage, *row.EndedAt)
+	}
+
+	// And the text filter is not an exception to it. A search that excludes
+	// the oldest row still reports the oldest row's horizon: coverage says how
+	// far back the STORE can see, so the overlay can tell the user their
+	// search only looked at what retention left — a horizon that shrank to
+	// the matches would say the opposite, and would say it most loudly when
+	// the search found nothing.
+	searched := queryOK(t, led, content.LedgerQuery{
+		Scope: content.ScopeEverywhere, Text: "deploy", Limit: 10,
+	})
+	wantOnly(t, searched, entryID(2))
+	if searched.Coverage == nil || *searched.Coverage != *row.EndedAt {
+		t.Fatalf("Coverage under a text filter = %v, want the store-wide oldest ended_at %d",
+			searched.Coverage, *row.EndedAt)
+	}
+	// The same for a needle nothing matches: an empty page still states the
+	// store's horizon.
+	missed := queryOK(t, led, content.LedgerQuery{
+		Scope: content.ScopeEverywhere, Text: "zzz-no-such-command", Limit: 10,
+	})
+	wantOnly(t, missed)
+	if missed.Coverage == nil || *missed.Coverage != *row.EndedAt {
+		t.Fatalf("Coverage under a needle that matched nothing = %v, want the store-wide oldest ended_at %d",
+			missed.Coverage, *row.EndedAt)
 	}
 }
 
