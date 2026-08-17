@@ -192,11 +192,18 @@ type agentRunDelta struct {
 
 // agentRunState is the agent.runState notification: the run's terminal
 // state. error is present only for failed, and it is a sentence a person
-// reads, never a Go error string (design §7).
+// reads, never a Go error string (design §7). droppedDeltas is present only
+// when the live view is incomplete: the wire refused one or more
+// agent.runDelta frames (a full outbound queue — outbound's deliberate
+// non-blocking policy), so the renderer must not read the block it received
+// as a complete answer. The durable answer is whole either way — every
+// chunk was persisted before the notify — so the marker is a live-view
+// bound, never a reason to treat the run as failed (nocx-dw3.1).
 type agentRunState struct {
-	RunID int64  `json:"runId"`
-	State string `json:"state"`
-	Error string `json:"error,omitempty"`
+	RunID         int64  `json:"runId"`
+	State         string `json:"state"`
+	Error         string `json:"error,omitempty"`
+	DroppedDeltas int    `json:"droppedDeltas,omitempty"`
 }
 
 // agentApprovalRequested is the agent.approvalRequested notification (design
@@ -529,7 +536,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		h.pendingRunsMu.Lock()
 		delete(h.pendingRuns, rc.runID)
 		h.pendingRunsMu.Unlock()
-		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
+		h.terminalize(ctx, rc, 0, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
 	}
 }
@@ -610,6 +617,13 @@ type askRunContext struct {
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
 	grant *content.Grant
+	// droppedBefore is the live-view drop count recorded before a
+	// suspension: deltas the wire refused while THIS stream ran. The
+	// resume re-drives the same run (agent.approve), so the count must
+	// survive the boundary — the visible gap describes the whole answer,
+	// not just the last Ask invocation. Written by suspendForApproval into
+	// the pendingRuns copy; never wire-facing.
+	droppedBefore int
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
 	// names. The resume passes the SAME attempt so the middleware's
@@ -626,6 +640,13 @@ type askRunContext struct {
 // terminalize. Every store touch goes through the operation (short
 // acquisitions); the gate is never held for the stream's duration.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	// dropped counts the deltas the wire refused while THIS stream ran. It
+	// is declared before the context assembly because the reference-failure
+	// path terminalizes below it. The stream is re-driven by a resume with
+	// the SAME run (agent.approve), so the count starts from what a prior
+	// attempt recorded — the visible gap describes the whole answer, never
+	// just the last Ask invocation.
+	dropped := rc.droppedBefore
 	// The gate deltas may not pass before: a delta persisted before the
 	// streaming transition commits would be a delta outside the run's
 	// non-terminal span.
@@ -665,7 +686,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			return e
 		})
 		if frameErr != nil {
-			h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
+			h.terminalize(ctx, rc, dropped, content.RunFailed, content.TermFailed,
 				"a referenced frame could not be read", r)
 			return
 		}
@@ -701,12 +722,25 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		}); persistErr != nil {
 			return persistErr
 		}
-		_ = r.TryNotify("agent.runDelta", mustMarshal(agentRunDelta{
+		// The wire may refuse the delta: a full outbound queue or an
+		// exhausted byte budget takes outbound's deliberate overflow path
+		// and the frame is dropped. That is safe BECAUSE the ledger
+		// persisted the chunk above — the answer on disk is whole. What
+		// must never happen is the drop going unnoticed: a hole in the
+		// live view that reads as a complete answer. Count it — the
+		// terminal agent.runState carries the count, so the renderer can
+		// mark the gap (a visible bound is the feature; a silent
+		// truncation is the defect, the bead's criterion 1). The drop must
+		// not abort the stream: returning the error would kill the run
+		// over a dropped REFRESHABLE notification.
+		if err := r.TryNotify("agent.runDelta", mustMarshal(agentRunDelta{
 			RunID:   rc.runID,
 			EntryID: rc.answerEntryID,
 			Seq:     seq,
 			Text:    text,
-		}))
+		})); err != nil {
+			dropped++
+		}
 		seq++
 		return nil
 	})
@@ -719,18 +753,18 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		var apErr *assistant.ApprovalRequestedError
 		var egErr *assistant.EgressRequestedError
 		if errors.As(err, &apErr) && apErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, apErr.Request, nil)
+			h.suspendForApproval(ctx, rc, r, dropped, apErr.Request, nil)
 			return
 		}
 		if errors.As(err, &egErr) && egErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, nil, egErr.Request)
+			h.suspendForApproval(ctx, rc, r, dropped, nil, egErr.Request)
 			return
 		}
 		reason, sentence := classifyAskFailure(err)
-		h.terminalize(ctx, rc, content.RunFailed, reason, sentence, r)
+		h.terminalize(ctx, rc, dropped, content.RunFailed, reason, sentence, r)
 		return
 	}
-	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
+	h.terminalize(ctx, rc, dropped, content.RunCompleted, content.TermCompleted, "", r)
 }
 
 // suspendForApproval moves the run to awaiting_approval and sends the
@@ -739,7 +773,13 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // mid-answer — even though the notification itself was one-shot. The run is
 // NOT terminalized: the person's answer resumes it (agent.approve) or
 // terminalizes it (decline).
-func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
+//
+// dropped is the live-view drop count the suspending stream accumulated;
+// it is recorded into the stored stream context so the resume's or the
+// decline's terminal close carries the WHOLE run's count — a gap observed
+// before the question reached the person is still a gap in the live view
+// after the resume's terminal close.
+func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, dropped int, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
 	}); err != nil {
@@ -747,6 +787,15 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		// by another path). The question is moot; nothing to render.
 		return
 	}
+	// Carry the drops across the suspension: the resume re-drives this
+	// same context (runAskStream starts from rc.droppedBefore), and the
+	// decline terminalizes with it too.
+	h.pendingRunsMu.Lock()
+	if stored, ok := h.pendingRuns[rc.runID]; ok {
+		stored.droppedBefore = dropped
+		h.pendingRuns[rc.runID] = stored
+	}
+	h.pendingRunsMu.Unlock()
 	n := agentApprovalRequested{Reason: "policy"}
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
@@ -822,7 +871,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		// says a person declined (criterion 2, no-half), and the withheld
 		// egress bytes — if any — are dropped: the person said don't send.
 		h.approvals.ClearRetained(ap)
-		h.terminalize(ctx, rc, content.RunFailed, content.TermAgentDeclined,
+		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermAgentDeclined,
 			"the run was declined", h.r)
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
 		return
@@ -843,7 +892,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 		h.resumeRun(taskCtx, rc, h.r)
 	}}); rej != nil {
-		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
+		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
 		return
@@ -900,7 +949,12 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 // cancels the stream's ctx (that is how the run got here), and a cancelled
 // ctx would fail the very write that closes the run. WithoutCancel keeps
 // the terminal close independent of the connection's fate.
-func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
+//
+// dropped is the run's live-view drop count (deltas the wire refused): the
+// notification carries it so the renderer can mark the gap. It is a
+// live-view bound, never a terminal-state change — the durable answer is
+// whole, so the run still closes with the state it earned.
+func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, dropped int, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question.
 	h.pendingRunsMu.Lock()
@@ -925,9 +979,10 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state 
 		return
 	}
 	_ = r.TryNotify("agent.runState", mustMarshal(agentRunState{
-		RunID: rc.runID,
-		State: string(state),
-		Error: sentence,
+		RunID:         rc.runID,
+		State:         string(state),
+		Error:         sentence,
+		DroppedDeltas: dropped,
 	}))
 }
 

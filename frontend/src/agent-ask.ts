@@ -270,6 +270,19 @@ export class AgentInputTarget implements InputTarget {
         // block was never associated: nothing to close.
         return
       }
+      // A dropped live delta is a visible bound (the bead's criterion 1):
+      // the wire refused one or more agent.runDelta frames, so the block
+      // must not read as a complete answer. The durable answer is whole —
+      // every chunk was persisted before the notify — so the run still
+      // closes with the state it earned; the gap is marked, never turned
+      // into a failure (nocx-dw3.1).
+      if ((s.droppedDeltas ?? 0) > 0) {
+        handle.append(
+          s.droppedDeltas === 1
+            ? '— part of the answer was dropped while streaming; the full answer was saved —'
+            : `— ${s.droppedDeltas} chunks of the answer were dropped while streaming; the full answer was saved —`,
+        )
+      }
       if (s.state === 'completed' || s.state === 'cancelled') {
         handle.close('success', undefined, handle.el.dataset.answeredBy)
       } else if (s.state === 'failed' || s.state === 'interrupted') {
