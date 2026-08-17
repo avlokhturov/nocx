@@ -1,6 +1,6 @@
 package transport
 
-// pane.close and the capture scope (nocx-tsajw): a closed pane's pending
+// secrets.paneClosed and the capture scope (nocx-tsajw): a closed pane's pending
 // credential dies with it, and only it. Every test here runs TWO panes on ONE
 // connection, because that is the arrangement the defect lives in — the old
 // connection-keyed destroy could not express "one of two panes closed" (it
@@ -45,19 +45,19 @@ func recordOnPane(t *testing.T, conn *websocket.Conn, line, paneID string, id in
 	return ack
 }
 
-// sendPaneClose sends the pane.close notification the renderer sends when a pane
+// sendPaneClosed sends the secrets.paneClosed notification the renderer sends when a pane
 // closes. The params are marshaled from the transport's own struct so the
 // behavior test doubles as the over-the-wire conformance check: the shape the
 // Go side declares is the shape the server acts on.
-func sendPaneClose(t *testing.T, conn *websocket.Conn, paneID string) {
+func sendPaneClosed(t *testing.T, conn *websocket.Conn, paneID string) {
 	t.Helper()
-	payload, err := json.Marshal(paneCloseParams{PaneID: paneID})
+	payload, err := json.Marshal(paneClosedParams{PaneID: paneID})
 	if err != nil {
-		t.Fatalf("marshal pane.close params: %v", err)
+		t.Fatalf("marshal secrets.paneClosed params: %v", err)
 	}
-	frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"pane.close","params":%s}`, payload)
+	frame := fmt.Sprintf(`{"jsonrpc":"2.0","method":"secrets.paneClosed","params":%s}`, payload)
 	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
-		t.Fatalf("write pane.close: %v", err)
+		t.Fatalf("write secrets.paneClosed: %v", err)
 	}
 }
 
@@ -111,7 +111,7 @@ func TestPaneClose_DestroysOnlyThatPanesCaptures(t *testing.T) {
 	captureA, captureB := ackA.Captures[0].ID, ackB.Captures[0].ID
 
 	// The closing event: pane-a dies, pane-b does not.
-	sendPaneClose(t, conn, "pane-a")
+	sendPaneClosed(t, conn, "pane-a")
 
 	if code := saveCapture(t, conn, captureA, 3); code != -32010 {
 		t.Fatalf("save of pane-a's capture after its pane closed = code %d, want -32010 (capture unknown)", code)
@@ -122,7 +122,7 @@ func TestPaneClose_DestroysOnlyThatPanesCaptures(t *testing.T) {
 }
 
 // TestPaneClose_OtherConnectionsPaneIdIsUntouchable: the pane identity is
-// renderer-minted and opaque, so a pane.close from ONE connection must not
+// renderer-minted and opaque, so a secrets.paneClosed from ONE connection must not
 // destroy the same-named pane's captures on ANOTHER connection — the pair key
 // (connection, pane) is the authorization boundary, not the id.
 func TestPaneClose_OtherConnectionsPaneIdIsUntouchable(t *testing.T) {
@@ -143,13 +143,13 @@ func TestPaneClose_OtherConnectionsPaneIdIsUntouchable(t *testing.T) {
 	ackB := recordOnPane(t, connB, "TOKEN=mmm-nnn-ooo-ppp-qqq-rrr-444", "pane-1", 2)
 
 	// connA closes ITS pane-1: connB's pane-1 must be untouched.
-	sendPaneClose(t, connA, "pane-1")
+	sendPaneClosed(t, connA, "pane-1")
 
 	if code := saveCapture(t, connA, ackA.Captures[0].ID, 3); code != -32010 {
-		t.Fatalf("connA's capture after its own pane.close = code %d, want -32010", code)
+		t.Fatalf("connA's capture after its own secrets.paneClosed = code %d, want -32010", code)
 	}
 	if code := saveCapture(t, connB, ackB.Captures[0].ID, 4); code != 0 {
-		t.Fatalf("connB's same-named capture after connA's pane.close = code %d, want success", code)
+		t.Fatalf("connB's same-named capture after connA's secrets.paneClosed = code %d, want success", code)
 	}
 }
 
@@ -236,7 +236,7 @@ func TestTransportDisconnect_DestroysEverythingOnTheConnection(t *testing.T) {
 	}
 }
 
-// TestPaneClose_RejectsMalformedNotification: a pane.close with no paneId or a
+// TestPaneClose_RejectsMalformedNotification: a secrets.paneClosed with no paneId or a
 // non-object payload is refused by the validator before the handler; the
 // capture stays pending (a notification has no response, so the assertion is
 // that nothing was destroyed).
@@ -252,25 +252,25 @@ func TestPaneClose_RejectsMalformedNotification(t *testing.T) {
 	capture := ack.Captures[0].ID
 
 	for _, frame := range []string{
-		`{"jsonrpc":"2.0","method":"pane.close","params":{}}`,
-		`{"jsonrpc":"2.0","method":"pane.close","params":"not-an-object"}`,
+		`{"jsonrpc":"2.0","method":"secrets.paneClosed","params":{}}`,
+		`{"jsonrpc":"2.0","method":"secrets.paneClosed","params":"not-an-object"}`,
 	} {
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
-			t.Fatalf("write malformed pane.close: %v", err)
+			t.Fatalf("write malformed secrets.paneClosed: %v", err)
 		}
 	}
 
 	if code := saveCapture(t, conn, capture, 2); code != 0 {
-		t.Fatalf("capture after malformed pane.close = code %d, want success", code)
+		t.Fatalf("capture after malformed secrets.paneClosed = code %d, want success", code)
 	}
 }
 
 // TestPaneClose_DTOConformsToContract pins the Go side of the wire shape: the
-// struct the handler parses marshals to exactly what contracts/pane.close
+// struct the handler parses marshals to exactly what contracts/secrets.paneClosed
 // declares (additionalProperties false, paneId required).
 func TestPaneClose_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "pane.close.schema.json")
-	cases := map[string]paneCloseParams{
+	schema := loadSchema(t, "secrets.paneClosed.schema.json")
+	cases := map[string]paneClosedParams{
 		"typical pane": {PaneID: "3f2a5c1e-8b0d-4e6a-9f2c-1d0b3e4a5f6a"},
 		"minimal pane": {PaneID: "1"},
 		"long pane id": {PaneID: strings.Repeat("x", 128)},
@@ -281,7 +281,7 @@ func TestPaneClose_DTOConformsToContract(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
-			validateJSON(t, schema, raw, "pane.close params DTO")
+			validateJSON(t, schema, raw, "secrets.paneClosed params DTO")
 		})
 	}
 }

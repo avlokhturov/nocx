@@ -31,6 +31,11 @@ type LayoutService interface {
 	// The creates take their first member with them, because a container
 	// with none may not exist even for the length of a statement
 	// (nocx-isoph.3, design §4.1): the create IS where the content goes.
+	// Snapshot is the whole chain in one answer, and the only read here that
+	// no write is checked against: it exists for the renderer, which draws
+	// itself from it (nocx-isoph.4).
+	Snapshot(ctx context.Context) (content.LayoutSnapshot, error)
+
 	CreateWorkspace(ctx context.Context, ws content.Workspace, firstTab content.Tab, firstPane content.Pane) (content.Created[content.NewWorkspace], error)
 	RenameWorkspace(ctx context.Context, id, name string) (content.Workspace, error)
 	ReorderWorkspaces(ctx context.Context, ids []string) ([]content.Workspace, error)
@@ -48,6 +53,10 @@ type LayoutService interface {
 
 	CreatePane(ctx context.Context, pane content.Pane) (content.Created[content.Pane], error)
 	MovePane(ctx context.Context, id, tabID string) (content.Pane, error)
+	// DeletePane takes the replacement for the same reason the other two
+	// closes do: removing the last pane can empty the application, and the
+	// tab that appears then has a durable id, so it is the frontend's.
+	DeletePane(ctx context.Context, id string, next content.Replacement) error
 }
 
 // LayoutOperation is the typed operation for the layout domain. Its gate is
@@ -154,4 +163,18 @@ func (s *layoutService) MovePane(ctx context.Context, id, tabID string) (content
 		return content.Pane{}, err
 	}
 	return s.layout.MovePane(ctx, id, tabID)
+}
+
+func (s *layoutService) DeletePane(ctx context.Context, id string, next content.Replacement) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.layout.DeletePane(ctx, id, next)
+}
+
+func (s *layoutService) Snapshot(ctx context.Context) (content.LayoutSnapshot, error) {
+	if err := s.guard.check(); err != nil {
+		return content.LayoutSnapshot{}, err
+	}
+	return s.layout.Snapshot(ctx)
 }

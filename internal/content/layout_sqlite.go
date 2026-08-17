@@ -235,6 +235,51 @@ func insertWorkspace(ctx context.Context, db execer, ws Workspace, digest string
 	return err
 }
 
+// Snapshot answers with the whole chain, by asking the three readers that
+// already answer each rung (nocx-isoph.4). It writes no SQL of its own on
+// purpose: "how are a workspace's tabs ordered" and "which panes are in this
+// tab" are questions with an owner each, and a fourth statement answering
+// them again is the second implementation AGENTS.md names — the two agree
+// until the day one of them learns about a column.
+//
+// The cost of that choice is 1 + N + N·M statements against a local file for
+// a strip a person can see; the cost of the alternative is a third place that
+// has to learn what `ORDER BY position, id` means. Consistency is not bought
+// by a transaction here but by WHERE this runs: every layout write goes
+// through the content domain's single operation lane, and so does the handler
+// that calls this, so nothing can land between the collections.
+func (s *sqliteContent) Snapshot(ctx context.Context) (LayoutSnapshot, error) {
+	if s.closed.Load() {
+		return LayoutSnapshot{}, ErrClosed
+	}
+	out := LayoutSnapshot{
+		DefaultWorkspaceID: DefaultWorkspaceID,
+		Workspaces:         []Workspace{},
+		Tabs:               []Tab{},
+		Panes:              []Pane{},
+	}
+	workspaces, err := s.Workspaces(ctx)
+	if err != nil {
+		return LayoutSnapshot{}, err
+	}
+	out.Workspaces = workspaces
+	for _, ws := range workspaces {
+		tabs, err := s.Tabs(ctx, ws.ID)
+		if err != nil {
+			return LayoutSnapshot{}, err
+		}
+		out.Tabs = append(out.Tabs, tabs...)
+		for _, tab := range tabs {
+			panes, err := s.Panes(ctx, tab.ID)
+			if err != nil {
+				return LayoutSnapshot{}, err
+			}
+			out.Panes = append(out.Panes, panes...)
+		}
+	}
+	return out, nil
+}
+
 func (s *sqliteContent) Workspaces(ctx context.Context) ([]Workspace, error) {
 	if s.closed.Load() {
 		return nil, ErrClosed
@@ -376,14 +421,7 @@ func mintReplacementIfEmpty(ctx context.Context, tx *sql.Tx, next Replacement) e
 	if strings.TrimSpace(next.TabID) == "" || strings.TrimSpace(next.PaneID) == "" {
 		return ErrNoReplacement
 	}
-	// The default workspace's row may not exist yet — nothing creates it
-	// eagerly, and the one being closed may have been the only one. OR
-	// IGNORE rather than a check-then-insert: the ledger's fallback writes
-	// the same row the same way, and two writers racing to create it must
-	// not turn into a failed close.
-	if _, err := tx.ExecContext(ctx,
-		`INSERT OR IGNORE INTO workspaces (id, name, position, created_at) VALUES (?, 'default', 0, ?)`,
-		DefaultWorkspaceID, time.Now().UnixMilli()); err != nil {
+	if err := ensureDefaultWorkspace(ctx, tx); err != nil {
 		return err
 	}
 	if err := admitAndInsertTab(ctx, tx, Tab{
@@ -403,6 +441,25 @@ func mintReplacementIfEmpty(ctx context.Context, tx *sql.Tx, next Replacement) e
 		Kind:      PaneLocal,
 		SizeShare: 1,
 	}, "")
+}
+
+// ensureDefaultWorkspace writes the default workspace's row if it is not
+// there. Nothing creates it eagerly: it is PERMANENT in the sense that it is
+// never deleted, not in the sense that it exists before anything needs it,
+// and three things need it — the replacement mint above, a tab created in it
+// (CreateTab), and the ledger's fallback for a session nobody named a
+// workspace for.
+//
+// OR IGNORE rather than a check-then-insert, and one helper rather than a
+// copy per caller: the row is identical whoever writes it, and two writers
+// racing to create it must not turn into a failed close. The name is not the
+// user's and never renders (workspaces-ux §4.2) — a column has to hold
+// something, and 'default' is what the ledger's fallback already writes.
+func ensureDefaultWorkspace(ctx context.Context, db execer) error {
+	_, err := db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO workspaces (id, name, position, created_at) VALUES (?, 'default', 0, ?)`,
+		DefaultWorkspaceID, time.Now().UnixMilli())
+	return err
 }
 
 // ── tabs ─────────────────────────────────────────────────────────────────
@@ -442,10 +499,19 @@ func (s *sqliteContent) CreateTab(ctx context.Context, tab Tab, firstPane Pane) 
 			case !errors.Is(err, ErrNoSuchTab):
 				return err
 			}
-			// The workspace is resolved before the write so the caller learns
-			// WHICH row was missing: the foreign key would refuse it anyway,
-			// and a driver's constraint text does not say.
-			if _, err := workspaceByID(ctx, tx, tab.WorkspaceID); err != nil {
+			// The DEFAULT workspace is minted on demand, and only it. A
+			// renderer's first tab has nowhere else to go — the default never
+			// renders, so no surface can offer to create it, and
+			// workspaces.create refuses any id that is not a UUIDv7, so the
+			// renderer cannot make it either. Every OTHER id is resolved
+			// before the write so the caller learns WHICH row was missing:
+			// the foreign key would refuse it anyway, and a driver's
+			// constraint text does not say.
+			if tab.WorkspaceID == DefaultWorkspaceID {
+				if err := ensureDefaultWorkspace(ctx, tx); err != nil {
+					return err
+				}
+			} else if _, err := workspaceByID(ctx, tx, tab.WorkspaceID); err != nil {
 				return err
 			}
 			if err := admitAndInsertTab(ctx, tx, tab, digest); err != nil {

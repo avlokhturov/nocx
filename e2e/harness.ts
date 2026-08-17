@@ -129,8 +129,51 @@ export const test = base.extend<object, { appReady: void }>({
   page: async ({ page }, use) => {
     await injectWailsShim(page)
     await use(page)
+    await resetLayout(page)
   },
 })
+
+/**
+ * Leave the stand with exactly one undecorated tab.
+ *
+ * THE PRODUCT NOW REMEMBERS TABS (nocx-isoph.4): the backend owns the
+ * workspace → tab → pane chain, and a renderer that goes away leaves the rows
+ * where they are — which is the whole feature, and is what a renderer reload
+ * brings back. The suite runs ONE stand for the entire run
+ * (playwright.config.ts globalSetup), so without this every spec would inherit
+ * the tabs the previous one opened, and the `toHaveCount(1)` every spec opens
+ * with would start failing in file order.
+ *
+ * Closing is done through the product's own control rather than by reaching
+ * into a store: closing the last tab mints a replacement, so this ends on one
+ * tab nobody has named, coloured or pinned — the state a fresh profile is in.
+ *
+ * Failures here are swallowed on purpose. This is cleanup, not an assertion:
+ * a page already closing, or a confirmation this teardown must not answer for
+ * the user, must not turn a passing test red.
+ */
+async function resetLayout(page: Page): Promise<void> {
+  const CLOSE = '.nocx-tab [aria-label="Close tab"]'
+  try {
+    if (page.isClosed()) return
+    // Bounded rather than "until it is done": a loop that trusts the product
+    // to shrink is a loop that hangs when the product is broken, and the
+    // broken product is exactly when this runs.
+    for (let i = 0; i < 16; i++) {
+      const tabs = await page.locator('.nocx-tab').count()
+      if (tabs === 0) return
+      await page.locator(CLOSE).first().click({ timeout: 2_000 })
+      if (tabs === 1) {
+        // That was the last one; the backend mints its replacement.
+        await baseExpect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 5_000 })
+        return
+      }
+      await baseExpect(page.locator('.nocx-tab')).toHaveCount(tabs - 1, { timeout: 5_000 })
+    }
+  } catch {
+    // Cleanup is best effort — see above.
+  }
+}
 
 // ── Vault e2e helper: managed devharness lifecycle ───────────────────
 //

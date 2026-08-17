@@ -457,3 +457,65 @@
 .tabstrip-vertical .nocx-tab-index {
   left: 10px;
 }
+
+/* ── Decoration the backend stores (nocx-isoph.4, design §4.5) ────────── */
+
+/* The tab's colour is a KEY, never a hex (layout/tab-colours.ts): a tab
+   coloured under one theme must still read under another, so the key resolves
+   to a token every shipped theme defines and the tab follows the theme. It
+   draws as a stripe down the row's leading edge rather than as a wash over the
+   tab: the colour is a mark the user put on this tab, and a repainted tab
+   would compete with the active-tab and activity indicators for the same
+   meaning. */
+.nocx-tab[data-colour] {
+  --tab-colour: var(--color-accent-secondary);
+}
+
+.nocx-tab[data-colour='green'] {
+  --tab-colour: var(--color-success);
+}
+
+.nocx-tab[data-colour='amber'] {
+  --tab-colour: var(--color-warning);
+}
+
+.nocx-tab[data-colour='red'] {
+  --tab-colour: var(--color-danger);
+}
+
+.nocx-tab[data-colour='violet'] {
+  --tab-colour: var(--color-accent-secondary);
+}
+
+.nocx-tab[data-colour]::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--tab-colour);
+  pointer-events: none;
+}
+
+/* The vertical strip's rows are stacked, so the leading edge is the same one
+   the horizontal strip uses — the stripe needs no orientation of its own. */
+
+.nocx-tab-pin {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  width: 12px;
+  height: 12px;
+  margin: 0 5px 0 0;
+  color: var(--color-text-muted);
+}
+
+.nocx-tab-pin svg {
+  width: 100%;
+  height: 100%;
+}
+
+.nocx-tab[aria-selected='true'] .nocx-tab-pin {
+  color: var(--color-text);
+}

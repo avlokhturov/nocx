@@ -23,6 +23,7 @@ import {
   makeClient,
   makeClipboard,
   setupTabBarDOM,
+  makeLayoutStore,
 } from './test-support/panes-fixtures'
 import { PaneManager } from './panes'
 import { HorizontalTabStrip } from './tab-strip'
@@ -114,6 +115,7 @@ async function mountManager(createProfile: Mock) {
     makeBanner(),
     profileClient,
     new HorizontalTabStrip(),
+    makeLayoutStore().store,
   )
   await manager.openInitialPane()
   return manager

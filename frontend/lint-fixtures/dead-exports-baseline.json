@@ -85,11 +85,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/scrollback/serializer.ts",
-      "symbol": "cellAttrs"
-    },
-    {
-      "kind": "exports",
       "file": "src/secret-kind.ts",
       "symbol": "KIND_LOUDNESS"
     },
@@ -121,27 +116,12 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "activatePane"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "addPane"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
       "symbol": "applyAcceptedSnapshot"
     },
     {
       "kind": "exports",
       "file": "src/state/index.ts",
       "symbol": "canResetSetting"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "closePane"
     },
     {
       "kind": "exports",
@@ -166,11 +146,6 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "createPaneModel"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
       "symbol": "monotonicRevisionPolicy"
     },
     {
@@ -186,27 +161,7 @@
     {
       "kind": "exports",
       "file": "src/state/index.ts",
-      "symbol": "reorderPane"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
       "symbol": "setProfileLists"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "updatePaneActivity"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "updatePaneAgentStatus"
-    },
-    {
-      "kind": "exports",
-      "file": "src/state/index.ts",
-      "symbol": "updatePaneTitle"
     },
     {
       "kind": "exports",
@@ -265,17 +220,17 @@
     },
     {
       "kind": "files",
-      "file": "src/generated/ledger.query.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
       "file": "src/generated/ledger.open.ts",
       "symbol": ""
     },
     {
       "kind": "files",
-      "file": "src/generated/notify.raise.ts",
+      "file": "src/generated/ledger.query.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/panes.move.ts",
       "symbol": ""
     },
     {
@@ -320,6 +275,26 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/workspaces.close.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/workspaces.create.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/workspaces.rename.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
+      "file": "src/generated/workspaces.reorder.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/ui/overlay/index.ts",
       "symbol": ""
     },
@@ -332,26 +307,6 @@
       "kind": "types",
       "file": "src/authentication-editor.tsx",
       "symbol": "AuthMethodEditorProps"
-    },
-    {
-      "kind": "types",
-      "file": "src/command-ledger.ts",
-      "symbol": "InterruptReason"
-    },
-    {
-      "kind": "types",
-      "file": "src/command-ledger.ts",
-      "symbol": "TransitionLifecycle"
-    },
-    {
-      "kind": "types",
-      "file": "src/environment-passport.ts",
-      "symbol": "PassportParseFailure"
-    },
-    {
-      "kind": "types",
-      "file": "src/environment-passport.ts",
-      "symbol": "PassportTier"
     },
     {
       "kind": "types",
@@ -445,68 +400,43 @@
     },
     {
       "kind": "types",
+      "file": "src/generated/panes.create.ts",
+      "symbol": "Pane"
+    },
+    {
+      "kind": "types",
       "file": "src/generated/shell.complete.ts",
       "symbol": "ShellEntry"
     },
     {
-      "kind": "files",
-      "file": "src/generated/panes.create.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/panes.move.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/tabs.close.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
+      "kind": "types",
       "file": "src/generated/tabs.create.ts",
-      "symbol": ""
+      "symbol": "Pane"
     },
     {
-      "kind": "files",
+      "kind": "types",
+      "file": "src/generated/tabs.create.ts",
+      "symbol": "Tab"
+    },
+    {
+      "kind": "types",
       "file": "src/generated/tabs.pin.ts",
-      "symbol": ""
+      "symbol": "Tab"
     },
     {
-      "kind": "files",
+      "kind": "types",
       "file": "src/generated/tabs.recolour.ts",
-      "symbol": ""
+      "symbol": "Tab"
     },
     {
-      "kind": "files",
+      "kind": "types",
       "file": "src/generated/tabs.rename.ts",
-      "symbol": ""
+      "symbol": "Tab"
     },
     {
-      "kind": "files",
+      "kind": "types",
       "file": "src/generated/tabs.reorder.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/workspaces.close.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/workspaces.create.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/workspaces.rename.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/workspaces.reorder.ts",
-      "symbol": ""
+      "symbol": "Tab"
     },
     {
       "kind": "types",
@@ -700,21 +630,6 @@
     },
     {
       "kind": "types",
-      "file": "src/state/index.ts",
-      "symbol": "PaneData"
-    },
-    {
-      "kind": "types",
-      "file": "src/state/index.ts",
-      "symbol": "PaneDescriptor"
-    },
-    {
-      "kind": "types",
-      "file": "src/state/index.ts",
-      "symbol": "PaneModel"
-    },
-    {
-      "kind": "types",
       "file": "src/state/settings-model.ts",
       "symbol": "ResetAllowed"
     },
@@ -747,11 +662,6 @@
       "kind": "types",
       "file": "src/state/settings-model.ts",
       "symbol": "SettingsMirror"
-    },
-    {
-      "kind": "types",
-      "file": "src/state/pane-model.ts",
-      "symbol": "PaneData"
     },
     {
       "kind": "types",

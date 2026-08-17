@@ -12,20 +12,6 @@
 export { createBannerState, type BannerState } from './banner-model'
 export { createProfileLists, setProfileLists, type ProfileLists } from './profiles-model'
 export { createSidebarState, type SidebarState } from './sidebar-model'
-export {
-  addPane,
-  activatePane,
-  closePane,
-  createPaneModel,
-  reorderPane,
-  updatePaneTitle,
-  updatePaneActivity,
-  updatePaneAgentStatus,
-  type PaneData,
-  type PaneDescriptor,
-  type PaneModel,
-} from './pane-model'
-
 // ── Settings (re‑exported from settings-domain, q.v.) ─────────────────────
 
 export {

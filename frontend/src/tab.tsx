@@ -1,5 +1,6 @@
 import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
+import { PinIcon } from './ui/icons'
 import type { AgentStatus } from './agent-status'
 
 /**
@@ -62,6 +63,20 @@ export interface TabProps {
    *  cannot say what it is about is a mark people learn to ignore. Falls
    *  back to the generic wording when nothing more specific is known. */
   warningLabel?: string
+  /** The tab's colour, as the backend stores it (nocx-isoph.4): one of the
+   *  closed set in layout/tab-colours.ts, or undefined for an undecorated
+   *  tab, which is the normal state. It renders as a swatch on the row and
+   *  never as a repaint of the tab — the colour is a mark the user put on it,
+   *  not a theme of its own. */
+  colour?: string
+  /** Whether the tab is kept at the head of the strip. The strip does the
+   *  keeping (layout/strip-order.ts); this only draws the mark that says why
+   *  a tab is where it is. */
+  pinned?: boolean
+  /** Called when the tab is right-clicked, with the viewport coordinates the
+   *  menu should open at. The strip owns the menu; a tab knows only that it
+   *  was asked for one. */
+  onMenu?: (paneId: number, x: number, y: number) => void
   /** Called when the tab is clicked. */
   onActivate: () => void
   /** Called with the tab id when the tab is closed (middle-click or close button). */
@@ -80,6 +95,8 @@ export function Tab(props: TabProps) {
       aria-selected={props.active}
       data-pane-id={String(props.paneId)}
       data-agent-status={props.agentStatus ?? undefined}
+      data-colour={props.colour || undefined}
+      data-pinned={props.pinned === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       // Kept in BOTH orientations. The vertical row shows the same text as a
       // subtitle, but that line ellipses — so dropping the native tooltip there
@@ -88,6 +105,16 @@ export function Tab(props: TabProps) {
       draggable={true}
       tabIndex={props.tabIndex}
       onClick={() => props.onActivate()}
+      onContextMenu={(e: MouseEvent) => {
+        if (!props.onMenu) return
+        // The browser's own menu here offers nothing about a tab, and the
+        // strip's actions (rename, colour, pin) have no other home in the
+        // horizontal strip — there is no room for a control per action on a
+        // row this narrow.
+        e.preventDefault()
+        e.stopPropagation()
+        props.onMenu(props.paneId, e.clientX, e.clientY)
+      }}
       onMouseDown={(e: MouseEvent) => {
         if (e.button === 1) {
           e.preventDefault()
@@ -125,6 +152,15 @@ export function Tab(props: TabProps) {
             centre. Wrapping the pair keeps the column at exactly two children. */}
         <span class="nocx-tab-line">
           <span class="nocx-tab-status" />
+          {/* Why this tab is at the head of the strip. Without the mark the
+              pinning is invisible until the strip is long enough for the
+              order to be surprising, which is the moment it is least
+              welcome. */}
+          <Show when={props.pinned === true}>
+            <span class="nocx-tab-pin" aria-label="Pinned" title="Pinned">
+              <PinIcon />
+            </span>
+          </Show>
           <Show when={props.warning === true}>
             <span
               class="nocx-tab-warning"

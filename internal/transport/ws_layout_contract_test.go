@@ -77,9 +77,39 @@ func TestLayoutTabDTOsConformToContract(t *testing.T) {
 	validateJSON(t, closed, mustMarshal(closedResponse{ID: tabID1}), "tabs.close DTO")
 }
 
+// layout.read's DTO, in the two states that must both hold: a populated
+// snapshot, and the empty one a fresh profile is in — whose collections must
+// marshal as [] and never null.
+func TestLayoutReadDTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "layout.read.schema.json")
+	name, colour := "deploy", "#ff8800"
+	full := layoutReadResponse{
+		DefaultWorkspaceID: "workspace:default",
+		Workspaces:         wireWorkspaces([]content.Workspace{{ID: wsID1, Name: "refactor-auth"}}),
+		Tabs: wireTabs([]content.Tab{
+			{ID: tabID1, WorkspaceID: wsID1, Layout: content.LayoutRow},
+			{ID: tabID2, WorkspaceID: wsID1, Name: &name, Colour: &colour, Position: 1, Pinned: true, Layout: content.LayoutColumn},
+		}),
+		Panes: wirePanes([]content.Pane{{ID: paneID1, TabID: tabID1, Cwd: "/repos/nocx", Kind: content.PaneLocal, SizeShare: 1}}),
+	}
+	validateJSON(t, schema, mustMarshal(full), "layout.read DTO (populated)")
+	empty := layoutReadResponse{
+		DefaultWorkspaceID: "workspace:default",
+		Workspaces:         wireWorkspaces(nil),
+		Tabs:               wireTabs(nil),
+		Panes:              wirePanes(nil),
+	}
+	validateJSON(t, schema, mustMarshal(empty), "layout.read DTO (empty)")
+	if got := string(mustMarshal(empty)); got != `{"defaultWorkspaceId":"workspace:default","workspaces":[],"tabs":[],"panes":[]}` {
+		t.Fatalf("an empty snapshot marshals as %s, want [] for every collection", got)
+	}
+}
+
 func TestLayoutPaneDTOsConformToContract(t *testing.T) {
 	created := loadSchema(t, "panes.create.schema.json")
 	moved := loadSchema(t, "panes.move.schema.json")
+	validateJSON(t, loadSchema(t, "panes.close.schema.json"),
+		mustMarshal(closedResponse{ID: paneID1}), "panes.close DTO")
 
 	endpoint := "deploy@srv-01:22"
 	local := wirePane(content.Pane{ID: paneID1, TabID: tabID1, Cwd: "/repos/nocx", Kind: content.PaneLocal, SizeShare: 1})
@@ -182,13 +212,27 @@ func TestLayoutOverTheWireConformsToContract(t *testing.T) {
 		mustLayoutCall(t, conn, "panes.move", map[string]any{"id": paneID4, "tabId": tabID3}, 14),
 		"panes.move result")
 
+	// The read, off the socket, against a chain that now has every shape in
+	// it: two workspaces, a decorated tab and an undecorated one, a local
+	// pane and an ssh pane. This is the check that matters most for this
+	// method — a snapshot the test built would prove the struct is
+	// well-formed, not that the server sends what a reloaded renderer draws
+	// itself from.
+	validateJSON(t, loadSchema(t, "layout.read.schema.json"),
+		mustLayoutCall(t, conn, "layout.read", map[string]any{}, 15),
+		"layout.read result (populated)")
+
+	validateJSON(t, loadSchema(t, "panes.close.schema.json"),
+		mustLayoutCall(t, conn, "panes.close",
+			map[string]any{"id": paneID4, "replacement": aReplacement()}, 16),
+		"panes.close result")
 	validateJSON(t, loadSchema(t, "tabs.close.schema.json"),
 		mustLayoutCall(t, conn, "tabs.close",
-			map[string]any{"id": tabID3, "replacement": aReplacement()}, 15),
+			map[string]any{"id": tabID3, "replacement": aReplacement()}, 17),
 		"tabs.close result")
 	validateJSON(t, loadSchema(t, "workspaces.close.schema.json"),
 		mustLayoutCall(t, conn, "workspaces.close",
-			map[string]any{"id": wsID2, "replacement": aReplacement()}, 16),
+			map[string]any{"id": wsID2, "replacement": aReplacement()}, 18),
 		"workspaces.close result")
 }
 

@@ -10,9 +10,11 @@ import {
   makeClipboard,
   makeBanner,
   setupTabBarDOM,
+  makeLayoutStore,
   FIXTURE_DIRECTORY_LABEL,
   type RendererMock,
 } from './test-support/panes-fixtures'
+import { isUuidv7 } from './layout/uuid7'
 import { Pane, PaneManager } from './panes'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
@@ -103,7 +105,18 @@ describe('PaneManager', () => {
     }
     const { HorizontalTabStrip } = await import('./tab-strip')
     const tabStrip = new HorizontalTabStrip()
-    const manager = new PaneManager(bar, bar, panes, c as never, cb, g, bn, pc as never, tabStrip)
+    const manager = new PaneManager(
+      bar,
+      bar,
+      panes,
+      c as never,
+      cb,
+      g,
+      bn,
+      pc as never,
+      tabStrip,
+      makeLayoutStore().store,
+    )
 
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(0)
 
@@ -224,19 +237,25 @@ describe('PaneManager', () => {
 
   // ── closing the last tab leaves exactly one fresh tab ─────────────────
 
-  it('closing the last tab opens a fresh tab immediately', async () => {
-    const { client, manager, bar, panes } = await mountPaneManager()
+  it('closing the last tab gets the replacement the BACKEND minted', async () => {
+    const { client, manager, bar, panes, backend } = await mountPaneManager()
 
     // Close the only tab
     manager.closeActivePane()
 
-    // A new tab replaces it (window never empty)
-    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
-    expect(panes.querySelectorAll('.pane').length).toBe(1)
-    // A new session was opened for the replacement (may be async)
+    // The window is still never empty — but the replacement is no longer the
+    // renderer's decision (nocx-isoph.4): panes.close mints it in the same
+    // transaction that removes the last pane, and the renderer adopts the row
+    // it reads back. So it arrives a round trip later, and it arrives with an
+    // identity the store can name.
     await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+      expect(panes.querySelectorAll('.pane').length).toBe(1)
       expect(client.openSession).toHaveBeenCalledTimes(2)
     })
+    const rows = backend.rows()
+    expect(rows.tabs).toHaveLength(1)
+    expect(rows.panes).toHaveLength(1)
   })
 
   // ── fallback title consistency (badge vs title after close) ───────────
@@ -510,9 +529,13 @@ describe('PaneManager', () => {
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', metaKey: true, bubbles: true }))
 
-    // Closing the last tab opens a fresh one, so there's still 1 tab
-    expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    // The session dies with the chrome, in the same turn.
     expect(session.close).toHaveBeenCalled()
+    // The strip is never left empty, but the tab that fills it is the
+    // backend's replacement and lands a round trip later.
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    })
   })
 
   it('switches tabs on Cmd+1..9', async () => {
@@ -619,48 +642,44 @@ describe('PaneManager', () => {
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
   })
 
-  it('closing a tab announces tab.close with its wire identity (nocx-tsajw)', async () => {
-    // Pin the per-tab wire identities so the announcement can be asserted
-    // against the exact id the chrome minted.
-    // Values kept verbatim — the assertions below name them. Only the TYPE
-    // needs help: crypto.randomUUID returns a UUID template literal, not a
-    // plain string.
-    const uuids = ['tab-wire-one', 'tab-wire-two', 'tab-wire-spare'] as unknown as ReturnType<
-      typeof crypto.randomUUID
-    >[]
-    const uuidSpy = vi
-      .spyOn(crypto, 'randomUUID')
-      .mockImplementation(() => uuids.shift() ?? uuids[uuids.length - 1])
-    try {
-      const { client, manager, bar } = await mountPaneManager()
+  it("closing a pane announces secrets.paneClosed with the pane's ONE identity", async () => {
+    // The identity is minted once per pane and is the same value the layout
+    // chain stores, history.record carries and this notification names
+    // (nocx-isoph.4): a pane has one identity, not one per seam. So the ids
+    // are read back FROM THE CHAIN rather than pinned by mocking a minter —
+    // that is the property worth asserting.
+    const { client, manager, bar, backend } = await mountPaneManager()
 
-      manager.newPane()
-      await vi.waitFor(() => {
-        expect(client.openSession).toHaveBeenCalledTimes(2)
-      })
+    manager.newPane()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(2)
+      expect(backend.rows().panes).toHaveLength(2)
+    })
+    const [first, second] = backend.rows().panes.map((p) => p.id)
+    expect(isUuidv7(first)).toBe(true)
 
-      // Close the FIRST tab: its own id is announced, the second's is not.
-      bar
-        .querySelectorAll('.nocx-tab')[0]
-        .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
-      await vi.waitFor(() => {
-        expect(client.notifyPaneClosed).toHaveBeenCalledWith('tab-wire-one')
-      })
-      expect(client.notifyPaneClosed).not.toHaveBeenCalledWith('tab-wire-two')
+    // Close the FIRST tab: its own id is announced, the second's is not.
+    bar
+      .querySelectorAll('.nocx-tab')[0]
+      .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
+    await vi.waitFor(() => {
+      expect(client.notifyPaneClosed).toHaveBeenCalledWith(first)
+    })
+    expect(client.notifyPaneClosed).not.toHaveBeenCalledWith(second)
 
-      // Close the remaining tab: its own id is announced. The automatic
-      // replacement tab mints a NEW id — a closed tab's identity is never
-      // reused (the backend scopes captures to it).
-      bar
-        .querySelectorAll('.nocx-tab')[0]
-        .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
-      await vi.waitFor(() => {
-        expect(client.notifyPaneClosed).toHaveBeenCalledWith('tab-wire-two')
-      })
-      expect(client.notifyPaneClosed).not.toHaveBeenCalledWith('tab-wire-spare')
-    } finally {
-      uuidSpy.mockRestore()
-    }
+    // Close the remaining tab: its own id is announced, and the replacement
+    // the backend mints carries a NEW one — a closed pane's identity is never
+    // reused, because the backend scopes captures to it.
+    bar
+      .querySelectorAll('.nocx-tab')[0]
+      .dispatchEvent(new MouseEvent('mousedown', { button: 1, bubbles: true }))
+    await vi.waitFor(() => {
+      expect(client.notifyPaneClosed).toHaveBeenCalledWith(second)
+    })
+    const replacement = backend.rows().panes.map((p) => p.id)
+    expect(replacement).toHaveLength(1)
+    expect(replacement[0]).not.toBe(first)
+    expect(replacement[0]).not.toBe(second)
   })
 
   // ── flex-grow regression guards ──────────────────────────────────────
@@ -1154,6 +1173,7 @@ describe('PaneManager', () => {
       banner,
       profileClient,
       tabStrip,
+      makeLayoutStore().store,
     )
     // Open the initial tab explicitly — the constructor mounts nothing.
     // Don't await: openInitialPane returns the _initialPaneReady promise;
@@ -1796,8 +1816,13 @@ describe('PaneManager', () => {
     tab1!.focus()
     expect(document.activeElement).toBe(tab1)
 
-    // Reorder: move tab 1 to position 3 (after tab 3).
+    // Reorder: move tab 1 to position 3 (after tab 3). The strip does not
+    // move until the backend has written the positions and answered with them
+    // (nocx-isoph.4), so this is a round trip rather than a splice.
     manager.reorderPane(1, 3)
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab')[0].getAttribute('data-pane-id')).toBe('2')
+    })
 
     // The same DOM node should still be in the DOM, just moved.
     const tab1After = document.getElementById('tab-btn-1')
