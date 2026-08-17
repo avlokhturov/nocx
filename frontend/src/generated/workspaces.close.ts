@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the workspaces.close JSON-RPC method: the id of the workspace that is gone. Its tabs, and their panes, went with it — a tab has no meaning outside a workspace (ON DELETE CASCADE). The result carries the id and nothing else on purpose: there is no object left to describe, and a copy of the row as it was would be a fact about a thing that no longer exists.
+ * Result of the workspaces.close JSON-RPC method: the id of the workspace that is gone. Its tabs, and their panes, went with it — a tab has no meaning outside a workspace (ON DELETE CASCADE). The result carries the id and nothing else on purpose: there is no object left to describe, and a copy of the row as it was would be a fact about a thing that no longer exists. A close that would leave the APPLICATION with no tab at all mints the replacement whose identity the params carried, in the same transaction; one that would and named none is refused whole and removes nothing (nocx-isoph.3). The replacement's ids are the frontend's to mint, like every durable id here (§7).
  */
 export interface WorkspacesCloseResult {
   /**

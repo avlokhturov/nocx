@@ -76,10 +76,14 @@ func TestDerivedWorkspaceFollowsThePane(t *testing.T) {
 	ws, _ := newLayoutWSServer(t)
 	conn := connectWS(t, ws)
 	seedWire(t, conn)
-	mustLayoutCall(t, conn, "workspaces.create",
-		map[string]any{"id": wsID2, "name": "ansible", "position": 1}, 20)
-	mustLayoutCall(t, conn, "tabs.create",
-		map[string]any{"id": tabID2, "workspaceId": wsID2, "position": 0, "layout": "row"}, 21)
+	// A second tab in the SAME workspace, because a pane is not dragged
+	// between workspaces yet (§12 q. 5, ErrCrossWorkspaceMove). What the
+	// derivation has to survive is the pane moving at all: a copy taken when
+	// the pane was made would be read from the row that no longer holds it.
+	mustLayoutCall(t, conn, "tabs.create", map[string]any{
+		"id": tabID2, "workspaceId": wsID1, "position": 1, "layout": "row",
+		"firstPane": firstPane(paneID2, "/var"),
+	}, 21)
 
 	before, rpcErr := openWorkspace(t, conn, paneID1, 22)
 	if rpcErr != nil {
@@ -90,9 +94,13 @@ func TestDerivedWorkspaceFollowsThePane(t *testing.T) {
 	if rpcErr != nil {
 		t.Fatalf("open after: %+v", rpcErr)
 	}
-	if before != wsID1 || after != wsID2 {
-		t.Fatalf("workspaceId before the move = %q and after = %q, want %q then %q — the answer must follow the pane",
-			before, after, wsID1, wsID2)
+	if before != wsID1 || after != wsID1 {
+		t.Fatalf("workspaceId before the move = %q and after = %q, want %q both times", before, after, wsID1)
+	}
+	// And the answer is walked rather than remembered: the pane is in the
+	// destination tab now, and that tab is what the chain reads.
+	if _, err := ws.contentDB.Layout().WorkspaceForPane(context.Background(), paneID1); err != nil {
+		t.Fatalf("WorkspaceForPane after the move: %v", err)
 	}
 }
 

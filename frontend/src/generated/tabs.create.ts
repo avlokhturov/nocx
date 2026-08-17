@@ -10,10 +10,11 @@
  */
 
 /**
- * Result of the tabs.create JSON-RPC method (nocx-isoph.2, design §4.1, §4.5 and §7): the stored tab, and whether this call was a retry of one already made. This file is also the single declaration of the tab shape; the other tabs.* results reference it cross-file. What is NOT here is as deliberate as what is: the activity indicator, the attention indicator and the label are computed from the tab's panes (§4.5) and have no field, because attention arrives at a PANE and a copy on the tab would give one fact two owners.
+ * Result of the tabs.create JSON-RPC method (nocx-isoph.2, design §4.1, §4.5 and §7): the tab, THE FIRST PANE it was created with, and whether this call was a retry of one already made. A tab is what a pane is dragged out INTO (§4.4), so the pane comes with it and a tab with no pane never exists. This file is also the single declaration of the tab shape; the other tabs.* results reference it cross-file. What is NOT here is as deliberate as what is: the activity indicator, the attention indicator and the label are computed from the tab's panes (§4.5) and have no field, because attention arrives at a PANE and a copy on the tab would give one fact two owners.
  */
 export interface TabsCreateResult {
   tab: Tab
+  firstPane: Pane
   /**
    * Whether this call found the work already done. A create whose answer was lost is retried — AD-9 exists because the socket drops — and the retry returns the FIRST object rather than minting a second one. true says so out loud, so the renderer can tell 'I made this' from 'this was already made' without comparing rows, and so the property is assertable over the wire instead of inferred from the absence of an error. A repeat asking for something DIFFERENT under the same id is not a replay: it is refused with -32602.
    */
@@ -56,4 +57,33 @@ export interface Tab {
    * When the user last looked at this tab, in Unix milliseconds, or null for a tab never seen. A MARK rather than a verdict: the unseen indicator is computed from it, and storing the verdict would be the duplication §4.5 refuses. The activity and attention indicators are absent for the same reason — attention arrives at a PANE, so a copy on the tab would give one fact two owners.
    */
   seenAt: number | null
+}
+/**
+ * The pane this tab was created around, as stored, with the tabId the backend filled in.
+ */
+export interface Pane {
+  /**
+   * The pane's id, and the DURABLE IDENTITY of this whole chain (§5): it outlives its shell, its tab and the application, and its blocks are found by it after a restart. Client-minted UUIDv7 and therefore UNTRUSTED INPUT (design .internal/specs/2026-08-16-tabs-panes-and-blocks-design.md §7): the shape is validated and never believed, an insert on an id that already means something else FAILS rather than overwriting, and knowing an id confers NO RIGHT to use it — a UUIDv7 embeds a timestamp and is guessable by construction, so nothing anywhere may treat possession of one as evidence.
+   */
+  id: string
+  /**
+   * The tab currently holding this pane — the pane's ONLY edge, because panes do not nest (§5). It is a field of an object the renderer asked for, NOT an address: every backend→renderer message is still addressed by sessionId (§4.4), since a tab holds several panes and 'the tab that spoke' is not well defined.
+   */
+  tabId: string
+  /**
+   * Where the pane's shell is, and what a restore reopens in.
+   */
+  cwd: string
+  /**
+   * Where the pane's pipe goes, and what decides restore behaviour rather than a dialog (§8): a local pane starts a fresh shell in the same cwd, an ssh pane attempts to reconnect. Deliberately two values and not the four an environment has — 'container' and 'unknown' are honest answers about where a recorded command RAN, and a pane is a thing the user opens.
+   */
+  kind: 'local' | 'ssh'
+  /**
+   * The canonical user@host:port an ssh pane applies at; null for a local pane. null rather than an empty string, which is a real value meaning the local machine.
+   */
+  endpoint: string | null
+  /**
+   * This pane's share of its tab's extent. Size is a property of the MEMBER, direction a property of the set (§5).
+   */
+  sizeShare: number
 }

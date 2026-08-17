@@ -636,7 +636,8 @@ func TestDeleteSessionSetsEntrySessionNull(t *testing.T) {
 
 	// The workspace is LayoutRepository's (nocx-isoph.1); the ledger only
 	// references it.
-	if _, err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "work"}); err != nil {
+	if _, err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "work"},
+		aTab("tab-1", "ws-1"), aPane("pane-1", "tab-1", "/srv")); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	if err := led.CreateSession(ctx, content.Session{ID: "sess-1", WorkspaceID: "ws-1"}); err != nil {
@@ -685,7 +686,8 @@ func TestCreateSessionRequiresWorkspace(t *testing.T) {
 	if err == nil {
 		t.Fatal("session under a missing workspace succeeded")
 	}
-	if _, err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-2", Name: "work"}); err != nil {
+	if _, err := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-2", Name: "work"},
+		aTab("tab-2", "ws-2"), aPane("pane-2", "tab-2", "/srv")); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	if err := led.CreateSession(ctx, content.Session{ID: "sess-2", WorkspaceID: "ws-2"}); err != nil {

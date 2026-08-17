@@ -66,9 +66,30 @@ const (
 	wsID2   = "0198f2b0-0000-7000-8000-000000000002"
 	tabID1  = "0198f2b0-0000-7000-8000-000000000011"
 	tabID2  = "0198f2b0-0000-7000-8000-000000000012"
+	tabID3  = "0198f2b0-0000-7000-8000-000000000013"
 	paneID1 = "0198f2b0-0000-7000-8000-000000000021"
 	paneID2 = "0198f2b0-0000-7000-8000-000000000022"
+	paneID3 = "0198f2b0-0000-7000-8000-000000000023"
+	paneID4 = "0198f2b0-0000-7000-8000-000000000024"
 )
+
+// firstTab and firstPane are the members a create carries: creation is always
+// creation-with-content (nocx-isoph.3), so there is no call that makes a
+// container on its own to write a test against.
+func firstTab(id string) map[string]any {
+	return map[string]any{"id": id, "position": 0, "layout": "row"}
+}
+
+func firstPane(id, cwd string) map[string]any {
+	return map[string]any{"id": id, "cwd": cwd, "kind": "local", "sizeShare": 1}
+}
+
+// aReplacement is the identity of the tab that appears if a close empties the
+// application. Pre-minted by the caller, because a tab id and a pane id are
+// durable and therefore the frontend's (§7).
+func aReplacement() map[string]any {
+	return map[string]any{"tabId": tabID3, "paneId": paneID3, "cwd": "/home/user"}
+}
 
 // layoutCall sends one request and returns the raw result plus the error
 // object, so a test can validate the result against its schema without the
@@ -117,12 +138,10 @@ func tabCount(t *testing.T, db content.ContentDB, workspaceID string) int {
 // renderer will.
 func seedWire(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
-	mustLayoutCall(t, conn, "workspaces.create",
-		map[string]any{"id": wsID1, "name": "refactor-auth", "position": 0}, 900)
-	mustLayoutCall(t, conn, "tabs.create",
-		map[string]any{"id": tabID1, "workspaceId": wsID1, "position": 0, "layout": "row"}, 901)
-	mustLayoutCall(t, conn, "panes.create",
-		map[string]any{"id": paneID1, "tabId": tabID1, "cwd": "/repos/nocx", "kind": "local", "sizeShare": 1}, 902)
+	mustLayoutCall(t, conn, "workspaces.create", map[string]any{
+		"id": wsID1, "name": "refactor-auth", "position": 0,
+		"firstTab": firstTab(tabID1), "firstPane": firstPane(paneID1, "/repos/nocx"),
+	}, 900)
 }
 
 // ── the retry AD-9 makes ordinary ────────────────────────────────────────
@@ -134,7 +153,10 @@ func seedWire(t *testing.T, conn *websocket.Conn) {
 func TestLayoutCreateReplaysTheSameRequestOverTheWire(t *testing.T) {
 	ws, db := newLayoutWSServer(t)
 	conn := connectWS(t, ws)
-	params := map[string]any{"id": wsID1, "name": "refactor-auth", "position": 2}
+	params := map[string]any{
+		"id": wsID1, "name": "refactor-auth", "position": 2,
+		"firstTab": firstTab(tabID1), "firstPane": firstPane(paneID1, "/repos/nocx"),
+	}
 
 	var first, second struct {
 		Workspace struct {
@@ -142,6 +164,14 @@ func TestLayoutCreateReplaysTheSameRequestOverTheWire(t *testing.T) {
 			Name     string `json:"name"`
 			Position int    `json:"position"`
 		} `json:"workspace"`
+		FirstTab struct {
+			ID          string `json:"id"`
+			WorkspaceID string `json:"workspaceId"`
+		} `json:"firstTab"`
+		FirstPane struct {
+			ID    string `json:"id"`
+			TabID string `json:"tabId"`
+		} `json:"firstPane"`
 		Replayed bool `json:"replayed"`
 	}
 	if err := json.Unmarshal(mustLayoutCall(t, conn, "workspaces.create", params, 1), &first); err != nil {
@@ -156,11 +186,19 @@ func TestLayoutCreateReplaysTheSameRequestOverTheWire(t *testing.T) {
 	if !second.Replayed {
 		t.Fatal("the retry was not reported as a replay")
 	}
-	if second.Workspace != first.Workspace {
-		t.Fatalf("retry returned %+v, want the first object %+v", second.Workspace, first.Workspace)
+	if second.Workspace != first.Workspace || second.FirstTab != first.FirstTab || second.FirstPane != first.FirstPane {
+		t.Fatalf("retry returned %+v, want the first objects %+v", second, first)
+	}
+	// The containers the create filled in are on the wire, not left for the
+	// renderer to infer.
+	if first.FirstTab.WorkspaceID != wsID1 || first.FirstPane.TabID != tabID1 {
+		t.Fatalf("create answered %+v, want the tab in %s and the pane in %s", first, wsID1, tabID1)
 	}
 	if n := workspaceCount(t, db); n != 1 {
 		t.Fatalf("workspaces after a retry = %d rows, want 1", n)
+	}
+	if n := tabCount(t, db, wsID1); n != 1 {
+		t.Fatalf("tabs after a retry = %d rows, want 1", n)
 	}
 }
 
@@ -169,11 +207,13 @@ func TestLayoutCreateReplaysTheSameRequestOverTheWire(t *testing.T) {
 // the connection would turn exactly the case AD-9 exists for into a conflict.
 func TestLayoutCreateReplaysAcrossAReconnect(t *testing.T) {
 	ws, db := newLayoutWSServer(t)
-	params := map[string]any{"id": tabID1, "workspaceId": wsID1, "position": 0, "layout": "row"}
+	params := map[string]any{
+		"id": tabID2, "workspaceId": wsID1, "position": 1, "layout": "row",
+		"firstPane": firstPane(paneID2, "/var"),
+	}
 
 	first := connectWS(t, ws)
-	mustLayoutCall(t, first, "workspaces.create",
-		map[string]any{"id": wsID1, "name": "refactor-auth", "position": 0}, 1)
+	seedWire(t, first)
 	mustLayoutCall(t, first, "tabs.create", params, 2)
 	_ = first.Close()
 
@@ -188,8 +228,8 @@ func TestLayoutCreateReplaysAcrossAReconnect(t *testing.T) {
 	if !retry.Replayed {
 		t.Fatal("a retry over a new connection was not a replay — the key must not be bound to the socket")
 	}
-	if n := tabCount(t, db, wsID1); n != 1 {
-		t.Fatalf("tabs after a reconnect retry = %d rows, want 1", n)
+	if n := tabCount(t, db, wsID1); n != 2 {
+		t.Fatalf("tabs after a reconnect retry = %d rows, want 2 (the seed and the one created once)", n)
 	}
 }
 
@@ -198,11 +238,12 @@ func TestLayoutCreateReplaysAcrossAReconnect(t *testing.T) {
 func TestLayoutCreateRefusesAnIDThatMeansSomethingElse(t *testing.T) {
 	ws, db := newLayoutWSServer(t)
 	conn := connectWS(t, ws)
-	mustLayoutCall(t, conn, "workspaces.create",
-		map[string]any{"id": wsID1, "name": "refactor-auth", "position": 0}, 1)
+	seedWire(t, conn)
 
-	_, rpcErr := layoutCall(t, conn, "workspaces.create",
-		map[string]any{"id": wsID1, "name": "ansible-rollout", "position": 0}, 2)
+	_, rpcErr := layoutCall(t, conn, "workspaces.create", map[string]any{
+		"id": wsID1, "name": "ansible-rollout", "position": 0,
+		"firstTab": firstTab(tabID1), "firstPane": firstPane(paneID1, "/repos/nocx"),
+	}, 2)
 	if rpcErr == nil || rpcErr.Code != -32602 {
 		t.Fatalf("aliasing create = %+v, want -32602", rpcErr)
 	}
@@ -232,8 +273,10 @@ func TestLayoutRefusesAMalformedIDBeforeWriting(t *testing.T) {
 		"unicode lookalike": "0198f2b0-0000-7000-8000-00000000000а",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, rpcErr := layoutCall(t, conn, "workspaces.create",
-				map[string]any{"id": id, "name": "nope", "position": 0}, 1)
+			_, rpcErr := layoutCall(t, conn, "workspaces.create", map[string]any{
+				"id": id, "name": "nope", "position": 0,
+				"firstTab": firstTab(tabID1), "firstPane": firstPane(paneID1, "/tmp"),
+			}, 1)
 			if rpcErr == nil || rpcErr.Code != -32602 {
 				t.Fatalf("workspaces.create with id %q = %+v, want -32602", id, rpcErr)
 			}
@@ -294,8 +337,10 @@ func TestLayoutReorderRefusesANonPermutation(t *testing.T) {
 	ws, db := newLayoutWSServer(t)
 	conn := connectWS(t, ws)
 	seedWire(t, conn)
-	mustLayoutCall(t, conn, "workspaces.create",
-		map[string]any{"id": wsID2, "name": "ansible", "position": 1}, 20)
+	mustLayoutCall(t, conn, "workspaces.create", map[string]any{
+		"id": wsID2, "name": "ansible", "position": 1,
+		"firstTab": firstTab(tabID2), "firstPane": firstPane(paneID2, "/srv"),
+	}, 20)
 
 	var ordered struct {
 		Workspaces []struct {
@@ -326,8 +371,10 @@ func TestLayoutPaneMoveChangesOnlyTheReference(t *testing.T) {
 	ws, db := newLayoutWSServer(t)
 	conn := connectWS(t, ws)
 	seedWire(t, conn)
-	mustLayoutCall(t, conn, "tabs.create",
-		map[string]any{"id": tabID2, "workspaceId": wsID1, "position": 1, "layout": "row"}, 30)
+	mustLayoutCall(t, conn, "tabs.create", map[string]any{
+		"id": tabID2, "workspaceId": wsID1, "position": 1, "layout": "row",
+		"firstPane": firstPane(paneID2, "/var"),
+	}, 30)
 
 	var moved struct {
 		Pane struct {
@@ -346,6 +393,9 @@ func TestLayoutPaneMoveChangesOnlyTheReference(t *testing.T) {
 	if moved.Pane.TabID != tabID2 {
 		t.Fatalf("moved pane tab = %q, want %q", moved.Pane.TabID, tabID2)
 	}
+	// The source tab held only this pane, so nocx-isoph.3's rule takes it:
+	// a tab exists only while it holds a member, and the row goes in the same
+	// transaction as the move.
 	left, _ := db.Layout().Panes(context.Background(), tabID1)
 	if len(left) != 0 {
 		t.Fatalf("source tab still holds %+v", left)
@@ -363,7 +413,7 @@ func TestLayoutCloseRemovesTheContainerAndItsMembers(t *testing.T) {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(mustLayoutCall(t, conn, "tabs.close",
-		map[string]any{"id": tabID1}, 40), &closed); err != nil {
+		map[string]any{"id": tabID1, "replacement": aReplacement()}, 40), &closed); err != nil {
 		t.Fatalf("decode tabs.close: %v", err)
 	}
 	if closed.ID != tabID1 {
@@ -376,12 +426,79 @@ func TestLayoutCloseRemovesTheContainerAndItsMembers(t *testing.T) {
 	if len(panes) != 0 {
 		t.Fatalf("the closed tab's panes survive: %+v", panes)
 	}
+	// That was the application's last tab, so the replacement was minted in
+	// the same transaction and it went to the DEFAULT workspace — never to
+	// the one being closed, or closing a workspace would resurrect it.
+	replacement, err := db.Layout().Tabs(context.Background(), content.DefaultWorkspaceID)
+	if err != nil {
+		t.Fatalf("Tabs(default): %v", err)
+	}
+	if len(replacement) != 1 || replacement[0].ID != tabID3 {
+		t.Fatalf("tabs in the default workspace = %+v, want the replacement %s", replacement, tabID3)
+	}
+	// And the workspace went with its last tab (nocx-isoph.3), so closing it
+	// by hand now names a row that is not there — which removes nothing and
+	// is not an error.
 	if err := json.Unmarshal(mustLayoutCall(t, conn, "workspaces.close",
-		map[string]any{"id": wsID1}, 41), &closed); err != nil {
+		map[string]any{"id": wsID1, "replacement": aReplacement()}, 41), &closed); err != nil {
 		t.Fatalf("decode workspaces.close: %v", err)
 	}
-	if n := workspaceCount(t, db); n != 0 {
-		t.Fatalf("workspaces after close = %d, want 0", n)
+	if closed.ID != wsID1 {
+		t.Fatalf("workspaces.close = %q, want %q", closed.ID, wsID1)
+	}
+}
+
+// The default workspace is not closed (nocx-isoph.3): it never renders, so no
+// surface can offer the affordance, and its row is where the replacement tab
+// goes and where the ledger records every session nobody named a workspace
+// for. The wire says so as a refusal rather than by hiding the method.
+func TestLayoutRefusesToCloseTheDefaultWorkspace(t *testing.T) {
+	ws, _ := newLayoutWSServer(t)
+	conn := connectWS(t, ws)
+	_, rpcErr := layoutCall(t, conn, "workspaces.close",
+		map[string]any{"id": content.DefaultWorkspaceID, "replacement": aReplacement()}, 1)
+	if rpcErr == nil || rpcErr.Code != -32602 {
+		t.Fatalf("closing the default workspace = %+v, want -32602", rpcErr)
+	}
+}
+
+// A close that would empty the application and named no replacement is
+// refused WHOLE: nothing is removed, because the alternative is a state no
+// surface can render, and minting the id here would put a durable pane id in
+// the backend, which §7 refuses.
+func TestLayoutRefusesAClosethatWouldEmptyTheApplication(t *testing.T) {
+	ws, db := newLayoutWSServer(t)
+	conn := connectWS(t, ws)
+	seedWire(t, conn)
+
+	_, rpcErr := layoutCall(t, conn, "tabs.close", map[string]any{"id": tabID1}, 1)
+	if rpcErr == nil || rpcErr.Code != -32602 {
+		t.Fatalf("close with no replacement = %+v, want -32602", rpcErr)
+	}
+	if n := tabCount(t, db, wsID1); n != 1 {
+		t.Fatalf("tabs after a refused close = %d, want 1 — the close fails closed", n)
+	}
+}
+
+// A pane is not dragged between workspaces yet (§12 q. 5): the atomicity
+// model for a subtree move is undesigned and the inherited requirement is
+// that a partial move fails closed, so the whole move is refused.
+func TestLayoutRefusesACrossWorkspaceMove(t *testing.T) {
+	ws, db := newLayoutWSServer(t)
+	conn := connectWS(t, ws)
+	seedWire(t, conn)
+	mustLayoutCall(t, conn, "workspaces.create", map[string]any{
+		"id": wsID2, "name": "ansible", "position": 1,
+		"firstTab": firstTab(tabID2), "firstPane": firstPane(paneID2, "/srv"),
+	}, 1)
+
+	_, rpcErr := layoutCall(t, conn, "panes.move", map[string]any{"id": paneID1, "tabId": tabID2}, 2)
+	if rpcErr == nil || rpcErr.Code != -32602 {
+		t.Fatalf("cross-workspace move = %+v, want -32602", rpcErr)
+	}
+	stayed, _ := db.Layout().Panes(context.Background(), tabID1)
+	if len(stayed) != 1 || stayed[0].ID != paneID1 {
+		t.Fatalf("panes in the source tab = %+v, want the pane where it was", stayed)
 	}
 }
 
@@ -400,8 +517,10 @@ func TestLayoutRefusesRowsThatDoNotExist(t *testing.T) {
 		"rename a tab that is not there":       {"tabs.rename", map[string]any{"id": tabID2, "name": "x"}},
 		"recolour a tab that is not there":     {"tabs.recolour", map[string]any{"id": tabID2, "colour": "#fff"}},
 		"pin a tab that is not there":          {"tabs.pin", map[string]any{"id": tabID2, "pinned": true}},
-		"tab in a workspace that is not there": {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID2, "position": 0, "layout": "row"}},
+		"tab in a workspace that is not there": {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID2, "position": 0, "layout": "row", "firstPane": firstPane(paneID2, "/var")}},
 		"pane in a tab that is not there":      {"panes.create", map[string]any{"id": paneID2, "tabId": tabID2, "cwd": "/", "kind": "local", "sizeShare": 1}},
+		"create with no first tab":             {"workspaces.create", map[string]any{"id": wsID2, "name": "x", "position": 0, "firstPane": firstPane(paneID2, "/var")}},
+		"create with no first pane":            {"tabs.create", map[string]any{"id": tabID2, "workspaceId": wsID1, "position": 0, "layout": "row"}},
 		"move a pane that is not there":        {"panes.move", map[string]any{"id": paneID2, "tabId": tabID1}},
 		"move into a tab that is not there":    {"panes.move", map[string]any{"id": paneID1, "tabId": tabID2}},
 	} {

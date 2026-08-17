@@ -29,8 +29,15 @@ func TestLayoutWorkspaceDTOsConformToContract(t *testing.T) {
 	closed := loadSchema(t, "workspaces.close.schema.json")
 
 	ws := workspaceWire{ID: wsID1, Name: "refactor-auth", Position: 3}
-	validateJSON(t, created, mustMarshal(workspaceCreateResponse{Workspace: ws}), "workspaces.create DTO (fresh)")
-	validateJSON(t, created, mustMarshal(workspaceCreateResponse{Workspace: ws, Replayed: true}), "workspaces.create DTO (replay)")
+	made := workspaceCreateResponse{
+		Workspace: ws,
+		FirstTab:  wireTab(content.Tab{ID: tabID1, WorkspaceID: wsID1, Layout: content.LayoutRow}),
+		FirstPane: wirePane(content.Pane{ID: paneID1, TabID: tabID1, Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1}),
+	}
+	validateJSON(t, created, mustMarshal(made), "workspaces.create DTO (fresh)")
+	replayed := made
+	replayed.Replayed = true
+	validateJSON(t, created, mustMarshal(replayed), "workspaces.create DTO (replay)")
 	validateJSON(t, renamed, mustMarshal(workspaceResponse{Workspace: ws}), "workspaces.rename DTO")
 	validateJSON(t, reordered, mustMarshal(workspaceListResponse{Workspaces: []workspaceWire{ws}}), "workspaces.reorder DTO")
 	// The empty collection must marshal as [] and never null — wireWorkspaces
@@ -58,8 +65,9 @@ func TestLayoutTabDTOsConformToContract(t *testing.T) {
 		ID: tabID1, WorkspaceID: wsID1, ParentID: &parent, Name: &name, Colour: &colour,
 		Position: 2, Pinned: true, Layout: content.LayoutColumn, SeenAt: &seen,
 	})
+	pane := wirePane(content.Pane{ID: paneID1, TabID: tabID1, Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1})
 	for what, tab := range map[string]tabWire{"bare": bare, "full": full} {
-		validateJSON(t, created, mustMarshal(tabCreateResponse{Tab: tab}), "tabs.create DTO ("+what+")")
+		validateJSON(t, created, mustMarshal(tabCreateResponse{Tab: tab, FirstPane: pane}), "tabs.create DTO ("+what+")")
 		validateJSON(t, renamed, mustMarshal(tabResponse{Tab: tab}), "tabs.rename DTO ("+what+")")
 		validateJSON(t, recoloured, mustMarshal(tabResponse{Tab: tab}), "tabs.recolour DTO ("+what+")")
 		validateJSON(t, pinned, mustMarshal(tabResponse{Tab: tab}), "tabs.pin DTO ("+what+")")
@@ -113,18 +121,22 @@ func TestLayoutOverTheWireConformsToContract(t *testing.T) {
 	ws, _ := newLayoutWSServer(t)
 	conn := connectWS(t, ws)
 
+	create := map[string]any{
+		"id": wsID1, "name": "refactor-auth", "position": 0,
+		"firstTab": firstTab(tabID1), "firstPane": firstPane(paneID1, "/repos/nocx"),
+	}
 	validateJSON(t, loadSchema(t, "workspaces.create.schema.json"),
-		mustLayoutCall(t, conn, "workspaces.create",
-			map[string]any{"id": wsID1, "name": "refactor-auth", "position": 0}, 1),
+		mustLayoutCall(t, conn, "workspaces.create", create, 1),
 		"workspaces.create result")
 	// The replay, off the socket: the same shape, and the field that says so.
 	validateJSON(t, loadSchema(t, "workspaces.create.schema.json"),
-		mustLayoutCall(t, conn, "workspaces.create",
-			map[string]any{"id": wsID1, "name": "refactor-auth", "position": 0}, 2),
+		mustLayoutCall(t, conn, "workspaces.create", create, 2),
 		"workspaces.create result (replay)")
 	validateJSON(t, loadSchema(t, "workspaces.create.schema.json"),
-		mustLayoutCall(t, conn, "workspaces.create",
-			map[string]any{"id": wsID2, "name": "ansible", "position": 1}, 3),
+		mustLayoutCall(t, conn, "workspaces.create", map[string]any{
+			"id": wsID2, "name": "ansible", "position": 1,
+			"firstTab": firstTab(tabID2), "firstPane": firstPane(paneID2, "/srv"),
+		}, 3),
 		"workspaces.create result (second)")
 	validateJSON(t, loadSchema(t, "workspaces.rename.schema.json"),
 		mustLayoutCall(t, conn, "workspaces.rename", map[string]any{"id": wsID2, "name": "ansible-rollout"}, 4),
@@ -133,22 +145,19 @@ func TestLayoutOverTheWireConformsToContract(t *testing.T) {
 		mustLayoutCall(t, conn, "workspaces.reorder", map[string]any{"ids": []string{wsID2, wsID1}}, 5),
 		"workspaces.reorder result")
 
-	// A bare tab — no name, no colour, no parent — because that is the
-	// normal one, and every nullable field must be present as null.
-	validateJSON(t, loadSchema(t, "tabs.create.schema.json"),
-		mustLayoutCall(t, conn, "tabs.create",
-			map[string]any{"id": tabID1, "workspaceId": wsID1, "position": 0, "layout": "row"}, 6),
-		"tabs.create result (bare)")
-	// And a decorated one whose lineage parent is the first, so parentId is
-	// exercised as a real value rather than only as null.
+	// A decorated tab whose lineage parent is the workspace's first, so
+	// parentId is exercised as a real value and not only as null. The bare
+	// case — no name, no colour, no parent, which is the normal one — is the
+	// firstTab the workspace was created with above.
 	validateJSON(t, loadSchema(t, "tabs.create.schema.json"),
 		mustLayoutCall(t, conn, "tabs.create", map[string]any{
-			"id": tabID2, "workspaceId": wsID1, "parentId": tabID1,
+			"id": tabID3, "workspaceId": wsID1, "parentId": tabID1,
 			"name": "deploy", "colour": "#ff8800", "position": 1, "pinned": true, "layout": "column",
+			"firstPane": firstPane(paneID3, "/var"),
 		}, 7),
 		"tabs.create result (decorated)")
 	validateJSON(t, loadSchema(t, "tabs.rename.schema.json"),
-		mustLayoutCall(t, conn, "tabs.rename", map[string]any{"id": tabID2, "name": nil}, 8),
+		mustLayoutCall(t, conn, "tabs.rename", map[string]any{"id": tabID3, "name": nil}, 8),
 		"tabs.rename result (cleared)")
 	validateJSON(t, loadSchema(t, "tabs.recolour.schema.json"),
 		mustLayoutCall(t, conn, "tabs.recolour", map[string]any{"id": tabID1, "colour": "#00aaff"}, 9),
@@ -158,29 +167,28 @@ func TestLayoutOverTheWireConformsToContract(t *testing.T) {
 		"tabs.pin result")
 	validateJSON(t, loadSchema(t, "tabs.reorder.schema.json"),
 		mustLayoutCall(t, conn, "tabs.reorder",
-			map[string]any{"workspaceId": wsID1, "ids": []string{tabID2, tabID1}}, 11),
+			map[string]any{"workspaceId": wsID1, "ids": []string{tabID3, tabID1}}, 11),
 		"tabs.reorder result")
 
+	// The SPLIT: a second pane into a tab that already exists. A tab's first
+	// pane arrives with the tab, so this is the only shape panes.create has.
 	validateJSON(t, loadSchema(t, "panes.create.schema.json"),
 		mustLayoutCall(t, conn, "panes.create", map[string]any{
-			"id": paneID1, "tabId": tabID1, "cwd": "/repos/nocx", "kind": "local", "sizeShare": 1,
-		}, 12),
-		"panes.create result (local)")
-	validateJSON(t, loadSchema(t, "panes.create.schema.json"),
-		mustLayoutCall(t, conn, "panes.create", map[string]any{
-			"id": paneID2, "tabId": tabID1, "cwd": "/srv", "kind": "ssh",
+			"id": paneID4, "tabId": tabID1, "cwd": "/srv", "kind": "ssh",
 			"endpoint": "deploy@srv-01:22", "sizeShare": 0.5,
 		}, 13),
 		"panes.create result (ssh)")
 	validateJSON(t, loadSchema(t, "panes.move.schema.json"),
-		mustLayoutCall(t, conn, "panes.move", map[string]any{"id": paneID2, "tabId": tabID2}, 14),
+		mustLayoutCall(t, conn, "panes.move", map[string]any{"id": paneID4, "tabId": tabID3}, 14),
 		"panes.move result")
 
 	validateJSON(t, loadSchema(t, "tabs.close.schema.json"),
-		mustLayoutCall(t, conn, "tabs.close", map[string]any{"id": tabID2}, 15),
+		mustLayoutCall(t, conn, "tabs.close",
+			map[string]any{"id": tabID3, "replacement": aReplacement()}, 15),
 		"tabs.close result")
 	validateJSON(t, loadSchema(t, "workspaces.close.schema.json"),
-		mustLayoutCall(t, conn, "workspaces.close", map[string]any{"id": wsID2}, 16),
+		mustLayoutCall(t, conn, "workspaces.close",
+			map[string]any{"id": wsID2, "replacement": aReplacement()}, 16),
 		"workspaces.close result")
 }
 

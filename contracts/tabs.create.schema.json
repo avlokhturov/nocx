@@ -2,13 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/tabs.create.schema.json",
   "title": "TabsCreateResult",
-  "description": "Result of the tabs.create JSON-RPC method (nocx-isoph.2, design §4.1, §4.5 and §7): the stored tab, and whether this call was a retry of one already made. This file is also the single declaration of the tab shape; the other tabs.* results reference it cross-file. What is NOT here is as deliberate as what is: the activity indicator, the attention indicator and the label are computed from the tab's panes (§4.5) and have no field, because attention arrives at a PANE and a copy on the tab would give one fact two owners.",
+  "description": "Result of the tabs.create JSON-RPC method (nocx-isoph.2, design §4.1, §4.5 and §7): the tab, THE FIRST PANE it was created with, and whether this call was a retry of one already made. A tab is what a pane is dragged out INTO (§4.4), so the pane comes with it and a tab with no pane never exists. This file is also the single declaration of the tab shape; the other tabs.* results reference it cross-file. What is NOT here is as deliberate as what is: the activity indicator, the attention indicator and the label are computed from the tab's panes (§4.5) and have no field, because attention arrives at a PANE and a copy on the tab would give one fact two owners.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["tab", "replayed"],
+  "required": ["tab", "firstPane", "replayed"],
   "properties": {
     "tab": {
       "$ref": "#/$defs/tab"
+    },
+    "firstPane": {
+      "description": "The pane this tab was created around, as stored, with the tabId the backend filled in.",
+      "$ref": "panes.create.schema.json#/$defs/pane"
     },
     "replayed": {
       "description": "Whether this call found the work already done. A create whose answer was lost is retried — AD-9 exists because the socket drops — and the retry returns the FIRST object rather than minting a second one. true says so out loud, so the renderer can tell 'I made this' from 'this was already made' without comparing rows, and so the property is assertable over the wire instead of inferred from the absence of an error. A repeat asking for something DIFFERENT under the same id is not a replay: it is refused with -32602.",

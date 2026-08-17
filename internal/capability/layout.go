@@ -28,17 +28,23 @@ import (
 // against — a create must be able to answer with the row that is already
 // there, which is a read — and nothing else.
 type LayoutService interface {
-	CreateWorkspace(ctx context.Context, ws content.Workspace) (content.Created[content.Workspace], error)
+	// The creates take their first member with them, because a container
+	// with none may not exist even for the length of a statement
+	// (nocx-isoph.3, design §4.1): the create IS where the content goes.
+	CreateWorkspace(ctx context.Context, ws content.Workspace, firstTab content.Tab, firstPane content.Pane) (content.Created[content.NewWorkspace], error)
 	RenameWorkspace(ctx context.Context, id, name string) (content.Workspace, error)
 	ReorderWorkspaces(ctx context.Context, ids []string) ([]content.Workspace, error)
-	DeleteWorkspace(ctx context.Context, id string) error
+	// The closes take the identity of the tab that replaces the application's
+	// last one, for the same §7 reason: it is a durable id, so it is the
+	// frontend's to mint and never the backend's.
+	DeleteWorkspace(ctx context.Context, id string, next content.Replacement) error
 
-	CreateTab(ctx context.Context, tab content.Tab) (content.Created[content.Tab], error)
+	CreateTab(ctx context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error)
 	RenameTab(ctx context.Context, id string, name *string) (content.Tab, error)
 	RecolourTab(ctx context.Context, id string, colour *string) (content.Tab, error)
 	PinTab(ctx context.Context, id string, pinned bool) (content.Tab, error)
 	ReorderTabs(ctx context.Context, workspaceID string, ids []string) ([]content.Tab, error)
-	DeleteTab(ctx context.Context, id string) error
+	DeleteTab(ctx context.Context, id string, next content.Replacement) error
 
 	CreatePane(ctx context.Context, pane content.Pane) (content.Created[content.Pane], error)
 	MovePane(ctx context.Context, id, tabID string) (content.Pane, error)
@@ -66,11 +72,11 @@ type layoutService struct {
 	layout content.LayoutRepository
 }
 
-func (s *layoutService) CreateWorkspace(ctx context.Context, ws content.Workspace) (content.Created[content.Workspace], error) {
+func (s *layoutService) CreateWorkspace(ctx context.Context, ws content.Workspace, firstTab content.Tab, firstPane content.Pane) (content.Created[content.NewWorkspace], error) {
 	if err := s.guard.check(); err != nil {
-		return content.Created[content.Workspace]{}, err
+		return content.Created[content.NewWorkspace]{}, err
 	}
-	return s.layout.CreateWorkspace(ctx, ws)
+	return s.layout.CreateWorkspace(ctx, ws, firstTab, firstPane)
 }
 
 func (s *layoutService) RenameWorkspace(ctx context.Context, id, name string) (content.Workspace, error) {
@@ -87,18 +93,18 @@ func (s *layoutService) ReorderWorkspaces(ctx context.Context, ids []string) ([]
 	return s.layout.ReorderWorkspaces(ctx, ids)
 }
 
-func (s *layoutService) DeleteWorkspace(ctx context.Context, id string) error {
+func (s *layoutService) DeleteWorkspace(ctx context.Context, id string, next content.Replacement) error {
 	if err := s.guard.check(); err != nil {
 		return err
 	}
-	return s.layout.DeleteWorkspace(ctx, id)
+	return s.layout.DeleteWorkspace(ctx, id, next)
 }
 
-func (s *layoutService) CreateTab(ctx context.Context, tab content.Tab) (content.Created[content.Tab], error) {
+func (s *layoutService) CreateTab(ctx context.Context, tab content.Tab, firstPane content.Pane) (content.Created[content.NewTab], error) {
 	if err := s.guard.check(); err != nil {
-		return content.Created[content.Tab]{}, err
+		return content.Created[content.NewTab]{}, err
 	}
-	return s.layout.CreateTab(ctx, tab)
+	return s.layout.CreateTab(ctx, tab, firstPane)
 }
 
 func (s *layoutService) RenameTab(ctx context.Context, id string, name *string) (content.Tab, error) {
@@ -129,11 +135,11 @@ func (s *layoutService) ReorderTabs(ctx context.Context, workspaceID string, ids
 	return s.layout.ReorderTabs(ctx, workspaceID, ids)
 }
 
-func (s *layoutService) DeleteTab(ctx context.Context, id string) error {
+func (s *layoutService) DeleteTab(ctx context.Context, id string, next content.Replacement) error {
 	if err := s.guard.check(); err != nil {
 		return err
 	}
-	return s.layout.DeleteTab(ctx, id)
+	return s.layout.DeleteTab(ctx, id, next)
 }
 
 func (s *layoutService) CreatePane(ctx context.Context, pane content.Pane) (content.Created[content.Pane], error) {

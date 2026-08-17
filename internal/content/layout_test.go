@@ -141,17 +141,18 @@ func TestLayoutStoresAndReadsBackEveryField(t *testing.T) {
 	ctx := context.Background()
 
 	ws := content.Workspace{ID: "ws-1", Name: "release", Position: 2}
-	if _, err := layout.CreateWorkspace(ctx, ws); err != nil {
-		t.Fatalf("CreateWorkspace: %v", err)
-	}
 	root := content.Tab{
 		ID:          "tab-root",
 		WorkspaceID: "ws-1",
 		Position:    0,
 		Layout:      content.LayoutRow,
 	}
-	if _, err := layout.CreateTab(ctx, root); err != nil {
-		t.Fatalf("CreateTab root: %v", err)
+	// The whole chain is minted in one call: a workspace is created together
+	// with its first tab and that tab's first pane (nocx-isoph.3).
+	if _, err := layout.CreateWorkspace(ctx, ws, root, content.Pane{
+		ID: "pane-root", TabID: "tab-root", Cwd: "/", Kind: content.PaneLocal, SizeShare: 1,
+	}); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
 	}
 	child := content.Tab{
 		ID:          "tab-child",
@@ -163,9 +164,6 @@ func TestLayoutStoresAndReadsBackEveryField(t *testing.T) {
 		Pinned:      true,
 		Layout:      content.LayoutColumn,
 		SeenAt:      i64(1_700_000_000_000),
-	}
-	if _, err := layout.CreateTab(ctx, child); err != nil {
-		t.Fatalf("CreateTab child: %v", err)
 	}
 	local := content.Pane{
 		ID:        "pane-local",
@@ -182,10 +180,13 @@ func TestLayoutStoresAndReadsBackEveryField(t *testing.T) {
 		Endpoint:  str("deploy@srv-01:22"),
 		SizeShare: 0.75,
 	}
-	for _, p := range []content.Pane{local, remote} {
-		if _, err := layout.CreatePane(ctx, p); err != nil {
-			t.Fatalf("CreatePane %s: %v", p.ID, err)
-		}
+	if _, err := layout.CreateTab(ctx, child, local); err != nil {
+		t.Fatalf("CreateTab child: %v", err)
+	}
+	// The second pane of a tab is a split, and that is the one creation
+	// that adds a member to a container that already exists.
+	if _, err := layout.CreatePane(ctx, remote); err != nil {
+		t.Fatalf("CreatePane %s: %v", remote.ID, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -410,7 +411,7 @@ func TestDeletingAWorkspaceTakesItsTabsAndTheirPanes(t *testing.T) {
 	ctx := context.Background()
 	seedChain(t, layout)
 
-	if err := layout.DeleteWorkspace(ctx, "ws-1"); err != nil {
+	if err := layout.DeleteWorkspace(ctx, "ws-1", aReplacement()); err != nil {
 		t.Fatalf("DeleteWorkspace: %v", err)
 	}
 	if tabs, err := layout.Tabs(ctx, "ws-1"); err != nil || len(tabs) != 0 {
@@ -433,7 +434,7 @@ func TestDeletingATabTakesItsPanesAndNullsItsChildrensLineage(t *testing.T) {
 	ctx := context.Background()
 	seedChain(t, layout)
 
-	if err := layout.DeleteTab(ctx, "tab-1"); err != nil {
+	if err := layout.DeleteTab(ctx, "tab-1", aReplacement()); err != nil {
 		t.Fatalf("DeleteTab: %v", err)
 	}
 	if panes, err := layout.Panes(ctx, "tab-1"); err != nil || len(panes) != 0 {
@@ -463,7 +464,7 @@ func TestDeletingAPaneLeavesItsTabAndSiblings(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreatePane: %v", err)
 	}
-	if err := layout.DeletePane(ctx, "pane-1"); err != nil {
+	if err := layout.DeletePane(ctx, "pane-1", aReplacement()); err != nil {
 		t.Fatalf("DeletePane: %v", err)
 	}
 	panes, err := layout.Panes(ctx, "tab-1")
@@ -479,27 +480,23 @@ func TestDeletingAPaneLeavesItsTabAndSiblings(t *testing.T) {
 }
 
 // seedChain writes ws-1 → tab-1 → pane-1, plus tab-2 whose lineage parent is
-// tab-1.
+// tab-1 and whose own first pane is pane-1b. Every tab here holds a pane
+// because a tab that holds none cannot exist (nocx-isoph.3).
 func seedChain(t *testing.T, layout content.LayoutRepository) {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "work"}); err != nil {
+	if _, err := layout.CreateWorkspace(ctx,
+		content.Workspace{ID: "ws-1", Name: "work"},
+		content.Tab{ID: "tab-1", WorkspaceID: "ws-1", Position: 0, Layout: content.LayoutRow},
+		content.Pane{ID: "pane-1", TabID: "tab-1", Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
 		t.Fatalf("CreateWorkspace: %v", err)
 	}
-	if _, err := layout.CreateTab(ctx, content.Tab{
-		ID: "tab-1", WorkspaceID: "ws-1", Position: 0, Layout: content.LayoutRow,
-	}); err != nil {
-		t.Fatalf("CreateTab tab-1: %v", err)
-	}
-	if _, err := layout.CreateTab(ctx, content.Tab{
-		ID: "tab-2", WorkspaceID: "ws-1", ParentID: str("tab-1"), Position: 1, Layout: content.LayoutRow,
-	}); err != nil {
+	if _, err := layout.CreateTab(ctx,
+		content.Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: str("tab-1"), Position: 1, Layout: content.LayoutRow},
+		content.Pane{ID: "pane-1b", TabID: "tab-2", Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
 		t.Fatalf("CreateTab tab-2: %v", err)
-	}
-	if _, err := layout.CreatePane(ctx, content.Pane{
-		ID: "pane-1", TabID: "tab-1", Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1,
-	}); err != nil {
-		t.Fatalf("CreatePane: %v", err)
 	}
 }
 
@@ -508,33 +505,36 @@ func seedChain(t *testing.T, layout content.LayoutRepository) {
 func TestTabLineageRefusesSelfCycleAndDepth(t *testing.T) {
 	_, layout := newLayout(t)
 	ctx := context.Background()
-	if _, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "work"}); err != nil {
-		t.Fatalf("CreateWorkspace: %v", err)
-	}
+	seedWorkspace(t, layout, "ws-1", "tab-seed", "pane-seed")
 	tab := func(id string, parent *string) content.Tab {
 		return content.Tab{ID: id, WorkspaceID: "ws-1", ParentID: parent, Layout: content.LayoutRow}
 	}
-	if _, err := layout.CreateTab(ctx, tab("self", str("self"))); !errors.Is(err, lineage.ErrSelf) {
+	// Every tab is minted with a pane, so the first pane's id follows the
+	// tab's; what this test is about is the lineage edge, not the member.
+	pane := func(tabID string) content.Pane {
+		return content.Pane{ID: "pane-" + tabID, TabID: tabID, Cwd: "/", Kind: content.PaneLocal, SizeShare: 1}
+	}
+	if _, err := layout.CreateTab(ctx, tab("self", str("self")), pane("self")); !errors.Is(err, lineage.ErrSelf) {
 		t.Fatalf("self-parent: err = %v, want lineage.ErrSelf", err)
 	}
 	// A parent no row carries is refused rather than written and left
 	// dangling — the store is the only thing that can answer that question,
 	// and it answers it before the insert.
-	if _, err := layout.CreateTab(ctx, tab("orphan", str("nobody"))); err == nil {
+	if _, err := layout.CreateTab(ctx, tab("orphan", str("nobody")), pane("orphan")); err == nil {
 		t.Fatalf("unknown parent: err = nil, want a refusal")
 	}
 	// The depth bound, both ends. n0 is a root; a child of n(MaxDepth-1) has
 	// exactly MaxDepth ancestors and is the last one accepted.
 	name := func(i int) string { return fmt.Sprintf("n%d", i) }
-	if _, err := layout.CreateTab(ctx, tab(name(0), nil)); err != nil {
+	if _, err := layout.CreateTab(ctx, tab(name(0), nil), pane(name(0))); err != nil {
 		t.Fatalf("CreateTab root: %v", err)
 	}
 	for i := 1; i <= lineage.MaxDepth; i++ {
-		if _, err := layout.CreateTab(ctx, tab(name(i), str(name(i-1)))); err != nil {
+		if _, err := layout.CreateTab(ctx, tab(name(i), str(name(i-1))), pane(name(i))); err != nil {
 			t.Fatalf("CreateTab within the bound at %d: %v", i, err)
 		}
 	}
-	_, err := layout.CreateTab(ctx, tab(name(lineage.MaxDepth+1), str(name(lineage.MaxDepth))))
+	_, err := layout.CreateTab(ctx, tab(name(lineage.MaxDepth+1), str(name(lineage.MaxDepth))), pane(name(lineage.MaxDepth+1)))
 	if !errors.Is(err, lineage.ErrTooDeep) {
 		t.Fatalf("one past the bound: err = %v, want lineage.ErrTooDeep", err)
 	}
@@ -547,8 +547,9 @@ func TestTabLineageRefusesSelfCycleAndDepth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tabs: %v", err)
 	}
-	if len(tabs) != lineage.MaxDepth+1 {
-		t.Fatalf("tabs = %d, want %d — a refusal left a row behind", len(tabs), lineage.MaxDepth+1)
+	// The seeded tab the workspace was minted around, plus n0…nMaxDepth.
+	if len(tabs) != lineage.MaxDepth+2 {
+		t.Fatalf("tabs = %d, want %d — a refusal left a row behind", len(tabs), lineage.MaxDepth+2)
 	}
 }
 
@@ -566,26 +567,24 @@ func TestClosedEnumsAreRefused(t *testing.T) {
 	}
 	if _, err := layout.CreateTab(ctx, content.Tab{
 		ID: "tab-bad", WorkspaceID: "ws-1", Layout: content.TabLayout("grid"),
-	}); err == nil {
+	}, content.Pane{ID: "pane-bad-tab", TabID: "tab-bad", Cwd: "/", Kind: content.PaneLocal, SizeShare: 1}); err == nil {
 		t.Fatalf("tab layout 'grid': err = nil, want a refusal — no asymmetric layouts (§5)")
 	}
 }
 
-// An id already taken by a DIFFERENT object FAILS; it never overwrites (§7
-// consequence 2). The id is untrusted input and knowing one confers nothing.
-// Every create below asks for something other than what the row holds, which
-// is what makes it a second object rather than a retry — the retry is the
-// other half of the same rule and is asserted in layout_mutations_test.go.
+// An id that is already taken FAILS; it never overwrites (§7 consequence 2).
+// The id is untrusted input and knowing one confers nothing.
 func TestCreateRefusesAnIDThatIsAlreadyTaken(t *testing.T) {
 	_, layout := newLayout(t)
 	ctx := context.Background()
 	seedChain(t, layout)
-	if _, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "other"}); err == nil {
+	if _, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "ws-1", Name: "other"},
+		aTab("tab-other", "ws-1"), aPane("pane-other", "tab-other", "/")); err == nil {
 		t.Fatalf("duplicate workspace id: err = nil, want a refusal")
 	}
 	if _, err := layout.CreateTab(ctx, content.Tab{
-		ID: "tab-1", WorkspaceID: "ws-1", Position: 5, Layout: content.LayoutRow,
-	}); err == nil {
+		ID: "tab-1", WorkspaceID: "ws-1", Layout: content.LayoutRow,
+	}, aPane("pane-dup", "tab-1", "/")); err == nil {
 		t.Fatalf("duplicate tab id: err = nil, want a refusal")
 	}
 	if _, err := layout.CreatePane(ctx, content.Pane{
@@ -606,7 +605,7 @@ func TestATabWithoutAWorkspaceAndAPaneWithoutATabAreRefused(t *testing.T) {
 	ctx := context.Background()
 	if _, err := layout.CreateTab(ctx, content.Tab{
 		ID: "tab-1", WorkspaceID: "ws-nobody", Layout: content.LayoutRow,
-	}); err == nil {
+	}, aPane("pane-1", "tab-1", "/")); err == nil {
 		t.Fatalf("tab under an absent workspace: err = nil, want a refusal")
 	}
 	if _, err := layout.CreatePane(ctx, content.Pane{
@@ -629,20 +628,54 @@ func TestLayoutOnAClosedStore(t *testing.T) {
 		call func() error
 	}{
 		{"CreateWorkspace", func() error {
-			_, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "w", Name: "n"})
+			_, err := layout.CreateWorkspace(ctx, content.Workspace{ID: "w", Name: "n"},
+				aTab("t", "w"), aPane("p", "t", "/"))
 			return err
 		}},
-		{"DeleteWorkspace", func() error { return layout.DeleteWorkspace(ctx, "w") }},
+		{"DeleteWorkspace", func() error { return layout.DeleteWorkspace(ctx, "w", aReplacement()) }},
 		{"CreateTab", func() error {
-			_, err := layout.CreateTab(ctx, content.Tab{ID: "t", WorkspaceID: "w", Layout: content.LayoutRow})
+			_, err := layout.CreateTab(ctx, content.Tab{ID: "t", WorkspaceID: "w", Layout: content.LayoutRow},
+				aPane("p", "t", "/"))
 			return err
 		}},
-		{"DeleteTab", func() error { return layout.DeleteTab(ctx, "t") }},
+		{"DeleteTab", func() error { return layout.DeleteTab(ctx, "t", aReplacement()) }},
 		{"CreatePane", func() error {
 			_, err := layout.CreatePane(ctx, content.Pane{ID: "p", TabID: "t", Cwd: "/", Kind: content.PaneLocal, SizeShare: 1})
 			return err
 		}},
-		{"DeletePane", func() error { return layout.DeletePane(ctx, "p") }},
+		{"DeletePane", func() error { return layout.DeletePane(ctx, "p", aReplacement()) }},
+		{"MovePane", func() error {
+			_, err := layout.MovePane(ctx, "p", "t")
+			return err
+		}},
+		{"RenameWorkspace", func() error {
+			_, err := layout.RenameWorkspace(ctx, "w", "n")
+			return err
+		}},
+		{"ReorderWorkspaces", func() error {
+			_, err := layout.ReorderWorkspaces(ctx, []string{"w"})
+			return err
+		}},
+		{"RenameTab", func() error {
+			_, err := layout.RenameTab(ctx, "t", nil)
+			return err
+		}},
+		{"RecolourTab", func() error {
+			_, err := layout.RecolourTab(ctx, "t", nil)
+			return err
+		}},
+		{"PinTab", func() error {
+			_, err := layout.PinTab(ctx, "t", true)
+			return err
+		}},
+		{"ReorderTabs", func() error {
+			_, err := layout.ReorderTabs(ctx, "w", []string{"t"})
+			return err
+		}},
+		{"WorkspaceForPane", func() error {
+			_, err := layout.WorkspaceForPane(ctx, "p")
+			return err
+		}},
 		{"Workspaces", func() error { _, err := layout.Workspaces(ctx); return err }},
 		{"Tabs", func() error { _, err := layout.Tabs(ctx, "w"); return err }},
 		{"Panes", func() error { _, err := layout.Panes(ctx, "t"); return err }},

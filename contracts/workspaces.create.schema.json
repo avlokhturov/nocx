@@ -2,13 +2,21 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/workspaces.create.schema.json",
   "title": "WorkspacesCreateResult",
-  "description": "Result of the workspaces.create JSON-RPC method (nocx-isoph.2, design §4.1 and §7): the stored workspace, and whether this call was a retry of one already made. The renderer ASKS for a workspace and renders what it is told — the id it minted is untrusted input, and what comes back is the row the backend actually holds, never an echo of the request. This file is also the single declaration of the workspace shape; the other workspaces.* results reference it cross-file.",
+  "description": "Result of the workspaces.create JSON-RPC method (nocx-isoph.2, design §4.1 and §7): the workspace, THE FIRST TAB AND THAT TAB'S FIRST PANE it was created with, and whether this call was a retry of one already made. Creation is always creation-with-content (nocx-isoph.3): an empty workspace was proposed and rejected — it has no meaning — so there is never a moment at which one exists, and the answer therefore names all three rows rather than a container the renderer would then have to fill. The renderer ASKS and renders what it is told; the ids it minted are untrusted input, and what comes back is what the backend holds, never an echo of the request. This file is also the single declaration of the workspace shape; the other workspaces.* results reference it cross-file.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["workspace", "replayed"],
+  "required": ["workspace", "firstTab", "firstPane", "replayed"],
   "properties": {
     "workspace": {
       "$ref": "#/$defs/workspace"
+    },
+    "firstTab": {
+      "description": "The tab the workspace was created with, as stored — including the workspaceId the backend filled in, which the request does not carry because this call is what creates the container.",
+      "$ref": "tabs.create.schema.json#/$defs/tab"
+    },
+    "firstPane": {
+      "description": "That tab's first pane, as stored, with the tabId the backend filled in.",
+      "$ref": "panes.create.schema.json#/$defs/pane"
     },
     "replayed": {
       "description": "Whether this call found the work already done. A create whose answer was lost is retried — AD-9 exists because the socket drops — and the retry returns the FIRST object rather than minting a second one. true says so out loud, so the renderer can tell 'I made this' from 'this was already made' without comparing rows, and so the property is assertable over the wire instead of inferred from the absence of an error. A repeat asking for something DIFFERENT under the same id is not a replay: it is refused with -32602.",

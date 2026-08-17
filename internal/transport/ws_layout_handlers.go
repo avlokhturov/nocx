@@ -33,10 +33,19 @@ package transport
 // several panes and "the tab that spoke" is not well defined. tabId appears
 // on this wire only as a field of a pane the renderer asked for.
 //
-// It also does not reap an emptied container. "A tab exists while it holds at
-// least one pane" is nocx-isoph.3's whole subject, and splitting that rule
-// across two beads would give one invariant two owners — which is the failure
-// this design spends its length avoiding.
+// CREATION IS ALWAYS CREATION-WITH-CONTENT, and the params say so
+// (nocx-isoph.3, §4.1): workspaces.create carries the first tab and that tab's
+// first pane, tabs.create carries its first pane. There is never a moment at
+// which an empty container exists, which is what makes "a container exists
+// only while it holds a member" a property of the model rather than a sweep.
+// The store enforces it — ErrNoFirstTab, ErrNoFirstPane — and this file does
+// not re-implement the rule, it only carries the fields.
+//
+// A CLOSE CARRIES THE REPLACEMENT for the same §7 reason the creates carry
+// their ids: when the close would leave the application with no tab at all,
+// one is minted, and its tab and pane ids are DURABLE, so they are the
+// frontend's to mint and never the backend's. A close that would empty the
+// application and named no replacement is refused whole and removes nothing.
 
 import (
 	"context"
@@ -130,8 +139,14 @@ func wireTabs(all []content.Tab) []tabWire {
 	return out
 }
 
+// workspaceCreateResponse answers with ALL THREE rows the call made: a
+// creation with content has no answer that names only its container, and the
+// renderer needs the tab and the pane as stored — with the container
+// references the store filled in — to draw anything at all.
 type workspaceCreateResponse struct {
 	Workspace workspaceWire `json:"workspace"`
+	FirstTab  tabWire       `json:"firstTab"`
+	FirstPane paneWire      `json:"firstPane"`
 	Replayed  bool          `json:"replayed"`
 }
 
@@ -144,8 +159,9 @@ type workspaceListResponse struct {
 }
 
 type tabCreateResponse struct {
-	Tab      tabWire `json:"tab"`
-	Replayed bool    `json:"replayed"`
+	Tab       tabWire  `json:"tab"`
+	FirstPane paneWire `json:"firstPane"`
+	Replayed  bool     `json:"replayed"`
 }
 
 type tabResponse struct {
@@ -178,6 +194,48 @@ type workspaceCreateParams struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Position int    `json:"position"`
+	// FirstTab and FirstPane are what make this creation-with-content. They
+	// carry no container reference of their own: this call is what creates
+	// the containers, so naming one would be asking the caller to repeat what
+	// it is already saying (the store refuses a mismatch rather than
+	// silently re-parenting).
+	FirstTab  firstTabParams  `json:"firstTab"`
+	FirstPane firstPaneParams `json:"firstPane"`
+}
+
+// firstTabParams is a tab minus its workspace: the decoration a tab may be
+// born with, and nothing that names where it lives.
+type firstTabParams struct {
+	ID       string  `json:"id"`
+	Name     *string `json:"name"`
+	Colour   *string `json:"colour"`
+	Position int     `json:"position"`
+	Pinned   bool    `json:"pinned"`
+	Layout   string  `json:"layout"`
+}
+
+// firstPaneParams is a pane minus its tab.
+type firstPaneParams struct {
+	ID        string  `json:"id"`
+	Cwd       string  `json:"cwd"`
+	Kind      string  `json:"kind"`
+	Endpoint  *string `json:"endpoint"`
+	SizeShare float64 `json:"sizeShare"`
+}
+
+func (p firstTabParams) tab(workspaceID string, parentID *string) content.Tab {
+	return content.Tab{
+		ID: p.ID, WorkspaceID: workspaceID, ParentID: parentID, Name: p.Name,
+		Colour: p.Colour, Position: p.Position, Pinned: p.Pinned,
+		Layout: content.TabLayout(p.Layout),
+	}
+}
+
+func (p firstPaneParams) pane(tabID string) content.Pane {
+	return content.Pane{
+		ID: p.ID, TabID: tabID, Cwd: p.Cwd, Kind: content.PaneKind(p.Kind),
+		Endpoint: p.Endpoint, SizeShare: p.SizeShare,
+	}
 }
 
 type workspaceRenameParams struct {
@@ -189,19 +247,38 @@ type workspaceReorderParams struct {
 	IDs []string `json:"ids"`
 }
 
-type layoutIDParams struct {
-	ID string `json:"id"`
+// layoutCloseParams closes a container. The replacement is consulted ONLY
+// when the close would otherwise leave the application with no tab at all, so
+// a caller that always sends one is not asking for a tab it will not get —
+// and a caller that never does will one day be refused with nothing removed.
+type layoutCloseParams struct {
+	ID          string             `json:"id"`
+	Replacement *replacementParams `json:"replacement"`
+}
+
+type replacementParams struct {
+	TabID  string `json:"tabId"`
+	PaneID string `json:"paneId"`
+	Cwd    string `json:"cwd"`
+}
+
+func (p layoutCloseParams) replacement() content.Replacement {
+	if p.Replacement == nil {
+		return content.Replacement{}
+	}
+	return content.Replacement{TabID: p.Replacement.TabID, PaneID: p.Replacement.PaneID, Cwd: p.Replacement.Cwd}
 }
 
 type tabCreateParams struct {
-	ID          string  `json:"id"`
-	WorkspaceID string  `json:"workspaceId"`
-	ParentID    *string `json:"parentId"`
-	Name        *string `json:"name"`
-	Colour      *string `json:"colour"`
-	Position    int     `json:"position"`
-	Pinned      bool    `json:"pinned"`
-	Layout      string  `json:"layout"`
+	ID          string          `json:"id"`
+	WorkspaceID string          `json:"workspaceId"`
+	ParentID    *string         `json:"parentId"`
+	Name        *string         `json:"name"`
+	Colour      *string         `json:"colour"`
+	Position    int             `json:"position"`
+	Pinned      bool            `json:"pinned"`
+	Layout      string          `json:"layout"`
+	FirstPane   firstPaneParams `json:"firstPane"`
 }
 
 // tabRenameParams and tabRecolourParams take a POINTER, and null is the
@@ -371,7 +448,46 @@ func validateWorkspaceCreateRaw(raw json.RawMessage) string {
 	if msg := boundedRunes("name", p.Name, maxConfigNameRunes); msg != "" {
 		return msg
 	}
-	return layoutPosition(p.Position)
+	if msg := layoutPosition(p.Position); msg != "" {
+		return msg
+	}
+	if msg := validateFirstTab(p.FirstTab); msg != "" {
+		return msg
+	}
+	return validateFirstPane(p.FirstPane)
+}
+
+// validateFirstTab and validateFirstPane check the members a create carries.
+// They bound and shape-check exactly what the standalone create does; whether
+// a member is REQUIRED at all is the store's rule (ErrNoFirstTab,
+// ErrNoFirstPane) and is not restated here, because a second statement of one
+// rule is a second thing to keep in step.
+func validateFirstTab(p firstTabParams) string {
+	if msg := layoutID("firstTab.id", p.ID); msg != "" {
+		return msg
+	}
+	if msg := nullableBounded("firstTab.name", p.Name, maxConfigNameRunes); msg != "" {
+		return msg
+	}
+	if msg := nullableBounded("firstTab.colour", p.Colour, maxLayoutColourRunes); msg != "" {
+		return msg
+	}
+	if msg := layoutPosition(p.Position); msg != "" {
+		return msg
+	}
+	switch content.TabLayout(p.Layout) {
+	case content.LayoutRow, content.LayoutColumn:
+		return ""
+	default:
+		return "firstTab.layout must be one of row, column"
+	}
+}
+
+func validateFirstPane(p firstPaneParams) string {
+	if msg := layoutID("firstPane.id", p.ID); msg != "" {
+		return msg
+	}
+	return validatePaneFacts("firstPane", p.Cwd, p.Kind, p.Endpoint, p.SizeShare)
 }
 
 func validateWorkspaceRenameRaw(raw json.RawMessage) string {
@@ -396,12 +512,29 @@ func validateWorkspaceReorderRaw(raw json.RawMessage) string {
 	return layoutMemberIDs(p.IDs)
 }
 
-func validateWorkspaceIDRaw(raw json.RawMessage) string {
-	var p layoutIDParams
+func validateLayoutCloseRaw(raw json.RawMessage) string {
+	var p layoutCloseParams
 	if msg := decodeObject(raw, &p); msg != "" {
 		return msg
 	}
-	return layoutID("id", p.ID)
+	if msg := layoutID("id", p.ID); msg != "" {
+		return msg
+	}
+	if p.Replacement == nil {
+		return ""
+	}
+	// A replacement that IS sent is shape-checked like anything else: its two
+	// ids are durable and client-minted, so they are untrusted in exactly the
+	// same way (§7).
+	if msg := layoutID("replacement.tabId", p.Replacement.TabID); msg != "" {
+		return msg
+	}
+	if msg := layoutID("replacement.paneId", p.Replacement.PaneID); msg != "" {
+		return msg
+	}
+	// An empty cwd is legal and means the backend process's own directory,
+	// which is what an unconfigured local shell already inherits.
+	return boundedRunes("replacement.cwd", p.Replacement.Cwd, maxCwdRunes)
 }
 
 func validateTabCreateRaw(raw json.RawMessage) string {
@@ -431,12 +564,12 @@ func validateTabCreateRaw(raw json.RawMessage) string {
 	}
 	switch content.TabLayout(p.Layout) {
 	case content.LayoutRow, content.LayoutColumn:
-		return ""
 	default:
 		// The set is closed and stays closed: panes do not nest, so an
 		// asymmetric layout is not expressible and is not meant to be (§5).
 		return "layout must be one of row, column"
 	}
+	return validateFirstPane(p.FirstPane)
 }
 
 func validateTabRenameRaw(raw json.RawMessage) string {
@@ -491,29 +624,39 @@ func validatePaneCreateRaw(raw json.RawMessage) string {
 	if msg := layoutID("tabId", p.TabID); msg != "" {
 		return msg
 	}
-	if strings.TrimSpace(p.Cwd) == "" || utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
-		return "cwd is required and bounded"
+	return validatePaneFacts("", p.Cwd, p.Kind, p.Endpoint, p.SizeShare)
+}
+
+// validatePaneFacts is the pane's own shape, wherever a pane arrives: on its
+// own through panes.create, or as the first member of a container. One
+// implementation, because two would agree until the day they did not.
+func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare float64) string {
+	if prefix != "" {
+		prefix += "."
 	}
-	if msg := nullableBounded("endpoint", p.Endpoint, maxLayoutEndpointRunes); msg != "" {
+	if strings.TrimSpace(cwd) == "" || utf8.RuneCountInString(cwd) > maxCwdRunes {
+		return prefix + "cwd is required and bounded"
+	}
+	if msg := nullableBounded(prefix+"endpoint", endpoint, maxLayoutEndpointRunes); msg != "" {
 		return msg
 	}
-	switch content.PaneKind(p.Kind) {
+	switch content.PaneKind(kind) {
 	case content.PaneLocal:
 		// An endpoint on a local pane would be accepted and then dropped —
 		// the empty string is a real value meaning the local machine, so
 		// there is nowhere honest to put it.
-		if p.Endpoint != nil {
-			return "endpoint is an ssh fact and is only accepted on kind = ssh"
+		if endpoint != nil {
+			return prefix + "endpoint is an ssh fact and is only accepted on kind = ssh"
 		}
 	case content.PaneSSH:
-		if p.Endpoint == nil || strings.TrimSpace(*p.Endpoint) == "" {
-			return "endpoint is required on kind = ssh"
+		if endpoint == nil || strings.TrimSpace(*endpoint) == "" {
+			return prefix + "endpoint is required on kind = ssh"
 		}
 	default:
-		return "kind must be one of local, ssh"
+		return prefix + "kind must be one of local, ssh"
 	}
-	if math.IsNaN(p.SizeShare) || math.IsInf(p.SizeShare, 0) || p.SizeShare <= 0 || p.SizeShare > 1 {
-		return "sizeShare must be greater than 0 and at most 1 — it is this pane's share of its tab"
+	if math.IsNaN(sizeShare) || math.IsInf(sizeShare, 0) || sizeShare <= 0 || sizeShare > 1 {
+		return prefix + "sizeShare must be greater than 0 and at most 1 — it is this pane's share of its tab"
 	}
 	return ""
 }
@@ -555,9 +698,17 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			if !h.decode(req, &p) {
 				return nil
 			}
-			made, err := svc.CreateWorkspace(ctx, content.Workspace{ID: p.ID, Name: p.Name, Position: p.Position})
+			made, err := svc.CreateWorkspace(ctx,
+				content.Workspace{ID: p.ID, Name: p.Name, Position: p.Position},
+				p.FirstTab.tab(p.ID, nil),
+				p.FirstPane.pane(p.FirstTab.ID))
 			h.answer(req, err, func() any {
-				return workspaceCreateResponse{Workspace: wireWorkspace(made.Object), Replayed: made.Replayed}
+				return workspaceCreateResponse{
+					Workspace: wireWorkspace(made.Object.Workspace),
+					FirstTab:  wireTab(made.Object.FirstTab),
+					FirstPane: wirePane(made.Object.FirstPane),
+					Replayed:  made.Replayed,
+				}
 			})
 		case "workspaces.rename":
 			var p workspaceRenameParams
@@ -574,12 +725,12 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			all, err := svc.ReorderWorkspaces(ctx, p.IDs)
 			h.answer(req, err, func() any { return workspaceListResponse{Workspaces: wireWorkspaces(all)} })
 		case "workspaces.close":
-			var p layoutIDParams
+			var p layoutCloseParams
 			if !h.decode(req, &p) {
 				return nil
 			}
-			err := svc.DeleteWorkspace(ctx, p.ID)
-			h.answer(req, err, func() any { return closedResponse(p) })
+			err := svc.DeleteWorkspace(ctx, p.ID, p.replacement())
+			h.answer(req, err, func() any { return closedResponse{ID: p.ID} })
 		case "tabs.create":
 			var p tabCreateParams
 			if !h.decode(req, &p) {
@@ -589,9 +740,13 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				ID: p.ID, WorkspaceID: p.WorkspaceID, ParentID: p.ParentID, Name: p.Name,
 				Colour: p.Colour, Position: p.Position, Pinned: p.Pinned,
 				Layout: content.TabLayout(p.Layout),
-			})
+			}, p.FirstPane.pane(p.ID))
 			h.answer(req, err, func() any {
-				return tabCreateResponse{Tab: wireTab(made.Object), Replayed: made.Replayed}
+				return tabCreateResponse{
+					Tab:       wireTab(made.Object.Tab),
+					FirstPane: wirePane(made.Object.FirstPane),
+					Replayed:  made.Replayed,
+				}
 			})
 		case "tabs.rename":
 			var p tabRenameParams
@@ -622,12 +777,12 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			tabs, err := svc.ReorderTabs(ctx, p.WorkspaceID, p.IDs)
 			h.answer(req, err, func() any { return tabListResponse{Tabs: wireTabs(tabs)} })
 		case "tabs.close":
-			var p layoutIDParams
+			var p layoutCloseParams
 			if !h.decode(req, &p) {
 				return nil
 			}
-			err := svc.DeleteTab(ctx, p.ID)
-			h.answer(req, err, func() any { return closedResponse(p) })
+			err := svc.DeleteTab(ctx, p.ID, p.replacement())
+			h.answer(req, err, func() any { return closedResponse{ID: p.ID} })
 		case "panes.create":
 			var p paneCreateParams
 			if !h.decode(req, &p) {
@@ -675,10 +830,12 @@ func (h layoutHandlers) answer(req jsonrpcRequest, err error, result func() any)
 
 // layoutErrorCode maps a store failure to a JSON-RPC code. Everything the
 // RENDERER can cause is invalid params and never a server fault: an id it
-// reused for a second object, an id naming a row that is not there, a
-// reorder that is not a permutation, and a lineage edge the admission rules
-// refuse. A caller that can tell those apart from a broken backend is a
-// caller that can retry the right ones.
+// reused for a second object, an id naming a row that is not there, a reorder
+// that is not a permutation, a lineage edge the admission rules refuse, a
+// create with no first member, a close with no replacement, a close of the
+// default workspace, and a move across workspaces (which §12 q. 5 leaves
+// open and which therefore fails closed). A caller that can tell those apart
+// from a broken backend is a caller that can retry the right ones.
 func layoutErrorCode(err error) int {
 	switch {
 	case errors.Is(err, content.ErrIDConflict),
@@ -686,6 +843,12 @@ func layoutErrorCode(err error) int {
 		errors.Is(err, content.ErrNoSuchTab),
 		errors.Is(err, content.ErrNoSuchPane),
 		errors.Is(err, content.ErrNotAPermutation),
+		errors.Is(err, content.ErrNoFirstTab),
+		errors.Is(err, content.ErrNoFirstPane),
+		errors.Is(err, content.ErrMismatchedContainer),
+		errors.Is(err, content.ErrNoReplacement),
+		errors.Is(err, content.ErrDefaultWorkspace),
+		errors.Is(err, content.ErrCrossWorkspaceMove),
 		errors.Is(err, lineage.ErrSelf),
 		errors.Is(err, lineage.ErrCycle),
 		errors.Is(err, lineage.ErrTooDeep),
@@ -729,13 +892,13 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 		{"workspaces.create", validateWorkspaceCreateRaw},
 		{"workspaces.rename", validateWorkspaceRenameRaw},
 		{"workspaces.reorder", validateWorkspaceReorderRaw},
-		{"workspaces.close", validateWorkspaceIDRaw},
+		{"workspaces.close", validateLayoutCloseRaw},
 		{"tabs.create", validateTabCreateRaw},
 		{"tabs.rename", validateTabRenameRaw},
 		{"tabs.recolour", validateTabRecolourRaw},
 		{"tabs.pin", validateTabPinRaw},
 		{"tabs.reorder", validateTabReorderRaw},
-		{"tabs.close", validateWorkspaceIDRaw},
+		{"tabs.close", validateLayoutCloseRaw},
 		{"panes.create", validatePaneCreateRaw},
 		{"panes.move", validatePaneMoveRaw},
 	}
