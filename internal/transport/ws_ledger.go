@@ -306,6 +306,15 @@ func (h ledgerHandlers) handleClose(ctx context.Context, req jsonrpcRequest) {
 	// The kind payload. Only the shell arm exists (design §3.3), and a close
 	// on any other kind leaves the column alone rather than writing an empty
 	// arm that claims to be a shell fact.
+	//
+	// The arm ALONE, deliberately: the store merges it into whatever payload
+	// the row holds (FinishExecution's json_patch), so the receipt the open
+	// wrote survives untouched. Resending the receipt here would be worse
+	// than pointless — the envelope is immutable, so a close after a capture
+	// save would resend the span that save consumed and put it back, and a
+	// retried save would then replace text at offsets the rewrite has already
+	// moved. The row's receipt is the open's fact plus the rewrite's; the
+	// close has nothing to say about it.
 	if content.EntryKind(p.Envelope.Kind) == content.EntryShell {
 		payload := content.ShellPayloadJSON(p.Facts.ExitCode)
 		cmd.finish.Payload = &payload
@@ -334,8 +343,38 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 	// the second durable writer of the same product object, so it masks
 	// through the SAME owner rather than growing a second policy. A detection
 	// failure fails CLOSED — the raw text must not reach a row.
-	masked, _, _, err := maskCommandSafe(e.Intent)
+	masked, findings, segs, err := maskCommandSafe(e.Intent)
 	if err != nil {
+		return ledgerCommand{}, "intent could not be screened for secrets; not recorded"
+	}
+
+	// And keep the RECEIPT, which this method used to throw away
+	// (`masked, _, _, err`): how many secrets were taken out, of which kinds,
+	// and where the masks sit. history.query's contract declares all three on
+	// every entry, and everything built on them — the "3 secrets masked"
+	// line, the recall overlay's unresolved chips, and the vault save that
+	// turns one span into a reference — is unanswerable without them.
+	//
+	// It rides entries.payload rather than columns of its own: a column is a
+	// schemaV1 change, a schemaV1 change bumps schemaVersion, and a bump
+	// DROPs command_history with the user's real history in it. nocx-rtg0.19
+	// pays that once; this must not make anyone pay it twice
+	// (internal/content/redaction.go carries the whole argument).
+	//
+	// The receipt is written for every intent, including the empty one of a
+	// clean command: absent then means "recorded by a build that kept no
+	// receipts", which is a different fact from "nothing was masked".
+	receipt := content.EntryMasking{
+		MaskedCount: len(findings),
+		MaskedKinds: maskedKindsOf(findings),
+		Redactions:  redactionsOf(findings, segs),
+	}
+	payload, err := content.WithEntryMasking("{}", receipt)
+	if err != nil {
+		// Unreachable for a freshly marshalled receipt, and it still fails
+		// closed rather than storing an intent whose receipt was lost: a row
+		// that cannot say what was masked out of it is the soft degrade this
+		// whole path exists to prevent.
 		return ledgerCommand{}, "intent could not be screened for secrets; not recorded"
 	}
 
@@ -357,7 +396,7 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 			Kind:        content.EntryKind(e.Kind),
 			Intent:      masked,
 			Sensitivity: content.Sensitivity(e.Sensitivity),
-			Payload:     "{}",
+			Payload:     payload,
 		},
 		start: content.StartExecution{EntryID: e.ID},
 	}, ""

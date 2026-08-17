@@ -182,16 +182,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	// The row's segments: one per finding, byte offsets into the masked
 	// command. Offsets are stored in bytes (the store slices bytes); the
 	// UTF-16 conversion happens at the wire, below, once.
-	redactions := make([]content.Redaction, 0, len(segs))
-	for i, seg := range segs {
-		redactions = append(redactions, content.Redaction{
-			Kind:   string(findings[i].Kind),
-			Start:  seg.Start,
-			End:    seg.End,
-			Prefix: seg.Prefix,
-			Suffix: seg.Suffix,
-		})
-	}
+	redactions := redactionsOf(findings, segs)
 
 	// Already saved this session: the row stores the existing reference
 	// automatically and nothing is offered. The fingerprint is equality
@@ -377,6 +368,30 @@ func maskCommandSafe(line string) (masked string, findings []secrets.Finding, se
 	}()
 	masked, findings, segs = secrets.MaskWithSegments(line)
 	return masked, findings, segs, nil
+}
+
+// redactionsOf pairs the detector's findings with its segments into the
+// store's redaction segments: kind from the finding, byte span and the
+// head/tail mask from the segment. Byte offsets into the MASKED text, which
+// is what the store slices; the UTF-16 conversion the renderer decorates with
+// happens at the wire and nowhere else.
+//
+// One owner (AD-8), because both durable writers of a masked command need
+// exactly this list: history.record for command_history's redactions column
+// and ledger.open for the entry's receipt. Two copies of the pairing would
+// agree until the day one of them learned about a new segment field.
+func redactionsOf(findings []secrets.Finding, segs []secrets.Segment) []content.Redaction {
+	out := make([]content.Redaction, 0, len(segs))
+	for i, seg := range segs {
+		out = append(out, content.Redaction{
+			Kind:   string(findings[i].Kind),
+			Start:  seg.Start,
+			End:    seg.End,
+			Prefix: seg.Prefix,
+			Suffix: seg.Suffix,
+		})
+	}
+	return out
 }
 
 // maskedKindsOf deduplicates the findings' kinds in first-occurrence order —

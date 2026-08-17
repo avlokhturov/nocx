@@ -24,7 +24,8 @@ import (
 	"time"
 )
 
-var _ LedgerRepository = (*sqliteContent)(nil)
+// The v1 methods hang off *sqliteContent and are promoted into ledgerRepo,
+// which adds the one method whose key is the ledger's own (sqlite.go).
 
 // ── identity and narrative scope ─────────────────────────────────────────
 
@@ -318,6 +319,61 @@ func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEnt
 	return out, rows.Err()
 }
 
+// RewriteRedaction turns one masked span on a ledger row into a vault
+// reference: the intent gets the reference, the receipt in entries.payload
+// loses the segment. Read-modify-write runs inside ONE writer turn (s.run),
+// so no other mutation can interleave between the read and the update.
+//
+// The entry's digest is deliberately NOT recomputed. It binds the untrusted
+// client id to the content as SUBMITTED, and a replay from the renderer's
+// outbox re-sends the original command, which masks back to the original
+// intent — recomputing the digest here would turn every such replay into
+// ErrIDConflict. A rewrite is a later event on a recorded row, not a second
+// submission of one intent (the same reasoning FinishExecution's header
+// gives for keeping the close off Submit).
+func (s ledgerRepo) RewriteRedaction(ctx context.Context, entryID string, span Redaction, reference string) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var intent, payload string
+		err = tx.QueryRowContext(ctx,
+			`SELECT intent, payload FROM entries WHERE id = ?`, entryID).Scan(&intent, &payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		masking, err := EntryMaskingOf(payload)
+		if err != nil {
+			return err
+		}
+		newIntent, kept, matched, err := applyRedactionRewrite(
+			intent, masking.Redactions, span, reference, entryID)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			return nil
+		}
+		masking.Redactions = kept
+		newPayload, err := WithEntryMasking(payload, masking)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE entries SET intent = ?, payload = ? WHERE id = ?`,
+			newIntent, newPayload, entryID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
 // DeleteEntry removes an entry; its edges, executions, artifacts, chunks and
 // grant cascade (open question 5, decided: an edge whose endpoint is gone is
 // meaningless). Idempotent for a missing id. A pin protects against
@@ -442,9 +498,18 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 // command produced none".
 //
 // COALESCE is the "fills what is missing, overwrites nothing" rule in SQL:
-// started_at keeps a start the row already knew, duration_ms and payload
-// keep what they hold when the close carries none. ended_at is assigned
-// outright because a close always knows when it ended.
+// started_at keeps a start the row already knew and duration_ms keeps what it
+// holds when the close carries none. ended_at is assigned outright because a
+// close always knows when it ended.
+//
+// payload is MERGED rather than assigned (json_patch, RFC 7396), because two
+// writers own different keys of that one column (nocx-rtg0.24): the close
+// writes the kind arm, and the open wrote the redaction receipt that a
+// capture save then rewrites. Assigning here would have the close erase the
+// receipt — or, if the close carried its own copy, resurrect a span a save
+// had already settled, which is precisely the stale-offset replacement the
+// rewrite's idempotency rule exists to prevent. A NULL payload still touches
+// nothing at all.
 func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -474,10 +539,10 @@ func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, 
 			   started_at = COALESCE(started_at, ?),
 			   ended_at = ?,
 			   duration_ms = COALESCE(?, duration_ms),
-			   payload = COALESCE(?, payload)
+			   payload = CASE WHEN ? IS NULL THEN payload ELSE json_patch(payload, ?) END
 			 WHERE id = ?`,
 			string(end.Status), end.StartedAt, end.EndedAt, end.DurationMs,
-			end.Payload, entryID); err != nil {
+			end.Payload, end.Payload, entryID); err != nil {
 			return err
 		}
 		// An ASK run (an entry with a caused-by answer) closes its answer

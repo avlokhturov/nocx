@@ -324,7 +324,14 @@ func TestLedgerClose_BothPathsRecordTheSameFacts(t *testing.T) {
 		Phase: content.PhaseClosed, Status: content.EntryFailure, Cwd: "/repo",
 		Kind: content.EntryShell, Intent: "make test",
 		StartedAt: i64(1_750_000_047_700), DurationMs: i64(2300),
-		Payload: `{"kind":"shell","v":1,"exitCode":2}`, Executions: 1, Ended: true,
+		// One column, two writers, and the close merges rather than assigns
+		// (nocx-rtg0.24): the open's redaction receipt — empty here, because
+		// `make test` carries no secret — and the close's shell arm. The
+		// string is compared byte for byte because the point of this test is
+		// that the two paths agree, and "agree" includes how the payload was
+		// composed.
+		Payload:    `{"masking":{"maskedCount":0,"maskedKinds":[],"redactions":[]},"kind":"shell","v":1,"exitCode":2}`,
+		Executions: 1, Ended: true,
 	}
 	for _, id := range []string{"twin-open", "twin-orphan"} {
 		got := factsOf(t, db, id)
@@ -472,14 +479,25 @@ func TestLedgerAnswers_TheCommandHistoryReadPath(t *testing.T) {
 	//    `trusted` as a field crossing to history.record; command_history's
 	//    column has been written 0 ever since, because the renderer stopped
 	//    sending it. The ledger does not resurrect the laundering.
-	// 10-12. masked_count / masked_kinds / redactions — NOT answerable. The
-	//    ledger masks the intent through maskCommandSafe and discards the
-	//    findings and the segments (ws_ledger.go's `masked, _, _, err`), and
-	//    no column holds them. Everything built on them — the "3 secrets
-	//    masked" receipt, the recall overlay's unresolved chips, and
-	//    RewriteRedaction's vault-capture flow, which addresses a
-	//    command_history row by id — has no ledger counterpart. FINDING for
-	//    nocx-rtg0.19: three columns and one write path, not one field.
+	// 10-12. masked_count / masked_kinds / redactions — ANSWERABLE since
+	//    nocx-rtg0.24. The receipt rides entries.payload (no schemaVersion
+	//    bump, so no user pays for a rebuild twice), and the write path that
+	//    turns one of those spans into a vault reference is
+	//    LedgerRepository.RewriteRedaction, keyed by the entry's UUIDv7
+	//    rather than by command_history's rowid.
+	receipt, err := content.EntryMaskingOf(row.Payload)
+	if err != nil {
+		t.Fatalf("EntryMaskingOf(%q): %v", row.Payload, err)
+	}
+	if receipt.MaskedCount != 1 {
+		t.Fatalf("maskedCount = %d, want 1 — the row says what was masked out of it", receipt.MaskedCount)
+	}
+	if len(receipt.MaskedKinds) != 1 {
+		t.Fatalf("maskedKinds = %v, want the one kind the detector named", receipt.MaskedKinds)
+	}
+	if len(receipt.Redactions) != 1 {
+		t.Fatalf("redactions = %+v, want the one span the mask left", receipt.Redactions)
+	}
 	if len(row.Executions) != 1 {
 		t.Fatalf("%d executions, want 1", len(row.Executions))
 	}
@@ -1020,8 +1038,12 @@ func TestLedgerEvents_EveryStoreCallFails(t *testing.T) {
 		}
 		// And none of the close's facts leaked past the failure: a closed
 		// entry with a half-written payload is the state nothing could
-		// recover from, because it looks exactly like a finished one.
-		if row.Payload != "{}" || row.DurationMs != nil || row.StartedAt != nil || row.EndedAt != nil {
+		// recover from, because it looks exactly like a finished one. The
+		// payload the open wrote — the redaction receipt — is untouched and
+		// carries no shell arm, which is what "the close wrote nothing"
+		// looks like now that both writers share the column.
+		openPayload := `{"masking":{"maskedCount":0,"maskedKinds":[],"redactions":[]}}`
+		if row.Payload != openPayload || row.DurationMs != nil || row.StartedAt != nil || row.EndedAt != nil {
 			t.Fatalf("a failed close left facts behind: payload=%s duration=%v started=%v ended=%v",
 				row.Payload, row.DurationMs, row.StartedAt, row.EndedAt)
 		}
