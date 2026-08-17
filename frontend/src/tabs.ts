@@ -724,6 +724,7 @@ export class TabManager {
     old.onActivate = null
     old.onClose = null
     old.onNewTab = null
+    old.onNewSandboxedTab = null
     old.onReorder = null
 
     // Determine the old and new mount hosts based on orientation.

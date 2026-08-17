@@ -2,7 +2,7 @@ import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
 import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
-import { ChevronDownIcon, KeyIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
+import { ChevronDownIcon, KeyIcon, PlusIcon, ShieldIcon, TextQuoteIcon } from './ui/icons'
 import type { Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
@@ -66,9 +66,11 @@ export interface TabStrip {
   removeTab(tabId: number): void
   setActive(tabId: number): void
   reorder(tabs: readonly TabView[]): void
+  setSandboxEnabled(enabled: boolean): void
   onActivate: ((tabId: number) => void) | null
   onClose: ((tabId: number) => void) | null
   onNewTab: (() => void) | null
+  onNewSandboxedTab: (() => void) | null
   onReorder: ((fromId: number, toId: number) => void) | null
   onQuickConnect: (() => void) | null
   onInsertSecret: (() => void) | null
@@ -103,6 +105,8 @@ abstract class TabStripBase implements TabStrip {
   private _setTabViews!: Setter<TabView[]>
   private _getTabViews!: () => TabView[]
   private _setDisplay!: (...args: unknown[]) => void
+  private _setSandboxEnabled: Setter<boolean> | null = null
+  private sandboxEnabled = false
 
   public abstract readonly orientation: Orientation
 
@@ -110,6 +114,7 @@ abstract class TabStripBase implements TabStrip {
   onActivate: ((tabId: number) => void) | null = null
   onClose: ((tabId: number) => void) | null = null
   onNewTab: (() => void) | null = null
+  onNewSandboxedTab: (() => void) | null = null
   onReorder: ((fromId: number, toId: number) => void) | null = null
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
@@ -132,10 +137,12 @@ abstract class TabStripBase implements TabStrip {
         activeId: number
       }>({ records: {}, activeId: -1 })
       const [searchQuery, setSearchQuery] = createSignal('')
+      const [sandboxEnabled, setSandboxEnabled] = createSignal(this.sandboxEnabled)
 
       this._getTabViews = tabViews
       this._setTabViews = setTabViews
       this._setDisplay = setDisplay
+      this._setSandboxEnabled = setSandboxEnabled
 
       return (
         <>
@@ -158,6 +165,16 @@ abstract class TabStripBase implements TabStrip {
                 <IconButton ariaLabel="New tab" square onClick={() => this.onNewTab?.()}>
                   <PlusIcon />
                 </IconButton>
+                <Show when={sandboxEnabled()}>
+                  <IconButton
+                    ariaLabel="New sandboxed tab"
+                    title="New sandboxed tab"
+                    square
+                    onClick={() => this.onNewSandboxedTab?.()}
+                  >
+                    <ShieldIcon />
+                  </IconButton>
+                </Show>
                 <IconButton
                   ariaLabel="Quick connect"
                   onClick={() => this.onQuickConnect?.()}
@@ -231,6 +248,15 @@ abstract class TabStripBase implements TabStrip {
               <IconButton ariaLabel="New tab" onClick={() => this.onNewTab?.()}>
                 <PlusIcon />
               </IconButton>
+              <Show when={sandboxEnabled()}>
+                <IconButton
+                  ariaLabel="New sandboxed tab"
+                  title="New sandboxed tab"
+                  onClick={() => this.onNewSandboxedTab?.()}
+                >
+                  <ShieldIcon />
+                </IconButton>
+              </Show>
               <IconButton
                 ariaLabel="Quick connect"
                 onClick={() => this.onQuickConnect?.()}
@@ -260,6 +286,11 @@ abstract class TabStripBase implements TabStrip {
         </>
       )
     }, container)
+  }
+
+  setSandboxEnabled(enabled: boolean): void {
+    this.sandboxEnabled = enabled
+    this._setSandboxEnabled?.(enabled)
   }
 
   addTab(tab: TabView): void {
