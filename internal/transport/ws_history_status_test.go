@@ -48,7 +48,7 @@ func decodeHistoryStatus(t *testing.T, resp *vaultRPCResult) historyStatusResult
 // running. The default has to be "available", not "unknown": the renderer
 // has one status to read and no third state to render.
 func TestHistoryStatus_DefaultIsAvailable(t *testing.T) {
-	ws, stop := newHistoryWSServer(t, &fakeHistoryDB{page: content.HistoryPage{HasRows: true}})
+	ws, stop := newHistoryWSServer(t, &fakeHistoryDB{page: content.LedgerPage{HasRows: true}})
 	defer stop()
 	conn := connectWS(t, ws)
 	got := decodeHistoryStatus(t, vaultCall(t, conn, "history.status", map[string]any{}, 1))
@@ -94,7 +94,7 @@ func TestHistoryStatus_ClearRestoresAvailable(t *testing.T) {
 	st := NewHistoryStatus()
 	st.Raise(HistoryDegradeOpenFailed, "database is locked")
 	st.Clear()
-	ws, stop := newHistoryWSServer(t, &fakeHistoryDB{page: content.HistoryPage{HasRows: true}}, WithHistoryStatus(st))
+	ws, stop := newHistoryWSServer(t, &fakeHistoryDB{page: content.LedgerPage{HasRows: true}}, WithHistoryStatus(st))
 	defer stop()
 	conn := connectWS(t, ws)
 	got := decodeHistoryStatus(t, vaultCall(t, conn, "history.status", map[string]any{}, 1))
@@ -114,7 +114,7 @@ func TestHistoryStatus_ClearRestoresAvailable(t *testing.T) {
 // tested from the Raise side rather than from startup.
 func TestHistoryStatus_RaiseNotifiesConnectedClient(t *testing.T) {
 	st := NewHistoryStatus()
-	ws, stop := newHistoryWSServer(t, &fakeHistoryDB{page: content.HistoryPage{HasRows: true}}, WithHistoryStatus(st))
+	ws, stop := newHistoryWSServer(t, &fakeHistoryDB{page: content.LedgerPage{HasRows: true}}, WithHistoryStatus(st))
 	defer stop()
 	conn := connectWS(t, ws)
 	// One completed round trip proves the connection is registered before
@@ -185,7 +185,7 @@ func TestHistoryStatus_ADifferentReasonAnnounces(t *testing.T) {
 func TestHistoryQuery_UnavailableAnswersUnavailable(t *testing.T) {
 	st := NewHistoryStatus()
 	st.Raise(HistoryDegradeNoKey, "keyring: item not found")
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true}}
 	ws, stop := newHistoryWSServer(t, fake, WithHistoryStatus(st))
 	defer stop()
 	conn := connectWS(t, ws)
@@ -194,7 +194,7 @@ func TestHistoryQuery_UnavailableAnswersUnavailable(t *testing.T) {
 	if got.Source != "unavailable" {
 		t.Fatalf("source = %q, want unavailable", got.Source)
 	}
-	if _, _, _, _, _, _, calls := fake.recorded(); calls != 0 {
+	if _, calls := fake.recorded(); calls != 0 {
 		t.Fatalf("store consulted %d times while unavailable, want 0", calls)
 	}
 }

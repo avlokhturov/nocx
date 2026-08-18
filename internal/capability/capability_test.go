@@ -492,50 +492,15 @@ func (f *fakeSession) ExitOutcome() (session.ExitCause, int) {
 }
 func (f *fakeSession) SSHOptions() []ssh.ConnectOption { return f.sshOpts }
 
-// fakeHistoryRepo is a minimal content.CommandHistoryRepository.
-type fakeHistoryRepo struct {
-	mu       sync.Mutex
-	rows     []content.CommandRecord
-	rewrites []string
-}
-
-func (f *fakeHistoryRepo) Add(_ context.Context, rec content.CommandRecord) (int64, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.rows = append(f.rows, rec)
-	return int64(len(f.rows)), nil
-}
-
-func (f *fakeHistoryRepo) List(context.Context, int) ([]content.CommandRecord, error) {
-	return nil, nil
-}
-
-func (f *fakeHistoryRepo) GetByID(context.Context, int64) (*content.CommandRecord, error) {
-	return nil, nil
-}
-
-func (f *fakeHistoryRepo) FindByPrefix(context.Context, string, int) ([]content.CommandRecord, error) {
-	return nil, nil
-}
-
-func (f *fakeHistoryRepo) RewriteRedaction(_ context.Context, _ int64, _ content.Redaction, reference string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.rewrites = append(f.rewrites, reference)
-	return nil
-}
-
-func (f *fakeHistoryRepo) Query(context.Context, content.Scope, string, string, int, *int64, string) (content.HistoryPage, error) {
-	return content.HistoryPage{}, nil
-}
-
-// fakeLedgerRepo records the ledger arm of the capture-save rewrite. Only
-// RewriteRedaction is reachable through this seam; the embedded nil interface
-// makes any other call a loud panic rather than a quiet zero value.
+// fakeLedgerRepo records the two ledger methods the capability layer reaches:
+// the capture-save rewrite and the completed-command write. Nothing else is
+// reachable through this seam; the embedded nil interface makes any other
+// call a loud panic rather than a quiet zero value.
 type fakeLedgerRepo struct {
 	content.LedgerRepository
 	mu       sync.Mutex
 	rewrites []string
+	recorded []content.CompletedCommand
 }
 
 func (f *fakeLedgerRepo) RewriteRedaction(_ context.Context, entryID string, _ content.Redaction, _ string) error {
@@ -545,26 +510,26 @@ func (f *fakeLedgerRepo) RewriteRedaction(_ context.Context, entryID string, _ c
 	return nil
 }
 
+func (f *fakeLedgerRepo) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recorded = append(f.recorded, in)
+	return "0192f0aa-0000-7000-8000-000000000001", nil
+}
+
 // fakeContentDB is a minimal content.ContentDB.
 type fakeContentDB struct {
-	history *fakeHistoryRepo
-	ledger  *fakeLedgerRepo
+	ledger *fakeLedgerRepo
 }
 
 func newFakeContentDB() *fakeContentDB {
-	return &fakeContentDB{history: &fakeHistoryRepo{}, ledger: &fakeLedgerRepo{}}
+	return &fakeContentDB{ledger: &fakeLedgerRepo{}}
 }
 
 func (f *fakeContentDB) Conversations() content.ConversationRepository { return nil }
-func (f *fakeContentDB) CommandHistory() content.CommandHistoryRepository {
-	return f.history
-}
-func (f *fakeContentDB) Backup(context.Context, string) error { return nil }
-func (f *fakeContentDB) Close() error                         { return nil }
-func (f *fakeContentDB) RestorePrivate(context.Context, []content.Conversation, []content.CommandRecord) error {
-	return nil
-}
-func (f *fakeContentDB) Ledger() content.LedgerRepository { return f.ledger }
+func (f *fakeContentDB) Backup(context.Context, string) error          { return nil }
+func (f *fakeContentDB) Close() error                                  { return nil }
+func (f *fakeContentDB) Ledger() content.LedgerRepository              { return f.ledger }
 
 // Layout is unused by these tests: the fake predates the layout chain and no
 // capability reaches it (nocx-isoph.1).
@@ -817,7 +782,7 @@ func TestNonConflictingOperationsOverlap(t *testing.T) {
 		done <- contentOp.Run(context.Background(), func(ctx context.Context, svc capability.ContentService) error {
 			close(started)
 			<-release
-			_, err := svc.RecordCommand(ctx, content.CommandRecord{})
+			_, err := svc.RecordCommand(ctx, content.CompletedCommand{})
 			return err
 		})
 	}()
@@ -1151,25 +1116,27 @@ func TestCaptureSaveWritesBothStores(t *testing.T) {
 		if _, _, err := svc.CreateSecret(ctx, credential.NewSecret("pw"), vault.SecretMeta{Name: "captured"}); err != nil {
 			return err
 		}
-		return svc.RewriteRedaction(ctx, "1", content.Redaction{}, "sec:v1:file:fakea")
+		return svc.RewriteRedaction(ctx, "0192f0aa-0000-7000-8000-00000000beef", content.Redaction{}, "sec:v1:file:fakea")
 	}); err != nil {
 		t.Fatalf("capture save failed: %v", err)
 	}
 	if len(seam.LifecycleCalls()) == 0 {
 		t.Fatal("capture save did not reach the vault")
 	}
-	if len(db.history.rewrites) != 1 {
-		t.Fatalf("capture save did not rewrite history: %v", db.history.rewrites)
+	if len(db.ledger.rewrites) != 1 {
+		t.Fatalf("capture save did not rewrite the ledger row: %v", db.ledger.rewrites)
 	}
 }
 
-// The link's entry id says which store minted it, and the service routes on
-// that alone: an autoincrement rowid in string form is command_history's, a
-// client-minted UUIDv7 is the ledger's. Both arms are asserted here because a
-// test that exercised one could not report that the other went to the wrong
-// table — which is the defect nocx-rtg0.24 exists to fix, where the flow
-// could not address a ledger row at all.
-func TestCaptureSaveRoutesTheRewriteByTheIdItWasGiven(t *testing.T) {
+// There is ONE store to rewrite, and the id reaches it whatever it looks
+// like. This used to be a routing test: two tables held masked command text
+// — the interim command_history keyed by an autoincrement rowid, the ledger
+// by a client-minted UUIDv7 — and the service chose between them by trying
+// to parse the id as a decimal. nocx-rtg0.19 deleted command_history and the
+// router with it, so the assertion is now that NOTHING is decided from the
+// shape of the string: a decimal-looking handle goes to the ledger exactly
+// as a UUID does, and both arrive verbatim.
+func TestCaptureSaveSendsEveryIdShapeToTheLedger(t *testing.T) {
 	vltGate := control.NewSemaphore(capability.GateVault, 1)
 	contentGate := control.NewSemaphore(capability.GateContent, 1)
 	db := newFakeContentDB()
@@ -1184,11 +1151,11 @@ func TestCaptureSaveRoutesTheRewriteByTheIdItWasGiven(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("capture save failed: %v", err)
 	}
-	if len(db.history.rewrites) != 1 {
-		t.Fatalf("the rowid link reached command_history %d times, want 1", len(db.history.rewrites))
+	if len(db.ledger.rewrites) != 2 {
+		t.Fatalf("the ledger got %v, want both links", db.ledger.rewrites)
 	}
-	if len(db.ledger.rewrites) != 1 || db.ledger.rewrites[0] != entryID {
-		t.Fatalf("the ledger arm got %v, want exactly [%s]", db.ledger.rewrites, entryID)
+	if db.ledger.rewrites[0] != "42" || db.ledger.rewrites[1] != entryID {
+		t.Fatalf("the ledger got %v, want exactly [42 %s] — each id verbatim", db.ledger.rewrites, entryID)
 	}
 }
 

@@ -1211,11 +1211,12 @@ func TestHistoryQuery_OverTheWireConformsToContract(t *testing.T) {
 		started := ended - 4_100
 		horizon := int64(1_700_000_000_000)
 		exit := 0
-		fake := &fakeHistoryDB{page: content.HistoryPage{
-			Entries: []content.CommandRecord{
-				{ID: 7, Command: "git status", Cwd: "/repo", Host: "", Status: content.StatusSuccess, ExitCode: &exit, StartedAt: &started, EndedAt: &ended},
-				{ID: 6, Command: "make", Cwd: "/repo", Host: "", Status: content.StatusFailure},
-			},
+		done := ledgerRow("0192f0aa-0000-7000-8000-000000000007", "git status", "/repo", "", content.EntrySuccess)
+		done.StartedAt, done.EndedAt = &started, &ended
+		done.Payload = content.ShellPayloadJSON(&exit)
+		failed := ledgerRow("0192f0aa-0000-7000-8000-000000000006", "make", "/repo", "", content.EntryFailure)
+		fake := &fakeHistoryDB{page: content.LedgerPage{
+			Entries:   []content.LedgerEntrySummary{done, failed},
 			HasRows:   true,
 			Exhausted: true,
 			Coverage:  &horizon,

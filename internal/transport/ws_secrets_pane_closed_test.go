@@ -61,9 +61,9 @@ func sendPaneClosed(t *testing.T, conn *websocket.Conn, paneID string) {
 	}
 }
 
-// failOnCommandDB is a captureFakeDB whose Add refuses one marker command —
-// the history-record failure trigger, scoped to one pane's record so the other
-// pane's record still lands. CommandHistory is overridden because the
+// failOnCommandDB is a captureFakeDB whose RecordCompleted refuses one marker
+// command — the history-record failure trigger, scoped to one pane's record so
+// the other pane's record still lands. Ledger is overridden because the
 // promoted one would answer the EMBEDDED fake, routing every record past this
 // override.
 type failOnCommandDB struct {
@@ -71,13 +71,13 @@ type failOnCommandDB struct {
 	failOn string
 }
 
-func (f *failOnCommandDB) CommandHistory() content.CommandHistoryRepository { return f }
+func (f *failOnCommandDB) Ledger() content.LedgerRepository { return f }
 
-func (f *failOnCommandDB) Add(ctx context.Context, rec content.CommandRecord) (int64, error) {
-	if strings.Contains(rec.Command, f.failOn) {
-		return 0, errors.New("store exploded (test)")
+func (f *failOnCommandDB) RecordCompleted(ctx context.Context, in content.CompletedCommand) (string, error) {
+	if strings.Contains(in.Intent, f.failOn) {
+		return "", errors.New("store exploded (test)")
 	}
-	return f.captureFakeDB.Add(ctx, rec)
+	return f.captureFakeDB.RecordCompleted(ctx, in)
 }
 
 // saveCapture is the wire settlement attempt; it returns the JSON-RPC error
