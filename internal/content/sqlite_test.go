@@ -53,26 +53,12 @@ func newTestStore(t *testing.T) (content.ContentDB, string) {
 	return db, dir
 }
 
-// markerRecord is a durable row these tests can look for — in the file's
-// bytes, or after a reopen. It goes through the ledger since nocx-rtg0.19;
-// what they assert (encryption at rest, the wrong-key refusal, concurrency)
-// never depended on which table held it.
-func markerRecord(marker string) content.CompletedCommand {
-	return content.CompletedCommand{
-		Client: "marker",
-		Env:    content.Environment{ID: "local", Kind: content.EnvLocal},
-		Cwd:    "/srv/api",
-		Intent: marker,
-		Status: content.EntrySuccess,
-	}
-}
-
 // The file, its WAL and its SHM are 0600 inside a 0700 directory, carry no
 // SQLite header and no plaintext of a row we wrote, and reopen with the key.
 func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if _, addErr := db.Ledger().RecordCompleted(ctx, markerRecord("canary-51e21c88-command")); addErr != nil {
+	if _, addErr := db.Ledger().RecordCompleted(ctx, aCompletedCommand("canary-51e21c88-command")); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 
@@ -150,7 +136,7 @@ func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 func TestWrongKeyFailsCleanly(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if _, err := db.Ledger().RecordCompleted(ctx, markerRecord("wrongkey-marker")); err != nil {
+	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("wrongkey-marker")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -247,7 +233,7 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := range total {
-			if _, err := hist.RecordCompleted(ctx, markerRecord(fmt.Sprintf("cmd-%d", i))); err != nil {
+			if _, err := hist.RecordCompleted(ctx, aCompletedCommand(fmt.Sprintf("cmd-%d", i))); err != nil {
 				errCh <- fmt.Errorf("writer: %w", err)
 				return
 			}
@@ -308,14 +294,14 @@ func TestDiskFullProducesActionableError(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original) })
 
 	big := strings.Repeat("x", 2<<20) // 2 MiB row, far over the cap
-	if _, err := hist.RecordCompleted(ctx, markerRecord(big)); err == nil {
+	if _, err := hist.RecordCompleted(ctx, aCompletedCommand(big)); err == nil {
 		t.Fatal("oversized write succeeded, want a disk-full-class error")
 	}
 
 	// The store is intact: after the limit is lifted, small writes work and
 	// the failed write left nothing behind.
 	_ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original)
-	if _, err := hist.RecordCompleted(ctx, markerRecord("after-full")); err != nil {
+	if _, err := hist.RecordCompleted(ctx, aCompletedCommand("after-full")); err != nil {
 		t.Fatalf("Add after the condition cleared: %v", err)
 	}
 	recs, err := hist.ListEntries(ctx, 10)
@@ -381,7 +367,7 @@ func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	_, err := db.Ledger().RecordCompleted(ctx, markerRecord("late"))
+	_, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("late"))
 	if !errors.Is(err, content.ErrClosed) {
 		t.Fatalf("Add after Close = %v, want ErrClosed", err)
 	}
@@ -395,7 +381,7 @@ func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 func TestAutoVacuumDecidedAtCreation(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if _, err := db.Ledger().RecordCompleted(ctx, markerRecord("av")); err != nil {
+	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("av")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -466,7 +452,7 @@ func TestAddHonorsDisabledHistory(t *testing.T) {
 	hist := db.Ledger()
 
 	// A command runs while history is off: no row appears, no error.
-	if _, addErr := hist.RecordCompleted(context.Background(), markerRecord("off-1")); addErr != nil {
+	if _, addErr := hist.RecordCompleted(context.Background(), aCompletedCommand("off-1")); addErr != nil {
 		t.Fatalf("Add while disabled returned an error: %v", addErr)
 	}
 	recs, err := hist.ListEntries(context.Background(), 10)
@@ -479,7 +465,7 @@ func TestAddHonorsDisabledHistory(t *testing.T) {
 
 	// Live toggle: enabled again, the next command is recorded.
 	policy.SetEnabled(true)
-	if _, addErr := hist.RecordCompleted(context.Background(), markerRecord("on-1")); addErr != nil {
+	if _, addErr := hist.RecordCompleted(context.Background(), aCompletedCommand("on-1")); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 	recs, err = hist.ListEntries(context.Background(), 10)

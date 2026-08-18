@@ -17,6 +17,19 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
+// aCompletedCommand is THE factory for a completed command in this package's
+// tests — the durable row an assertion is about, whether it is looked for in
+// the file's bytes, read back after a reopen, or paged over.
+//
+// It is ONE factory because a struct literal in a test is a promise that ages
+// badly: CompletedCommand will gain fields, every literal keeps compiling with
+// a zero value for them, and the test goes on passing over a shape the product
+// no longer writes. AGENTS.md records that exact failure — a struct literal in
+// a test that predated a new required dependency, surfacing as a nil
+// dereference on a merge neither branch could have caught.
+//
+// So a caller names only what its assertion is ABOUT, and everything a valid
+// row needs lives here, where a new required field breaks loudly and once.
 func aCompletedCommand(intent string) content.CompletedCommand {
 	return content.CompletedCommand{
 		Client: "test-client",

@@ -106,10 +106,7 @@ func TestOpenRebuildsADatabaseWrittenByAnOlderSchema(t *testing.T) {
 
 	// The store WORKS — this is the assertion that used to fail, and it fails
 	// on a write as well as on a read, so both are exercised.
-	if _, err := db.Ledger().RecordCompleted(context.Background(), CompletedCommand{
-		Client: "schema-test", Env: Environment{ID: "local", Kind: EnvLocal},
-		Intent: "echo new", Cwd: "/srv", Status: EntrySuccess,
-	}); err != nil {
+	if _, err := db.Ledger().RecordCompleted(context.Background(), aRecordedCommand("echo new")); err != nil {
 		t.Fatalf("Add after rebuild: %v", err)
 	}
 	page, err := db.Ledger().QueryEntries(context.Background(), LedgerQuery{Scope: ScopeEverywhere, Limit: 50})
@@ -139,10 +136,7 @@ func TestReopeningACurrentDatabaseKeepsItsRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.db")
 
 	first := openStore(t, path)
-	if _, err := first.Ledger().RecordCompleted(context.Background(), CompletedCommand{
-		Client: "schema-test", Env: Environment{ID: "local", Kind: EnvLocal},
-		Intent: "echo keep", Cwd: "/srv", Status: EntrySuccess,
-	}); err != nil {
+	if _, err := first.Ledger().RecordCompleted(context.Background(), aRecordedCommand("echo keep")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := first.Close(); err != nil {

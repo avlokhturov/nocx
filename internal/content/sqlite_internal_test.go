@@ -99,7 +99,7 @@ func TestPlaintextCanary(t *testing.T) {
 		t.Fatalf("Open: %v", openErr)
 	}
 	hist := db.Ledger()
-	if _, addErr := hist.RecordCompleted(ctx, aCanaryCommand(canaryMarker)); addErr != nil {
+	if _, addErr := hist.RecordCompleted(ctx, aRecordedCommand(canaryMarker)); addErr != nil {
 		t.Fatalf("RecordCompleted: %v", addErr)
 	}
 
@@ -228,7 +228,7 @@ func TestBackupProducesConsistentEncryptedSnapshot(t *testing.T) {
 	hist := db.Ledger()
 	const rows = 50
 	for i := range rows {
-		if _, err := hist.RecordCompleted(ctx, aCanaryCommand(fmt.Sprintf("cmd-%d", i))); err != nil {
+		if _, err := hist.RecordCompleted(ctx, aRecordedCommand(fmt.Sprintf("cmd-%d", i))); err != nil {
 			t.Fatalf("RecordCompleted: %v", err)
 		}
 	}
@@ -310,7 +310,7 @@ func childWriter(t *testing.T) {
 	ctx := context.Background()
 	hist := db.Ledger()
 	for i := 0; ; i++ {
-		if _, err := hist.RecordCompleted(ctx, aCanaryCommand(fmt.Sprintf("child-row-%d", i))); err != nil {
+		if _, err := hist.RecordCompleted(ctx, aRecordedCommand(fmt.Sprintf("child-row-%d", i))); err != nil {
 			os.Exit(4)
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -379,17 +379,23 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	}
 
 	// The same database keeps working across processes: a fresh store writes.
-	if _, err := db.Ledger().RecordCompleted(ctx, CompletedCommand{Client: "canary", Env: Environment{ID: "local", Kind: EnvLocal}, Cwd: "/", Status: EntrySuccess, Intent: "after-kills"}); err != nil {
+	if _, err := db.Ledger().RecordCompleted(ctx, aRecordedCommand("after-kills")); err != nil {
 		t.Fatalf("Add after kills: %v", err)
 	}
 }
 
-// aCanaryCommand is the row these tests write to have SOMETHING durable in the
-// file — a marker to look for in the bytes, or a stream of rows to be killed
-// halfway through. It goes through the ledger since nocx-rtg0.19; what the
-// tests are about (encryption at rest, crash recovery) never depended on which
-// table it landed in.
-func aCanaryCommand(intent string) CompletedCommand {
+// aRecordedCommand is THE factory for a completed command in this package's
+// tests, and it is one because a struct literal in a test is a promise that
+// ages badly: CompletedCommand will gain fields, every literal keeps compiling
+// with a zero value for them, and the test goes on passing over a shape the
+// product no longer writes. AGENTS.md records that exact failure — a struct
+// literal in a test that predated a new required dependency, found as a nil
+// dereference on a merge nobody could have caught from either branch.
+//
+// So the callers below name only what their assertion is ABOUT — the intent —
+// and everything a valid row needs lives here, in one place that a new
+// required field breaks loudly and once.
+func aRecordedCommand(intent string) CompletedCommand {
 	return CompletedCommand{
 		Client: "canary",
 		Env:    Environment{ID: "local", Kind: EnvLocal},

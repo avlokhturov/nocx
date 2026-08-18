@@ -68,11 +68,7 @@ func TestSchemaRebuildLogsRowsDiscarded(t *testing.T) {
 	}
 	// And the store works on the rebuilt shape: a command records, into the
 	// ledger, which is the only place one lives now.
-	if _, err := db.Ledger().RecordCompleted(context.Background(), CompletedCommand{
-		Client: "rebuild-test",
-		Env:    Environment{ID: "local", Kind: EnvLocal},
-		Cwd:    "/", Intent: "after-rebuild", Status: EntrySuccess,
-	}); err != nil {
+	if _, err := db.Ledger().RecordCompleted(context.Background(), aRecordedCommand("after-rebuild")); err != nil {
 		t.Fatalf("RecordCompleted after rebuild: %v", err)
 	}
 }
