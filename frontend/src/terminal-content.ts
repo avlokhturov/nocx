@@ -2228,7 +2228,7 @@ export class TerminalContent extends BaseTabContent {
         const message = err instanceof Error ? err.message : String(err)
         showToast({
           level: 'danger',
-          message: `Sandboxed opencode failed to start: ${message}`,
+          message: `Sandboxed shell failed to start: ${message}`,
         })
         this._readyResolve(false)
         log.error('nocx: sandboxed terminal failed', { error: message })
