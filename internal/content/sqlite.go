@@ -56,6 +56,21 @@ type Config struct {
 	// Logger receives operational logging. When nil, the default slog
 	// adapter is used.
 	Logger log.Logger
+	// OnDiscard is called, once, when Open REBUILT the file because it was
+	// written by a different schema — with the number of commands that went
+	// with it, or -1 when the file held no countable table.
+	//
+	// IT EXISTS BECAUSE A LOG LINE IS NOT THE PRODUCT (nocx-rtg0.19).
+	// "your history was discarded" is a fact the user is entitled to, and
+	// AGENTS.md is explicit that a soft degrade must be visible where a
+	// person is looking rather than only in a warning nobody reads. This is
+	// a callback rather than a return value or an interface method so that
+	// adding it costs no caller anything: the composition root is the only
+	// place that knows what a product surface even is, and every test that
+	// opens a store keeps working without naming it.
+	//
+	// Nil means nobody is listening, which is the ordinary state in tests.
+	OnDiscard func(rows int)
 }
 
 const (
@@ -218,7 +233,7 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if _, err := createConn.ExecContext(ctx, "SELECT count(*) FROM sqlite_master"); err != nil {
 			return fmt.Errorf("content: open %s: %w (wrong key or corrupt file)", cfg.Path, err)
 		}
-		if err := resetIfSchemaChanged(ctx, createConn, cfg.Logger); err != nil {
+		if err := resetIfSchemaChanged(ctx, createConn, cfg.Logger, cfg.OnDiscard); err != nil {
 			return err
 		}
 		if _, err := createConn.ExecContext(ctx, schemaV1); err != nil {
@@ -365,7 +380,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 8
+const schemaVersion = 9
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -401,7 +416,7 @@ var rebuildDropOrder = []string{
 // failed DROP midway leaves the file wholly old or wholly new, and the
 // warning is logged only after the commit, with the count that commit
 // actually discarded. SQLite DDL is transactional, so this costs nothing.
-func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
+func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger, onDiscard func(rows int)) error {
 	var onDisk int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&onDisk); err != nil {
 		return fmt.Errorf("content: read schema version: %w", err)
@@ -497,6 +512,9 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 	if logger != nil {
 		logger.Warn("content: history discarded — the database was written by an older schema",
 			"was", onDisk, "now", schemaVersion, "rowsDiscarded", rowsDiscarded)
+	}
+	if onDiscard != nil {
+		onDiscard(rowsDiscarded)
 	}
 	return nil
 }

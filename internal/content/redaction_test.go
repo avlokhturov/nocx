@@ -97,3 +97,69 @@ func (c *captureLogger) Warn(msg string, args ...any)           { c.warn(msg, ar
 func (c *captureLogger) Error(string, ...any)                   {}
 func (c *captureLogger) With(...any) log.Logger                 { return c }
 func (c *captureLogger) WithContext(context.Context) log.Logger { return c }
+
+// The discard is handed to the PRODUCT, not only to the log (nocx-rtg0.19).
+//
+// AGENTS.md: a soft degrade must be visible where a person is looking. The
+// warning above says it to a log nobody reads; this callback is what lets the
+// composition root say it on a surface. Asserted with the same fixture, so the
+// two cannot drift: one rebuild, one announcement, the same number.
+func TestSchemaRebuildHandsTheDiscardToTheProduct(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	rawExec(
+		t, path,
+		`CREATE TABLE command_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			command TEXT NOT NULL, cwd TEXT NOT NULL, host TEXT NOT NULL,
+			status TEXT NOT NULL) STRICT`,
+		`INSERT INTO command_history (command, cwd, host, status) VALUES ('echo old-1', '/', '', 'success')`,
+		`INSERT INTO command_history (command, cwd, host, status) VALUES ('echo old-2', '/', '', 'success')`,
+		`PRAGMA user_version=1`,
+	)
+
+	var announced []int
+	db, err := Open(context.Background(), Config{
+		Path:      path,
+		Key:       schemaTestKey(),
+		Budget:    testBudgetInternal(),
+		OnDiscard: func(rows int) { announced = append(announced, rows) },
+	})
+	if err != nil {
+		t.Fatalf("Open over the older file: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if len(announced) != 1 || announced[0] != 2 {
+		t.Fatalf("OnDiscard saw %v, want exactly [2] — the rows the user lost", announced)
+	}
+}
+
+// And a file this build wrote itself announces NOTHING. An announcement on
+// every start would be a warning that means nothing by the third time, which
+// is how a real one stops being read.
+func TestOpeningACurrentFileAnnouncesNoDiscard(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	first, err := openTestStore(t, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if closeErr := first.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+
+	announced := 0
+	again, err := Open(context.Background(), Config{
+		Path:      path,
+		Key:       schemaTestKey(),
+		Budget:    testBudgetInternal(),
+		OnDiscard: func(int) { announced++ },
+	})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+
+	if announced != 0 {
+		t.Fatalf("OnDiscard fired %d times reopening a current file, want 0", announced)
+	}
+}
