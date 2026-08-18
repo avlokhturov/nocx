@@ -8,11 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strconv"
 
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/secrets"
 )
 
 // historyQueryParams is the request the recall overlay sends. There is
@@ -41,14 +39,14 @@ type historyQueryParams struct {
 // StartedAt rides along so the detail pane can render a duration; it is
 // nullable and omitted when the store never observed a start.
 type historyQueryEntry struct {
-	ID        string                `json:"id"`
-	Command   string                `json:"command"`
-	Cwd       string                `json:"cwd"`
-	Host      string                `json:"host"`
-	Status    content.CommandStatus `json:"status"`
-	ExitCode  *int                  `json:"exitCode,omitempty"`
-	StartedAt *int64                `json:"startedAt,omitempty"`
-	EndedAt   *int64                `json:"endedAt"`
+	ID        string `json:"id"`
+	Command   string `json:"command"`
+	Cwd       string `json:"cwd"`
+	Host      string `json:"host"`
+	Status    string `json:"status"`
+	ExitCode  *int   `json:"exitCode,omitempty"`
+	StartedAt *int64 `json:"startedAt,omitempty"`
+	EndedAt   *int64 `json:"endedAt"`
 	// MaskedCount and MaskedKinds are what the store redacted from Command
 	// at record time — the durable text is always the masked one, and the
 	// facts ride the row so a block reconstructed after a restart can say
@@ -133,7 +131,7 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 	}
 
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ContentService) error {
-		page, err := svc.QueryHistory(ctx, scope, cwd, host, limit, before, text)
+		page, err := svc.QueryHistory(ctx, historyLedgerQuery(scope, cwd, host, limit, before, text))
 		if err != nil {
 			return err
 		}
@@ -142,31 +140,15 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 		}
 		resp.Exhausted = page.Exhausted
 		resp.Coverage = page.Coverage
-		for _, r := range page.Entries {
-			kinds := r.MaskedKinds
-			if kinds == nil {
-				kinds = []string{}
+		for _, row := range page.Entries {
+			entry, mapErr := historyQueryEntryOf(row)
+			if mapErr != nil {
+				return mapErr
 			}
-			reds := make([]redactionWire, 0, len(r.Redactions))
-			for _, red := range r.Redactions {
-				start, end := secrets.ToUTF16Span(r.Command, red.Start, red.End)
-				reds = append(reds, redactionWire{
-					Kind: red.Kind, Start: start, End: end, Prefix: red.Prefix, Suffix: red.Suffix,
-				})
+			if entry == nil {
+				continue
 			}
-			resp.Entries = append(resp.Entries, historyQueryEntry{
-				ID:          strconv.FormatInt(r.ID, 10),
-				Command:     r.Command,
-				Cwd:         r.Cwd,
-				Host:        r.Host,
-				Status:      r.Status,
-				ExitCode:    r.ExitCode,
-				StartedAt:   r.StartedAt,
-				EndedAt:     r.EndedAt,
-				MaskedCount: r.MaskedCount,
-				MaskedKinds: kinds,
-				Redactions:  reds,
-			})
+			resp.Entries = append(resp.Entries, *entry)
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(resp))
 		return nil
@@ -185,7 +167,7 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 
 // parseHistoryQueryParams validates the request against the handler contract
 // above. The returned message is empty when the params are usable.
-func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string, int, *int64, string, string) {
+func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string, int, *string, string, string) {
 	var p historyQueryParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
 		return "", "", "", 0, nil, "", "params must be an object"
@@ -229,13 +211,18 @@ func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string,
 		}
 	}
 
-	var before *int64
+	// THE CURSOR IS OPAQUE, and after nocx-rtg0.19 it is opaque in fact and
+	// not only in the contract's word: it used to be parsed as the interim
+	// table's decimal rowid, and it is now the entry's own id, which the
+	// store resolves to a position. Nothing here inspects its shape — a
+	// handle this transport can parse is a handle it will one day be tempted
+	// to compare, and the order is commit order and never an id.
+	var before *string
 	if p.Before != nil {
-		n, err := strconv.ParseInt(*p.Before, 10, 64)
-		if err != nil {
+		if *p.Before == "" {
 			return "", "", "", 0, nil, "", "before must be the opaque row id of the previous page"
 		}
-		before = &n
+		before = p.Before
 	}
 
 	// Absent and empty are the same state on the wire: no filter. The

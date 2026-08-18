@@ -2,7 +2,6 @@ package capability
 
 import (
 	"context"
-	"strconv"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -79,33 +78,25 @@ func (s *captureSaveService) CreateSecret(ctx context.Context, value credential.
 	return s.vault.CreateNamedResolved(ctx, value, meta)
 }
 
-// RewriteRedaction routes one link to the store that minted its id. This is
-// the ONE place that knows two tables hold masked command text, and it is
-// here rather than in the transport because this is the only object holding
-// both repositories — a handler that picked the store would be a second
-// place to keep in step.
+// RewriteRedaction replaces one masked span in a recorded command with the
+// vault reference the user saved it as.
 //
-// The two key spaces are disjoint by construction, which is what makes the
-// discrimination a fact rather than a heuristic: command_history's id is an
-// SQLite AUTOINCREMENT rowid, so it is decimal digits and nothing else, and
-// an entry id is a client-minted UUIDv7, which is not. Anything that is not
-// a rowid goes to the ledger and, if no such entry exists, comes back
-// ErrNotFound — the same answer a swept row gives, which the caller already
-// treats as "nothing to rewrite".
+// IT USED TO BE A ROUTER, and the router is what nocx-rtg0.19 came to
+// demolish. Two tables held masked command text — the interim command_history
+// keyed by an AUTOINCREMENT rowid, the ledger keyed by a client-minted
+// UUIDv7 — and this method chose between them by trying to parse the id as a
+// decimal integer. The key spaces were disjoint by construction, so it was
+// correct rather than a heuristic; it was still a dispatcher deciding which
+// database to use from the SHAPE of a string, which is exactly the kind of
+// scaffolding that outlives its reason when nobody writes down that it was
+// scaffolding.
 //
-// nocx-rtg0.19 deletes command_history and with it this branch: the ledger
-// becomes the only store, and the parse below is the whole of what has to go.
-// Until then, nothing on the wire mints a ledger-keyed link — history.record
-// is what mints links, and it writes command_history rows — so the ledger arm
-// is reachable and correct rather than exercised in production. That is
-// stated here because a reachable branch nobody takes is exactly how an
-// unwired write path once shipped behind a green deadcode run (nocx-rtg0).
+// command_history is gone, so there is one store and nothing to choose. An id
+// naming no entry comes back ErrNotFound, which is the answer a swept row
+// already gave and which the caller already treats as "nothing to rewrite".
 func (s *captureSaveService) RewriteRedaction(ctx context.Context, entryID string, span content.Redaction, reference string) error {
 	if err := s.guard.check(); err != nil {
 		return err
-	}
-	if rowID, err := strconv.ParseInt(entryID, 10, 64); err == nil {
-		return s.contentDB.CommandHistory().RewriteRedaction(ctx, rowID, span, reference)
 	}
 	return s.contentDB.Ledger().RewriteRedaction(ctx, entryID, span, reference)
 }

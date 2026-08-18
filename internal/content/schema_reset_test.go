@@ -106,23 +106,24 @@ func TestOpenRebuildsADatabaseWrittenByAnOlderSchema(t *testing.T) {
 
 	// The store WORKS — this is the assertion that used to fail, and it fails
 	// on a write as well as on a read, so both are exercised.
-	if _, err := db.CommandHistory().Add(context.Background(), CommandRecord{
-		Command: "echo new", Cwd: "/srv", Host: "", Status: StatusSuccess,
+	if _, err := db.Ledger().RecordCompleted(context.Background(), CompletedCommand{
+		Client: "schema-test", Env: Environment{ID: "local", Kind: EnvLocal},
+		Intent: "echo new", Cwd: "/srv", Status: EntrySuccess,
 	}); err != nil {
 		t.Fatalf("Add after rebuild: %v", err)
 	}
-	page, err := db.CommandHistory().Query(context.Background(), ScopeEverywhere, "", "", 50, nil, "")
+	page, err := db.Ledger().QueryEntries(context.Background(), LedgerQuery{Scope: ScopeEverywhere, Limit: 50})
 	if err != nil {
 		t.Fatalf("Query after rebuild: %v", err)
 	}
-	if len(page.Entries) != 1 || page.Entries[0].Command != "echo new" {
+	if len(page.Entries) != 1 || page.Entries[0].Intent != "echo new" {
 		t.Fatalf("entries = %+v, want only the row written after the rebuild", page.Entries)
 	}
 	// The old row is gone by design: it belongs to a shape this build cannot
 	// read, and keeping it would need the migration this project does not
 	// carry.
 	for _, e := range page.Entries {
-		if e.Command == "echo old" {
+		if e.Intent == "echo old" {
 			t.Fatal("a row from the discarded schema survived the rebuild")
 		}
 	}
@@ -138,8 +139,9 @@ func TestReopeningACurrentDatabaseKeepsItsRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.db")
 
 	first := openStore(t, path)
-	if _, err := first.CommandHistory().Add(context.Background(), CommandRecord{
-		Command: "echo keep", Cwd: "/srv", Host: "", Status: StatusSuccess,
+	if _, err := first.Ledger().RecordCompleted(context.Background(), CompletedCommand{
+		Client: "schema-test", Env: Environment{ID: "local", Kind: EnvLocal},
+		Intent: "echo keep", Cwd: "/srv", Status: EntrySuccess,
 	}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -149,11 +151,11 @@ func TestReopeningACurrentDatabaseKeepsItsRows(t *testing.T) {
 
 	for i := range 2 {
 		again := openStore(t, path)
-		page, err := again.CommandHistory().Query(context.Background(), ScopeEverywhere, "", "", 50, nil, "")
+		page, err := again.Ledger().QueryEntries(context.Background(), LedgerQuery{Scope: ScopeEverywhere, Limit: 50})
 		if err != nil {
 			t.Fatalf("Query on reopen %d: %v", i, err)
 		}
-		if len(page.Entries) != 1 || page.Entries[0].Command != "echo keep" {
+		if len(page.Entries) != 1 || page.Entries[0].Intent != "echo keep" {
 			t.Fatalf("reopen %d: entries = %+v, want the row to survive", i, page.Entries)
 		}
 		if err := again.Close(); err != nil {

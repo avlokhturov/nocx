@@ -3,7 +3,6 @@ package content
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,9 +98,9 @@ func TestPlaintextCanary(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("Open: %v", openErr)
 	}
-	hist := db.CommandHistory()
-	if _, addErr := hist.Add(ctx, CommandRecord{Command: canaryMarker, Cwd: "/srv", Host: "", Status: StatusSuccess}); addErr != nil {
-		t.Fatalf("Add: %v", addErr)
+	hist := db.Ledger()
+	if _, addErr := hist.RecordCompleted(ctx, aCanaryCommand(canaryMarker)); addErr != nil {
+		t.Fatalf("RecordCompleted: %v", addErr)
 	}
 
 	// 1. The store's own files: db, -wal, -shm. No header, no plaintext.
@@ -121,7 +120,7 @@ func TestPlaintextCanary(t *testing.T) {
 	if header || plain {
 		t.Fatalf("backup leaked: header=%v plaintext=%v", header, plain)
 	}
-	assertReadsMarker(t, snap, "backup destination", "SELECT command FROM command_history WHERE command = '"+canaryMarker+"'")
+	assertReadsMarker(t, snap, "backup destination", "SELECT intent FROM entries WHERE intent = '"+canaryMarker+"'")
 
 	// 3. VACUUM INTO through the keyed URI — the documented form — must be
 	// encrypted AND usable.
@@ -134,7 +133,7 @@ func TestPlaintextCanary(t *testing.T) {
 	if header || plain {
 		t.Fatalf("keyed VACUUM INTO leaked: header=%v plaintext=%v", header, plain)
 	}
-	assertReadsMarker(t, vac, "keyed VACUUM INTO destination", "SELECT command FROM command_history WHERE command = '"+canaryMarker+"'")
+	assertReadsMarker(t, vac, "keyed VACUUM INTO destination", "SELECT intent FROM entries WHERE intent = '"+canaryMarker+"'")
 
 	// 4. ATTACH through the keyed URI, writing into the attached database.
 	att := filepath.Join(dir, "attached.db")
@@ -199,7 +198,7 @@ func TestPlaintextCanary(t *testing.T) {
 // assertReadsMarker reopens an encrypted destination with the key and checks
 // the canary row is there — usability, not only confidentiality. The query is
 // the caller's: the backup and VACUUM destinations carry the store schema
-// (command_history), the ATTACH destination carries the test's own table.
+// (entries), the ATTACH destination carries the test's own table.
 func assertReadsMarker(t *testing.T, path, label, query string) {
 	t.Helper()
 	conn := openKeyedConn(t, path)
@@ -226,13 +225,11 @@ func TestBackupProducesConsistentEncryptedSnapshot(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("Open: %v", openErr)
 	}
-	hist := db.CommandHistory()
+	hist := db.Ledger()
 	const rows = 50
 	for i := range rows {
-		if _, err := hist.Add(ctx, CommandRecord{
-			Command: fmt.Sprintf("cmd-%d", i), Cwd: "/repo", Host: "", Status: StatusSuccess,
-		}); err != nil {
-			t.Fatalf("Add: %v", err)
+		if _, err := hist.RecordCompleted(ctx, aCanaryCommand(fmt.Sprintf("cmd-%d", i))); err != nil {
+			t.Fatalf("RecordCompleted: %v", err)
 		}
 	}
 	// Deliberately do NOT checkpoint: the newest rows are WAL-only.
@@ -254,14 +251,14 @@ func TestBackupProducesConsistentEncryptedSnapshot(t *testing.T) {
 	// The snapshot is a complete standalone database: reopen it directly.
 	conn := openKeyedConn(t, snap)
 	var n int
-	if err := conn.QueryRow("SELECT count(*) FROM command_history").Scan(&n); err != nil {
-		t.Fatalf("snapshot has no command_history: %v", err)
+	if err := conn.QueryRow("SELECT count(*) FROM entries").Scan(&n); err != nil {
+		t.Fatalf("snapshot has no entries: %v", err)
 	}
 	if n != rows {
 		t.Fatalf("snapshot holds %d rows, want %d (WAL-only rows lost)", n, rows)
 	}
 	var newest string
-	if err := conn.QueryRow("SELECT command FROM command_history ORDER BY id DESC LIMIT 1").Scan(&newest); err != nil {
+	if err := conn.QueryRow("SELECT intent FROM entries ORDER BY ingest_seq DESC LIMIT 1").Scan(&newest); err != nil {
 		t.Fatalf("read newest: %v", err)
 	}
 	if newest != fmt.Sprintf("cmd-%d", rows-1) {
@@ -311,11 +308,9 @@ func childWriter(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
-	hist := db.CommandHistory()
+	hist := db.Ledger()
 	for i := 0; ; i++ {
-		if _, err := hist.Add(ctx, CommandRecord{
-			Command: fmt.Sprintf("child-row-%d", i), Cwd: "/proc", Host: "", Status: StatusSuccess,
-		}); err != nil {
+		if _, err := hist.RecordCompleted(ctx, aCanaryCommand(fmt.Sprintf("child-row-%d", i))); err != nil {
 			os.Exit(4)
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -373,51 +368,33 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	}
 
 	var n int
-	if err := conn.QueryRow("SELECT count(*) FROM command_history").Scan(&n); err != nil {
+	if err := conn.QueryRow("SELECT count(*) FROM entries").Scan(&n); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if n == 0 {
 		t.Fatal("no rows survived two processes writing to one database")
 	}
-	if _, err := db.CommandHistory().Query(ctx, ScopeEverywhere, "", "", 10, nil, ""); err != nil {
+	if _, err := db.Ledger().QueryEntries(ctx, LedgerQuery{Scope: ScopeEverywhere, Limit: 10}); err != nil {
 		t.Fatalf("query after kills: %v", err)
 	}
 
 	// The same database keeps working across processes: a fresh store writes.
-	if _, err := db.CommandHistory().Add(ctx, CommandRecord{Command: "after-kills", Cwd: "/", Host: "", Status: StatusSuccess}); err != nil {
+	if _, err := db.Ledger().RecordCompleted(ctx, CompletedCommand{Client: "canary", Env: Environment{ID: "local", Kind: EnvLocal}, Cwd: "/", Status: EntrySuccess, Intent: "after-kills"}); err != nil {
 		t.Fatalf("Add after kills: %v", err)
 	}
 }
 
-// The retention sweep is best-effort by design: the INSERT is already
-// durable when the sweep runs, so a sweep failure must log and leave Add
-// successful — otherwise a caller retrying Add would duplicate the command.
-func TestRetentionSweepFailureIsBestEffort(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "content.db")
-	db, err := openTestStore(t, path)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	sc, ok := db.(*sqliteContent)
-	if !ok {
-		t.Fatalf("store is %T, want *sqliteContent", db)
-	}
-	sc.policy.SetRetentionDays(1)
-	sc.sweep = func(context.Context, int64) error { return errors.New("sweep failed") }
-
-	now := time.Now().UnixMilli()
-	if _, addErr := db.CommandHistory().Add(context.Background(), CommandRecord{
-		Command: "sweep-failure-row", Cwd: "/", Host: "", Status: StatusSuccess, EndedAt: &now,
-	}); addErr != nil {
-		t.Fatalf("Add with a failing sweep returned an error: %v", addErr)
-	}
-	recs, err := db.CommandHistory().List(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(recs) != 1 {
-		t.Fatalf("rows = %d, want the inserted row to survive a failed sweep", len(recs))
+// aCanaryCommand is the row these tests write to have SOMETHING durable in the
+// file — a marker to look for in the bytes, or a stream of rows to be killed
+// halfway through. It goes through the ledger since nocx-rtg0.19; what the
+// tests are about (encryption at rest, crash recovery) never depended on which
+// table it landed in.
+func aCanaryCommand(intent string) CompletedCommand {
+	return CompletedCommand{
+		Client: "canary",
+		Env:    Environment{ID: "local", Kind: EnvLocal},
+		Cwd:    "/srv",
+		Intent: intent,
+		Status: EntrySuccess,
 	}
 }

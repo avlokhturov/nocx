@@ -35,13 +35,6 @@ func TestStubConversationsReturnsNonNil(t *testing.T) {
 	}
 }
 
-func TestStubCommandHistoryReturnsNonNil(t *testing.T) {
-	chr := content.NewStub(&testLogger{}).CommandHistory()
-	if chr == nil {
-		t.Fatal("CommandHistory() returned nil")
-	}
-}
-
 func TestStubCloseReturnsNil(t *testing.T) {
 	s := content.NewStub(&testLogger{})
 	if err := s.Close(); err != nil {
@@ -75,44 +68,3 @@ func TestConversationListReturnsSentinel(t *testing.T) {
 	}
 }
 
-// ── CommandHistoryRepository stub method tests ──
-
-func TestCommandHistoryAddReturnsSentinel(t *testing.T) {
-	chr := content.NewStub(&testLogger{}).CommandHistory()
-	_, err := chr.Add(context.Background(), content.CommandRecord{Command: "ls"})
-	if !errors.Is(err, content.ErrNotImplemented) {
-		t.Errorf("expected ErrNotImplemented, got %v", err)
-	}
-}
-
-func TestCommandHistoryListReturnsSentinel(t *testing.T) {
-	chr := content.NewStub(&testLogger{}).CommandHistory()
-	_, err := chr.List(context.Background(), 10)
-	if !errors.Is(err, content.ErrNotImplemented) {
-		t.Errorf("expected ErrNotImplemented, got %v", err)
-	}
-}
-
-func TestCommandHistoryGetByIDReturnsSentinel(t *testing.T) {
-	chr := content.NewStub(&testLogger{}).CommandHistory()
-	_, err := chr.GetByID(context.Background(), 1)
-	if !errors.Is(err, content.ErrNotImplemented) {
-		t.Errorf("expected ErrNotImplemented, got %v", err)
-	}
-}
-
-func TestCommandHistoryFindByPrefixReturnsSentinel(t *testing.T) {
-	chr := content.NewStub(&testLogger{}).CommandHistory()
-	_, err := chr.FindByPrefix(context.Background(), "git", 5)
-	if !errors.Is(err, content.ErrNotImplemented) {
-		t.Errorf("expected ErrNotImplemented, got %v", err)
-	}
-}
-
-func TestCommandHistoryQueryReturnsSentinel(t *testing.T) {
-	chr := content.NewStub(&testLogger{}).CommandHistory()
-	_, err := chr.Query(context.Background(), content.ScopeDirectory, "/repo", "", 10, nil, "")
-	if !errors.Is(err, content.ErrNotImplemented) {
-		t.Errorf("expected ErrNotImplemented, got %v", err)
-	}
-}

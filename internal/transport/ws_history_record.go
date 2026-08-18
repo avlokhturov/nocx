@@ -120,6 +120,11 @@ type historyRecordHandlers struct {
 	op       capability.ContentOperation // nil → content store not wired
 	captures *credential.CaptureRegistry
 	machine  historyMachine // discovery prompt hint (transport-owned)
+	// clientID binds a recorded row to the connection that wrote it, exactly
+	// as the ledger's lifecycle writer binds its own (nocx-rtg0.19). Every
+	// entry carries one; a row that cannot say who wrote it is a shape the
+	// ledger does not have.
+	clientID string
 	r        Responder
 }
 
@@ -255,18 +260,39 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		return
 	}
 
-	rec := content.CommandRecord{
-		Command:     rowCommand,
-		Cwd:         p.Cwd,
-		Host:        p.Host,
-		Status:      content.CommandStatus(p.Status),
-		ExitCode:    p.ExitCode,
-		StartedAt:   p.StartedAt,
-		EndedAt:     p.EndedAt,
-		Trusted:     p.Trusted,
+	// THE RECEIPT RIDES entries.payload, which is where the ledger keeps it
+	// (internal/content/redaction.go): how many secrets were taken out, of
+	// which kinds, and where the masks sit. history.query's contract declares
+	// all three on every row, and the "3 secrets masked" line, the recall
+	// overlay's unresolved chips and the vault save that turns one span into
+	// a reference are unanswerable without them.
+	payload, payloadErr := content.WithEntryMasking("{}", content.EntryMasking{
 		MaskedCount: ack.MaskedCount,
 		MaskedKinds: ack.MaskedKinds,
 		Redactions:  rowRedactions,
+	})
+	if payloadErr == nil && p.ExitCode != nil {
+		payload, payloadErr = mergeShellExitCode(payload, p.ExitCode)
+	}
+	if payloadErr != nil {
+		// Fails CLOSED, as the ledger's other writer does: a row that cannot
+		// say what was masked out of it is the soft degrade this whole path
+		// exists to prevent.
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: the redaction receipt could not be recorded; command not recorded"})
+		return
+	}
+
+	rec := content.CompletedCommand{
+		Client:            h.clientID,
+		Env:               environmentForHost(p.Host),
+		PaneID:            panePtr(p.PaneID),
+		Cwd:               p.Cwd,
+		Intent:            rowCommand,
+		Payload:           payload,
+		Status:            content.EntryStatus(p.Status),
+		StartedAt:         p.StartedAt,
+		EndedAt:           p.EndedAt,
+		TerminationReason: terminationForStatus(content.EntryStatus(p.Status)),
 	}
 	entryID := ""
 	runErr := h.op.Run(ctx, func(ctx context.Context, svc capability.ContentService) error {
@@ -274,8 +300,10 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		if err != nil {
 			return err
 		}
-		if id > 0 {
-			entryID = strconv.FormatInt(id, 10)
+		// An empty id is keep-history-off: the command ran, no row appeared,
+		// and there is nothing for a capture to rewrite.
+		if id != "" {
+			entryID = id
 			ack.EntryID = entryID
 		}
 		return nil
@@ -420,9 +448,14 @@ func validateHistoryRecord(p historyRecordParams) string {
 	if strings.TrimSpace(p.PaneID) == "" {
 		return "paneId is required"
 	}
-	switch content.CommandStatus(p.Status) {
-	case content.StatusRunning, content.StatusSuccess, content.StatusFailure,
-		content.StatusInterrupted, content.StatusUnknown:
+	// The closed set is the WIRE's, and it is deliberately not the ledger's:
+	// entries.status also has `pending`, which this method can never carry —
+	// a command being reported has already ended. `running` stays in the set
+	// because the renderer sends it for a command it is still watching, and
+	// the ledger's own enum accepts it (nocx-rtg0.19).
+	switch content.EntryStatus(p.Status) {
+	case content.EntryRunning, content.EntrySuccess, content.EntryFailure,
+		content.EntryInterrupted, content.EntryUnknown:
 	default:
 		return "status must be one of running, success, failure, interrupted, unknown"
 	}

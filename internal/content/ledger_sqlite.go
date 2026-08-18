@@ -447,6 +447,9 @@ func validateLedgerQuery(q LedgerQuery) error {
 	if q.Limit < 1 || q.Limit > MaxLedgerPageLimit {
 		return fmt.Errorf("content: query: limit %d is outside [1, %d]", q.Limit, MaxLedgerPageLimit)
 	}
+	if q.BeforeID != "" && q.Before != nil {
+		return fmt.Errorf("content: query: before and beforeId are two answers to where the page starts; send one")
+	}
 	if q.Before != nil && *q.Before < 1 {
 		return fmt.Errorf("content: query: before %d is not an ingest_seq", *q.Before)
 	}
@@ -479,6 +482,23 @@ func (s *sqliteContent) QueryEntries(ctx context.Context, q LedgerQuery) (Ledger
 		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// The cursor, resolved INSIDE the read transaction so the page and the
+	// position it starts from cannot disagree about what the store holds
+	// (nocx-rtg0.19). One primary-key lookup; the ordering is still
+	// ingest_seq and only ingest_seq.
+	if q.BeforeID != "" {
+		var seq int64
+		switch err := tx.QueryRowContext(ctx,
+			`SELECT ingest_seq FROM entries WHERE id = ?`, q.BeforeID).Scan(&seq); {
+		case errors.Is(err, sql.ErrNoRows):
+			return LedgerPage{Entries: []LedgerEntrySummary{}},
+				fmt.Errorf("%w: cursor %q", ErrNotFound, q.BeforeID)
+		case err != nil:
+			return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+		}
+		q.Before = &seq
+	}
 
 	cond, args := ledgerWhere(q)
 	entries, err := entryPage(ctx, tx, cond, args, q.Limit+1)
@@ -559,7 +579,7 @@ func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEnt
 // ErrIDConflict. A rewrite is a later event on a recorded row, not a second
 // submission of one intent (the same reasoning FinishExecution's header
 // gives for keeping the close off Submit).
-func (s ledgerRepo) RewriteRedaction(ctx context.Context, entryID string, span Redaction, reference string) error {
+func (s *sqliteContent) RewriteRedaction(ctx context.Context, entryID string, span Redaction, reference string) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {

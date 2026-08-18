@@ -24,13 +24,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,12 +77,6 @@ type sqliteContent struct {
 	keyHex string
 	path   string
 	policy *Policy
-	// sweep removes rows older than cutoff (age retention). A field so the
-	// failure path is testable: the default runs the DELETE; tests inject a
-	// failing one to prove Add stays nil (the sweep is best-effort by
-	// design — the INSERT is already durable, so a sweep failure must not
-	// make Add fail or a retry would duplicate the command).
-	sweep func(ctx context.Context, cutoff int64) error
 
 	// writeCh serializes every mutation (design §5.3: one writer goroutine,
 	// short transactions). It is NEVER closed: Close signals via stop, so a
@@ -97,42 +88,19 @@ type sqliteContent struct {
 	wg      sync.WaitGroup
 }
 
-// writeOp is one kind of mutation on the serialized write path.
-type writeOp int
-
-const (
-	opAdd writeOp = iota
-	opRewrite
-	opRestore
-	opRun // one ledger mutation, executed as fn on the writer goroutine
-)
-
-// writeReq is one mutation on the serialized write path. The writer answers
-// on done with the outcome: the assigned row id (opAdd) and any error.
+// writeReq is one mutation on the serialized write path: a function the
+// writer goroutine runs, and the channel it answers on.
+//
+// IT USED TO BE A TAGGED UNION of four kinds — an interim-table insert, that
+// table's redaction rewrite, a private-content restore, and the ledger's
+// catch-all. Three of them died with command_history (nocx-rtg0.19), and what
+// is left is the one shape that was always general: the caller brings the
+// mutation, the writer decides only WHEN it runs. There is nothing here for a
+// fifth kind to be added to, which is the point.
 type writeReq struct {
-	ctx     context.Context
-	op      writeOp
-	fn      func(ctx context.Context) error // opRun: the ledger mutation
-	record  CommandRecord                   // opAdd
-	rew     rewriteRequest                  // opRewrite
-	restore restoreRequest                  // opRestore
-	done    chan writeOutcome
-}
-
-// rewriteRequest is the opRewrite payload: address the row by its stable
-// id, replace the redaction segment at span with reference, drop the
-// segment from the row's redactions.
-type rewriteRequest struct {
-	id        int64
-	span      Redaction
-	reference string
-}
-
-// restoreRequest is the opRestore payload: one private-content block to
-// apply atomically.
-type restoreRequest struct {
-	conversations []Conversation
-	history       []CommandRecord
+	ctx  context.Context
+	fn   func(ctx context.Context) error
+	done chan writeOutcome
 }
 
 // writeOutcome is the writer's answer to one writeReq.
@@ -152,7 +120,7 @@ func (s *sqliteContent) run(ctx context.Context, fn func(ctx context.Context) er
 	if s.closed.Load() {
 		return ErrClosed
 	}
-	req := writeReq{ctx: ctx, op: opRun, fn: fn, done: make(chan writeOutcome, 1)}
+	req := writeReq{ctx: ctx, fn: fn, done: make(chan writeOutcome, 1)}
 	select {
 	case s.writeCh <- req:
 	case <-ctx.Done():
@@ -295,11 +263,6 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		path:   cfg.Path,
 		policy: cfg.Policy,
 	}
-	s.sweep = func(ctx context.Context, cutoff int64) error {
-		_, err := s.db.ExecContext(ctx,
-			`DELETE FROM command_history WHERE ended_at IS NOT NULL AND ended_at < ?`, cutoff)
-		return err
-	}
 	s.writeCh = make(chan writeReq)
 	s.stop = make(chan struct{})
 	s.wg.Add(1)
@@ -416,6 +379,15 @@ var rebuildDropOrder = []string{
 	"panes", "tabs",
 	"sessions", "environments", "workspaces", "ledger_sequence",
 	"retention_watermark",
+	// RETIRED, AND STILL LISTED ON PURPOSE (nocx-rtg0.19). command_history
+	// was the interim table this build no longer creates, reads or writes —
+	// but a file written by an earlier nocx still HAS it, and this list is
+	// also the membership gate below: a file holding a table that is not
+	// here is REFUSED as "written by a newer schema", not rebuilt. Dropping
+	// the name with the table would therefore turn every existing user's
+	// database into one the app declines to open, which is a worse answer
+	// than the discard the rebuild already promises. It comes out when no
+	// file in the wild can still carry it, and not before.
 	"command_history",
 }
 
@@ -438,8 +410,7 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 		return nil
 	}
 	// A fresh file is version 0 with no tables — that is a creation, not a
-	// reset, and must not be announced as data loss. Any user table (the
-	// interim command_history on a pre-v1 file, a v1 table on a future one)
+	// reset, and must not be announced as data loss. Any user table at all
 	// means the file belongs to a different schema and is rebuilt.
 	names, err := conn.QueryContext(ctx,
 		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
@@ -485,18 +456,35 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 		}
 	}
 	// Count inside the transaction, before any DROP: the number is the only
-	// measure of what the user lost, and the count that is logged is the
-	// one this commit discards. A count that fails (the interim table is
-	// absent on a v1 file) is not a reason to abandon the rebuild — report
-	// it as unknown and carry on.
+	// measure of what the user lost, and the count that is logged is the one
+	// this commit discards. It counts ENTRIES — the ledger's commands — since
+	// nocx-rtg0.19 made that the only place a command lives; before it, the
+	// number came from the interim table beside it. A count that fails (a
+	// file written before the ledger existed has no such table) is not a
+	// reason to abandon the rebuild — report it as unknown and carry on.
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("content: begin rebuild: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// BOTH TABLES, SUMMED, because a file reaching here may be from either
+	// side of nocx-rtg0.19: a current one keeps its commands in `entries`,
+	// and one written before the cutover keeps them in the retired
+	// `command_history`. Counting only the table this build knows would
+	// report "0 rows discarded" while discarding a user's entire history,
+	// which is the one number this warning exists to get right. Each count
+	// fails independently to zero — an absent table is not an error — and
+	// the total is -1 only when neither could be read at all.
 	rowsDiscarded := -1
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&rowsDiscarded); err != nil {
-		rowsDiscarded = -1
+	for _, table := range []string{"entries", "command_history"} {
+		var n int
+		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil { //nolint:gosec // constant table names
+			continue
+		}
+		if rowsDiscarded < 0 {
+			rowsDiscarded = 0
+		}
+		rowsDiscarded += n
 	}
 	for _, t := range rebuildDropOrder {
 		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
@@ -514,10 +502,12 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 }
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
-// design §5.2 as amended by ADR-0019 and ADR-0020: the interim
-// command_history table plus the v1 tables. command_history stays the live
-// path until nocx-rtg0.3 cuts the wire over to ledger.*; nothing writes both
-// (ADR-0019 §4). The engine posture is fixed here: STRICT, auto_vacuum, WAL.
+// design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
+// interim `command_history` table beside these, holding a command and no
+// output at all; nocx-rtg0.19 deleted it and the ledger is the only place a
+// command lives. Nothing writes two tables (ADR-0019 §4) because there is no
+// longer a second one. The engine posture is fixed here: STRICT, auto_vacuum,
+// WAL.
 //
 // entries' two clocks, because the column comments have room for the answer
 // and not the reason (nocx-rtg0.23). started_at is the RENDERER's wall clock
@@ -559,24 +549,6 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 //     retained content (§5.4), and physical disk use is the separate
 //     Budget.DiskCeiling number.
 const schemaV1 = `
-CREATE TABLE IF NOT EXISTS command_history (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT, -- backend seq; the only total order
-  command      TEXT    NOT NULL,
-  cwd          TEXT    NOT NULL,
-  host         TEXT    NOT NULL,
-  status       TEXT    NOT NULL,
-  exit_code    INTEGER,
-  started_at   INTEGER,
-  ended_at     INTEGER,
-  trusted      INTEGER NOT NULL DEFAULT 0,
-  masked_count INTEGER NOT NULL DEFAULT 0,
-  masked_kinds TEXT    NOT NULL DEFAULT '[]',
-  redactions   TEXT    NOT NULL DEFAULT '[]'
-) STRICT;
-CREATE INDEX IF NOT EXISTS command_history_by_scope ON command_history (cwd, host, id DESC);
-CREATE INDEX IF NOT EXISTS command_history_by_host  ON command_history (host, id DESC);
-CREATE INDEX IF NOT EXISTS command_history_by_ended ON command_history (ended_at);
-
 -- The layout chain (nocx-isoph.1, tabs-panes-and-blocks §3): workspace → tab
 -- → pane. A workspace is FLAT — it has no column naming another workspace, so
 -- nesting is unrepresentable rather than merely unused; depth comes from
@@ -885,17 +857,7 @@ func enforceFileModes(path string) {
 // waiting for its outcome must never hang, and a committed outcome must
 // never be replaced by a proxy error.
 func (s *sqliteContent) process(req writeReq) {
-	switch req.op {
-	case opAdd:
-		id, err := s.doAdd(req.ctx, req.record)
-		req.done <- writeOutcome{id: id, err: err}
-	case opRewrite:
-		req.done <- writeOutcome{err: s.doRewrite(req.ctx, req.rew)}
-	case opRestore:
-		req.done <- writeOutcome{err: s.doRestore(req.ctx, req.restore)}
-	case opRun:
-		req.done <- writeOutcome{err: req.fn(req.ctx)}
-	}
+	req.done <- writeOutcome{err: req.fn(req.ctx)}
 }
 
 func (s *sqliteContent) writer() {
@@ -929,416 +891,9 @@ func (s *sqliteContent) writer() {
 	}
 }
 
-func (s *sqliteContent) doAdd(ctx context.Context, r CommandRecord) (int64, error) {
-	id, err := insertRecord(ctx, s.db, r)
-	if err != nil {
-		return 0, err
-	}
-	enforceFileModes(s.path)
-
-	// Age-based retention, run in the same writer turn: completed commands
-	// older than the limit are removed from nocx. Deletion is a short
-	// autocommit transaction and uses the ended_at index; a crash between
-	// the insert and the sweep only delays the sweep.
-	if days := s.policy.RetentionDays(); days > 0 {
-		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
-		if sweepErr := s.sweep(ctx, cutoff); sweepErr != nil {
-			s.log.Warn("retention sweep failed", "error", sweepErr)
-		}
-	}
-	return id, nil
-}
-
-// insertRecord executes one command-history INSERT through the given
-// executor — the pool (single-row path) or a restore transaction. Shared so
-// the two write paths cannot drift on the row shape.
-func insertRecord(ctx context.Context, ex execer, r CommandRecord) (int64, error) {
-	kinds := r.MaskedKinds
-	if kinds == nil {
-		kinds = []string{}
-	}
-	kindsJSON, err := json.Marshal(kinds)
-	if err != nil {
-		return 0, err
-	}
-	redactions := r.Redactions
-	if redactions == nil {
-		redactions = []Redaction{}
-	}
-	redactionsJSON, err := json.Marshal(redactions)
-	if err != nil {
-		return 0, err
-	}
-	// One INSERT, one autocommit transaction: short, atomic, replay-safe.
-	res, err := ex.ExecContext(ctx, `INSERT INTO command_history
-		(command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds, redactions)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.Command, r.Cwd, r.Host, string(r.Status), r.ExitCode, r.StartedAt, r.EndedAt, r.Trusted, r.MaskedCount, string(kindsJSON), string(redactionsJSON))
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
-}
-
-// doRestore applies one private-content block in a single transaction:
-// either every history row is durable or none is. A caller that restored
-// rows one by one could be interrupted between rows, and a partial restore
-// cannot be unwound through the repository surface — the store owns the
-// atomicity (the export restore operation relies on it).
-//
-// Conversations are stubbed until agent mode (design §5.1): a block that
-// carries them is refused, exactly as ConversationRepository.Save refuses.
-func (s *sqliteContent) doRestore(ctx context.Context, r restoreRequest) error {
-	if len(r.conversations) > 0 {
-		return ErrNotImplemented
-	}
-	if len(r.history) == 0 {
-		return nil
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("restore private content: %w", err)
-	}
-	for _, rec := range r.history {
-		if _, err := insertRecord(ctx, tx, rec); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("restore private content: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("restore private content: %w", err)
-	}
-	enforceFileModes(s.path)
-
-	// Retention at the batch level: restored rows older than the limit are
-	// removed, matching the per-write path. Best-effort, as in doAdd.
-	if days := s.policy.RetentionDays(); days > 0 {
-		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixMilli()
-		if sweepErr := s.sweep(ctx, cutoff); sweepErr != nil {
-			s.log.Warn("retention sweep failed", "error", sweepErr)
-		}
-	}
-	return nil
-}
-
 // execer is the ExecContext surface shared by *sql.DB and *sql.Tx.
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-// Add serializes the insert through the single writer goroutine and returns
-// the backend-assigned row id — the row's stable identity, which a later
-// RewriteRedaction addresses. The record's ID field is informational.
-func (s *sqliteContent) Add(ctx context.Context, record CommandRecord) (int64, error) {
-	if s.closed.Load() {
-		return 0, ErrClosed
-	}
-	// Keep-history-off: a command runs and no row appears. Decided before the
-	// writer is invoked, so nothing is serialized for a record nobody wants.
-	if !s.policy.Enabled() {
-		return 0, nil
-	}
-	req := writeReq{ctx: ctx, op: opAdd, record: record, done: make(chan writeOutcome, 1)}
-	select {
-	case s.writeCh <- req:
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case <-s.stop:
-		return 0, ErrClosed
-	}
-	select {
-	case out := <-req.done:
-		return out.id, out.err
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case <-s.stop:
-		return 0, ErrClosed
-	}
-}
-
-// RestorePrivate applies one private-content block atomically through the
-// single writer. The caller's context governs the transaction: a
-// cancellation before the writer accepts the request does nothing, and a
-// cancellation INSIDE the transaction aborts it (the insert path observes
-// ctx). A cancellation AFTER the transaction committed must not surface as
-// an error — the restore is committed, and reporting failure would send the
-// export restore operation into a rollback that splits the stores — so once
-// the writer accepts the request the caller waits for its outcome, which is
-// authoritative. The writer drains its queue on Close, so an accepted
-// request is always answered.
-func (s *sqliteContent) RestorePrivate(ctx context.Context, conversations []Conversation, history []CommandRecord) error {
-	if s.closed.Load() {
-		return ErrClosed
-	}
-	if len(conversations) > 0 {
-		// The SQLite backing has no conversation table yet; the stub is
-		// the honest surface (agent mode, design §5.1). Refuse rather
-		// than drop.
-		return ErrNotImplemented
-	}
-	if !s.policy.Enabled() {
-		// History off: the single-row path's Add stores nothing and
-		// succeeds, and the restore matches it exactly.
-		return nil
-	}
-	req := writeReq{
-		ctx:     ctx,
-		op:      opRestore,
-		restore: restoreRequest{history: history},
-		done:    make(chan writeOutcome, 1),
-	}
-	select {
-	case s.writeCh <- req:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.stop:
-		return ErrClosed
-	}
-	// Accepted: the writer owns the outcome. Deliberately no ctx.Done or
-	// stop case here — either could win after the transaction committed and
-	// report failure for a committed restore (see the doc comment).
-	out := <-req.done
-	return out.err
-}
-
-// RewriteRedaction replaces the redaction segment at span in the row's
-// stored command with reference, dropping the segment from the row's
-// redactions. Read-modify-write happens inside one writer turn, so no
-// concurrent mutation can interleave. Idempotent for a span already holding
-// the same reference.
-func (s *sqliteContent) RewriteRedaction(ctx context.Context, id int64, span Redaction, reference string) error {
-	if s.closed.Load() {
-		return ErrClosed
-	}
-	req := writeReq{
-		ctx:  ctx,
-		op:   opRewrite,
-		rew:  rewriteRequest{id: id, span: span, reference: reference},
-		done: make(chan writeOutcome, 1),
-	}
-	select {
-	case s.writeCh <- req:
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.stop:
-		return ErrClosed
-	}
-	select {
-	case out := <-req.done:
-		return out.err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.stop:
-		return ErrClosed
-	}
-}
-
-func (s *sqliteContent) doRewrite(ctx context.Context, rr rewriteRequest) error {
-	var command string
-	var redactionsJSON string
-	err := s.db.QueryRowContext(
-		ctx,
-		"SELECT command, redactions FROM command_history WHERE id = ?", rr.id,
-	).Scan(&command, &redactionsJSON)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	var redactions []Redaction
-	if uerr := json.Unmarshal([]byte(redactionsJSON), &redactions); uerr != nil {
-		return uerr
-	}
-	// The span check and the idempotency rule are ONE decision and live in
-	// one place (applyRedactionRewrite): the ledger's RewriteRedaction makes
-	// the same one on the other table, and two copies of it would be two
-	// answers to "may this span be replaced".
-	newCommand, kept, matched, err := applyRedactionRewrite(
-		command, redactions, rr.span, rr.reference, strconv.FormatInt(rr.id, 10))
-	if err != nil {
-		return err
-	}
-	if !matched {
-		return nil
-	}
-	keptJSON, err := json.Marshal(kept)
-	if err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(
-		ctx,
-		"UPDATE command_history SET command = ?, redactions = ? WHERE id = ?",
-		newCommand, string(keptJSON), rr.id,
-	); err != nil {
-		return err
-	}
-	enforceFileModes(s.path)
-	return nil
-}
-
-const recordCols = "id, command, cwd, host, status, exit_code, started_at, ended_at, trusted, masked_count, masked_kinds, redactions"
-
-func scanRecord(row interface{ Scan(...any) error }) (CommandRecord, error) {
-	var r CommandRecord
-	var kindsJSON string
-	var redactionsJSON string
-	err := row.Scan(&r.ID, &r.Command, &r.Cwd, &r.Host, &r.Status, &r.ExitCode, &r.StartedAt, &r.EndedAt, &r.Trusted, &r.MaskedCount, &kindsJSON, &redactionsJSON)
-	if err != nil {
-		return CommandRecord{}, err
-	}
-	if err := json.Unmarshal([]byte(kindsJSON), &r.MaskedKinds); err != nil {
-		return CommandRecord{}, err
-	}
-	if err := json.Unmarshal([]byte(redactionsJSON), &r.Redactions); err != nil {
-		return CommandRecord{}, err
-	}
-	return r, nil
-}
-
-// List returns the limit newest records, newest first.
-func (s *sqliteContent) List(ctx context.Context, limit int) ([]CommandRecord, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordCols+
-		" FROM command_history ORDER BY id DESC LIMIT ?", limit)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []CommandRecord
-	for rows.Next() {
-		r, err := scanRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// GetByID returns one record, or (nil, nil) when no row carries that id.
-func (s *sqliteContent) GetByID(ctx context.Context, id int64) (*CommandRecord, error) {
-	row := s.db.QueryRowContext(ctx, "SELECT "+recordCols+" FROM command_history WHERE id = ?", id)
-	r, err := scanRecord(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &r, nil
-}
-
-// FindByPrefix returns the limit newest records whose command starts with
-// prefix. LIKE wildcards in the prefix are escaped: a prefix containing % or
-// _ matches them literally.
-func (s *sqliteContent) FindByPrefix(ctx context.Context, prefix string, limit int) ([]CommandRecord, error) {
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
-	rows, err := s.db.QueryContext(ctx, "SELECT "+recordCols+
-		" FROM command_history WHERE command LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?",
-		escaped+"%", limit)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []CommandRecord
-	for rows.Next() {
-		r, err := scanRecord(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
-}
-
-// Query returns one page of history for the recall-ladder rung, newest first
-// (contracts/history.query.schema.json). The directory rung is the exact
-// (cwd, host) pair — the overlay's own rung semantics, design §10.6. The page
-// and the store-wide row count are read in one read transaction so HasRows
-// cannot race a concurrent write.
-//
-// text is the search filter (nocx-ms7v): a case-insensitive substring over
-// command, applied WITHIN the rung — the server never silently widens. Empty
-// means no filter. There is deliberately no FTS: a substring match cannot use
-// an index, and at command-history sizes a full scan of the rung is cheap —
-// measured 100k rows, filter hit, ~260 µs per query (dev machine, WAL warm),
-// so the overlay's per-keystroke queries are nowhere near a frame budget.
-// FTS arrives with output search, whose indexing unit is still an open
-// decision.
-//
-// Coverage is the store-wide MIN(ended_at) — how far back retention lets this
-// answer see, independent of the rung and the filter. It is read in the same
-// transaction so the horizon and the page cannot disagree about the store's
-// state.
-func (s *sqliteContent) Query(ctx context.Context, scope Scope, cwd, host string, limit int, before *int64, text string) (HistoryPage, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return HistoryPage{}, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	cond, args := scopeWhere(scope, cwd, host)
-	if before != nil {
-		if cond == "" {
-			cond = " WHERE id < ?"
-		} else {
-			cond += " AND id < ?"
-		}
-		args = append(args, *before)
-	}
-	// The filter is a parameterized case-folded substring predicate, not
-	// LIKE: instr() has no wildcard grammar, so a search for "100%_done"
-	// matches that literal command and nothing else. lower(?) is bound once;
-	// lower(command) is computed per row (no index — the measurement above).
-	if text != "" {
-		if cond == "" {
-			cond = " WHERE instr(lower(command), lower(?)) > 0"
-		} else {
-			cond += " AND instr(lower(command), lower(?)) > 0"
-		}
-		args = append(args, text)
-	}
-	// Fetch limit+1: one extra row proves the rung is not exhausted.
-	// cond and recordCols are package constants — never user input.
-	rows, err := tx.QueryContext(ctx, "SELECT "+recordCols+ //nolint:gosec // constant fragments
-		" FROM command_history"+cond+" ORDER BY id DESC LIMIT ?",
-		append(args, limit+1)...)
-	if err != nil {
-		return HistoryPage{}, err
-	}
-	entries := []CommandRecord{}
-	extra := false
-	for rows.Next() {
-		r, err := scanRecord(rows)
-		if err != nil {
-			_ = rows.Close()
-			return HistoryPage{}, err
-		}
-		if len(entries) == limit {
-			extra = true
-			break
-		}
-		entries = append(entries, r)
-	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return HistoryPage{}, err
-	}
-
-	var total int
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM command_history").Scan(&total); err != nil {
-		return HistoryPage{}, err
-	}
-	// MIN ignores NULL ended_at (running entries), so a store full of
-	// running rows reports no horizon rather than a misleading one.
-	var coverage *int64
-	if err := tx.QueryRowContext(ctx, "SELECT MIN(ended_at) FROM command_history").Scan(&coverage); err != nil {
-		return HistoryPage{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return HistoryPage{}, err
-	}
-	return HistoryPage{Entries: entries, Exhausted: !extra, HasRows: total > 0, Coverage: coverage}, nil
 }
 
 func scopeWhere(scope Scope, cwd, host string) (string, []any) {
@@ -1381,28 +936,26 @@ func (s *sqliteContent) Conversations() ConversationRepository {
 	return &convStub{log: s.log}
 }
 
-func (s *sqliteContent) CommandHistory() CommandHistoryRepository {
-	return s
-}
-
-// ledgerRepo is the schema-v1 repository's own receiver. It exists because
-// the two repositories genuinely disagree about one method: rewriting a
-// redaction addresses command_history by its autoincrement rowid and an entry
-// by its client-minted UUIDv7, and one Go type cannot carry both signatures
-// under one name. The disagreement is the point — each repository writes its
-// own rows, keyed the way its own table is keyed — so the boundary is made
-// real here rather than papered over with a second method name on one struct.
-// Everything else is promoted unchanged from the embedded store.
-type ledgerRepo struct{ *sqliteContent }
-
-var _ LedgerRepository = ledgerRepo{}
+// The ledger repository IS the store. It used to be a wrapper type
+// (`ledgerRepo`), and the reason was real while it lasted: two repositories
+// disagreed about one method, because rewriting a redaction addressed
+// command_history by its autoincrement rowid and an entry by its
+// client-minted UUIDv7, and one Go type cannot carry both signatures under
+// one name. nocx-rtg0.19 deleted the other repository, so the disagreement
+// has no second party and the wrapper has nothing left to separate.
+//
+// It is removed rather than left standing, because a shim whose reason is
+// gone is the scaffolding that outlives its purpose — and the next reader
+// would have to reconstruct a boundary that no longer exists to explain why
+// it is there.
+var _ LedgerRepository = (*sqliteContent)(nil)
 
 // Ledger returns the schema-v1 repository (ledger.go). Its wire callers are
 // ledger.open / ledger.bind / ledger.close and the agent ask transaction;
 // ledger.go's header keeps the by-hand list of what is still test-reachable
 // only, because `deadcode` cannot tell the two apart in this package.
 func (s *sqliteContent) Ledger() LedgerRepository {
-	return ledgerRepo{s}
+	return s
 }
 
 // Layout returns the workspace → tab → pane repository (layout.go). No

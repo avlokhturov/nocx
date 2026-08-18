@@ -16,9 +16,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
-	"syscall"
 	"testing"
 
 	"github.com/ncruces/go-sqlite3"
@@ -1389,44 +1387,6 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 }
 
 // ── restore: a multi-row procedure fails as a whole ──────────────────────
-
-// The partial-failure enumeration for the restore procedure: step 3 of 3
-// fails — nothing is true on disk, and the next start sees a clean store.
-func TestRestorePrivatePartialFailureLeavesNothingOnDisk(t *testing.T) {
-	db, _ := newLedger(t)
-	ctx := context.Background()
-	var lim syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
-		t.Fatalf("Getrlimit: %v", err)
-	}
-	original := lim
-	lim.Cur = 1 << 20
-	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
-		t.Fatalf("Setrlimit: %v", err)
-	}
-	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original) })
-
-	records := []content.CommandRecord{
-		{Command: "one", Cwd: "/", Host: "", Status: content.StatusSuccess},
-		{Command: "two", Cwd: "/", Host: "", Status: content.StatusSuccess},
-		{Command: strings.Repeat("x", 2<<20), Cwd: "/", Host: "", Status: content.StatusSuccess}, // exceeds the cap
-	}
-	err := db.RestorePrivate(ctx, nil, records)
-	if err == nil {
-		t.Fatal("restore with an oversized row succeeded")
-	}
-
-	page, err := db.CommandHistory().Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query after failed restore: %v", err)
-	}
-	if len(page.Entries) != 0 {
-		t.Fatalf("after a failed restore there are %d rows, want 0 — a partial restore leaked", len(page.Entries))
-	}
-	if page.HasRows {
-		t.Fatal("HasRows after a failed restore — rows survived on disk")
-	}
-}
 
 // ── closed store ─────────────────────────────────────────────────────────
 

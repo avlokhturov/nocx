@@ -11,6 +11,7 @@ package content_test
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -166,5 +167,86 @@ func TestRecordCompleted_LeavesNoEntryWhenItsExecutionCannotBeWritten(t *testing
 	}
 	if page.HasRows {
 		t.Fatal("the store reports rows after a rolled-back record")
+	}
+}
+
+// ── paging by the handle the wire actually carries (nocx-rtg0.19) ────────
+
+// history.query has only ever put ONE handle on the wire — the row's id — and
+// after the cutover that id is the entry's UUID. So the cursor takes it and
+// resolves it, rather than the wire growing a second handle.
+func TestQueryEntries_PagesFromTheEntryIdItWasGiven(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	ids := make([]string, 0, 3)
+	for _, intent := range []string{"first", "second", "third"} {
+		id, err := led.RecordCompleted(ctx, aCompletedCommand(intent))
+		if err != nil {
+			t.Fatalf("RecordCompleted %q: %v", intent, err)
+		}
+		ids = append(ids, id)
+	}
+
+	// Newest first, so the page starts at "third".
+	page, err := led.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 1})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].ID != ids[2] {
+		t.Fatalf("first page = %+v, want the newest entry", page.Entries)
+	}
+
+	next, err := led.QueryEntries(ctx, content.LedgerQuery{
+		Scope: content.ScopeEverywhere, Limit: 1, BeforeID: page.Entries[0].ID,
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries after a cursor: %v", err)
+	}
+	if len(next.Entries) != 1 || next.Entries[0].ID != ids[1] {
+		t.Fatalf("second page = %+v, want the entry before the cursor", next.Entries)
+	}
+	// The ORDER is ingest_seq, not the id: the second page's row is the one
+	// recorded before the cursor's, whatever the ids sort like.
+	if next.Entries[0].IngestSeq >= page.Entries[0].IngestSeq {
+		t.Fatalf("cursor did not move backwards in commit order: %d then %d",
+			page.Entries[0].IngestSeq, next.Entries[0].IngestSeq)
+	}
+}
+
+// A cursor the store cannot place is REFUSED. Answering it with the newest
+// page would silently restart a person's paging at the top, which reads as
+// "there is nothing older" — the opposite of what happened.
+func TestQueryEntries_RefusesACursorNoRowCarries(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	if _, err := led.RecordCompleted(ctx, aCompletedCommand("make ci")); err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+
+	page, err := led.QueryEntries(ctx, content.LedgerQuery{
+		Scope: content.ScopeEverywhere, Limit: 10, BeforeID: "no-such-entry",
+	})
+	if err == nil {
+		t.Fatalf("QueryEntries accepted an unknown cursor and answered %+v", page.Entries)
+	}
+	if !errors.Is(err, content.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound so a caller can tell it apart", err)
+	}
+}
+
+// Two cursors are two answers to "where does this page start", and the store
+// refuses rather than picking one.
+func TestQueryEntries_RefusesBothCursorsAtOnce(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	id, err := led.RecordCompleted(ctx, aCompletedCommand("make ci"))
+	if err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+	seq := int64(1)
+	if _, err := led.QueryEntries(ctx, content.LedgerQuery{
+		Scope: content.ScopeEverywhere, Limit: 10, BeforeID: id, Before: &seq,
+	}); err == nil {
+		t.Fatal("QueryEntries accepted both a seq cursor and an id cursor")
 	}
 }

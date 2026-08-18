@@ -841,10 +841,25 @@ type LedgerQuery struct {
 	// pane is not a step on it, so this composes with whichever rung was
 	// asked for instead of becoming a fourth one. Empty is no filter.
 	PaneID string
-	Text   string
-	Since  *int64
-	Before *int64
-	Limit  int
+	// BeforeID is the cursor expressed as the previous page's last entry id,
+	// which is the only handle history.query has ever put on the wire
+	// (nocx-rtg0.19). The store resolves it to that row's ingest_seq inside
+	// the same read transaction and pages before it.
+	//
+	// NOTHING IS ORDERED BY IT. The order is ingest_seq and only ingest_seq —
+	// a UUIDv7 sorts by the moment a CLIENT minted it, which is not the
+	// moment the backend accepted it, so ordering by one would silently
+	// reshuffle a user's history. This is a position resolved through a row,
+	// never a comparison.
+	//
+	// An id naming no row is REFUSED rather than answered with the newest
+	// page: a caller paging with a handle the store has evicted must learn
+	// that instead of quietly starting again from the top.
+	BeforeID string
+	Text     string
+	Since    *int64
+	Before   *int64
+	Limit    int
 }
 
 // LedgerPage is one page of recall, newest first, plus the three facts that

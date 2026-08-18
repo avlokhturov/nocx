@@ -97,6 +97,14 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 	if in.TerminationReason == "" {
 		in.TerminationReason = TermCompleted
 	}
+	// Keep-history-off: a command runs and no row appears, and that is not an
+	// error — the same rule the interim table's Add followed, moved here with
+	// the write path it belonged to. Decided before the writer is reached, so
+	// nothing is serialized for a record nobody wants. The empty id is the
+	// caller's signal that there is no row to reference.
+	if !s.policy.Enabled() {
+		return "", nil
+	}
 
 	var id string
 	err := s.run(ctx, func(ctx context.Context) error {
