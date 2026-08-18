@@ -1,5 +1,6 @@
 import { For, Show, createSignal } from 'solid-js'
 import { Tab } from './tab'
+import { Button } from './ui/button'
 import { IconButton } from './ui/icon-button'
 import { ContextMenu } from './ui/context-menu'
 import { Caption } from './ui/caption'
@@ -371,19 +372,39 @@ abstract class TabStripBase implements TabStrip {
           // them. A row that turned into a control when a second workspace
           // existed would be chrome appearing on a counter, which is the rule
           // §4.2 withdrew.
+          // THE CONTROL IS THE KIT'S, and the heading places it — the same
+          // shape the chip uses, for the same reason. A hand-rolled
+          // role="button" was the first attempt and eslint's
+          // nocx/no-role-impersonation refused it: a button that opens a menu
+          // is a kit primitive, not a behavioural unit outside the kit's
+          // vocabulary, so the rule's answer is to use the component rather
+          // than to declare a composite contract. That is also what gets the
+          // focus ring and the keyboard for free instead of re-deriving them.
+          //
+          // The div stays as the row's LAYOUT and paints nothing: a surface
+          // may place a kit component and may never repaint one, and the
+          // Caption inside keeps the typography a heading has always had.
+          //
+          // Every heading that is drawn has rows to open — the default draws
+          // none at all (§4.2) — so there is no heading in the product that
+          // is a control leading nowhere.
           return (
-            <div
-              class="tabstrip-group-heading"
-              onClick={(e: MouseEvent) => {
-                const rows = this.workspaceMenuRows?.(item.key) ?? []
-                if (rows.length === 0) return
-                const anchor = e.currentTarget
-                if (!(anchor instanceof HTMLElement)) return
-                const rect = anchor.getBoundingClientRect()
-                setWorkspaceMenu({ rows, x: rect.left, y: rect.bottom })
-              }}
-            >
-              <Caption size="context">{item.heading}</Caption>
+            <div class="tabstrip-group-heading">
+              <Button
+                variant="ghost"
+                size="sm"
+                title={`Workspace: ${item.heading}`}
+                onClick={(e: MouseEvent) => {
+                  const anchor = e.currentTarget
+                  if (!(anchor instanceof HTMLElement)) return
+                  const rows = this.workspaceMenuRows?.(item.key) ?? []
+                  if (rows.length === 0) return
+                  const rect = anchor.getBoundingClientRect()
+                  setWorkspaceMenu({ rows, x: rect.left, y: rect.bottom })
+                }}
+              >
+                <Caption size="context">{item.heading}</Caption>
+              </Button>
             </div>
           )
         }

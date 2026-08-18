@@ -214,7 +214,12 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
 
     const heading = bar.querySelector<HTMLElement>('.tabstrip-group-heading')!
     expect(heading.textContent).toBe('refactor-auth')
-    heading.click()
+    // The control is the kit's Button, so it is focusable and keyboard
+    // operable without this file re-deriving either — which is what
+    // nocx/no-role-impersonation exists to enforce.
+    const control = heading.querySelector<HTMLElement>('.ui-button')!
+    expect(control).not.toBeNull()
+    control.click()
 
     const rows = [...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')].map(
       (el) => el.textContent,
@@ -229,7 +234,7 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
     showPromptMock.mockResolvedValue('deploy')
 
-    bar.querySelector<HTMLElement>('.tabstrip-group-heading')!.click()
+    bar.querySelector<HTMLElement>('.tabstrip-group-heading .ui-button')!.click()
     ;[...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')]
       .find((el) => el.textContent === 'Rename workspace…')!
       .click()
