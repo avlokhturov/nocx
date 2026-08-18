@@ -480,3 +480,14 @@ describe('historyDiscardSentence', () => {
     expect(historyDiscardSentence(down)).not.toBeNull()
   })
 })
+
+// The runtime degrade (nocx-rtg0.10) — the only reason that ends without a
+// restart, and the sentence says so.
+describe('historyUnavailableSentence for a refusing store', () => {
+  it('says commands run but are not kept, which is the whole distinction', () => {
+    const s = historyUnavailableSentence(aStatus({ available: false, reason: 'writeFailed' }))
+    expect(s).not.toBeNull()
+    expect(s!.description).toContain('running')
+    expect(s!.description).toContain('not being kept')
+  })
+})

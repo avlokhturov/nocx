@@ -74,6 +74,12 @@ export function historyUnavailableSentence(
     case 'openFailed':
       description = 'The history database could not be opened, so nothing is being stored.'
       break
+    case 'writeFailed':
+      // The only reason that can end without a restart, and the sentence says
+      // so: the person can stop reading and come back to a working feature.
+      description =
+        'The history database is refusing writes, so commands are running but not being kept.'
+      break
     default:
       // A reason this build does not know — a newer backend, or a degrade
       // raised without one. Saying less is still honest; saying nothing

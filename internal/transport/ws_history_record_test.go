@@ -571,3 +571,80 @@ func readVaultResult(t *testing.T, conn *websocket.Conn) *vaultRPCResult {
 	}
 	return &resp
 }
+
+// ── the loss policy, as a product contract (nocx-rtg0.10) ────────────────
+
+// N failing writes say so ONCE, not N times — which is the whole difference
+// between a product stating a degrade and a product shouting about every
+// symptom of it. Commands keep running throughout: history.record answering
+// an error is not the terminal's problem, and the renderer already treats a
+// dropped record exactly like nothing to show.
+func TestHistoryRecord_AFailingStoreIsAnnouncedOncePerEpisode(t *testing.T) {
+	db := &fakeHistoryDB{} // RecordCompleted returns ErrNotImplemented
+	status := NewHistoryStatus()
+	announcements := 0
+	status.AddListener(func() { announcements++ })
+
+	ws, stop := newHistoryWSServer(t, db, WithHistoryStatus(status))
+	defer stop()
+	conn := connectWS(t, ws)
+
+	const commands = 5
+	for i := range commands {
+		resp := vaultCall(t, conn, "history.record", recordParams(nil), i+1)
+		// Every one of them answers. A command that ran is never left
+		// without a reply because the store is broken.
+		if resp.Error == nil || resp.Error.Code != -32603 {
+			t.Fatalf("record %d: error = %+v, want -32603", i, resp.Error)
+		}
+	}
+
+	if announcements != 1 {
+		t.Fatalf("the surface announced %d times for %d failing writes, want exactly 1",
+			announcements, commands)
+	}
+	if status.Available() {
+		t.Fatal("durable history reports available while every write is failing")
+	}
+}
+
+// And the episode CLOSES on the first write that lands, because an interval
+// with no closing event is a notice that never goes away.
+func TestHistoryRecord_TheEpisodeEndsWhenAWriteLands(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	status := NewHistoryStatus()
+	status.Raise(HistoryDegradeWriteFailed, "the store was refusing writes")
+
+	ws, stop := newHistoryWSServer(t, db, WithHistoryStatus(status))
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(nil), 1)
+	if resp.Error != nil {
+		t.Fatalf("record: %+v", resp.Error)
+	}
+	if !status.Available() {
+		t.Fatal("durable history still reports unavailable after a write landed")
+	}
+}
+
+// A STARTUP DEGRADE IS NOT CLOSED BY A RUNTIME SUCCESS. An episode is ended
+// by the event that ends IT: one recorded command does not disprove "the
+// content key could not be read", and clearing that would erase a sentence
+// that is still true and that nothing else would ever say again.
+func TestHistoryRecord_ASuccessDoesNotEraseADifferentDegrade(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	status := NewHistoryStatus()
+	status.Raise(HistoryDegradeNoKey, "contentkey: open salt: is a directory")
+
+	ws, stop := newHistoryWSServer(t, db, WithHistoryStatus(status))
+	defer stop()
+	conn := connectWS(t, ws)
+
+	if resp := vaultCall(t, conn, "history.record", recordParams(nil), 1); resp.Error != nil {
+		t.Fatalf("record: %+v", resp.Error)
+	}
+	if status.Available() {
+		t.Fatal("a successful write cleared a degrade it did not open")
+	}
+}

@@ -18,9 +18,9 @@ export interface HistoryStatus {
    */
   available: boolean
   /**
-   * Why durable history is not running — a closed machine code, so the renderer picks its own sentence rather than parsing prose. Null exactly when available is true. 'noKey' the content key could not be read; 'invalidBudget' the History size settings do not make a usable budget; 'openFailed' the history database could not be opened. A runtime write failure (nocx-rtg0.10) adds its member here rather than inventing a second status.
+   * Why durable history is not running — a closed machine code, so the renderer picks its own sentence rather than parsing prose. Null exactly when available is true. 'noKey' the content key could not be read; 'invalidBudget' the History size settings do not make a usable budget; 'openFailed' the history database could not be opened; 'writeFailed' it opened and is refusing writes, which is the only reason that can end without a restart. A runtime write failure (nocx-rtg0.10) adds its member here rather than inventing a second status.
    */
-  reason: 'noKey' | 'invalidBudget' | 'openFailed' | null
+  reason: 'noKey' | 'invalidBudget' | 'openFailed' | 'writeFailed' | null
   /**
    * The underlying error in the words the backend has for it, for the second line of the notice and for a bug report. Null when available is true, and may be null even when it is false — a reason without a detail is still a complete answer.
    */

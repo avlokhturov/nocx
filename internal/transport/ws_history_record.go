@@ -120,6 +120,13 @@ type historyRecordHandlers struct {
 	op       capability.ContentOperation // nil → content store not wired
 	captures *credential.CaptureRegistry
 	machine  historyMachine // discovery prompt hint (transport-owned)
+	// status is the product's one place for "durable history is not doing
+	// what the settings promise" (nocx-rtg0.15). The write path raises on it
+	// and clears on it, which is nocx-rtg0.10's policy in one line: the user
+	// is told ONCE PER EPISODE rather than once per lost command, because
+	// Raise is idempotent within a reason and the episode ends at the first
+	// write that lands. Nil when nothing wired one.
+	status *HistoryStatus
 	// clientID binds a recorded row to the connection that wrote it, exactly
 	// as the ledger's lifecycle writer binds its own (nocx-rtg0.19). Every
 	// entry carries one; a row that cannot say who wrote it is a shape the
@@ -309,6 +316,20 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		return nil
 	})
 	if runErr != nil {
+		// THE EPISODE OPENS HERE (nocx-rtg0.10). A store that is refusing
+		// writes is durable history not running, and the person is entitled
+		// to know — once. Raise is idempotent within a reason, so a hundred
+		// failing commands raise it once and the notice goes away when a
+		// write lands, not when it fades.
+		//
+		// A SATURATION REFUSAL IS NOT A DEGRADE and is deliberately excluded
+		// below: the gate refusing one call under load says nothing about
+		// whether the store is keeping commands, and treating backpressure
+		// as a broken feature would put a permanent notice on a healthy app.
+		var saturated *capability.RefusedError
+		if h.status != nil && !errors.As(runErr, &saturated) {
+			h.status.Raise(HistoryDegradeWriteFailed, runErr.Error())
+		}
 		// History-record failure destroys the pane's pending captures: the
 		// record that was to carry the offer's row never landed (capture
 		// contract). A gate refusal is the saturation error; anything else
@@ -324,6 +345,14 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		}
 		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "history.record: ", runErr))
 		return
+	}
+
+	// AND THE EPISODE CLOSES HERE: a write landed, so the store is keeping
+	// commands again. Only a writeFailed episode is closed — a runtime
+	// success does not disprove "the content key could not be read", and
+	// clearing that would erase a sentence that is still true.
+	if h.status != nil {
+		h.status.ClearReason(HistoryDegradeWriteFailed)
 	}
 
 	// The offers, decided after the row exists (the capture's first link is

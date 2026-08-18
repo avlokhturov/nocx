@@ -62,6 +62,12 @@ const (
 	HistoryDegradeInvalidBudget HistoryDegradeReason = "invalidBudget"
 	// HistoryDegradeOpenFailed — the history database itself would not open.
 	HistoryDegradeOpenFailed HistoryDegradeReason = "openFailed"
+	// HistoryDegradeWriteFailed is the RUNTIME one: the store opened and is
+	// refusing writes (nocx-rtg0.10). It is a degrade like the three above —
+	// commands are not being kept — and it is the reason this type was built
+	// with a raise/clear interval rather than a one-shot flag, because it is
+	// the only one that can end without a restart.
+	HistoryDegradeWriteFailed HistoryDegradeReason = "writeFailed"
 )
 
 // historyStatusResponse is the wire shape of history.status, and — byte for
@@ -129,6 +135,30 @@ func (h *HistoryStatus) Discarded(rows int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.discarded = &rows
+}
+
+// ClearReason closes an episode ONLY if it is the one named, and returns
+// whether it closed anything.
+//
+// It exists because a runtime success does not disprove a startup degrade.
+// The write path calls this after a record lands, and clearing
+// unconditionally would let one successful write erase "the content key could
+// not be read" — a sentence that is still true and that nothing else would
+// ever say again. An episode is closed by the event that ends IT, which is
+// the interval rule stated as a method.
+func (h *HistoryStatus) ClearReason(reason HistoryDegradeReason) bool {
+	h.mu.Lock()
+	if h.available || h.reason != reason {
+		h.mu.Unlock()
+		return false
+	}
+	h.available = true
+	h.reason = ""
+	h.detail = ""
+	listeners := append([]func(){}, h.listeners...)
+	h.mu.Unlock()
+	notifyHistoryStatusListeners(listeners)
+	return true
 }
 
 // Raise opens a degrade episode: durable history is not running, for this
