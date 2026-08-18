@@ -17,6 +17,7 @@ import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { EndpointClient } from './endpoints'
+import type { SandboxAccessClient } from './sandbox-access-settings'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -41,6 +42,7 @@ export class SettingsContent extends SolidTabContent {
     private readonly endpointsClient?: EndpointClient,
     private readonly agentClient?: AgentClient,
     private readonly snippetsStore?: SnippetsStore,
+    private readonly sandboxAccessClient?: SandboxAccessClient,
   ) {
     super()
   }
@@ -57,6 +59,7 @@ export class SettingsContent extends SolidTabContent {
           agentClient: this.agentClient,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
+          sandboxAccessClient: this.sandboxAccessClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

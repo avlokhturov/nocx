@@ -20,6 +20,7 @@ import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import type { SnippetsStore } from './snippets/snippets-store'
+import { SandboxAccessSettings, type SandboxAccessClient } from './sandbox-access-settings'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -146,6 +147,7 @@ export interface SettingsComponentProps {
    *  a snippet saved here is in the next fire without a notification on the
    *  wire (design §6). Absent in an embedding with no snippets service. */
   snippetsStore?: SnippetsStore
+  sandboxAccessClient?: SandboxAccessClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -470,6 +472,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+    const sandboxAccessPage: SettingsPage = {
+      kind: 'component',
+      id: 'sandbox-access',
+      title: 'Sandbox access',
+      groupId: 'developer',
+      scrollMode: 'page',
+      renderContent: () => <SandboxAccessSettings client={props.sandboxAccessClient} />,
+    }
     return [
       ...generated,
       backupPage,
@@ -478,6 +488,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
+      sandboxAccessPage,
     ]
   })
 

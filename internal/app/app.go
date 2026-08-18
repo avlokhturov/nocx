@@ -463,7 +463,8 @@ func New(opts ...Option) (*App, error) {
 	// One platform sandbox service at the composition root (AD-8). It owns
 	// policy construction and the per-session runtime roots; callers only
 	// carry an optional workspace request.
-	sandboxSvc := sandbox.New(logger, paths.CacheDir())
+	accessInbox := sandbox.NewAccessInbox(nil)
+	sandboxSvc := sandbox.NewWithAccess(logger, paths.CacheDir(), accessInbox)
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
 	// each lane's owning session before it can compose a child bootstrap.
@@ -579,6 +580,7 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
+	accessInbox.SetGrantStore(sandboxGrantStore{registry: settingsRegistry})
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -734,6 +736,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithCredentialStore(v),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithSandboxService(sandboxSvc),
+		transport.WithSandboxAccessInbox(accessInbox),
 		transport.WithVaultLifecycle(v),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithContentDB(contentDB),
@@ -1828,4 +1831,19 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 		Capability: cfg.Capability,
 		Recovery:   cfg.Recovery,
 	}, adapter, nil
+}
+
+type sandboxGrantStore struct {
+	registry *settings.Registry
+}
+
+func (s sandboxGrantStore) AppendSandboxPath(access sandbox.AccessClass, path string) (int, error) {
+	switch access {
+	case sandbox.AccessReadOnly:
+		return s.registry.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, path)
+	case sandbox.AccessReadWrite:
+		return s.registry.AppendSandboxPath(settings.SandboxAllowedWritablePaths, path)
+	default:
+		return 0, sandbox.ErrInvalidAccessDecision
+	}
 }

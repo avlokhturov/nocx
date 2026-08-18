@@ -307,6 +307,7 @@ async function main() {
         endpointsClient,
         agentClient,
         snippetsStore,
+        client,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
