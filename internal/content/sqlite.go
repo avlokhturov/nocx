@@ -119,8 +119,13 @@ type writeReq struct {
 }
 
 // writeOutcome is the writer's answer to one writeReq.
+//
+// It used to carry a row id as well, because one of the four mutations was an
+// INSERT whose autoincrement key the caller needed. That mutation went with
+// command_history (nocx-rtg0.19); the ledger's ids are minted inside its own
+// transaction and come back through the call, so the only thing left to
+// answer with is whether it worked.
 type writeOutcome struct {
-	id  int64
 	err error
 }
 
@@ -912,17 +917,6 @@ func (s *sqliteContent) writer() {
 // execer is the ExecContext surface shared by *sql.DB and *sql.Tx.
 type execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}
-
-func scopeWhere(scope Scope, cwd, host string) (string, []any) {
-	switch scope {
-	case ScopeDirectory:
-		return " WHERE cwd = ? AND host = ?", []any{cwd, host}
-	case ScopeHost:
-		return " WHERE host = ?", []any{host}
-	default:
-		return "", nil
-	}
 }
 
 // ── backup (the canary-safe copy path) ───────────────────────────────────

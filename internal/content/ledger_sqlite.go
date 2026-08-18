@@ -489,13 +489,13 @@ func (s *sqliteContent) QueryEntries(ctx context.Context, q LedgerQuery) (Ledger
 	// ingest_seq and only ingest_seq.
 	if q.BeforeID != "" {
 		var seq int64
-		switch err := tx.QueryRowContext(ctx,
+		switch cursorErr := tx.QueryRowContext(ctx,
 			`SELECT ingest_seq FROM entries WHERE id = ?`, q.BeforeID).Scan(&seq); {
-		case errors.Is(err, sql.ErrNoRows):
+		case errors.Is(cursorErr, sql.ErrNoRows):
 			return LedgerPage{Entries: []LedgerEntrySummary{}},
 				fmt.Errorf("%w: cursor %q", ErrNotFound, q.BeforeID)
-		case err != nil:
-			return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+		case cursorErr != nil:
+			return LedgerPage{Entries: []LedgerEntrySummary{}}, cursorErr
 		}
 		q.Before = &seq
 	}

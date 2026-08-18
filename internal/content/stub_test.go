@@ -67,4 +67,3 @@ func TestConversationListReturnsSentinel(t *testing.T) {
 		t.Errorf("expected ErrNotImplemented, got %v", err)
 	}
 }
-

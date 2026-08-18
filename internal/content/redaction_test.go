@@ -77,16 +77,6 @@ func TestSchemaRebuildLogsRowsDiscarded(t *testing.T) {
 	}
 }
 
-// newStoreAt opens a fresh store at path with the internal test key.
-func newStoreAt(t *testing.T, path string) (ContentDB, string) {
-	t.Helper()
-	db, err := openTestStore(t, path)
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	return db, path
-}
-
 type captureLogger struct {
 	warn func(msg string, args ...any)
 }

@@ -120,4 +120,3 @@ type ConversationRepository interface {
 	GetByID(ctx context.Context, id string) (*Conversation, error)
 	List(ctx context.Context, limit int) ([]Conversation, error)
 }
-

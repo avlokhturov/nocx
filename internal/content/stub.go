@@ -38,7 +38,6 @@ func (s *convStub) List(_ context.Context, limit int) ([]Conversation, error) {
 	return nil, ErrNotImplemented
 }
 
-
 // Conversations returns a stub ConversationRepository.
 func (s *Stub) Conversations() ConversationRepository {
 	s.log.Info("content stub: Conversations called (no-op)")
