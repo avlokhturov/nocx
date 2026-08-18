@@ -92,6 +92,36 @@ export function historyUnavailableSentence(
 }
 
 /**
+ * What to say about a DISCARD, or null when there was none.
+ *
+ * A DIFFERENT FACT FROM THE ONE ABOVE, and kept apart on purpose: history is
+ * running, and it is empty because the storage format changed under it
+ * (nocx-rtg0.19). The sentence above says a feature is down; this one says a
+ * working feature starts from nothing. Folding them together would make the
+ * settings below read as ungoverned when they govern perfectly.
+ *
+ * It is worth saying at all because the symptom is invisible: an empty
+ * history after an update looks exactly like a fresh install, and a person
+ * with no explanation concludes the feature never worked.
+ *
+ * -1 is the store's "there was something and I could not count it", which is
+ * still a discard and still theirs to know.
+ */
+export function historyDiscardSentence(
+  status: HistoryStatus | null,
+): HistoryUnavailableSentence | null {
+  if (status === null || status.discarded === null || status.discarded === undefined) return null
+  const rows = status.discarded
+  return {
+    title: 'Earlier history was discarded',
+    description:
+      rows < 0
+        ? 'The storage format changed in this version, so what was kept before could not be carried over.'
+        : `The storage format changed in this version, so ${rows === 1 ? '1 command' : `${rows} commands`} kept before it could not be carried over.`,
+  }
+}
+
+/**
  * What the recall panel puts in its empty list when there is no store to
  * answer from — the third state of `source`, distinct from "the store
  * answered and had nothing".
@@ -188,7 +218,12 @@ export class HistoryStatusStore {
  *  change on every reconnect. */
 function sameStatus(a: HistoryStatus | null, b: HistoryStatus | null): boolean {
   if (a === null || b === null) return a === b
-  return a.available === b.available && a.reason === b.reason && a.detail === b.detail
+  return (
+    a.available === b.available &&
+    a.reason === b.reason &&
+    a.detail === b.detail &&
+    a.discarded === b.discarded
+  )
 }
 
 /** Narrow an untrusted notification payload to the wire type. A malformed
@@ -200,9 +235,14 @@ function asHistoryStatus(params: unknown): HistoryStatus | null {
   if (typeof p.available !== 'boolean') return null
   const reason = p.reason
   const detail = p.detail
+  const discarded = p.discarded
   return {
     available: p.available,
     reason: typeof reason === 'string' ? (reason as HistoryStatus['reason']) : null,
     detail: typeof detail === 'string' ? detail : null,
+    // A non-integer is dropped to null rather than coerced: "how many
+    // commands you lost" is a number or it is nothing, and a NaN rendered
+    // into that sentence would be worse than not saying it.
+    discarded: typeof discarded === 'number' && Number.isInteger(discarded) ? discarded : null,
   }
 }

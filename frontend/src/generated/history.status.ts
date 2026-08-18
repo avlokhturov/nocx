@@ -25,4 +25,8 @@ export interface HistoryStatus {
    * The underlying error in the words the backend has for it, for the second line of the notice and for a bug report. Null when available is true, and may be null even when it is false — a reason without a detail is still a complete answer.
    */
   detail: string | null
+  /**
+   * How many commands the store threw away when it opened, because the file had been written by a different schema — null when nothing was, which is every ordinary start. It is NOT a degrade and rides beside `available` rather than as a reason for it: history IS running, and it is empty because the format changed under it. Saying that with available:false would claim the feature is off; saying it only in a log is the silent degrade this method exists to end, and the one that hurts most — an empty history is indistinguishable from a fresh install. -1 means the old file held nothing this build could count, which is still a discard worth stating.
+   */
+  discarded: number | null
 }

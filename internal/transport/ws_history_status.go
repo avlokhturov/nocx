@@ -73,6 +73,18 @@ type historyStatusResponse struct {
 	Available bool    `json:"available"`
 	Reason    *string `json:"reason"`
 	Detail    *string `json:"detail"`
+	// Discarded is how many commands the store threw away when it opened,
+	// because the file was written by a different schema — null when nothing
+	// was, which is every ordinary start (nocx-rtg0.19).
+	//
+	// IT IS NOT A DEGRADE, and that is why it rides beside `available`
+	// rather than as a reason for it: history IS running, and it is empty
+	// because the format changed under it. Saying that with `available:
+	// false` would claim the feature is off; saying it only in a log is the
+	// silent degrade AGENTS.md forbids, and the one that hurts most, because
+	// the honest symptom — an empty history — is indistinguishable from a
+	// fresh install.
+	Discarded *int `json:"discarded"`
 }
 
 // HistoryStatus is the raise/clear state of durable command history: the one
@@ -90,6 +102,11 @@ type HistoryStatus struct {
 	available bool
 	reason    HistoryDegradeReason
 	detail    string
+	// discarded is a ONE-SHOT FACT, not an episode: the store rebuilt itself
+	// at open and this many commands went with the old shape. It has no
+	// closing event because there is nothing to close — it happened once, on
+	// this start, and the next start either repeats it or does not.
+	discarded *int
 	listeners []func()
 }
 
@@ -100,6 +117,18 @@ type HistoryStatus struct {
 // ever starts.
 func NewHistoryStatus() *HistoryStatus {
 	return &HistoryStatus{available: true}
+}
+
+// Discarded records that the store rebuilt itself at open and how many
+// commands that cost. Called once, from the composition root, before the
+// transport starts — so no listener has to fire and no episode opens.
+//
+// A count of -1 means the file held nothing this build could count, which is
+// still a discard worth stating: something was there and is not now.
+func (h *HistoryStatus) Discarded(rows int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.discarded = &rows
 }
 
 // Raise opens a degrade episode: durable history is not running, for this
@@ -170,6 +199,10 @@ func (h *HistoryStatus) snapshot() historyStatusResponse {
 	if h.detail != "" {
 		detail := h.detail
 		out.Detail = &detail
+	}
+	if h.discarded != nil {
+		n := *h.discarded
+		out.Discarded = &n
 	}
 	return out
 }
