@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -289,16 +290,30 @@ func TestContentDBChild(t *testing.T) {
 // has one implementation: the role and the path are the whole interface.
 func newChild(t *testing.T, role, path string) *exec.Cmd {
 	t.Helper()
+	cmd, _ := newChildReporting(t, role, path)
+	return cmd
+}
+
+// newChildReporting is newChild plus the child's stdout, for a caller that
+// must wait until the child has actually DONE something rather than until
+// some number of milliseconds has passed. AGENTS.md: a test may not depend on
+// timing — wait on an observable state change, never on a duration.
+func newChildReporting(t *testing.T, role, path string) (*exec.Cmd, io.Reader) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=TestContentDBChild") //nolint:gosec // standard Go test re-exec pattern
 	cmd.Env = append(
 		os.Environ(),
 		"NOCX_CONTENT_CHILD="+role,
 		"NOCX_CONTENT_PATH="+path,
 	)
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start %s child: %v", role, err)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe for %s child: %v", role, err)
 	}
-	return cmd
+	if startErr := cmd.Start(); startErr != nil {
+		t.Fatalf("start %s child: %v", role, startErr)
+	}
+	return cmd, out
 }
 
 func childWriter(t *testing.T) {

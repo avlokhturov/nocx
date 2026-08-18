@@ -17,6 +17,7 @@ package content
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -48,6 +49,14 @@ func childEvictor(t *testing.T) {
 	for {
 		if _, err := led.EvictEntries(ctx, EvictionRequest{Before: 1 << 40, Max: 1}); err != nil {
 			os.Exit(6)
+		}
+		// One byte per committed pass. This is the child's only way of saying
+		// "a pass has landed", and it is what the parent kills on — a fixed
+		// delay would be asking the machine to run at a particular speed,
+		// which the container proved it does not (AGENTS.md: a test may not
+		// depend on timing).
+		if _, err := os.Stdout.Write([]byte{'.'}); err != nil {
+			os.Exit(7)
 		}
 		time.Sleep(time.Millisecond)
 	}
@@ -102,8 +111,32 @@ func seedClosedEntries(t *testing.T, db ContentDB, n int) {
 // fixed delay tests a single instant in the pass and the interesting instants
 // are the ones inside a transaction.
 func TestEvictionAccountingSurvivesAKill(t *testing.T) {
-	for _, delay := range []time.Duration{30 * time.Millisecond, 60 * time.Millisecond, 120 * time.Millisecond} {
-		t.Run(delay.String(), func(t *testing.T) {
+	// Three kills at DIFFERENT AMOUNTS OF WORK DONE, not at different
+	// wall-clock delays.
+	//
+	// It was three delays — 30, 60 and 120ms — and that is a test asking the
+	// machine to run at a particular speed. It passed on the developer's host
+	// and failed in the container, where at 60ms the child had not started:
+	// "evicted 0, surviving 400", which the test correctly refuses as an
+	// instant that cannot see a torn eviction. AGENTS.md is explicit — wait
+	// on an observable state change, never on a duration; a test that needs a
+	// slow machine is broken on a fast one too and has only not been caught.
+	//
+	// So each case waits for exactly this many COMMITTED passes, reported by
+	// the child, and kills after them. What that buys is the guard: the kill
+	// is now guaranteed to land with work both done and outstanding, on any
+	// machine. What it does not buy — and no test here can — is a kill
+	// GUARANTEED to land inside a transaction; the signal arrives at an
+	// arbitrary point in the child's next pass or its pause. The proof that
+	// this assertion is discriminating comes from the other direction and is
+	// recorded on nocx-rtg0.12: splitting the DELETE and the watermark into
+	// two transactions makes it fail, "evicted 9 + surviving 390 = 399".
+	//
+	// The sleep in childEvictor stays for the same reason: without it a fast
+	// machine drains all 400 before the signal lands, which is the same
+	// vacuity from the other end.
+	for _, passes := range []int{1, 5, 20} {
+		t.Run(fmt.Sprintf("after-%d-passes", passes), func(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "content.db")
 
@@ -116,8 +149,15 @@ func TestEvictionAccountingSurvivesAKill(t *testing.T) {
 				t.Fatalf("close after seeding: %v", closeErr)
 			}
 
-			cmd := newChild(t, "evictor", path)
-			time.Sleep(delay)
+			cmd, reports := newChildReporting(t, "evictor", path)
+			// Read exactly `passes` acknowledgements, then kill. The read
+			// blocks until the child has done the work, however long that
+			// takes here — which is what makes the same assertion true on a
+			// fast machine and a slow container.
+			ack := make([]byte, passes)
+			if _, readErr := io.ReadFull(reports, ack); readErr != nil {
+				t.Fatalf("waiting for %d eviction passes: %v", passes, readErr)
+			}
 			if killErr := cmd.Process.Signal(syscall.SIGKILL); killErr != nil {
 				t.Fatalf("kill evictor: %v", killErr)
 			}
@@ -152,7 +192,7 @@ func TestEvictionAccountingSurvivesAKill(t *testing.T) {
 			// otherwise the accounting below balances trivially: a child that
 			// died before its first pass leaves 0 + 40, which proves nothing
 			// about a half-finished transaction.
-			t.Logf("kill at %s: evicted %d, surviving %d", delay, wm.EvictedCount, surviving)
+			t.Logf("kill after %d passes: evicted %d, surviving %d", passes, wm.EvictedCount, surviving)
 			if wm.EvictedCount == 0 {
 				t.Fatal("the child evicted nothing before the kill — this case cannot see a torn eviction")
 			}
