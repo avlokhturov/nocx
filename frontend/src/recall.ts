@@ -61,6 +61,10 @@ import type { CommandLedger } from './command-ledger'
 import { createSearchFieldDisplay } from './ui/search-field'
 import { FloatingPanel, type FloatingPanelRow } from './ui/floating-panel'
 import { commandFragment } from './command-text'
+// The words for "durable history is not running" have ONE owner
+// (history-status.ts), because Settings says the same thing to the same
+// person a moment earlier and the two must not drift apart.
+import { HISTORY_UNAVAILABLE_RECALL_DESC, HISTORY_UNAVAILABLE_RECALL_TITLE } from './history-status'
 
 /**
  * The scrollTop that puts `row` FULLY inside `list`'s visible box — its top
@@ -877,11 +881,16 @@ export class RecallOverlay {
     }
     header.appendChild(count)
 
-    if (s.name !== 'loading' && s.query.source === 'session') {
+    // The source badge, three states and not two (nocx-rtg0.15). 'session'
+    // is a store that answered and holds nothing — what you see is this
+    // session, and it will be kept. 'unavailable' is no store at all —
+    // what you see is this session and nothing is being kept, which is a
+    // different thing to tell somebody and a worse one to leave unsaid.
+    if (s.name !== 'loading' && s.query.source !== 'store') {
       const note = document.createElement('span')
       note.className = 'ui-badge ui-floating-panel__source'
-      note.dataset.tone = 'warning'
-      note.textContent = 'this session only'
+      note.dataset.tone = s.query.source === 'unavailable' ? 'danger' : 'warning'
+      note.textContent = s.query.source === 'unavailable' ? 'not being kept' : 'this session only'
       header.appendChild(note)
     }
 
@@ -1036,8 +1045,11 @@ export class RecallOverlay {
   }
 
   /** The kit's empty state inside the shared list: loading must not read as
-   *  "no history yet", and a filter that found nothing must not read as a
-   *  terminal that forgot. */
+   *  "no history yet", a filter that found nothing must not read as a
+   *  terminal that forgot, and a terminal that is not keeping anything must
+   *  not read as one that has nothing yet to show. That last one is the
+   *  whole of nocx-rtg0.15 on this surface: "commands you run will appear
+   *  here" is a promise, and with no store behind it, a false one. */
   private emptyState(s: RecallState): HTMLElement {
     const empty = document.createElement('div')
     empty.className = 'ui-empty-state'
@@ -1054,7 +1066,12 @@ export class RecallOverlay {
       empty.appendChild(emptyTitle)
       return empty
     }
-    if (s.filter !== '') {
+    if (s.query.source === 'unavailable') {
+      // Ahead of the filter branch on purpose: with no store to search,
+      // "no matches" would blame the filter for a store that never looked.
+      emptyTitle.textContent = HISTORY_UNAVAILABLE_RECALL_TITLE
+      emptyDesc.textContent = HISTORY_UNAVAILABLE_RECALL_DESC
+    } else if (s.filter !== '') {
       emptyTitle.textContent = `no matches for "${s.filter}"`
       emptyDesc.textContent = 'backspace to clear the filter'
     } else {

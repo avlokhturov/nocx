@@ -305,10 +305,17 @@ type WSServer struct {
 	profileUsage session.ProfileUsageTracker
 
 	// contentDB is the durable content store backing history.query. When
-	// nil, the method answers source=session — the overlay then labels what
-	// it shows "this session only" instead of presenting the in-memory
+	// nil, the method answers source=unavailable — the overlay then says
+	// durable history is not running instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+
+	// historyStatus is the raise/clear state of durable command history:
+	// whether it is running and, when it is not, why. It answers
+	// history.status and pushes history.statusChanged. When nil the server
+	// makes no claim and reports history as running — the composition root
+	// is what says otherwise (ws_history_status.go).
+	historyStatus *HistoryStatus
 
 	// filesys is the binding registry backing the files.* control plane
 	// (fm-w8). When nil, those methods return -32601. The provider
@@ -953,6 +960,10 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
+	// history.status rides the plain lane, not the content queue: it is a
+	// mutex read of in-memory state and must stay answerable while the
+	// content domain is exactly what is broken.
+	specs = append(specs, s.historyStatusSpecs(s.lane)...)
 	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)

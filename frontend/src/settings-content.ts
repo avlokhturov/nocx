@@ -17,6 +17,7 @@ import { SettingsComponent, type SettingsComponentHandle } from './settings'
 import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { EndpointClient } from './endpoints'
+import type { HistoryStatusStore } from './history-status'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -41,6 +42,11 @@ export class SettingsContent extends SolidPaneContent {
     private readonly endpointsClient?: EndpointClient,
     private readonly agentClient?: AgentClient,
     private readonly snippetsStore?: SnippetsStore,
+    /** Whether durable command history is running (nocx-rtg0.15). Passed
+     *  through to the History section, which otherwise offers a toggle, a
+     *  retention age and a two-number budget that govern nothing when the
+     *  store never opened. */
+    private readonly historyStatus?: HistoryStatusStore,
   ) {
     super()
   }
@@ -57,6 +63,7 @@ export class SettingsContent extends SolidPaneContent {
           agentClient: this.agentClient,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
+          historyStatus: this.historyStatus,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)
