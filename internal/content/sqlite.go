@@ -402,7 +402,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 7
+const schemaVersion = 8
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -415,6 +415,7 @@ var rebuildDropOrder = []string{
 	"edges", "executions", "environment_observations", "entries",
 	"panes", "tabs",
 	"sessions", "environments", "workspaces", "ledger_sequence",
+	"retention_watermark",
 	"command_history",
 }
 
@@ -816,6 +817,23 @@ CREATE TABLE IF NOT EXISTS ledger_sequence (
 INSERT INTO ledger_sequence (id, next) VALUES (1, 0)
   ON CONFLICT(id) DO NOTHING;  -- schemaV1 re-runs on every open; the seed must be idempotent.
                                -- next=0: the first Submit increments to ingest_seq 1.
+
+-- The retention watermark (nocx-rtg0.12, design §5.4): what eviction removed
+-- and how far this store's knowledge is now incomplete. It exists because
+-- coverage CANNOT be computed from the rows that remain — once eviction has
+-- deleted them there is nothing left to count, and MIN(ended_at) over the
+-- survivors reports a partial store as a whole one. Written in the SAME
+-- transaction as the deletion it accounts for; see retention.go for why this
+-- is one accumulating row rather than a journal of passes.
+CREATE TABLE IF NOT EXISTS retention_watermark (
+  id              INTEGER PRIMARY KEY CHECK (id = 1), -- exactly one row
+  evicted_count   INTEGER NOT NULL DEFAULT 0, -- entries EVER evicted; monotonic
+  horizon         INTEGER,                    -- newest instant removed; complete only after it
+  last_evicted_at INTEGER                     -- wall clock of the last pass that removed something
+) STRICT;
+INSERT INTO retention_watermark (id, evicted_count, horizon, last_evicted_at)
+  VALUES (1, 0, NULL, NULL)
+  ON CONFLICT(id) DO NOTHING;  -- idempotent for the same reason as the sequence seed above.
 -- The layout chain is read by parent: a workspace's tabs in strip order, a
 -- tab's panes. tabs_by_parent is what keeps ON DELETE SET NULL — and the
 -- lineage walk — from scanning the strip.

@@ -172,6 +172,16 @@ func (s *ledgerStub) DeleteEntry(_ context.Context, id string) error {
 	return ErrNotImplemented
 }
 
+func (s *ledgerStub) EvictEntries(_ context.Context, req EvictionRequest) (EvictionResult, error) {
+	s.log.Info("content stub: LedgerRepository.EvictEntries", "before", req.Before, "max", req.Max)
+	return EvictionResult{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) Watermark(_ context.Context) (RetentionWatermark, error) {
+	s.log.Info("content stub: LedgerRepository.Watermark")
+	return RetentionWatermark{}, ErrNotImplemented
+}
+
 func (s *ledgerStub) StartExecution(_ context.Context, in StartExecution) (int64, error) {
 	s.log.Info("content stub: LedgerRepository.StartExecution", "entry", in.EntryID)
 	return 0, ErrNotImplemented

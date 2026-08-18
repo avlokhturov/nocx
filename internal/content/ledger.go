@@ -860,10 +860,18 @@ type LedgerPage struct {
 	// answer and an unanswerable question must not look alike, and a reader
 	// that cannot tell them apart renders "no history" for "history is off".
 	HasRows bool
-	// Coverage is the store-wide horizon: the oldest retained entry's
-	// ended_at in Unix milliseconds, independent of the rung and of every
+	// Coverage is the store-wide horizon in Unix milliseconds: how far back
+	// this store can still speak for, independent of the rung and of every
 	// filter, because retention is store-wide so the horizon is too. Nil
-	// when nothing has completed — there is no horizon to state.
+	// when there is no horizon to state.
+	//
+	// It has two sources and the honest one depends on eviction. Once this
+	// store has evicted anything the number comes from the retention
+	// watermark — the horizon CANNOT be computed from the rows that remain,
+	// because the rows that carried it are the ones that were deleted
+	// (§5.4). Until then it is the oldest retained entry's ended_at, which
+	// is exact: the survivors are the whole store. Nil while nothing has
+	// completed and nothing has been evicted.
 	Coverage *int64
 }
 
@@ -1024,6 +1032,23 @@ type LedgerRepository interface {
 	// executions (and their artifacts, chunks and grant) cascade. A pin
 	// protects against background eviction, not against this.
 	DeleteEntry(ctx context.Context, id string) error
+	// EvictEntries removes the oldest completed entries retention no longer
+	// covers — oldest-first by ingest_seq, the ledger's only total order —
+	// and records what it removed in the retention watermark, in ONE
+	// transaction. An entry holding a pinned artifact is exempt; an entry
+	// that has not ended is unfinished rather than old and is never a
+	// candidate. Max bounds the pass, because eviction shares the writer
+	// goroutine with every other mutation.
+	//
+	// The deletion and the watermark commit together or not at all: a
+	// deletion without its watermark would silently narrow what the store
+	// can answer while it went on claiming full coverage.
+	EvictEntries(ctx context.Context, req EvictionRequest) (EvictionResult, error)
+	// Watermark reports what this store has ever lost to eviction: the
+	// running count and the horizon its knowledge is complete after. Both
+	// are read from the watermark alone — that they are underivable from
+	// the surviving rows is the reason it exists.
+	Watermark(ctx context.Context) (RetentionWatermark, error)
 	// StartExecution begins one run, pinning the environment observation
 	// current at this moment, and returns the execution's row identity.
 	// Fails when the entry's environment has no observation yet — there

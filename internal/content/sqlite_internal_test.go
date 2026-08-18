@@ -280,9 +280,28 @@ func TestContentDBChild(t *testing.T) {
 		childWriter(t)
 	case "checkpointer":
 		childCheckpointer(t)
+	case "evictor":
+		childEvictor(t)
 	default:
 		t.Skip("not a child invocation")
 	}
+}
+
+// newChild re-execs this test binary in the given role against the given
+// database. Shared by every cross-process test here so the re-exec pattern
+// has one implementation: the role and the path are the whole interface.
+func newChild(t *testing.T, role, path string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestContentDBChild") //nolint:gosec // standard Go test re-exec pattern
+	cmd.Env = append(
+		os.Environ(),
+		"NOCX_CONTENT_CHILD="+role,
+		"NOCX_CONTENT_PATH="+path,
+	)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start %s child: %v", role, err)
+	}
+	return cmd
 }
 
 func childWriter(t *testing.T) {
@@ -320,21 +339,8 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "content.db")
 
-	startChild := func(role string) *exec.Cmd {
-		cmd := exec.Command(os.Args[0], "-test.run=TestContentDBChild") //nolint:gosec // standard Go test re-exec pattern
-		cmd.Env = append(
-			os.Environ(),
-			"NOCX_CONTENT_CHILD="+role,
-			"NOCX_CONTENT_PATH="+path,
-		)
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start %s child: %v", role, err)
-		}
-		return cmd
-	}
-
-	writer := startChild("writer")
-	checkpointer := startChild("checkpointer")
+	writer := newChild(t, "writer", path)
+	checkpointer := newChild(t, "checkpointer", path)
 
 	// Let both processes work on the shared database, then kill the
 	// checkpointer mid-checkpoint and the writer mid-write.

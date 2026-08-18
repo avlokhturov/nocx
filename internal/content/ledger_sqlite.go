@@ -193,6 +193,13 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 			return err
 		}
 		out = SubmitResult{ID: in.ID, IngestSeq: next, SubmittedAt: submittedAt}
+		// Age retention, in the same writer turn and after the entry is
+		// durable — the placement the command-history sweep already uses
+		// (doAdd). It runs here rather than on a timer because this is the
+		// one moment the ledger is known to have grown, and it is
+		// best-effort: the submit above has committed, so an eviction
+		// failure must not turn it into an error the caller would retry.
+		s.evictOnWrite(ctx)
 		return nil
 	})
 	return out, err
@@ -487,16 +494,38 @@ func (s *sqliteContent) QueryEntries(ctx context.Context, q LedgerQuery) (Ledger
 	// ledger has anything to answer from, and a count would read every row
 	// to answer a yes/no.
 	var hasRows bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM entries)`).Scan(&hasRows); err != nil {
+	if existsErr := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM entries)`).Scan(&hasRows); existsErr != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, existsErr
+	}
+	// Coverage has TWO sources, and which one is honest depends on whether
+	// this store has ever evicted (§5.4, nocx-rtg0.12).
+	//
+	// Once it has, the watermark owns the answer: the rows that would have
+	// carried the horizon are deleted, so no query over the survivors can
+	// recover it. MIN(ended_at) would then report the oldest row eviction
+	// happened to leave — and would report NO horizon at all for a store
+	// evicted empty, which reads as "nothing was ever here". That is the
+	// failure this field exists to prevent.
+	//
+	// Until it has, the surviving rows ARE the whole store, so the oldest
+	// one is the honest horizon — and it is the better answer, because it is
+	// exact where the watermark would still be null.
+	//
+	// Read in the same transaction as the page: a horizon that disagrees
+	// with its page is worse than no horizon. MIN ignores NULL ended_at
+	// (entries still running), so a ledger holding nothing but live commands
+	// reports no horizon rather than a misleading one. No rung and no filter
+	// appear on either path: retention is store-wide, so the horizon it
+	// leaves is store-wide too.
+	wm, err := s.watermark(ctx, tx)
+	if err != nil {
 		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
 	}
-	// MIN ignores NULL ended_at (entries still running), so a ledger holding
-	// nothing but live commands reports no horizon rather than a misleading
-	// one. No rung and no filter appear here: retention is store-wide, so
-	// the horizon it leaves is store-wide too (§5.4).
-	var coverage *int64
-	if err := tx.QueryRowContext(ctx, `SELECT MIN(ended_at) FROM entries`).Scan(&coverage); err != nil {
-		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	coverage := wm.Horizon
+	if wm.EvictedCount == 0 {
+		if minErr := tx.QueryRowContext(ctx, `SELECT MIN(ended_at) FROM entries`).Scan(&coverage); minErr != nil {
+			return LedgerPage{Entries: []LedgerEntrySummary{}}, minErr
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
