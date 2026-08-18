@@ -13,7 +13,16 @@
  */
 
 import type { JSX } from 'solid-js'
-import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup } from 'solid-js'
+import {
+  For,
+  Show,
+  untrack,
+  createSignal,
+  createMemo,
+  createEffect,
+  onMount,
+  onCleanup,
+} from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
@@ -510,9 +519,9 @@ export function SettingsComponent(props: SettingsComponentProps) {
       ),
     }
     return [
+      connectionPage,
       ...generated,
       backupPage,
-      connectionPage,
       vaultPage,
       secretsPage,
       endpointsPage,
@@ -557,16 +566,26 @@ export function SettingsComponent(props: SettingsComponentProps) {
    * Open on the first page rather than on everything at once.
    *
    * With no selection the body listed every section end to end and the rail
-   * showed nothing as current, so the rail read as decoration. Runs once, when
-   * the sections first arrive, and only while the user has not already chosen —
-   * a later re-render must not yank them back to the top of the list.
+   * showed nothing as current, so the rail read as decoration. The first page
+   * is the first REGISTRY page (settingsPages()[0]) — the top-level
+   * Connections page — not sections()[0], which is the first generated
+   * section and can sit deep inside a group (History under Application).
+   * Runs once, when the sections first arrive, and only while the user has
+   * not already chosen — a later re-render must not yank them back to the
+   * top of the list.
    */
   createEffect(() => {
-    const first = sections()[0]
+    if (sections().length === 0) return
+    const first = settingsPages()[0]
     if (first === undefined) return
-    if (sectionFilter() !== null || activeComponentPage() !== null) return
-    if (searchQuery() !== '') return
-    setSectionFilter(first)
+    // The guard reads are untracked: the effect must fire only when the data
+    // arrives, never in reaction to the user's own navigation. Tracking
+    // activeComponentPage here let a click's first write (acp → null) re-run
+    // the effect BEFORE sectionFilter was set, re-selecting Connections and
+    // yanking the click back to the top of the rail.
+    if (untrack(() => sectionFilter() !== null || activeComponentPage() !== null)) return
+    if (untrack(() => searchQuery() !== '')) return
+    handleNavClick(first)
   })
 
   const modifiedCount = createMemo(() => {

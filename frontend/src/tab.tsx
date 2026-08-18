@@ -1,5 +1,6 @@
 import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
+import { TAB_DRAG_TYPE } from './layout/strip-drag'
 import { PinIcon } from './ui/icons'
 import type { AgentStatus } from './agent-status'
 
@@ -51,6 +52,10 @@ export interface TabProps {
   /** The row's second line in vertical placement: the tab's location. Empty when the
    *  title already carries it, in which case no second line is drawn. */
   subtitle?: string
+  /** What is happening in the pane, in one line (`Pane.preview`). The
+   *  vertical row's second line prefers it over the location — see the
+   *  render. */
+  preview?: string
   /** When true, the tab offers a save action (alias adoption). */
   adoptable?: boolean
   /** Triggered when the user clicks the save action. */
@@ -64,11 +69,28 @@ export interface TabProps {
    *  back to the generic wording when nothing more specific is known. */
   warningLabel?: string
   /** The tab's colour, as the backend stores it (nocx-isoph.4): one of the
-   *  closed set in layout/tab-colours.ts, or undefined for an undecorated
+   *  closed set in layout/workspace-colours.ts, or undefined for an undecorated
    *  tab, which is the normal state. It renders as a swatch on the row and
    *  never as a repaint of the tab — the colour is a mark the user put on it,
    *  not a theme of its own. */
   colour?: string
+  /**
+   * THE COLOUR OF THE RUN THIS TAB SITS IN, not of the tab (workspaces UX
+   * rework). Set on every tab of an unfolded workspace in the horizontal
+   * strip, so the run reads as one segment with the workspace's pill in
+   * front of it — the thing that makes a workspace a place in the row rather
+   * than a mode of the window.
+   *
+   * DELIBERATELY A SECOND ATTRIBUTE AND NOT A REUSE OF `colour`. That one is
+   * a mark the USER put on this tab; this one is derived from which container
+   * the tab is in, and the user chose neither the mapping nor the palette
+   * entry. Folding them into one attribute would make "why is this tab
+   * green?" a question with two answers, and clearing a tab's own colour
+   * would then have to know whether it was clearing a decoration or a group.
+   * They draw differently in tab.css for the same reason: a swatch on the row
+   * against a rule along its edge.
+   */
+  groupColour?: string
   /** Whether the tab is kept at the head of the strip. The strip does the
    *  keeping (layout/strip-order.ts); this only draws the mark that says why
    *  a tab is where it is. */
@@ -91,8 +113,30 @@ export interface TabProps {
   onActivate: () => void
   /** Called with the tab id when the tab is closed (middle-click or close button). */
   onClose: (paneId: number) => void
-  /** Called when a tab is dropped onto this one: (fromId, toId). */
-  onReorder: (fromId: number, toId: number) => void
+  /**
+   * Called when a tab is dropped onto this one.
+   *
+   * `before` is which SIDE of this row the drop lands on — the half of the
+   * row the pointer was over. Without it there is no way to put a tab last:
+   * every drop meant "in front of the row I hit", so the final slot of a run
+   * was unreachable and the bottom row could not move at all, since every
+   * target below it was itself.
+   */
+  onReorder: (fromId: number, toId: number, before: boolean) => void
+  /** Tell the strip a drag has started or finished, so it can say which rows
+   *  will accept it. */
+  onDragBegin?: (paneId: number) => void
+  onDragFinish?: () => void
+  /**
+   * Whether the drag in flight may land on this row.
+   *
+   * A reorder is one workspace's business — the wire takes a permutation of
+   * ONE workspace's tabs (`tabs.reorder`) and refuses anything else — so a
+   * row in another group cannot accept the drop. It shows no indicator
+   * either: an insertion line at a place that will not take the tab is worse
+   * than none, because the person believes it.
+   */
+  dropAllowed?: boolean
 }
 
 export function Tab(props: TabProps) {
@@ -106,6 +150,7 @@ export function Tab(props: TabProps) {
       data-pane-id={String(props.paneId)}
       data-agent-status={props.agentStatus ?? undefined}
       data-colour={props.colour || undefined}
+      data-group-colour={props.groupColour || undefined}
       data-pinned={props.pinned === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       data-depth={(props.depth ?? 0) > 0 ? String(props.depth) : undefined}
@@ -133,24 +178,58 @@ export function Tab(props: TabProps) {
         }
       }}
       onDragStart={(e: DragEvent) => {
+        // The kind first, so a target can ask what is coming while the drag is
+        // in flight; the id is unreadable until the drop (strip-drag.ts).
+        e.dataTransfer?.setData(TAB_DRAG_TYPE, String(props.paneId))
         e.dataTransfer?.setData('text/plain', String(props.paneId))
+        props.onDragBegin?.(props.paneId)
         if (e.currentTarget instanceof HTMLElement) {
           e.currentTarget.classList.add('dragging')
         }
       }}
       onDragEnd={(e: DragEvent) => {
+        props.onDragFinish?.()
         if (e.currentTarget instanceof HTMLElement) {
           e.currentTarget.classList.remove('dragging')
+          delete e.currentTarget.dataset.dropEdge
         }
       }}
       onDragOver={(e: DragEvent) => {
+        // A WORKSPACE IS NOT A TAB. Its heading is dragged around the same
+        // rail, and a row that took every drag lit its insertion line for one
+        // — offering a place between two tabs where a workspace cannot go,
+        // and doing nothing when it landed there.
+        if (!e.dataTransfer?.types.includes(TAB_DRAG_TYPE)) return
+        if (props.dropAllowed === false) return
+        // Preventing the default is what makes this a drop target at all.
         e.preventDefault()
+        const row = e.currentTarget
+        if (!(row instanceof HTMLElement)) return
+        // WHICH SIDE, from the pointer's half of the row — the axis being the
+        // strip's own: a column is divided top from bottom, a row left from
+        // right. It is measured per move rather than remembered because a
+        // drag crosses the midline without leaving the element, and a stale
+        // answer would draw the line on the wrong edge.
+        const rect = row.getBoundingClientRect()
+        const before =
+          props.orientation === 'vertical'
+            ? e.clientY < rect.top + rect.height / 2
+            : e.clientX < rect.left + rect.width / 2
+        row.dataset.dropEdge = before ? 'before' : 'after'
+      }}
+      onDragLeave={(e: DragEvent) => {
+        if (e.currentTarget instanceof HTMLElement) delete e.currentTarget.dataset.dropEdge
       }}
       onDrop={(e: DragEvent) => {
         e.preventDefault()
-        const draggedId = Number(e.dataTransfer?.getData('text/plain'))
+        const row = e.currentTarget
+        const edge = row instanceof HTMLElement ? row.dataset.dropEdge : undefined
+        if (row instanceof HTMLElement) delete row.dataset.dropEdge
+        props.onDragFinish?.()
+        if (props.dropAllowed === false) return
+        const draggedId = Number(e.dataTransfer?.getData(TAB_DRAG_TYPE))
         if (!Number.isNaN(draggedId) && draggedId !== props.paneId) {
-          props.onReorder(draggedId, props.paneId)
+          props.onReorder(draggedId, props.paneId, edge !== 'after')
         }
       }}
     >
@@ -181,8 +260,26 @@ export function Tab(props: TabProps) {
           </Show>
           <span class="nocx-tab-title">{props.title}</span>
         </span>
-        <Show when={props.orientation === 'vertical' && (props.subtitle ?? '') !== ''}>
-          <span class="nocx-tab-subtitle">{props.subtitle}</span>
+        {/* ONE SECOND LINE, AND WHAT IT SAYS. The row has room for exactly
+            one line under the title, and two facts want it: WHERE the pane is
+            (the location, when the title is a program's name rather than a
+            path) and WHAT IT IS DOING — the same sentence the overview's card
+            prints for the same pane.
+
+            What it is doing wins when there is one. A rail of tabs is read to
+            find the one that needs you, and `go test ./… · exit 1` answers
+            that where a host and a directory do not; the location falls back
+            in for a pane with nothing to report, which is when it is the only
+            thing there is to say. */}
+        <Show
+          when={
+            props.orientation === 'vertical' &&
+            ((props.preview ?? '') !== '' || (props.subtitle ?? '') !== '')
+          }
+        >
+          <span class="nocx-tab-subtitle">
+            {(props.preview ?? '') !== '' ? props.preview : props.subtitle}
+          </span>
         </Show>
       </span>
       <Show when={props.adoptable === true}>

@@ -323,7 +323,7 @@ func TestWorkspaceAndPaneStoreExactlyTheirFields(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 	if got, want := columnsOf(t, path, "workspaces"),
-		[]string{"id", "name", "position", "created_at", "payload", "digest"}; !equalStrings(got, want) {
+		[]string{"id", "name", "colour", "position", "created_at", "payload", "digest"}; !equalStrings(got, want) {
 		t.Fatalf("workspaces columns = %v, want exactly %v", got, want)
 	}
 	if got, want := columnsOf(t, path, "panes"),

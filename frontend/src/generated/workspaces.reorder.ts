@@ -28,6 +28,10 @@ export interface Workspace {
    */
   name: string
   /**
+   * The colour the user chose for it, or null for a workspace nobody coloured — the default workspace, and any row the backend minted for a session nobody recorded. One of the closed nine in the renderer's layout/workspace-colours.ts. DELIBERATELY NOT THE TAB PALETTE: a tab's colour follows the theme, because a tab decorated under one theme must still read under another; a workspace's colour is the identity of a container the user made and must NOT change when the theme does, any more than its name would. The store keeps a string and judges none of it — what is drawable is the renderer's question, and it already answers it by drawing an unknown value as no colour rather than as a broken swatch.
+   */
+  colour: string | null
+  /**
    * Where it sits in the switcher. Written by the backend from the order workspaces.reorder was given; the renderer never computes it.
    */
   position: number

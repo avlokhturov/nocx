@@ -99,4 +99,24 @@
   --terminal-ansi-13: #a855f7;
   --terminal-ansi-14: #06b6d4;
   --terminal-ansi-15: #ffffff;
+
+  /* ── The workspace palette (nocx-2mipw) ────────────────────────────────
+     Nine hues a user picks from to identify a workspace. They are repeated
+     IDENTICALLY in every theme on purpose, and that is the opposite of what
+     an accent does: a tab's colour follows the theme, because a tab decorated
+     under one theme must still read under another; a workspace's colour is
+     the identity of a container the person made, and an identity that changed
+     when you switched theme would not be one — no more than its name would
+     change. A theme whose ground makes one of these unreadable is free to
+     override that one here, which is exactly why they live per-theme rather
+     than in a single shared file. */
+  --ws-grey: #8b949e;
+  --ws-blue: #4c8dff;
+  --ws-cyan: #39c5cf;
+  --ws-green: #3fb950;
+  --ws-yellow: #d29922;
+  --ws-orange: #f0883e;
+  --ws-red: #f85149;
+  --ws-pink: #f778ba;
+  --ws-purple: #a371f7;
 }

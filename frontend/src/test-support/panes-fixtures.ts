@@ -580,7 +580,7 @@ export function makeLayoutBackend(): LayoutClientLike & {
   const allWorkspaces = (): LayoutWorkspace[] => {
     const rows = [...made].sort((a, b) => a.position - b.position)
     return tabs.some((t) => t.workspaceId === DEFAULT_WS)
-      ? [{ id: DEFAULT_WS, name: 'default', position: 0 }, ...rows]
+      ? [{ id: DEFAULT_WS, name: 'default', colour: null, position: 0 }, ...rows]
       : rows
   }
 
@@ -604,7 +604,10 @@ export function makeLayoutBackend(): LayoutClientLike & {
       // fake that accepted one would let the renderer ship a blank workspace
       // and stay green.
       if (ws.name.trim() === '') return Promise.reject(new Error('name is required'))
-      const workspace = { id: ws.id, name: ws.name, position: ws.position }
+      // The colour is stored as it ARRIVED, unjudged — the real store does
+      // not police it either, and a fake that normalised it would hide a
+      // renderer sending something the backend would have kept verbatim.
+      const workspace = { id: ws.id, name: ws.name, colour: ws.colour, position: ws.position }
       const tab = tabRow(ws.firstTab.id, { workspaceId: ws.id, position: 0 })
       const first = paneRow(ws.firstPane.id, ws.firstTab.id, {
         cwd: ws.firstPane.cwd,
@@ -615,6 +618,19 @@ export function makeLayoutBackend(): LayoutClientLike & {
       tabs = [...tabs, tab]
       panes = [...panes, first]
       return Promise.resolve({ workspace, firstTab: tab, firstPane: first, replayed: false })
+    },
+
+    recolourWorkspace: (id, colour) => {
+      const refused = refuse<never>('recolourWorkspace')
+      if (refused) return refused
+      const target = made.find((w) => w.id === id)
+      // A recolour NEVER creates — an id naming no workspace is refused,
+      // exactly as the store refuses it, because a create is the only thing
+      // that may fix an id.
+      if (!target) return Promise.reject(new Error('no such workspace'))
+      const workspace = { ...target, colour }
+      made = made.map((w) => (w.id === id ? workspace : w))
+      return Promise.resolve({ workspace })
     },
 
     closeWorkspace: (id, replacement) => {

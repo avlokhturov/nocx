@@ -61,7 +61,7 @@ import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboar
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
-import { CommandLedger, type CommandRecord } from './command-ledger'
+import { CommandLedger, type CommandRecord, type CommandStatus } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
@@ -104,6 +104,21 @@ const RESIZE_SETTLE_MS = 80
  * Those are not symmetric.
  */
 const RESIZE_ECHO_MS = 400
+
+/**
+ * How long a session that never draws an OSC 133 prompt is still treated as
+ * opening.
+ *
+ * The exact signal is the prompt marker: the shell has finished starting and
+ * is waiting on a person, which is precisely when the tab's output stops
+ * being the tab's own start (PaneHost.contentSettled). Not every session
+ * emits one — a raw destination, an ssh host with no integration, a pane
+ * launched straight into a program — and for those there is no event to
+ * wait for, only this backstop. Erring long costs one missed indicator on a
+ * tab three seconds old; erring short is what put the mark on every tab
+ * after a reload.
+ */
+const SETTLE_BACKSTOP_MS = 3000
 
 /**
  * Whether a settle call failed because the backend no longer holds the
@@ -337,6 +352,13 @@ type InputOwner = 'editor' | 'pty' | 'none'
  * ledger, lifecycle kernel, and PTY resize policy. It receives geometry
  * through viewportChanged() — it NEVER interprets container geometry itself.
  */
+/** A pane's last command block, as a surface quotes it (nocx-edhcu). */
+export interface PaneBlock {
+  readonly command: string
+  readonly status: CommandStatus
+  readonly exitCode: number | null
+}
+
 export class TerminalContent extends BasePaneContent {
   private renderer: TerminalRenderer | null = null
   private session: SessionHandle | null = null
@@ -481,6 +503,9 @@ export class TerminalContent extends BasePaneContent {
   private resizeTimer: number | undefined
   /** Timestamp until which incoming data is the echo of a resize we sent. */
   private echoUntil = 0
+  /** Whether the opening is over (see _settle). */
+  private _settled = false
+  private _settleTimer: number | undefined
   private host: PaneHost | null = null
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
@@ -708,6 +733,123 @@ export class TerminalContent extends BasePaneContent {
     const running = this.latestRunningRecord()
     const command = running === null ? null : running.command.trim()
     return { command: command === '' ? null : command, host: this.hostLabel() || null }
+  }
+
+  /**
+   * When the foreground command started, in epoch milliseconds, or null when
+   * nothing is running (nocx-edhcu).
+   *
+   * The ledger already stamps this — `CommandRecord.startedAt`, a WALL clock
+   * precisely so it can be rendered as an age across a restart — so nothing
+   * new is being remembered here. It is exposed for the overview's cards,
+   * which say how long a thing has been going: "running" without a duration
+   * is the fact a person already has from the spinner.
+   */
+  runningSince(): number | null {
+    return this.latestRunningRecord()?.startedAt ?? null
+  }
+
+  /**
+   * THE PANE'S LAST BLOCK — the command it last ran, finished or still
+   * running, or null when it has run none.
+   *
+   * The ledger already holds this; nothing is remembered here. It is the
+   * fact the overview's card wants, because "what did this pane last do" is
+   * answered by a command and its outcome, not by whichever line happened to
+   * be at the bottom of the buffer. Reading `top`'s process table one row at
+   * a time told a person nothing at all.
+   *
+   * A record whose MARKER has gone (`disposed`) still counts. That flag says
+   * the live xterm marker was dropped — which happens when the block is
+   * frozen — and not that the command never ran: filtering on it hid every
+   * finished command, so a pane that had just run `ls` quoted nothing at all
+   * while a pane still running one quoted it.
+   */
+  lastBlock(): PaneBlock | null {
+    const records = this.ledger?.records() ?? []
+    for (let i = records.length - 1; i >= 0; i--) {
+      const rec = records[i]
+      const command = rec.command.trim()
+      if (command === '') continue
+      return { command, status: rec.status, exitCode: rec.exitCode }
+    }
+    return null
+  }
+
+  /**
+   * Is a program drawing on the ALTERNATE buffer — owning the whole screen?
+   *
+   * There are no blocks in that state and there is no last line worth
+   * quoting either: a full-screen program repaints its own frame, so the
+   * bottom row of the buffer is a fragment of a picture rather than a thing
+   * the pane said. The card names the program instead.
+   */
+  fullScreen(): boolean {
+    return this._bufferType === 'alternate'
+  }
+
+  /**
+   * A FEW LINES OF WHAT THE PANE IS SHOWING, so a person can tell at a glance
+   * what is going on in it (the overview's cards).
+   *
+   * WHICH lines depends on who is drawing. A full-screen program is read from
+   * the TOP: `top` puts uptime, load and its task and memory summary in the
+   * first rows and its process table below, `vim` names the file there, and a
+   * pager its position — the head of the frame is the part that says what the
+   * program is doing. Everything else is read from the BOTTOM, because a
+   * shell's newest output is its last: what happened most recently is what a
+   * person is asking about.
+   *
+   * Blank lines are dropped rather than reproduced. They carry no information
+   * at this size and a card that spends two of its three lines on emptiness
+   * looks broken.
+   *
+   * Read on demand and never cached: the buffer is the renderer's and moves
+   * constantly (AD-6).
+   */
+  excerpt(limit = 3): string[] {
+    const renderer = this.renderer
+    if (!renderer || limit <= 0) return []
+    const read = (line: number): string =>
+      renderer.getBufferLine(line)?.translateToString(true).trim() ?? ''
+    const lines: string[] = []
+    if (this._bufferType === 'alternate') {
+      const top = renderer.viewportTopLine
+      for (let line = top; line < top + this.rows && lines.length < limit; line++) {
+        const text = read(line)
+        if (text) lines.push(text)
+      }
+      return lines
+    }
+    for (let line = renderer.cursorLine(); line >= 0 && lines.length < limit; line--) {
+      const text = read(line)
+      if (text) lines.push(text)
+    }
+    return lines.reverse()
+  }
+
+  /**
+   * The last line this pane actually DREW, or null when there is nothing to
+   * quote (nocx-edhcu).
+   *
+   * It walks UP from the cursor rather than reading the cursor's own line: a
+   * program that has just printed and ended its output with a newline leaves
+   * the cursor on a blank line, and quoting that would report emptiness as
+   * the pane's last word. The first non-blank line above it is what a person
+   * would say the terminal currently says.
+   *
+   * Read on demand and never cached — the buffer is the renderer's and moves
+   * constantly (AD-6), so a stored copy would be stale by the time anything
+   * drew it.
+   */
+  lastOutputLine(): string | null {
+    const renderer = this.renderer
+    if (!renderer) return null
+    for (let line = renderer.cursorLine(); line >= 0; line--) {
+      const text = renderer.getBufferLine(line)?.translateToString(true).trim()
+      if (text) return text
+    }
+    return null
   }
 
   /** The active pane's raw env-view facts for the snippet provider (design
@@ -1596,6 +1738,13 @@ export class TerminalContent extends BasePaneContent {
         // activate an environment or enable rewriting — every one of those
         // paths was deleted with the marker cycle (nocx-u7uh.1).
         logDecision('marker observed', { kind: marker.kind, exitCode: marker.exitCode })
+        // ONE thing is read off a marker here, and it is not a decision about
+        // the session: B is prompt-end, so the shell has finished starting
+        // and is waiting on a person. That is the moment this pane's output
+        // stops being its own start and becomes something a user can miss
+        // (PaneHost.contentSettled). It grants nothing, opens nothing and
+        // persists nothing, so ADR-0024 §1's severed list is untouched.
+        if (marker.kind === 'B') this._settle()
       })
 
       // Optional on the renderer contract (types.ts): a renderer that does
@@ -2167,6 +2316,10 @@ export class TerminalContent extends BasePaneContent {
       }
       this.pushTitle()
 
+      // Nothing else will say the opening ended on a session that draws no
+      // prompt marker — see SETTLE_BACKSTOP_MS.
+      this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
+
       session.onData((data: string) => {
         log.debug('nocx: session data received', { length: data.length })
         renderer.write(data)
@@ -2428,6 +2581,21 @@ export class TerminalContent extends BasePaneContent {
    * write a style — a layout thrash on the hot path, for a height that can only
    * be painted once per frame anyway.
    */
+  /**
+   * Tell the tab its opening is over, once.
+   *
+   * Before this, output arriving in a pane nobody is looking at is the shell
+   * starting up — and after a reload that is EVERY pane, so every tab but
+   * the active one wore an unread mark for output nobody had missed.
+   */
+  private _settle(): void {
+    if (this._settled || this._disposed) return
+    this._settled = true
+    clearTimeout(this._settleTimer)
+    this._settleTimer = undefined
+    this.host?.contentSettled()
+  }
+
   private scheduleLiveResize(): void {
     if (this.liveResizeFrame !== 0) return
     this.liveResizeFrame = requestAnimationFrame(() => {
@@ -3123,6 +3291,8 @@ export class TerminalContent extends BasePaneContent {
   dispose(): void {
     this._disposed = true
     this.mountAbortController?.abort()
+    clearTimeout(this._settleTimer)
+    this._settleTimer = undefined
     this._lifecycleUnsub?.()
     this._lifecycleUnsub = null
     this._integrationUnsub?.()

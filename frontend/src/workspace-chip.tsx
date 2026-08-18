@@ -1,137 +1,113 @@
-import { Show, createSignal } from 'solid-js'
+import { Show } from 'solid-js'
 import { Button } from './ui/button'
-import { ContextMenu } from './ui/context-menu'
-import { ChevronDownIcon, LayersIcon } from './ui/icons'
+import type { GroupAttention } from './layout/workspace-colour'
+import type { WorkspaceColour } from './layout/workspace-colours'
 
 /**
- * WorkspaceChip — how a window says which workspace it is showing, and how
- * you get to another one (nocx-isoph.5; workspaces UX design §4.3).
+ * WorkspaceChip — a workspace as a SEGMENT OF THE TAB ROW, not as a mode of
+ * the window (workspaces UX rework; amends design §4.3).
  *
- * A WINDOW IS A VIEWPORT, NOT A CONTAINER (tabs/panes design §10). It shows
- * one workspace at a time and owns no tabs — this chip and its switcher ARE
- * that sentence in the UI. The horizontal strip therefore draws the current
- * workspace's tabs and no others, and the chip is the way back.
+ * WHAT THIS REPLACED, AND WHY. §4.3 gave the horizontal strip one chip on the
+ * left: the row drew the current workspace's tabs, and every other workspace
+ * was reachable only by opening the chip's menu. Two complaints in first use,
+ * and they are the same complaint: switching is a dropdown, and the tabs you
+ * are not looking at are gone from the screen entirely. §4.3 had rejected
+ * inline chips — the Firefox/Chrome/Edge shape — on the grounds that "lineage
+ * depth does not fit in one row". That reason does not hold: the horizontal
+ * strip never draws lineage at all, because the same section puts the tree in
+ * the vertical strip and keeps this row flat. The rejection was answering a
+ * problem this row does not have.
  *
- * IN THE DEFAULT WORKSPACE IT IS A NEUTRAL GLYPH WITH NO LABEL (§4.2). Not a
- * different control, not a hidden one: the same chip, without a name, because
- * the default never renders a name and the chip still has to exist or there
- * is no way back from a named workspace. Nothing here counts workspaces — the
- * label is absent because `name` is null, which is a fact about which
- * workspace this is and never about how many there are.
+ * SO A WORKSPACE IS NOW A RUN OF TABS WITH A PILL IN FRONT OF IT. Every
+ * workspace is present in the row at all times. The one holding the current
+ * tab shows its tabs; the rest are folded to their pill. Switching stops
+ * being a mode change performed through a menu and becomes what it always
+ * was on this row — clicking a tab, or clicking the pill that stands for a
+ * run of them.
  *
- * IT ADVERTISES NAVIGATION AND NOTHING ELSE (§5.5). Epic B ships membership,
- * not a fence: no shield, no lock, no "safe", "isolated" or "contained". The
- * glyph is a stack of plates — several things taken together — and the copy
- * says where you are and where you can go. When enforcement lands (nocx-mp2vd)
- * this same component gains a state-backed status; until then a badge would
- * be a promise with no mechanism behind it.
+ * THE PILL REPORTS, IT DOES NOT MERELY LABEL (`layout/workspace-colour.ts`).
+ * A folded browser tab group is inert; a folded workspace here can hold three
+ * agents, one of which is waiting on a human. The attention mark is what makes
+ * folding safe, and it is the reason this design can hide anything at all.
  *
- * It PLACES kit components and repaints none: the control is the kit's ghost
- * Button, the switcher is the kit's ContextMenu, and this file's own class is
- * a wrapper that positions them in the strip.
+ * IT STILL ADVERTISES NAVIGATION AND NOTHING ELSE (§5.5). Membership, not a
+ * fence: no shield, no lock, no "isolated". The colour is identity — the one
+ * thing you read sideways — and never a status the workspace does not have.
+ *
+ * It PLACES a kit component and repaints none: the control is the kit's
+ * workspace Button, which owns the full-height coloured badge and type. This
+ * file positions it and carries the three `data-*` facts (colour, expanded,
+ * attention) its contents read.
  */
 
-/** One row of the switcher: a workspace, and what to call it. `name` is null
- *  for the default workspace, which has none. */
-interface WorkspaceChoice {
-  readonly id: string
-  readonly name: string | null
+export interface WorkspaceChipProps {
+  /** The workspace's name. Never the default's — the default draws no pill at
+   *  all (§4.2), so this component is never built for it. */
+  readonly name: string
+  /** The colour the USER chose, or null for a workspace nobody coloured. Null
+   *  draws the dot in the neutral accent — a pill still has to be visible,
+   *  and inventing a colour is what this replaced. */
+  readonly colour: WorkspaceColour | null
+  /** How many tabs the workspace holds, shown only while it is folded: an
+   *  expanded group's tabs are on screen and counting them for the user is
+   *  noise. */
+  readonly count: number
+  readonly attention: GroupAttention
+  /** Whether this workspace's tabs are the ones the row is drawing. */
+  readonly expanded: boolean
+  /** Go to this workspace. One click, and it is the whole of switching now —
+   *  there is no menu in the path. */
+  onActivate: () => void
+  /** The workspace's own actions (rename, close…), which live on the context
+   *  menu rather than on a caret. A caret would put two controls a few pixels
+   *  apart where one of them is used constantly and the other a few times a
+   *  week, and the frequent one would keep hitting the rare one. */
+  onMenu: (x: number, y: number) => void
 }
-
-/** What the strip is told about the chip. Null anywhere there is no chain to
- *  draw one from. */
-export interface WorkspaceChipView {
-  /** The current workspace's name, or null in the default workspace. */
-  readonly name: string | null
-  /** WHICH workspace is in front, as an id. The name cannot stand in for it:
-   *  the default has none, and two workspaces may share one. It is what the
-   *  actions below are built for (nocx-isoph.7). */
-  readonly currentId: string
-  /** Every workspace, in the order the switcher shows them. */
-  readonly workspaces: readonly WorkspaceChoice[]
-}
-
-export interface WorkspaceChipProps extends WorkspaceChipView {
-  onSwitch: (workspaceId: string) => void
-  onNew: () => void
-  /** What the CURRENT workspace can have done to it, built by
-   *  workspace-menu.ts and handed in (nocx-isoph.7). The chip does not build
-   *  them and does not decide which exist: a vertical strip's heading opens
-   *  the same rows for the workspace it heads, and one owner is what keeps
-   *  the two from disagreeing — first of all about the default, which is
-   *  offered none. Empty is the ordinary state in the default workspace. */
-  actions: readonly { id: string; label: string; onSelect: () => void }[]
-}
-
-/**
- * What the switcher calls the default workspace.
- *
- * IT IS A DESCRIPTION OF A DESTINATION, NOT A NAME THE DEFAULT ACQUIRES, and
- * the distinction is load bearing: it is never drawn as a heading, never
- * shown on the chip, cannot be renamed, and is not read from the row's stored
- * name — the backend's `name` for that row is never rendered anywhere (see
- * layout/strip-groups.ts). What it solves is the one thing §4.3 requires and
- * §4.2 does not name: from a named workspace there has to be a way back, and
- * a menu row with an empty label is not one.
- */
-const UNGROUPED_LABEL = 'Ungrouped tabs'
 
 export function WorkspaceChip(props: WorkspaceChipProps) {
-  const [menu, setMenu] = createSignal<{ x: number; y: number } | null>(null)
-
-  const items = () => {
-    const rows = props.workspaces.map((w) => ({
-      id: `workspace-${w.id}`,
-      label: w.name ?? UNGROUPED_LABEL,
-      onSelect: () => props.onSwitch(w.id),
-    }))
-    rows.push({ id: 'workspace-new', label: 'New workspace…', onSelect: () => props.onNew() })
-    // The actions come last, after navigation: the switcher's first job is to
-    // get you somewhere (§4.3), so rows acting on where you already are must
-    // not sit between you and the place you were reaching for. Closing is
-    // among them now rather than being built here — `closable` was the chip's
-    // own reading of "not the default", and that rule belongs to
-    // workspace-menu.ts, which answers it identically for both placements.
-    rows.push(...props.actions.map((a) => ({ ...a })))
-    return rows
-  }
-
   return (
-    <div class="nocx-workspace-chip">
+    <div
+      class="nocx-workspace-chip"
+      data-colour={props.colour}
+      data-expanded={props.expanded ? 'true' : undefined}
+      data-attention={props.attention === 'quiet' ? undefined : props.attention}
+    >
       <Button
-        variant="ghost"
-        size="sm"
-        // The accessible name says what the control DOES when the chip
-        // carries no visible label, and gets out of the way when it does —
-        // an aria-label over a visible name is a control announced as
-        // something other than what it reads as.
-        ariaLabel={props.name === null ? 'Workspaces' : undefined}
-        title={props.name === null ? 'Workspaces' : `Workspace: ${props.name}`}
-        onClick={(e: MouseEvent) => {
-          const anchor = e.currentTarget
-          if (!(anchor instanceof HTMLElement)) return
-          const rect = anchor.getBoundingClientRect()
-          setMenu({ x: rect.left, y: rect.bottom })
+        variant="workspace"
+        // This is still the current workspace in a set of navigation choices;
+        // the dedicated Button variant changes only its Edge-style paint.
+        selected={props.expanded}
+        title={`Workspace: ${props.name}`}
+        onClick={() => props.onActivate()}
+        onContextMenu={(e: MouseEvent) => {
+          e.preventDefault()
+          props.onMenu(e.clientX, e.clientY)
         }}
       >
-        <LayersIcon />
-        <Show when={props.name}>
-          {(name) => <span class="nocx-workspace-chip__name">{name()}</span>}
+        {/* NOT A Caption, and that was the first version's worst mistake.
+            Caption is the kit's GROUP-CAPTION register — uppercase, letter-
+            spaced, dim, deliberately fine print — and it is right over a
+            column of rows in a rail. Here it made the workspace the smallest
+            and quietest object in a row of 200px tabs, so the thing that
+            names a container read as a footnote beside the things it
+            contains. The pill is primary navigation and takes the Button's
+            own type. */}
+        {/* THE MARK LEADS THE NAME. It is the one thing on this pill read
+            without looking at it, and a row of pills is scanned down its left
+            edge — a dot sitting after a name of unpredictable length lands in
+            a different place on every pill, so there is no column to scan.
+            In front, every workspace's report is in the same place. */}
+        <Show when={props.attention !== 'quiet'}>
+          <span class="nocx-workspace-chip__attention" aria-hidden="true" />
         </Show>
-        <ChevronDownIcon />
+        <span class="nocx-workspace-chip__name">{props.name}</span>
+        {/* The count is the folded group's only account of itself, so it
+            appears exactly when the tabs do not. */}
+        <Show when={!props.expanded}>
+          <span class="nocx-workspace-chip__count">{props.count}</span>
+        </Show>
       </Button>
-      <Show when={menu()} keyed>
-        {(open) => (
-          <ContextMenu
-            open
-            x={open.x}
-            y={open.y}
-            items={items()}
-            onClose={() => setMenu(null)}
-            data-testid="workspace-switcher"
-          />
-        )}
-      </Show>
     </div>
   )
 }

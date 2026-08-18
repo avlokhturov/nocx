@@ -328,11 +328,20 @@ async function mountSettings(
     store,
   )
   const host: PaneHost = {
+    contentSettled: () => {},
     setTitle: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
   }
   await content.mount(target, host, new AbortController().signal)
+  await settle()
+  // Settings opens on the first rail page — Connections, a component page —
+  // so the History section is not in the DOM until the user navigates there.
+  const historyLink = target.querySelector<HTMLButtonElement>(
+    '.ui-grouped-nav__item[data-item="History"] > .ui-button',
+  )
+  expect(historyLink).toBeTruthy()
+  historyLink!.click()
   await settle()
   return content
 }

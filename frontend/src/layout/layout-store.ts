@@ -203,8 +203,13 @@ export class LayoutStore {
    * tab, is always created deliberately (the backend refuses a blank one).
    * The default workspace is the exception that proves it, and nothing here
    * can create that — it is the backend's row and this method never names it.
+   *
+   * The COLOUR travels with the create rather than following it (nocx-2mipw):
+   * a workspace that existed uncoloured for one round trip would draw the
+   * neutral pill and then repaint, and a create whose second half failed
+   * would leave a workspace the person believes they coloured.
    */
-  createWorkspace(name: string, pane: NewPane): OpenedWorkspace {
+  createWorkspace(name: string, colour: string | null, pane: NewPane): OpenedWorkspace {
     const workspaceId = uuidv7()
     const tabId = uuidv7()
     const paneId = uuidv7()
@@ -212,6 +217,7 @@ export class LayoutStore {
       .createWorkspace({
         id: workspaceId,
         name,
+        colour,
         position: this.state.workspaces.length,
         firstTab: { id: tabId },
         firstPane: paneFacts(paneId, pane),
@@ -267,6 +273,18 @@ export class LayoutStore {
     this.state = {
       ...this.state,
       workspaces: this.state.workspaces.map((w) => (w.id === renamed.id ? renamed : w)),
+    }
+    this.changed()
+  }
+
+  /** The workspace's colour, as the backend answers it. Same shape as the
+   *  tab's `recolour` below and for the same reason: the store holds what
+   *  came back, never what was sent. */
+  async recolourWorkspace(workspaceId: string, colour: string | null): Promise<void> {
+    const recoloured = (await this.client.recolourWorkspace(workspaceId, colour)).workspace
+    this.state = {
+      ...this.state,
+      workspaces: this.state.workspaces.map((w) => (w.id === recoloured.id ? recoloured : w)),
     }
     this.changed()
   }

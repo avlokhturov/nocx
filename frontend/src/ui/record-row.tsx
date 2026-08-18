@@ -26,6 +26,14 @@
  *   status  the record's current state, rendered as the kit's StatusDot +
  *           text — never a badge. A state that has no colour to say uses the
  *           neutral tone.
+ *   detail  ONE line of verbatim evidence under the meta line — the last line
+ *           a pane printed, the reason a check failed. It is the record's own
+ *           words rather than the composite's, so it is typed as a string and
+ *           rendered as text: a JSX slot here would be the free-form `info`
+ *           coming back through the side door. Added for the workspace
+ *           overview (nocx-edhcu), whose whole argument is that a card is text
+ *           — the alternative was a second row grammar beside this one, which
+ *           is exactly what this composite exists to prevent.
  *
  * `actions` stays free-form (a row's controls are the surface's decision).
  * The genuinely free-form `info` slot on CollectionRow survives for rows
@@ -33,7 +41,7 @@
  * and the Git panel's dense commit rows whose meta line carries several
  * ref badges — and only for those.
  */
-import { Show, type JSX } from 'solid-js'
+import { For, Show, type JSX } from 'solid-js'
 import { Badge, type BadgeTone } from './badge'
 import { CollectionRow } from './collection-view'
 import { StatusDot, type StatusDotTone } from './status-dot'
@@ -48,6 +56,11 @@ export interface RecordRowProps {
   meta?: string
   /** The record's current state: the kit's dot + text, never a badge. */
   status?: { tone: StatusDotTone; text: string }
+  /** The record's own words, under the meta line: one line, or a few of them
+   *  as an array — a pane's last output, a check's failing lines. Typed as
+   *  strings, never a slot, so it stays the record's words and not a second
+   *  free-form body — see the header. */
+  detail?: string | readonly string[]
   actions: JSX.Element
   /** Makes the row activatable — see CollectionRow. */
   onActivate?: (e: MouseEvent | KeyboardEvent) => void
@@ -61,6 +74,15 @@ export interface RecordRowProps {
 
 /** The shared name/meta/status/actions record row inside a CollectionView. */
 export function RecordRow(props: RecordRowProps) {
+  /** One string is one line; several are several. Blank lines are dropped —
+   *  a row that spends its detail on emptiness reads as broken. */
+  const detailLines = (): readonly string[] => {
+    const detail = props.detail
+    if (detail === undefined) return []
+    const lines = typeof detail === 'string' ? [detail] : detail
+    return lines.filter((line) => line.trim() !== '')
+  }
+
   return (
     <CollectionRow
       actions={props.actions}
@@ -88,6 +110,11 @@ export function RecordRow(props: RecordRowProps) {
               )}
             </Show>
           </div>
+          <Show when={detailLines().length > 0}>
+            <div class="ui-record-row__detail">
+              <For each={detailLines()}>{(line) => <div>{line}</div>}</For>
+            </div>
+          </Show>
         </>
       }
     />

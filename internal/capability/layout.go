@@ -38,6 +38,7 @@ type LayoutService interface {
 
 	CreateWorkspace(ctx context.Context, ws content.Workspace, firstTab content.Tab, firstPane content.Pane) (content.Created[content.NewWorkspace], error)
 	RenameWorkspace(ctx context.Context, id, name string) (content.Workspace, error)
+	RecolourWorkspace(ctx context.Context, id string, colour *string) (content.Workspace, error)
 	ReorderWorkspaces(ctx context.Context, ids []string) ([]content.Workspace, error)
 	// The closes take the identity of the tab that replaces the application's
 	// last one, for the same §7 reason: it is a durable id, so it is the
@@ -93,6 +94,13 @@ func (s *layoutService) RenameWorkspace(ctx context.Context, id, name string) (c
 		return content.Workspace{}, err
 	}
 	return s.layout.RenameWorkspace(ctx, id, name)
+}
+
+func (s *layoutService) RecolourWorkspace(ctx context.Context, id string, colour *string) (content.Workspace, error) {
+	if err := s.guard.check(); err != nil {
+		return content.Workspace{}, err
+	}
+	return s.layout.RecolourWorkspace(ctx, id, colour)
 }
 
 func (s *layoutService) ReorderWorkspaces(ctx context.Context, ids []string) ([]content.Workspace, error) {

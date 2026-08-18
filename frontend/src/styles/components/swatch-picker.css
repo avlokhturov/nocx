@@ -1,0 +1,86 @@
+/* SwatchPicker — choose one colour from a closed set (nocx-2mipw).
+
+   The colour each swatch shows arrives as `--swatch-colour`, set inline by the
+   component from the token NAME its caller gave it (ADR-0013's shape for
+   carrying a colour through data). So there is no palette here and no literal:
+   this file draws a swatch, and which colours exist is the caller's business.
+
+   The selected state is drawn as a ring SEPARATED from the swatch rather than
+   as a change to the swatch itself — a tick or a border drawn on top would be
+   a mark whose contrast depends on which colour it landed on, and the one
+   thing a colour picker cannot afford is a selection you cannot see on one of
+   its options.
+
+   AND THE RING IS INSIDE THE BUTTON'S OWN BOX. The first version drew it with
+   `outline` + `outline-offset`, which puts it OUTSIDE the element — and the
+   dialog body is a scroll container, so it clipped the ring of the first
+   swatch against its own left edge. Nothing here may paint outside its box.
+   So the button is larger than the swatch, the colour is clipped to the
+   content box, and the ring is the button's border: same picture, no
+   overflow, and it cannot be clipped by whatever a caller puts this in. */
+
+.ui-swatch-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.ui-swatch-picker__swatch {
+  flex: none;
+  /* The BUTTON is 32px and the swatch inside it is 22px: the difference is the
+     ring's room, reserved in every state so selecting one does not move the
+     eight beside it. */
+  width: 32px;
+  height: 32px;
+  padding: 3px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  /* The fallback is not decoration: `--swatch-colour` is set INLINE by the
+     component from the token name its caller gave it, so it has no
+     declaration anywhere in the cascade — and a swatch that resolved to
+     nothing would be an invisible button. The neutral is what a swatch with
+     no colour behind it honestly is. */
+  background: var(--swatch-colour, var(--color-text-dim));
+  /* What makes the 32px box show a 22px circle: the background stops at the
+     content box, so the padding is a transparent gap between the colour and
+     its ring. */
+  background-clip: content-box;
+}
+
+/* "No colour" — an empty ring with a stroke through it, which is the mark for
+   absence wherever absence has to be pickable. It is deliberately NOT a
+   coloured circle: a tenth hue standing for "no hue" is a joke the eye has to
+   work out, and the whole point of this swatch is that it reads as different
+   in kind from the ones beside it. */
+.ui-swatch-picker__swatch[data-none='true'] {
+  background:
+    linear-gradient(
+        to bottom right,
+        transparent calc(50% - 1px),
+        var(--color-text-dim) calc(50% - 1px),
+        var(--color-text-dim) calc(50% + 1px),
+        transparent calc(50% + 1px)
+      )
+      content-box,
+    var(--color-surface-sunken) content-box;
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+
+.ui-swatch-picker__swatch[aria-checked='true'] {
+  border-color: var(--color-text);
+}
+
+.ui-swatch-picker__swatch:hover {
+  border-color: var(--color-text-dim);
+}
+
+/* Focus wins over selection on the same slot, and that is deliberate rather
+   than a collision: with a roving tabindex and arrows that select as they
+   move, the focused swatch IS the selected one almost always. The one time
+   they differ is tabbing into a group before anything is chosen — and there
+   "the keyboard is here" is the more useful of the two things to say. */
+.ui-swatch-picker__swatch:focus-visible {
+  border-color: var(--color-focus-ring);
+  outline: none;
+}

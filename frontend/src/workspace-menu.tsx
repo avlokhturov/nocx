@@ -23,10 +23,17 @@
 // switch row built here would be an action for one placement wearing the shape
 // of a shared one.
 
-/** One row of a workspace menu, in the kit ContextMenu's shape. */
+import type { JSX } from 'solid-js'
+import { ArrowDownIcon, ArrowUpIcon, CloseIcon, PencilIcon } from './ui/icons'
+
+/** One row of a workspace menu, in the kit ContextMenu's shape — including
+ *  its mark, which is why this module is a `.tsx`: the rows are built here so
+ *  the two placements cannot come to differ, and an icon chosen by each
+ *  caller would be exactly such a difference. */
 export interface WorkspaceMenuRow {
   readonly id: string
   readonly label: string
+  readonly icon?: JSX.Element
   readonly onSelect: () => void
 }
 
@@ -97,20 +104,32 @@ export function workspaceActionRows(
     {
       id: 'workspace-rename',
       label: 'Rename workspace…',
+      icon: <PencilIcon />,
       onSelect: () => actions.onRename(subject),
     },
   ]
   const up = moveWorkspace(set.ids, subject, -1)
   if (up) {
-    rows.push({ id: 'workspace-up', label: 'Move up', onSelect: () => actions.onReorder(up) })
+    rows.push({
+      id: 'workspace-up',
+      label: 'Move up',
+      icon: <ArrowUpIcon />,
+      onSelect: () => actions.onReorder(up),
+    })
   }
   const down = moveWorkspace(set.ids, subject, 1)
   if (down) {
-    rows.push({ id: 'workspace-down', label: 'Move down', onSelect: () => actions.onReorder(down) })
+    rows.push({
+      id: 'workspace-down',
+      label: 'Move down',
+      icon: <ArrowDownIcon />,
+      onSelect: () => actions.onReorder(down),
+    })
   }
   rows.push({
     id: 'workspace-close',
     label: 'Close workspace',
+    icon: <CloseIcon />,
     onSelect: () => actions.onClose(subject),
   })
   return rows

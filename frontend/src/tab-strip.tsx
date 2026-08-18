@@ -4,16 +4,48 @@ import { Button } from './ui/button'
 import { IconButton } from './ui/icon-button'
 import { ContextMenu } from './ui/context-menu'
 import { Caption } from './ui/caption'
-import { TAB_COLOURS } from './layout/tab-colours'
 import { groupStrip } from './layout/strip-groups'
+import { WORKSPACE_DRAG_TYPE } from './layout/strip-drag'
+import { isWorkspaceColour, type WorkspaceColour } from './layout/workspace-colours'
+import { groupAttention } from './layout/workspace-colour'
 import { SearchField } from './ui/search-field'
-import { WorkspaceChip, type WorkspaceChipView } from './workspace-chip'
+import { ResizeHandle } from './ui/resize-handle'
+import { WorkspaceChip } from './workspace-chip'
 import type { WorkspaceMenuRow } from './workspace-menu'
-import { ChevronDownIcon, KeyIcon, LayersIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
+import {
+  ChevronDownIcon,
+  CloseIcon,
+  KeyIcon,
+  LayersIcon,
+  PencilIcon,
+  PinIcon,
+  PlugIcon,
+  PlusIcon,
+  TextQuoteIcon,
+} from './ui/icons'
 import type { JSX, Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
 import type { AgentStatus } from './agent-status'
+
+/**
+ * The vertical strip's width bounds, in CSS pixels.
+ *
+ * MIN 160. A row spends its width on the tab's index, its title and — for a
+ * grouped row — its indent; below this the title is an ellipsis and the
+ * column has stopped answering "which tab is this".
+ *
+ * MAX 480. The strip sits beside the panes and its job is to name them, not
+ * to compete with them: 480 is half of the narrowest window the app is built
+ * for once the activity bar is accounted for.
+ *
+ * DEFAULT 240 — the fixed width it had before it could be dragged, so a user
+ * who never touches the edge sees no change.
+ */
+export const TABSTRIP_WIDTH_MIN = 160
+export const TABSTRIP_WIDTH_MAX = 480
+export const TABSTRIP_WIDTH_STEP = 8
+export const TABSTRIP_WIDTH_DEFAULT = 240
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TabStrip — presentation port for tab chrome
@@ -31,6 +63,10 @@ export interface PaneView {
   /** The tab's location for the strip's second line, or '' when the title already
    *  says it — see Tab.subtitle. */
   readonly subtitle: string
+  /** What is happening in the pane, in one line — the same sentence the
+   *  overview's card prints (`Pane.preview`). The vertical strip's second
+   *  line prefers it; '' when the pane has nothing to say. */
+  readonly preview: string
   /** When true, the tab offers a save action (alias adoption). */
   readonly adoptable?: boolean
   readonly onAdopt?: (() => void) | null
@@ -70,6 +106,7 @@ interface PaneDisplayRecord {
   title: string
   tooltip: string
   subtitle: string
+  preview: string
   adoptable: boolean
   warning: boolean
   warningLabel: string
@@ -88,6 +125,12 @@ interface PaneDisplayRecord {
 interface StripGroupHeading {
   readonly key: string
   readonly heading: string | null
+  /** The workspace's stored colour, or null for one that has none — the
+   *  default workspace, and any row the backend minted. It travels WITH the
+   *  heading because it is the same fact about the same object, and because
+   *  the strip must not derive it: it was derived once, by hashing the id,
+   *  and that is exactly what nocx-2mipw replaced. */
+  readonly colour: string | null
 }
 
 /** A heading in the strip's flat list of things to draw. An object rather
@@ -125,18 +168,51 @@ export interface TabStrip {
    *  row carries and looks the heading up here, so a group nobody named draws
    *  none — and no row can go missing for want of a heading. */
   setGroupHeadings(headings: readonly StripGroupHeading[]): void
-  /** Which workspace this window is showing, and what else it could show.
-   *  Null while there is no chain to draw it from. Only the horizontal strip
-   *  renders it: the vertical one shows every workspace at once, so a chip
-   *  there would be a second answer to a question it already answers. */
-  setWorkspaceChip(chip: WorkspaceChipView | null): void
+  /**
+   * WHICH GROUP IS UNFOLDED in the horizontal strip, and null for none.
+   *
+   * It replaced `setWorkspaceChip`, and the replacement is the whole rework:
+   * the row used to be told which workspace it was *showing*, and drew that
+   * one alone behind a chip whose menu was the only way anywhere else. Now
+   * every workspace is in the row and this says which one has its tabs out.
+   * The strip is TOLD rather than deriving it from the active pane, because
+   * the active pane can be one the chain does not hold at all — Settings, a
+   * file viewer — and a group that folded itself the moment you opened
+   * Settings would be chrome moving for a reason nobody can see.
+   *
+   * The vertical strip ignores it: that surface unfolds everything by design
+   * (§4.3), so folding there would hide the finished worker it exists to
+   * show.
+   */
+  setExpandedGroup(key: string | null): void
   onSwitchWorkspace: ((workspaceId: string) => void) | null
   onNewWorkspace: (() => void) | null
+  /**
+   * SHOW EVERY WORKSPACE AND EVERYTHING IN IT — the overview (nocx-edhcu).
+   *
+   * The button at the head of the row raises this and no longer creates. It
+   * changed meaning deliberately: its glyph is a stack of plates, which has
+   * always said "the workspaces" and never said "a new one", and the surface
+   * it now opens shows CONTENTS rather than names — which is the complaint
+   * the whole rework began with. Creating moved into the overview's own `+`
+   * and into this strip's menu, where it has room for a name.
+   */
+  onOpenOverview: (() => void) | null
   /** The rows a workspace's own menu offers, asked for per heading
    *  (nocx-isoph.7). The strip DECIDES none of them: it is handed the rows by
    *  whoever owns the workspace set, exactly as it is handed a heading rather
    *  than working one out. Null when there is no chain to act on. */
   workspaceMenuRows: ((workspaceId: string) => WorkspaceMenuRow[]) | null
+  /** Close a whole workspace, with the tabs in it. The strip raises the
+   *  intent and closes nothing itself — what closing a workspace does to its
+   *  panes is PaneManager's, and the menu row of the same name has always
+   *  gone the same way. */
+  onCloseWorkspace: ((workspaceId: string) => void) | null
+  /** Put `movedId` next to `targetId`, before it or after it — the drag of a
+   *  workspace heading. The strip raises the move and computes no order: what
+   *  the wire takes is a whole permutation, and that belongs to whoever holds
+   *  the set (PaneManager, through workspace-menu.ts's `moveWorkspace`). */
+  onMoveWorkspace: ((movedId: string, targetId: string, before: boolean) => void) | null
   /** The CURRENT workspace was asked to close. The strip names no workspace
    *  in this intent — it shows one at a time, so "the current one" is the
    *  only thing it can mean, and the ask and the close belong to
@@ -144,7 +220,7 @@ export interface TabStrip {
   onActivate: ((paneId: number) => void) | null
   onClose: ((paneId: number) => void) | null
   onNewPane: (() => void) | null
-  onReorder: ((fromId: number, toId: number) => void) | null
+  onReorder: ((fromId: number, toId: number, before: boolean) => void) | null
   /** The tab's decoration, asked for from its context menu (nocx-isoph.4).
    *  Three intents rather than one "update": a patch where a missing field
    *  and a null field mean different things is how "what changed" stops
@@ -188,13 +264,13 @@ abstract class TabStripBase implements TabStrip {
   private _getPaneViews!: () => PaneView[]
   private _setDisplay!: (...args: unknown[]) => void
   private _setGroupHeadings!: Setter<StripGroupHeading[]>
-  private _setChip!: Setter<WorkspaceChipView | null>
+  private _setExpandedGroup!: Setter<string | null>
   /** What the strip was told before it was mounted. A caller that sets the
-   *  chip or the headings first and mounts second must not lose them — the
-   *  composition root replaces the whole strip when the placement setting
-   *  changes, and the order of those two calls is not its business. */
+   *  expanded group or the headings first and mounts second must not lose
+   *  them — the composition root replaces the whole strip when the placement
+   *  setting changes, and the order of those two calls is not its business. */
   private pendingHeadings: StripGroupHeading[] = []
-  private pendingChip: WorkspaceChipView | null = null
+  private pendingExpanded: string | null = null
 
   public abstract readonly orientation: Orientation
 
@@ -202,7 +278,7 @@ abstract class TabStripBase implements TabStrip {
   onActivate: ((paneId: number) => void) | null = null
   onClose: ((paneId: number) => void) | null = null
   onNewPane: (() => void) | null = null
-  onReorder: ((fromId: number, toId: number) => void) | null = null
+  onReorder: ((fromId: number, toId: number, before: boolean) => void) | null = null
   onRename: ((paneId: number) => void) | null = null
   onRecolour: ((paneId: number, colour: string | null) => void) | null = null
   onPin: ((paneId: number, pinned: boolean) => void) | null = null
@@ -211,7 +287,10 @@ abstract class TabStripBase implements TabStrip {
   onSnippets: (() => void) | null = null
   onSwitchWorkspace: ((workspaceId: string) => void) | null = null
   onNewWorkspace: (() => void) | null = null
+  onOpenOverview: (() => void) | null = null
   workspaceMenuRows: ((workspaceId: string) => WorkspaceMenuRow[]) | null = null
+  onCloseWorkspace: ((workspaceId: string) => void) | null = null
+  onMoveWorkspace: ((movedId: string, targetId: string, before: boolean) => void) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -247,13 +326,36 @@ abstract class TabStripBase implements TabStrip {
       const [groupHeadings, setGroupHeadings] = createSignal<StripGroupHeading[]>(
         this.pendingHeadings,
       )
-      const [chip, setChip] = createSignal<WorkspaceChipView | null>(this.pendingChip)
+      const [expandedGroup, setExpandedGroup] = createSignal<string | null>(this.pendingExpanded)
+      // The strip's own overflow menu — the caret at the end of the row. Its
+      // own signal for the same reason the workspace menu has one: three
+      // menus that can be reached in the same frame, and one signal holding
+      // any of them would make "which menu is open" a question with three
+      // answers.
+      const [stripMenu, setStripMenu] = createSignal<{ x: number; y: number } | null>(null)
+      // WHICH ROW IS BEING DRAGGED, so every other row can say whether it
+      // would take it. The dragged id cannot be read from the DataTransfer
+      // during a dragover — the browser withholds the data until the drop —
+      // so the strip remembers what its own row told it at dragstart.
+      const [dragging, setDragging] = createSignal<number | null>(null)
+      // THE VERTICAL STRIP'S WIDTH. A panel beside the panes is a thing the
+      // user drags, in both placements — the sidebar has answered to a drag
+      // since nocx-qmcu and this one was a fixed 240px, so the same window
+      // behaved two ways depending on where the tabs were.
+      //
+      // NOT PERSISTED YET, and deliberately not through the settings
+      // registry: a width produced by dragging an edge is UI state rather
+      // than a deliberate choice, and registering it would put a second
+      // "width" row on the Settings page — the defect nocx-mqie.3 exists to
+      // remove for the sidebar. It settles into the UI-state document that
+      // epic builds, beside the sidebar's.
+      const [stripWidth, setStripWidth] = createSignal(TABSTRIP_WIDTH_DEFAULT)
 
       this._getPaneViews = paneViews
       this._setPaneViews = setPaneViews
       this._setDisplay = setDisplay
       this._setGroupHeadings = setGroupHeadings
-      this._setChip = setChip
+      this._setExpandedGroup = setExpandedGroup
 
       /**
        * What the strip draws, top to bottom: headings and rows in one list.
@@ -302,6 +404,47 @@ abstract class TabStripBase implements TabStrip {
         )
       }
 
+      /**
+       * Whether a row is FOLDED AWAY behind its workspace's pill.
+       *
+       * Only the horizontal strip folds, and only rows that belong to a named
+       * group. A row with no group — the default workspace's tabs (§4.2),
+       * Settings, a file viewer, a pane whose create has not answered — is
+       * never folded, because there is no pill standing for it and folding it
+       * would remove it from the product with nothing left to say where it
+       * went. That is the failure this whole rework exists to end, and it
+       * would be a poor joke to reintroduce it here.
+       *
+       * A folded row is HIDDEN, exactly like a filtered one: it keeps its DOM,
+       * its identity and its place in the order, so unfolding is a repaint
+       * rather than a rebuild — which is what ADR-0012 §1's node identity and
+       * any drag in progress depend on.
+       */
+      const folded = (view: PaneView): boolean => {
+        if (this.orientation === 'vertical') return false
+        const key = display.records[view.id]?.groupKey ?? ''
+        if (key === '') return false
+        if (groupHeadings().find((g) => g.key === key)?.heading == null) return false
+        return key !== expandedGroup()
+      }
+
+      /** The colour of the run a row sits in, or undefined for a row that
+       *  sits in no run at all — an ungrouped tab is not a one-tab group and
+       *  must not be drawn as one, and a workspace nobody coloured is drawn
+       *  without one rather than with a colour this renderer invented. */
+      const groupColourOf = (key: string): WorkspaceColour | undefined => {
+        if (key === '') return undefined
+        const group = groupHeadings().find((g) => g.key === key)
+        if (group?.heading == null) return undefined
+        return isWorkspaceColour(group.colour) ? group.colour : undefined
+      }
+
+      /** What one workspace's pill has to say about the panes inside it. Read
+       *  off the rows the strip already holds — every pane is in the row now,
+       *  folded or not, so nothing has to be plumbed in for this. */
+      const groupMembers = (key: string): PaneView[] =>
+        paneViews().filter((v) => (display.records[v.id]?.groupKey ?? '') === key)
+
       const items = (): Array<StripHeadingItem | PaneView> => {
         const rows = paneViews()
         const groups = groupStrip(rows, {
@@ -327,31 +470,37 @@ abstract class TabStripBase implements TabStrip {
       /** The actions a tab offers, in the order they are reached for. The
        *  strip builds the rows; every one of them raises an intent and
        *  decides nothing — the answer comes back through the store. */
+      /**
+       * A MENU OF ACTIONS, AND THE COLOURS ARE NOT ACTIONS. This menu used to
+       * carry the palette inline — one row per colour word, "Green", "Amber",
+       * "Red", "Violet", plus "No colour" — so choosing a colour meant reading
+       * a list of nouns that showed none of them, and the three things a
+       * person actually does to a tab were spread around them. Name and colour
+       * are one decision about one tab, and they are asked for together now,
+       * in the form the workspace already used (name-colour-dialog.tsx).
+       */
       const menuItems = (paneId: number) => {
-        const record = display.records[paneId]
-        const pinned = record?.pinned === true
-        const items = [
-          { id: 'rename', label: 'Rename…', onSelect: () => this.onRename?.(paneId) },
+        const pinned = display.records[paneId]?.pinned === true
+        return [
+          {
+            id: 'rename',
+            label: 'Rename…',
+            icon: <PencilIcon />,
+            onSelect: () => this.onRename?.(paneId),
+          },
           {
             id: 'pin',
             label: pinned ? 'Unpin' : 'Pin',
+            icon: <PinIcon />,
             onSelect: () => this.onPin?.(paneId, !pinned),
           },
-          ...TAB_COLOURS.map((c) => ({
-            id: `colour-${c.key}`,
-            label: c.label,
-            onSelect: () => this.onRecolour?.(paneId, c.key),
-          })),
+          {
+            id: 'close',
+            label: 'Close',
+            icon: <CloseIcon />,
+            onSelect: () => this.onClose?.(paneId),
+          },
         ]
-        if (record?.colour) {
-          items.push({
-            id: 'colour-none',
-            label: 'No colour',
-            onSelect: () => this.onRecolour?.(paneId, null),
-          })
-        }
-        items.push({ id: 'close', label: 'Close', onSelect: () => this.onClose?.(paneId) })
-        return items
       }
 
       /** One thing the strip draws: a group heading, or a tab row. Written
@@ -360,6 +509,39 @@ abstract class TabStripBase implements TabStrip {
        *  per item, exactly as they were before headings existed. */
       const drawItem = (item: StripHeadingItem | PaneView): JSX.Element => {
         if (isHeading(item)) {
+          // THE HORIZONTAL STRIP DRAWS A WORKSPACE AS A PILL IN THE ROW, and
+          // the vertical one as a heading over a column. Same object, same
+          // menu, two orientations — which is why this is a branch inside one
+          // drawItem rather than two components that would drift.
+          if (this.orientation === 'horizontal') {
+            const members = () => groupMembers(item.key)
+            return (
+              <WorkspaceChip
+                name={item.heading}
+                colour={groupColourOf(item.key) ?? null}
+                count={members().length}
+                attention={groupAttention(
+                  members().map((v) => ({
+                    hasActivity: display.records[v.id]?.hasActivity === true,
+                    agentStatus: display.records[v.id]?.agentStatus ?? null,
+                    warning: display.records[v.id]?.warning === true,
+                  })),
+                )}
+                expanded={item.key === expandedGroup()}
+                // ONE CLICK IS THE WHOLE OF SWITCHING NOW. The strip raises
+                // the intent and picks nothing: which of the workspace's tabs
+                // ends up in front is an MRU question, and the MRU belongs to
+                // PaneManager. A strip that chose "the first row" would be a
+                // second answer to a question that already has an owner.
+                onActivate={() => this.onSwitchWorkspace?.(item.key)}
+                onMenu={(x, y) => {
+                  const rows = this.workspaceMenuRows?.(item.key) ?? []
+                  if (rows.length === 0) return
+                  setWorkspaceMenu({ rows, x, y })
+                }}
+              />
+            )
+          }
           // THE HEADING IS THE HANDLE (nocx-isoph.7). A vertical strip shows
           // every workspace at once, so the thing standing above a group is
           // where that workspace's own actions belong — the chip is the same
@@ -389,7 +571,50 @@ abstract class TabStripBase implements TabStrip {
           // none at all (§4.2) — so there is no heading in the product that
           // is a control leading nowhere.
           return (
-            <div class="tabstrip-group-heading">
+            // THE HEADING CARRIES THE WORKSPACE'S COLOUR, because in this
+            // orientation nothing else can. The colour is IDENTITY — the one
+            // thing about a workspace a person reads without looking at it —
+            // and the horizontal strip puts it on the pill. The column had no
+            // pill and no wash (tab.css suppresses it here on purpose: the
+            // heading above the rows already says where a run begins), so the
+            // colour was simply absent and every workspace looked alike.
+            <div
+              class="tabstrip-group-heading"
+              data-colour={groupColourOf(item.key)}
+              // A WORKSPACE IS DRAGGED BY ITS HEADING, which is the thing that
+              // stands for it — the same object the menu's Move up / Move down
+              // act on, and the same rows this drag replaces for anyone who
+              // would rather point than count. The payload is its own MIME
+              // type: a tab and a workspace are both being dragged around the
+              // same rail, and a heading that accepted a tab's plain text
+              // would take a drop it cannot honour.
+              draggable={true}
+              onDragStart={(e: DragEvent) => {
+                e.dataTransfer?.setData(WORKSPACE_DRAG_TYPE, item.key)
+                e.dataTransfer?.setData('text/plain', item.heading)
+              }}
+              onDragOver={(e: DragEvent) => {
+                if (!e.dataTransfer?.types.includes(WORKSPACE_DRAG_TYPE)) return
+                e.preventDefault()
+                const row = e.currentTarget
+                if (!(row instanceof HTMLElement)) return
+                const rect = row.getBoundingClientRect()
+                row.dataset.dropEdge =
+                  e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+              }}
+              onDragLeave={(e: DragEvent) => {
+                if (e.currentTarget instanceof HTMLElement) delete e.currentTarget.dataset.dropEdge
+              }}
+              onDrop={(e: DragEvent) => {
+                const row = e.currentTarget
+                const edge = row instanceof HTMLElement ? row.dataset.dropEdge : undefined
+                if (row instanceof HTMLElement) delete row.dataset.dropEdge
+                const moved = e.dataTransfer?.getData(WORKSPACE_DRAG_TYPE)
+                if (!moved || moved === item.key) return
+                e.preventDefault()
+                this.onMoveWorkspace?.(moved, item.key, edge !== 'after')
+              }}
+            >
               <Button
                 variant="ghost"
                 size="sm"
@@ -405,6 +630,23 @@ abstract class TabStripBase implements TabStrip {
               >
                 <Caption size="context">{item.heading}</Caption>
               </Button>
+              {/* CLOSING THE WHOLE RUN, from the row that stands for it. The
+                  action already existed as a menu row and stays there — this
+                  is the same intent given the place a person reaches for it,
+                  exactly as a tab's own close mark sits on the tab rather
+                  than only in its menu. It is the kit's IconButton, and the
+                  heading only places it. */}
+              <IconButton
+                size="sm"
+                ariaLabel={`Close workspace ${item.heading}`}
+                title="Close workspace"
+                onClick={(e: MouseEvent) => {
+                  e.stopPropagation()
+                  this.onCloseWorkspace?.(item.key)
+                }}
+              >
+                {'\u00d7'}
+              </IconButton>
             </div>
           )
         }
@@ -424,15 +666,33 @@ abstract class TabStripBase implements TabStrip {
             title={display.records[item.id]?.title ?? ''}
             tooltip={display.records[item.id]?.tooltip ?? ''}
             subtitle={display.records[item.id]?.subtitle ?? ''}
+            preview={display.records[item.id]?.preview ?? ''}
             hasActivity={display.records[item.id]?.hasActivity === true}
             tabIndex={display.activeId === item.id ? 0 : -1}
             orientation={this.orientation}
-            hidden={!matchesFilter(item)}
+            hidden={!matchesFilter(item) || folded(item)}
             colour={display.records[item.id]?.colour ?? undefined}
+            // WHICH RUN OF TABS THIS ONE BELONGS TO, so the unfolded group
+            // reads as a segment rather than as tabs that happen to sit next
+            // to a pill. It is the GROUP's colour and never the tab's — the
+            // tab's own `colour` above is a mark the user put on it — so the
+            // two are separate attributes and tab.css draws them differently.
+            groupColour={
+              folded(item) ? undefined : groupColourOf(display.records[item.id]?.groupKey ?? '')
+            }
             pinned={display.records[item.id]?.pinned === true}
             onActivate={() => this.onActivate?.(item.id)}
             onClose={(id) => this.onClose?.(id)}
-            onReorder={(fromId, toId) => this.onReorder?.(fromId, toId)}
+            onReorder={(fromId, toId, before) => this.onReorder?.(fromId, toId, before)}
+            onDragBegin={(id) => setDragging(id)}
+            onDragFinish={() => setDragging(null)}
+            // A reorder is one workspace's business (see Tab.dropAllowed), so
+            // a row accepts a drop only from its own run.
+            dropAllowed={
+              dragging() === null ||
+              (display.records[dragging()!]?.groupKey ?? '') ===
+                (display.records[item.id]?.groupKey ?? '')
+            }
             onMenu={(paneId, x, y) => setMenu({ paneId, x, y })}
           />
         )
@@ -442,6 +702,19 @@ abstract class TabStripBase implements TabStrip {
         <>
           <Show when={this.orientation === 'vertical'}>
             <div class="tabstrip-header">
+              {/* THE HEAD OF THE RAIL, and it is the head of the row in the
+                  other placement for the same reason: the overview is where a
+                  workspace is looked at whole, so it stands before the list of
+                  them rather than among the actions at the far end. */}
+              <div class="tabstrip-lead">
+                <IconButton
+                  ariaLabel="Show all workspaces"
+                  title="Show all workspaces"
+                  onClick={() => this.onOpenOverview?.()}
+                >
+                  <LayersIcon />
+                </IconButton>
+              </div>
               <div class="tabstrip-search">
                 <SearchField
                   value={searchQuery()}
@@ -455,67 +728,114 @@ abstract class TabStripBase implements TabStrip {
                   }}
                 />
               </div>
+              {/* ONE VOCABULARY, BOTH PLACEMENTS. This header carried the
+                  five same-weight glyphs the horizontal strip shed — new tab,
+                  new workspace, quick connect, insert a secret, snippets — and
+                  the layers glyph among them meant NEW WORKSPACE while the
+                  identical glyph at the head of the horizontal row meant SHOW
+                  ALL WORKSPACES. One mark with two meanings is not a
+                  difference in layout, it is a person learning a control twice
+                  and being wrong once; which of the two they get depended on a
+                  placement setting.
+
+                  So the row is the horizontal one's: the layers mark opens the
+                  overview, `+` opens a tab, and the caret opens everything
+                  else. Nothing was removed — quick connect, the secret picker
+                  and snippets are rows in that menu, where they have their
+                  names, and creating a workspace is a row there too (it cannot
+                  live on a heading: the default draws none, so a create
+                  offered only there would be unreachable for exactly the
+                  person who has never made a workspace — nocx-isoph.7). */}
               <div class="tabstrip-actions">
                 <IconButton ariaLabel="New tab" square onClick={() => this.onNewPane?.()}>
                   <PlusIcon />
                 </IconButton>
-                {/* CREATION CANNOT LIVE ON A HEADING (nocx-isoph.7). The
-                    default workspace draws none — that is §4.2 and it is not
-                    negotiable — so a user whose tabs are all in the default
-                    sees no heading at all, and a create offered only there
-                    would be unreachable exactly for the person who has never
-                    made a workspace. It is an action of the STRIP, so it sits
-                    with the strip's actions, and the chip carries the same
-                    intent on the other orientation. */}
                 <IconButton
-                  ariaLabel="New workspace"
-                  title="New workspace"
-                  onClick={() => this.onNewWorkspace?.()}
-                  tabIndex={-1}
-                >
-                  <LayersIcon />
-                </IconButton>
-                <IconButton
-                  ariaLabel="Quick connect"
-                  onClick={() => this.onQuickConnect?.()}
-                  tabIndex={-1}
+                  ariaLabel="More"
+                  title="More"
+                  onClick={(e: MouseEvent) => {
+                    const anchor = e.currentTarget
+                    if (!(anchor instanceof HTMLElement)) return
+                    const rect = anchor.getBoundingClientRect()
+                    setStripMenu({ x: rect.left, y: rect.bottom })
+                  }}
                 >
                   <ChevronDownIcon />
-                </IconButton>
-                <IconButton
-                  ariaLabel="Insert a secret"
-                  title="Insert a secret"
-                  onClick={() => this.onInsertSecret?.()}
-                  tabIndex={-1}
-                >
-                  <KeyIcon />
-                </IconButton>
-                <IconButton
-                  ariaLabel="Snippets"
-                  title="Snippets"
-                  onClick={() => this.onSnippets?.()}
-                  tabIndex={-1}
-                >
-                  <TextQuoteIcon />
                 </IconButton>
               </div>
             </div>
           </Show>
-          <Show when={this.orientation === 'horizontal' && chip()} keyed>
-            {(view) => (
-              <WorkspaceChip
-                name={view.name}
-                currentId={view.currentId}
-                workspaces={view.workspaces}
-                onSwitch={(id) => this.onSwitchWorkspace?.(id)}
-                onNew={() => this.onNewWorkspace?.()}
-                // The SAME rows a vertical heading opens, for the workspace
-                // this chip is showing (nocx-isoph.7).
-                actions={this.workspaceMenuRows?.(view.currentId) ?? []}
-              />
-            )}
+          {/* The chip that used to stand here is gone, and with it the
+              dropdown that was the only way between workspaces. Every
+              workspace is IN the row now — see drawItem's horizontal branch.
+              What stands here instead is the way to see them all at once:
+              the overview (nocx-edhcu), which answers with CONTENTS what the
+              old chip's menu answered with names.
+
+              IT IS OUTSIDE `.tabs-container` ON PURPOSE. Inside, it would
+              scroll away with the tabs the moment the row overflowed — and it
+              is exactly when a person has more tabs than fit that they reach
+              for the picture of all of them. Here it is pinned, and it reads
+              as what it is: the head of the row of workspaces. */}
+          <Show when={this.orientation === 'horizontal'}>
+            <div class="tabstrip-lead">
+              <IconButton
+                ariaLabel="Show all workspaces"
+                title="Show all workspaces"
+                onClick={() => this.onOpenOverview?.()}
+              >
+                <LayersIcon />
+              </IconButton>
+            </div>
           </Show>
-          <div class="tabs-container">
+          <div
+            class="tabs-container"
+            // THREE SOURCES, BECAUSE OVERFLOW CHANGES THREE WAYS. The
+            // scroll event covers moving within a row that is already too
+            // long; the resize observer covers the row or the window changing
+            // size under a scroll position that did not move; the mutation
+            // observer covers the CONTENTS growing inside a box whose own
+            // size did not change — which is the whole of a restore, where
+            // the rows arrive after this ref has run and every title is
+            // rewritten again when its pane publishes one. Any of the three
+            // alone leaves a stale fade: a window dragged narrower fires no
+            // scroll event, and a row that is already at its maximum width
+            // resizes not at all when the eighth tab lands in it.
+            // None is unregistered, and none needs to be: all three are
+            // rooted in this element, the composition root drops the whole
+            // strip and its host together when the placement setting changes
+            // (PaneManager.replaceStrip), and an observer whose only target
+            // has gone is collected with it.
+            ref={(el: HTMLElement) => {
+              // Coalesced to one measurement per frame — a restore mutates
+              // the row dozens of times in a tick, and `scrollWidth` is a
+              // forced layout every time it is read.
+              let queued = false
+              const measure = (): void => {
+                if (queued) return
+                queued = true
+                requestAnimationFrame(() => {
+                  queued = false
+                  this.updateOverflow()
+                })
+              }
+              el.addEventListener('scroll', () => this.updateOverflow(), { passive: true })
+              new ResizeObserver(() => this.updateOverflow()).observe(el)
+              new MutationObserver(measure).observe(el, {
+                childList: true,
+                subtree: true,
+                characterData: true,
+              })
+              // After the first paint: `scrollWidth` is meaningless until the
+              // rows are laid out, and this ref runs before they are.
+              measure()
+              // And once more when the UI font has actually arrived: a web
+              // font swapping in re-lays every tab without mutating one, so
+              // a row that only just fits in the fallback metrics overflows
+              // silently. `document.fonts` is absent in jsdom.
+              void document.fonts?.ready.then(measure)
+            }}
+          >
             {/* A group with no heading draws NOTHING above its rows — no
                 element, no empty caption, no wrapper. That is what makes the
                 default workspace's rows top-level rows (§4.2) rather than
@@ -532,6 +852,48 @@ abstract class TabStripBase implements TabStrip {
                 items={menuItems(open.paneId)}
                 onClose={() => setMenu(null)}
                 data-testid="tab-menu"
+              />
+            )}
+          </Show>
+          <Show when={stripMenu()} keyed>
+            {(open) => (
+              <ContextMenu
+                open
+                x={open.x}
+                y={open.y}
+                items={[
+                  {
+                    id: 'quick-connect',
+                    label: 'Quick connect…',
+                    // The marks are the ones each action already wears
+                    // elsewhere in the product — the key that opens the
+                    // secret picker, the layers that stand for a workspace —
+                    // so the menu teaches the glyph a person will next meet
+                    // on a button rather than inventing a second set.
+                    icon: <PlugIcon />,
+                    onSelect: () => this.onQuickConnect?.(),
+                  },
+                  {
+                    id: 'insert-secret',
+                    label: 'Insert a secret…',
+                    icon: <KeyIcon />,
+                    onSelect: () => this.onInsertSecret?.(),
+                  },
+                  {
+                    id: 'snippets',
+                    label: 'Snippets…',
+                    icon: <TextQuoteIcon />,
+                    onSelect: () => this.onSnippets?.(),
+                  },
+                  {
+                    id: 'new-workspace',
+                    label: 'New workspace…',
+                    icon: <LayersIcon />,
+                    onSelect: () => this.onNewWorkspace?.(),
+                  },
+                ]}
+                onClose={() => setStripMenu(null)}
+                data-testid="strip-menu"
               />
             )}
           </Show>
@@ -553,35 +915,65 @@ abstract class TabStripBase implements TabStrip {
                 column — the list is `flex: 1 1 auto`, so it pushed them apart and
                 left the caret alone in the bottom corner. As a group they can be
                 placed once, per orientation, by the strip's own CSS. */}
+            {/* FIVE ICONS BECAME TWO, and the two that stayed are the ones a
+                person reaches for without looking. `+` opens a tab, which is
+                the strip's whole purpose; the caret opens everything else.
+
+                What was there before was a rank of five same-sized, same-
+                weight glyphs — new tab, new workspace, quick connect, insert
+                a secret, snippets — with nothing to say which was ordinary
+                and which was occasional. A row like that is not read, it is
+                hunted through, and it competes with the tabs beside it for
+                the same corner of the eye. Edge's tab strip ends in exactly
+                these two controls for the same reason.
+
+                Nothing was removed: the three that left are rows in the menu,
+                where they have room for their names — and a name is a better
+                affordance than a key glyph for an action performed twice an
+                hour. */}
             <div class="tabstrip-actions">
-              <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
+              <IconButton
+                ariaLabel="New tab"
+                onClick={() => this.onNewPane?.()}
+              >
                 <PlusIcon />
               </IconButton>
               <IconButton
-                ariaLabel="Quick connect"
-                onClick={() => this.onQuickConnect?.()}
-                tabIndex={-1}
+                ariaLabel="More"
+                title="More"
+                onClick={(e: MouseEvent) => {
+                  const anchor = e.currentTarget
+                  if (!(anchor instanceof HTMLElement)) return
+                  const rect = anchor.getBoundingClientRect()
+                  setStripMenu({ x: rect.right, y: rect.bottom })
+                }}
               >
                 <ChevronDownIcon />
               </IconButton>
-              <IconButton
-                ariaLabel="Insert a secret"
-                title="Insert a secret"
-                onClick={() => this.onInsertSecret?.()}
-                tabIndex={-1}
-              >
-                <KeyIcon />
-              </IconButton>
-              <IconButton
-                ariaLabel="Snippets"
-                title="Snippets"
-                onClick={() => this.onSnippets?.()}
-                tabIndex={-1}
-              >
-                <TextQuoteIcon />
-              </IconButton>
             </div>
             <div class="tabbar-spacer" />
+          </Show>
+          {/* The strip's trailing edge. Placed absolutely against the strip
+              (tab-strip.css) rather than as a flex item, because the strip is
+              a COLUMN — the sidebar's handle is the trailing slot of a row and
+              this one has no row to be a slot in. Placement only: the control,
+              its keyboard and its bounds are the kit's. */}
+          <Show when={this.orientation === 'vertical'}>
+            <ResizeHandle
+              ariaLabel="Resize the tab strip"
+              value={stripWidth()}
+              min={TABSTRIP_WIDTH_MIN}
+              max={TABSTRIP_WIDTH_MAX}
+              step={TABSTRIP_WIDTH_STEP}
+              onChange={(w) => {
+                setStripWidth(w)
+                container.style.setProperty('--tabstrip-width', `${w}px`)
+              }}
+              onCommit={(w) => {
+                setStripWidth(w)
+                container.style.setProperty('--tabstrip-width', `${w}px`)
+              }}
+            />
           </Show>
         </>
       )
@@ -597,6 +989,7 @@ abstract class TabStripBase implements TabStrip {
         title: tab.displayTitle ?? tab.title,
         tooltip: tab.tooltip,
         subtitle: tab.subtitle,
+        preview: tab.preview,
         adoptable: tab.adoptable,
         warning: tab.warning,
         warningLabel: tab.warningLabel ?? '',
@@ -616,6 +1009,7 @@ abstract class TabStripBase implements TabStrip {
       title: tab.displayTitle ?? tab.title,
       tooltip: tab.tooltip,
       subtitle: tab.subtitle,
+      preview: tab.preview,
       adoptable: tab.adoptable,
       warning: tab.warning,
       warningLabel: tab.warningLabel ?? '',
@@ -650,6 +1044,52 @@ abstract class TabStripBase implements TabStrip {
   setActive(paneId: number): void {
     if (!this.mounted) return
     this._setDisplay('activeId', paneId)
+    this.revealPane(paneId)
+  }
+
+  /**
+   * BRING THE TAB YOU ARE ON BACK ONTO THE SCREEN.
+   *
+   * The row scrolls now (tab-strip.css), and a scrolling row without this is
+   * worse than one that clips: open an eighth tab and it becomes the active
+   * one somewhere past the right edge, so the thing you just created is the
+   * one thing you cannot see. It is the same for `Cmd+1..9`, for the MRU
+   * landing after a close, and for a workspace switch.
+   *
+   * `inline: 'nearest'` scrolls the least that will do — a tab already in
+   * view does not move, so activating tabs does not slew the row about under
+   * the pointer.
+   *
+   * The DOM is settled by now: Solid's signal setters run their dependent
+   * effects synchronously outside a batch, which is the same fact `reorder`
+   * relies on to restore focus.
+   */
+  private revealPane(paneId: number): void {
+    const row = this.container?.querySelector(`[data-pane-id="${paneId}"]`)
+    if (row instanceof HTMLElement) row.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    this.updateOverflow()
+  }
+
+  /**
+   * Say whether the row runs past either edge, so the strip can fade there.
+   *
+   * MEASURED, NOT GUESSED. There is no CSS that asks "is this box scrolled",
+   * and a fade painted unconditionally would lie for the ordinary case of
+   * four tabs in a wide window — an edge that says "there is more" when there
+   * is not is worse than no edge at all, because it is unfalsifiable by
+   * looking.
+   *
+   * The one-pixel slack absorbs fractional scroll positions, which a trackpad
+   * and a fractional device-pixel ratio both produce; without it the end fade
+   * flickers on at rest.
+   */
+  private updateOverflow(): void {
+    if (this.orientation !== 'horizontal') return
+    const box = this.container?.querySelector('.tabs-container')
+    if (!(box instanceof HTMLElement)) return
+    const max = box.scrollWidth - box.clientWidth
+    box.toggleAttribute('data-overflow-start', box.scrollLeft > 1)
+    box.toggleAttribute('data-overflow-end', box.scrollLeft < max - 1)
   }
 
   setGroupHeadings(headings: readonly StripGroupHeading[]): void {
@@ -657,11 +1097,9 @@ abstract class TabStripBase implements TabStrip {
     if (this.mounted) this._setGroupHeadings(this.pendingHeadings)
   }
 
-  setWorkspaceChip(chip: WorkspaceChipView | null): void {
-    this.pendingChip = chip
-    // A signal holding an object needs the functional form, or Solid takes
-    // the object for an updater and calls it.
-    if (this.mounted) this._setChip(() => chip)
+  setExpandedGroup(key: string | null): void {
+    this.pendingExpanded = key
+    if (this.mounted) this._setExpandedGroup(key)
   }
 
   reorder(tabs: readonly PaneView[]): void {
@@ -676,6 +1114,10 @@ abstract class TabStripBase implements TabStrip {
     if (active instanceof HTMLElement && this.container?.contains(active)) {
       active.focus({ preventScroll: true })
     }
+    // The set of rows just changed, so what runs past the edges did too —
+    // closing the last tab can end an overflow that no scroll event will
+    // report.
+    this.updateOverflow()
   }
 
   // ── Keyboard (roving tabindex) ───────────────────────────────────────

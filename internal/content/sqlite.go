@@ -385,7 +385,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 9
+const schemaVersion = 10
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -591,6 +591,8 @@ const schemaV1 = `
 CREATE TABLE IF NOT EXISTS workspaces (
   id           TEXT PRIMARY KEY,           -- client-minted UUIDv7
   name         TEXT NOT NULL,
+  colour       TEXT,                       -- NULL: the default workspace, and
+                                           -- any row the backend minted
   position     INTEGER NOT NULL DEFAULT 0, -- switcher order
   created_at   INTEGER NOT NULL,           -- backend wall clock, display only
   payload      TEXT NOT NULL DEFAULT '{}', -- sparse extension only

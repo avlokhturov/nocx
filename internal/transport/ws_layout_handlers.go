@@ -75,9 +75,15 @@ import (
 // name is a tab whose label is derived from its panes, and a missing key
 // would make that indistinguishable from an older backend.
 type workspaceWire struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Position int    `json:"position"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Colour is null for a workspace nobody coloured: the default, and any row
+	// the backend minted for a session nobody recorded. It is the user's
+	// choice from a closed palette the RENDERER owns — the store keeps a
+	// string and judges none of it, so a value a newer renderer understands is
+	// carried rather than refused.
+	Colour   *string `json:"colour"`
+	Position int     `json:"position"`
 }
 
 type tabWire struct {
@@ -102,7 +108,7 @@ type paneWire struct {
 }
 
 func wireWorkspace(ws content.Workspace) workspaceWire {
-	return workspaceWire{ID: ws.ID, Name: ws.Name, Position: ws.Position}
+	return workspaceWire{ID: ws.ID, Name: ws.Name, Colour: ws.Colour, Position: ws.Position}
 }
 
 func wireTab(t content.Tab) tabWire {
@@ -217,9 +223,15 @@ type closedResponse struct {
 // ── params ────────────────────────────────────────────────────────────────
 
 type workspaceCreateParams struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Position int    `json:"position"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Colour is chosen in the same dialog as the name (nocx-2mipw) and
+	// travels with the create rather than following it as a second call: a
+	// workspace that existed uncoloured for one round trip would flash the
+	// neutral pill and then repaint, and a create whose second half failed
+	// would leave a workspace the user thinks they coloured.
+	Colour   *string `json:"colour"`
+	Position int     `json:"position"`
 	// FirstTab and FirstPane are what make this creation-with-content. They
 	// carry no container reference of their own: this call is what creates
 	// the containers, so naming one would be asking the caller to repeat what
@@ -267,6 +279,14 @@ func (p firstPaneParams) pane(tabID string) content.Pane {
 type workspaceRenameParams struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+}
+
+// workspaceRecolourParams shapes exactly like tabRecolourParams, because it
+// is the same act one rung up: null is "clear the colour", which is an
+// operation a person can ask for and not an omitted field.
+type workspaceRecolourParams struct {
+	ID     string  `json:"id"`
+	Colour *string `json:"colour"`
 }
 
 type workspaceReorderParams struct {
@@ -474,6 +494,9 @@ func validateWorkspaceCreateRaw(raw json.RawMessage) string {
 	if msg := boundedRunes("name", p.Name, maxConfigNameRunes); msg != "" {
 		return msg
 	}
+	if msg := nullableBounded("colour", p.Colour, maxLayoutColourRunes); msg != "" {
+		return msg
+	}
 	if msg := layoutPosition(p.Position); msg != "" {
 		return msg
 	}
@@ -528,6 +551,17 @@ func validateWorkspaceRenameRaw(raw json.RawMessage) string {
 		return "name is required"
 	}
 	return boundedRunes("name", p.Name, maxConfigNameRunes)
+}
+
+func validateWorkspaceRecolourRaw(raw json.RawMessage) string {
+	var p workspaceRecolourParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := layoutID("id", p.ID); msg != "" {
+		return msg
+	}
+	return nullableBounded("colour", p.Colour, maxLayoutColourRunes)
 }
 
 func validateWorkspaceReorderRaw(raw json.RawMessage) string {
@@ -742,7 +776,7 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				return nil
 			}
 			made, err := svc.CreateWorkspace(ctx,
-				content.Workspace{ID: p.ID, Name: p.Name, Position: p.Position},
+				content.Workspace{ID: p.ID, Name: p.Name, Colour: p.Colour, Position: p.Position},
 				p.FirstTab.tab(p.ID, nil),
 				p.FirstPane.pane(p.FirstTab.ID))
 			h.answer(req, err, func() any {
@@ -759,6 +793,13 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				return nil
 			}
 			ws, err := svc.RenameWorkspace(ctx, p.ID, p.Name)
+			h.answer(req, err, func() any { return workspaceResponse{Workspace: wireWorkspace(ws)} })
+		case "workspaces.recolour":
+			var p workspaceRecolourParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			ws, err := svc.RecolourWorkspace(ctx, p.ID, p.Colour)
 			h.answer(req, err, func() any { return workspaceResponse{Workspace: wireWorkspace(ws)} })
 		case "workspaces.reorder":
 			var p workspaceReorderParams
@@ -946,6 +987,7 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 		{"layout.read", nil},
 		{"workspaces.create", validateWorkspaceCreateRaw},
 		{"workspaces.rename", validateWorkspaceRenameRaw},
+		{"workspaces.recolour", validateWorkspaceRecolourRaw},
 		{"workspaces.reorder", validateWorkspaceReorderRaw},
 		{"workspaces.close", validateLayoutCloseRaw},
 		{"tabs.create", validateTabCreateRaw},

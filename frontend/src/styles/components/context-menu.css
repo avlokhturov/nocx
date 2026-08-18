@@ -26,7 +26,9 @@
    focus between items). The label is one line that ellipsises — a path
    must never wrap the menu wider than its ceiling. */
 .ui-context-menu__item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   width: 100%;
   box-sizing: border-box;
   padding: var(--space-2) var(--space-3);
@@ -37,6 +39,28 @@
   font: inherit;
   font-size: var(--font-size-sm);
   text-align: start;
+}
+
+/* The mark's column, RESERVED WHETHER OR NOT THE ROW HAS ONE. A menu that
+   only indents the rows that carry a glyph puts its labels on two different
+   left edges, and the eye reads that as two lists. Dim, because the label is
+   what is read and the glyph is what is recognised — they are not competing
+   for the same attention. */
+.ui-context-menu__icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-dim);
+}
+
+/* The label is one line that ellipsises — a path must never wrap the menu
+   wider than its ceiling. */
+.ui-context-menu__label {
+  flex: 1 1 auto;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

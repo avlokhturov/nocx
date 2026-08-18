@@ -22,6 +22,7 @@ import type { PanesCloseResult } from '../generated/panes.close'
 import type { WorkspacesCreateResult } from '../generated/workspaces.create'
 import type { WorkspacesCloseResult } from '../generated/workspaces.close'
 import type { WorkspacesRenameResult } from '../generated/workspaces.rename'
+import type { WorkspacesRecolourResult } from '../generated/workspaces.recolour'
 import type { WorkspacesReorderResult } from '../generated/workspaces.reorder'
 
 /** The identity a close carries in case it empties the application: the
@@ -52,6 +53,12 @@ export interface PaneFacts {
 export interface WorkspaceFacts {
   id: string
   name: string
+  /** The colour the user picked in the create dialog, or null if they cleared
+   *  it. It travels WITH the create rather than following it as a second
+   *  call: a workspace that existed uncoloured for one round trip would draw
+   *  the neutral pill and then repaint, and a create whose second half failed
+   *  would leave a workspace the person believes they coloured. */
+  colour: string | null
   position: number
   firstTab: { id: string }
   firstPane: PaneFacts
@@ -64,6 +71,7 @@ export interface LayoutClientLike {
   createWorkspace(workspace: WorkspaceFacts): Promise<WorkspacesCreateResult>
   closeWorkspace(id: string, replacement: Replacement): Promise<WorkspacesCloseResult>
   renameWorkspace(id: string, name: string): Promise<WorkspacesRenameResult>
+  recolourWorkspace(id: string, colour: string | null): Promise<WorkspacesRecolourResult>
   reorderWorkspaces(ids: readonly string[]): Promise<WorkspacesReorderResult>
   createTab(tab: {
     id: string
@@ -99,6 +107,7 @@ export class LayoutClient implements LayoutClientLike {
     return this.dispatcher.call<WorkspacesCreateResult>('workspaces.create', {
       id: workspace.id,
       name: workspace.name,
+      colour: workspace.colour,
       position: workspace.position,
       firstTab: {
         id: workspace.firstTab.id,
@@ -129,6 +138,18 @@ export class LayoutClient implements LayoutClientLike {
    *  the tab falls back to its cwd. */
   renameWorkspace(id: string, name: string): Promise<WorkspacesRenameResult> {
     return this.dispatcher.call<WorkspacesRenameResult>('workspaces.rename', { id, name })
+  }
+
+  /** Change a workspace's colour, or clear it with null.
+   *
+   *  NULL IS A VALUE HERE, unlike in renameWorkspace above — which is the one
+   *  asymmetry worth stating, because the two methods otherwise look alike. A
+   *  workspace always has a name and the backend refuses a blank one; it need
+   *  not have a colour, because the default workspace has none and a row the
+   *  backend minted has none either. So "make this one undecorated" is a real
+   *  ask, and the signature has to be able to make it. */
+  recolourWorkspace(id: string, colour: string | null): Promise<WorkspacesRecolourResult> {
+    return this.dispatcher.call<WorkspacesRecolourResult>('workspaces.recolour', { id, colour })
   }
 
   /** The WHOLE order, for the same reason reorderTabs takes one: the backend

@@ -82,6 +82,7 @@ import { NotesStore } from './notes/notes-store'
 import { NotesPanel } from './notes/notes-panel'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
+import { createOverviewController } from './overview/overview-controller'
 import { askFields } from './snippets/resolve'
 
 async function main() {
@@ -303,6 +304,14 @@ async function main() {
   // editor already up on a blank one.
   tm.onCreateEndpoint = () => openSettingsPane().startNewEndpoint()
   tm.onActivity = reportActivity
+
+  // ── The workspace overview (nocx-edhcu) ──────────────────────────────
+  // Every workspace and every pane at once, as text cards. The controller
+  // installs its own ⌥⌘O listener on the document — like the other two ⌥⌘
+  // surfaces, because which pane you are in is not the question it answers —
+  // and the strip's head button opens the same one rather than a second.
+  const overview = createOverviewController(tm.overviewPort())
+  tm.onOpenOverview = () => overview.open()
 
   const observer = new SettingsObserver(dispatcher)
   // Durable-history availability (nocx-rtg0.15). Started here rather than

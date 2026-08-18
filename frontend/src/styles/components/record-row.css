@@ -58,3 +58,26 @@
 .ui-record-row__status[data-tone='error'] {
   color: var(--color-danger);
 }
+
+/* One line of the record's own words — the last line a pane printed, the
+   reason a check failed. Verbatim output, so it is set in the mono family and
+   clipped to one line: a card that grew with the length of a stack trace
+   would stop being a card. */
+/* The record's own words: one line, or a few. Each truncates on its own,
+   which is why the clipping sits on the LINE and not on the block — a
+   nowrap block with several children clips the block and lets every line
+   inside it run past the edge. */
+.ui-record-row__detail {
+  margin-top: 2px;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-muted);
+  min-width: 0;
+}
+
+.ui-record-row__detail > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

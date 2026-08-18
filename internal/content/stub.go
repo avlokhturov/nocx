@@ -228,6 +228,11 @@ func (s *layoutStub) RenameWorkspace(_ context.Context, id, name string) (Worksp
 	return Workspace{}, ErrNotImplemented
 }
 
+func (s *layoutStub) RecolourWorkspace(_ context.Context, id string, colour *string) (Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.RecolourWorkspace", "id", id, "set", colour != nil)
+	return Workspace{}, ErrNotImplemented
+}
+
 func (s *layoutStub) ReorderWorkspaces(_ context.Context, ids []string) ([]Workspace, error) {
 	s.log.Info("content stub: LayoutRepository.ReorderWorkspaces", "count", len(ids))
 	return nil, ErrNotImplemented

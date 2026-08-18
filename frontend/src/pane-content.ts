@@ -82,6 +82,24 @@ export interface PaneHost {
   setTitle(title: string): void
   requestAttention(): void
   requestClose(): void
+  /**
+   * THE OPENING IS OVER — from here, output is the user's to have missed.
+   *
+   * A tab lights an unread-activity mark for output that arrived while
+   * nobody was looking at it, and until this is called there is no such
+   * output: a session that has just opened prints a banner, its rc file's
+   * chatter and a prompt, and none of it is news. The distinction cannot be
+   * drawn from the bytes — they are output like any other — and it cannot be
+   * drawn with a clock either: a restore opens every pane at once, so a
+   * pane's own start is separated from the pane before it by however long
+   * ten other shells took to start. It is drawn HERE, by the content, which
+   * is the only party that knows what its own start looks like.
+   *
+   * Called at most once, and the host clears anything the opening
+   * accumulated: the state where every tab but one carries the mark is the
+   * state where the mark says nothing at all.
+   */
+  contentSettled(): void
 }
 
 // ── Content (B.4, B.6) ────────────────────────────────────────────────────
