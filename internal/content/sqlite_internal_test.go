@@ -419,3 +419,62 @@ func aRecordedCommand(intent string) CompletedCommand {
 		Status: EntrySuccess,
 	}
 }
+
+// The startup sweep uses the PARTIAL INDEX and does not scan the table
+// (nocx-rtg0.6). It is the one statement that runs on every start before the
+// store is handed out, and the table it runs over grows with a person's whole
+// history — so a plan that degrades to a scan turns "nocx starts" into "nocx
+// starts, eventually", years in, on the machine of the user with the most to
+// lose.
+//
+// Asserted from the QUERY PLAN rather than from a duration: a timing
+// assertion would pass on an empty test database whatever the plan said, and
+// is the shape AGENTS.md forbids anyway.
+func TestStartupSweepUsesThePartialIndex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "content.db")
+	db, err := openTestStore(t, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+
+	conn := openKeyedConn(t, path)
+	rows, err := conn.Query(`EXPLAIN QUERY PLAN
+		UPDATE entries SET phase = 'closed', status =
+		  CASE WHEN kind = 'agent' THEN 'interrupted' ELSE 'unknown' END
+		WHERE phase != 'closed'`)
+	if err != nil {
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	plan := ""
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if scanErr := rows.Scan(&id, &parent, &notused, &detail); scanErr != nil {
+			t.Fatalf("scan plan: %v", scanErr)
+		}
+		plan += detail + "\n"
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		t.Fatalf("plan rows: %v", rowsErr)
+	}
+
+	t.Logf("startup sweep plan:\n%s", plan)
+	if !strings.Contains(plan, "entries_open") {
+		t.Fatalf("the startup sweep does not use entries_open:\n%s", plan)
+	}
+	// The plan reads "SCAN entries USING INDEX entries_open", and the word
+	// SCAN there is not the failure: entries_open is PARTIAL (phase !=
+	// 'closed'), so walking it walks only the rows the sweep is for — which
+	// on a healthy store is none. What must never appear is a bare "SCAN
+	// entries", the plan with the index gone, which walks a person's whole
+	// history on every start.
+	if strings.Contains(plan, "SCAN entries\n") {
+		t.Fatalf("the startup sweep scans the whole table:\n%s", plan)
+	}
+}
