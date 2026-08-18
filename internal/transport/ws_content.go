@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
@@ -47,10 +46,18 @@ func validateHistoryQueryRaw(raw json.RawMessage) string {
 	if p.Scope == "host" && p.Host == nil {
 		return "host is required for scope=host"
 	}
-	if p.Before != nil {
-		if _, err := strconv.ParseInt(*p.Before, 10, 64); err != nil {
-			return "before must be the opaque row id of the previous page"
-		}
+	// THE CURSOR IS OPAQUE, and this bound may not know more about it than
+	// the handler does. It used to ParseInt the handle, which was true of the
+	// interim command_history's rowid and is false of the ledger's
+	// client-minted UUIDv7 — so after nocx-rtg0.19 every real `before` a
+	// renderer could send was refused here, in front of a handler that had
+	// already stopped reading the shape (parseHistoryQueryParams). Two owners
+	// of one predicate, and the one that lost the plot won by running first.
+	// The only cursor that is refusable without reading it is the empty one,
+	// which names no row at all — the same rule, in the same words, as the
+	// handler's.
+	if p.Before != nil && *p.Before == "" {
+		return "before must be the opaque row id of the previous page"
 	}
 	if p.Text != nil && utf8.RuneCountInString(*p.Text) > maxSearchTextRunes {
 		return fmt.Sprintf("text exceeds %d characters", maxSearchTextRunes)
