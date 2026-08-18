@@ -82,7 +82,7 @@ function mkQuery(
 }
 
 function emptyQuery(
-  source: 'store' | 'session' = 'session',
+  source: HistoryQuery['source'] = 'session',
 ): (scope: RecallScope) => Promise<HistoryQuery> {
   return (scope) => Promise.resolve({ entries: [], scope, exhausted: true, source, coverage: null })
 }
@@ -91,7 +91,7 @@ function emptyQuery(
  *  typing-narrows tests, where a static fixture would ignore the filter. */
 function filteringQuery(
   commands: string[],
-  source: 'store' | 'session' = 'session',
+  source: HistoryQuery['source'] = 'session',
 ): (scope: RecallScope, text?: string) => Promise<HistoryQuery> {
   return (scope, text) => {
     const needle = text ?? ''
@@ -1345,5 +1345,74 @@ describe('queryLedgerHistory: the session fallback behind the generated types', 
     ledger.open('only', '/a', 'h1', () => undefined) // still running
     const q = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1')
     expect(q.coverage).toBe(null)
+  })
+})
+
+// ── Durable history is not running (nocx-rtg0.15) ───────────────────────
+//
+// Three states of `source`, not two. Before this the panel showed the same
+// "no history yet / commands you run will appear here" whether the store had
+// answered with nothing or there was no store to answer from — so a terminal
+// that is keeping nothing looked exactly like a brand new one, and the
+// description was a promise nothing behind it could keep.
+describe('recall: the store is not there', () => {
+  it('an unavailable store reads as not being kept, never as "no history yet"', async () => {
+    const { container, ed, view } = setupRecall({ query: emptyQuery('unavailable') })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+
+    const panel = panelOf(container)
+    const title = panel.querySelector<HTMLElement>('.ui-empty-state__title')?.textContent
+    const desc = panel.querySelector<HTMLElement>('.ui-empty-state__desc')?.textContent
+    expect(title).toBe('history is not being kept')
+    expect(desc).toBe('see Settings → History for why')
+    // The promise that used to be made here.
+    expect(panel.textContent).not.toContain('commands you run will appear here')
+  })
+
+  it('an empty store still reads as "no history yet" — the two must not be one', async () => {
+    const { container, ed, view } = setupRecall({ query: emptyQuery('session') })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+
+    const panel = panelOf(container)
+    expect(panel.querySelector<HTMLElement>('.ui-empty-state__title')?.textContent).toBe(
+      'no history yet',
+    )
+    expect(panel.querySelector<HTMLElement>('.ui-empty-state__desc')?.textContent).toBe(
+      'commands you run will appear here',
+    )
+  })
+
+  it('the header badge names which of the two it is', async () => {
+    const unavailable = setupRecall({ query: emptyQuery('unavailable') })
+    unavailable.ed.show()
+    key(unavailable.view, { key: 'ArrowUp' })
+    await settled(unavailable.container)
+    const gone = panelOf(unavailable.container).querySelector<HTMLElement>(
+      '.ui-floating-panel__source',
+    )
+    expect(gone?.textContent).toBe('not being kept')
+    expect(gone?.dataset.tone).toBe('danger')
+
+    const empty = setupRecall({ query: emptyQuery('session') })
+    empty.ed.show()
+    key(empty.view, { key: 'ArrowUp' })
+    await settled(empty.container)
+    const session = panelOf(empty.container).querySelector<HTMLElement>(
+      '.ui-floating-panel__source',
+    )
+    expect(session?.textContent).toBe('this session only')
+    expect(session?.dataset.tone).toBe('warning')
+  })
+
+  it('a store that answered carries no source badge at all', async () => {
+    const { container, ed, view } = setupRecall({ query: emptyQuery('store') })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(panelOf(container).querySelector<HTMLElement>('.ui-floating-panel__source')).toBeNull()
   })
 })

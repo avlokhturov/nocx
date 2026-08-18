@@ -349,7 +349,8 @@ func TestHistoryRecord_RejectsGarbageParams(t *testing.T) {
 }
 
 // With no store wired the request is accepted and recorded nowhere — the
-// same state where history.query answers source=session.
+// same state where history.query answers source=unavailable, because there
+// is no store to have answered.
 func TestHistoryRecord_NoStoreIsAcceptedAndRecordsNothing(t *testing.T) {
 	ws, stop := newHistoryWSServer(t, nil)
 	defer stop()
@@ -360,8 +361,8 @@ func TestHistoryRecord_NoStoreIsAcceptedAndRecordsNothing(t *testing.T) {
 		t.Fatalf("record error: %+v", resp.Error)
 	}
 	got := decodeHistoryResult(t, vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 2))
-	if got.Source != "session" {
-		t.Fatalf("source = %q, want session", got.Source)
+	if got.Source != "unavailable" {
+		t.Fatalf("source = %q, want unavailable", got.Source)
 	}
 }
 

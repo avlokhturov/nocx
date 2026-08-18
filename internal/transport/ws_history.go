@@ -83,13 +83,23 @@ const defaultHistoryPageLimit = 50
 // whole history in one request.
 const maxHistoryPageLimit = 200
 
-// historyQueryHandlers answers history.query. It holds the ContentOperation
-// and the Responder; nothing else (migration map, "history.* — the content
-// domain"). A nil operation is the content store not being wired: the
-// handler then answers the honest source=session fallback, never an error.
+// historyQueryHandlers answers history.query. It holds the ContentOperation,
+// the durable-history availability read, and the Responder; nothing else
+// (migration map, "history.* — the content domain").
+//
+// Two things mean "there is no store to answer from" and both answer
+// source=unavailable, never an error: a nil operation (nothing wired at all)
+// and an availability that says durable history is not running. The second
+// is the production case — the composition root injects a stub ContentDB on
+// its degrade paths, so the operation is non-nil and the store would answer
+// ErrNotImplemented; before this the honest fallback below was unreachable
+// in the shipped app and the overlay got a -32603 instead (nocx-rtg0.15).
 type historyQueryHandlers struct {
 	op capability.ContentOperation // nil → content store not wired
-	r  Responder
+	// durable reports whether durable history is running. Never nil; the
+	// registration supplies the server's reader.
+	durable func() bool
+	r       Responder
 }
 
 // handleHistoryQuery serves the history.query method.
@@ -103,8 +113,12 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 	}
 
 	// The default answer is the honest one when there is nothing to answer
-	// from: session, empty, exhausted, scope echoed, no horizon. The overlay
-	// labels it "this session only" rather than presenting it as all history.
+	// from: empty, exhausted, scope echoed, no horizon. Source starts at
+	// session — the store answered and holds nothing — and becomes store
+	// below when it holds rows, or unavailable when there is no store at
+	// all. Three states, because the first two used to be one and the
+	// overlay could not tell a terminal that has forgotten nothing from a
+	// terminal that is not keeping anything.
 	resp := historyQueryResponse{
 		Entries:   []historyQueryEntry{},
 		Scope:     string(scope),
@@ -112,7 +126,8 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 		Source:    "session",
 	}
 
-	if h.op == nil {
+	if h.op == nil || !h.durable() {
+		resp.Source = "unavailable"
 		_ = h.r.TryResult(req.ID, mustMarshal(resp))
 		return
 	}

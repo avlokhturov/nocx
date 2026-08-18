@@ -573,6 +573,11 @@ func New(opts ...Option) (*App, error) {
 	// theirs and never discard, because text somebody wrote cannot
 	// (.internal/specs/2026-08-16-notes-design.md §4.2).
 	var contentKey []byte
+	// The key's own failure text, kept rather than only logged: it is the
+	// second line of the notice the History settings raise when durable
+	// history is not running (nocx-rtg0.15). A reason without a detail is a
+	// dead end for whoever has to act on it.
+	var contentKeyErr string
 	if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
 		Registry:    reg,
 		KeyID:       vault.ContentKeyID,
@@ -585,6 +590,7 @@ func New(opts ...Option) (*App, error) {
 		Logger:   logger,
 	}); keyErr != nil {
 		slogger.Warn("encrypted local stores unavailable; starting without them", "reason", keyErr)
+		contentKeyErr = keyErr.Error()
 	} else {
 		contentKey = key
 	}
@@ -637,13 +643,27 @@ func New(opts ...Option) (*App, error) {
 	// the app starts WITHOUT durable history (the stub) and says so: a
 	// terminal that refuses to start because its history database could not
 	// open a key is worse than one that starts and admits the gap.
+	//
+	// "Says so" is a product statement, not a log line, and until
+	// nocx-rtg0.15 it was only ever the latter: every path below warned and
+	// the Settings screen went on offering a keep-history toggle, a
+	// retention age and a two-number budget that governed nothing.
+	// historyStatus is what makes the sentence true. It is deliberately the
+	// SAME surface a runtime write failure will raise through
+	// (nocx-rtg0.10) — raise/clear, not one-shot, and not named after
+	// startup — so the product has one way to say "durable history is not
+	// running, here is why" and never grows a second (ws_history_status.go
+	// carries the argument in full).
+	historyStatus := transport.NewHistoryStatus()
 	historyPolicy := policyFromSettings(settingsRegistry)
 	budget, budgetErr := budgetFromSettings(settingsRegistry)
 	if budgetErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
+		historyStatus.Raise(transport.HistoryDegradeInvalidBudget, budgetErr.Error())
 	} else if contentKey == nil {
 		// The key already said why, once, above.
 		slogger.Warn("durable command history unavailable; starting without it", "reason", "no content key")
+		historyStatus.Raise(transport.HistoryDegradeNoKey, contentKeyErr)
 	} else if db, openErr := content.Open(ctx, content.Config{
 		Path:   filepath.Join(paths.DataDir(), "content.db"),
 		Key:    contentKey,
@@ -652,8 +672,15 @@ func New(opts ...Option) (*App, error) {
 		Logger: logger,
 	}); openErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
+		historyStatus.Raise(transport.HistoryDegradeOpenFailed, openErr.Error())
 	} else {
 		contentDB = db
+		// The closing event, named. Nothing has raised on this path today —
+		// Clear is a no-op on a status that starts available — but the
+		// interval is stated at both ends here rather than left to be
+		// inferred, and this is the line a retry (or nocx-rtg0.10's queue
+		// draining) closes its episode on.
+		historyStatus.Clear()
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
@@ -722,6 +749,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		transport.WithHistoryStatus(historyStatus),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),

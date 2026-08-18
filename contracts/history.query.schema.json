@@ -23,8 +23,8 @@
       "type": "boolean"
     },
     "source": {
-      "description": "Where the rows came from. 'session' means the in-memory ledger only — the persistent store is unavailable or empty, and the overlay must say so rather than presenting one session as all history. 'store' means the persistent store answered. Distinguishing them is the same rule as unavailable-never-collapses-into-unresolved: an empty answer and an unanswerable question must not look alike.",
-      "enum": ["store", "session"]
+      "description": "Where the rows came from — three states, because two of them used to be one and the overlay could not tell a terminal that has forgotten nothing from a terminal that is not keeping anything. 'store' means the persistent store answered, with or without matches on this rung. 'session' means the store answered and holds no rows at all, so what the overlay shows is the in-memory ledger and it must say 'this session only' rather than presenting one session as all history. 'unavailable' means there is no store to answer from: durable history is not running, and the reason is on history.status — the ONE place the product says so (contracts/history.status.schema.json). This field carries the same fact on the read path so the recall panel needs no second call; it does not own it. Distinguishing all three is the rule the store's own HasRows was written for: an empty answer and an unanswerable question must not look alike.",
+      "enum": ["store", "session", "unavailable"]
     },
     "coverage": {
       "description": "How far back the answer's source can see: the oldest retained entry's ended_at in Unix milliseconds, store-wide — independent of the rung and of the text filter, because retention is store-wide. With retention set, a search can only see part of history; the overlay renders this line so a partial answer is not presented as the whole one. Null when the source holds no completed rows (nothing to state a horizon for).",

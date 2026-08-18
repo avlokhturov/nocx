@@ -73,13 +73,15 @@ func (f *fakeHistoryDB) recorded() (content.Scope, string, string, int, *int64, 
 }
 
 // newHistoryWSServer builds a server with the given store wired. A nil db
-// leaves the store absent — the source=session state.
-func newHistoryWSServer(t *testing.T, db content.ContentDB) (*WSServer, func()) {
+// leaves the store absent — the source=unavailable state. Extra options let
+// a test wire the durable-history status (ws_history_status_test.go).
+func newHistoryWSServer(t *testing.T, db content.ContentDB, extra ...WSServerOption) (*WSServer, func()) {
 	t.Helper()
 	opts := []WSServerOption{}
 	if db != nil {
 		opts = append(opts, WithContentDB(db))
 	}
+	opts = append(opts, extra...)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -123,9 +125,10 @@ func decodeHistoryResult(t *testing.T, resp *vaultRPCResult) historyQueryResult 
 
 // ── source semantics ──────────────────────────────────────────────────────
 
-// With no store wired the method must answer session, never store: an empty
-// answer and an unanswerable question must not look alike.
-func TestHistoryQuery_NoStoreAnswersSession(t *testing.T) {
+// With no store wired the method must answer unavailable — neither store
+// (nothing looked) nor session (the store looked and holds nothing): an
+// empty answer and an unanswerable question must not look alike.
+func TestHistoryQuery_NoStoreAnswersUnavailable(t *testing.T) {
 	ws, stop := newHistoryWSServer(t, nil)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -134,8 +137,8 @@ func TestHistoryQuery_NoStoreAnswersSession(t *testing.T) {
 	}, 1)
 
 	got := decodeHistoryResult(t, resp)
-	if got.Source != "session" {
-		t.Fatalf("source = %q, want session", got.Source)
+	if got.Source != "unavailable" {
+		t.Fatalf("source = %q, want unavailable", got.Source)
 	}
 	if got.Scope != "directory" {
 		t.Fatalf("scope = %q, want directory echoed", got.Scope)
@@ -385,8 +388,20 @@ func TestHistoryQuery_CoverageOverTheWire(t *testing.T) {
 		}
 	})
 
-	t.Run("empty store reports null, not absence", func(t *testing.T) {
+	t.Run("no store reports null, not absence", func(t *testing.T) {
 		ws, stop := newHistoryWSServer(t, nil)
+		defer stop()
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)
+		got := decodeHistoryResult(t, resp)
+		if got.Source != "unavailable" || got.Coverage != nil {
+			t.Fatalf("unavailable answer coverage = %v, want null (no horizon to state)", got.Coverage)
+		}
+	})
+
+	t.Run("empty store reports null, not absence", func(t *testing.T) {
+		fake := &fakeHistoryDB{page: content.HistoryPage{Exhausted: true}} // HasRows false
+		ws, stop := newHistoryWSServer(t, fake)
 		defer stop()
 		conn := connectWS(t, ws)
 		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)

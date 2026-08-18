@@ -26,6 +26,7 @@ import type { ConnectionsPasswordRequest } from './generated/connections.passwor
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
+import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { AgentClient } from './agent'
@@ -304,6 +305,12 @@ async function main() {
   tm.onActivity = reportActivity
 
   const observer = new SettingsObserver(dispatcher)
+  // Durable-history availability (nocx-rtg0.15). Started here rather than
+  // inside Settings so the status is already known when the tab opens, and
+  // so a degrade raised while the app runs (nocx-rtg0.10 will raise through
+  // the same surface) reaches a screen that is already on the section.
+  const historyStatusStore = new HistoryStatusStore(client)
+  historyStatusStore.start()
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -322,6 +329,7 @@ async function main() {
         endpointsClient,
         agentClient,
         snippetsStore,
+        historyStatusStore,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

@@ -61,8 +61,21 @@ import {
   GroupedRail,
   type GroupedRailItem,
   IconButton,
+  StatusCard,
 } from './ui'
 import { ResetIcon } from './ui/icons'
+import {
+  historyUnavailableSentence,
+  type HistoryStatus,
+  type HistoryStatusStore,
+} from './history-status'
+
+/** The section whose controls the history degrade contradicts. It is the
+ *  Go-declared section string (internal/settings/settings.go), matched here
+ *  rather than carried on settings.describe: the wire has no section object
+ *  at all, and inventing one so that one section can carry one notice would
+ *  make every future section-level fact a schema change. */
+const HISTORY_SECTION = 'History'
 
 export type SettingsPage =
   | { kind: 'generated'; id: string; title: string; groupId?: string }
@@ -145,6 +158,13 @@ export interface SettingsComponentProps {
    *  a snippet saved here is in the next fire without a notification on the
    *  wire (design §6). Absent in an embedding with no snippets service. */
   snippetsStore?: SnippetsStore
+  /** Whether durable command history is actually running (nocx-rtg0.15).
+   *  The History section's five controls all describe a store, so when
+   *  there is no store the section has to say so where the user is looking
+   *  — a soft degrade visible only in a log is how a feature that does not
+   *  exist survives a release. Absent in an embedding with no backend; the
+   *  section then makes no claim either way. */
+  historyStatus?: HistoryStatusStore
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -177,6 +197,20 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // lookup table in the frontend (nocx-dgsp).
   const [groups, setGroups] = createSignal<SettingsGroup[]>([])
   const [sectionGroups, setSectionGroups] = createSignal<Record<string, string>>({})
+  // Durable-history availability, mirrored from the store so the section can
+  // render it. null is "not read yet" and renders nothing — a surface shows
+  // its placeholder rather than a lie in either direction.
+  const [historyStatus, setHistoryStatus] = createSignal<HistoryStatus | null>(null)
+  onMount(() => {
+    const store = props.historyStatus
+    if (store === undefined) return
+    setHistoryStatus(store.status())
+    onCleanup(store.subscribe((s) => setHistoryStatus(s)))
+  })
+  /** The two lines of the History notice, or null when there is nothing to
+   *  say. One owner for the words (history-status.ts) — the recall panel
+   *  tells the same person the same thing a moment later. */
+  const historyNotice = createMemo(() => historyUnavailableSentence(historyStatus()))
 
   // Promise that resolves when the initial data load finishes.
   let resolveReady: () => void
@@ -1082,6 +1116,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
                       title={section}
                       divided
                     >
+                      {/* The degrade notice, above the controls it
+                          contradicts. A kit StatusCard, placed and never
+                          repainted: a state plus what to do about it is
+                          exactly what it is for, and hand-rolling a
+                          coloured div here is the defect two epics spent
+                          themselves unwinding (ui/README.md). */}
+                      <Show when={section === HISTORY_SECTION && historyNotice() !== null}>
+                        <StatusCard
+                          tone="warning"
+                          title={historyNotice()!.title}
+                          description={historyNotice()!.description}
+                        />
+                      </Show>
                       <For each={sectionDecls()}>
                         {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
                       </For>
