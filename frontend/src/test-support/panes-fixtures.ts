@@ -632,6 +632,38 @@ export function makeLayoutBackend(): LayoutClientLike & {
       return Promise.resolve({ id })
     },
 
+    renameWorkspace: (id, name) => {
+      const refused = refuse<never>('renameWorkspace')
+      if (refused) return refused
+      // The backend refuses a blank workspace name, and so does this — the
+      // same reason createWorkspace does: a fake that accepted one would let
+      // the renderer ship a nameless workspace and stay green.
+      if (name.trim() === '') return Promise.reject(new Error('name is required'))
+      if (id === DEFAULT_WS) return Promise.reject(new Error('the default workspace has no name'))
+      const workspace = made.find((w) => w.id === id)
+      if (!workspace) return Promise.reject(new Error('no such workspace'))
+      const renamed = { ...workspace, name }
+      made = made.map((w) => (w.id === id ? renamed : w))
+      return Promise.resolve({ workspace: renamed })
+    },
+
+    reorderWorkspaces: (ids) => {
+      const refused = refuse<never>('reorderWorkspaces')
+      if (refused) return refused
+      // A PERMUTATION or nothing, exactly as content.ReorderWorkspaces
+      // requires: a fake that accepted a subset would let the renderer send
+      // one and never learn that the real store refuses it.
+      const held = allWorkspaces().map((w) => w.id)
+      const sorted = (xs: readonly string[]) => [...xs].sort()
+      if (ids.length !== held.length || sorted(ids).some((id, i) => id !== sorted(held)[i])) {
+        return Promise.reject(new Error('ids must be a permutation of the workspaces held'))
+      }
+      const byId = new Map(allWorkspaces().map((w) => [w.id, w]))
+      const workspaces = ids.map((id, position) => ({ ...byId.get(id)!, position }))
+      made = workspaces.filter((w) => w.id !== DEFAULT_WS)
+      return Promise.resolve({ workspaces })
+    },
+
     createTab: (t) => {
       const refused = refuse<never>('createTab')
       if (refused) return refused

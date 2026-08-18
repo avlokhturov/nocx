@@ -21,6 +21,8 @@ import type { PanesCreateResult } from '../generated/panes.create'
 import type { PanesCloseResult } from '../generated/panes.close'
 import type { WorkspacesCreateResult } from '../generated/workspaces.create'
 import type { WorkspacesCloseResult } from '../generated/workspaces.close'
+import type { WorkspacesRenameResult } from '../generated/workspaces.rename'
+import type { WorkspacesReorderResult } from '../generated/workspaces.reorder'
 
 /** The identity a close carries in case it empties the application: the
  *  backend mints the replacement tab, but its ids are DURABLE and therefore
@@ -61,6 +63,8 @@ export interface LayoutClientLike {
   read(): Promise<LayoutReadResult>
   createWorkspace(workspace: WorkspaceFacts): Promise<WorkspacesCreateResult>
   closeWorkspace(id: string, replacement: Replacement): Promise<WorkspacesCloseResult>
+  renameWorkspace(id: string, name: string): Promise<WorkspacesRenameResult>
+  reorderWorkspaces(ids: readonly string[]): Promise<WorkspacesReorderResult>
   createTab(tab: {
     id: string
     workspaceId: string
@@ -116,6 +120,25 @@ export class LayoutClient implements LayoutClientLike {
    *  standing with its invisible members inside it. */
   closeWorkspace(id: string, replacement: Replacement): Promise<WorkspacesCloseResult> {
     return this.dispatcher.call<WorkspacesCloseResult>('workspaces.close', { id, replacement })
+  }
+
+  /** A workspace's name, which unlike a tab's may never be cleared: a
+   *  workspace is always created deliberately and the backend refuses a blank
+   *  one, so `null` has no meaning here and the parameter is not nullable.
+   *  That is the difference from renameTab below, where null IS a value and
+   *  the tab falls back to its cwd. */
+  renameWorkspace(id: string, name: string): Promise<WorkspacesRenameResult> {
+    return this.dispatcher.call<WorkspacesRenameResult>('workspaces.rename', { id, name })
+  }
+
+  /** The WHOLE order, for the same reason reorderTabs takes one: the backend
+   *  writes positions 0..n-1 from this list and refuses anything that is not a
+   *  permutation of the workspaces it holds. A move of one member is not
+   *  expressible on this wire, deliberately — two clients each moving a
+   *  different member would otherwise both believe they had written the order.
+   */
+  reorderWorkspaces(ids: readonly string[]): Promise<WorkspacesReorderResult> {
+    return this.dispatcher.call<WorkspacesReorderResult>('workspaces.reorder', { ids: [...ids] })
   }
 
   /** Creation is always creation-with-content: a tab arrives with the pane it

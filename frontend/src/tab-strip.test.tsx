@@ -268,7 +268,7 @@ describe('the workspace chip (§4.3)', () => {
         { id: DEFAULT_WS, name: null },
         { id: 'ws-1', name: 'refactor-auth' },
       ],
-      closable: false,
+      currentId: DEFAULT_WS,
     })
 
     expect(chip()).not.toBeNull()
@@ -284,7 +284,7 @@ describe('the workspace chip (§4.3)', () => {
         { id: DEFAULT_WS, name: null },
         { id: 'ws-1', name: 'refactor-auth' },
       ],
-      closable: true,
+      currentId: 'ws-1',
     })
 
     expect(chip()!.textContent).toContain('refactor-auth')
@@ -300,7 +300,7 @@ describe('the workspace chip (§4.3)', () => {
         { id: DEFAULT_WS, name: null },
         { id: 'ws-1', name: 'refactor-auth' },
       ],
-      closable: false,
+      currentId: DEFAULT_WS,
     })
 
     openSwitcher()
@@ -320,7 +320,7 @@ describe('the workspace chip (§4.3)', () => {
         { id: DEFAULT_WS, name: null },
         { id: 'ws-1', name: 'refactor-auth' },
       ],
-      closable: true,
+      currentId: 'ws-1',
     })
 
     const rows = openSwitcher()
@@ -331,18 +331,31 @@ describe('the workspace chip (§4.3)', () => {
     expect(switched).toEqual([DEFAULT_WS])
   })
 
-  it('offers New workspace, and Close workspace only where there is one to close', () => {
+  it("offers New workspace, and the current workspace's own actions after it", () => {
+    // The actions are HANDED IN (nocx-isoph.7): the chip does not decide which
+    // exist, so what is asserted here is that it places them, after
+    // navigation, for the workspace it is showing. Which rows exist for which
+    // workspace is workspace-menu.ts's rule and is tested there.
     const strip = setupHorizontalStrip()
     let created = 0
-    let closed = 0
+    const closed: string[] = []
     strip.onNewWorkspace = () => (created += 1)
-    strip.onCloseWorkspace = () => (closed += 1)
+    strip.workspaceMenuRows = (workspaceId) =>
+      workspaceId === DEFAULT_WS
+        ? []
+        : [
+            {
+              id: 'workspace-close',
+              label: 'Close workspace',
+              onSelect: () => closed.push(workspaceId),
+            },
+          ]
+
     strip.setWorkspaceChip({
       name: null,
       workspaces: [{ id: DEFAULT_WS, name: null }],
-      closable: false,
+      currentId: DEFAULT_WS,
     })
-
     const inDefault = openSwitcher().map((el) => el.textContent)
     expect(inDefault).toContain('New workspace…')
     expect(inDefault.join(' ')).not.toContain('Close workspace')
@@ -353,16 +366,23 @@ describe('the workspace chip (§4.3)', () => {
         { id: DEFAULT_WS, name: null },
         { id: 'ws-1', name: 'refactor-auth' },
       ],
-      closable: true,
+      currentId: 'ws-1',
     })
-    const inWorkspace = openSwitcher()
-    inWorkspace.find((el) => el.textContent === 'New workspace…')!.click()
+    const inWorkspace = openSwitcher().map((el) => el.textContent)
+    // Navigation first, then what acts on where you already are.
+    expect(inWorkspace.indexOf('New workspace…')).toBeLessThan(
+      inWorkspace.indexOf('Close workspace'),
+    )
+    openSwitcher()
+      .find((el) => el.textContent === 'New workspace…')!
+      .click()
     openSwitcher()
       .find((el) => el.textContent === 'Close workspace')!
       .click()
 
     expect(created).toBe(1)
-    expect(closed).toBe(1)
+    // The SUBJECT is the workspace in front, not a global "current".
+    expect(closed).toEqual(['ws-1'])
   })
 
   it('is absent until something says there is a chain behind it', () => {
@@ -372,7 +392,7 @@ describe('the workspace chip (§4.3)', () => {
 
   it('never appears in the vertical strip, which shows every workspace at once', () => {
     const { strip } = setupVerticalStrip()
-    strip.setWorkspaceChip({ name: 'refactor-auth', workspaces: [], closable: true })
+    strip.setWorkspaceChip({ name: 'refactor-auth', workspaces: [], currentId: 'ws-1' })
     expect(chip()).toBeNull()
   })
 })

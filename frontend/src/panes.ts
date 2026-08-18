@@ -34,6 +34,7 @@ import { tabLabel } from './layout/tab-label'
 import { stripOrder } from './layout/strip-order'
 import { lineageOrder } from './layout/strip-tree'
 import { workspaceAxis, type GroupAxis } from './layout/strip-groups'
+import { workspaceActionRows, type WorkspaceMenuRow } from './workspace-menu'
 import { isTabColour } from './layout/tab-colours'
 import { uuidv7 } from './layout/uuid7'
 import type { Pane as PaneRow, Workspace as WorkspaceRow } from './generated/layout.read'
@@ -950,7 +951,7 @@ export class PaneManager {
     old.onPin = null
     old.onSwitchWorkspace = null
     old.onNewWorkspace = null
-    old.onCloseWorkspace = null
+    old.workspaceMenuRows = null
 
     // Determine the old and new mount hosts based on orientation.
     // This handles both horizontal→vertical and vertical→horizontal transitions.
@@ -1013,7 +1014,7 @@ export class PaneManager {
     strip.onPin = (id, pinned) => void this.pinTab(id, pinned)
     strip.onSwitchWorkspace = (workspaceId) => this.switchWorkspace(workspaceId)
     strip.onNewWorkspace = () => void this.newWorkspace()
-    strip.onCloseWorkspace = () => void this.closeCurrentWorkspace()
+    strip.workspaceMenuRows = (workspaceId) => this.workspaceMenuRows(workspaceId)
   }
 
   // ── decoration: asked for here, decided by the backend ────────────────
@@ -1033,6 +1034,59 @@ export class PaneManager {
     if (typed === null) return
     const name = typed.trim() === '' ? null : typed.trim()
     await this.ask(() => this.layout.rename(tab.id, name), 'Could not rename the tab')
+  }
+
+  /**
+   * The rows a workspace's own menu offers (nocx-isoph.7).
+   *
+   * THE ROWS ARE BUILT ONCE, in workspace-menu.ts, and this method only says
+   * what set they are about. The chip's switcher appends the same rows for the
+   * workspace in front of it, so the two placements cannot come to disagree
+   * about what a workspace may do — which they would first do over the rule
+   * that the default offers nothing at all.
+   *
+   * The set is the BACKEND's list, never `workspaceRows()`: a reorder must be
+   * a permutation of what the store holds, and the display list can carry a
+   * synthesised default row the store has not written yet.
+   */
+  private workspaceMenuRows(workspaceId: string): WorkspaceMenuRow[] {
+    if (!this.layoutAvailable) return []
+    return workspaceActionRows(
+      workspaceId,
+      {
+        ids: this.layout.workspaces().map((w) => w.id),
+        defaultWorkspaceId: this.layout.defaultWorkspaceId(),
+      },
+      {
+        onRename: (id) => void this.renameWorkspace(id),
+        onReorder: (ids) => void this.reorderWorkspaces(ids),
+        onClose: (id) => void this.closeWorkspaceById(id),
+      },
+    )
+  }
+
+  /**
+   * Rename a workspace.
+   *
+   * UNLIKE A TAB, A WORKSPACE MAY NOT LOSE ITS NAME. A tab with no name falls
+   * back to the label its panes give it (§4.5); a workspace has no such
+   * fallback and the backend refuses a blank one, so an empty answer here is
+   * a cancel rather than a clear. The prompt is seeded with the current name
+   * because renaming is almost always an edit.
+   */
+  private async renameWorkspace(workspaceId: string): Promise<void> {
+    const current = this.layout.workspaces().find((w) => w.id === workspaceId)
+    if (!current) return
+    const typed = await showPrompt('Rename workspace', 'Name', current.name)
+    if (typed === null || typed.trim() === '') return
+    await this.ask(
+      () => this.layout.renameWorkspace(workspaceId, typed.trim()),
+      'Could not rename the workspace',
+    )
+  }
+
+  private async reorderWorkspaces(ids: readonly string[]): Promise<void> {
+    await this.ask(() => this.layout.reorderWorkspaces(ids), 'Could not reorder the workspaces')
   }
 
   private async recolourTab(paneId: number, colour: string | null): Promise<void> {
@@ -1211,9 +1265,19 @@ export class PaneManager {
    * exist (§4.2), so this refuses without asking rather than asking and then
    * refusing.
    */
-  async closeCurrentWorkspace(): Promise<void> {
+  /**
+   * Close a workspace, named by id.
+   *
+   * IT TAKES THE ID RATHER THAN CLOSING "THE CURRENT ONE" (nocx-isoph.7). The
+   * chip closes the workspace it is showing and a vertical heading closes the
+   * one it heads — and a vertical strip shows several at once, so "current"
+   * cannot be the parameter. Both reach this through the shared menu rows,
+   * which supply the subject; a second close path would be a second place
+   * holding the confirm, the membership walk and the default's refusal, and
+   * those three are exactly what must not drift apart.
+   */
+  async closeWorkspaceById(id: string): Promise<void> {
     if (!this.layoutAvailable) return
-    const id = this.currentWorkspaceId()
     if (id === this.layout.defaultWorkspaceId()) return
 
     // Membership is resolved by the CACHE OF THE CHAIN (LayoutStore), and
@@ -1842,8 +1906,8 @@ export class PaneManager {
     const current = this.currentWorkspaceId()
     return {
       name: axis.heading(current),
+      currentId: current,
       workspaces: this.workspaceRows().map((w) => ({ id: w.id, name: axis.heading(w.id) })),
-      closable: current !== this.layout.defaultWorkspaceId(),
     }
   }
 

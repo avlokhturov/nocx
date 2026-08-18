@@ -6,7 +6,7 @@ import {
   mountPaneManager,
   type RendererMock,
 } from './test-support/panes-fixtures'
-import { VerticalTabStrip } from './tab-strip'
+import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 
 // A window is a VIEWPORT, not a container (tabs/panes design §10): it shows
 // one workspace at a time, and the chip is that sentence in the UI. These
@@ -137,7 +137,7 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     const { manager, backend } = await twoWorkspaces()
     const id = manager.currentWorkspaceId()
 
-    await manager.closeCurrentWorkspace()
+    await manager.closeWorkspaceById(manager.currentWorkspaceId())
 
     expect(showConfirmMock).toHaveBeenCalled()
     await vi.waitFor(() => {
@@ -152,7 +152,7 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     const { manager, backend } = await twoWorkspaces()
     const id = manager.currentWorkspaceId()
 
-    await manager.closeCurrentWorkspace()
+    await manager.closeWorkspaceById(manager.currentWorkspaceId())
 
     expect(backend.rows().workspaces.map((w) => w.id)).toContain(id)
     expect(manager.currentWorkspaceId()).toBe(id)
@@ -161,7 +161,7 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
   it('refuses to close the default workspace without even asking', async () => {
     const { manager } = await mountPaneManager()
 
-    await manager.closeCurrentWorkspace()
+    await manager.closeWorkspaceById(manager.currentWorkspaceId())
 
     expect(showConfirmMock).not.toHaveBeenCalled()
   })
@@ -178,6 +178,88 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
       (el) => el.textContent,
     )
     expect(headings).toEqual(['refactor-auth'])
+  })
+
+  // ── nocx-isoph.7: the vertical strip is not a second-class placement ──
+
+  it('lets a user in VERTICAL placement create a workspace', async () => {
+    // THE BUG THIS CLOSES. The chip is horizontal-only by design — the
+    // vertical strip already shows every workspace, so a chip there would be
+    // a second answer to one question — and the consequence was that after
+    // changing one real setting a whole feature vanished with no explanation.
+    // Driven IN vertical placement, never in horizontal with a note that
+    // vertical is similar.
+    const { manager, bar, backend } = await mountPaneManager()
+    manager.replaceStrip(new VerticalTabStrip())
+    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(1))
+    expect(chip(bar)).toBeNull()
+
+    const before = backend.rows().workspaces.length
+    bar.querySelector<HTMLElement>('[aria-label="New workspace"]')!.click()
+
+    await vi.waitFor(() => {
+      expect(backend.rows().workspaces.length).toBe(before + 1)
+    })
+    const made = backend.rows().workspaces.find((w) => w.name === 'refactor-auth')!
+    // Creation is always creation-with-content, in either placement.
+    expect(backend.rows().tabs.some((t) => t.workspaceId === made.id)).toBe(true)
+  })
+
+  it('offers a named workspace its own actions from the heading it heads', async () => {
+    // ONE MECHANISM PLACED TWICE: these are the rows the chip shows for the
+    // workspace in front of it, opened here from the heading instead.
+    const { manager, bar } = await twoWorkspaces()
+    manager.replaceStrip(new VerticalTabStrip())
+    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
+
+    const heading = bar.querySelector<HTMLElement>('.tabstrip-group-heading')!
+    expect(heading.textContent).toBe('refactor-auth')
+    heading.click()
+
+    const rows = [...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')].map(
+      (el) => el.textContent,
+    )
+    expect(rows).toContain('Rename workspace…')
+    expect(rows).toContain('Close workspace')
+  })
+
+  it("renames a workspace from the strip, and the new name is the backend's", async () => {
+    const { manager, bar, backend } = await twoWorkspaces()
+    manager.replaceStrip(new VerticalTabStrip())
+    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
+    showPromptMock.mockResolvedValue('deploy')
+
+    bar.querySelector<HTMLElement>('.tabstrip-group-heading')!.click()
+    ;[...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')]
+      .find((el) => el.textContent === 'Rename workspace…')!
+      .click()
+
+    await vi.waitFor(() => {
+      expect(backend.rows().workspaces.map((w) => w.name)).toContain('deploy')
+    })
+    // The heading redraws from the store's answer, not from what was typed.
+    await vi.waitFor(() => {
+      expect(bar.querySelector('.tabstrip-group-heading')?.textContent).toBe('deploy')
+    })
+  })
+
+  it('never offers the default workspace a heading, or anything to do to it', async () => {
+    // The rule §4.2 fixes, restated at the new surface: the default has no
+    // heading, so it has nowhere to hang an action — and asking for its rows
+    // directly answers with none either.
+    const { manager, bar } = await twoWorkspaces()
+    manager.replaceStrip(new VerticalTabStrip())
+    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
+
+    const headings = [...bar.querySelectorAll('.tabstrip-group-heading')].map(
+      (el) => el.textContent,
+    )
+    expect(headings).toEqual(['refactor-auth'])
+
+    manager.switchWorkspace(DEFAULT_WS)
+    manager.replaceStrip(new HorizontalTabStrip())
+    await vi.waitFor(() => expect(chip(bar)).not.toBeNull())
+    expect(switcherRows(bar).map((el) => el.textContent)).not.toContain('Rename workspace…')
   })
 
   it('opens a new tab in the workspace the window is showing', async () => {

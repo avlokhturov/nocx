@@ -7,7 +7,8 @@ import { TAB_COLOURS } from './layout/tab-colours'
 import { groupStrip } from './layout/strip-groups'
 import { SearchField } from './ui/search-field'
 import { WorkspaceChip, type WorkspaceChipView } from './workspace-chip'
-import { ChevronDownIcon, KeyIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
+import type { WorkspaceMenuRow } from './workspace-menu'
+import { ChevronDownIcon, KeyIcon, LayersIcon, PlusIcon, TextQuoteIcon } from './ui/icons'
 import type { JSX, Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
@@ -90,8 +91,14 @@ interface StripGroupHeading {
 
 /** A heading in the strip's flat list of things to draw. An object rather
  *  than a bare string so it is told apart from a row by shape, and so it can
- *  keep a stable identity across redraws. */
+ *  keep a stable identity across redraws.
+ *
+ *  It carries its group's KEY as well as its text (nocx-isoph.7): a heading is
+ *  the vertical strip's handle on the workspace it heads, and a menu opened
+ *  from it has to name a subject. Deriving the subject from the text would be
+ *  a second, lossier identity — two workspaces may be called the same thing. */
 interface StripHeadingItem {
+  readonly key: string
   readonly heading: string
 }
 
@@ -124,11 +131,15 @@ export interface TabStrip {
   setWorkspaceChip(chip: WorkspaceChipView | null): void
   onSwitchWorkspace: ((workspaceId: string) => void) | null
   onNewWorkspace: (() => void) | null
+  /** The rows a workspace's own menu offers, asked for per heading
+   *  (nocx-isoph.7). The strip DECIDES none of them: it is handed the rows by
+   *  whoever owns the workspace set, exactly as it is handed a heading rather
+   *  than working one out. Null when there is no chain to act on. */
+  workspaceMenuRows: ((workspaceId: string) => WorkspaceMenuRow[]) | null
   /** The CURRENT workspace was asked to close. The strip names no workspace
    *  in this intent — it shows one at a time, so "the current one" is the
    *  only thing it can mean, and the ask and the close belong to
    *  PaneManager.closeWorkspace (nocx-isoph.6). */
-  onCloseWorkspace: (() => void) | null
   onActivate: ((paneId: number) => void) | null
   onClose: ((paneId: number) => void) | null
   onNewPane: (() => void) | null
@@ -199,7 +210,7 @@ abstract class TabStripBase implements TabStrip {
   onSnippets: (() => void) | null = null
   onSwitchWorkspace: ((workspaceId: string) => void) | null = null
   onNewWorkspace: (() => void) | null = null
-  onCloseWorkspace: (() => void) | null = null
+  workspaceMenuRows: ((workspaceId: string) => WorkspaceMenuRow[]) | null = null
 
   /** Subclasses set up container attributes (class, aria). */
   protected abstract setupContainer(container: HTMLElement): void
@@ -223,6 +234,15 @@ abstract class TabStripBase implements TabStrip {
       // singleton on screen, and a component per tab would be N listeners
       // for a thing at most one of which can be open.
       const [menu, setMenu] = createSignal<{ paneId: number; x: number; y: number } | null>(null)
+      // The workspace menu is its OWN signal rather than a variant of the tab
+      // menu above: the two are opened from different things, carry different
+      // rows and can be reached in the same frame, and one signal holding
+      // either would make "which menu is open" a question with two answers.
+      const [workspaceMenu, setWorkspaceMenu] = createSignal<{
+        rows: WorkspaceMenuRow[]
+        x: number
+        y: number
+      } | null>(null)
       const [groupHeadings, setGroupHeadings] = createSignal<StripGroupHeading[]>(
         this.pendingHeadings,
       )
@@ -262,7 +282,7 @@ abstract class TabStripBase implements TabStrip {
       const headingItem = (key: string, heading: string): StripHeadingItem => {
         const cached = headingItems.get(`${key} ${heading}`)
         if (cached) return cached
-        const item: StripHeadingItem = { heading }
+        const item: StripHeadingItem = { key, heading }
         headingItems.set(`${key} ${heading}`, item)
         return item
       }
@@ -339,8 +359,30 @@ abstract class TabStripBase implements TabStrip {
        *  per item, exactly as they were before headings existed. */
       const drawItem = (item: StripHeadingItem | PaneView): JSX.Element => {
         if (isHeading(item)) {
+          // THE HEADING IS THE HANDLE (nocx-isoph.7). A vertical strip shows
+          // every workspace at once, so the thing standing above a group is
+          // where that workspace's own actions belong — the chip is the same
+          // mechanism placed on the other orientation, and both take their
+          // rows from workspace-menu.ts so they cannot come to disagree about
+          // what a workspace may do.
+          //
+          // It stays a heading and does not become a button: the element, its
+          // class and its Caption are unchanged, and the click is added to
+          // them. A row that turned into a control when a second workspace
+          // existed would be chrome appearing on a counter, which is the rule
+          // §4.2 withdrew.
           return (
-            <div class="tabstrip-group-heading">
+            <div
+              class="tabstrip-group-heading"
+              onClick={(e: MouseEvent) => {
+                const rows = this.workspaceMenuRows?.(item.key) ?? []
+                if (rows.length === 0) return
+                const anchor = e.currentTarget
+                if (!(anchor instanceof HTMLElement)) return
+                const rect = anchor.getBoundingClientRect()
+                setWorkspaceMenu({ rows, x: rect.left, y: rect.bottom })
+              }}
+            >
               <Caption size="context">{item.heading}</Caption>
             </div>
           )
@@ -396,6 +438,22 @@ abstract class TabStripBase implements TabStrip {
                 <IconButton ariaLabel="New tab" square onClick={() => this.onNewPane?.()}>
                   <PlusIcon />
                 </IconButton>
+                {/* CREATION CANNOT LIVE ON A HEADING (nocx-isoph.7). The
+                    default workspace draws none — that is §4.2 and it is not
+                    negotiable — so a user whose tabs are all in the default
+                    sees no heading at all, and a create offered only there
+                    would be unreachable exactly for the person who has never
+                    made a workspace. It is an action of the STRIP, so it sits
+                    with the strip's actions, and the chip carries the same
+                    intent on the other orientation. */}
+                <IconButton
+                  ariaLabel="New workspace"
+                  title="New workspace"
+                  onClick={() => this.onNewWorkspace?.()}
+                  tabIndex={-1}
+                >
+                  <LayersIcon />
+                </IconButton>
                 <IconButton
                   ariaLabel="Quick connect"
                   onClick={() => this.onQuickConnect?.()}
@@ -426,11 +484,13 @@ abstract class TabStripBase implements TabStrip {
             {(view) => (
               <WorkspaceChip
                 name={view.name}
+                currentId={view.currentId}
                 workspaces={view.workspaces}
-                closable={view.closable}
                 onSwitch={(id) => this.onSwitchWorkspace?.(id)}
                 onNew={() => this.onNewWorkspace?.()}
-                onClose={() => this.onCloseWorkspace?.()}
+                // The SAME rows a vertical heading opens, for the workspace
+                // this chip is showing (nocx-isoph.7).
+                actions={this.workspaceMenuRows?.(view.currentId) ?? []}
               />
             )}
           </Show>
@@ -451,6 +511,18 @@ abstract class TabStripBase implements TabStrip {
                 items={menuItems(open.paneId)}
                 onClose={() => setMenu(null)}
                 data-testid="tab-menu"
+              />
+            )}
+          </Show>
+          <Show when={workspaceMenu()} keyed>
+            {(open) => (
+              <ContextMenu
+                open
+                x={open.x}
+                y={open.y}
+                items={open.rows}
+                onClose={() => setWorkspaceMenu(null)}
+                data-testid="workspace-menu"
               />
             )}
           </Show>

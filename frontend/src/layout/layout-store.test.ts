@@ -107,11 +107,88 @@ function fakeClient(over: Partial<LayoutClientLike> = {}): LayoutClientLike & {
       calls.push(['workspaces.close', { id, replacement }])
       return Promise.resolve({ id })
     },
+    renameWorkspace: (id: string, name: string) => {
+      calls.push(['workspaces.rename', { id, name }])
+      return Promise.resolve({ workspace: { id, name, position: 0 } })
+    },
+    reorderWorkspaces: (ids: readonly string[]) => {
+      calls.push(['workspaces.reorder', { ids: [...ids] }])
+      return Promise.resolve({
+        workspaces: ids.map((id, position) => ({ id, name: id, position })),
+      })
+    },
   }
   return Object.assign({ calls }, base, over)
 }
 
 describe('LayoutStore', () => {
+  // ── nocx-isoph.7: a workspace can be renamed and the set reordered ──
+
+  it("writes a renamed workspace from the backend's answer, not from the request", async () => {
+    // The answer and the request differ on purpose here. A store that cached
+    // what it SENT would look identical in the happy case and be wrong in
+    // every case where the backend normalised, trimmed or refused — and the
+    // symptom would be a name that survives until the next read and then
+    // changes under the user.
+    const client = fakeClient({
+      read: () =>
+        Promise.resolve(snapshot({ workspaces: [{ id: 'ws-1', name: 'old', position: 0 }] })),
+      renameWorkspace: (id: string) =>
+        Promise.resolve({ workspace: { id, name: 'what the backend stored', position: 0 } }),
+    })
+    const store = new LayoutStore(client)
+    await store.load()
+
+    await store.renameWorkspace('ws-1', 'what the user typed')
+
+    expect(store.workspaces().map((w) => w.name)).toEqual(['what the backend stored'])
+  })
+
+  it('replaces the whole set on a reorder, in the order the backend answered', async () => {
+    const client = fakeClient({
+      read: () =>
+        Promise.resolve(
+          snapshot({
+            workspaces: [
+              { id: 'ws-1', name: 'one', position: 0 },
+              { id: 'ws-2', name: 'two', position: 1 },
+            ],
+          }),
+        ),
+    })
+    const store = new LayoutStore(client)
+    await store.load()
+
+    await store.reorderWorkspaces(['ws-2', 'ws-1'])
+
+    expect(store.workspaces().map((w) => w.id)).toEqual(['ws-2', 'ws-1'])
+    // The WHOLE order crosses the wire, because that is what the backend
+    // takes — it refuses anything that is not a permutation of what it holds.
+    expect(client.calls).toContainEqual(['workspaces.reorder', { ids: ['ws-2', 'ws-1'] }])
+  })
+
+  it('leaves the set exactly as it was when a reorder is refused', async () => {
+    const client = fakeClient({
+      read: () =>
+        Promise.resolve(
+          snapshot({
+            workspaces: [
+              { id: 'ws-1', name: 'one', position: 0 },
+              { id: 'ws-2', name: 'two', position: 1 },
+            ],
+          }),
+        ),
+      reorderWorkspaces: () => Promise.reject(new Error('not a permutation')),
+    })
+    const store = new LayoutStore(client)
+    await store.load()
+
+    await expect(store.reorderWorkspaces(['ws-2', 'ws-1'])).rejects.toThrow('not a permutation')
+
+    // No optimistic move to snap back from: the strip never moved.
+    expect(store.workspaces().map((w) => w.id)).toEqual(['ws-1', 'ws-2'])
+  })
+
   it('draws itself from the read and holds nothing before it', async () => {
     const client = fakeClient({
       read: () =>

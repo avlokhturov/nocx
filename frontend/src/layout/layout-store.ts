@@ -252,6 +252,35 @@ export class LayoutStore {
     return replacement
   }
 
+  /**
+   * Rename a workspace, and reorder the whole set (nocx-isoph.7).
+   *
+   * Both write the cache from the ANSWER, never from the request — the same
+   * rule the tab methods below follow and for the same reason: a backend that
+   * refuses leaves the strip exactly as it was, so there is no optimistic
+   * change to snap back from. That is also what makes the new name survive a
+   * renderer reload without the backend restarting: nothing here is state the
+   * renderer owns, only a cache of what the store answered.
+   */
+  async renameWorkspace(workspaceId: string, name: string): Promise<void> {
+    const renamed = (await this.client.renameWorkspace(workspaceId, name)).workspace
+    this.state = {
+      ...this.state,
+      workspaces: this.state.workspaces.map((w) => (w.id === renamed.id ? renamed : w)),
+    }
+    this.changed()
+  }
+
+  /** The WHOLE order, which is what the wire takes: the answer replaces the
+   *  set rather than being merged into it, because a permutation that came
+   *  back different from the one sent is the backend's word and not a
+   *  discrepancy to reconcile. */
+  async reorderWorkspaces(ids: readonly string[]): Promise<void> {
+    const reordered = (await this.client.reorderWorkspaces(ids)).workspaces
+    this.state = { ...this.state, workspaces: [...reordered] }
+    this.changed()
+  }
+
   /** The name the user typed, or null to go back to the label its panes
    *  give it — a real operation and the normal state. */
   async rename(tabId: string, name: string | null): Promise<void> {

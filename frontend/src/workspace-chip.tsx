@@ -43,18 +43,24 @@ interface WorkspaceChoice {
 export interface WorkspaceChipView {
   /** The current workspace's name, or null in the default workspace. */
   readonly name: string | null
+  /** WHICH workspace is in front, as an id. The name cannot stand in for it:
+   *  the default has none, and two workspaces may share one. It is what the
+   *  actions below are built for (nocx-isoph.7). */
+  readonly currentId: string
   /** Every workspace, in the order the switcher shows them. */
   readonly workspaces: readonly WorkspaceChoice[]
-  /** Whether closing the current workspace is offered. False in the default
-   *  workspace, which is permanent — the affordance does not exist rather
-   *  than existing and refusing. */
-  readonly closable: boolean
 }
 
 export interface WorkspaceChipProps extends WorkspaceChipView {
   onSwitch: (workspaceId: string) => void
   onNew: () => void
-  onClose: () => void
+  /** What the CURRENT workspace can have done to it, built by
+   *  workspace-menu.ts and handed in (nocx-isoph.7). The chip does not build
+   *  them and does not decide which exist: a vertical strip's heading opens
+   *  the same rows for the workspace it heads, and one owner is what keeps
+   *  the two from disagreeing — first of all about the default, which is
+   *  offered none. Empty is the ordinary state in the default workspace. */
+  actions: readonly { id: string; label: string; onSelect: () => void }[]
 }
 
 /**
@@ -80,13 +86,13 @@ export function WorkspaceChip(props: WorkspaceChipProps) {
       onSelect: () => props.onSwitch(w.id),
     }))
     rows.push({ id: 'workspace-new', label: 'New workspace…', onSelect: () => props.onNew() })
-    if (props.closable) {
-      rows.push({
-        id: 'workspace-close',
-        label: 'Close workspace',
-        onSelect: () => props.onClose(),
-      })
-    }
+    // The actions come last, after navigation: the switcher's first job is to
+    // get you somewhere (§4.3), so rows acting on where you already are must
+    // not sit between you and the place you were reaching for. Closing is
+    // among them now rather than being built here — `closable` was the chip's
+    // own reading of "not the default", and that rule belongs to
+    // workspace-menu.ts, which answers it identically for both placements.
+    rows.push(...props.actions.map((a) => ({ ...a })))
     return rows
   }
 
