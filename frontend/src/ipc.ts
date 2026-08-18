@@ -1,5 +1,6 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
+import { historyOutbox } from './history-client'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
 import type { SessionLiveness } from './generated/session.liveness'
@@ -343,6 +344,11 @@ export class WSClient {
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
+      // A socket came back, so anything the outbox kept can go now
+      // (nocx-rtg0.4). Fire-and-forget: a drain that fails leaves the queue
+      // exactly as it was and the next connect tries again, which is the
+      // whole point of keeping it.
+      void historyOutbox.drain()
       const ws = this.dispatcher.socket!
       ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer) {
