@@ -39,6 +39,7 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
+	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -151,6 +152,10 @@ type WSServer struct {
 	// notes is the notes library service backing the notes.* JSON-RPC
 	// methods. When nil, those methods return -32601.
 	notes *note.Service
+	// uiState owns what the app remembers without being asked (ADR-0033);
+	// it backs the uistate.* JSON-RPC methods. When nil, those return
+	// -32601 and the shell keeps its declared defaults.
+	uiState *uistate.Store
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
@@ -754,6 +759,14 @@ func WithSnippets(svc *snippet.Service) WSServerOption {
 // says the library is unavailable — never an empty list.
 func WithNotes(svc *note.Service) WSServerOption {
 	return func(s *WSServer) { s.notes = svc }
+}
+
+// WithUIState attaches the UI-state store, enabling the uistate.* JSON-RPC
+// methods. When nil, those methods return -32601 and the shell falls back to
+// its declared defaults — a sidebar at 240px that does not survive a restart,
+// which is what the product looked like before ADR-0033.
+func WithUIState(store *uistate.Store) WSServerOption {
+	return func(s *WSServer) { s.uiState = store }
 }
 
 // WithCaptureRegistry injects the pending-capture registry. Test seam:

@@ -37,8 +37,6 @@ import {
   type SidebarWidthController,
 } from './sidebar-width'
 
-const STORAGE_KEY = 'nocx.sidebar.collapsed'
-
 // ── Types ──────────────────────────────────────────────────────────────────
 
 /** Props every sidebar view receives from the shell. Views that need
@@ -79,10 +77,26 @@ export interface SidebarAction {
   readonly onActivate: () => void
 }
 
-/** Minimal storage surface — injectable so tests avoid localStorage quirks. */
-export interface SidebarStorage {
-  getItem(key: string): string | null
-  setItem(key: string, value: string): void
+/** The sidebar's remembered state, and the seam that records a change.
+ *
+ *  It used to be `localStorage` under `nocx.sidebar.collapsed`, which is
+ *  precisely the ad-hoc pattern ADR-0033 ends: localStorage may not carry
+ *  facts. The panel's collapse and its active view are UI state — what the
+ *  app must remember without being asked — so they live in the UI-state
+ *  document on the Go side and are reached over the control plane.
+ *
+ *  Injectable and null-able, so a test needs no transport and a shell
+ *  without a backend simply starts expanded on the first view. */
+export interface SidebarPersistence {
+  /** Collapsed at boot, as the document had it. */
+  readonly collapsed: boolean
+  /** The view that was on screen, or "" for none. An id this build no
+   *  longer registers falls back to the first view — the ordinary path for
+   *  a view that has since been renamed or removed. */
+  readonly activeViewId: string
+  /** Record a change. Fire-and-forget: the write is coalesced on the Go
+   *  side, and a failed one never reverts what is on screen. */
+  save(state: { collapsed: boolean; activeViewId: string }): void
 }
 
 /** Handle returned by mountSidebar. */
@@ -92,14 +106,6 @@ export interface SidebarHandle {
    *  the panel on the view when it is hidden, focuses the view's
    *  activity-bar button when it is already on screen. */
   revealView(viewId: string): void
-}
-
-function safeLocalStorage(): SidebarStorage | null {
-  try {
-    return window.localStorage
-  } catch {
-    return null
-  }
 }
 
 interface PanelRootProps {
@@ -197,7 +203,7 @@ interface SidebarSolidProps {
   panel: HTMLElement
   views: readonly SidebarViewDescriptor[]
   actions: readonly SidebarAction[]
-  storage: SidebarStorage | null
+  persistence: SidebarPersistence | null
   state: AppState
   storeActions: AppActions
   /** Reactive: true while the ACTIVE tab is a Settings tab (nocx-3e3b).
@@ -279,13 +285,19 @@ function SidebarSolid(props: SidebarSolidProps) {
     ),
   )
 
-  // ── Persist collapsed state ───────────────────────────────────────────
+  // ── Persist the collapse and the active view ──────────────────────────
   // Stands down while the Settings collapse is in force (nocx-3e3b): the
   // transient collapse is a consequence of where the user is, and persisting
-  // it would rewrite the preference the next boot restores from.
+  // it would rewrite the state the next boot restores from.
   createEffect(() => {
     if (props.getActiveTabIsSettings()) return
-    props.storage?.setItem(STORAGE_KEY, props.state.sidebar.collapsed ? '1' : '0')
+    props.persistence?.save({
+      collapsed: props.state.sidebar.collapsed,
+      // "" rather than null on the wire: the document's activeViewId is a
+      // string whose empty value means "no view", so the absence has one
+      // spelling instead of two.
+      activeViewId: props.state.sidebar.activeViewId ?? '',
+    })
   })
 
   // ── Collapsed class on the panel host (CSS in style.css) ──────────────
@@ -429,7 +441,10 @@ function SidebarSolid(props: SidebarSolidProps) {
  * @param panel              #sidebar element — Solid mounts the panel content here
  * @param views              view descriptors (top zone)
  * @param actions            action descriptors (bottom zone)
- * @param storage            injectable storage (defaults to localStorage)
+ * @param persistence        the sidebar's remembered state and the seam
+ *                           that records it (ADR-0033), from the UI-state
+ *                           document. Null starts expanded on the first
+ *                           view and remembers nothing.
  * @param getActiveProfileId reactive accessor for the active tab's
  *                           saved-profile id, forwarded to every view
  *                           (see SidebarViewProps). Defaults to null —
@@ -439,9 +454,10 @@ function SidebarSolid(props: SidebarSolidProps) {
  *                           to null — views that need real scope provide
  *                           one (the Files panel, design §5.4).
  * @param resize             the width controller (nocx-qmcu), created by
- *                           the composition root from the `sidebar.width`
- *                           setting. When present the panel renders the
- *                           kit ResizeHandle and drags resize #sidebar.
+ *                           the composition root from the UI-state
+ *                           document's width. When present the panel
+ *                           renders the kit ResizeHandle and drags resize
+ *                           #sidebar.
  * @param getActiveTabIsSettings reactive accessor for "the active tab is a
  *                           Settings tab" (nocx-3e3b): while true, the
  *                           panel collapses transiently on arrival — the
@@ -456,13 +472,12 @@ export function mountSidebar(
   panel: HTMLElement,
   views: readonly SidebarViewDescriptor[],
   actions: readonly SidebarAction[],
-  storage?: SidebarStorage | null,
+  persistence?: SidebarPersistence | null,
   getActiveProfileId?: () => string | null,
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   getActiveTabIsSettings?: () => boolean,
 ): SidebarHandle {
-  const safeStorage = storage ?? safeLocalStorage()
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
   const activeTabIsSettings = getActiveTabIsSettings ?? (() => false)
@@ -471,15 +486,23 @@ export function mountSidebar(
 
   // ── Fix nocx-rp2j: correct initial state ─────────────────────────────
   const firstViewId = views.length > 0 ? views[0].id : ''
-  const persistedCollapsed = safeStorage?.getItem(STORAGE_KEY) === '1'
+  const persistedCollapsed = persistence?.collapsed === true
+  // The remembered view, when this build still registers it. A renamed or
+  // removed id falls back to the first view rather than leaving the panel
+  // open on nothing — a value the app no longer understands is repaired,
+  // never treated as an error (ADR-0033 §4).
+  const rememberedViewId =
+    persistence && views.some((v) => v.id === persistence.activeViewId)
+      ? persistence.activeViewId
+      : firstViewId
 
-  // Set active view to the first registered view
-  if (firstViewId !== state.sidebar.activeViewId) {
-    storeActions.setActiveView(firstViewId)
+  // Set active view to the remembered one, else the first registered view
+  if (rememberedViewId !== state.sidebar.activeViewId) {
+    storeActions.setActiveView(rememberedViewId)
   }
 
   // Restore persisted collapsed state, or collapse if no views exist
-  if (persistedCollapsed || firstViewId === '') {
+  if (persistedCollapsed || rememberedViewId === '') {
     if (!state.sidebar.collapsed) {
       storeActions.collapseSidebar()
     }
@@ -493,7 +516,7 @@ export function mountSidebar(
         panel={panel}
         views={views}
         actions={actions}
-        storage={safeStorage}
+        persistence={persistence ?? null}
         state={state}
         storeActions={storeActions}
         getActiveTabIsSettings={activeTabIsSettings}

@@ -1,0 +1,263 @@
+package uistate
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/shady2k/nocx/internal/storage"
+)
+
+// DefaultDebounce is how long the store waits for changes to stop before it
+// writes. Longer than the gap between two frames of a window drag, shorter
+// than the gap between a user releasing the mouse and reaching for Cmd-Q.
+const DefaultDebounce = 500 * time.Millisecond
+
+// DefaultSampleInterval is how often Watch asks the platform where the window
+// is. Wails v2 offers no moved/resized callback, so a poll is the only seam
+// there is; combined with the debounce above, a drag of any length costs
+// exactly one write, 500ms after it stops.
+const DefaultSampleInterval = 250 * time.Millisecond
+
+// timerHandle is the part of *time.Timer this package uses. It exists so the
+// debounce can be driven deterministically from a test instead of by waiting —
+// a test that sleeps for the debounce is a test that depends on timing, which
+// AGENTS.md forbids and which would be the first thing to go flaky.
+type timerHandle interface {
+	Stop() bool
+	Reset(d time.Duration) bool
+}
+
+// afterFunc has time.AfterFunc's shape.
+type afterFunc func(d time.Duration, f func()) timerHandle
+
+func realAfterFunc(d time.Duration, f func()) timerHandle { return time.AfterFunc(d, f) }
+
+// Probe is what the platform can tell us about the live window. main.go
+// implements it over the Wails runtime and nothing else may: it is the one
+// place a Wails context exists, and keeping the interface here is what lets
+// every rule above it be tested without a display.
+type Probe interface {
+	// Geometry reports the window's current size, position and states, and
+	// the displays attached right now. ok is false when the platform cannot
+	// answer — the sample is then discarded rather than recorded as zeros.
+	Geometry() (window Window, displays []Display, ok bool)
+}
+
+// Store is the single owner of the UI-state document (AD-8). Reads are served
+// from memory; writes are coalesced and land on disk once changes stop.
+type Store struct {
+	doc storage.DocumentStore
+	log *slog.Logger
+
+	debounce time.Duration
+	after    afterFunc
+
+	mu    sync.Mutex
+	state Document
+	dirty bool
+	timer timerHandle
+	// closed makes Close idempotent and stops a timer that fires during
+	// shutdown from scheduling another write behind the final one.
+	closed bool
+}
+
+// New opens the UI-state document. It never fails: an absent document is an
+// ordinary state, and an unreadable one costs the user their window size, not
+// their launch. log may be nil.
+func New(doc storage.DocumentStore, log *slog.Logger) *Store {
+	return newStore(doc, log, DefaultDebounce, realAfterFunc)
+}
+
+func newStore(doc storage.DocumentStore, log *slog.Logger, debounce time.Duration, after afterFunc) *Store {
+	if log == nil {
+		log = slog.Default()
+	}
+	s := &Store{
+		doc:      doc,
+		log:      log,
+		debounce: debounce,
+		after:    after,
+		state:    defaultDocument(),
+	}
+	s.load()
+	return s
+}
+
+// load reads the document, repairing what it can and falling back to defaults
+// for what it cannot. Every failure here is a warning and a default — see the
+// table in ADR-0033 §4. It is deliberately quiet about absence: a first launch
+// is not a problem worth a log line above Debug.
+func (s *Store) load() {
+	var stored Document
+	found, err := s.doc.Read(DocumentName, &stored)
+	if err != nil {
+		s.log.Warn("uistate: document unreadable, starting from defaults", "error", err)
+		return
+	}
+	if !found {
+		s.log.Debug("uistate: no document yet, starting from defaults")
+		return
+	}
+
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		s.log.Warn("uistate: document unusable, starting from defaults", "error", err)
+		return
+	}
+	migrated, err := module.Migrate(raw, storage.SchemaVersion(stored.SchemaVersion))
+	if err != nil {
+		// Includes storage.ErrVersionTooNew: a document written by a newer
+		// build is left exactly as it is and simply not used. Truncating it
+		// would cost the user their layout on the build that understands it.
+		s.log.Warn("uistate: document version not understood, starting from defaults",
+			"error", err, "storedVersion", stored.SchemaVersion)
+		return
+	}
+	var doc Document
+	if err := json.Unmarshal(migrated, &doc); err != nil {
+		s.log.Warn("uistate: document unusable after migration, starting from defaults", "error", err)
+		return
+	}
+	s.state = sanitise(doc)
+}
+
+// Window reports the recorded geometry.
+func (s *Store) Window() Window {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state.Window
+}
+
+// SetWindow records geometry and schedules a write. Callers are expected to
+// call it freely — the debounce is the store's business, not theirs, which is
+// what keeps the write policy in one place instead of one place per caller.
+func (s *Store) SetWindow(w Window) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Window == w {
+		return
+	}
+	s.state.Window = w
+	s.markDirtyLocked()
+}
+
+// Layout reports the renderer's half of the document.
+func (s *Store) Layout() Layout {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Layout{Sidebar: s.state.Sidebar, ActiveTab: s.state.ActiveTab}
+}
+
+// SetLayout records the renderer's half and schedules a write. The sidebar
+// width is clamped here as well as on read, so the wire cannot install a value
+// the panel could not lay out.
+func (s *Store) SetLayout(l Layout) {
+	l.Sidebar.Width = ClampSidebarWidth(l.Sidebar.Width)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Sidebar == l.Sidebar && s.state.ActiveTab == l.ActiveTab {
+		return
+	}
+	s.state.Sidebar = l.Sidebar
+	s.state.ActiveTab = l.ActiveTab
+	s.markDirtyLocked()
+}
+
+// markDirtyLocked starts or restarts the coalescing window. Restarting rather
+// than letting the first timer run is what makes it a debounce: the write
+// happens after changes STOP, so a drag of any length is one write.
+func (s *Store) markDirtyLocked() {
+	if s.closed {
+		return
+	}
+	s.dirty = true
+	if s.timer == nil {
+		s.timer = s.after(s.debounce, s.flush)
+		return
+	}
+	s.timer.Reset(s.debounce)
+}
+
+// flush is the timer's callback: write whatever the state is now.
+func (s *Store) flush() {
+	s.mu.Lock()
+	if !s.dirty || s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.dirty = false
+	doc := s.state
+	s.mu.Unlock()
+
+	if err := s.doc.Write(DocumentName, doc); err != nil {
+		// The value stays applied in the running app and the next change
+		// retries. There is no UI to contradict here — nothing in the product
+		// promises this write succeeded — so a warning is the whole degrade.
+		s.log.Warn("uistate: could not write document", "error", err)
+	}
+}
+
+// Close writes any pending state synchronously and stops the timer, so a clean
+// quit inside the debounce window loses nothing. It is safe to call twice.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+	dirty := s.dirty
+	s.dirty = false
+	doc := s.state
+	s.mu.Unlock()
+
+	if !dirty {
+		return nil
+	}
+	if err := s.doc.Write(DocumentName, doc); err != nil {
+		s.log.Warn("uistate: could not write document at shutdown", "error", err)
+		return err
+	}
+	return nil
+}
+
+// Watch samples the platform on a ticker and records what it sees, until ctx
+// is cancelled. It is the save-on-change half of window persistence: Wails v2
+// has no moved/resized callback, so there is nothing to subscribe to.
+//
+// Sampling is cheap and idempotent — SetWindow returns immediately when
+// nothing moved — so a still window costs one interface call per tick and no
+// writes at all.
+func (s *Store) Watch(ctx context.Context, p Probe, interval time.Duration) {
+	if interval <= 0 {
+		interval = DefaultSampleInterval
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.Sample(p)
+		}
+	}
+}
+
+// Sample takes one reading. Exported because Watch's loop is untestable
+// without a clock and this is the part with the behaviour in it.
+func (s *Store) Sample(p Probe) {
+	live, displays, ok := p.Geometry()
+	if !ok {
+		return
+	}
+	live.Displays = Fingerprint(displays)
+	s.SetWindow(Observe(s.Window(), live))
+}

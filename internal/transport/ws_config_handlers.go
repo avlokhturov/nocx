@@ -2242,6 +2242,8 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 	snippetOp := capability.NewSnippetOperation(configGate, lane, s.snippets)
 	noteWired := s.notes != nil
 	noteOp := capability.NewNoteOperation(configGate, lane, s.notes)
+	uiStateWired := s.uiState != nil
+	uiStateOp := capability.NewUIStateOperation(configGate, lane, s.uiState)
 	var tabbyOp capability.TabbyImportOperation
 	if profilesWired || groupsWired || s.credentials != nil {
 		tabbyOp = capability.NewTabbyImportOperation(
@@ -2412,6 +2414,14 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		}),
 		regResponder(configSub, "notes.search", params(validateNoteSearchRaw), func(r Responder) handlerFunc {
 			h := noteHandlers{op: noteOp, wired: noteWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "uistate.get", noParams(), func(r Responder) handlerFunc {
+			h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "uistate.set", params(validateUIStateSetRaw), func(r Responder) handlerFunc {
+			h := uiStateHandlers{op: uiStateOp, wired: uiStateWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(tabbySub, "profiles.importTabby", params(validateTabbyImportRaw), func(r Responder) handlerFunc {

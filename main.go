@@ -16,6 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
+	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -40,12 +41,21 @@ func main() {
 
 	wailsApp := &WailsApp{backend: backend}
 
+	// The size the window opens at, from the UI-state document (ADR-0033).
+	// Wails wants it before there is a window, and therefore before
+	// ScreenGetAll can say what is attached — so this pass gets the saved
+	// size and the minimum, and startup() does the display-aware half:
+	// the clamp to the screen, the position, maximised and full-screen.
+	// Doing it in two passes rather than one is what makes the first frame
+	// the right size instead of 1024x768 followed by a jump.
+	opening := uistate.Restore(backend.UIState.Window(), nil)
+
 	err = wails.Run(&options.App{
 		Title:     "nocx",
-		Width:     1024,
-		Height:    768,
-		MinWidth:  640,
-		MinHeight: 480,
+		Width:     opening.Width,
+		Height:    opening.Height,
+		MinWidth:  uistate.MinWindowWidth,
+		MinHeight: uistate.MinWindowHeight,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
@@ -94,6 +104,10 @@ type WailsApp struct {
 	// updateInfo holds the most recent Check result. Apply takes no
 	// arguments — it applies the update that Check already verified.
 	updateInfo *update.UpdateInfo
+
+	// stopGeometry cancels the window-geometry sampler at shutdown, so no
+	// poll outlives the process.
+	stopGeometry context.CancelFunc
 }
 
 // Log logs a message from the frontend.
@@ -184,6 +198,113 @@ func (w *WailsApp) startup(ctx context.Context) {
 	if err := w.backend.Start(ctx); err != nil {
 		w.backend.Logger.Error("failed to start backend", "error", err)
 	}
+
+	w.restoreWindow(ctx)
+}
+
+// restoreWindow puts the window back where the user left it and then starts
+// watching it, which is the whole of nocx-mqie.1 on this side of the seam.
+//
+// The decision is not made here — uistate.Restore makes it, from the saved
+// geometry and the displays attached now — because a rule that can only run
+// with a window on a screen is a rule nobody can test. This function reads the
+// probe, applies the answer, and owns no policy of its own.
+func (w *WailsApp) restoreWindow(ctx context.Context) {
+	store := w.backend.UIState
+	probe := wailsWindowProbe{ctx: ctx}
+
+	_, displays, ok := probe.Geometry()
+	if !ok {
+		w.backend.Logger.Warn("window geometry unavailable; opening at the default")
+		return
+	}
+
+	p := uistate.Restore(store.Window(), displays)
+	runtime.WindowSetSize(ctx, p.Width, p.Height)
+	if p.UsePosition {
+		runtime.WindowSetPosition(ctx, p.X, p.Y)
+	} else {
+		// Either nothing was saved or the displays are not the ones the
+		// position was recorded on. Centring is the visible answer; the saved
+		// position stays in the document, so plugging the monitor back in
+		// restores the old arrangement.
+		runtime.WindowCenter(ctx)
+	}
+	// States, not pixels: entering them is what makes leaving them land on
+	// the normal geometry set just above.
+	if p.Maximise {
+		runtime.WindowMaximise(ctx)
+	}
+	if p.FullScreen {
+		runtime.WindowFullscreen(ctx)
+	}
+
+	// Save-on-change. Wails v2 has no moved/resized callback, so a poll is
+	// the only seam there is; the store coalesces what it sees, so a drag of
+	// any length costs one write half a second after it stops.
+	watchCtx, cancel := context.WithCancel(ctx)
+	w.stopGeometry = cancel
+	go store.Watch(watchCtx, probe, uistate.DefaultSampleInterval)
+}
+
+// wailsWindowProbe reads the live window and the attached displays through the
+// Wails runtime. It is the only implementation of uistate.Probe and it lives
+// here because this is the only place a Wails context exists — keeping the
+// interface on the other side is what lets every rule above it be tested
+// without a display.
+type wailsWindowProbe struct {
+	ctx context.Context
+}
+
+func (p wailsWindowProbe) Geometry() (uistate.Window, []uistate.Display, bool) {
+	if p.ctx == nil {
+		return uistate.Window{}, nil, false
+	}
+	width, height := runtime.WindowGetSize(p.ctx)
+	if width <= 0 || height <= 0 {
+		// The window is not laid out yet (or is minimised). A zero is not a
+		// geometry, and recording it would restore a window with no size.
+		return uistate.Window{}, nil, false
+	}
+	x, y := runtime.WindowGetPosition(p.ctx)
+
+	var displays []uistate.Display
+	screens, err := runtime.ScreenGetAll(p.ctx)
+	if err != nil {
+		// Reported as no displays, which uistate reads as "unknown" and
+		// treats as a mismatch: when we cannot tell, we open somewhere
+		// visible.
+		p.logScreenFailure(err)
+	} else {
+		displays = make([]uistate.Display, 0, len(screens))
+		for _, s := range screens {
+			// Size is the logical size Wails sets windows in; Width/Height
+			// are its deprecated predecessors and are all an older platform
+			// backend fills in.
+			sw, sh := s.Size.Width, s.Size.Height
+			if sw == 0 || sh == 0 {
+				sw, sh = s.Width, s.Height
+			}
+			displays = append(displays, uistate.Display{
+				Primary: s.IsPrimary,
+				Width:   sw,
+				Height:  sh,
+			})
+		}
+	}
+
+	return uistate.Window{
+		Width:      width,
+		Height:     height,
+		X:          x,
+		Y:          y,
+		Maximised:  runtime.WindowIsMaximised(p.ctx),
+		FullScreen: runtime.WindowIsFullscreen(p.ctx),
+	}, displays, true
+}
+
+func (p wailsWindowProbe) logScreenFailure(err error) {
+	slog.Debug("cannot enumerate displays; window position will not be restored", "error", err)
 }
 
 // wailsDialogService opens the platform file picker through the Wails
@@ -250,6 +371,13 @@ func upgradeInstallPath(execPath string) string {
 
 func (w *WailsApp) shutdown(ctx context.Context) {
 	w.backend.Logger.Info("Wails app shutting down")
+	// Before the backend, and before the runtime goes: the sampler reads the
+	// Wails context on every tick, and one more tick after the window is gone
+	// would be a read of something that no longer exists. The final write is
+	// the backend's job — App.Shutdown flushes the store.
+	if w.stopGeometry != nil {
+		w.stopGeometry()
+	}
 	w.backend.Shutdown(ctx)
 }
 
