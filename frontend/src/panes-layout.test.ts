@@ -439,3 +439,124 @@ describe('a row the renderer cannot draw', () => {
     expect(order[3]).not.toBe(view.id)
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The session names the pane it is the pipe of (nocx-rtg0.29)
+//
+// The backend derives a block's anchor and a session's workspace by walking
+// pane -> tab -> workspace from the id the renderer sends. Sending nothing is
+// the state this bead found the product in: every anchor NULL, every session
+// in the default workspace, with the id sitting in the renderer all along.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
+  /** design §7: the ids are UUIDv7 — version nibble 7, RFC 4122 variant. */
+  const UUIDV7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+  it('opens the session naming the pane the chain just stored', async () => {
+    const backend = makeLayoutBackend()
+    const { client } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(1))
+    const row = backend.rows().panes[0]
+    expect(row.id).toMatch(UUIDV7)
+
+    // The id the OPEN carried is the id the CHAIN holds — one identity, not
+    // two that happen to agree.
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(1))
+    expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: row.id })
+  })
+
+  it('names the pane on a second tab too, not just the first', async () => {
+    const backend = makeLayoutBackend()
+    const { manager, client } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(1))
+
+    manager.newPane()
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(2))
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+
+    const opened = client.openSession.mock.calls.map((c: unknown[]) => c[2])
+    expect(opened).toEqual(backend.rows().panes.map((r) => ({ paneId: r.id })))
+  })
+
+  it('names the pane on an ssh tab — an ssh tab is a pane too', async () => {
+    const backend = makeLayoutBackend()
+    const { manager, client } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(1))
+
+    manager.newSSHPane('ssh:test:1', 'example.test')
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(2))
+    await vi.waitFor(() => expect(client.openSSHSession).toHaveBeenCalledTimes(1))
+
+    const sshRow = backend.rows().panes.find((r) => r.kind === 'ssh')
+    expect(sshRow).toBeDefined()
+    expect(client.openSSHSession.mock.calls[0][3]).toEqual({ paneId: sshRow!.id })
+  })
+
+  // Criterion 4. No layout store is a DEGRADE, never a refusal: the id is
+  // still minted and still one identity for history.record and
+  // secrets.paneClosed — it simply names no row, so the open must not claim
+  // it does. Before this bead the path opened unanchored; it still must.
+  it('still opens — without a paneId — when there is no layout store', async () => {
+    const backend = makeLayoutBackend()
+    backend.fail('read', new Error('layout store not available'))
+    const { manager, client } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+
+    expect(manager.paneCount).toBe(1)
+    expect(client.openSession).toHaveBeenCalledTimes(1)
+    // Not `{ paneId: '' }`: an empty id is MALFORMED to validateOpenRaw and
+    // refused, while an absent one is legitimate. The two must not collapse.
+    expect(client.openSession.mock.calls[0][2]).toEqual({})
+    expect(backend.rows().panes).toHaveLength(0)
+  })
+
+  // Criterion 5. A create the backend REFUSED leaves an id naming no row.
+  // `open` refuses such an id (-32602, nocx-isoph.2) and that refusal stays,
+  // so the renderer must not send it — the session opens unanchored instead.
+  it('does not name a pane the backend refused to create', async () => {
+    const backend = makeLayoutBackend()
+    const { manager, client, bar } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+    )
+    await vi.waitFor(() => expect(backend.rows().panes).toHaveLength(1))
+    const admitted = backend.rows().panes[0].id
+
+    backend.fail('createTab', new Error('id already means something else'))
+    manager.newPane()
+
+    // The chrome went up and came back down — that is the existing contract,
+    // and reaching it is what says the refusal has been fully processed.
+    await vi.waitFor(() => expect(stripTabs(bar)).toHaveLength(1))
+
+    // THE INVARIANT, stated over every open rather than over a count: no
+    // session names a pane the chain does not hold. In practice the refused
+    // pane's chrome is disposed before its session is ever requested, so it
+    // opens nothing at all — but asserting the count would be asserting that
+    // race rather than the rule, and the rule is what must hold.
+    const held = backend.rows().panes.map((r) => r.id)
+    expect(held).toEqual([admitted])
+    for (const call of client.openSession.mock.calls as unknown[][]) {
+      const anchor = (call[2] ?? {}) as { paneId?: string }
+      if (anchor.paneId !== undefined) expect(held).toContain(anchor.paneId)
+    }
+    // And the pane that WAS admitted is still named — the refusal of one
+    // create does not unanchor the sessions around it.
+    expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: admitted })
+  })
+})

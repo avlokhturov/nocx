@@ -269,6 +269,102 @@ describe('openSession', () => {
     }
   })
 
+  // ── the open names the pane it is opening (nocx-rtg0.29) ──────────────
+  //
+  // The renderer is the only end that knows WHICH pane it is opening. The
+  // backend walks pane → tab → workspace itself and, told nothing, can only
+  // answer "the default" — so an opener that drops the id leaves every
+  // block this session records anchored on nothing.
+  describe('the open names the pane it is opening (nocx-rtg0.29)', () => {
+    const PANE = '0199c5e2-8f3a-7c41-b9d6-2e7a04f18b53'
+
+    async function connected(): Promise<WSClient> {
+      const client = new WSClient(mockDispatcher())
+      const connecting = client.connect(9876)
+      socket().serverAccepts()
+      await connecting
+      return client
+    }
+
+    it('carries it on a local open', async () => {
+      const client = await connected()
+      void client.openSession(132, 43, { paneId: PANE })
+      expect(socket().requests()[0].params).toEqual({
+        cols: 132,
+        rows: 43,
+        xpixel: 0,
+        ypixel: 0,
+        paneId: PANE,
+      })
+    })
+
+    it('carries it on a profile ssh open', async () => {
+      const client = await connected()
+      void client.openSSHSession(80, 24, 'ssh:test:1', { paneId: PANE })
+      expect(socket().requests()[0].params).toEqual({
+        cols: 80,
+        rows: 24,
+        xpixel: 0,
+        ypixel: 0,
+        kind: 'ssh',
+        profileId: 'ssh:test:1',
+        paneId: PANE,
+      })
+    })
+
+    it('carries it on a direct-host ssh open — an ssh tab is a pane too', async () => {
+      const client = await connected()
+      void client.openSSHSessionByHost(80, 24, '192.168.0.93', 'pi', { paneId: PANE })
+      expect(socket().requests()[0].params).toEqual({
+        cols: 80,
+        rows: 24,
+        xpixel: 0,
+        ypixel: 0,
+        kind: 'ssh',
+        host: '192.168.0.93',
+        user: 'pi',
+        paneId: PANE,
+      })
+    })
+
+    // "Absent is legitimate — a session attached to no recorded pane" is
+    // what validateOpenRaw says, while a MALFORMED id is refused (-32602).
+    // An empty string is the second of those, not the first, so the key
+    // comes OFF the params rather than riding along blank.
+    it('omits the key entirely when there is no pane row, on all three openers', async () => {
+      const client = await connected()
+      void client.openSession(80, 24)
+      void client.openSSHSession(80, 24, 'ssh:test:1')
+      void client.openSSHSessionByHost(80, 24, '192.168.0.93', 'pi')
+
+      const requests = socket().requests()
+      expect(requests).toHaveLength(3)
+      for (const req of requests) {
+        expect(req.params).not.toHaveProperty('paneId')
+      }
+    })
+  })
+
+  // The workspace is DERIVED, never sent: the renderer has no name for the
+  // default because the default never renders, so the ack is the only place
+  // it learns where the session landed (nocx-fraus).
+  it('reads the workspace the backend resolved for the session (nocx-fraus)', async () => {
+    const client = new WSClient(mockDispatcher())
+    const connecting = client.connect(9876)
+    socket().serverAccepts()
+    await connecting
+
+    const opening = client.openSession(80, 24)
+    const openID = socket().requests()[0].id
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: openID,
+      result: { sessionId: SID, ...OPEN_IDENTITY, workspaceId: 'workspace:default' },
+    })
+
+    await expect(opening.then((s) => s.workspaceId)).resolves.toBe('workspace:default')
+  })
+
   it('resolves with a SessionHandle carrying the server-assigned id (AD-7)', async () => {
     const { session } = await connectedSession()
     expect(session.sessionId).toBe(SID)

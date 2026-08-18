@@ -6,6 +6,7 @@
 //
 // See AD-7: sessionId is server-authoritative, cwd is set once at session
 // open. The fake must carry both.
+import type { PaneIdentity } from '../terminal-content'
 import { vi, type Mock } from 'vitest'
 import type {
   CommandMarkerCallback,
@@ -410,6 +411,18 @@ export function lifecycleHandler(
     }
     deliver({ ...params, sessionId })
   }
+}
+
+/**
+ * A pane whose row the chain ALREADY HOLDS — what every test that is not
+ * about the create race wants (nocx-rtg0.29).
+ *
+ * Spelled once rather than at each construction site: "registered" is the
+ * readiness TerminalContent waits on before it names the pane on `open`, and
+ * six literals would be six places to get the default wrong.
+ */
+export function anchoredPane(paneId = 'tab-wire-1'): PaneIdentity {
+  return { paneId, registered: Promise.resolve(true) }
 }
 
 /**

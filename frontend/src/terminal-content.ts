@@ -64,7 +64,7 @@ import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger, type CommandRecord } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
@@ -183,6 +183,29 @@ function isTextEntry(el: Element | null): boolean {
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+}
+
+/**
+ * A pane's one identity, and the moment its row exists.
+ *
+ * ONE SHAPE FOR BOTH ENDS: PaneManager.mintPane returns exactly this and
+ * TerminalContent consumes exactly this, so "which pane is this" is not
+ * answered twice in two vocabularies that agree until they do not.
+ */
+export interface PaneIdentity {
+  /** The renderer-minted UUIDv7 (design §7). Durable, so it cannot come from
+   *  a backend instance, and it is one identity for history.record and
+   *  secrets.paneClosed WHETHER OR NOT a row was ever written for it. */
+  readonly paneId: string
+  /**
+   * True once the backend holds this pane's row; false when there is no
+   * layout store to hold it, or the backend refused the create.
+   *
+   * NEVER REJECTS — a refusal is the `false` answer, not an error, because
+   * every consumer has to handle "no row" anyway and a rejection would make
+   * the ordinary case look exceptional.
+   */
+  readonly registered: Promise<boolean>
 }
 
 /** The host callbacks a tab may hand a TerminalContent. Named rather than
@@ -532,10 +555,15 @@ export class TerminalContent extends BasePaneContent {
 
   constructor(
     private readonly client: WSClient,
-    /** The renderer-minted per-tab identity (nocx-tsajw): minted once per
-     *  tab by PaneManager, never reused, and carried on history.record so
-     *  the backend scopes pending captures to this tab. */
-    private readonly paneId: string,
+    /** The renderer-minted per-pane identity and its row's readiness
+     *  (nocx-tsajw, nocx-rtg0.29): minted once per pane by PaneManager,
+     *  never reused, carried on history.record so the backend scopes pending
+     *  captures to this pane, and on `open` so every block this session
+     *  records anchors on it. The identity replaced a bare string so the
+     *  readiness cannot be forgotten at a construction site — an optional
+     *  extra would have type-checked when omitted, which is the whole reason
+     *  the hooks below are named. */
+    private readonly pane: PaneIdentity,
     private readonly clipboard: ClipboardAccess,
     private readonly gate: ClipboardGate,
     private readonly banner: ClipboardBanner,
@@ -824,18 +852,41 @@ export class TerminalContent extends BasePaneContent {
 
   // ── PaneContent ──────────────────────────────────────────────────────────
 
-  private openRequestedSession(): Promise<SessionHandle> {
+  /**
+   * THE RACE THIS AWAIT CLOSES, and why the wait is on this side of it.
+   *
+   * A pane's ids are minted SYNCHRONOUSLY so the chrome can go up in the
+   * same turn the key was pressed (LayoutStore.OpenedTab), while the row
+   * itself is written by a round trip that is still in flight. `open`
+   * refuses a paneId that names no pane (-32602, nocx-isoph.2) — and that
+   * refusal is deliberate and stays, because "the pane you named does not
+   * exist" and "you named no pane" are different facts and defaulting the
+   * first would hide it. So naming the pane before its row lands would
+   * refuse the session and leave a tab that never appears.
+   *
+   * The session therefore waits for its pane's row. The alternative — let
+   * `open` default a pane it cannot resolve — would buy the same ordering by
+   * deleting the only check that can report a renderer minting ids the
+   * backend never agreed to.
+   *
+   * A pane with NO row is not an error and does not wait forever: registered
+   * resolves false (no layout store, or a create the backend refused) and
+   * the open goes out exactly as it did before this bead, unanchored.
+   */
+  private async openRequestedSession(): Promise<SessionHandle> {
+    const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
-      return this.client.openSession(this.cols, this.rows)
+      return this.client.openSession(this.cols, this.rows, anchor)
     }
     if (this.sshOpts.profileId) {
-      return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId)
+      return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId, anchor)
     }
     return this.client.openSSHSessionByHost(
       this.cols,
       this.rows,
       this.sshOpts.host,
       this.sshOpts.user,
+      anchor,
     )
   }
 
@@ -1731,7 +1782,7 @@ export class TerminalContent extends BasePaneContent {
           },
         },
         (rec, attempt) =>
-          recordCommand(this.client, this.paneId, rec, attempt).then((ack) => {
+          recordCommand(this.client, this.pane.paneId, rec, attempt).then((ack) => {
             if (ack) {
               const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
               this.attachRecordedAck(rec.id, block, ack)
@@ -2053,7 +2104,16 @@ export class TerminalContent extends BasePaneContent {
 
       this.session = session
       lifecycleSubscription.bindSession(session.sessionId)
-      log.info('nocx: session opened', { sid: session.sessionId, cwd: session.cwd || '' })
+      // The workspace is READ here, not assumed: the renderer named a pane
+      // and the backend walked pane -> tab -> workspace itself, so this is
+      // where a session's placement is learnt at all. It is recorded as
+      // provenance and drives nothing — §5.5 forbids any surface before the
+      // fence epic from acting on membership.
+      log.info('nocx: session opened', {
+        sid: session.sessionId,
+        cwd: session.cwd || '',
+        workspace: session.workspaceId,
+      })
 
       // The open ack carries the resolved launch policy and the refusal
       // reason (nocx-4t37.2): the capability control starts from the

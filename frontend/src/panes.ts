@@ -52,7 +52,7 @@ import type {
 } from './pane-content'
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
-import { TerminalContent, type HostKeyErrorEvidence } from './terminal-content'
+import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pane — chrome and lifecycle, delegates content to PaneContent
@@ -694,9 +694,19 @@ export class PaneManager {
    *
    * With no layout store the id is still a UUIDv7 and still one identity for
    * both history.record and secrets.paneClosed — it is simply not stored.
+   *
+   * THE READINESS COMES BACK WITH THE ID because the session may not name a
+   * pane before its row exists: `open` refuses a paneId it cannot resolve
+   * (-32602, nocx-isoph.2) and that refusal is deliberate, so a session
+   * racing its own pane row would be refused outright and leave a tab that
+   * never appears (nocx-rtg0.29). Returning the id alone is what made that
+   * race impossible to close at the call site.
    */
-  private mintPane(kind: 'local' | 'ssh', endpoint: string | null): string {
-    if (!this.layoutAvailable) return uuidv7()
+  private mintPane(kind: 'local' | 'ssh', endpoint: string | null): PaneIdentity {
+    // No store is a DEGRADE, not a refusal: the id is minted and simply
+    // names no row, which `registered: false` states rather than leaving the
+    // caller to infer it from a promise that never settles.
+    if (!this.layoutAvailable) return { paneId: uuidv7(), registered: Promise.resolve(false) }
     // Into the workspace the window is SHOWING, not into the default: the
     // strip draws one workspace's tabs, so a tab that opened somewhere else
     // would either vanish on arrival or drag the window away from where the
@@ -707,9 +717,14 @@ export class PaneManager {
     // on the same promise leave the first one's rejection unhandled, which
     // surfaces as a process-level unhandled rejection rather than as the
     // toast below.
-    void opened.created.then(
+    //
+    // Its BOOLEAN is the pane's readiness, so the two answers the session
+    // needs — "there is a row" and "there is not, for either reason" — come
+    // off the one handler that already knew them.
+    const registered = opened.created.then(
       () => {
         this.registered.add(opened.paneId)
+        return true
       },
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
@@ -717,9 +732,10 @@ export class PaneManager {
         showToast({ level: 'danger', message: `Could not open a tab: ${message}` })
         const orphan = this.panes.find((p) => p.wireId === opened.paneId)
         if (orphan) this.dropChrome(orphan)
+        return false
       },
     )
-    return opened.paneId
+    return { paneId: opened.paneId, registered }
   }
 
   /** Create a new local terminal pane and activate it: mint the identity,
@@ -731,11 +747,11 @@ export class PaneManager {
   /** The chrome and content of a LOCAL terminal pane with a given identity —
    *  one implementation for a pane the user just asked for and a pane the
    *  chain already holds, because "a local pane" must not mean two things. */
-  private buildLocalPane(wireId: string): Pane {
+  private buildLocalPane(identity: PaneIdentity): Pane {
     const paneRef = { current: undefined as Pane | undefined }
     const content = new TerminalContent(
       this.client,
-      wireId,
+      identity,
       this.clipboard,
       this.gate,
       this.banner,
@@ -773,7 +789,7 @@ export class PaneManager {
       // nothing moves when the real one lands.
       defaultTitle: '',
     }
-    const pane = this.addPane(content, descriptor, wireId)
+    const pane = this.addPane(content, descriptor, identity.paneId)
     paneRef.current = pane
     return pane
   }
@@ -786,10 +802,10 @@ export class PaneManager {
     // is what §5 stores on an ssh pane. The profile it was opened from is NOT
     // stored — the chain has no column for it — which is why a restored ssh
     // pane cannot be reconnected yet: see adopt().
-    const wireId = this.mintPane('ssh', endpointOf(host, user, port))
+    const identity = this.mintPane('ssh', endpointOf(host, user, port))
     const content = new TerminalContent(
       this.client,
-      wireId,
+      identity,
       this.clipboard,
       this.gate,
       this.banner,
@@ -828,7 +844,7 @@ export class PaneManager {
       supportsAttention: true,
       defaultTitle: title || host,
     }
-    const pane = this.addPane(content, descriptor, wireId)
+    const pane = this.addPane(content, descriptor, identity.paneId)
     paneRef.current = pane
     return pane
   }
@@ -1155,19 +1171,29 @@ export class PaneManager {
     // chrome goes up in the same turn the person pressed the key, and a
     // refusal takes it down again — the same shape as mintPane's.
     this.viewedWorkspaceId = made.workspaceId
-    const pane = this.buildLocalPane(made.paneId)
-    await made.created.then(
+    // The same shape mintPane returns, for the same reason: this pane's
+    // session must not name a row the backend has not written yet, and the
+    // handler that already knows the answer is the one that reports it. The
+    // paneRef is the idiom buildLocalPane and newSSHPane already use — the
+    // handler must reach the chrome, and the chrome cannot be built until
+    // the readiness it waits on exists.
+    const paneRef = { current: undefined as Pane | undefined }
+    const registered = made.created.then(
       () => {
         this.registered.add(made.paneId)
+        return true
       },
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err)
         log.error('nocx: the backend refused a workspace', { error: message })
         showToast({ level: 'danger', message: `Could not create the workspace: ${message}` })
         this.viewedWorkspaceId = null
-        this.dropChrome(pane)
+        if (paneRef.current) this.dropChrome(paneRef.current)
+        return false
       },
     )
+    paneRef.current = this.buildLocalPane({ paneId: made.paneId, registered })
+    await registered
   }
 
   /**
@@ -1585,7 +1611,9 @@ export class PaneManager {
       return
     }
     this.registered.add(row.id)
-    this.buildLocalPane(row.id)
+    // The row is what the renderer was just told about, so it exists NOW:
+    // nothing to wait for, and the session names the pane immediately.
+    this.buildLocalPane({ paneId: row.id, registered: Promise.resolve(true) })
   }
 
   /**

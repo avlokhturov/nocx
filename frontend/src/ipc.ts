@@ -22,12 +22,51 @@ type OpenResult = {
   sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
+  /** The workspace the backend RESOLVED for this session (nocx-fraus). It is
+   *  derived, never sent: the renderer names a pane and the backend walks
+   *  pane -> tab -> workspace itself, so this ack is the only place the
+   *  renderer can learn where the session landed — the default workspace
+   *  never renders, so the renderer has no name of its own for it. */
+  workspaceId?: string
   /** The opener the backend ADMITTED, or null for a root session
    *  (nocx-9hu9d). Read rather than dropped because it is the only place the
    *  renderer ever learns it: the edge is written once, at open, and the ack
    *  is the one message that carries it. PROVENANCE ONLY — see
    *  SessionHandle.parent. */
   parent?: Open['parent']
+}
+
+/**
+ * What an open carries beyond its geometry and its destination.
+ *
+ * NAMED rather than positional, for the reason TerminalContentHooks is named
+ * (see terminal-content.ts): `user` and `paneId` are both optional strings in
+ * adjacent slots on openSSHSessionByHost, so two bare positionals would let
+ * every misalignment type-check — which is exactly the defect that put
+ * onSetupVault into the onAdoptabilityChange slot.
+ */
+export interface OpenAnchor {
+  /**
+   * The pane this session is the pipe of: the renderer-minted UUIDv7 the
+   * layout chain stores (design §7). The renderer is the only end that knows
+   * it — the backend walks pane -> tab -> workspace from here, and told
+   * nothing it can only answer "the default", which leaves every block this
+   * session records anchored on nothing (nocx-rtg0.29).
+   *
+   * ABSENT AND EMPTY ARE DIFFERENT ANSWERS on the wire. validateOpenRaw
+   * treats an absent paneId as legitimate — a session attached to no
+   * recorded pane — and refuses a malformed one with -32602. An empty string
+   * is the second, so the openers below drop the key rather than send it
+   * blank.
+   */
+  paneId?: string
+}
+
+/** The paneId as the wire wants it: the key, or no key at all. One helper for
+ *  all three openers, because "how an absent pane is expressed" is one fact
+ *  and three copies of `...(x ? {paneId: x} : {})` would be three. */
+function paneParam(anchor: OpenAnchor): { paneId?: string } {
+  return anchor.paneId ? { paneId: anchor.paneId } : {}
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -239,6 +278,16 @@ export class SessionHandle {
      *  is read for is the ASK in PaneManager.closePane — naming what a close
      *  would leave running, which is the opposite of acting on them. */
     readonly parent: Open['parent'] = null,
+    /** The workspace the backend resolved this session into (nocx-fraus).
+     *
+     *  IT CARRIES NO BEHAVIOUR, and the contract says so: nothing reads
+     *  authority, addressability or reachability from it, and §5.5 forbids
+     *  any surface before the fence epic from describing a workspace as
+     *  safe, isolated or contained. It is read as PROVENANCE — what the
+     *  backend resolved from the pane the renderer named — which is why it
+     *  is decoded here rather than dropped: this ack is the only message
+     *  that carries it. */
+    readonly workspaceId: string = '',
   ) {}
 
   send(data: string): void {
@@ -557,13 +606,14 @@ export class WSClient {
   // never established a lifecycle channel and could never show a block. The
   // renderer still wires the editor BEFORE this call, so no invisible
   // prompt gap can occur (nocx-4ff.10).
-  openSession(cols: number, rows: number): Promise<SessionHandle> {
+  openSession(cols: number, rows: number, anchor: OpenAnchor = {}): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
         ypixel: 0,
+        ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result))
   }
@@ -571,7 +621,12 @@ export class WSClient {
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
-  openSSHSession(cols: number, rows: number, profileId: string): Promise<SessionHandle> {
+  openSSHSession(
+    cols: number,
+    rows: number,
+    profileId: string,
+    anchor: OpenAnchor = {},
+  ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,
@@ -580,6 +635,7 @@ export class WSClient {
         ypixel: 0,
         kind: 'ssh',
         profileId,
+        ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result))
   }
@@ -591,6 +647,7 @@ export class WSClient {
     rows: number,
     host: string,
     user?: string,
+    anchor: OpenAnchor = {},
   ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
@@ -601,6 +658,7 @@ export class WSClient {
         kind: 'ssh',
         host,
         user,
+        ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result))
   }
@@ -639,6 +697,7 @@ export class WSClient {
       result?.cwd ?? '',
       result?.desiredMode ?? 'script',
       result?.parent ?? null,
+      result?.workspaceId ?? '',
     )
   }
 

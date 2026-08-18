@@ -27,6 +27,7 @@ import { resolve } from 'node:path'
 const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 
+import type { PaneIdentity } from './terminal-content'
 import { EditorView } from '@codemirror/view'
 import {
   createRendererMock,
@@ -34,6 +35,7 @@ import {
   makeClipboard,
   makeBanner,
   makeSession,
+  anchoredPane,
   integrationHandler,
   lifecycleHandler,
   type ClipboardFake,
@@ -125,6 +127,10 @@ interface MountOpts {
   /** What `content.ready` must settle to. Default true — an open that is
    *  expected to fail (the host-key refusal) sets it false. */
   expectedReady?: boolean
+  /** The pane this content is the surface of, and when its row exists
+   *  (nocx-rtg0.29). The default is a pane the chain already holds, which is
+   *  what every test that is not about the race wants. */
+  pane?: PaneIdentity
 }
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
 async function mountTerminal(
@@ -145,7 +151,7 @@ async function mountTerminal(
   const wsClient = clientFake as unknown as WSClient
   const content = new TerminalContent(
     wsClient,
-    'tab-wire-1',
+    opts.pane ?? anchoredPane(),
     clipboard,
     new ClipboardGate(),
     makeBanner(),
@@ -1330,7 +1336,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
     const wsClient = clientFake as unknown as WSClient
     const content = new TerminalContent(
       wsClient,
-      'tab-wire-1',
+      anchoredPane(),
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -2033,7 +2039,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     const wsClient = makeClient() as unknown as WSClient
     const unmounted = new TerminalContent(
       wsClient,
-      'tab-wire-1',
+      anchoredPane(),
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -4925,6 +4931,91 @@ describe('liveWork — what a close would destroy in this pane (nocx-isoph.6)', 
       // The tab is still on screen, so its provenance is still true. The two
       // answers differ on purpose.
       expect(content.lineage()?.sessionId).toBe(session.sessionId)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The session waits for its pane's row (nocx-rtg0.29)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the session waits for its pane row (nocx-rtg0.29)', () => {
+  const PANE = '0199c5e2-8f3a-7c41-b9d6-2e7a04f18b53'
+
+  it('does not open while the row is still in flight, then names the pane', async () => {
+    let admit!: (registered: boolean) => void
+    const registered = new Promise<boolean>((resolve) => {
+      admit = resolve
+    })
+    const client = makeClient()
+    const mounting = mountTerminal(makeClipboard(), { pane: { paneId: PANE, registered } }, client)
+
+    // The lifecycle subscription is wired in mount() IMMEDIATELY before the
+    // open, so waiting for it is waiting for the exact point the session
+    // used to be opened from. Reaching it with no open having been sent is
+    // what proves the order — no duration is involved, which is the only
+    // kind of ordering assertion that survives a fast machine.
+    await vi.waitFor(() => expect(client.dispatcher.subscribe).toHaveBeenCalled())
+    expect(client.openSession).not.toHaveBeenCalled()
+
+    admit(true)
+    const { teardown } = await mounting
+    try {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+      expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: PANE })
+    } finally {
+      teardown()
+    }
+  })
+
+  // Criterion 4: no layout store is not a refusal. The id is still one
+  // identity for history.record and secrets.paneClosed; it simply names no
+  // row, so the open must not claim it does.
+  it('opens without a paneId when the pane has no row, rather than refusing', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      { pane: { paneId: PANE, registered: Promise.resolve(false) } },
+      client,
+    )
+    try {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+      expect(client.openSession.mock.calls[0][2]).toEqual({})
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the pane on a profile ssh open too — an ssh tab is a pane', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'example.test' },
+        pane: { paneId: PANE, registered: Promise.resolve(true) },
+      },
+      client,
+    )
+    try {
+      expect(client.openSSHSession.mock.calls[0][3]).toEqual({ paneId: PANE })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the pane on a direct-host ssh open too', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: '', host: 'example.test' },
+        pane: { paneId: PANE, registered: Promise.resolve(true) },
+      },
+      client,
+    )
+    try {
+      expect(client.openSSHSessionByHost.mock.calls[0][4]).toEqual({ paneId: PANE })
     } finally {
       teardown()
     }

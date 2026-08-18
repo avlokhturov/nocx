@@ -12,6 +12,7 @@ import {
   setupTabBarDOM,
   makeLayoutStore,
   FIXTURE_DIRECTORY_LABEL,
+  anchoredPane,
   type RendererMock,
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
@@ -1211,7 +1212,7 @@ describe('PaneManager', () => {
     const banner = makeBanner()
     const content = new TerminalContent(
       wsClient,
-      'tab-wire-1',
+      anchoredPane(),
       clipboard,
       gate,
       banner,
@@ -1264,7 +1265,7 @@ describe('PaneManager', () => {
     const banner = makeBanner()
     const content = new TerminalContent(
       wsClient,
-      'tab-wire-1',
+      anchoredPane(),
       clipboard,
       gate,
       banner,
@@ -1322,7 +1323,7 @@ describe('PaneManager', () => {
     const banner = makeBanner()
     const content = new TerminalContent(
       wsClient,
-      'tab-wire-1',
+      anchoredPane(),
       clipboard,
       gate,
       banner,
@@ -1666,7 +1667,7 @@ describe('PaneManager', () => {
       const wsClient = client as unknown as import('./ipc').WSClient
       const content = new TerminalContent(
         wsClient,
-        'tab-wire-1',
+        anchoredPane(),
         makeClipboard(),
         new ClipboardGate(),
         makeBanner(),
