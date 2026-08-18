@@ -23,6 +23,9 @@ function facts(over: Partial<OverviewPaneFacts> = {}): OverviewPaneFacts {
     failed: false,
     since: null,
     lastLine: null,
+    fullScreen: false,
+    lastBlock: null,
+    excerpt: [],
     ...over,
   }
 }

@@ -86,6 +86,17 @@ vi.mock('./ui/dialog', () => ({
   showConfirm: (...args: unknown[]) => showConfirmMock(...args) as Promise<boolean>,
 }))
 
+/**
+ * Bring a pane out of its opening, the way a shell does: OSC 133 B is
+ * prompt-end, so the shell has finished starting and is waiting on a person
+ * (PaneHost.contentSettled). Before it, output is the pane's own start and
+ * marks nothing — which is what stops a restore from lighting every tab.
+ */
+async function settlePane(index: number): Promise<void> {
+  const renderers = await getRendererMocks()
+  renderers[index]._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+}
+
 describe('PaneManager', () => {
   beforeEach(() => {
     resetSessionCounter()
@@ -394,6 +405,10 @@ describe('PaneManager', () => {
     // Make tab 1 (index 0) active; tab 2 (index 1) is now background.
     manager.activateByIndex(0)
 
+    // The pane's opening is over — its shell has drawn a prompt — so what
+    // arrives now is output rather than a start (PaneHost.contentSettled).
+    await settlePane(1)
+
     // Deliver output to the background tab (index 1 = session 2).
     const bgSession = client._sessions[1]
     bgSession.fireData('hello')
@@ -461,6 +476,15 @@ describe('PaneManager', () => {
     manager.activateByIndex(0)
 
     const bgSession = client._sessions[1]
+
+    // BEFORE THE PROMPT, output is the pane starting up and marks nothing.
+    bgSession.fireData('a banner and an rc file')
+    expect(bar.querySelectorAll('.nocx-tab-indicator')[1].getAttribute('data-activity')).not.toBe(
+      'true',
+    )
+
+    // After it, the same bytes are something a person can have missed.
+    await settlePane(1)
     bgSession.fireData('normal output')
 
     const indicators = bar.querySelectorAll('.nocx-tab-indicator')
@@ -477,6 +501,10 @@ describe('PaneManager', () => {
 
     // Tab 1 active, tab 2 is background.
     manager.activateByIndex(0)
+
+    // Settled first: a bell rung while the pane is still starting up is part
+    // of that start, like everything else it emits then.
+    await settlePane(1)
 
     // Put the background tab into the alternate buffer via onBufferChange.
     const renderers = await getRendererMocks()

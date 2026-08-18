@@ -35,7 +35,7 @@ function pane(id: string, tabId: string, over: Partial<Pane> = {}): Pane {
 function snapshot(over: Partial<LayoutReadResult> = {}): LayoutReadResult {
   return {
     defaultWorkspaceId: DEFAULT_WS,
-    workspaces: [{ id: DEFAULT_WS, name: 'default', position: 0 }],
+    workspaces: [{ id: DEFAULT_WS, name: 'default', position: 0, colour: null }],
     tabs: [],
     panes: [],
     ...over,
@@ -94,7 +94,7 @@ function fakeClient(over: Partial<LayoutClientLike> = {}): LayoutClientLike & {
     createWorkspace: (ws) => {
       calls.push(['workspaces.create', ws])
       return Promise.resolve({
-        workspace: { id: ws.id, name: ws.name, position: ws.position },
+        workspace: { id: ws.id, name: ws.name, position: ws.position, colour: null },
         firstTab: tab(ws.firstTab.id, { workspaceId: ws.id }),
         firstPane: pane(ws.firstPane.id, ws.firstTab.id, {
           cwd: ws.firstPane.cwd,
@@ -107,14 +107,18 @@ function fakeClient(over: Partial<LayoutClientLike> = {}): LayoutClientLike & {
       calls.push(['workspaces.close', { id, replacement }])
       return Promise.resolve({ id })
     },
+    recolourWorkspace: (id: string, colour: string | null) => {
+      calls.push(['workspaces.recolour', { id, colour }])
+      return Promise.resolve({ workspace: { id, name: id, position: 0, colour } })
+    },
     renameWorkspace: (id: string, name: string) => {
       calls.push(['workspaces.rename', { id, name }])
-      return Promise.resolve({ workspace: { id, name, position: 0 } })
+      return Promise.resolve({ workspace: { id, name, position: 0, colour: null } })
     },
     reorderWorkspaces: (ids: readonly string[]) => {
       calls.push(['workspaces.reorder', { ids: [...ids] }])
       return Promise.resolve({
-        workspaces: ids.map((id, position) => ({ id, name: id, position })),
+        workspaces: ids.map((id, position) => ({ id, name: id, position, colour: null })),
       })
     },
   }
@@ -132,9 +136,13 @@ describe('LayoutStore', () => {
     // changes under the user.
     const client = fakeClient({
       read: () =>
-        Promise.resolve(snapshot({ workspaces: [{ id: 'ws-1', name: 'old', position: 0 }] })),
+        Promise.resolve(
+          snapshot({ workspaces: [{ id: 'ws-1', name: 'old', position: 0, colour: null }] }),
+        ),
       renameWorkspace: (id: string) =>
-        Promise.resolve({ workspace: { id, name: 'what the backend stored', position: 0 } }),
+        Promise.resolve({
+          workspace: { id, name: 'what the backend stored', position: 0, colour: null },
+        }),
     })
     const store = new LayoutStore(client)
     await store.load()
@@ -150,8 +158,8 @@ describe('LayoutStore', () => {
         Promise.resolve(
           snapshot({
             workspaces: [
-              { id: 'ws-1', name: 'one', position: 0 },
-              { id: 'ws-2', name: 'two', position: 1 },
+              { id: 'ws-1', name: 'one', position: 0, colour: null },
+              { id: 'ws-2', name: 'two', position: 1, colour: null },
             ],
           }),
         ),
@@ -173,8 +181,8 @@ describe('LayoutStore', () => {
         Promise.resolve(
           snapshot({
             workspaces: [
-              { id: 'ws-1', name: 'one', position: 0 },
-              { id: 'ws-2', name: 'two', position: 1 },
+              { id: 'ws-1', name: 'one', position: 0, colour: null },
+              { id: 'ws-2', name: 'two', position: 1, colour: null },
             ],
           }),
         ),
@@ -364,7 +372,11 @@ describe('LayoutStore', () => {
     const store = new LayoutStore(client)
     await store.load()
 
-    const made = store.createWorkspace('refactor-auth', { kind: 'local', endpoint: null, cwd: '' })
+    const made = store.createWorkspace('refactor-auth', 'blue', {
+      kind: 'local',
+      endpoint: null,
+      cwd: '',
+    })
     await made.created
 
     expect(isUuidv7(made.workspaceId)).toBe(true)
@@ -390,7 +402,7 @@ describe('LayoutStore', () => {
     const changes = vi.fn()
     store.onChange(changes)
 
-    const made = store.createWorkspace('', { kind: 'local', endpoint: null, cwd: '' })
+    const made = store.createWorkspace('', 'blue', { kind: 'local', endpoint: null, cwd: '' })
 
     await expect(made.created).rejects.toThrow('name is required')
     expect(store.workspaces().map((w) => w.id)).toEqual([DEFAULT_WS])
@@ -400,8 +412,8 @@ describe('LayoutStore', () => {
   it('closes a workspace with a minted replacement and re-reads what is left', async () => {
     let read = snapshot({
       workspaces: [
-        { id: DEFAULT_WS, name: 'default', position: 0 },
-        { id: 'ws-1', name: 'refactor-auth', position: 1 },
+        { id: DEFAULT_WS, name: 'default', position: 0, colour: null },
+        { id: 'ws-1', name: 'refactor-auth', position: 1, colour: null },
       ],
       tabs: [tab('t1', { workspaceId: 'ws-1' })],
       panes: [pane('p1', 't1')],
@@ -447,8 +459,8 @@ describe('LayoutStore', () => {
           Promise.resolve(
             snapshot({
               workspaces: [
-                { id: DEFAULT_WS, name: 'default', position: 0 },
-                { id: 'ws-1', name: 'refactor-auth', position: 1 },
+                { id: DEFAULT_WS, name: 'default', position: 0, colour: null },
+                { id: 'ws-1', name: 'refactor-auth', position: 1, colour: null },
               ],
               tabs: [
                 tab('t1', { workspaceId: 'ws-1' }),

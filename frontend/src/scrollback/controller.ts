@@ -218,6 +218,15 @@ export class ScrollbackController {
     // shift applies from the first frame (nocx-w1n4).
     this._applyEchoShift()
     this._updateSeparator()
+    // Size the region to what is actually in the grid ON THIS FRAME, not
+    // after the first chunk of output. The class's 140px is a fallback for
+    // "cannot measure yet"; leaving it in charge until the echo arrived
+    // painted a mostly-empty box, then shrank it to one or two lines the
+    // moment output landed and scrolled again — the pop at every command
+    // start. setLiveHeight is a no-op while the renderer cannot measure
+    // (the fallback stands), and when it does size, the scroll below lands
+    // on the same target — the second scroll is a no-op.
+    this.setLiveHeight(this._renderer.liveContentHeight())
     this._scrollToBottom()
   }
 

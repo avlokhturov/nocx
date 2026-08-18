@@ -1176,10 +1176,7 @@ export class PaneManager {
       await this.ask(() => this.layout.rename(tab.id, name), 'Could not rename the tab')
     }
     if (draft.colour !== (tab.colour ?? null)) {
-      await this.ask(
-        () => this.layout.recolour(tab.id, draft.colour),
-        'Could not colour the tab',
-      )
+      await this.ask(() => this.layout.recolour(tab.id, draft.colour), 'Could not colour the tab')
     }
   }
 
@@ -2011,32 +2008,38 @@ export class PaneManager {
     for (const pane of this.panes) {
       if (!fromChain.includes(pane)) pane.setStripPlacement({ groupKey: '', depth: 0 })
     }
-    // A VIEW PANE BELONGS TO THE UNGROUPED RUN, not to the bottom of the
-    // rail. It used to keep whatever slot it was created in, which is always
-    // the end — so opening Settings put it under the LAST workspace's
-    // heading, reading as a member of a workspace it is not in and cannot be
-    // in. The chain's own rows are the groups; everything else is ungrouped,
-    // and the ungrouped run is the one that opens the strip.
+    // A VIEW PANE BELONGS TO THE UNGROUPED RUN, and to its own place within
+    // it. Opening Settings used to put it wherever it was created — the end
+    // of the rail — which after the strip learnt to group meant UNDER THE
+    // LAST WORKSPACE'S HEADING, reading as a member of a workspace it is not
+    // in and cannot be in.
     //
-    // Placed after the default workspace's rows rather than before them: the
-    // default's tabs are the ones a person has been using, and a surface they
-    // opened a moment ago belongs at the end of that run, the way a new tab
-    // does. With no default rows at all it opens the strip, which is the same
-    // rule with nothing in front of it.
+    // So it is placed among the DEFAULT workspace's rows rather than after
+    // every group: the ungrouped run is where a thing with no workspace
+    // belongs. And within that run it keeps its order relative to the rows
+    // beside it, because "the last tab is the one that just opened" is a
+    // promise several specs make — a rule that swept view panes to the end of
+    // the run would put Settings after the connection a person had just
+    // opened.
     const chainPanes = new Set(fromChain)
-    const views = this.panes.filter((pane) => !chainPanes.has(pane))
     const defaultWorkspaceId = this.layout.defaultWorkspaceId()
-    const next: Pane[] = []
-    let viewsPlaced = false
-    for (const row of chain) {
-      if (!viewsPlaced && row.groupKey !== defaultWorkspaceId) {
-        next.push(...views)
-        viewsPlaced = true
+    const grouped = chain.filter((row) => row.groupKey !== defaultWorkspaceId).map((r) => r.pane)
+    const ungrouped = chain.filter((row) => row.groupKey === defaultWorkspaceId).map((r) => r.pane)
+    // The ungrouped run in the order the window already has: the chain's rows
+    // take the chain's order among themselves, and a view pane sits where it
+    // was opened relative to them.
+    const ungroupedSet = new Set(ungrouped)
+    const chainQueue = [...ungrouped]
+    const run: Pane[] = []
+    for (const pane of this.panes) {
+      if (ungroupedSet.has(pane)) {
+        const next = chainQueue.shift()
+        if (next) run.push(next)
+      } else if (!chainPanes.has(pane)) {
+        run.push(pane)
       }
-      next.push(row.pane)
     }
-    if (!viewsPlaced) next.push(...views)
-    this.panes.splice(0, this.panes.length, ...next)
+    this.panes.splice(0, this.panes.length, ...run, ...grouped)
     this.tabStrip.setGroupHeadings(this.groupHeadings())
     this.tabStrip.setExpandedGroup(this.expandedGroup())
     this.tabStrip.reorder(this.stripRows())

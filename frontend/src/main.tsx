@@ -61,12 +61,11 @@ import { createGitStore } from './git/git-store'
 import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
 import type { ActiveOrigin, SurfaceType } from './pane-content'
 import {
-  SIDEBAR_WIDTH_KEY,
-  SIDEBAR_WIDTH_DEFAULT,
   clampSidebarWidth,
   createSidebarWidthController,
   persistSidebarWidth,
 } from './sidebar-width'
+import { UIStateClient } from './uistate-client'
 import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
@@ -150,6 +149,11 @@ async function main() {
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
+  // The UI-state document (ADR-0033): what the app remembers without being
+  // asked — the sidebar's collapse, its view, its width. Not the settings
+  // registry, which holds what a user deliberately chose, and not
+  // localStorage, which may not carry facts.
+  const uiStateClient = new UIStateClient(dispatcher)
   // The snippet library: ONE store, read by the palette, the settings page
   // and every later surface (design §6 — no change notification on the
   // wire, a writer re-reads). Constructed with the other clients because
@@ -253,10 +257,13 @@ async function main() {
   applyOutputWrap(OUTPUT_WRAP_DEFAULT)
 
   let placement: unknown = 'horizontal'
-  // The sidebar width from the same snapshot: the value that survives a
-  // restart. A fetch failure falls back to the declared default, which is
-  // also what the CSS paints before this bootstrap runs (style.css #sidebar).
-  let sidebarWidth = SIDEBAR_WIDTH_DEFAULT
+  // The sidebar's remembered state, from the UI-state document rather than
+  // the settings snapshot below — a drag is not a decision (ADR-0033). A
+  // failure falls back to the declared defaults, which is also what the CSS
+  // paints before this bootstrap runs (style.css #sidebar); load() never
+  // throws for exactly that reason.
+  const uiState = await uiStateClient.load()
+  const sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
@@ -267,10 +274,6 @@ async function main() {
     // The default wrap for a command block's output — one attribute on the
     // root, read by the CSS; the per-block ⋮ override is not touched by it.
     applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
-    const raw = snap.values[SIDEBAR_WIDTH_KEY]
-    if (typeof raw === 'number' && Number.isFinite(raw)) {
-      sidebarWidth = clampSidebarWidth(raw)
-    }
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
@@ -610,9 +613,9 @@ async function main() {
     // The persistence seam (persistSidebarWidth): fire-and-forget, and a
     // failed write surfaces a warning instead of reverting the width or
     // wedging the handle — the value stays applied, and the next commit
-    // retries. `setSetting` is a method, hence the closure.
+    // retries. `save` is a method, hence the closure.
     persistSidebarWidth(
-      (key, value) => profileClient.setSetting(key, value),
+      (px) => uiStateClient.save({ sidebar: { width: px } }),
       (message) => showToast({ level: 'warning', message }),
       width,
     )
@@ -639,15 +642,10 @@ async function main() {
         // has overridden, in place, with no restart and no reflow of the
         // blocks that carry their own answer.
         applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
-        // Sidebar width changed — apply it unless the user is mid-drag: the
-        // live pointer position is the truth until the release commits it
-        // (nocx-qmcu).
-        if (!sidebarWidthCtrl.isDragging()) {
-          const raw = snap.values[SIDEBAR_WIDTH_KEY]
-          if (typeof raw === 'number' && Number.isFinite(raw)) {
-            sidebarWidthCtrl.apply(clampSidebarWidth(raw))
-          }
-        }
+        // The sidebar width is deliberately absent from this loop now. It
+        // is not a setting, so no settings revision can carry it, and one
+        // window is the only thing that changes it — re-reading it here
+        // would be the app telling itself what it just did (ADR-0033 §7).
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }
@@ -747,7 +745,18 @@ async function main() {
         },
       },
     ],
-    undefined,
+    {
+      collapsed: uiState.sidebar.collapsed,
+      activeViewId: uiState.sidebar.activeViewId,
+      save: (next) => {
+        // Fire-and-forget, and silent: a collapse that fails to persist
+        // costs the next launch's starting state and nothing a user could
+        // act on now. The width's seam warns because a drag is a
+        // deliberate act with an expectation attached; toggling a panel
+        // twenty times a session is not.
+        void uiStateClient.save({ sidebar: next }).catch(() => {})
+      },
+    },
     /* eslint-disable solid/reactivity -- mountSidebar consumes these
        accessors reactively (SidebarViewProps.activeProfileId and
        .activeOrigin, fed with the ports target and the Files origin, plus

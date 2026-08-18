@@ -471,61 +471,22 @@ func TestNumberValidation(t *testing.T) {
 	}
 }
 
-// ── Sidebar width (nocx-qmcu) ──────────────────────────────────────────
+// ── The sidebar's width is NOT a setting (nocx-mqie.3) ─────────────────
 
-func TestSidebarWidthDeclaration(t *testing.T) {
+// A width produced by dragging a panel edge is not a decision, so the
+// registry must not declare it: a declaration is what puts a row on
+// Settings → Interface and what makes a drag count toward the section's
+// "Modified" badge. Both symptoms had one cause, and this is the assertion
+// that the cause is gone — the width lives in internal/uistate now.
+func TestSidebarWidthIsNotDeclaredAsASetting(t *testing.T) {
 	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
-	n := findNumber(t, reg, "sidebar.width")
 
-	if n.Default() != float64(240) {
-		t.Errorf("default = %v, want 240 (the pre-drag width)", n.Default())
-	}
-	if n.Min() == nil || *n.Min() != 200 {
-		t.Errorf("min = %v, want 200 (the Git dense row's floor)", n.Min())
-	}
-	if n.Max() == nil || *n.Max() != 640 {
-		t.Errorf("max = %v, want 640 (the panel must not own the window)", n.Max())
-	}
-	if n.Section() != "Interface" {
-		t.Errorf("section = %q, want Interface", n.Section())
-	}
-}
-
-func TestSidebarWidthRoundTrip(t *testing.T) {
-	doc := &fakeDoc{}
-	reg := settings.New(doc, &fakeSecretStore{})
-	n := findNumber(t, reg, "sidebar.width")
-
-	// A fresh registry reports the default.
-	got, err := reg.GetNumber(n)
-	if err != nil {
-		t.Fatalf("GetNumber: %v", err)
-	}
-	if got != 240 {
-		t.Fatalf("fresh GetNumber = %v, want 240", got)
-	}
-
-	// Set within bounds, then a NEW registry over the same doc reads it
-	// back — the persistence that makes the width survive a restart.
-	if setErr := reg.SetNumber(n, 480); setErr != nil {
-		t.Fatalf("SetNumber: %v", setErr)
-	}
-	reloaded := settings.New(doc, &fakeSecretStore{})
-	got, err = reloaded.GetNumber(findNumber(t, reloaded, "sidebar.width"))
-	if err != nil {
-		t.Fatalf("reloaded GetNumber: %v", err)
-	}
-	if got != 480 {
-		t.Fatalf("reloaded GetNumber = %v, want 480", got)
-	}
-
-	// Out-of-bounds values are rejected at the seam, the same validation
-	// the drag handle's own clamp enforces on the other side.
-	if err := reg.SetNumber(n, 100); !errors.Is(err, settings.ErrValidation) {
-		t.Errorf("below-min SetNumber error = %v, want ErrValidation", err)
-	}
-	if err := reg.SetNumber(n, 900); !errors.Is(err, settings.ErrValidation) {
-		t.Errorf("above-max SetNumber error = %v, want ErrValidation", err)
+	for _, d := range reg.Declarations() {
+		if d.Key == "sidebar.width" {
+			t.Fatalf("sidebar.width is still declared (section %q, label %q): "+
+				"a drag is not a decision, so it must not appear on a Settings page",
+				d.Section, d.Label)
+		}
 	}
 }
 

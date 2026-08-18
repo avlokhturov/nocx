@@ -180,7 +180,6 @@
   align-items: stretch;
 }
 
-
 /* SQUARE, AND NOT FULL-HEIGHT. `height: 100%` of a 38px bar made every one of
    these a 30x37 rectangle — the shape said "column of the strip", which is
    what a tab is, so the buttons read as tabs that had lost their labels. The

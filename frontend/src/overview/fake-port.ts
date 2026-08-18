@@ -74,9 +74,12 @@ export class FakeOverviewPort implements OverviewPort {
     this.tabsCreated.push(workspaceId)
   }
 
-  async closeWorkspace(workspaceId: string): Promise<boolean> {
+  closeWorkspace(workspaceId: string): Promise<boolean> {
     this.workspacesClosed.push(workspaceId)
-    return this.workspaceCloseResult
+    // Resolved rather than `async`: the fake answers from a field and awaits
+    // nothing, and an async function with no await is a promise of work that
+    // does not happen.
+    return Promise.resolve(this.workspaceCloseResult)
   }
 
   createWorkspace(): void {

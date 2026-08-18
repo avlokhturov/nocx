@@ -33,13 +33,7 @@
 import { splitProps } from 'solid-js'
 import type { JSX } from 'solid-js'
 
-export type ButtonVariant =
-  | 'default'
-  | 'primary'
-  | 'danger'
-  | 'ghost'
-  | 'dashed'
-  | 'workspace'
+export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost' | 'dashed' | 'workspace'
 export type ButtonSize = 'sm' | 'md'
 
 export interface ButtonProps {

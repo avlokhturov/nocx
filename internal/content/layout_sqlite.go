@@ -900,12 +900,12 @@ func (s *sqliteContent) ReorderWorkspaces(ctx context.Context, ids []string) ([]
 			if !isPermutation(ids, members) {
 				return ErrNotAPermutation
 			}
-			if _, err := tx.ExecContext(ctx,
+			if _, err = tx.ExecContext(ctx,
 				`UPDATE workspaces SET position = 0 WHERE id = ?`, DefaultWorkspaceID); err != nil {
 				return err
 			}
 			for position, id := range ids {
-				if _, err := tx.ExecContext(ctx,
+				if _, err = tx.ExecContext(ctx,
 					`UPDATE workspaces SET position = ? WHERE id = ?`, position+1, id); err != nil {
 					return err
 				}
@@ -914,12 +914,8 @@ func (s *sqliteContent) ReorderWorkspaces(ctx context.Context, ids []string) ([]
 			// renderer replaces its cache with this answer, and a list with
 			// the default missing would delete the row every ungrouped tab
 			// belongs to.
-			rows, err := workspacesInOrder(ctx, tx)
-			if err != nil {
-				return err
-			}
-			out = rows
-			return nil
+			out, err = workspacesInOrder(ctx, tx)
+			return err
 		})
 	})
 	if err != nil {

@@ -20,20 +20,28 @@
  * The surface may place the menu (choosing when to open it and where) and
  * may never repaint it — items are the kit's own buttons.
  */
-import { For, Show, createEffect, onCleanup, type JSX } from 'solid-js'
+import { For, Show, createEffect, onCleanup, type Component } from 'solid-js'
 import { Portal } from 'solid-js/web'
 
 export interface ContextMenuItem {
   /** Stable identity for the item — keying and data-testid. */
   id: string
   label: string
-  /** The action's mark, from the kit's icon set. Optional, and a menu may mix
-   *  rows with and without one: the icon column is reserved either way, so
-   *  the labels stay in a single column instead of stepping in and out as
-   *  rows acquire marks. A glyph is the fastest way back to an action a
-   *  person has used before — they stop reading the menu and start pointing
-   *  at it — which is exactly what a menu of frequent actions is for. */
-  icon?: JSX.Element
+  /**
+   * The action's mark, from the kit's icon set. Optional, and a menu may mix
+   * rows with and without one: the icon column is reserved either way, so the
+   * labels stay in a single column instead of stepping in and out as rows
+   * acquire marks. A glyph is the fastest way back to an action a person has
+   * used before — they stop reading the menu and start pointing at it — which
+   * is exactly what a menu of frequent actions is for.
+   *
+   * A COMPONENT, NOT AN ELEMENT. An element is DOM the moment it is written,
+   * so a row carrying one can only be built where a document exists — and the
+   * modules that BUILD rows (workspace-menu.ts) are deliberately pure, tested
+   * without a renderer. Naming the component defers the DOM to this file,
+   * which is the only place that has one.
+   */
+  icon?: Component
   onSelect: () => void
 }
 
@@ -138,7 +146,9 @@ export function ContextMenu(props: ContextMenuProps) {
                 }}
               >
                 <span class="ui-context-menu__icon" aria-hidden="true">
-                  {item.icon}
+                  <Show when={item.icon} keyed>
+                    {(Icon) => <Icon />}
+                  </Show>
                 </span>
                 <span class="ui-context-menu__label">{item.label}</span>
               </button>

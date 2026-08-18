@@ -42,10 +42,10 @@ import type { AgentStatus } from './agent-status'
  * DEFAULT 240 — the fixed width it had before it could be dragged, so a user
  * who never touches the edge sees no change.
  */
-export const TABSTRIP_WIDTH_MIN = 160
-export const TABSTRIP_WIDTH_MAX = 480
-export const TABSTRIP_WIDTH_STEP = 8
-export const TABSTRIP_WIDTH_DEFAULT = 240
+const TABSTRIP_WIDTH_MIN = 160
+const TABSTRIP_WIDTH_MAX = 480
+const TABSTRIP_WIDTH_STEP = 8
+const TABSTRIP_WIDTH_DEFAULT = 240
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TabStrip — presentation port for tab chrome
@@ -485,19 +485,19 @@ abstract class TabStripBase implements TabStrip {
           {
             id: 'rename',
             label: 'Rename…',
-            icon: <PencilIcon />,
+            icon: PencilIcon,
             onSelect: () => this.onRename?.(paneId),
           },
           {
             id: 'pin',
             label: pinned ? 'Unpin' : 'Pin',
-            icon: <PinIcon />,
+            icon: PinIcon,
             onSelect: () => this.onPin?.(paneId, !pinned),
           },
           {
             id: 'close',
             label: 'Close',
-            icon: <CloseIcon />,
+            icon: CloseIcon,
             onSelect: () => this.onClose?.(paneId),
           },
         ]
@@ -599,8 +599,7 @@ abstract class TabStripBase implements TabStrip {
                 const row = e.currentTarget
                 if (!(row instanceof HTMLElement)) return
                 const rect = row.getBoundingClientRect()
-                row.dataset.dropEdge =
-                  e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                row.dataset.dropEdge = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
               }}
               onDragLeave={(e: DragEvent) => {
                 if (e.currentTarget instanceof HTMLElement) delete e.currentTarget.dataset.dropEdge
@@ -870,25 +869,25 @@ abstract class TabStripBase implements TabStrip {
                     // secret picker, the layers that stand for a workspace —
                     // so the menu teaches the glyph a person will next meet
                     // on a button rather than inventing a second set.
-                    icon: <PlugIcon />,
+                    icon: PlugIcon,
                     onSelect: () => this.onQuickConnect?.(),
                   },
                   {
                     id: 'insert-secret',
                     label: 'Insert a secret…',
-                    icon: <KeyIcon />,
+                    icon: KeyIcon,
                     onSelect: () => this.onInsertSecret?.(),
                   },
                   {
                     id: 'snippets',
                     label: 'Snippets…',
-                    icon: <TextQuoteIcon />,
+                    icon: TextQuoteIcon,
                     onSelect: () => this.onSnippets?.(),
                   },
                   {
                     id: 'new-workspace',
                     label: 'New workspace…',
-                    icon: <LayersIcon />,
+                    icon: LayersIcon,
                     onSelect: () => this.onNewWorkspace?.(),
                   },
                 ]}
@@ -932,10 +931,7 @@ abstract class TabStripBase implements TabStrip {
                 affordance than a key glyph for an action performed twice an
                 hour. */}
             <div class="tabstrip-actions">
-              <IconButton
-                ariaLabel="New tab"
-                onClick={() => this.onNewPane?.()}
-              >
+              <IconButton ariaLabel="New tab" onClick={() => this.onNewPane?.()}>
                 <PlusIcon />
               </IconButton>
               <IconButton

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TerminalRenderer, RenderFenceEvent } from '../renderers/types'
 import { ScrollbackController } from './controller'
 import { CommandSnapshotStore } from '../command-snapshot'
+import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 
@@ -24,6 +25,10 @@ function makeRenderer(): TerminalRenderer {
     // 0 = "cannot measure", which the frozen-block metric publisher treats
     // as "publish nothing" — existing tests are unaffected by the metric.
     cellWidth: 0,
+    // 0 = "cannot measure yet"; setRunning sizes the live region from this
+    // on the first frame (the command-start pop), so tests that want the
+    // sizing path override it.
+    liveContentHeight: vi.fn(() => 0),
     getBufferLine: vi.fn(() => null),
     cursorLine: vi.fn(() => 0),
     reset: vi.fn(),
@@ -557,5 +562,61 @@ describe('the frozen block metric is published from the renderer (nocx-yy9g)', (
     renderer._fireCellDimsChange()
     expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-width')).toBe('')
     expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-delta')).toBe('')
+  })
+})
+describe('the live region is sized on the first frame of a command, not after the first chunk (command-start pop)', () => {
+  const protoScrollTo = Element.prototype.scrollTo?.bind(Element.prototype)
+  beforeEach(() => {
+    Element.prototype.scrollTo = () => {}
+  })
+  afterEach(() => {
+    Element.prototype.scrollTo = protoScrollTo
+  })
+
+  it('sizes the region to the renderer measurement when the block opens', () => {
+    const renderer = makeRenderer()
+    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(96)
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    // jsdom does no layout: give the scroller a real height so the running
+    // cap (clientHeight − block header) is measurable.
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+
+    controller.beginBlock('ls', '~', 0, 1)
+
+    // The FIRST frame already shows the measured height — not the class's
+    // 140px placeholder that the next chunk of output would snap down to.
+    expect(controller.xtermLiveContainer.style.height).toBe('96px')
+    expect(controller.mode).toBe('running')
+  })
+
+  it('keeps the 140px class fallback while the renderer cannot measure', () => {
+    const renderer = makeRenderer()
+    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(0)
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+
+    controller.beginBlock('ls', '~', 0, 1)
+
+    // Unmeasurable renderer: no inline height, the CSS class's 140px
+    // placeholder stands until the first output arrives.
+    expect(controller.xtermLiveContainer.style.height).toBe('')
+    expect(controller.xtermLiveContainer.className).toContain('live-running')
+    expect(controller.mode).toBe('running')
   })
 })

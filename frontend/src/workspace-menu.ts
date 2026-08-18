@@ -23,7 +23,7 @@
 // switch row built here would be an action for one placement wearing the shape
 // of a shared one.
 
-import type { JSX } from 'solid-js'
+import type { Component } from 'solid-js'
 import { ArrowDownIcon, ArrowUpIcon, CloseIcon, PencilIcon } from './ui/icons'
 
 /** One row of a workspace menu, in the kit ContextMenu's shape — including
@@ -33,7 +33,7 @@ import { ArrowDownIcon, ArrowUpIcon, CloseIcon, PencilIcon } from './ui/icons'
 export interface WorkspaceMenuRow {
   readonly id: string
   readonly label: string
-  readonly icon?: JSX.Element
+  readonly icon?: Component
   readonly onSelect: () => void
 }
 
@@ -104,7 +104,7 @@ export function workspaceActionRows(
     {
       id: 'workspace-rename',
       label: 'Rename workspace…',
-      icon: <PencilIcon />,
+      icon: PencilIcon,
       onSelect: () => actions.onRename(subject),
     },
   ]
@@ -113,7 +113,7 @@ export function workspaceActionRows(
     rows.push({
       id: 'workspace-up',
       label: 'Move up',
-      icon: <ArrowUpIcon />,
+      icon: ArrowUpIcon,
       onSelect: () => actions.onReorder(up),
     })
   }
@@ -122,14 +122,14 @@ export function workspaceActionRows(
     rows.push({
       id: 'workspace-down',
       label: 'Move down',
-      icon: <ArrowDownIcon />,
+      icon: ArrowDownIcon,
       onSelect: () => actions.onReorder(down),
     })
   }
   rows.push({
     id: 'workspace-close',
     label: 'Close workspace',
-    icon: <CloseIcon />,
+    icon: CloseIcon,
     onSelect: () => actions.onClose(subject),
   })
   return rows

@@ -5,12 +5,7 @@
   "description": "Result of the workspaces.create JSON-RPC method (nocx-isoph.2, design §4.1 and §7): the workspace, THE FIRST TAB AND THAT TAB'S FIRST PANE it was created with, and whether this call was a retry of one already made. Creation is always creation-with-content (nocx-isoph.3): an empty workspace was proposed and rejected — it has no meaning — so there is never a moment at which one exists, and the answer therefore names all three rows rather than a container the renderer would then have to fill. The renderer ASKS and renders what it is told; the ids it minted are untrusted input, and what comes back is what the backend holds, never an echo of the request. This file is also the single declaration of the workspace shape; the other workspaces.* results reference it cross-file.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "workspace",
-    "firstTab",
-    "firstPane",
-    "replayed"
-  ],
+  "required": ["workspace", "firstTab", "firstPane", "replayed"],
   "properties": {
     "workspace": {
       "$ref": "#/$defs/workspace"
@@ -32,12 +27,7 @@
     "workspace": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "name",
-        "colour",
-        "position"
-      ],
+      "required": ["id", "name", "colour", "position"],
       "properties": {
         "id": {
           "description": "The workspace's id. Client-minted UUIDv7 and therefore UNTRUSTED INPUT (design .internal/specs/2026-08-16-tabs-panes-and-blocks-design.md §7): the shape is validated and never believed, an insert on an id that already means something else FAILS rather than overwriting, and knowing an id confers NO RIGHT to use it — a UUIDv7 embeds a timestamp and is guessable by construction, so nothing anywhere may treat possession of one as evidence.",
@@ -50,10 +40,7 @@
         },
         "colour": {
           "description": "The colour the user chose for it, or null for a workspace nobody coloured — the default workspace, and any row the backend minted for a session nobody recorded. One of the closed nine in the renderer's layout/workspace-colours.ts. DELIBERATELY NOT THE TAB PALETTE: a tab's colour follows the theme, because a tab decorated under one theme must still read under another; a workspace's colour is the identity of a container the user made and must NOT change when the theme does, any more than its name would. The store keeps a string and judges none of it — what is drawable is the renderer's question, and it already answers it by drawing an unknown value as no colour rather than as a broken swatch.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         },
         "position": {
           "description": "Where it sits in the switcher. Written by the backend from the order workspaces.reorder was given; the renderer never computes it.",

@@ -88,15 +88,19 @@ describe('the overview a person opens', () => {
       <OverviewPanel port={port} onClose={() => {}} now={() => NOW} />
     ))
 
-    // workspaces-ux §4.2: the default workspace NEVER renders — no header,
-    // no name, no colour. Two columns, exactly one head, and it is the named
-    // one: the ungrouped column is cards with nothing above them.
+    // EVERY COLUMN IS HEADED HERE, including the ungrouped one — and that is
+    // not a breach of §4.2 but the place where its reason runs out. In the
+    // STRIP the default draws nothing because its rows sit among the tabs and
+    // a chip for it would be a second answer to "which workspace am I in". In
+    // a picture of every workspace at once, a column with no head is a column
+    // a person cannot name, so the ungrouped one says exactly that.
     expect(container.querySelectorAll('.overview__column').length).toBe(2)
     const heads = Array.from(container.querySelectorAll<HTMLElement>('.overview__column-head'))
-    expect(heads.length).toBe(1)
-    expect(heads[0].textContent).toContain('refactor-auth')
-    expect(heads[0].textContent).toContain('1 pane')
-    expect(heads[0].dataset.attention).toBe('waiting')
+    expect(heads.length).toBe(2)
+    expect(heads[0].textContent).toContain('Ungrouped')
+    expect(heads[1].textContent).toContain('refactor-auth')
+    expect(heads[1].textContent).toContain('1 pane')
+    expect(heads[1].dataset.attention).toBe('waiting')
   })
 
   it('goes to a workspace when its head is pressed, and closes', () => {
@@ -111,7 +115,9 @@ describe('the overview a person opens', () => {
         now={() => NOW}
       />
     ))
-    const head = container.querySelector<HTMLElement>('.overview__column-head .ui-button')
+    // The NAMED workspace's head — the ungrouped column is headed too now, and
+    // it is the first of the two.
+    const head = container.querySelectorAll<HTMLElement>('.overview__column-head .ui-button')[1]
     head?.click()
     // It asks the application to switch and never picks a pane itself: which
     // one you land on is the MRU question, and PaneManager owns the answer.
@@ -131,11 +137,19 @@ describe('the overview a person opens', () => {
         now={() => NOW}
       />
     ))
-    const plus = container.querySelector<HTMLElement>('.overview__column-head .ui-icon-button')
-    plus?.click()
+    // The create sits in the SPOTLIGHT column's footer now, not in its head:
+    // the head names the workspace and offers to close it, and a column that
+    // is not in front offers no create at all — the gesture would land in a
+    // workspace the person is only glancing at. So the subject is read off
+    // the column that HAS the action, which is the fact being asserted.
+    const column = container.querySelector<HTMLElement>(
+      '.overview__column:has(.overview__column-actions)',
+    )!
+    const subject = column.dataset.workspaceId
+    column.querySelector<HTMLElement>('.overview__column-actions .ui-button')!.click()
     // The WORKSPACE it was pressed in, not "wherever the window is": this
     // surface shows every workspace at once.
-    expect(port.tabsCreated).toEqual(['w1'])
+    expect(port.tabsCreated).toEqual([subject])
     expect(closed).toBe(1)
   })
 
@@ -236,15 +250,23 @@ describe('the overview a person opens', () => {
       <OverviewPanel port={port} onClose={() => {}} now={() => NOW} />
     ))
 
-    const focusables = cards(container).map((c) => c.querySelector<HTMLElement>('[tabindex]')!)
-    const last = focusables[focusables.length - 1]
+    // The trap holds every control the panel draws — the cards AND the
+    // buttons around them (a column's head, its close mark, its create, the
+    // make-a-workspace action). What it promises is not an order but a
+    // boundary: Tab and Shift+Tab move, and neither ever leaves.
+    const panel = container.querySelector<HTMLElement>('.overview')!
+    const cardStops = cards(container).map((c) => c.querySelector<HTMLElement>('[tabindex]')!)
+    const last = cardStops[cardStops.length - 1]
+
     last.focus()
     fireEvent.keyDown(last, { key: 'Tab' })
-    expect(document.activeElement).toBe(focusables[0])
+    expect(document.activeElement).not.toBe(last)
+    expect(panel.contains(document.activeElement)).toBe(true)
 
-    focusables[0].focus()
-    fireEvent.keyDown(focusables[0], { key: 'Tab', shiftKey: true })
-    expect(document.activeElement).toBe(last)
+    cardStops[0].focus()
+    fireEvent.keyDown(cardStops[0], { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).not.toBe(cardStops[0])
+    expect(panel.contains(document.activeElement)).toBe(true)
   })
 })
 

@@ -152,6 +152,7 @@ function mockPaneHost(): PaneHost {
     setTitle: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
+    contentSettled: vi.fn(),
   }
 }
 /** Click a generated section's rail item. Settings opens on the first rail
@@ -584,8 +585,6 @@ describe('SettingsContent', () => {
     await vi.waitFor(() => {
       expect(target.querySelectorAll<HTMLInputElement>('input[type="search"]').length).toBe(1)
     })
-
-    const allSearchInputs = target.querySelectorAll<HTMLInputElement>('input[type="search"]')
 
     // Also: no search input of type text with search-related placeholder
     const textInputsSearching = target.querySelectorAll<HTMLInputElement>(

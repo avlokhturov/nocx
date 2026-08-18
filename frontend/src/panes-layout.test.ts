@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { NameColourDraft } from './name-colour-dialog'
 import {
   createRendererMock,
   resetSessionCounter,
@@ -25,7 +26,9 @@ vi.mock('./renderers/xterm', () => ({
 // and asserts what the STRIP shows, not what a method returned.
 
 const showConfirmMock = vi.fn()
-const showPromptMock = vi.fn()
+const workspaceCreateMock = vi.fn()
+const workspaceEditMock = vi.fn()
+const tabEditMock = vi.fn()
 // The toast host lives in App.tsx, which these tests do not mount, so the
 // outcome is asserted where it is raised. A degrade that is only in a log is
 // the defect AGENTS.md names; this is how the test says it is not.
@@ -36,9 +39,22 @@ vi.mock('./ui/toast', () => ({
   },
 }))
 
-vi.mock('./ui/dialog', () => ({
+// PARTIAL: name-colour-dialog.tsx renders the kit's Dialog, so a wholesale
+// mock of this module leaves it without one.
+vi.mock('./ui/dialog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./ui/dialog')>()),
   showConfirm: (...args: unknown[]) => showConfirmMock(...args) as Promise<boolean>,
-  showPrompt: (...args: unknown[]) => showPromptMock(...args) as Promise<string | null>,
+}))
+
+// Naming and colouring are one form now, for both subjects (nocx-2mipw.2).
+// The tests drive it through one mock and read back what was asked for.
+vi.mock('./name-colour-dialog', () => ({
+  showWorkspaceCreateDialog: (...args: unknown[]) =>
+    workspaceCreateMock(...args) as Promise<NameColourDraft | null>,
+  showWorkspaceEditDialog: (...args: unknown[]) =>
+    workspaceEditMock(...args) as Promise<NameColourDraft | null>,
+  showTabEditDialog: (...args: unknown[]) =>
+    tabEditMock(...args) as Promise<NameColourDraft | null>,
 }))
 
 /** The rows of a chain that already holds two decorated tabs — what a
@@ -184,7 +200,10 @@ describe('the renderer draws the chain the backend holds', () => {
     })
     const paneId = Number(stripTabs(bar)[0].getAttribute('data-pane-id'))
 
-    showPromptMock.mockResolvedValueOnce('deploy')
+    // Naming and colouring are one form now (nocx-2mipw.2), so the rename
+    // intent opens the tab's edit dialog and what it answers is what the
+    // backend is asked for.
+    tabEditMock.mockResolvedValueOnce({ name: 'deploy', colour: null })
     tabStrip.onRename?.(paneId)
     await vi.waitFor(() => {
       expect(stripTabs(bar)[0].querySelector('.nocx-tab-title')?.textContent).toBe('deploy')
@@ -192,16 +211,16 @@ describe('the renderer draws the chain the backend holds', () => {
     expect(backend.rows().tabs.find((t) => t.id === 'tab-b')?.name).toBe('deploy')
 
     // An empty answer CLEARS the name — a real operation, and the tab goes
-    // back to the label its panes give it (§4.5). Cancelling is the other
-    // answer and changes nothing.
-    showPromptMock.mockResolvedValueOnce('   ')
+    // back to the label its panes give it (§4.5). It is not a cancel, which
+    // is the dialog answering null and is asserted below.
+    tabEditMock.mockResolvedValueOnce({ name: '', colour: null })
     tabStrip.onRename?.(paneId)
     await vi.waitFor(() => {
       expect(backend.rows().tabs.find((t) => t.id === 'tab-b')?.name).toBeNull()
     })
     expect(stripTabs(bar)[0].querySelector('.nocx-tab-title')?.textContent).not.toBe('deploy')
 
-    showPromptMock.mockResolvedValueOnce(null)
+    tabEditMock.mockResolvedValueOnce(null)
     tabStrip.onRename?.(paneId)
     await Promise.resolve()
     expect(backend.rows().tabs.find((t) => t.id === 'tab-b')?.name).toBeNull()

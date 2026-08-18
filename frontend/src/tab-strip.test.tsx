@@ -17,6 +17,7 @@ function makePane(id: number, title: string, tooltip: string): PaneView {
     // The strip's filter reads the tooltip whether or not a second line is shown,
     // so these fixtures keep it searchable and leave the line itself empty.
     subtitle: '',
+    preview: '',
     hasActivity: false,
     agentStatus: null,
     paneId: `pane-${id}`,
@@ -146,7 +147,11 @@ function grouped(id: number, groupKey: string, depth = 0): PaneView {
 }
 
 function headings(): string[] {
-  return [...document.querySelectorAll(HEADING)].map((el) => el.textContent ?? '')
+  // The heading carries its own close mark now, so its NAME is the control it
+  // places rather than everything inside the row.
+  return [...document.querySelectorAll(HEADING)].map(
+    (el) => el.querySelector('.ui-button')?.textContent ?? '',
+  )
 }
 
 /** The rendered strip, row by row, as a person reads it down the column:
@@ -156,7 +161,7 @@ function readStrip(): string[] {
   return [...container.children].map((el) =>
     el.classList.contains('nocx-tab')
       ? `${'·'.repeat(Number(el.getAttribute('data-depth') ?? 0))}${el.querySelector('.nocx-tab-title')?.textContent}`
-      : `# ${el.textContent}`,
+      : `# ${el.querySelector('.ui-button')?.textContent ?? ''}`,
   )
 }
 
@@ -164,8 +169,8 @@ describe('the vertical strip draws headings, and the default workspace has none'
   it('draws a heading above each group that has one, in the order the rows arrive', () => {
     const { strip } = setupVerticalStrip()
     strip.setGroupHeadings([
-      { key: 'ws-1', heading: 'refactor-auth' },
-      { key: DEFAULT_WS, heading: null },
+      { key: 'ws-1', heading: 'refactor-auth', colour: null },
+      { key: DEFAULT_WS, heading: null, colour: null },
     ])
     strip.addPane(grouped(1, 'ws-1'))
     strip.addPane(grouped(2, 'ws-1'))
@@ -180,7 +185,7 @@ describe('the vertical strip draws headings, and the default workspace has none'
     // workspaces exist. So this compares the default's rendered rows, byte
     // for byte, across the arrival of another workspace.
     const { strip } = setupVerticalStrip()
-    strip.setGroupHeadings([{ key: DEFAULT_WS, heading: null }])
+    strip.setGroupHeadings([{ key: DEFAULT_WS, heading: null, colour: null }])
     strip.addPane(grouped(1, DEFAULT_WS))
     strip.addPane(grouped(2, DEFAULT_WS))
     const alone = readStrip()
@@ -188,8 +193,8 @@ describe('the vertical strip draws headings, and the default workspace has none'
     expect(headings()).toEqual([])
 
     strip.setGroupHeadings([
-      { key: DEFAULT_WS, heading: null },
-      { key: 'ws-1', heading: 'refactor-auth' },
+      { key: DEFAULT_WS, heading: null, colour: null },
+      { key: 'ws-1', heading: 'refactor-auth', colour: null },
     ])
     strip.addPane(grouped(3, 'ws-1'))
 
@@ -204,7 +209,7 @@ describe('the vertical strip draws headings, and the default workspace has none'
 
   it('indents a lineage child under its parent', () => {
     const { strip } = setupVerticalStrip()
-    strip.setGroupHeadings([{ key: DEFAULT_WS, heading: null }])
+    strip.setGroupHeadings([{ key: DEFAULT_WS, heading: null, colour: null }])
     strip.addPane(grouped(1, DEFAULT_WS))
     strip.addPane(grouped(2, DEFAULT_WS, 1))
 
@@ -217,7 +222,7 @@ describe('the vertical strip draws headings, and the default workspace has none'
     // The rows are hidden rather than removed, so the heading has to ask
     // whether any of its own survived the filter.
     const { strip } = setupVerticalStrip()
-    strip.setGroupHeadings([{ key: 'ws-1', heading: 'refactor-auth' }])
+    strip.setGroupHeadings([{ key: 'ws-1', heading: 'refactor-auth', colour: null }])
     strip.addPane({ ...makePane(1, 'deploy', 'ssh deploy@srv-01'), groupKey: 'ws-1' })
     strip.addPane({ ...makePane(2, 'notes', '~/notes'), groupKey: '' })
     expect(headings()).toEqual(['refactor-auth'])
@@ -245,176 +250,52 @@ describe('the vertical strip draws headings, and the default workspace has none'
   })
 })
 
-describe('the workspace chip (§4.3)', () => {
-  function setupHorizontalStrip(): HorizontalTabStrip {
-    const strip = new HorizontalTabStrip()
-    const container = document.createElement('div')
-    document.body.appendChild(container)
-    strip.mount(container)
-    return strip
-  }
-
-  const chip = () => document.querySelector<HTMLButtonElement>('.nocx-workspace-chip .ui-button')
-  const openSwitcher = (): HTMLElement[] => {
-    chip()!.click()
-    return [...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')]
-  }
-
-  it('is a glyph with no label in the default workspace, whatever else exists', () => {
-    const strip = setupHorizontalStrip()
-    strip.setWorkspaceChip({
-      name: null,
-      workspaces: [
-        { id: DEFAULT_WS, name: null },
-        { id: 'ws-1', name: 'refactor-auth' },
-      ],
-      currentId: DEFAULT_WS,
-    })
-
-    expect(chip()).not.toBeNull()
-    expect(chip()!.textContent).toBe('')
-    expect(chip()!.querySelector('svg')).not.toBeNull()
-  })
-
-  it('names the current workspace when it has a name', () => {
-    const strip = setupHorizontalStrip()
-    strip.setWorkspaceChip({
-      name: 'refactor-auth',
-      workspaces: [
-        { id: DEFAULT_WS, name: null },
-        { id: 'ws-1', name: 'refactor-auth' },
-      ],
-      currentId: 'ws-1',
-    })
-
-    expect(chip()!.textContent).toContain('refactor-auth')
-  })
-
-  it('switches to the workspace the person picked', () => {
-    const strip = setupHorizontalStrip()
-    const switched: string[] = []
-    strip.onSwitchWorkspace = (id) => switched.push(id)
-    strip.setWorkspaceChip({
-      name: null,
-      workspaces: [
-        { id: DEFAULT_WS, name: null },
-        { id: 'ws-1', name: 'refactor-auth' },
-      ],
-      currentId: DEFAULT_WS,
-    })
-
-    openSwitcher()
-      .find((el) => el.textContent === 'refactor-auth')!
-      .click()
-
-    expect(switched).toEqual(['ws-1'])
-  })
-
-  it('offers a way back to the default workspace without giving it a name', () => {
-    const strip = setupHorizontalStrip()
-    const switched: string[] = []
-    strip.onSwitchWorkspace = (id) => switched.push(id)
-    strip.setWorkspaceChip({
-      name: 'refactor-auth',
-      workspaces: [
-        { id: DEFAULT_WS, name: null },
-        { id: 'ws-1', name: 'refactor-auth' },
-      ],
-      currentId: 'ws-1',
-    })
-
-    const rows = openSwitcher()
-    const back = rows[0]
-    expect(back.textContent).not.toBe('')
-    back.click()
-
-    expect(switched).toEqual([DEFAULT_WS])
-  })
-
-  it("offers New workspace, and the current workspace's own actions after it", () => {
-    // The actions are HANDED IN (nocx-isoph.7): the chip does not decide which
-    // exist, so what is asserted here is that it places them, after
-    // navigation, for the workspace it is showing. Which rows exist for which
-    // workspace is workspace-menu.ts's rule and is tested there.
-    const strip = setupHorizontalStrip()
-    let created = 0
-    const closed: string[] = []
-    strip.onNewWorkspace = () => (created += 1)
-    strip.workspaceMenuRows = (workspaceId) =>
-      workspaceId === DEFAULT_WS
-        ? []
-        : [
-            {
-              id: 'workspace-close',
-              label: 'Close workspace',
-              onSelect: () => closed.push(workspaceId),
-            },
-          ]
-
-    strip.setWorkspaceChip({
-      name: null,
-      workspaces: [{ id: DEFAULT_WS, name: null }],
-      currentId: DEFAULT_WS,
-    })
-    const inDefault = openSwitcher().map((el) => el.textContent)
-    expect(inDefault).toContain('New workspace…')
-    expect(inDefault.join(' ')).not.toContain('Close workspace')
-
-    strip.setWorkspaceChip({
-      name: 'refactor-auth',
-      workspaces: [
-        { id: DEFAULT_WS, name: null },
-        { id: 'ws-1', name: 'refactor-auth' },
-      ],
-      currentId: 'ws-1',
-    })
-    const inWorkspace = openSwitcher().map((el) => el.textContent)
-    // Navigation first, then what acts on where you already are.
-    expect(inWorkspace.indexOf('New workspace…')).toBeLessThan(
-      inWorkspace.indexOf('Close workspace'),
-    )
-    openSwitcher()
-      .find((el) => el.textContent === 'New workspace…')!
-      .click()
-    openSwitcher()
-      .find((el) => el.textContent === 'Close workspace')!
-      .click()
-
-    expect(created).toBe(1)
-    // The SUBJECT is the workspace in front, not a global "current".
-    expect(closed).toEqual(['ws-1'])
-  })
-
-  it('is absent until something says there is a chain behind it', () => {
-    setupHorizontalStrip()
-    expect(chip()).toBeNull()
-  })
-
-  it('never appears in the vertical strip, which shows every workspace at once', () => {
-    const { strip } = setupVerticalStrip()
-    strip.setWorkspaceChip({ name: 'refactor-auth', workspaces: [], currentId: 'ws-1' })
-    expect(chip()).toBeNull()
-  })
-})
+// THE CHIP-AS-SWITCHER TESTS ARE GONE, and their absence is the record of a
+// design that was withdrawn. §4.3 gave the horizontal strip ONE chip: the row
+// drew the current workspace's tabs and every other workspace was reachable
+// only through that chip's dropdown. The rework replaced it — every workspace
+// is a pill IN the row, one click switches, and the strip has no
+// `setWorkspaceChip` at all — so tests that drove that method were asserting a
+// mechanism the product no longer has.
+//
+// What they were protecting is protected still, and end to end rather than at
+// this seam: panes-workspaces.test.ts drives a real PaneManager for "the
+// default draws no pill whatever else exists", "clicking a pill switches to
+// that workspace", "a workspace's actions come from its pill", and "the
+// default is offered nothing to do to it".
 
 describe('the snippets action (nocx-d346)', () => {
-  // The strip is a presentation port: it reports that the button was
-  // pressed, nothing more. What opens is the quick-connect palette in its
-  // snippets variant — the same surface the caret and the key icon beside
-  // it open, which is the correction the owner's review made.
+  // The strip is a presentation port: it reports that the action was picked,
+  // nothing more. What opens is the quick-connect palette in its snippets
+  // variant — the same surface the key row beside it opens.
+  //
+  // IT IS A ROW IN THE STRIP'S MENU, in BOTH placements, and it used to be a
+  // glyph of its own in each. Five same-weight marks became three (the
+  // overview, a new tab, and the caret), and the rest became named rows —
+  // which is also what stopped the two placements from meaning different
+  // things by the same glyph.
   const pressesOf = (strip: { onSnippets: (() => void) | null }) => {
     let presses = 0
     strip.onSnippets = () => (presses += 1)
     return () => presses
   }
 
+  /** Open the strip's caret menu and hand back its rows. */
+  const menuRows = (): HTMLElement[] => {
+    document.querySelector<HTMLButtonElement>('[aria-label="More"]')!.click()
+    return [...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')]
+  }
+
+  const snippetsRow = (): HTMLElement | undefined =>
+    menuRows().find((el) => el.textContent?.includes('Snippets'))
+
   it('the vertical strip offers it and reports the press', () => {
     const { strip } = setupVerticalStrip()
     const presses = pressesOf(strip)
 
-    const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')
-    expect(button, 'the vertical strip has no snippets action').not.toBeNull()
-    button!.click()
+    const row = snippetsRow()
+    expect(row, 'the vertical strip does not offer snippets').toBeDefined()
+    row!.click()
 
     expect(presses()).toBe(1)
   })
@@ -426,16 +307,16 @@ describe('the snippets action (nocx-d346)', () => {
     strip.mount(container)
     const presses = pressesOf(strip)
 
-    const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')
-    expect(button, 'the horizontal strip has no snippets action').not.toBeNull()
-    button!.click()
+    const row = snippetsRow()
+    expect(row, 'the horizontal strip does not offer snippets').toBeDefined()
+    row!.click()
 
     expect(presses()).toBe(1)
   })
 
-  it('with no callback wired the button is inert rather than broken', () => {
+  it('with no callback wired the row is inert rather than broken', () => {
     setupVerticalStrip()
-    const button = document.querySelector<HTMLButtonElement>('[aria-label="Snippets"]')!
-    expect(() => button.click()).not.toThrow()
+    const row = snippetsRow()!
+    expect(() => row.click()).not.toThrow()
   })
 })

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from 'vitest'
+import type { NameColourDraft } from './name-colour-dialog'
 import {
   createRendererMock,
   resetSessionCounter,
@@ -20,10 +21,25 @@ vi.mock('./renderers/xterm', () => ({
 }))
 
 const showConfirmMock = vi.fn()
-const showPromptMock = vi.fn()
-vi.mock('./ui/dialog', () => ({
+const workspaceCreateMock = vi.fn()
+const workspaceEditMock = vi.fn()
+const tabEditMock = vi.fn()
+// PARTIAL: name-colour-dialog.tsx renders the kit's Dialog, so a wholesale
+// mock of this module leaves it without one.
+vi.mock('./ui/dialog', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./ui/dialog')>()),
   showConfirm: (...args: unknown[]) => showConfirmMock(...args) as Promise<boolean>,
-  showPrompt: (...args: unknown[]) => showPromptMock(...args) as Promise<string | null>,
+}))
+
+// Naming and colouring are one form now, for both subjects (nocx-2mipw.2).
+// The tests drive it through one mock and read back what was asked for.
+vi.mock('./name-colour-dialog', () => ({
+  showWorkspaceCreateDialog: (...args: unknown[]) =>
+    workspaceCreateMock(...args) as Promise<NameColourDraft | null>,
+  showWorkspaceEditDialog: (...args: unknown[]) =>
+    workspaceEditMock(...args) as Promise<NameColourDraft | null>,
+  showTabEditDialog: (...args: unknown[]) =>
+    tabEditMock(...args) as Promise<NameColourDraft | null>,
 }))
 
 const DEFAULT_WS = 'workspace:default'
@@ -37,8 +53,18 @@ const tabTitles = (root: HTMLElement): string[] =>
 
 const chip = (root: HTMLElement): HTMLElement | null => root.querySelector(CHIP)
 
+/** The tabs a person can actually see: a folded workspace's rows are in the
+ *  row and hidden (workspaces UX rework), not removed. */
+const visibleTabs = (root: HTMLElement): HTMLElement[] =>
+  [...root.querySelectorAll<HTMLElement>(TAB)].filter((el) => el.dataset.hidden !== 'true')
+
+/** A workspace pill's own actions. A CLICK on the pill switches to that
+ *  workspace now — one click is the whole of switching — so the actions live
+ *  where a row's actions live: the context menu. */
 const switcherRows = (root: HTMLElement): HTMLElement[] => {
-  chip(root)!.click()
+  const pill = chip(root)
+  if (!pill) return []
+  pill.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
   return [...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')]
 }
 
@@ -46,7 +72,9 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
   beforeEach(() => {
     resetSessionCounter()
     vi.clearAllMocks()
-    showPromptMock.mockResolvedValue('refactor-auth')
+    workspaceCreateMock.mockResolvedValue({ name: 'refactor-auth', colour: 'blue' })
+    workspaceEditMock.mockResolvedValue({ name: 'refactor-auth', colour: 'blue' })
+    tabEditMock.mockResolvedValue({ name: 'refactor-auth', colour: null })
     showConfirmMock.mockResolvedValue(true)
   })
 
@@ -55,7 +83,7 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
   async function twoWorkspaces() {
     const mounted = await mountPaneManager()
     const { manager, bar } = mounted
-    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(1))
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(1))
 
     await manager.newWorkspace()
     await vi.waitFor(() => expect(manager.currentWorkspaceId()).not.toBe(DEFAULT_WS))
@@ -65,7 +93,7 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
   it('creates a workspace together with its first tab, and shows it', async () => {
     const { manager, bar, backend } = await twoWorkspaces()
 
-    expect(showPromptMock).toHaveBeenCalled()
+    expect(workspaceCreateMock).toHaveBeenCalled()
     const rows = backend.rows()
     const workspace = rows.workspaces.find((w) => w.id !== DEFAULT_WS)!
     expect(workspace.name).toBe('refactor-auth')
@@ -74,12 +102,18 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     const member = rows.tabs.find((t) => t.workspaceId === workspace.id)!
     expect(rows.panes.some((p) => p.tabId === member.id)).toBe(true)
     expect(manager.currentWorkspaceId()).toBe(workspace.id)
-    // THE HORIZONTAL STRIP SHOWS THE CURRENT WORKSPACE AND NOTHING ELSE.
-    expect(bar.querySelectorAll(TAB)).toHaveLength(1)
+    // THE HORIZONTAL STRIP SHOWS THE CURRENT WORKSPACE'S TABS AND FOLDS THE
+    // NAMED REST. The default's rows are top-level (§4.2 — it draws no pill,
+    // so folding them would put them out of reach), which is why the row
+    // holds two visible tabs here and not one: the default's, and the new
+    // workspace's.
+    expect(visibleTabs(bar)).toHaveLength(2)
+    const made = bar.querySelector<HTMLElement>(`${TAB}[aria-selected="true"]`)
+    expect(made?.dataset.hidden).not.toBe('true')
   })
 
   it('does not create anything when the person cancels the name', async () => {
-    showPromptMock.mockResolvedValue(null)
+    workspaceCreateMock.mockResolvedValue(null)
     const { manager, backend } = await mountPaneManager()
 
     await manager.newWorkspace()
@@ -88,49 +122,62 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     expect(manager.currentWorkspaceId()).toBe(DEFAULT_WS)
   })
 
-  it('switching the chip changes the set of tabs the strip draws', async () => {
-    const { manager, bar } = await twoWorkspaces()
-    const inWorkspace = tabTitles(bar)
+  it('clicking a workspace pill switches to it, and its tabs are the ones on show', async () => {
+    // ONE CLICK IS THE WHOLE OF SWITCHING now: every workspace is a pill IN
+    // the row, and the one holding the current tab shows its tabs while the
+    // rest are folded to their pill. There is no dropdown in the path.
+    const { manager, bar } = await mountPaneManager()
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(1))
+    await manager.newWorkspace()
+    await vi.waitFor(() => expect(manager.currentWorkspaceId()).not.toBe(DEFAULT_WS))
+    const made = manager.currentWorkspaceId()
 
-    switcherRows(bar)
-      .find((el) => el.textContent === 'Ungrouped tabs')!
-      .click()
+    // A second named workspace, so there is one to fold.
+    workspaceCreateMock.mockResolvedValue({ name: 'second', colour: 'red' })
+    await manager.newWorkspace()
+    await vi.waitFor(() => expect(manager.currentWorkspaceId()).not.toBe(made))
+    // Three rows exist — the default's and one per named workspace — and two
+    // of them are on show: the default's, which is never folded (§4.2: it
+    // draws no pill, so folding it would put its tabs out of reach), and the
+    // current workspace's. The third is folded to its pill.
+    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(3))
+    expect(visibleTabs(bar)).toHaveLength(2)
 
-    await vi.waitFor(() => expect(manager.currentWorkspaceId()).toBe(DEFAULT_WS))
-    const inDefault = tabTitles(bar)
-    expect(inDefault).toHaveLength(1)
-    expect(inDefault).not.toEqual(inWorkspace)
+    // Clicking that pill is the whole of switching: no menu in the path.
+    const pill = [...bar.querySelectorAll<HTMLElement>(CHIP)].find((el) =>
+      el.textContent?.includes('refactor-auth'),
+    )!
+    pill.click()
+
+    await vi.waitFor(() => expect(manager.currentWorkspaceId()).toBe(made))
+    expect(visibleTabs(bar)).toHaveLength(2)
   })
 
-  it('gives the chip no label in the default workspace, whatever else exists', async () => {
-    // The bead's second criterion at the seam a person touches: the default's
-    // chip is a glyph with no name, and the arrival of another workspace does
-    // not give it one.
+  it('gives the default workspace no pill at all, whatever else exists', async () => {
+    // §4.2 at the seam a person touches: the default renders NO chrome — not
+    // an unnamed pill, not an empty one — and the arrival of another
+    // workspace does not give it any. The pill that appears belongs to the
+    // workspace that was made, and it wears that workspace's name.
     const { manager, bar } = await mountPaneManager()
-    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(1))
-    const alone = chip(bar)!.textContent
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(1))
+    expect(chip(bar)).toBeNull()
 
     await manager.newWorkspace()
     await vi.waitFor(() => expect(manager.currentWorkspaceId()).not.toBe(DEFAULT_WS))
-    manager.switchWorkspace(DEFAULT_WS)
 
-    expect(chip(bar)!.textContent).toBe(alone)
-    expect(chip(bar)!.textContent).toBe('')
+    const pills = [...bar.querySelectorAll<HTMLElement>(CHIP)]
+    expect(pills).toHaveLength(1)
+    expect(pills[0].textContent).toContain('refactor-auth')
   })
 
-  it('names the current workspace on the chip when it has a name', async () => {
+  it('offers to close a workspace from its pill, and the default has none to offer', async () => {
     const { bar } = await twoWorkspaces()
-
-    expect(chip(bar)!.textContent).toContain('refactor-auth')
-  })
-
-  it('offers to close a workspace, and never the default', async () => {
-    const { manager, bar } = await twoWorkspaces()
 
     expect(switcherRows(bar).map((el) => el.textContent)).toContain('Close workspace')
 
-    manager.switchWorkspace(DEFAULT_WS)
-    expect(switcherRows(bar).map((el) => el.textContent)).not.toContain('Close workspace')
+    // Nothing about the default can be asked for, because the default draws
+    // nothing to ask it from.
+    expect([...bar.querySelectorAll(CHIP)]).toHaveLength(1)
   })
 
   it('asks before closing a workspace, and then takes the whole container', async () => {
@@ -173,9 +220,9 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     const { manager, bar } = await twoWorkspaces()
     manager.replaceStrip(new VerticalTabStrip())
 
-    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(2))
     const headings = [...bar.querySelectorAll('.tabstrip-group-heading')].map(
-      (el) => el.textContent,
+      (el) => el.querySelector('.ui-button')?.textContent,
     )
     expect(headings).toEqual(['refactor-auth'])
   })
@@ -191,11 +238,18 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     // vertical is similar.
     const { manager, bar, backend } = await mountPaneManager()
     manager.replaceStrip(new VerticalTabStrip())
-    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(1))
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(1))
     expect(chip(bar)).toBeNull()
 
     const before = backend.rows().workspaces.length
-    bar.querySelector<HTMLElement>('[aria-label="New workspace"]')!.click()
+    // FIVE GLYPHS BECAME THREE, in both placements: creating a workspace is a
+    // named row in the strip's own menu, where the horizontal row has always
+    // had it, rather than a second unlabelled mark beside the layers one.
+    bar.querySelector<HTMLElement>('[aria-label="More"]')!.click()
+    const create = [...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')].find(
+      (el) => el.textContent?.includes('New workspace'),
+    )!
+    create.click()
 
     await vi.waitFor(() => {
       expect(backend.rows().workspaces.length).toBe(before + 1)
@@ -210,10 +264,12 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     // workspace in front of it, opened here from the heading instead.
     const { manager, bar } = await twoWorkspaces()
     manager.replaceStrip(new VerticalTabStrip())
-    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(2))
 
     const heading = bar.querySelector<HTMLElement>('.tabstrip-group-heading')!
-    expect(heading.textContent).toBe('refactor-auth')
+    // The heading carries its own close mark now, so its NAME is the control
+    // rather than the whole row's text.
+    expect(heading.querySelector('.ui-button')!.textContent).toBe('refactor-auth')
     // The control is the kit's Button, so it is focusable and keyboard
     // operable without this file re-deriving either — which is what
     // nocx/no-role-impersonation exists to enforce.
@@ -231,8 +287,10 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
   it("renames a workspace from the strip, and the new name is the backend's", async () => {
     const { manager, bar, backend } = await twoWorkspaces()
     manager.replaceStrip(new VerticalTabStrip())
-    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
-    showPromptMock.mockResolvedValue('deploy')
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(2))
+    // Renaming and recolouring are one form now (nocx-2mipw.2): the row opens
+    // the edit dialog, and what it answers is what the backend is asked for.
+    workspaceEditMock.mockResolvedValue({ name: 'deploy', colour: 'green' })
 
     bar.querySelector<HTMLElement>('.tabstrip-group-heading .ui-button')!.click()
     ;[...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')]
@@ -244,7 +302,7 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     })
     // The heading redraws from the store's answer, not from what was typed.
     await vi.waitFor(() => {
-      expect(bar.querySelector('.tabstrip-group-heading')?.textContent).toBe('deploy')
+      expect(bar.querySelector('.tabstrip-group-heading .ui-button')?.textContent).toBe('deploy')
     })
   })
 
@@ -254,17 +312,20 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     // directly answers with none either.
     const { manager, bar } = await twoWorkspaces()
     manager.replaceStrip(new VerticalTabStrip())
-    await vi.waitFor(() => expect(bar.querySelectorAll(TAB)).toHaveLength(2))
+    await vi.waitFor(() => expect(visibleTabs(bar)).toHaveLength(2))
 
     const headings = [...bar.querySelectorAll('.tabstrip-group-heading')].map(
-      (el) => el.textContent,
+      (el) => el.querySelector('.ui-button')?.textContent,
     )
     expect(headings).toEqual(['refactor-auth'])
 
     manager.switchWorkspace(DEFAULT_WS)
     manager.replaceStrip(new HorizontalTabStrip())
-    await vi.waitFor(() => expect(chip(bar)).not.toBeNull())
-    expect(switcherRows(bar).map((el) => el.textContent)).not.toContain('Rename workspace…')
+    // And in the other placement the same rule holds by ABSENCE: the one pill
+    // in the row belongs to the named workspace, so there is no surface from
+    // which the default could be renamed, recoloured or closed.
+    await vi.waitFor(() => expect([...bar.querySelectorAll(CHIP)]).toHaveLength(1))
+    expect(chip(bar)!.textContent).toContain('refactor-auth')
   })
 
   it('opens a new tab in the workspace the window is showing', async () => {
@@ -277,7 +338,9 @@ describe('the window shows one workspace at a time (nocx-isoph.5)', () => {
     manager.newPane()
 
     await vi.waitFor(() => {
-      expect(bar.querySelectorAll(TAB)).toHaveLength(2)
+      // Two in this workspace, plus the default's own row, which is always in
+      // the strip (§4.2).
+      expect(visibleTabs(bar)).toHaveLength(3)
     })
     expect(backend.rows().tabs.filter((t) => t.workspaceId === id)).toHaveLength(2)
     expect(manager.currentWorkspaceId()).toBe(id)

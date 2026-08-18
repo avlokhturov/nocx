@@ -703,25 +703,16 @@ var UITheme = MustRegisterSelect(SelectSpec{
 	},
 })
 
-// SidebarWidth is the sidebar panel's width in CSS pixels. The frontend
-// applies it to #sidebar through the --sidebar-width variable and persists
-// it here — the one owner of the number (nocx-qmcu). The bounds mirror
-// frontend/src/sidebar-width.ts: the minimum is the Git dense row's floor
-// (status letter + type glyph + counts + stage control leave ≈35px of file
-// name at 200px), the maximum is the width at which the panel plus the
-// activity bar would own more than half of a 1280px window. Move the
-// numbers in both places.
-var SidebarWidth = MustRegisterNumber(NumberSpec{
-	Key:         "sidebar.width",
-	Section:     "Interface",
-	Label:       "Sidebar width",
-	Description: "Width of the sidebar panel in pixels. Drag the panel's edge, or focus the separator and use the arrow keys.",
-	DataClass:   PublicConfig,
-	Default:     240,
-	Min:         fp(200),
-	Max:         fp(640),
-	Unit:        "px",
-})
+// The sidebar's width used to be registered here as `sidebar.width`. It is
+// not a setting and never was: a setting is something a user DELIBERATELY
+// CHOOSES, and a width produced by dragging a panel edge is what the app must
+// remember without being asked. Registering it put a "Sidebar width" row on
+// Settings → Interface reading 206.3828125 px and badged the section
+// "Modified" the moment anybody dragged the edge — two symptoms of the one
+// wrong owner (nocx-mqie.3). It now lives in internal/uistate, beside the
+// window geometry, as a whole number of CSS pixels. See ADR-0033 for the line
+// between the two stores, and check a new key against it before adding one
+// here.
 
 // ── Declared groups ────────────────────────────────────────────────────
 // The settings rail's group catalogue (nocx-dgsp): declared here, shipped

@@ -19,7 +19,16 @@
 // creation are `Button`; state is `StatusDot`. This surface owns only their
 // placement and the workspace-colour tint of each containing panel. It never
 // repaints a kit control.
-import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount } from 'solid-js'
+import {
+  For,
+  Show,
+  createEffect,
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+  untrack,
+} from 'solid-js'
 import { Badge } from '../ui/badge'
 import { Button } from '../ui/button'
 import { IconButton } from '../ui/icon-button'
@@ -81,7 +90,12 @@ export function OverviewPanel(props: OverviewPanelProps) {
   // and visually broken: one side became empty while the other showed slivers.
   const centreWorkspace = (id: string): void => {
     queueMicrotask(() => {
-      if (spotlightWorkspaceId() !== id || !root) return
+      // UNTRACKED ON PURPOSE. A microtask is not a tracked scope, and this
+      // read is not a subscription: it asks whether the spotlight is STILL
+      // the column this centring was queued for, one tick after the queueing.
+      // Tracking it would subscribe whatever happened to be reactive around
+      // the caller to a value read after the fact.
+      if (untrack(spotlightWorkspaceId) !== id || !root) return
       const column = Array.from(root.querySelectorAll<HTMLElement>('.overview__column')).find(
         (candidate) => candidate.dataset.workspaceId === id,
       )
@@ -105,7 +119,7 @@ export function OverviewPanel(props: OverviewPanelProps) {
       const settle = (event: TransitionEvent): void => {
         if (event.propertyName !== 'flex-basis') return
         columns.removeEventListener('transitionend', settle)
-        if (spotlightWorkspaceId() !== id) return
+        if (untrack(spotlightWorkspaceId) !== id) return
         centreNow(column, columns)
       }
       columns.addEventListener('transitionend', settle)
@@ -338,10 +352,13 @@ export function OverviewPanel(props: OverviewPanelProps) {
                         onClick={() => {
                           if (closingWorkspaceId() !== null) return
                           setClosingWorkspaceId(group.id)
+                          // The continuations run after the click, outside any
+                          // tracked scope: they SET state and call the panel's
+                          // own close, neither of which is a subscription.
                           void props.port.closeWorkspace(group.id).then(
                             (closed) => {
                               setClosingWorkspaceId(null)
-                              if (closed) props.onClose()
+                              if (closed) untrack(() => props.onClose())
                             },
                             () => setClosingWorkspaceId(null),
                           )

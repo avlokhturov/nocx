@@ -49,6 +49,7 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
+	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
@@ -116,6 +117,12 @@ type App struct {
 	// the table was built; this is only the surface it reaches, and it stays
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
+
+	// UIState owns what the app must remember without being asked
+	// (ADR-0033) — window geometry and the shell's layout. Exported because
+	// main.go is the only place a Wails context exists, and the window half
+	// of this document can only be sampled and applied there.
+	UIState *uistate.Store
 
 	// slogger is the same logger Logger wraps, kept so an adapter built
 	// outside this package (main.go's attention host) writes to the log file
@@ -508,6 +515,13 @@ func New(opts ...Option) (*App, error) {
 		return hex.EncodeToString(raw[:])
 	})
 
+	// The UI-state document (ADR-0033): the same document family again, and
+	// deliberately NOT the settings registry — a drag is not a decision. It
+	// never fails to open, because an absent document is an ordinary state
+	// and an unreadable one costs the user their window size, not their
+	// launch.
+	uiStateStore := uistate.New(docStore, slogger)
+
 	// The installed fact (nocx-mlm7 P7, design §5.4): backend-owned,
 	// persisted across restarts, keyed by the resolved destination
 	// identity, written only from a passport the renderer accepted and
@@ -761,6 +775,7 @@ func New(opts ...Option) (*App, error) {
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
+		transport.WithUIState(uiStateStore),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
@@ -1085,6 +1100,7 @@ func New(opts ...Option) (*App, error) {
 		logFile:          logFile,
 		procs:            procs,
 		attentionHost:    attentionHost,
+		UIState:          uiStateStore,
 		slogger:          slogger,
 	}
 
@@ -1635,6 +1651,15 @@ func (a *App) Shutdown(ctx context.Context) {
 	// for a new watch once the transport and the sessions are gone.
 	if a.procs != nil {
 		_ = a.procs.Close()
+	}
+	// The UI-state document last of the writers: its debounce means the very
+	// last drag of the session may still be pending, and Close is what turns
+	// a clean quit into a write rather than a lost layout. After the
+	// transport, so no renderer can still be setting a layout underneath it.
+	if a.UIState != nil {
+		if err := a.UIState.Close(); err != nil {
+			a.Logger.Error("ui state shutdown error", "error", err)
+		}
 	}
 	a.Logger.Info("application stopped")
 	// Close the log file last, after the final line: the stable copy of

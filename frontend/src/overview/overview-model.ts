@@ -11,11 +11,7 @@ import type { WorkspaceColour } from '../layout/workspace-colours'
 
 import type { CommandStatus } from '../command-ledger'
 import type { AgentStatus } from '../agent-status'
-import type {
-  OverviewBlockFacts,
-  OverviewPaneFacts,
-  OverviewSnapshot,
-} from './overview-port'
+import type { OverviewBlockFacts, OverviewPaneFacts, OverviewSnapshot } from './overview-port'
 
 /**
  * What a pane is doing, in the vocabulary a person uses when they are looking
@@ -202,7 +198,17 @@ export interface QuoteFacts {
 }
 
 export function cardQuote(f: QuoteFacts): string | null {
-  if (f.agentStatus !== null) return null
+  // AN AGENT IS QUOTED ONLY WHEN IT HAS SAID SOMETHING. Its last line is
+  // often the most useful thing on the surface — an agent that has stopped is
+  // usually stopped ON A QUESTION, and that question is the whole reason a
+  // person opened the overview. What it must not be is the agent's own empty
+  // prompt: Claude Code draws an input box, so a pane waiting on a human was
+  // quoted "❯" and told the reader nothing at all. So the furniture is
+  // dropped and the words are kept.
+  if (f.agentStatus !== null) {
+    const line = present(f.lastLine)
+    return line === null || isPromptFurniture(line) ? null : line
+  }
   if (f.fullScreen) {
     const name = present(f.runningCommand) ?? present(f.title)
     return name === null ? 'Full screen' : `${name} · full screen`
@@ -225,6 +231,13 @@ export function cardQuote(f: QuoteFacts): string | null {
  * that reported no status, and it is printed as silence rather than as a
  * guess at success.
  */
+/** A line that is a prompt and nothing else — one or two glyphs of shell or
+ *  agent furniture. Quoting it says only "this pane is waiting", which the
+ *  status line above has already said. */
+function isPromptFurniture(line: string): boolean {
+  return /^[>❯›»$#%λ⯈▶]{1,2}$/u.test(line)
+}
+
 function blockOutcome(status: CommandStatus, exitCode: number | null): string | null {
   switch (status) {
     case 'success':
