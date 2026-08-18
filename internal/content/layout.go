@@ -99,6 +99,24 @@ type Workspace struct {
 	// Name is the user's. A workspace, unlike a tab, is always created
 	// deliberately, so it always has one.
 	Name string
+	// Colour is the user's too, and it is what the strip reads sideways: a
+	// name is read, a colour is recognised. One of the closed set in the
+	// renderer's layout/tab-colours.ts — the same four every shipped theme
+	// defines, so a workspace keeps its colour when the theme changes.
+	//
+	// NIL IS A REAL STATE AND IT IS THE DEFAULT WORKSPACE'S. That workspace
+	// renders no chrome at all (§4.2) — no header, no name, no colour — so it
+	// is never offered one and never stores one. It is also what a workspace
+	// minted by the BACKEND has: the fallback row the ledger ensures for a
+	// session nobody recorded was chosen by no user, so there is nobody whose
+	// colour it could be.
+	//
+	// The store does not police the value. What is drawable is the renderer's
+	// question and it already answers it for tabs — an unrecognised colour
+	// draws as none rather than as a broken swatch — and a store that rejected
+	// a colour a newer renderer understands would be the older half deciding
+	// for the newer one.
+	Colour *string
 	// Position orders the switcher.
 	Position int
 }
@@ -309,9 +327,26 @@ type LayoutRepository interface {
 	// row. ErrNoSuchWorkspace when the id names none — a rename never
 	// creates, because a create is the only thing that may fix an id.
 	RenameWorkspace(ctx context.Context, id, name string) (Workspace, error)
-	// ReorderWorkspaces takes the WHOLE switcher order and writes positions
-	// 0..n-1 from it, in one transaction. ids must be a permutation of every
-	// workspace; anything else is ErrNotAPermutation and nothing moves.
+	// RecolourWorkspace sets the workspace's colour, or clears it with nil,
+	// and returns the stored row. Nil is an operation and not an omission —
+	// see RecolourTab, whose shape and reasoning this follows exactly rather
+	// than inventing a second vocabulary for one act.
+	RecolourWorkspace(ctx context.Context, id string, colour *string) (Workspace, error)
+	// ReorderWorkspaces takes the whole USER-MADE order and writes it in one
+	// transaction. ids must be a permutation of every workspace EXCEPT the
+	// default; anything else is ErrNotAPermutation and nothing moves. It
+	// answers with every workspace in the order that now stands, the default
+	// included, because the caller replaces its cache with what comes back.
+	//
+	// THE DEFAULT IS NOT A MEMBER OF THE ARRANGEMENT. It renders no chrome at
+	// all (§4.2), so no surface can offer to move it, and it keeps position 0
+	// — the user's workspaces are written after it. Requiring it in the
+	// permutation made this method unreachable rather than strict: the wire
+	// checks that every id it is given is a UUIDv7 (§7 — durable,
+	// client-minted ids), and the default's is the reserved `workspace:default`
+	// instead, so a renderer that included it was refused by the transport and
+	// one that omitted it was refused by the store. Every reorder failed,
+	// whichever way it was sent.
 	ReorderWorkspaces(ctx context.Context, ids []string) ([]Workspace, error)
 	// DeleteWorkspace removes a workspace; its tabs, and their panes, go with
 	// it (ON DELETE CASCADE — a tab has no meaning outside a workspace), and

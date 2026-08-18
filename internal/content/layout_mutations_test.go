@@ -332,6 +332,55 @@ func TestDecorationDoesNotBreakTheCreateRetry(t *testing.T) {
 
 // ── order ────────────────────────────────────────────────────────────────
 
+// THE DEFAULT WORKSPACE IS NOT PART OF THE ORDER, and this is the test that
+// bought the rule. Two requirements used to contradict each other: the wire
+// refuses any id that is not a UUIDv7 (§7 — ids are durable and
+// client-minted), while this method demanded a permutation of EVERY stored
+// workspace, one of which is the reserved `workspace:default`. A renderer
+// including it was refused by the transport; one omitting it was refused
+// here. Every reorder in the product failed, and the toast said "ids must be
+// a UUIDv7", which named the half that was not the problem.
+//
+// So the order is the user-made workspaces, the default keeps position 0, and
+// the answer still carries every row — the renderer replaces its cache with
+// it, and a list without the default would drop the workspace every ungrouped
+// tab belongs to.
+func TestReorderWorkspacesLeavesTheDefaultOutAndInPlace(t *testing.T) {
+	_, layout := newLayout(t)
+	ctx := context.Background()
+	// A tab in the default workspace is what writes that row, which is how it
+	// comes to exist in the product.
+	if _, err := layout.CreateTab(ctx,
+		content.Tab{ID: "tab-0", WorkspaceID: content.DefaultWorkspaceID, Position: 0, Layout: content.LayoutRow},
+		aPane("pane-0", "tab-0", "/srv"),
+	); err != nil {
+		t.Fatalf("CreateTab in the default workspace: %v", err)
+	}
+	seedWorkspace(t, layout, "ws-1", "tab-1", "pane-1")
+	seedWorkspace(t, layout, "ws-2", "tab-2", "pane-2")
+
+	got, err := layout.ReorderWorkspaces(ctx, []string{"ws-2", "ws-1"})
+	if err != nil {
+		t.Fatalf("ReorderWorkspaces without the default: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("answered with %d workspaces, want every one of the 3", len(got))
+	}
+	if got[0].ID != content.DefaultWorkspaceID || got[0].Position != 0 {
+		t.Fatalf("the default is %+v, want it first at position 0", got[0])
+	}
+	if got[1].ID != "ws-2" || got[2].ID != "ws-1" {
+		t.Fatalf("user order = %s, %s, want ws-2, ws-1", got[1].ID, got[2].ID)
+	}
+
+	// And naming it is refused, rather than quietly accepted and ignored: the
+	// caller would be sending an order it does not have the right to state.
+	if _, err := layout.ReorderWorkspaces(ctx,
+		[]string{content.DefaultWorkspaceID, "ws-1", "ws-2"}); !errors.Is(err, content.ErrNotAPermutation) {
+		t.Fatalf("reorder naming the default: %v, want ErrNotAPermutation", err)
+	}
+}
+
 // Reorder takes the WHOLE order, never a move: a partial list is a second
 // implementation of "where does everything else go", and the two answers
 // diverge the first time they disagree. So a list that is not a permutation
@@ -348,9 +397,11 @@ func TestReorderWorkspacesTakesAPermutationOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReorderWorkspaces: %v", err)
 	}
+	// Positions start at 1: 0 belongs to the default, which is not a member of
+	// this order and keeps its place whatever arrives.
 	for i, id := range want {
-		if got[i].ID != id || got[i].Position != i {
-			t.Fatalf("reordered workspaces = %+v, want %v in position order", got, want)
+		if got[i].ID != id || got[i].Position != i+1 {
+			t.Fatalf("reordered workspaces = %+v, want %v at positions 1..n", got, want)
 		}
 	}
 	if stored := workspaceIDs(t, layout); stored[0] != "ws-3" || stored[1] != "ws-1" || stored[2] != "ws-2" {

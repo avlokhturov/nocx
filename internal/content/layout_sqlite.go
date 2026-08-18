@@ -116,7 +116,7 @@ func createDigest(kind string, fields ...any) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func workspaceFields(ws Workspace) []any { return []any{ws.ID, ws.Name, ws.Position} }
+func workspaceFields(ws Workspace) []any { return []any{ws.ID, ws.Name, ws.Colour, ws.Position} }
 
 func tabFields(t Tab) []any {
 	return []any{
@@ -230,8 +230,8 @@ func storedWorkspace(ctx context.Context, q rowQuerier, ws Workspace, tabID, pan
 // the workspace somebody else is working in.
 func insertWorkspace(ctx context.Context, db execer, ws Workspace, digest string) error {
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO workspaces (id, name, position, created_at, digest) VALUES (?, ?, ?, ?, ?)`,
-		ws.ID, ws.Name, ws.Position, time.Now().UnixMilli(), digest)
+		`INSERT INTO workspaces (id, name, colour, position, created_at, digest) VALUES (?, ?, ?, ?, ?, ?)`,
+		ws.ID, ws.Name, ws.Colour, ws.Position, time.Now().UnixMilli(), digest)
 	return err
 }
 
@@ -284,17 +284,37 @@ func (s *sqliteContent) Workspaces(ctx context.Context) ([]Workspace, error) {
 	if s.closed.Load() {
 		return nil, ErrClosed
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, name, position FROM workspaces ORDER BY position, id`)
+	return scanWorkspaces(s.db.QueryContext(ctx,
+		`SELECT id, name, colour, position FROM workspaces ORDER BY position, id`))
+}
+
+// workspacesInOrder reads the same list INSIDE a transaction, so a caller that
+// has just written positions answers from the rows it wrote rather than from a
+// second read that another writer could have moved under it.
+func workspacesInOrder(ctx context.Context, tx *sql.Tx) ([]Workspace, error) {
+	return scanWorkspaces(tx.QueryContext(ctx,
+		`SELECT id, name, colour, position FROM workspaces ORDER BY position, id`))
+}
+
+// scanWorkspaces owns the row shape once. Taking the query's two results
+// rather than a *sql.Rows keeps the error path at the call site, where the
+// query is.
+func scanWorkspaces(rows *sql.Rows, err error) ([]Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	out := []Workspace{}
 	for rows.Next() {
-		var ws Workspace
-		if err := rows.Scan(&ws.ID, &ws.Name, &ws.Position); err != nil {
+		var (
+			ws     Workspace
+			colour sql.NullString
+		)
+		if err := rows.Scan(&ws.ID, &ws.Name, &colour, &ws.Position); err != nil {
 			return nil, err
+		}
+		if colour.Valid {
+			ws.Colour = &colour.String
 		}
 		out = append(out, ws)
 	}
@@ -808,10 +828,33 @@ func tabWorkspace(ctx context.Context, tx *sql.Tx, tabID string) (string, error)
 // ── decoration and order (nocx-isoph.2) ──────────────────────────────────
 
 func (s *sqliteContent) RenameWorkspace(ctx context.Context, id, name string) (Workspace, error) {
+	return s.setWorkspaceColumn(ctx, id, `UPDATE workspaces SET name = ? WHERE id = ?`, name)
+}
+
+// RecolourWorkspace writes the colour the user chose, and nil clears it.
+//
+// NIL IS AN OPERATION, NOT AN OMISSION — the same distinction RecolourTab
+// draws, and for the same reason: "make this workspace undecorated" is
+// something a person can ask for, and a signature that could not say it would
+// make the ask unrepresentable. It is why this takes a *string rather than a
+// string with "" standing in for absent.
+func (s *sqliteContent) RecolourWorkspace(ctx context.Context, id string, colour *string) (Workspace, error) {
+	return s.setWorkspaceColumn(ctx, id, `UPDATE workspaces SET colour = ? WHERE id = ?`, colour)
+}
+
+// setWorkspaceColumn writes one column and reads the row back inside the same
+// transaction: what the caller is answered with is what the store holds, not
+// what the caller asked for.
+//
+// The workspace's DIGEST is deliberately not recomputed, exactly as
+// setTabColumn's is not. It binds the untrusted id to the CREATE; a rename or
+// a recolour is a second event on a row that already exists, and recomputing
+// it here would turn a later retry of the original create into ErrIDConflict.
+func (s *sqliteContent) setWorkspaceColumn(ctx context.Context, id, stmt string, value any) (Workspace, error) {
 	var out Workspace
 	err := s.run(ctx, func(ctx context.Context) error {
 		return s.inTx(ctx, func(tx *sql.Tx) error {
-			res, err := tx.ExecContext(ctx, `UPDATE workspaces SET name = ? WHERE id = ?`, name, id)
+			res, err := tx.ExecContext(ctx, stmt, value, id)
 			if err != nil {
 				return err
 			}
@@ -836,35 +879,46 @@ func (s *sqliteContent) RenameWorkspace(ctx context.Context, id, name string) (W
 	return out, nil
 }
 
-// ReorderWorkspaces writes positions 0..n-1 from the order it is given, in
-// ONE transaction: the membership it checked must be the membership it writes
-// against, or a concurrent create lands a workspace with no position while
-// the caller believes it wrote the whole order.
+// ReorderWorkspaces writes the user-made order, in ONE transaction: the
+// membership it checked must be the membership it writes against, or a
+// concurrent create lands a workspace with no position while the caller
+// believes it wrote the whole order.
+//
+// THE DEFAULT IS EXCLUDED FROM THE PERMUTATION AND KEPT AT POSITION 0 — see
+// the interface doc for why requiring it made this method impossible to call.
+// The user's workspaces are written at 1..n, so the default stays where §4.2
+// puts it whatever order arrives.
 func (s *sqliteContent) ReorderWorkspaces(ctx context.Context, ids []string) ([]Workspace, error) {
 	var out []Workspace
 	err := s.run(ctx, func(ctx context.Context) error {
 		return s.inTx(ctx, func(tx *sql.Tx) error {
-			members, err := idsOf(ctx, tx, `SELECT id FROM workspaces`)
+			members, err := idsOf(ctx, tx,
+				`SELECT id FROM workspaces WHERE id != ?`, DefaultWorkspaceID)
 			if err != nil {
 				return err
 			}
 			if !isPermutation(ids, members) {
 				return ErrNotAPermutation
 			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE workspaces SET position = 0 WHERE id = ?`, DefaultWorkspaceID); err != nil {
+				return err
+			}
 			for position, id := range ids {
 				if _, err := tx.ExecContext(ctx,
-					`UPDATE workspaces SET position = ? WHERE id = ?`, position, id); err != nil {
+					`UPDATE workspaces SET position = ? WHERE id = ?`, position+1, id); err != nil {
 					return err
 				}
 			}
-			out = make([]Workspace, 0, len(ids))
-			for _, id := range ids {
-				stored, err := workspaceByID(ctx, tx, id)
-				if err != nil {
-					return err
-				}
-				out = append(out, stored.Workspace)
+			// EVERY workspace comes back, not just the ones that moved: the
+			// renderer replaces its cache with this answer, and a list with
+			// the default missing would delete the row every ungrouped tab
+			// belongs to.
+			rows, err := workspacesInOrder(ctx, tx)
+			if err != nil {
+				return err
 			}
+			out = rows
 			return nil
 		})
 	})
@@ -997,12 +1051,18 @@ type workspaceRow struct {
 }
 
 func workspaceByID(ctx context.Context, q rowQuerier, id string) (workspaceRow, error) {
-	var row workspaceRow
+	var (
+		row    workspaceRow
+		colour sql.NullString
+	)
 	err := q.QueryRowContext(ctx,
-		`SELECT id, name, position, digest FROM workspaces WHERE id = ?`, id,
-	).Scan(&row.ID, &row.Name, &row.Position, &row.digest)
+		`SELECT id, name, colour, position, digest FROM workspaces WHERE id = ?`, id,
+	).Scan(&row.ID, &row.Name, &colour, &row.Position, &row.digest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return workspaceRow{}, fmt.Errorf("%w: %s", ErrNoSuchWorkspace, id)
+	}
+	if colour.Valid {
+		row.Colour = &colour.String
 	}
 	return row, err
 }
