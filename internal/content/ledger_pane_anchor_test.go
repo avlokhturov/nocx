@@ -13,6 +13,7 @@ package content_test
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -253,5 +254,82 @@ func TestClosingAPaneNullsTheAnchorAndKeepsTheBlock(t *testing.T) {
 	}
 	if got.PaneID != nil {
 		t.Fatalf("paneId after the pane closed = %v, want nil rather than a dangling id", *got.PaneID)
+	}
+}
+
+// ── the startup sweep's own failure path (nocx-rtg0.28) ──────────────────
+
+// dropDeadSessions runs inside Open, so its failure is Open's failure — and
+// that is the whole point of testing it: the sweep is what makes
+// entries.session_id's "null once that pipe is gone" true, and a store that
+// came up with the sweep silently skipped would hand out rows naming sessions
+// of a backend that is no longer running. Refusing to open is the only honest
+// answer; a half-swept store is the soft degrade AGENTS.md names.
+//
+// The interval has both ends: the file is UNCHANGED from before the failed
+// Open until a later Open succeeds, which is asserted by opening again with
+// the trigger gone and finding the block's provenance exactly as it was.
+func TestOpenFailsWhenTheDeadSessionSweepIsRefused(t *testing.T) {
+	ctx := context.Background()
+	db, led, path := newLedgerAt(t)
+	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
+	envReady(t, led, "local")
+
+	const sessionID = "session-of-the-dead-backend"
+	if err := led.CreateSession(ctx, content.Session{ID: sessionID, WorkspaceID: "ws-1"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	const id = "00000000-0000-7000-8000-00000000f001"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "test-client", EnvironmentID: "local",
+		PaneID: strPtr("pane-1"), SessionID: strPtr(sessionID),
+		Cwd: "/repo", Kind: content.EntryShell, Intent: "make ci",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Refuse the sweep's DELETE the way the retention failure tests refuse
+	// theirs: a trigger in the encrypted file, installed while nothing holds
+	// it, so the statement fails for a real reason rather than a stubbed one.
+	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
+		`CREATE TRIGGER sweep_boom BEFORE DELETE ON sessions
+		 BEGIN SELECT RAISE(ABORT, 'sweep refused'); END`,
+	); err != nil {
+		t.Fatalf("install sweep trigger: %v", err)
+	}
+
+	again, err := reopenStore(t, path)
+	if err == nil {
+		_ = again.Close()
+		t.Fatal("Open succeeded while the dead-session sweep was refused")
+	}
+	if again != nil {
+		t.Fatal("Open returned a store alongside its error — a refused open must hand out nothing")
+	}
+
+	// The other end: with the refusal removed the store opens, the sweep runs,
+	// and the row is exactly where it was — its pane kept, its dead session
+	// dropped. Nothing was half-done by the failed attempt.
+	if dropErr := rawLedger(t, path, hex.EncodeToString(testKey()), `DROP TRIGGER sweep_boom`); dropErr != nil {
+		t.Fatalf("remove sweep trigger: %v", dropErr)
+	}
+	healthy, err := reopenStore(t, path)
+	if err != nil {
+		t.Fatalf("reopen after the refusal was lifted: %v", err)
+	}
+	defer func() { _ = healthy.Close() }()
+
+	got, err := healthy.Ledger().Entry(ctx, id)
+	if err != nil || got == nil {
+		t.Fatalf("Entry after recovery = %+v, %v", got, err)
+	}
+	if got.PaneID == nil || *got.PaneID != "pane-1" {
+		t.Fatalf("paneId after recovery = %v, want pane-1", got.PaneID)
+	}
+	if got.SessionID != nil {
+		t.Fatalf("sessionId after recovery = %v, want nil — the sweep ran this time", *got.SessionID)
 	}
 }
