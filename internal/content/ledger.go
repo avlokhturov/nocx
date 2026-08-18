@@ -988,6 +988,14 @@ type LedgerRepository interface {
 	// row identity — what an execution pins. Append-only: a later
 	// observation never rewrites an earlier one.
 	RecordObservation(ctx context.Context, obs Observation) (int64, error)
+	// RecordCompleted writes one command that has already finished — the
+	// intent, its single execution and its outcome in ONE transaction, with
+	// the entry id minted by the backend. It is what history.record lands
+	// through since nocx-rtg0.19 replaced command_history, and it exists
+	// beside Submit rather than instead of it because the two answer
+	// different questions: Submit opens a lifecycle the renderer will drive
+	// to a close, this records one that is already over.
+	RecordCompleted(ctx context.Context, in CompletedCommand) (string, error)
 	// Submit accepts an intent as an open entry and returns the
 	// backend-assigned ingest_seq. Two entries in the same millisecond
 	// still get distinct, ordered sequences — wall time is not a key.

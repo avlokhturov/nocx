@@ -142,6 +142,11 @@ func (s *ledgerStub) RecordObservation(_ context.Context, obs Observation) (int6
 	return 0, ErrNotImplemented
 }
 
+func (s *ledgerStub) RecordCompleted(_ context.Context, in CompletedCommand) (string, error) {
+	s.log.Info("content stub: LedgerRepository.RecordCompleted", "intent", in.Intent)
+	return "", ErrNotImplemented
+}
+
 func (s *ledgerStub) Submit(_ context.Context, in SubmitEntry) (SubmitResult, error) {
 	s.log.Info("content stub: LedgerRepository.Submit", "id", in.ID, "intent", in.Intent)
 	return SubmitResult{}, ErrNotImplemented
