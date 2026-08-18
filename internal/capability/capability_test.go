@@ -471,6 +471,7 @@ func (f *fakeSession) Liveness() session.LivenessState {
 // (nocx-fraus), so there is nothing here for a workspace to change.
 func (f *fakeSession) WorkspaceID() workspace.ID { return workspace.Default }
 func (f *fakeSession) Kind() session.Kind        { return f.kind }
+func (f *fakeSession) PaneID() string            { return "" }
 func (f *fakeSession) Host() string              { return f.host }
 func (f *fakeSession) Cwd() string               { return "/home/test" }
 func (f *fakeSession) ProfileID() string         { return "" }

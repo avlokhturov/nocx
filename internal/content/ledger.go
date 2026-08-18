@@ -293,9 +293,15 @@ type Observation struct {
 // the submitted content, so a replay of the same id aliases the same intent
 // and a replay with different content is refused (ErrIDConflict).
 type SubmitEntry struct {
-	ID             string // client-minted UUIDv7
-	Client         string // client identity binding the idempotency key
-	EnvironmentID  string
+	ID            string // client-minted UUIDv7
+	Client        string // client identity binding the idempotency key
+	EnvironmentID string
+	// PaneID is the block's DURABLE anchor (design §6.1): the pane it ran
+	// in, frontend-minted and therefore UNTRUSTED — an id naming no pane is
+	// refused with ErrUnknownPane rather than stored dangling. Nil means the
+	// entry is attached to no recorded pane, which is what an agent run
+	// outside a terminal and every submit before nocx-rtg0.28 look like.
+	PaneID         *string
 	SessionID      *string
 	Cwd            string
 	Kind           EntryKind
@@ -829,10 +835,16 @@ type LedgerQuery struct {
 	Cwd           string
 	Kind          EntryKind
 	Status        EntryStatus
-	Text          string
-	Since         *int64
-	Before        *int64
-	Limit         int
+	// PaneID narrows the page to one pane's blocks — the read design §8's
+	// restore is made of. It is a FILTER and not a rung: the rungs are the
+	// recall ladder the user climbs (everywhere / host / directory) and a
+	// pane is not a step on it, so this composes with whichever rung was
+	// asked for instead of becoming a fourth one. Empty is no filter.
+	PaneID string
+	Text   string
+	Since  *int64
+	Before *int64
+	Limit  int
 }
 
 // LedgerPage is one page of recall, newest first, plus the three facts that
@@ -867,7 +879,11 @@ type LedgerEntry struct {
 	// LedgerEntrySummary.Environment): the entry's host, kind and profile,
 	// read back in the same statement as the entry. Nil when the
 	// environment row is gone.
-	Environment    *Environment
+	Environment *Environment
+	// PaneID is the anchor the restore path reads; SessionID beside it is
+	// provenance, and it is nil from the first Open after the backend that
+	// wrote it exited (design §6.1).
+	PaneID         *string
 	SessionID      *string
 	Cwd            string
 	Kind           EntryKind

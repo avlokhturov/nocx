@@ -386,12 +386,24 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 			ID:            e.ID,
 			Client:        h.clientID,
 			EnvironmentID: env.ID,
+			// The block's DURABLE anchor (nocx-rtg0.28, design §6.1), and it
+			// comes from the SESSION for the same reason the environment
+			// above does: open already resolved which pane this session is
+			// the pipe of, and refused the open if that pane did not exist.
+			// A paneId on the envelope would put the same input under a
+			// second owner, and the renderer's copy would be the one nobody
+			// checked. Nil when the session is attached to no recorded pane
+			// — the ordinary state until every tab mints one — which costs
+			// the restore hint and no recall.
+			PaneID: panePtr(sess.PaneID()),
 			// SessionID stays nil: entries.session_id is a foreign key into
 			// the ledger's own sessions table, and nothing creates a row
-			// there yet (a session row needs a workspace). The column is
-			// nullable by design — an entry outlives its session (ADR-0019
-			// §5) and sessionId is never a recall key (design §3.1) — so a
-			// null here loses no recall, only the restore hint.
+			// there yet (a session row needs a workspace — nocx-49d4 owns
+			// that question). The column is nullable by design — an entry
+			// outlives its session (ADR-0019 §5) and sessionId is never a
+			// recall key (design §3.1) — and from nocx-rtg0.28 the store
+			// actively nulls it at every start, because the pipe it names
+			// died with the backend that opened it.
 			Cwd:         e.Cwd,
 			Kind:        content.EntryKind(e.Kind),
 			Intent:      masked,
@@ -400,6 +412,17 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 		},
 		start: content.StartExecution{EntryID: e.ID},
 	}, ""
+}
+
+// panePtr turns the session's pane into the column's nullable value: empty
+// means "attached to no recorded pane", and that must reach the store as NULL
+// rather than as an empty string, which would be an id naming nothing and
+// would be refused by the chain lookup.
+func panePtr(paneID string) *string {
+	if paneID == "" {
+		return nil
+	}
+	return &paneID
 }
 
 // apply is the whole of §6.3, in one place because the four rules are one

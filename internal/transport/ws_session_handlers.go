@@ -243,6 +243,12 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		// direction and forgetting to ask is the one that shipped a tab
 		// with no blocks and no diagnostic.
 		Enhanced: true,
+		// The pane this session is the pipe of, recorded so the ledger can
+		// anchor every block it records without the renderer restating it
+		// per event (nocx-rtg0.28, design §6.1). It is the id the chain walk
+		// above has already resolved, so a session never carries one that
+		// names nothing.
+		PaneID: params.PaneID,
 	}
 	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a
 	// claim; the registry is the single owner of whether it may be recorded,
@@ -976,6 +982,17 @@ func validateOpenRaw(raw json.RawMessage) string {
 	// a session should never reach it. Both ids are server-minted 32-hex
 	// (session.IDToBytes owns that shape for both), and the epoch is minted
 	// from 1, so zero names no incarnation.
+	// The pane is frontend-minted and UNTRUSTED (design §7), so its SHAPE is
+	// checked here and its EXISTENCE by the chain walk in the handler. Both,
+	// because they are different answers: before this, a malformed id went
+	// straight to WorkspaceForPane, which can only report "no such pane", so
+	// "you sent nonsense" and "that pane is gone" came back as one fact.
+	// Absent is legitimate — a session attached to no recorded pane.
+	if p.PaneID != "" {
+		if msg := layoutID("paneId", p.PaneID); msg != "" {
+			return msg
+		}
+	}
 	if p.Parent != nil {
 		if msg := validateSessionIDShape(p.Parent.SessionID); msg != "" {
 			return "parent.sessionId " + msg

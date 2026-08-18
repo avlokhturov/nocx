@@ -165,13 +165,25 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 		).Scan(&next); err != nil {
 			return fmt.Errorf("content: assign ingest_seq: %w", err)
 		}
+		// The anchor is RESOLVED before the write, not left to the foreign
+		// key — the same rule the layout chain follows when it inserts a tab
+		// (layout_sqlite.go): the FK would refuse a dangling pane_id anyway,
+		// but a driver's constraint text does not say WHICH reference was
+		// missing, and entries has three. ErrNoSuchPane is the answer this
+		// repository already gives to "that pane does not exist"; a second
+		// name for it would be a second owner of one fact.
+		if in.PaneID != nil {
+			if _, err := paneByID(ctx, tx, *in.PaneID); err != nil {
+				return err
+			}
+		}
 		submittedAt = time.Now().UnixMilli()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, intent,
 			 phase, status, conversation_id, submitted_at, started_at, ended_at, duration_ms,
 			 sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending', ?, ?, ?, ?, ?, ?, ?)`,
-			in.ID, next, in.Client, digest, in.EnvironmentID, in.SessionID, in.Cwd,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+			in.ID, next, in.Client, digest, in.EnvironmentID, in.PaneID, in.SessionID, in.Cwd,
 			string(in.Kind), in.Intent, in.ConversationID, submittedAt, in.StartedAt,
 			in.EndedAt, in.DurationMs, string(in.Sensitivity), in.Payload,
 		); err != nil {
@@ -196,11 +208,11 @@ func entryDigest(in SubmitEntry) string {
 	_ = enc.Encode(struct {
 		Client, EnvironmentID, Cwd, Intent, Payload string
 		Kind, Sensitivity                           string
-		SessionID, ConversationID                   *string
+		PaneID, SessionID, ConversationID           *string
 	}{
 		Client: in.Client, EnvironmentID: in.EnvironmentID, Cwd: in.Cwd, Intent: in.Intent,
 		Payload: in.Payload, Kind: string(in.Kind), Sensitivity: string(in.Sensitivity),
-		SessionID: in.SessionID, ConversationID: in.ConversationID,
+		PaneID: in.PaneID, SessionID: in.SessionID, ConversationID: in.ConversationID,
 	})
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -262,12 +274,12 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 	e := &LedgerEntry{}
 	var env environmentScan
 	dest := []any{
-		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.SessionID, &e.Cwd,
+		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.PaneID, &e.SessionID, &e.Cwd,
 		&e.Kind, &e.Intent, &e.Phase, &e.Status, &e.ConversationID, &e.SubmittedAt,
 		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.ReviewedAt, &e.Payload,
 	}
 	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.ingest_seq, e.client, e.digest,
-		e.environment_id, e.session_id, e.cwd, e.kind, e.intent, e.phase, e.status,
+		e.environment_id, e.pane_id, e.session_id, e.cwd, e.kind, e.intent, e.phase, e.status,
 		e.conversation_id, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
 		e.sensitivity, e.reviewed_at, e.payload, `+environmentColumns+`
 		FROM entries e `+environmentJoin+` WHERE e.id = ?`, id).
@@ -367,6 +379,13 @@ func ledgerWhere(q LedgerQuery) (string, []any) {
 	if q.Status != "" {
 		conds = append(conds, "e.status = ?")
 		args = append(args, string(q.Status))
+	}
+	// One pane's blocks (design §8): the restore read, served by
+	// entries_by_pane. It composes with the rung rather than replacing it,
+	// so "this pane, on this host" is one query and not two semantics.
+	if q.PaneID != "" {
+		conds = append(conds, "e.pane_id = ?")
+		args = append(args, q.PaneID)
 	}
 	// The search box, and it is the SAME predicate the interim path answers
 	// (sqlite.go's Query, nocx-ms7v) — one matching semantics for one product

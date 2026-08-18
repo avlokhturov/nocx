@@ -157,6 +157,14 @@ type Config struct {
 	// It carries provenance and nothing else: no part of Open reads it to
 	// decide what the session may do.
 	Parent Ref
+	// PaneID names the pane this session is the pipe of (design §6.1 and
+	// §7). Frontend-minted UUIDv7, validated and resolved by the transport
+	// BEFORE anything is spawned, and empty when this session is attached to
+	// no recorded pane.
+	//
+	// It is recorded rather than derived, unlike the workspace beside it —
+	// see the note on Session.PaneID.
+	PaneID string
 }
 
 type PTYFactory interface {
@@ -196,6 +204,22 @@ type Session interface {
 	// be asserted by nobody, and that `unknown` is what a session on an
 	// unreachable host reads as, because both other renderings would lie.
 	Liveness() LivenessState
+	// PaneID returns the pane this session is the pipe of, or empty when it
+	// is attached to none (nocx-rtg0.28). Immutable: a session is the pipe
+	// of one pane for its whole life, and the pane outlives it (D5) rather
+	// than the other way round.
+	//
+	// This is NOT the second owner the workspace below would have been, and
+	// the difference is where the fact comes from. The workspace is DERIVED
+	// — the chain pane → tab → workspace answers it, and a copy here would
+	// start lying the first time a pane was dragged. The pane is not derived
+	// from anything the session holds; it is what the opener named, and the
+	// transport already refused it if it named nothing. It is here because
+	// the ledger's write path needs the anchor for every block this session
+	// records (design §6.1), and reading it off the session is what keeps
+	// the renderer from restating it per event on the envelope — which would
+	// be two surfaces owning one input.
+	PaneID() string
 	// There is deliberately NO WorkspaceID here (nocx-isoph.2). The field
 	// nocx-fraus put on the session was the intermediate step, not the
 	// destination: since tabs-panes-and-blocks §4.5 the workspace is a
@@ -459,6 +483,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		kind:         cfg.Kind,
 		host:         cfg.Host,
 		cwd:          resolveSessionCwd(cfg.Cwd),
+		paneID:       cfg.PaneID,
 		profileID:    cfg.ProfileID,
 		credentialID: cfg.CredentialID,
 		sshOpts:      opts,
@@ -663,6 +688,7 @@ type realSession struct {
 	kind         Kind
 	host         string // empty for local sessions; the remote hostname for SSH
 	cwd          string
+	paneID       string // the pane this session is the pipe of; empty for none. Written once, at construction
 	profileID    string
 	credentialID string
 	sshOpts      []ssh.ConnectOption // the options the SSH connection was opened with; nil for local
@@ -716,6 +742,7 @@ func (s *realSession) ID() ID                          { return s.id }
 func (s *realSession) Identity() Identity              { return s.identity }
 func (s *realSession) Parent() (Ref, bool)             { return s.parent, !s.parent.Zero() }
 func (s *realSession) Kind() Kind                      { return s.kind }
+func (s *realSession) PaneID() string                  { return s.paneID }
 func (s *realSession) Host() string                    { return s.host }
 func (s *realSession) Cwd() string                     { return s.cwd }
 func (s *realSession) ProfileID() string               { return s.profileID }
