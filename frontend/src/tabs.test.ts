@@ -1825,6 +1825,7 @@ describe('newSandboxedTab (ADR-0036)', () => {
             workspace: '/w',
             writableRoots: ['/w'],
             readOnlyRoots: ['/usr', '/opt'],
+            homeProjections: [],
           },
         }),
       ),

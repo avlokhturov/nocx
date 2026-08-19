@@ -41,5 +41,14 @@ export interface Open {
     workspace: string
     writableRoots: string[]
     readOnlyRoots: string[]
+    /**
+     * Disposable discoverability aliases from the isolated runtime HOME to exact canonical host roots. These objects carry no access class; writableRoots and readOnlyRoots remain authoritative.
+     *
+     * @maxItems 129
+     */
+    homeProjections: {
+      hostPath: string
+      relativePath: string
+    }[]
   }
 }

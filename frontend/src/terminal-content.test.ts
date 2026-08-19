@@ -247,9 +247,18 @@ describe('sandboxed session launch failure', () => {
   })
 })
 
-describe('sandboxed session tooltip (ADR-0036 §8)', () => {
-  const onSandboxedChange = vi.fn()
-  it('reports both installed root classes', async () => {
+describe('sandboxed session tooltip (ADR-0036 §8, ADR-0039)', () => {
+  const sandboxRequest = {
+    workspace: '/w',
+    settingsRevision: 0,
+    addWritable: [],
+    removeWritable: [],
+    addReadOnly: [],
+    removeReadOnly: [],
+  }
+
+  it('reports both installed root classes and populated HOME projections', async () => {
+    const onSandboxedChange = vi.fn()
     const client = makeClient({
       openSandboxedSession: vi.fn(() =>
         Promise.resolve(
@@ -259,6 +268,12 @@ describe('sandboxed session tooltip (ADR-0036 §8)', () => {
               workspace: '/w',
               writableRoots: ['/w', '/extra'],
               readOnlyRoots: ['/usr', '/opt'],
+              homeProjections: [
+                {
+                  hostPath: '/host/home/.config/opencode',
+                  relativePath: '.config/opencode',
+                },
+              ],
             },
           }),
         ),
@@ -266,25 +281,44 @@ describe('sandboxed session tooltip (ADR-0036 §8)', () => {
     })
     const { tab, teardown } = await mountTerminal(
       makeClipboard(),
-      {
-        hooks: {
-          sandbox: {
-            workspace: '/w',
-            settingsRevision: 0,
-            addWritable: [],
-            removeWritable: [],
-            addReadOnly: [],
-            removeReadOnly: [],
-          },
-          onSandboxedChange,
-        },
-      },
+      { hooks: { sandbox: sandboxRequest, onSandboxedChange } },
       client,
     )
     try {
       expect(tab.tooltip).toContain('writable: /w, /extra')
       expect(tab.tooltip).toContain('read-only: /usr, /opt')
+      expect(tab.tooltip).toContain(
+        'Home projections: ~/.config/opencode -> /host/home/.config/opencode',
+      )
       expect(onSandboxedChange).toHaveBeenCalledWith(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('states that HOME is isolated when no host folder projects', async () => {
+    const client = makeClient({
+      openSandboxedSession: vi.fn(() =>
+        Promise.resolve(
+          makeSession({
+            sandbox: {
+              backend: 'landlock',
+              workspace: '/w',
+              writableRoots: ['/w'],
+              readOnlyRoots: ['/usr'],
+              homeProjections: [],
+            },
+          }),
+        ),
+      ),
+    })
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { sandbox: sandboxRequest } },
+      client,
+    )
+    try {
+      expect(tab.tooltip).toContain('Home: isolated; no host folders projected')
     } finally {
       teardown()
     }

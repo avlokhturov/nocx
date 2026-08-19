@@ -1978,9 +1978,15 @@ export class TerminalContent extends BaseTabContent {
       if (sandboxInfo) {
         const writable = sandboxInfo.writableRoots.join(', ')
         const readOnly = sandboxInfo.readOnlyRoots.join(', ')
+        const homeProjectionLine =
+          sandboxInfo.homeProjections.length === 0
+            ? 'Home: isolated; no host folders projected'
+            : `Home projections: ${sandboxInfo.homeProjections
+                .map(({ relativePath, hostPath }) => `~/${relativePath} -> ${hostPath}`)
+                .join(', ')}`
         this.host.setTitle(sandboxInfo.workspace || session.cwd || '')
         this.host.updateTooltip(
-          `${session.cwd ? session.cwd + ' (initial cwd)\n' : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable} — read-only: ${readOnly}`,
+          `${session.cwd ? session.cwd + ' (initial cwd)\n' : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable} — read-only: ${readOnly}\n${homeProjectionLine}`,
         )
       }
       // The statement is OBSERVED: until the first marker arrives, an auto
