@@ -73,7 +73,7 @@ func TestCaptureOutput_StoresTheBodyWithItsProvenance(t *testing.T) {
 	entryID := recordOne(t, led, "ls -la")
 	in := aCapture(entryID, "00000000-0000-7000-8000-0000000000a1")
 
-	if err := led.CaptureOutput(ctx, in); err != nil {
+	if _, err := led.CaptureOutput(ctx, in); err != nil {
 		t.Fatalf("CaptureOutput: %v", err)
 	}
 
@@ -107,10 +107,10 @@ func TestCaptureOutput_IsIdempotentOnArtifactAndSeq(t *testing.T) {
 	_, led := newLedger(t)
 	in := aCapture(recordOne(t, led, "ls -la"), "00000000-0000-7000-8000-0000000000a2")
 
-	if err := led.CaptureOutput(ctx, in); err != nil {
+	if _, err := led.CaptureOutput(ctx, in); err != nil {
 		t.Fatalf("first capture: %v", err)
 	}
-	if err := led.CaptureOutput(ctx, in); err != nil {
+	if _, err := led.CaptureOutput(ctx, in); err != nil {
 		t.Fatalf("replayed capture: %v", err)
 	}
 
@@ -134,12 +134,12 @@ func TestCaptureOutput_ChunksJoinInSeqOrderWhateverOrderTheyArriveIn(t *testing.
 
 	second := aCapture(entryID, id)
 	second.Seq, second.Body = 2, []byte("second")
-	if err := led.CaptureOutput(ctx, second); err != nil {
+	if _, err := led.CaptureOutput(ctx, second); err != nil {
 		t.Fatalf("capture seq 2: %v", err)
 	}
 	first := aCapture(entryID, id)
 	first.Seq, first.Body = 1, []byte("first ")
-	if err := led.CaptureOutput(ctx, first); err != nil {
+	if _, err := led.CaptureOutput(ctx, first); err != nil {
 		t.Fatalf("capture seq 1: %v", err)
 	}
 
@@ -154,14 +154,14 @@ func TestCaptureOutput_RefusesTheSameIDForADifferentMediaType(t *testing.T) {
 	ctx := context.Background()
 	_, led := newLedger(t)
 	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000a4")
-	if err := led.CaptureOutput(ctx, in); err != nil {
+	if _, err := led.CaptureOutput(ctx, in); err != nil {
 		t.Fatalf("first capture: %v", err)
 	}
 
 	other := in
 	other.MediaType = content.MediaText
 	other.Body = []byte("something else")
-	if err := led.CaptureOutput(ctx, other); !errors.Is(err, content.ErrIDConflict) {
+	if _, err := led.CaptureOutput(ctx, other); !errors.Is(err, content.ErrIDConflict) {
 		t.Fatalf("err = %v, want ErrIDConflict", err)
 	}
 	if got := bodyOf(t, led, in.ArtifactID); got != capturedBody {
@@ -175,7 +175,7 @@ func TestCaptureOutput_RefusesTheSameIDForADifferentMediaType(t *testing.T) {
 func TestCaptureOutput_RefusesAnUnknownEntry(t *testing.T) {
 	_, led := newLedger(t)
 	in := aCapture("00000000-0000-7000-8000-00000000dead", "00000000-0000-7000-8000-0000000000a5")
-	if err := led.CaptureOutput(context.Background(), in); !errors.Is(err, content.ErrNoSuchEntry) {
+	if _, err := led.CaptureOutput(context.Background(), in); !errors.Is(err, content.ErrNoSuchEntry) {
 		t.Fatalf("err = %v, want ErrNoSuchEntry", err)
 	}
 }
@@ -198,8 +198,12 @@ func TestCaptureOutput_StoresNothingWhenOutputRetentionIsOff(t *testing.T) {
 	led := db.Ledger()
 
 	in := aCapture(recordOne(t, led, "ls"), "00000000-0000-7000-8000-0000000000a6")
-	if captureErr := led.CaptureOutput(ctx, in); captureErr != nil {
+	stored, captureErr := led.CaptureOutput(ctx, in)
+	if captureErr != nil {
 		t.Fatalf("CaptureOutput with output retention off: %v, want nil", captureErr)
+	}
+	if stored {
+		t.Fatal("stored = true while output retention is off")
 	}
 	art, err := led.Artifact(ctx, in.ArtifactID)
 	if err != nil {
@@ -227,11 +231,41 @@ func TestCaptureOutput_StoresNothingForASensitiveEntry(t *testing.T) {
 	}
 
 	in := aCapture(entryID, "00000000-0000-7000-8000-0000000000a7")
-	if captureErr := led.CaptureOutput(ctx, in); captureErr != nil {
+	stored, captureErr := led.CaptureOutput(ctx, in)
+	if captureErr != nil {
 		t.Fatalf("CaptureOutput for a sensitive entry: %v, want nil", captureErr)
+	}
+	if stored {
+		t.Fatal("stored = true for a sensitive entry")
 	}
 	art, _ := led.Artifact(ctx, in.ArtifactID)
 	if art != nil {
 		t.Fatal("a sensitive command's output was stored")
+	}
+}
+
+// The ceiling on ONE artifact, checked inside the transaction against what
+// the artifact already holds. The wire bounds a single message; this is what
+// stops a caller assembling an illegal artifact out of legal chunks.
+func TestCaptureOutput_RefusesAnArtifactPastTheCeiling(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	entryID := recordOne(t, led, "cat enormous.log")
+	const id = "00000000-0000-7000-8000-0000000000a8"
+
+	first := aCapture(entryID, id)
+	first.Body = make([]byte, content.MaxArtifactBytes-10)
+	if _, err := led.CaptureOutput(ctx, first); err != nil {
+		t.Fatalf("a body under the ceiling was refused: %v", err)
+	}
+
+	second := aCapture(entryID, id)
+	second.Seq, second.Body = 2, make([]byte, 11)
+	if _, err := led.CaptureOutput(ctx, second); !errors.Is(err, content.ErrArtifactTooLarge) {
+		t.Fatalf("err = %v, want ErrArtifactTooLarge", err)
+	}
+	art, _ := led.Artifact(ctx, id)
+	if art.ByteLen != int64(content.MaxArtifactBytes-10) {
+		t.Fatalf("byte_len = %d — a refused chunk must change nothing", art.ByteLen)
 	}
 }

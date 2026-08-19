@@ -708,7 +708,17 @@ var (
 	ErrRegionOutOfBounds    = errors.New("content: region is out of bounds")
 	ErrNoSuchRun            = errors.New("content: no such run")
 	ErrNoSuchEntry          = errors.New("content: no such entry")
+	// ErrArtifactTooLarge is the ceiling on ONE artifact, and it is input
+	// validation rather than the user's retention preference: the per-command
+	// cap decides how much of an output is worth keeping, this decides what a
+	// caller may make the store hold whatever any setting says.
+	ErrArtifactTooLarge = errors.New("content: artifact exceeds the per-artifact ceiling")
 )
+
+// MaxArtifactBytes is that ceiling. Four times the per-command cap's default,
+// so raising the setting to its own maximum does not walk into it by
+// accident.
+const MaxArtifactBytes = 1 << 20
 
 // CaptureOutput is one body of a frozen block arriving from the renderer
 // (nocx-2f0f, design §4). It is the only write path for what a shell command
@@ -1127,12 +1137,14 @@ type LedgerRepository interface {
 	// is not there yet and the chunk at its seq, in one transaction against
 	// the entry's own execution. Idempotent on (artifact id, seq).
 	//
-	// REFUSING TO STORE IS NOT AN ERROR. Output retention off, or an entry
-	// marked sensitive, returns nil and writes nothing — the block keeps its
-	// row and keeps no body, the same shape RecordCompleted uses for
-	// history.enabled. An error there would surface in front of somebody who
-	// turned the setting off deliberately.
-	CaptureOutput(ctx context.Context, in CaptureOutput) error
+	// REFUSING TO STORE IS NOT AN ERROR, and the answer says which happened.
+	// Output retention off, or an entry marked sensitive, returns
+	// (false, nil): the block keeps its row and keeps no body, the same shape
+	// RecordCompleted uses for history.enabled. An error there would surface
+	// in front of somebody who turned the setting off deliberately, and a
+	// bare nil would leave the caller sending the rest of a body nobody is
+	// storing.
+	CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error)
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
 	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error

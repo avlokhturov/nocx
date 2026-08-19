@@ -53,6 +53,11 @@ type LedgerService interface {
 	// entry, in either direction. It is what makes the ledger a memory
 	// rather than a log (design §3.4).
 	Edges(ctx context.Context, entryID string) ([]content.Edge, error)
+	// CaptureOutput serves ledger.capture: one body of a frozen block,
+	// against the entry's own execution. The bool is whether the body is
+	// kept — false when output retention is off or the entry is sensitive,
+	// which is an answer and not a failure.
+	CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error)
 }
 
 // LedgerOperation is the typed operation for the ledger domain. Its gate is
@@ -131,4 +136,11 @@ func (s *ledgerService) Edges(ctx context.Context, entryID string) ([]content.Ed
 		return nil, err
 	}
 	return s.ledger.Edges(ctx, entryID)
+}
+
+func (s *ledgerService) CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error) {
+	if err := s.guard.check(); err != nil {
+		return false, err
+	}
+	return s.ledger.CaptureOutput(ctx, in)
 }

@@ -155,10 +155,10 @@ func (s *ledgerStub) AppendArtifact(_ context.Context, in AppendArtifact) (strin
 	return "", ErrNotImplemented
 }
 
-func (s *ledgerStub) CaptureOutput(_ context.Context, in CaptureOutput) error {
+func (s *ledgerStub) CaptureOutput(_ context.Context, in CaptureOutput) (bool, error) {
 	s.log.Info("content stub: LedgerRepository.CaptureOutput",
 		"artifact", in.ArtifactID, "seq", in.Seq, "bytes", len(in.Body))
-	return nil
+	return false, nil
 }
 
 func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, seq int, body []byte) error {

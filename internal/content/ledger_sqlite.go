@@ -920,17 +920,18 @@ func appendChunkAt(ctx context.Context, q execer, artifactID string, seq int, bo
 // opens, so nothing is written for a body nobody wants: output retention off
 // is the user's setting, and a sensitive entry is the store's own rule about
 // what a command's text says about its output.
-func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) error {
+func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error) {
 	if in.EntryID == "" || in.ArtifactID == "" {
-		return errors.New("content: capture: entry id and artifact id are required")
+		return false, errors.New("content: capture: entry id and artifact id are required")
 	}
 	if in.Seq < 1 {
-		return errors.New("content: capture: seq starts at 1")
+		return false, errors.New("content: capture: seq starts at 1")
 	}
 	if !s.policy.OutputEnabled() {
-		return nil
+		return false, nil
 	}
-	return s.run(ctx, func(ctx context.Context) error {
+	stored := false
+	err := s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE for the reason Submit and RecordCompleted state:
 		// the write lock is taken at BEGIN rather than at the first write, so
 		// a second writer waits instead of failing an upgrade (nocx-rtg0.18).
@@ -990,11 +991,27 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) err
 				return ErrIDConflict
 			}
 		}
+		// The ceiling is read INSIDE the transaction, against what the
+		// artifact already holds: a caller splitting a body into legal chunks
+		// must not be able to assemble an illegal artifact out of them.
+		var held int64
+		if sizeErr := tx.QueryRowContext(ctx,
+			`SELECT byte_len FROM artifacts WHERE id = ?`, in.ArtifactID).Scan(&held); sizeErr != nil {
+			return sizeErr
+		}
+		if held+int64(len(in.Body)) > MaxArtifactBytes {
+			return ErrArtifactTooLarge
+		}
 		if chunkErr := appendChunkAt(ctx, tx, in.ArtifactID, in.Seq, in.Body); chunkErr != nil {
 			return chunkErr
 		}
-		return tx.Commit()
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+		stored = true
+		return nil
 	})
+	return stored, err
 }
 
 // AppendChunk appends one chunk to an artifact and maintains its byte_len —
