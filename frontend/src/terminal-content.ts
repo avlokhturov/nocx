@@ -451,6 +451,9 @@ export class TerminalContent extends BasePaneContent {
    *  command; the ledger must already reflect it). Registered AFTER the
    *  projections' own subscriber so it always sees the reconciled state. */
   private _titleReconcileUnsub: (() => void) | null = null
+  /** Unsubscribe from the reconnect report, which is what gives a restore
+   *  that raced a dropped socket its second chance (nocx-m3fqk). */
+  private _restoreRetryUnsub: (() => void) | null = null
   /** The pending restoration episode (ADR-0024 decision 8): the fence the
    *  shell must write to the pty and the generation to acknowledge, captured
    *  from the lost fact. Non-null from the moment the channel is declared
@@ -1983,6 +1986,13 @@ export class TerminalContent extends BasePaneContent {
       // re-read — subscriber order is the mechanism, this listener is
       // registered after the projections' own.
       this._titleReconcileUnsub = this.lifecycle.onChange(() => this.pushTitle())
+      // A restore that could not reach the store is tried again when the
+      // socket comes back. The report fires once per reconnect, after every
+      // attach has settled, so this cannot run against a half-open
+      // connection — and restorePast is a no-op once the past is drawn.
+      this._restoreRetryUnsub = this.client.onReconnectResult(() => {
+        void this.restorePast()
+      })
 
       // The kernel starts Native and onChange may not fire for the initial
       // state: present the session with the terminal visible from the first
@@ -2807,6 +2817,14 @@ export class TerminalContent extends BasePaneContent {
    *  is drawn once; the guard is set before the first await so two switches
    *  in the same turn cannot both start. */
   private _pastRestored = false
+  /** Guards the window between asking and answering: a tab switched away and
+   *  back while the read is in flight must not start a second one. */
+  private _pastRestoring = false
+  /** A retry that arrived while a read was in flight. Without it the window
+   *  is small but real: a reconnect report landing between "asked" and "the
+   *  ask failed" would be dropped, and the pane would wait for another
+   *  reconnect that may never come. */
+  private _pastRetryPending = false
 
   /**
    * Draw what this pane printed before the application closed.
@@ -2821,9 +2839,38 @@ export class TerminalContent extends BasePaneContent {
    */
   private async restorePast(): Promise<void> {
     if (this._pastRestored) return
-    this._pastRestored = true
+    if (this._pastRestoring) {
+      this._pastRetryPending = true
+      return
+    }
+    // The first setVisible(true) arrives while the pane is still being built
+    // and there is no scrollback to draw into — so this is a "not yet", never
+    // a "done". Spending the one shot here cost the pane its whole past, and
+    // no unit test saw it: a test shows a pane that is already mounted, and
+    // the real activation does not.
     if (!this.scrollback) return
-    const blocks = await blocksForPane(this.client, this.pane.paneId)
+    this._pastRestoring = true
+    let blocks
+    try {
+      blocks = await blocksForPane(this.client, this.pane.paneId)
+    } catch (err) {
+      // THE STORE COULD NOT BE ASKED, which is not "there was nothing".
+      // A reconnect is ordinary (AD-9) and a restore that raced one used to
+      // leave the pane showing an empty past for the rest of the session.
+      // The attempt is not spent, and the reconnect below runs it again.
+      this._pastRestoring = false
+      log.warn('nocx: the pane blocks could not be read', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+      if (this._pastRetryPending) {
+        this._pastRetryPending = false
+        void this.restorePast()
+      }
+      return
+    }
+    this._pastRetryPending = false
+    this._pastRestored = true
+    this._pastRestoring = false
     if (blocks.length === 0) return
     const snapshot = fromITheme(getCurrentTheme())
     const els: HTMLElement[] = []
@@ -3416,6 +3463,8 @@ export class TerminalContent extends BasePaneContent {
     this._projections?.detach()
     this._titleReconcileUnsub?.()
     this._titleReconcileUnsub = null
+    this._restoreRetryUnsub?.()
+    this._restoreRetryUnsub = null
     this._projections = null
     this.env?.detach()
     this.env = null

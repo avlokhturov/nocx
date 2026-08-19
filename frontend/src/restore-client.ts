@@ -14,7 +14,6 @@ import type { WSClient } from './ipc'
 import type { LedgerQuery } from './generated/ledger.query'
 import type { LedgerArtifact } from './generated/ledger.artifact'
 import type { LedgerGet } from './generated/ledger.get'
-import { log } from './log'
 
 /** How many blocks a pane comes back with.
  *
@@ -59,35 +58,30 @@ function frozenStatus(status: string): RestorableBlock['status'] {
 /**
  * The blocks this pane had, oldest first — the order they are drawn in.
  *
- * Answers [] when the store has nothing, and [] when the store cannot be
- * reached: a restore that fails costs the blocks and never the pane. The
- * caller says so in the product; this says so in the log and gets out of the
- * way.
+ * THROWS when the store could not be asked, and that is the whole point of
+ * not catching here. "This pane had no blocks" and "nobody could tell me"
+ * are different answers, and the caller has to act differently on them: the
+ * first is final, the second must be tried again when the socket is back
+ * (AD-9 — a reconnect is ordinary, and a pane that restored during one would
+ * otherwise show an empty past for the rest of the session).
  */
 export async function blocksForPane(client: WSClient, paneId: string): Promise<RestorableBlock[]> {
-  try {
-    const page = await client.call<LedgerQuery>('ledger.query', {
-      scope: 'everywhere',
-      paneId,
-      limit: RESTORE_BLOCK_LIMIT,
-    })
-    return page.entries
-      .map((e) => ({
-        entryId: e.id,
-        command: e.intent,
-        cwd: e.cwd,
-        host: e.host ?? '',
-        status: frozenStatus(e.status),
-        durationMs: e.durationMs ?? 0,
-        exitCode: e.exitCode,
-      }))
-      .reverse()
-  } catch (err) {
-    log.warn('nocx: the pane blocks could not be read', {
-      error: err instanceof Error ? err.message : String(err),
-    })
-    return []
-  }
+  const page = await client.call<LedgerQuery>('ledger.query', {
+    scope: 'everywhere',
+    paneId,
+    limit: RESTORE_BLOCK_LIMIT,
+  })
+  return page.entries
+    .map((e) => ({
+      entryId: e.id,
+      command: e.intent,
+      cwd: e.cwd,
+      host: e.host ?? '',
+      status: frozenStatus(e.status),
+      durationMs: e.durationMs ?? 0,
+      exitCode: e.exitCode,
+    }))
+    .reverse()
 }
 
 /**

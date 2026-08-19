@@ -5338,6 +5338,68 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  it('survives being shown before it is mounted, which is what really happens', async () => {
+    // The activation seam calls setVisible(true) while the pane is still
+    // being built, so the first show finds no scrollback. Spending the
+    // one-shot there costs the pane its whole past — and no unit test would
+    // have seen it, because a test shows a pane that is already mounted.
+    const client = storeWith([entry()], 'output')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const withScrollback = content as unknown as { scrollback: ScrollbackController | null }
+      const real = withScrollback.scrollback
+      withScrollback.scrollback = null
+      content.setVisible(true)
+      await Promise.resolve()
+      withScrollback.scrollback = real
+
+      content.setVisible(false)
+      content.setVisible(true)
+      await vi.waitFor(() => {
+        expect(real!.scrollbackInner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('tries again when the socket comes back, instead of showing an empty past forever', async () => {
+    // The defect the e2e found, and the one no unit test would have: the
+    // restart drops the socket, the pane is shown while it is still coming
+    // back, ledger.query is refused — and a one-shot spent on that failure
+    // leaves the pane with no past for the rest of the session. A reconnect
+    // is ordinary (AD-9), so "could not ask" must not be recorded as
+    // "there was nothing".
+    const client = storeWith([entry()], 'output')
+    const live = client.call.getMockImplementation()! as (
+      method: string,
+      params?: unknown,
+    ) => Promise<unknown>
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') return Promise.reject(new Error('socket is reconnecting'))
+      return live(method, params)
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      await Promise.resolve()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
+
+      // The socket returns and the report fires. The past appears without
+      // the person doing anything.
+      expect(client.onReconnectResult).toHaveBeenCalled()
+      client.call.mockImplementation(live)
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+    } finally {
+      teardown()
+    }
+  })
+
   it('says the output is gone when the artifact is, instead of drawing an empty block', async () => {
     const client = storeWith([entry()], null)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)

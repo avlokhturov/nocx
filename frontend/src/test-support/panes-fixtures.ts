@@ -386,6 +386,14 @@ export interface ClientFake {
   /** The pane.close notification (nocx-tsajw): records the wire identity of
    *  the closed pane so tests can assert the backend was told. */
   notifyPaneClosed: ReturnType<typeof vi.fn>
+  /** The reconnect report (nocx-gbhwh): fires once per reconnect, after every
+   *  attach has settled. A pane subscribes to retry work that could not reach
+   *  the store while the socket was down — restoring its past is one. Returns
+   *  an unsubscribe, like the real one. */
+  onReconnectResult: ReturnType<typeof vi.fn>
+  /** Fire that report at every subscriber, so a test can drive the retry the
+   *  way a returning socket does. */
+  _fireReconnect: (r?: { resumed: number; lost: number }) => void
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
@@ -448,6 +456,7 @@ export function anchoredPane(paneId = 'tab-wire-1'): PaneIdentity {
  */
 export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const sessions: SessionFake[] = []
+  const reconnectHandlers = new Set<(r: { resumed: number; lost: number }) => void>()
   const newSession = (): SessionFake => {
     const s = makeSession()
     sessions.push(s)
@@ -466,6 +475,13 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     onSessionExit: vi.fn(),
     onSessionReset: vi.fn(),
     notifyPaneClosed: vi.fn(),
+    onReconnectResult: vi.fn((cb: (r: { resumed: number; lost: number }) => void) => {
+      reconnectHandlers.add(cb)
+      return () => reconnectHandlers.delete(cb)
+    }),
+    _fireReconnect: (r = { resumed: 0, lost: 0 }) => {
+      for (const cb of [...reconnectHandlers]) cb(r)
+    },
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),
       // A live prompt opens the attempt before the pty write; the default
