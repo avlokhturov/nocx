@@ -3,7 +3,8 @@
 // Flat warp-style design (P0-1): no card borders, dividers between blocks,
 // subtle background tint on hover/select.
 
-import { serializeRange, fromITheme } from './serializer'
+import { serializeRange, serializeRangeSGR, serializeRangeText, fromITheme } from './serializer'
+import type { CapturedBody } from '../capture-client'
 import { getCurrentTheme } from '../renderers/theme-adapter'
 import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
 import type { CommandSnapshotStore } from '../command-snapshot'
@@ -185,6 +186,17 @@ export interface BlockRecord {
    *  refused for looking unfinished, and was gone for good — a captured
    *  secret with nothing offering to save it (nocx-ggha). */
   afterVisualFreeze?: () => void
+  /** What the VISUAL freeze produced for the store (nocx-2f0f): the block's
+   *  rows as SGR and as characters, with the grid the serializer saw.
+   *
+   *  PARKED HERE rather than sent, because the artifact hangs on an ENTRY
+   *  and the entry id arrives with the history.record ack — a different
+   *  event that may land before or after this freeze. Whoever sends it
+   *  clears the field, so a block cannot be captured twice.
+   *
+   *  Undefined until the visual freeze runs, and after the capture has been
+   *  handed over. */
+  captured?: CapturedBody
   /** The authenticated attempt this block is bound to (ADR-0024 §7
    *  projection): set when the running block binds to the published
    *  attempt, kept when the block freezes. Absent only for a block that
@@ -935,6 +947,11 @@ export interface BlockManagerOpts {
    *  output end. The freeze originated inside the manager (sightFence /
    *  the deferral timer), so the caller learns to settle the live region. */
   onDeferredFreeze?: () => void
+  /** The terminal grid, read at freeze time. It is capture PROVENANCE
+   *  (ADR-0019 §6): the same rows serialized at a different width are a
+   *  different rendering, and a reader that cannot tell has to guess. The
+   *  manager holds no renderer, so the caller that does supplies it. */
+  dimensions?: () => { cols: number; rows: number }
 }
 
 export class BlockManager {
@@ -956,6 +973,7 @@ export class BlockManager {
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: () => void
+  private _dimensions?: () => { cols: number; rows: number }
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
@@ -1002,6 +1020,7 @@ export class BlockManager {
     this._now = opts.now ?? (() => performance.now())
     this._snapshotStore = opts.snapshotStore
     this._onDeferredFreeze = opts.onDeferredFreeze
+    this._dimensions = opts.dimensions
   }
 
   get blocks(): readonly BlockRecord[] {
@@ -1241,6 +1260,18 @@ export class BlockManager {
     rec.endLine = endLine
     const snapshot = fromITheme(getCurrentTheme())
     const outputHtml = serializeRange(snapshot, getLine, rec.outputStart, endLine)
+    // The DURABLE bodies, from the same rows and the same walk the frozen
+    // block on screen is made of — so what comes back after a restart is
+    // what was there, not a second reading of the buffer taken later.
+    const dims = this._dimensions?.()
+    if (dims) {
+      rec.captured = {
+        sgr: serializeRangeSGR(getLine, rec.outputStart, endLine),
+        text: serializeRangeText(getLine, rec.outputStart, endLine),
+        cols: dims.cols,
+        rows: dims.rows,
+      }
+    }
 
     const newEl = freezeBlock(
       rec.el,

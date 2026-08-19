@@ -63,6 +63,7 @@ import { ScrollbackController } from './scrollback/controller'
 import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger, type CommandRecord, type CommandStatus } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
+import { captureBlock } from './capture-client'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
 import { showConfirm } from './ui/dialog'
@@ -3397,6 +3398,21 @@ export class TerminalContent extends BasePaneContent {
     if (blockEl.classList.contains('cmd-block-running')) {
       block.afterVisualFreeze = () => this.attachRecordedAck(_recId, block, ack)
       return
+    }
+    // THE BODY GOES NOW, against the entry the ack has just named
+    // (nocx-2f0f). This is past the parking check above, so the visual
+    // freeze has run and `captured` is filled; when the ack raced the fence
+    // the parked re-entry brings it back here the instant the block settles,
+    // which is the same mechanism the receipt already relies on.
+    //
+    // The field is cleared before the send, so a second entry into this
+    // method — a re-recorded block, a replayed ack — cannot capture the same
+    // block twice. Fire-and-forget by design: a capture that fails costs the
+    // body and never the block (capture-client.ts).
+    if (ack.entryId !== '' && block.captured !== undefined) {
+      const body = block.captured
+      block.captured = undefined
+      void captureBlock(this.client, ack.entryId, body)
     }
     if (ack.redactions.length > 0) {
       renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)

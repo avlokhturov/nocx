@@ -149,6 +149,10 @@ export class ScrollbackController {
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
       onDeferredFreeze: () => this._settleFrozen(),
+      // Read at freeze time rather than captured at construction: a pane is
+      // resized, and the provenance must say what the serializer actually
+      // saw.
+      dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
     })
 
     // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────
