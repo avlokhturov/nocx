@@ -20,7 +20,7 @@
 // honest answer for a surface whose whole job is to say what is true now.
 import { render } from 'solid-js/web'
 import { getPortalRoot } from '../ui/overlay/portal'
-import { popOverlay, pushOverlay, restoreFocus, type OverlayEntry } from '../ui/overlay/stack'
+import { popOverlay, pushOverlay, type OverlayEntry } from '../ui/overlay/stack'
 import { isOverviewChord } from './chord'
 import { OverviewPanel } from './overview-panel'
 import type { OverviewPort } from './overview-port'
@@ -65,9 +65,14 @@ export function createOverviewController(
     host = null
     if (entry) {
       popOverlay(entry)
-      restoreFocus(entry)
       entry = null
     }
+    // NOT `restoreFocus`. The overview covers the whole workspace, so what it
+    // hands the keyboard back to is the pane in FRONT, not the thing that
+    // opened it — see the port. Restoring the invoker parked the keyboard on
+    // the toolbar button, where every keystroke went nowhere, and stole it
+    // back from a pane the person had just chosen from a card.
+    port.focusActive()
   }
 
   const openOverview = (): void => {
@@ -78,9 +83,11 @@ export function createOverviewController(
     // see the overview, not to see it and then not.
     if (isOpen()) return
 
-    // READ BEFORE THE PANEL TAKES IT. Mounting focuses a card in the same
-    // turn, so an `activeElement` read afterwards would be that card, and
-    // "restore focus" would return the person to the overview they closed.
+    // Recorded for the overlay stack's own bookkeeping, and read BEFORE the
+    // panel takes focus: mounting focuses a card in the same turn, so an
+    // `activeElement` read afterwards would be that card. Closing does not
+    // return here — the keyboard goes to the pane in front (`focusActive`) —
+    // but a nested overlay raised over this one still restores to it.
     const cameFrom = document.activeElement
 
     host = document.createElement('div')

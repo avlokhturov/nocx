@@ -141,6 +141,21 @@ export interface OverviewPort {
    */
   activate(paneId: string): void
   /**
+   * Give the keyboard back to the pane that is in front.
+   *
+   * Called when the overview closes, whatever closed it. It is NOT "restore
+   * focus to whatever opened me", and the difference is the whole point: the
+   * overview covers the entire workspace, so what it hands input back to is
+   * the pane in front — which is frequently NOT the pane it was opened from,
+   * because choosing a card activates another pane and then closes.
+   *
+   * Restoring the invoker was wrong in both directions. Opened from the
+   * toolbar button, it left the keyboard on a button that swallows every
+   * keystroke, so typing did nothing at all. Opened and then used to choose a
+   * card, it took the keyboard away from the pane the person had just picked.
+   */
+  focusActive(): void
+  /**
    * Go to a workspace, landing on the pane the person was last in there —
    * which is the MRU question, and PaneManager already owns the answer
    * (`switchWorkspace`). The overview asks and never picks: a surface that

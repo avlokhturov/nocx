@@ -62,6 +62,13 @@ export class FakeOverviewPort implements OverviewPort {
     return this.state
   }
 
+  /** How many times the overview handed the keyboard back to the front pane. */
+  focusedActive = 0
+
+  focusActive(): void {
+    this.focusedActive += 1
+  }
+
   activate(paneId: string): void {
     this.activated.push(paneId)
   }

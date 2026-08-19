@@ -89,31 +89,29 @@ describe('opening and closing the overview', () => {
     expect(cards().length).toBe(2)
   })
 
-  it('gives focus back to where it came from', () => {
-    const anchor = document.createElement('input')
+  it('hands the keyboard to the pane in front, not back to what opened it', () => {
+    // The overview covers the whole workspace, so there is nothing behind it
+    // to return to except a pane — and WHICH pane is a question only the
+    // application can answer after the fact, because choosing a card
+    // activates another one and then closes. Restoring the invoker parked the
+    // keyboard on the toolbar button, where every keystroke went nowhere
+    // (nocx-jhxdt).
+    const anchor = document.createElement('button')
     document.body.appendChild(anchor)
     anchor.focus()
-    expect(document.activeElement).toBe(anchor)
 
     const p = port()
     const c = createOverviewController(p)
     dispose = () => c.dispose()
 
     document.dispatchEvent(chord())
-    expect(document.activeElement).not.toBe(anchor)
     expect(document.querySelector('.overview')?.contains(document.activeElement)).toBe(true)
+    expect(p.focusedActive).toBe(0)
 
     c.close()
-    // restoreFocus goes through requestAnimationFrame, as the overlay stack
-    // does for every overlay; the assertion waits on the frame, not a clock.
-    return new Promise<void>((resolve) => {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          expect(document.activeElement).toBe(anchor)
-          resolve()
-        })
-      })
-    })
+
+    expect(p.focusedActive).toBe(1)
+    expect(document.activeElement).not.toBe(anchor)
   })
 
   it('lands the person in the pane they picked, and gets out of the way', () => {

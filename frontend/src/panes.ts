@@ -2250,6 +2250,7 @@ export class PaneManager {
         // second answer to "which workspace is in front".
         if (pane) void this.activate(pane)
       },
+      focusActive: () => this.activePane?.focus(),
       switchWorkspace: (workspaceId) => this.switchWorkspace(workspaceId),
       // INTO THE COLUMN THAT WAS PRESSED, not into wherever the window is.
       // The overview shows every workspace at once, so "the current one" is
