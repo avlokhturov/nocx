@@ -227,11 +227,12 @@ export interface TerminalRenderer {
    *
    * The presentation layer sizes the live region from this instead of from a
    * constant, so three lines of `ls` get three lines and a program repainting a
-   * whole screen gets the whole screen. `0` when the grid is empty or the
-   * renderer cannot measure a cell yet — the caller keeps its previous height
-   * rather than collapsing.
+   * whole screen gets the whole screen. `0` is a grid nobody has written to,
+   * which is a real height; `null` is a renderer that cannot measure yet, where
+   * the caller keeps the height it has. The two are different answers and were
+   * once the same one — see the implementation for what that cost.
    */
-  liveContentHeight(): number
+  liveContentHeight(): number | null
 
   // dispose releases renderer-held resources (timers, listeners). Called when
   // the tab owning this renderer is closed so a periodic forced-refresh pump

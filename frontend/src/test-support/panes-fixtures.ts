@@ -51,7 +51,7 @@ export const FIXTURE_DIRECTORY_LABEL = 'repos/nocx'
 /** The renderer mock's live-content-height measurer: a spy the tests
  *  program to stand in for the real renderer measuring the grid (the
  *  TerminalRenderer interface types it as a plain function). */
-export type LiveContentHeightSpy = Mock<() => number>
+export type LiveContentHeightSpy = Mock<() => number | null>
 export interface RendererMock extends TerminalRenderer {
   /** This tab's OSC 636 store — XtermRenderer owns one, so the mock must too. */
   snapshotStore: CommandSnapshotStore
@@ -188,10 +188,11 @@ export function createRendererMock(): RendererMock {
     getBufferLine: vi.fn().mockReturnValue(undefined),
     cursorLine: vi.fn().mockReturnValue(0),
     clearViewport: vi.fn(),
-    // Zero means "cannot measure", which the caller treats as "keep the current
+    // NULL means "cannot measure", which the caller treats as "keep the current
     // height" — so a fixture that does not care about live-region sizing gets
-    // the same behaviour as before this method existed.
-    liveContentHeight: vi.fn().mockReturnValue(0),
+    // the same behaviour as before this method existed. Zero would be a
+    // different statement: a grid nobody has written to.
+    liveContentHeight: vi.fn().mockReturnValue(null),
     cols: 80,
     rows: 24,
     // A REAL store, not a stub: the composition point hands

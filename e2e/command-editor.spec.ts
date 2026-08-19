@@ -267,19 +267,27 @@ test.describe('command editor (nocx-4ff)', () => {
           .querySelector<HTMLElement>('.pane.active .xterm-live-container')
           ?.getBoundingClientRect().height ?? -1) < 0.5,
     )
+    // And wait for the settle to finish. The pane MOVES to its new geometry
+    // rather than jumping to it, so a measurement taken mid-glide reads the
+    // transform, not the layout (nocx-i4h04.2).
+    await page.waitForFunction(
+      () =>
+        (document.querySelector<HTMLElement>('.pane.active .scrollback-inner')?.getAnimations()
+          .length ?? 0) === 0,
+    )
     const after = await geometry()
     expect(after.visibility).toBe('')
     expect(after.editorHeight).toBe(before.editorHeight)
     expect(after.areaHeight).toBe(before.areaHeight)
 
-    // THE FREEZE MUST NOT PUSH THE HEADER BACK DOWN. The frozen body is the
-    // same box as the live region it replaces — same row pitch, same padding
-    // — so serializing the rows into it changes the pane's height by at most
-    // the one row that is genuinely leaving: the row the grid's cursor sits
-    // on, which is below the fence the block ends at and therefore belongs to
-    // no block at all. Upward movement is unbounded on purpose: output
-    // arriving pushes the header up, exactly as a terminal scrolls.
+    // THE FREEZE MUST NOT PUSH THE HEADER BACK DOWN — not by a row, not at
+    // all. The frozen body is the same box as the live region it replaces:
+    // same row pitch, same body padding, and the same rows, because the live
+    // region stopped reserving the one the cursor moved to (it is below the
+    // fence the block ends at, and belongs to no block). Upward movement is
+    // unbounded on purpose: output arriving pushes the header up, exactly as
+    // a terminal scrolls. One pixel of rounding is all that is allowed back.
     expect(after.cell).toBeGreaterThan(0)
-    expect(after.blockTop - running.blockTop).toBeLessThanOrEqual(after.cell)
+    expect(after.blockTop - running.blockTop).toBeLessThanOrEqual(1)
   })
 })

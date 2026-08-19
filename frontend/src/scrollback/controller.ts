@@ -15,6 +15,14 @@ import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
+/** How long the pane takes to settle after a block opens or freezes. Short
+ *  enough to belong to the keypress that caused it; long enough to read as a
+ *  movement rather than a displacement. */
+const SETTLE_MS = 140
+/** Fast out, slow in: the stack leaves at once and arrives gently, which is
+ *  what makes it read as the block taking its place. */
+const SETTLE_EASING = 'cubic-bezier(0.2, 0, 0, 1)'
+
 export interface ScrollbackControllerOpts {
   /** The pane this controller owns the scrollback inside. */
   pane: HTMLElement
@@ -59,6 +67,14 @@ export class ScrollbackController {
   private _filledPane = false
   /** True while the end of the live output is visible. */
   private _following = true
+  /** The glide in flight per element, so a change landing mid-settle
+   *  retargets rather than snapping — see `_glide`. */
+  private readonly _settleAnimations = new Map<Element, Animation>()
+  /** Where the stack was on the last painted frame, and the handle of the
+   *  loop that records it — see `_watchPaintedTop`. */
+  private _paintedTop: number | null = null
+  private _paintWatch = 0
+  private _painting = false
   private _followObserver: IntersectionObserver | null = null
   /** The ask mode's owner (nocx-x8s2.2): called when the scrollback is
    *  cleared, so the chip — and with it the agent target — closes when its
@@ -118,11 +134,7 @@ export class ScrollbackController {
       // the FENCE_DEFER_MS window elapsed): hand the block's rows to the
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
-      onDeferredFreeze: () => {
-        this._clearFrozenRows()
-        this.setIdle()
-        this._scrollToLastBlockStart()
-      },
+      onDeferredFreeze: () => this._settleFrozen(),
     })
 
     // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────
@@ -230,6 +242,7 @@ export class ScrollbackController {
     // shift applies from the first frame (nocx-w1n4).
     this._applyEchoShift()
     this._updateSeparator()
+    this._watchPaintedTop()
     // Size both layers from the rows that exist now. A short command therefore
     // opens beside the prompt instead of reserving a pane-high empty window.
     // Both layers change in the same layout pass: a transition here can still
@@ -281,14 +294,17 @@ export class ScrollbackController {
    * Height changes are synchronous: animation can be only 2–4px open when a
    * fast command freezes, turning one layout change into two movements.
    */
-  setLiveHeight(px: number): void {
+  setLiveHeight(px: number | null): void {
     if (this._mode !== 'running') return
     // nocx-w1n4: the echoed command line leaves the LIVE region the same way
     // it leaves the frozen body — the first shown row is the running block's
     // outputStart. Applied before the height guards so a viewport scroll that
     // leaves the box size unchanged still releases the shift.
     this._applyEchoShift()
-    if (px <= 0) return
+    // Null is the renderer saying it cannot measure; the class's fallback
+    // height stands. Zero is a grid nobody has written to, and it sizes the
+    // region like any other measurement — to nothing but the body's padding.
+    if (px === null) return
     const max = this.runningLiveCap
     if (max === null) return
     const pad = this._bodyPaddingPx()
@@ -461,8 +477,10 @@ export class ScrollbackController {
    */
   beginBlock(command: string, cwd: string, startLine: number, outputStart?: number): void {
     const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
-    this.setRunning()
+    this._glide(() => {
+      this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
+      this.setRunning()
+    })
   }
 
   /**
@@ -495,9 +513,7 @@ export class ScrollbackController {
   onCommandEnd(getLine: GetLineFn, endLine: number, exitCode: number | null): void {
     const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
     if (rec) {
-      this._clearFrozenRows()
-      this.setIdle()
-      this._scrollToLastBlockStart()
+      this._settleFrozen()
     }
   }
 
@@ -520,7 +536,22 @@ export class ScrollbackController {
       const blocks = this.scrollbackInner.querySelectorAll('.cmd-block')
       const last = blocks[blocks.length - 1]
       if (!last) return
-      last.scrollIntoView({ block: 'start', behavior: 'instant' })
+      // ONLY FOR A BLOCK THAT DOES NOT FIT, which is the case this was
+      // written for: a program that filled the pane leaves the view at the top
+      // of a block taller than the viewport, showing its first screen with the
+      // prompt far below. A block that fits is already whole on screen — the
+      // stack hangs from the bottom edge and we are following it — so there is
+      // nothing to bring into view, and asking anyway put a second owner on
+      // the scroll position beside the settle that was still unwinding
+      // (nocx-i4h04.2: `scrollIntoView` reads the transformed box, and in the
+      // container it scrolled a row it then had to give back).
+      if (last.getBoundingClientRect().height <= this.scrollbackArea.clientHeight) return
+      // Through the glide: the freeze's own settle may still be unwinding, and
+      // a scroll that lands as a jump in the middle of it is the twitch this
+      // whole seam exists to remove.
+      this._glide(() => {
+        last.scrollIntoView({ block: 'start', behavior: 'instant' })
+      })
     })
   }
 
@@ -558,6 +589,150 @@ export class ScrollbackController {
     })
   }
 
+  /**
+   * MOVE THE PANE, DO NOT JUMP IT.
+   *
+   * Every structural change to a command's block — it opens, it freezes —
+   * changes the pane's height, and the stack of blocks hangs from the bottom
+   * edge of the scroller (`.scrollback-inner` has `margin-top: auto`), so all
+   * of it moves at once. Two of those in thirty milliseconds is what the
+   * owner reported as the pane "not settling": the eye reads a sequence of
+   * instant displacements as a twitch, whatever their direction.
+   *
+   * This is FLIP, and the F and the I are why it is not the animation that
+   * was tried and removed. The DOM change is applied WHOLE and at once; then
+   * the stack is given the inverse translation, so the frame looks exactly as
+   * it did; then the translation is released over `SETTLE_MS`. What animates
+   * is a TRANSFORM — it takes no part in layout, so nothing measuring these
+   * elements can read a value mid-flight, which is precisely what a
+   * `transition: height` on the live region did (it re-laid the box on every
+   * frame of output and never finished, so the scroll aimed at a target that
+   * had already moved).
+   *
+   * Both elements move by the same delta, because they are one stack: the
+   * blocks and the live region below them. Skipped when the person is not
+   * following the output — movement they did not cause is not theirs to
+   * watch — and under `prefers-reduced-motion`, like every other motion in
+   * this app. An in-flight glide is measured INTO the next one rather than
+   * cancelled first, so a change landing mid-settle retargets instead of
+   * snapping (nocx-i4h04.2).
+   */
+  private _glide(mutate: () => void): void {
+    const moved = [this.scrollbackInner, this.xtermLiveContainer]
+    // Measured with any in-flight transform still applied: this is where the
+    // stack IS, not where layout says it belongs. A capture taken earlier in
+    // this same task wins — see `_captureGlideOrigin`.
+    // WHERE THE STACK WAS LAST PAINTED, which is not where it is now.
+    // Several changes land in one task — the live region takes the shell's
+    // last row, then the block freezes and takes it back — and the frames
+    // between them are never drawn. Measuring here would invert the glide for
+    // exactly those, and it did: the block approached its place from the
+    // wrong side by one row (nocx-i4h04.2, measured in the container).
+    const before = this._paintedTop ?? this.scrollbackInner.getBoundingClientRect().top
+    // The in-flight transform goes BEFORE the mutation, not after it. A
+    // `scrollIntoView` inside `mutate` reads the element's transformed box and
+    // would scroll by the offset the glide is currently hiding — two owners of
+    // the scroll position, which is the defect `overflow-anchor: none` is set
+    // against one line further out. Cancelling first leaves the mutation to
+    // see layout, and `before` above has already remembered where the stack
+    // looked to be.
+    this._cancelGlides()
+    mutate()
+    this._watchPaintedTop()
+    if (!this._following || !this._motionAllowed()) return
+    const dy = before - this.scrollbackInner.getBoundingClientRect().top
+    // Below a pixel there is nothing to watch. Above a viewport it is not a
+    // settle at all — a clear, a restore, a jump the person asked for — and
+    // gliding it would be a second animation over their own gesture.
+    if (!Number.isFinite(dy) || Math.abs(dy) < 1) return
+    if (Math.abs(dy) > this.scrollbackArea.clientHeight) return
+    for (const el of moved) {
+      const anim = el.animate(
+        [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0px)' }],
+        { duration: SETTLE_MS, easing: SETTLE_EASING },
+      )
+      this._settleAnimations.set(el, anim)
+      anim.finished.then(
+        () => {
+          if (this._settleAnimations.get(el) === anim) this._settleAnimations.delete(el)
+        },
+        () => {
+          /* cancelled by the next glide — the next one owns the element */
+        },
+      )
+    }
+  }
+
+  private _cancelGlides(): void {
+    for (const anim of this._settleAnimations.values()) anim.cancel()
+    this._settleAnimations.clear()
+  }
+
+  /**
+   * Record where the stack is, once per frame, while there is something to
+   * watch.
+   *
+   * An animation frame runs after that frame's tasks and before its paint, so
+   * what it reads is exactly what is about to be drawn — the position the
+   * person will have seen when the next change arrives. That is the only
+   * honest origin for a glide: within one task the live region can take a row
+   * and the freeze give it back, and neither of those states is ever on
+   * screen.
+   *
+   * It runs while a command is running or a glide is unwinding, and stops
+   * itself otherwise: an idle pane watching nothing would be one layout read
+   * per frame per pane, for the life of the window.
+   */
+  private _watchPaintedTop(): void {
+    if (this._paintWatch !== 0) return
+    const tick = (): void => {
+      // Re-entrancy, not recursion: a host that runs animation-frame callbacks
+      // synchronously — which the unit tests do, to make a frame deterministic
+      // — would otherwise re-enter here until the stack ends.
+      if (this._painting) return
+      this._painting = true
+      try {
+        this._paintedTop = this.scrollbackInner.getBoundingClientRect().top
+        if (this._mode === 'running' || this._settleAnimations.size > 0) {
+          this._paintWatch = requestAnimationFrame(tick)
+          return
+        }
+        this._paintWatch = 0
+        this._paintedTop = null
+      } finally {
+        this._painting = false
+      }
+    }
+    this._paintWatch = requestAnimationFrame(tick)
+  }
+
+  /** Whether this build may move anything: the Web Animations API has to
+   *  exist (it does not in jsdom, where a test asserts the layout and not the
+   *  motion) and the person must not have asked for less of it. */
+  private _motionAllowed(): boolean {
+    if (typeof this.scrollbackInner.animate !== 'function') return false
+    const mq = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    return mq ? !mq.matches : true
+  }
+
+  /**
+   * The block has taken its rows. Hand them back to the DOM, collapse the
+   * live region and bring the block's start into view — as ONE settle.
+   *
+   * Six paths freeze a block (the marker path, the attempt, two
+   * abandonments, an entered environment, and the deferred fence), and every
+   * one of them did these three calls in the same order by hand. That is one
+   * behaviour with six copies: the glide had to be added in six places, and
+   * the seventh path to arrive would have been written without it.
+   */
+  private _settleFrozen(): void {
+    this._glide(() => {
+      this._clearFrozenRows()
+      this.setIdle()
+    })
+    this._scrollToLastBlockStart()
+  }
+
   private _updateSeparator(): void {
     const hasBlocks = this._blockManager.blocks.length > 0
     this.separator.style.display = hasBlocks && this._mode !== 'fullscreen' ? '' : 'none'
@@ -578,9 +753,7 @@ export class ScrollbackController {
       this._renderer.cursorLine(),
     )
     if (rec) {
-      this._clearFrozenRows()
-      this.setIdle()
-      this._scrollToLastBlockStart()
+      this._settleFrozen()
       return true
     }
     return false
@@ -592,9 +765,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
     if (rec) {
-      this._clearFrozenRows()
-      this.setIdle()
-      this._scrollToLastBlockStart()
+      this._settleFrozen()
       return true
     }
     return false
@@ -607,9 +778,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonUnbound(getLine, endLine)
     if (rec) {
-      this._clearFrozenRows()
-      this.setIdle()
-      this._scrollToLastBlockStart()
+      this._settleFrozen()
       return true
     }
     return false
@@ -622,15 +791,16 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.freezeEntered(getLine, endLine)
     if (rec) {
-      this._clearFrozenRows()
-      this.setIdle()
-      this._scrollToLastBlockStart()
+      this._settleFrozen()
       return true
     }
     return false
   }
 
   dispose(): void {
+    if (this._paintWatch !== 0) cancelAnimationFrame(this._paintWatch)
+    this._paintWatch = 0
+    this._cancelGlides()
     this._followObserver?.disconnect()
     this._followObserver = null
     this._blockManager.dispose()
