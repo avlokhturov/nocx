@@ -385,7 +385,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 10
+const schemaVersion = 11
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -616,9 +616,26 @@ CREATE TABLE IF NOT EXISTS workspaces (
 -- CASCADE would delete an independent tab the user still has open; RESTRICT
 -- would make a tab that ever spawned another undeletable, and §4.4 removes
 -- tabs automatically the moment their last pane leaves.
+--
+-- closed_at IS THE WINDOW (nocx-l21ib.4). NULL means the tab is in the
+-- window; a timestamp means it left. A tab is never deleted, because
+-- entries.pane_id is ON DELETE SET NULL and panes.tab_id is ON DELETE
+-- CASCADE, so deleting one tab permanently unhooked every block its panes
+-- had printed — an ordinary Cmd-W forgot a session's work. Every read that
+-- feeds the window filters closed_at IS NULL, and that read IS the window
+-- set.
+--
+-- workspace_id is therefore NULLABLE with ON DELETE SET NULL, which
+-- workspaces being the ONE row still deleted forces: under the previous
+-- CASCADE, deleting a workspace took its closed tabs and then their panes,
+-- which is exactly what the marking exists to prevent. Same shape and same
+-- reason as parent_id above — the link going null is the honest "the
+-- container this row remembers is gone" state. The invariant that replaces
+-- the NOT NULL is the CHECK at the foot of the table: an OPEN tab is always
+-- in a workspace; a CLOSED tab may have outlived its own.
 CREATE TABLE IF NOT EXISTS tabs (
   id           TEXT PRIMARY KEY,           -- client-minted UUIDv7: UNTRUSTED
-  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id TEXT REFERENCES workspaces(id) ON DELETE SET NULL,
   parent_id    TEXT REFERENCES tabs(id) ON DELETE SET NULL
                CHECK (parent_id IS NULL OR parent_id != id), -- no self-parent
   name         TEXT,                       -- NULL: nobody named it (§4.5)
@@ -627,7 +644,9 @@ CREATE TABLE IF NOT EXISTS tabs (
   pinned       INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
   layout       TEXT NOT NULL DEFAULT 'row' CHECK (layout IN ('row','column')),
   seen_at      INTEGER,                    -- the seen-mark; NULL = never seen
-  digest       TEXT NOT NULL DEFAULT ''    -- the create key's content binding
+  closed_at    INTEGER,                    -- NULL: in the window
+  digest       TEXT NOT NULL DEFAULT '',   -- the create key's content binding
+  CHECK (closed_at IS NOT NULL OR workspace_id IS NOT NULL)
 ) STRICT;
 
 -- A pane is the DURABLE IDENTITY (§5): it outlives its shell, its tab and the
@@ -640,6 +659,13 @@ CREATE TABLE IF NOT EXISTS tabs (
 -- size_share is the MEMBER's property; the direction is the SET's and lives on
 -- the tab. That split is why the tab needed a row and the display group did
 -- not.
+--
+-- closed_at is the tab's column one rung down and means the same thing: NULL
+-- is "in the window", and a pane that leaves is marked rather than deleted so
+-- the blocks anchored to it (entries.pane_id) keep their anchor. tab_id keeps
+-- its CASCADE and it is now unreachable — a tab row is never deleted either —
+-- which is why the mark has to be written on BOTH tables in one transaction
+-- rather than left to the foreign key.
 CREATE TABLE IF NOT EXISTS panes (
   id         TEXT PRIMARY KEY,             -- client-minted UUIDv7: UNTRUSTED
   tab_id     TEXT NOT NULL REFERENCES tabs(id) ON DELETE CASCADE,
@@ -647,6 +673,7 @@ CREATE TABLE IF NOT EXISTS panes (
   kind       TEXT NOT NULL CHECK (kind IN ('local','ssh')),
   endpoint   TEXT,                         -- canonical user@host:port; NULL local
   size_share REAL NOT NULL DEFAULT 1.0 CHECK (size_share > 0),
+  closed_at  INTEGER,                      -- NULL: in the window
   digest     TEXT NOT NULL DEFAULT ''      -- the create key's content binding
 ) STRICT;
 

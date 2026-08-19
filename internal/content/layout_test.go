@@ -295,9 +295,13 @@ func TestTabStoresNoActivityNoAttentionAndNoLabel(t *testing.T) {
 	// digest is the create key's content binding (§7, nocx-isoph.2), not a
 	// property of the tab: it is what tells a RETRY of a create from an id
 	// reused for something else, and it never crosses the wire.
+	// closed_at is not a property of the tab either — it is which SET the row
+	// is in, the window or the store (nocx-l21ib.4) — and it is a column for
+	// exactly that reason: the alternative is a second table holding the same
+	// identity, which is two owners of one row.
 	want := []string{
 		"id", "workspace_id", "parent_id", "name", "colour",
-		"position", "pinned", "layout", "seen_at", "digest",
+		"position", "pinned", "layout", "seen_at", "closed_at", "digest",
 	}
 	if !equalStrings(got, want) {
 		t.Fatalf("tabs columns = %v, want exactly %v", got, want)
@@ -327,7 +331,7 @@ func TestWorkspaceAndPaneStoreExactlyTheirFields(t *testing.T) {
 		t.Fatalf("workspaces columns = %v, want exactly %v", got, want)
 	}
 	if got, want := columnsOf(t, path, "panes"),
-		[]string{"id", "tab_id", "cwd", "kind", "endpoint", "size_share", "digest"}; !equalStrings(got, want) {
+		[]string{"id", "tab_id", "cwd", "kind", "endpoint", "size_share", "closed_at", "digest"}; !equalStrings(got, want) {
 		t.Fatalf("panes columns = %v, want exactly %v", got, want)
 	}
 }
@@ -392,8 +396,13 @@ func TestTabLineageEdgeIsAPointerToATabAndSurvivesNothingElse(t *testing.T) {
 	for _, fk := range fks {
 		byFrom[fk[1]] = fk
 	}
-	if got := byFrom["workspace_id"]; got == nil || got[0] != "workspaces" || got[3] != "CASCADE" {
-		t.Fatalf("tabs.workspace_id = %v, want → workspaces ON DELETE CASCADE", got)
+	// BOTH of the tab's edges are ON DELETE SET NULL, and workspace_id became
+	// the second one with nocx-l21ib.4: a workspace is deleted while its
+	// closed tabs are kept, so a cascade would take them — and their panes,
+	// and every block anchored to those panes — which is what the marking
+	// exists to prevent.
+	if got := byFrom["workspace_id"]; got == nil || got[0] != "workspaces" || got[3] != "SET NULL" {
+		t.Fatalf("tabs.workspace_id = %v, want → workspaces ON DELETE SET NULL", got)
 	}
 	if got := byFrom["parent_id"]; got == nil || got[0] != "tabs" || got[3] != "SET NULL" {
 		t.Fatalf("tabs.parent_id = %v, want → tabs ON DELETE SET NULL", got)
@@ -422,14 +431,13 @@ func TestDeletingAWorkspaceTakesItsTabsAndTheirPanes(t *testing.T) {
 	}
 }
 
-// A pane belongs to its tab: the tab going takes its panes. A CHILD tab does
-// not go — it is an independent tab that merely records where it came from —
-// so its lineage edge goes null instead, which is the honest "provenance
-// lost" state (the same choice artifacts.derived_from makes, and for the same
-// reason). Cascading here would delete a tab the user still has open; RESTRICT
-// would make a tab that ever spawned another undeletable, and §4.4 removes
-// tabs automatically.
-func TestDeletingATabTakesItsPanesAndNullsItsChildrensLineage(t *testing.T) {
+// A pane leaves the window with its tab. A CHILD tab does not — it is an
+// independent tab that merely records where it came from — and since
+// nocx-l21ib.4 it KEEPS the lineage edge it had: the parent's row is still
+// there, marked closed, so "provenance lost" is no longer the honest state.
+// It was the honest one while the parent was deleted, and the null it left
+// was the cost of that delete rather than a property of closing a tab.
+func TestClosingATabTakesItsPanesAndLeavesItsChildrensLineageIntact(t *testing.T) {
 	_, layout := newLayout(t)
 	ctx := context.Background()
 	seedChain(t, layout)
@@ -438,17 +446,17 @@ func TestDeletingATabTakesItsPanesAndNullsItsChildrensLineage(t *testing.T) {
 		t.Fatalf("DeleteTab: %v", err)
 	}
 	if panes, err := layout.Panes(ctx, "tab-1"); err != nil || len(panes) != 0 {
-		t.Fatalf("Panes after the tab went = %v (err %v), want none", panes, err)
+		t.Fatalf("Panes after the tab left the window = %v (err %v), want none", panes, err)
 	}
 	tabs, err := layout.Tabs(ctx, "ws-1")
 	if err != nil {
 		t.Fatalf("Tabs: %v", err)
 	}
 	if len(tabs) != 1 || tabs[0].ID != "tab-2" {
-		t.Fatalf("tabs after the parent went = %+v, want the child alone", tabs)
+		t.Fatalf("tabs after the parent left = %+v, want the child alone", tabs)
 	}
-	if tabs[0].ParentID != nil {
-		t.Fatalf("child lineage = %q, want null once the parent's row is gone", *tabs[0].ParentID)
+	if tabs[0].ParentID == nil || *tabs[0].ParentID != "tab-1" {
+		t.Fatalf("child lineage = %v, want tab-1 — the parent's row outlives its closing", tabs[0].ParentID)
 	}
 }
 

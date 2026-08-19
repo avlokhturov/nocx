@@ -190,6 +190,45 @@ func policyFromSettings(reg *settings.Registry) *content.Policy {
 	return p
 }
 
+// clearWindowOnCleanStart is the whole of "reopen tabs and panes on startup"
+// being OFF (settings.RestoreOnStartup, nocx-l21ib.4): everything the last
+// session left in the window is marked closed, once, before the transport can
+// serve a single layout.read.
+//
+// IT IS THE BACKEND'S ACT AND NOT THE RENDERER'S, though the renderer is what
+// decides not to draw the rows, and the choice is deliberate. A renderer
+// sweeping through the existing write path would issue one close per leftover
+// tab: N transactions where the act is one, so a backend that died halfway
+// would leave half a session open and reopen exactly it on the next launch
+// with restore back on — the defect this exists to end, one launch later. It
+// would also mint a replacement tab on the last close (that is what a close
+// does when the application is left with none) and then have to reconcile a
+// row nobody asked for. Here the same act is one transaction, and it lands
+// where the store's other startup reconciliations already live: closeOpenEntries
+// and dropDeadSessions run on the same argument — a backend start IS an
+// application start (D5), and this Open is the new one.
+//
+// The POLICY stays in the composition root and the MECHANISM in the store,
+// which is why the setting is read here rather than in content.Config: the
+// store has no business knowing what a person ticked in Settings.
+//
+// A failure is a WARN and nothing more. The window still opens, on the
+// leftovers the sweep did not reach — worse than a clean start and much
+// better than a backend that refuses to start over a preference.
+func clearWindowOnCleanStart(ctx context.Context, reg *settings.Registry, db content.ContentDB, logger *slog.Logger) {
+	restore, err := reg.GetBool(settings.RestoreOnStartup)
+	if err != nil {
+		logger.Warn("restore-on-startup setting unreadable; opening on what was left", "error", err)
+		return
+	}
+	if restore {
+		return
+	}
+	if err := db.Layout().ClearWindow(ctx); err != nil {
+		logger.Warn("clean start could not close the last session's tabs; they may reopen later", "error", err)
+	}
+}
+
 // SetDialogService attaches the native dialog capability (dialog.* RPCs). It
 // is wired from main.go's WailsApp.startup — the Wails context it needs only
 // exists there, after the transport was built — and must be called before
@@ -705,6 +744,7 @@ func New(opts ...Option) (*App, error) {
 		// inferred, and this is the line a retry (or nocx-rtg0.10's queue
 		// draining) closes its episode on.
 		historyStatus.Clear()
+		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The

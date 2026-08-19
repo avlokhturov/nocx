@@ -321,10 +321,13 @@ func scanWorkspaces(rows *sql.Rows, err error) ([]Workspace, error) {
 	return out, rows.Err()
 }
 
-// DeleteWorkspace takes the workspace's tabs and their panes with it, through
-// the two ON DELETE CASCADEs — and the sessions recorded under it, through a
-// third. Stated here as well as in the schema because a delete behaviour
-// nobody wrote down is a delete behaviour nobody tested.
+// DeleteWorkspace takes the workspace's tabs and their panes OUT OF THE
+// WINDOW and then deletes the workspace row. The order is the whole of it:
+// the tabs are marked closed first, so the ON DELETE SET NULL that follows
+// leaves them standing with no workspace rather than being refused by the
+// CHECK — an open tab is always in a workspace, a closed one may have
+// outlived its own. The sessions recorded under it still go, through their
+// own CASCADE; a session dies with the backend anyway (D5).
 //
 // The DEFAULT workspace is refused. Closing it is not an affordance any
 // surface has (§4.2: it never renders), and its row is load bearing twice
@@ -349,6 +352,17 @@ func (s *sqliteContent) DeleteWorkspace(ctx context.Context, id string, next Rep
 			}
 			if exists == 0 {
 				return nil
+			}
+			tabs, err := idsOf(ctx, tx,
+				`SELECT id FROM tabs WHERE workspace_id = ? AND closed_at IS NULL`, id)
+			if err != nil {
+				return err
+			}
+			at := closedNow()
+			for _, tabID := range tabs {
+				if err := markTabClosed(ctx, tx, tabID, at); err != nil {
+					return err
+				}
 			}
 			if _, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, id); err != nil {
 				return err
@@ -376,13 +390,43 @@ func (s *sqliteContent) inTx(ctx context.Context, fn func(tx *sql.Tx) error) err
 	return tx.Commit()
 }
 
-// dissolveTabIfEmpty removes the tab when its last pane has just left, and
-// then asks the same question of its workspace. It is called from inside the
-// caller's transaction, never on its own.
+// ── leaving the window ───────────────────────────────────────────────────
+
+// closedNow is the mark a row leaving the window carries: the backend's wall
+// clock, in the same milliseconds every other timestamp in this schema uses.
+// One helper rather than a time.Now() per close, so "when did this leave" has
+// one derivation.
+func closedNow() int64 { return time.Now().UnixMilli() }
+
+// markTabClosed takes the tab out of the window AND its panes with it. Both
+// marks, always together and always in the caller's transaction: panes.tab_id
+// is ON DELETE CASCADE, so when a tab was deleted the panes went with it for
+// free — now that nothing is deleted, a tab marked without its panes would
+// leave open panes in a tab the window no longer draws.
+//
+// Idempotent by the WHERE clause: a row already closed keeps the timestamp it
+// left at, which is the one a session-search surface would show.
+func markTabClosed(ctx context.Context, tx *sql.Tx, tabID string, at int64) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE panes SET closed_at = ? WHERE tab_id = ? AND closed_at IS NULL`, at, tabID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx,
+		`UPDATE tabs SET closed_at = ? WHERE id = ? AND closed_at IS NULL`, at, tabID)
+	return err
+}
+
+// dissolveTabIfEmpty takes the tab out of the window when its last OPEN pane
+// has just left, and then asks the same question of its workspace. It is
+// called from inside the caller's transaction, never on its own.
+//
+// "Empty" counts OPEN panes, not rows: with closed panes kept, a count over
+// the whole table would say every tab a user ever closed a pane in is still
+// occupied, and the tab would never leave.
 func dissolveTabIfEmpty(ctx context.Context, tx *sql.Tx, tabID string) error {
 	var panes int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT count(*) FROM panes WHERE tab_id = ?`, tabID).Scan(&panes); err != nil {
+		`SELECT count(*) FROM panes WHERE tab_id = ? AND closed_at IS NULL`, tabID).Scan(&panes); err != nil {
 		return err
 	}
 	if panes > 0 {
@@ -390,28 +434,35 @@ func dissolveTabIfEmpty(ctx context.Context, tx *sql.Tx, tabID string) error {
 	}
 	var workspaceID string
 	switch err := tx.QueryRowContext(ctx,
-		`SELECT workspace_id FROM tabs WHERE id = ?`, tabID).Scan(&workspaceID); {
+		`SELECT workspace_id FROM tabs WHERE id = ? AND closed_at IS NULL`, tabID).Scan(&workspaceID); {
 	case errors.Is(err, sql.ErrNoRows):
+		// Either there is no such tab or it has already left the window.
+		// Neither is a failure and neither empties a workspace a second time.
 		return nil
 	case err != nil:
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM tabs WHERE id = ?`, tabID); err != nil {
+	if err := markTabClosed(ctx, tx, tabID, closedNow()); err != nil {
 		return err
 	}
 	return dissolveWorkspaceIfEmpty(ctx, tx, workspaceID)
 }
 
-// dissolveWorkspaceIfEmpty removes the workspace when its last tab has just
-// left. The default is the one exemption, for the reasons DeleteWorkspace
-// gives.
+// dissolveWorkspaceIfEmpty DELETES the workspace when its last open tab has
+// just left. The workspace is the one row in the chain that is still deleted:
+// it holds nothing a block hangs on, and whether an empty workspace should
+// survive as furniture is an open question the owner has not answered yet.
+// Its closed tabs outlive it with a null workspace_id (ON DELETE SET NULL),
+// which is why the delete may only run AFTER they are marked.
+//
+// The default is the one exemption, for the reasons DeleteWorkspace gives.
 func dissolveWorkspaceIfEmpty(ctx context.Context, tx *sql.Tx, workspaceID string) error {
 	if workspaceID == DefaultWorkspaceID {
 		return nil
 	}
 	var tabs int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT count(*) FROM tabs WHERE workspace_id = ?`, workspaceID).Scan(&tabs); err != nil {
+		`SELECT count(*) FROM tabs WHERE workspace_id = ? AND closed_at IS NULL`, workspaceID).Scan(&tabs); err != nil {
 		return err
 	}
 	if tabs > 0 {
@@ -419,6 +470,45 @@ func dissolveWorkspaceIfEmpty(ctx context.Context, tx *sql.Tx, workspaceID strin
 	}
 	_, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, workspaceID)
 	return err
+}
+
+// ClearWindow is the CLEAN START (restore.onStartup off): everything the last
+// session left the window holding leaves it, in ONE transaction, and nothing
+// is deleted but the workspaces that are then holding no open tab.
+//
+// It is a sweep, which every other rule in this file deliberately is not —
+// and it is one because the act it records is one: "this launch opens on
+// nothing". Issuing it as a close per tab would be N transactions, so a
+// backend that died halfway would leave half a session open and reopen it on
+// the next launch with restore back on — which is the defect this method
+// exists to end, one launch later.
+//
+// No replacement is minted, unlike every other close: the window that follows
+// a clean start is the renderer's to open, and it opens a pane of its own the
+// moment this returns.
+func (s *sqliteContent) ClearWindow(ctx context.Context) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			at := closedNow()
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE panes SET closed_at = ? WHERE closed_at IS NULL`, at); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE tabs SET closed_at = ? WHERE closed_at IS NULL`, at); err != nil {
+				return err
+			}
+			// The same rule dissolveWorkspaceIfEmpty applies one workspace at
+			// a time, applied to all of them at once — including the same
+			// exemption for the default, which is never deleted.
+			_, err := tx.ExecContext(ctx,
+				`DELETE FROM workspaces WHERE id != ?
+				   AND NOT EXISTS (SELECT 1 FROM tabs
+				                    WHERE tabs.workspace_id = workspaces.id
+				                      AND tabs.closed_at IS NULL)`, DefaultWorkspaceID)
+			return err
+		})
+	})
 }
 
 // mintReplacementIfEmpty gives the application a tab again when the close
@@ -431,8 +521,12 @@ func dissolveWorkspaceIfEmpty(ctx context.Context, tx *sql.Tx, workspaceID strin
 // application still has the tab it had, or it has the replacement. A caller
 // that supplied no identity gets ErrNoReplacement and loses nothing.
 func mintReplacementIfEmpty(ctx context.Context, tx *sql.Tx, next Replacement) error {
+	// "Still has a tab" means still has one IN THE WINDOW. A closed row is a
+	// record, not a tab the user can look at, so counting it here would leave
+	// the application with an empty strip and no replacement.
 	var stillOpen int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM tabs)`).Scan(&stillOpen); err != nil {
+	if err := tx.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM tabs WHERE closed_at IS NULL)`).Scan(&stillOpen); err != nil {
 		return err
 	}
 	if stillOpen != 0 {
@@ -585,7 +679,8 @@ func (s *sqliteContent) Tabs(ctx context.Context, workspaceID string) ([]Tab, er
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at
-		   FROM tabs WHERE workspace_id = ? ORDER BY position, id`, workspaceID)
+		   FROM tabs WHERE workspace_id = ? AND closed_at IS NULL
+		  ORDER BY position, id`, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -619,28 +714,28 @@ func (s *sqliteContent) Tabs(ctx context.Context, workspaceID string) ([]Tab, er
 	return out, rows.Err()
 }
 
-// DeleteTab takes the tab's panes with it (ON DELETE CASCADE) and leaves any
-// tab that records it as lineage parent standing, with a null parent (ON
-// DELETE SET NULL) — the honest "provenance lost" state. See the interface
-// for why neither of the other two behaviours fits.
-// And it takes its workspace with it when it was the last tab there, and
-// mints the replacement when it was the last tab anywhere — all in the one
-// transaction (nocx-isoph.3).
+// DeleteTab takes the tab OUT OF THE WINDOW, and its panes with it — nothing
+// is removed. Any tab that records it as lineage parent keeps its row and its
+// parent, which is now simply a tab that is no longer on screen. It takes its
+// workspace with it when it was the last OPEN tab there, and mints the
+// replacement when it was the last one anywhere — all in the one transaction
+// (nocx-isoph.3).
 func (s *sqliteContent) DeleteTab(ctx context.Context, id string, next Replacement) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		return s.inTx(ctx, func(tx *sql.Tx) error {
 			var workspaceID string
 			switch err := tx.QueryRowContext(ctx,
-				`SELECT workspace_id FROM tabs WHERE id = ?`, id).Scan(&workspaceID); {
+				`SELECT workspace_id FROM tabs WHERE id = ? AND closed_at IS NULL`, id).Scan(&workspaceID); {
 			case errors.Is(err, sql.ErrNoRows):
-				// Nothing to remove and therefore nothing to dissolve: a
-				// delete of a row that is not there is not a failure, and it
-				// must not mint a replacement either.
+				// Nothing in the window under that id — no such tab, or one
+				// that has already left. Neither is a failure, and neither
+				// may dissolve a workspace or mint a replacement a second
+				// time.
 				return nil
 			case err != nil:
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM tabs WHERE id = ?`, id); err != nil {
+			if err := markTabClosed(ctx, tx, id, closedNow()); err != nil {
 				return err
 			}
 			if err := dissolveWorkspaceIfEmpty(ctx, tx, workspaceID); err != nil {
@@ -671,8 +766,17 @@ func (s *sqliteContent) CreatePane(ctx context.Context, pane Pane) (Created[Pane
 			case !errors.Is(err, ErrNoSuchPane):
 				return err
 			}
-			if _, err := tabByID(ctx, tx, pane.TabID); err != nil {
+			// The tab has to be IN THE WINDOW, not merely on record. The row
+			// readers answer from the whole store on purpose (an id is
+			// unique across both sets — see paneByID), so the window half of
+			// the question is asked here: a split whose tab the user closed
+			// while it was in flight is refused, exactly as it was when the
+			// close deleted the row.
+			switch tab, err := tabByID(ctx, tx, pane.TabID); {
+			case err != nil:
 				return err
+			case tab.closedAt != nil:
+				return fmt.Errorf("%w: %s has left the window", ErrNoSuchTab, pane.TabID)
 			}
 			if err := insertPane(ctx, tx, pane, digest); err != nil {
 				return err
@@ -701,7 +805,7 @@ func (s *sqliteContent) Panes(ctx context.Context, tabID string) ([]Pane, error)
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, tab_id, cwd, kind, endpoint, size_share
-		   FROM panes WHERE tab_id = ? ORDER BY id`, tabID)
+		   FROM panes WHERE tab_id = ? AND closed_at IS NULL ORDER BY id`, tabID)
 	if err != nil {
 		return nil, err
 	}
@@ -723,24 +827,29 @@ func (s *sqliteContent) Panes(ctx context.Context, tabID string) ([]Pane, error)
 	return out, rows.Err()
 }
 
-// DeletePane removes the pane and then unwinds as far up the chain as the
-// removal empties: the tab it was the last pane of, the workspace that tab
-// was the last tab of, and the replacement if that was the application's last
-// tab. All of it in one transaction — a store that used two would leave a tab
-// with no panes visible in between, which is the state §4.1 says cannot
-// happen.
+// DeletePane takes the pane out of the window and then unwinds as far up the
+// chain as that empties: the tab it was the last open pane of, the workspace
+// that tab was the last open tab of, and the replacement if that was the
+// application's last tab. All of it in one transaction — a store that used
+// two would leave a tab with no panes visible in between, which is the state
+// §4.1 says cannot happen.
+//
+// The pane's ROW stays, and that is the whole point: entries.pane_id is the
+// block's durable anchor, and it is ON DELETE SET NULL, so the delete this
+// used to issue silently unhooked everything the pane had printed.
 func (s *sqliteContent) DeletePane(ctx context.Context, id string, next Replacement) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		return s.inTx(ctx, func(tx *sql.Tx) error {
 			var tabID string
 			switch err := tx.QueryRowContext(ctx,
-				`SELECT tab_id FROM panes WHERE id = ?`, id).Scan(&tabID); {
+				`SELECT tab_id FROM panes WHERE id = ? AND closed_at IS NULL`, id).Scan(&tabID); {
 			case errors.Is(err, sql.ErrNoRows):
 				return nil
 			case err != nil:
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `DELETE FROM panes WHERE id = ?`, id); err != nil {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE panes SET closed_at = ? WHERE id = ?`, closedNow(), id); err != nil {
 				return err
 			}
 			if err := dissolveTabIfEmpty(ctx, tx, tabID); err != nil {
@@ -766,7 +875,7 @@ func (s *sqliteContent) SetPaneCwd(ctx context.Context, paneID, cwd string) (Pan
 	err := s.run(ctx, func(ctx context.Context) error {
 		return s.inTx(ctx, func(tx *sql.Tx) error {
 			res, err := tx.ExecContext(ctx,
-				`UPDATE panes SET cwd = ? WHERE id = ?`, cwd, paneID)
+				`UPDATE panes SET cwd = ? WHERE id = ? AND closed_at IS NULL`, cwd, paneID)
 			if err != nil {
 				return err
 			}
@@ -791,7 +900,7 @@ func (s *sqliteContent) MovePane(ctx context.Context, paneID, tabID string) (Pan
 		return s.inTx(ctx, func(tx *sql.Tx) error {
 			var from string
 			switch err := tx.QueryRowContext(ctx,
-				`SELECT tab_id FROM panes WHERE id = ?`, paneID).Scan(&from); {
+				`SELECT tab_id FROM panes WHERE id = ? AND closed_at IS NULL`, paneID).Scan(&from); {
 			case errors.Is(err, sql.ErrNoRows):
 				return fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
 			case err != nil:
@@ -841,10 +950,14 @@ func (s *sqliteContent) MovePane(ctx context.Context, paneID, tabID string) (Pan
 	return out, nil
 }
 
+// tabWorkspace answers "which workspace is this tab in" for a drag — so it
+// asks it of the WINDOW: a tab that has left cannot be dragged out of and
+// cannot be dropped into, and a closed tab's workspace_id may be null anyway
+// because the workspace it names has been deleted.
 func tabWorkspace(ctx context.Context, tx *sql.Tx, tabID string) (string, error) {
 	var workspaceID string
 	switch err := tx.QueryRowContext(ctx,
-		`SELECT workspace_id FROM tabs WHERE id = ?`, tabID).Scan(&workspaceID); {
+		`SELECT workspace_id FROM tabs WHERE id = ? AND closed_at IS NULL`, tabID).Scan(&workspaceID); {
 	case errors.Is(err, sql.ErrNoRows):
 		return "", fmt.Errorf("%w: %s", ErrNoSuchTab, tabID)
 	case err != nil:
@@ -958,15 +1071,15 @@ func (s *sqliteContent) ReorderWorkspaces(ctx context.Context, ids []string) ([]
 // "clear it", and clearing is a real operation here: a tab whose name is
 // removed goes back to the label derived from its panes (§4.5).
 func (s *sqliteContent) RenameTab(ctx context.Context, id string, name *string) (Tab, error) {
-	return s.setTabColumn(ctx, id, `UPDATE tabs SET name = ? WHERE id = ?`, name)
+	return s.setTabColumn(ctx, id, `UPDATE tabs SET name = ? WHERE id = ? AND closed_at IS NULL`, name)
 }
 
 func (s *sqliteContent) RecolourTab(ctx context.Context, id string, colour *string) (Tab, error) {
-	return s.setTabColumn(ctx, id, `UPDATE tabs SET colour = ? WHERE id = ?`, colour)
+	return s.setTabColumn(ctx, id, `UPDATE tabs SET colour = ? WHERE id = ? AND closed_at IS NULL`, colour)
 }
 
 func (s *sqliteContent) PinTab(ctx context.Context, id string, pinned bool) (Tab, error) {
-	return s.setTabColumn(ctx, id, `UPDATE tabs SET pinned = ? WHERE id = ?`, boolToInt(pinned))
+	return s.setTabColumn(ctx, id, `UPDATE tabs SET pinned = ? WHERE id = ? AND closed_at IS NULL`, boolToInt(pinned))
 }
 
 // setTabColumn writes one column and reads the row back inside the same
@@ -978,6 +1091,12 @@ func (s *sqliteContent) PinTab(ctx context.Context, id string, pinned bool) (Tab
 // exists — recomputing it here would turn a later retry of the original
 // create into ErrIDConflict, which is the same trap ledger_sqlite.go's close
 // path names.
+//
+// The statement each caller passes carries `AND closed_at IS NULL`, so a tab
+// that has left the window is ErrNoSuchTab — the same answer the renderer got
+// when the close deleted the row. It has to be: a closed tab can have a null
+// workspace_id (the workspace was deleted under it), and the wire says a
+// tab's workspaceId is never empty.
 func (s *sqliteContent) setTabColumn(ctx context.Context, id, stmt string, value any) (Tab, error) {
 	var out Tab
 	err := s.run(ctx, func(ctx context.Context) error {
@@ -1014,7 +1133,13 @@ func (s *sqliteContent) ReorderTabs(ctx context.Context, workspaceID string, ids
 			if _, err := workspaceByID(ctx, tx, workspaceID); err != nil {
 				return err
 			}
-			members, err := idsOf(ctx, tx, `SELECT id FROM tabs WHERE workspace_id = ?`, workspaceID)
+			// The membership a reorder is checked against is the WINDOW set:
+			// the renderer sends the tabs a person can see and drag. Counting
+			// closed rows here would make the first reorder after any close
+			// "not a permutation", which is the whole strip refusing to be
+			// rearranged because somebody once pressed Cmd-W.
+			members, err := idsOf(ctx, tx,
+				`SELECT id FROM tabs WHERE workspace_id = ? AND closed_at IS NULL`, workspaceID)
 			if err != nil {
 				return err
 			}
@@ -1053,7 +1178,12 @@ func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (st
 	}
 	var workspaceID string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT t.workspace_id FROM panes p JOIN tabs t ON t.id = p.tab_id WHERE p.id = ?`,
+		// The window's chain, both rungs: a session opens in a pane that is on
+		// screen, and a CLOSED tab's workspace_id can be null — the workspace
+		// was deleted and the row outlived it — so a walk that admitted closed
+		// rows would answer a live question with a dead one, or with nothing.
+		`SELECT t.workspace_id FROM panes p JOIN tabs t ON t.id = p.tab_id
+		  WHERE p.id = ? AND p.closed_at IS NULL AND t.closed_at IS NULL`,
 		paneID,
 	).Scan(&workspaceID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1091,31 +1221,48 @@ func workspaceByID(ctx context.Context, q rowQuerier, id string) (workspaceRow, 
 	return row, err
 }
 
+// tabRow and paneRow answer from the WHOLE store, closed rows included, and
+// deliberately so: an id is unique across both sets, so these are what tell
+// "this create is a retry" from "this id already means something else" (§7).
+// A reader that hid closed rows would turn a replayed create into a primary
+// key failure. The window question is a different one and is asked by the
+// callers that need it, through closedAt.
 type tabRow struct {
 	Tab
-	digest string
+	closedAt *int64
+	digest   string
 }
 
 func tabByID(ctx context.Context, q rowQuerier, id string) (tabRow, error) {
 	var (
-		row    tabRow
-		parent sql.NullString
-		name   sql.NullString
-		colour sql.NullString
-		pinned int
-		layout string
-		seenAt sql.NullInt64
+		row       tabRow
+		workspace sql.NullString
+		parent    sql.NullString
+		name      sql.NullString
+		colour    sql.NullString
+		pinned    int
+		layout    string
+		seenAt    sql.NullInt64
+		closedAt  sql.NullInt64
 	)
 	err := q.QueryRowContext(ctx,
-		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at, digest
+		`SELECT id, workspace_id, parent_id, name, colour, position, pinned, layout, seen_at, closed_at, digest
 		   FROM tabs WHERE id = ?`, id,
-	).Scan(&row.ID, &row.WorkspaceID, &parent, &name, &colour, &row.Position,
-		&pinned, &layout, &seenAt, &row.digest)
+	).Scan(&row.ID, &workspace, &parent, &name, &colour, &row.Position,
+		&pinned, &layout, &seenAt, &closedAt, &row.digest)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return tabRow{}, fmt.Errorf("%w: %s", ErrNoSuchTab, id)
 	case err != nil:
 		return tabRow{}, err
+	}
+	// A CLOSED tab may have outlived its workspace, which is the one case
+	// where this column is null — the tab keeps its row, the workspace does
+	// not (see dissolveWorkspaceIfEmpty).
+	row.WorkspaceID = workspace.String
+	if closedAt.Valid {
+		v := closedAt.Int64
+		row.closedAt = &v
 	}
 	row.ParentID = nullableString(parent)
 	row.Name = nullableString(name)

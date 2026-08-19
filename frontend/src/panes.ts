@@ -786,12 +786,22 @@ export class PaneManager {
     this.tabStrip.mount(this.hostFor(this.tabStrip))
     // A CLEAN START, when the person asked for one (nocx-yejir). The chain is
     // still READ — a tab opened in this session must be recorded, or the
-    // commands run in it have no pane to anchor their blocks to — and the
-    // stored rows simply do not become panes. They are otherwise left alone,
-    // which is what makes this a decision about startup rather than an
-    // instruction to forget: turning the setting back on restores what was
-    // there. Deleting the chain here would null every block's anchor too, a
-    // quieter and much larger loss than the one that was asked for.
+    // commands run in it have no pane to anchor their blocks to — and any row
+    // that arrives on it does not become a pane.
+    //
+    // THE LEFTOVERS WERE ALREADY MARKED CLOSED, by the backend, before this
+    // renderer could ask for anything (app.clearWindowOnCleanStart,
+    // nocx-l21ib.4): a backend start IS an application start, so the decision
+    // belongs there, in one transaction, rather than as a close per tab from
+    // here. So on the ordinary clean start this read returns nothing, and
+    // what the skip below still covers is the case the sweep cannot see — a
+    // renderer reloading against a backend that is already up, whose chain
+    // holds the tabs THIS session opened.
+    //
+    // Marked, not deleted: the rows stay, with every block still anchored to
+    // the pane that printed it. Deleting the chain would null those anchors
+    // (entries.pane_id ON DELETE SET NULL), a quieter and much larger loss
+    // than the one that was asked for.
     if (!restoreOnStartup()) {
       await this.readLayoutWithoutAdopting()
       const fresh = this.newPane()
@@ -852,6 +862,12 @@ export class PaneManager {
    * workspace a new tab belongs in. What the setting removes is the window
    * opening on what was left, and that is done by naming those rows rather
    * than by not reading them.
+   *
+   * On a cold start the chain is empty by the time this runs: the backend
+   * marked the leftovers closed and no window read returns a closed row.
+   * What is left for this to name is the RELOAD — the same backend, still
+   * holding the rows this session opened, which no sweep at startup could
+   * have seen.
    */
   private async readLayoutWithoutAdopting(): Promise<void> {
     // ADOPTION IS SUPPRESSED FOR THE LENGTH OF THE READ, rather than undone

@@ -17,6 +17,17 @@ package content
 // (sessions.workspace_id) and still ensures a fallback default row for a
 // session nobody has recorded; nothing else writes these tables.
 //
+// THE WINDOW IS NOT THE STORE (nocx-l21ib.4). A tab or a pane that leaves the
+// window is MARKED CLOSED and keeps its row; only a workspace is ever
+// deleted, once its last open tab has gone. Every read here answers with the
+// WINDOW SET — the rows whose closed_at is null — so a caller cannot forget
+// the filter, and the closed rows are reachable only through a reader written
+// for them. The reason is the block's anchor: entries.pane_id is ON DELETE
+// SET NULL and panes.tab_id is ON DELETE CASCADE, so deleting one tab
+// unhooked every block its panes had ever printed, and an ordinary Cmd-W was
+// a permanent loss of that work. ClearWindow is the one bulk form of leaving,
+// and it exists for exactly one caller — the composition root's clean start.
+//
 // WHAT IS STORED AND WHAT IS ONLY COMPUTED is the reason the field list looks
 // short (§4.5). The activity indicator, the attention indicator and the label
 // are computed from the tab's panes and have NO column: attention arrives at
@@ -348,9 +359,12 @@ type LayoutRepository interface {
 	// one that omitted it was refused by the store. Every reorder failed,
 	// whichever way it was sent.
 	ReorderWorkspaces(ctx context.Context, ids []string) ([]Workspace, error)
-	// DeleteWorkspace removes a workspace; its tabs, and their panes, go with
-	// it (ON DELETE CASCADE — a tab has no meaning outside a workspace), and
-	// so do the sessions recorded under it. If it held the last tabs in the
+	// DeleteWorkspace removes a workspace — the ONE row in this chain that is
+	// still deleted (see the block above the interface). Its tabs and their
+	// panes are MARKED CLOSED first and keep their rows; the tabs then
+	// outlive the workspace with a null workspace_id, which is what
+	// ON DELETE SET NULL is for here. The sessions recorded under it do go,
+	// through their own cascade. If it held the last open tabs in the
 	// application, the replacement is minted in the same transaction.
 	//
 	// The DEFAULT workspace is refused with ErrDefaultWorkspace. It never
@@ -380,15 +394,14 @@ type LayoutRepository interface {
 	// workspace is not a member, so naming one is ErrNotAPermutation and not
 	// a move: reordering a strip never changes membership.
 	ReorderTabs(ctx context.Context, workspaceID string, ids []string) ([]Tab, error)
-	// DeleteTab removes a tab; its panes go with it, and any tab that records
-	// it as its lineage parent keeps its row with a null parent — the honest
-	// "provenance lost" state (ON DELETE SET NULL, the same choice
-	// artifacts.derived_from makes and for the same reason). Cascading would
-	// delete a tab the user still has open; RESTRICT would make a tab that
-	// ever spawned another undeletable, and §4.4 removes tabs automatically.
+	// DeleteTab takes a tab OUT OF THE WINDOW: the tab and its panes are
+	// marked closed and every row stays. A tab that records it as lineage
+	// parent is untouched — the parent it names is now simply a tab nobody is
+	// looking at, which is a better answer than the null the delete used to
+	// leave.
 	//
-	// If it was its workspace's last tab the workspace goes with it, and if
-	// it was the application's last the replacement is minted — all in the
+	// If it was its workspace's last OPEN tab the workspace is deleted, and
+	// if it was the application's last the replacement is minted — all in the
 	// one transaction.
 	DeleteTab(ctx context.Context, id string, next Replacement) error
 	// CreatePane records one pane under an existing tab: a SPLIT, the one
@@ -439,9 +452,23 @@ type LayoutRepository interface {
 	// turns out to be needed — inventing it here would put it in the wire
 	// contract and the whole chain before anything can say what it means.
 	Panes(ctx context.Context, tabID string) ([]Pane, error)
-	// DeletePane removes a pane — and with it the tab it was the last pane
-	// of, the workspace that tab was the last tab of, and, if that emptied
-	// the application, mints the replacement. One transaction, whichever of
-	// those rungs it reaches.
+	// DeletePane takes a pane out of the window — and with it the tab it was
+	// the last open pane of, the workspace that tab was the last open tab of,
+	// and, if that emptied the application, mints the replacement. One
+	// transaction, whichever of those rungs it reaches.
+	//
+	// The pane's ROW never goes. It is the durable identity (§5) and the
+	// anchor every block it printed hangs on (entries.pane_id), so deleting
+	// it — which this did until nocx-l21ib.4 — made an ordinary Cmd-W a
+	// permanent loss of that pane's history.
 	DeletePane(ctx context.Context, id string, next Replacement) error
+	// ClearWindow marks EVERY open tab and pane closed, in one transaction,
+	// and deletes the workspaces left holding no open tab. It is the clean
+	// start (settings: restore.onStartup off) and nothing else calls it: what
+	// the chain holds as open is then always the last session, so turning the
+	// setting back on reopens THAT session rather than the one before it.
+	//
+	// It mints no replacement, unlike every close: the window that follows a
+	// clean start is the renderer's to open, and it opens one immediately.
+	ClearWindow(ctx context.Context) error
 }

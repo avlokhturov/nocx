@@ -219,11 +219,14 @@ func TestSubmitRefusesAnEntryNamingAPaneThatDoesNotExist(t *testing.T) {
 	}
 }
 
-// A pane that is CLOSED takes its restore anchor with it and leaves the block:
-// recall is scoped by environment and directory, never by pane, so the command
-// stays findable while nothing dangles. This is the same interval session_id
-// has, applied to the other edge.
-func TestClosingAPaneNullsTheAnchorAndKeepsTheBlock(t *testing.T) {
+// A pane that is CLOSED KEEPS the blocks anchored to it, because the pane
+// keeps its row (nocx-l21ib.4): it leaves the window, and leaving the window
+// is not ceasing to exist. This assertion used to say the opposite — the
+// close deleted the row and entries.pane_id went null behind it — and the
+// two edges only look alike from here. A SESSION is provenance and dies with
+// the backend (D5), so its null is a fact; a PANE is the durable identity
+// (§5), so nulling its edge was a loss dressed up as tidiness.
+func TestClosingAPaneKeepsTheAnchorAndTheBlock(t *testing.T) {
 	ctx := context.Background()
 	db, led, _ := newLedgerAt(t)
 	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
@@ -252,8 +255,13 @@ func TestClosingAPaneNullsTheAnchorAndKeepsTheBlock(t *testing.T) {
 	if err != nil || got == nil {
 		t.Fatalf("Entry after the pane closed = %+v, %v — the block outlives its pane", got, err)
 	}
-	if got.PaneID != nil {
-		t.Fatalf("paneId after the pane closed = %v, want nil rather than a dangling id", *got.PaneID)
+	if got.PaneID == nil || *got.PaneID != "pane-1" {
+		t.Fatalf("paneId after the pane closed = %v, want pane-1 — a close must not unhook the block", got.PaneID)
+	}
+	// And the pane is out of the window, which is what "closed" means here:
+	// its tab held nothing else, so the tab left with it.
+	if panes, panesErr := db.Layout().Panes(ctx, "tab-1"); panesErr != nil || len(panes) != 0 {
+		t.Fatalf("panes of the closed tab = %+v (err %v), want none in the window", panes, panesErr)
 	}
 }
 

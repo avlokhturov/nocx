@@ -79,12 +79,16 @@ func seedChainInternal(t *testing.T, layout LayoutRepository, wsID, tabID, paneI
 	}
 }
 
-// The pane goes and the tab goes together, or neither does. With the tab's
-// delete raising, the pane's delete — which had already succeeded inside the
-// transaction — must be rolled back with it: a store that removed the pane in
-// one transaction and the tab in another would leave a tab with no panes,
-// which is the state §4.1 says is unreachable.
-func TestTheTabGoesInTheSameTransactionAsItsLastPane(t *testing.T) {
+// The pane leaves and the tab leaves together, or neither does. With the
+// tab's mark raising, the pane's — which had already succeeded inside the
+// transaction — must be rolled back with it: a store that marked the pane in
+// one transaction and the tab in another would leave a tab with no panes IN
+// THE WINDOW, which is the state §4.1 says is unreachable.
+//
+// The trigger is on UPDATE rather than DELETE since nocx-l21ib.4, because
+// that is now the statement the lifecycle issues; a trigger left on DELETE
+// would fire on nothing and the test would report a rollback it never made.
+func TestTheTabLeavesInTheSameTransactionAsItsLastPane(t *testing.T) {
 	_, s, layout := lifecycleStore(t)
 	ctx := context.Background()
 	seedChainInternal(t, layout, "ws-1", "tab-1", "pane-1")
@@ -92,34 +96,39 @@ func TestTheTabGoesInTheSameTransactionAsItsLastPane(t *testing.T) {
 	// the replacement is a different rule and has its own test.
 	seedChainInternal(t, layout, "ws-2", "tab-2", "pane-2")
 
-	restore := abortOn(t, s, "DELETE", "tabs")
+	restore := abortOn(t, s, "UPDATE", "tabs")
 	err := layout.DeletePane(ctx, "pane-1", Replacement{TabID: "tab-r", PaneID: "pane-r"})
 	if err == nil {
-		t.Fatal("DeletePane with the tab's delete raising: err = nil, want the failure reported")
+		t.Fatal("DeletePane with the tab's mark raising: err = nil, want the failure reported")
 	}
-	// BOTH present: the interval's other end.
-	if n := countRows(t, s, `SELECT count(*) FROM panes WHERE id = 'pane-1'`); n != 1 {
-		t.Fatalf("panes named pane-1 after the killed transaction = %d, want 1 — the pane's delete was not rolled back", n)
+	// BOTH still in the window: the interval's other end.
+	if n := countRows(t, s, `SELECT count(*) FROM panes WHERE id = 'pane-1' AND closed_at IS NULL`); n != 1 {
+		t.Fatalf("open panes named pane-1 after the killed transaction = %d, want 1 — the pane's mark was not rolled back", n)
 	}
-	if n := countRows(t, s, `SELECT count(*) FROM tabs WHERE id = 'tab-1'`); n != 1 {
-		t.Fatalf("tabs named tab-1 after the killed transaction = %d, want 1", n)
+	if n := countRows(t, s, `SELECT count(*) FROM tabs WHERE id = 'tab-1' AND closed_at IS NULL`); n != 1 {
+		t.Fatalf("open tabs named tab-1 after the killed transaction = %d, want 1", n)
 	}
-	// And never the forbidden middle: no tab holds zero panes.
+	// And never the forbidden middle: no open tab holds zero open panes.
 	if n := countRows(t, s,
-		`SELECT count(*) FROM tabs WHERE NOT EXISTS (SELECT 1 FROM panes WHERE panes.tab_id = tabs.id)`); n != 0 {
-		t.Fatalf("tabs with no panes = %d, want 0 — a killed transaction left the state §4.1 calls unreachable", n)
+		`SELECT count(*) FROM tabs WHERE closed_at IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM panes WHERE panes.tab_id = tabs.id AND panes.closed_at IS NULL)`); n != 0 {
+		t.Fatalf("open tabs with no open panes = %d, want 0 — a killed transaction left the state §4.1 calls unreachable", n)
 	}
 
-	// Both gone, once the transaction can complete.
+	// Both out of the window, once the transaction can complete — and both
+	// rows still there, which is the half a delete could never have.
 	restore()
 	if err := layout.DeletePane(ctx, "pane-1", Replacement{TabID: "tab-r", PaneID: "pane-r"}); err != nil {
 		t.Fatalf("DeletePane: %v", err)
 	}
-	if n := countRows(t, s, `SELECT count(*) FROM panes WHERE id = 'pane-1'`); n != 0 {
-		t.Fatalf("panes named pane-1 = %d, want 0", n)
+	if n := countRows(t, s, `SELECT count(*) FROM panes WHERE id = 'pane-1' AND closed_at IS NULL`); n != 0 {
+		t.Fatalf("open panes named pane-1 = %d, want 0", n)
 	}
-	if n := countRows(t, s, `SELECT count(*) FROM tabs WHERE id = 'tab-1'`); n != 0 {
-		t.Fatalf("tabs named tab-1 = %d, want 0 — the tab goes with its last pane", n)
+	if n := countRows(t, s, `SELECT count(*) FROM tabs WHERE id = 'tab-1' AND closed_at IS NULL`); n != 0 {
+		t.Fatalf("open tabs named tab-1 = %d, want 0 — the tab leaves with its last pane", n)
+	}
+	if n := countRows(t, s, `SELECT count(*) FROM panes WHERE id = 'pane-1'`); n != 1 {
+		t.Fatalf("rows for pane-1 = %d, want 1 — the pane's row is the block's anchor and is never deleted", n)
 	}
 }
 

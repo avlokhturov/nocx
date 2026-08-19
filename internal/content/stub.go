@@ -315,3 +315,8 @@ func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string,
 	s.log.Info("content stub: LayoutRepository.WorkspaceForPane", "pane", paneID)
 	return "", ErrNotImplemented
 }
+
+func (s *layoutStub) ClearWindow(_ context.Context) error {
+	s.log.Info("content stub: LayoutRepository.ClearWindow")
+	return ErrNotImplemented
+}

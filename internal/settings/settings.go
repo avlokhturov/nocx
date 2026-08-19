@@ -693,12 +693,15 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 // here resurrects anything, and nothing in the product may suggest otherwise
 // (ADR-0019 §3).
 //
-// OFF LEAVES THE STORED ROWS ALONE. It is a decision about what happens at
-// startup and not an instruction to forget: turning it back on restores what
-// was there, and a person who wanted the history gone has the History
-// settings for that. Deleting the chain on a clean start would also null
-// every block's anchor (entries.pane_id ON DELETE SET NULL), which is a
-// quieter and much larger loss than the one they asked for.
+// OFF MARKS THE LAST SESSION'S TABS CLOSED, and deletes nothing (the
+// composition root's clearWindowOnCleanStart, nocx-l21ib.4). It is still not
+// an instruction to forget — every row stays, with every block still anchored
+// to the pane that printed it, and a person who wants the history gone has
+// the History settings for that. What turning it back on reopens is the LAST
+// session, which is the whole reason the sweep exists: while a clean start
+// merely left the rows open and unshown, the next launch with the setting
+// back on reopened the session BEFORE the clean one, and every clean start
+// added another layer to the pile.
 //
 // In Interface rather than a section of its own: it is a decision about what
 // the window looks like when it opens, beside where the tabs are, and a
@@ -707,7 +710,7 @@ var RestoreOnStartup = MustRegisterBool(BoolSpec{
 	Key:         "restore.onStartup",
 	Section:     "Interface",
 	Label:       "Reopen tabs and panes on startup",
-	Description: "Reopen the workspaces, tabs and panes you left, each with the commands it ran. The shells themselves are new: a local pane starts a fresh shell in the same directory, and nothing that was running comes back. Off gives a clean start and keeps what is stored.",
+	Description: "Reopen the workspaces, tabs and panes you left, each with the commands it ran. The shells themselves are new: a local pane starts a fresh shell in the same directory, and nothing that was running comes back. Off opens on an empty window: the tabs you had are closed, not deleted, and the commands they ran stay in your history — but they are not waiting for you if you turn this back on.",
 	DataClass:   PublicConfig,
 	Default:     true,
 })
