@@ -236,10 +236,10 @@ func TestDeleteEntryCascadesToEdgesAndArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AppendArtifact: %v", err)
 	}
-	if err = led.AppendChunk(ctx, artID, []byte("hello ")); err != nil {
+	if err = led.AppendChunk(ctx, artID, 1, []byte("hello ")); err != nil {
 		t.Fatalf("AppendChunk: %v", err)
 	}
-	if err = led.AppendChunk(ctx, artID, []byte("world")); err != nil {
+	if err = led.AppendChunk(ctx, artID, 2, []byte("world")); err != nil {
 		t.Fatalf("AppendChunk: %v", err)
 	}
 
@@ -1251,10 +1251,10 @@ func TestAppendChunkMaintainsByteLen(t *testing.T) {
 	if a.ByteLen != 0 {
 		t.Fatalf("fresh artifact byte_len = %d, want 0", a.ByteLen)
 	}
-	if err = led.AppendChunk(ctx, artID, []byte("0123456789")); err != nil {
+	if err = led.AppendChunk(ctx, artID, 1, []byte("0123456789")); err != nil {
 		t.Fatalf("AppendChunk 1: %v", err)
 	}
-	if err = led.AppendChunk(ctx, artID, []byte("abcdef")); err != nil {
+	if err = led.AppendChunk(ctx, artID, 2, []byte("abcdef")); err != nil {
 		t.Fatalf("AppendChunk 2: %v", err)
 	}
 	a, err = led.Artifact(ctx, artID)
@@ -1311,10 +1311,10 @@ func TestArtifactWritesValidateTheirTargets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("artifact under a real execution failed: %v", err)
 	}
-	if err := led.AppendChunk(ctx, "no-such-artifact", []byte("x")); err == nil {
+	if err := led.AppendChunk(ctx, "no-such-artifact", 1, []byte("x")); err == nil {
 		t.Fatal("chunk under a missing artifact succeeded")
 	}
-	if err := led.AppendChunk(ctx, artID, []byte("x")); err != nil {
+	if err := led.AppendChunk(ctx, artID, 1, []byte("x")); err != nil {
 		t.Fatalf("chunk under a real artifact failed: %v", err)
 	}
 }
@@ -1430,7 +1430,7 @@ func TestLedgerRejectsAllWritesAfterClose(t *testing.T) {
 			_, err := led.AppendArtifact(ctx, content.AppendArtifact{ID: "a", MediaType: content.MediaText})
 			return err
 		}},
-		{"AppendChunk", func() error { return led.AppendChunk(ctx, "a", []byte("x")) }},
+		{"AppendChunk", func() error { return led.AppendChunk(ctx, "a", 1, []byte("x")) }},
 		{"AddEdge", func() error {
 			return led.AddEdge(ctx, content.Edge{From: "i", To: "i", Rel: content.RelCites})
 		}},

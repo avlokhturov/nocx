@@ -510,7 +510,7 @@ func TestLedgerGet_ReturnsEdgesAndArtifactMetadataWithoutTheBytes(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("AppendArtifact: %v", err)
 	}
-	if err := led.AppendChunk(ctx, "artifact-1", []byte(body)); err != nil {
+	if err := led.AppendChunk(ctx, "artifact-1", 1, []byte(body)); err != nil {
 		t.Fatalf("AppendChunk: %v", err)
 	}
 

@@ -707,7 +707,46 @@ var (
 	ErrFrameSessionMismatch = errors.New("content: frame belongs to another session")
 	ErrRegionOutOfBounds    = errors.New("content: region is out of bounds")
 	ErrNoSuchRun            = errors.New("content: no such run")
+	ErrNoSuchEntry          = errors.New("content: no such entry")
 )
+
+// CaptureOutput is one body of a frozen block arriving from the renderer
+// (nocx-2f0f, design §4). It is the only write path for what a shell command
+// printed, and it is deliberately not AppendArtifact followed by AppendChunk
+// at the caller: the two have to land in one transaction, and the execution
+// the artifact hangs on is resolved HERE — the renderer knows the entry it
+// recorded and has never seen an execution id, which is a backend integer.
+//
+// EVERY ID IS UNTRUSTED. The artifact id is client-minted, so a capture whose
+// ack was lost is retried: the same id and seq is a replay that writes
+// nothing, and the same id asking for a different artifact is ErrIDConflict.
+type CaptureOutput struct {
+	// EntryID is the row the body belongs to — what history.record answered
+	// with.
+	EntryID string
+	// ArtifactID is client-minted UUIDv7 and the idempotency key.
+	ArtifactID string
+	// MediaType is application/vt for the SGR body a restore draws, or
+	// text/plain for the derived body search and copy read.
+	MediaType MediaType
+	// DerivedFrom names the artifact this one was produced from: the plain
+	// body names the SGR body, and nothing else in this path sets it.
+	DerivedFrom *string
+	// Truncated says the body is not the whole of what was printed — 'cap'
+	// when the middle was dropped at the per-command limit.
+	Truncated *Truncation
+
+	CaptureMethod  CaptureMethod
+	CaptureVersion int
+	TerminalCols   *int
+	TerminalRows   *int
+
+	// Seq is the chunk's position, minted by the CALLER so a retry is a
+	// no-op. It starts at 1, which is where AppendChunk's own numbering
+	// starts.
+	Seq  int
+	Body []byte
+}
 
 // AppendArtifact creates one artifact of an execution, with its capture
 // provenance (ADR-0019 §6). Content arrives via AppendChunk; an artifact is
@@ -1084,9 +1123,19 @@ type LedgerRepository interface {
 	// AppendArtifact creates one artifact of an execution (never a BLOB:
 	// content arrives chunked).
 	AppendArtifact(ctx context.Context, in AppendArtifact) (string, error)
+	// CaptureOutput records one body of a frozen block: the artifact if it
+	// is not there yet and the chunk at its seq, in one transaction against
+	// the entry's own execution. Idempotent on (artifact id, seq).
+	//
+	// REFUSING TO STORE IS NOT AN ERROR. Output retention off, or an entry
+	// marked sensitive, returns nil and writes nothing — the block keeps its
+	// row and keeps no body, the same shape RecordCompleted uses for
+	// history.enabled. An error there would surface in front of somebody who
+	// turned the setting off deliberately.
+	CaptureOutput(ctx context.Context, in CaptureOutput) error
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
-	AppendChunk(ctx context.Context, artifactID string, body []byte) error
+	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error
 	// Artifact returns one artifact with its chunk bodies, or nil when no
 	// artifact carries id.
 	Artifact(ctx context.Context, id string) (*Artifact, error)

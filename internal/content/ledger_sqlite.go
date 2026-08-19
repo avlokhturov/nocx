@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -834,6 +835,21 @@ func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (
 	if in.ID == "" {
 		return "", errors.New("content: append artifact: id is required")
 	}
+	err := s.run(ctx, func(ctx context.Context) error {
+		return insertArtifact(ctx, s.db, in)
+	})
+	return in.ID, err
+}
+
+// insertArtifact and appendChunkAt take the `execer` sqlite.go already
+// declares — the surface *sql.DB and *sql.Tx share — so the artifact and
+// chunk statements are written ONCE and run either way: AppendArtifact on the
+// store's own connection, CaptureOutput inside a transaction, with no second
+// copy of the column list to drift from the first.
+//
+// insertArtifact is THE artifact insert. Its defaults live here rather than at
+// a caller, so an artifact written by any path has the same shape.
+func insertArtifact(ctx context.Context, q execer, in AppendArtifact) error {
 	if in.CaptureMethod == "" {
 		in.CaptureMethod = CaptureNone
 	}
@@ -844,7 +860,7 @@ func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (
 	if len(in.Gaps) > 0 {
 		b, err := json.Marshal(in.Gaps)
 		if err != nil {
-			return "", err
+			return err
 		}
 		gaps = string(b)
 	}
@@ -858,44 +874,144 @@ func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (
 		v := string(*in.Truncated)
 		truncated = &v
 	}
-	err := s.run(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx, `INSERT INTO artifacts
-			(id, execution_id, media_type, derived_from, pinned, truncated, capture_method,
-			 capture_version, terminal_cols, terminal_rows, stream, byte_offset, byte_end,
-			 encoding, gaps, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			in.ID, in.ExecutionID, string(in.MediaType), in.DerivedFrom, in.Pinned, truncated,
-			string(in.CaptureMethod), in.CaptureVersion, in.TerminalCols, in.TerminalRows,
-			stream, in.ByteOffset, in.ByteEnd, in.Encoding, gaps, in.Payload)
+	payload := in.Payload
+	if payload == "" {
+		payload = "{}"
+	}
+	_, err := q.ExecContext(ctx, `INSERT INTO artifacts
+		(id, execution_id, media_type, derived_from, pinned, truncated, capture_method,
+		 capture_version, terminal_cols, terminal_rows, stream, byte_offset, byte_end,
+		 encoding, gaps, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.ID, in.ExecutionID, string(in.MediaType), in.DerivedFrom, in.Pinned, truncated,
+		string(in.CaptureMethod), in.CaptureVersion, in.TerminalCols, in.TerminalRows,
+		stream, in.ByteOffset, in.ByteEnd, in.Encoding, gaps, payload)
+	return err
+}
+
+// appendChunkAt is THE chunk insert, and the idempotency point of the whole
+// capture path: (artifact_id, seq) is the table's key, so a replayed chunk
+// inserts nothing, and byte_len moves only when a row actually appeared.
+func appendChunkAt(ctx context.Context, q execer, artifactID string, seq int, body []byte) error {
+	res, err := q.ExecContext(ctx,
+		`INSERT INTO artifact_chunks (artifact_id, seq, body) VALUES (?, ?, ?)
+		 ON CONFLICT (artifact_id, seq) DO NOTHING`,
+		artifactID, seq, body)
+	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	_, err = q.ExecContext(ctx,
+		`UPDATE artifacts SET byte_len = byte_len + ? WHERE id = ?`, len(body), artifactID)
+	return err
+}
+
+// CaptureOutput records one body of a frozen block (nocx-2f0f, design §4):
+// the artifact if it is not there yet, then the chunk at its seq, in ONE
+// transaction against the entry's own execution.
+//
+// The two refusals-that-are-not-errors are decided before the transaction
+// opens, so nothing is written for a body nobody wants: output retention off
+// is the user's setting, and a sensitive entry is the store's own rule about
+// what a command's text says about its output.
+func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) error {
+	if in.EntryID == "" || in.ArtifactID == "" {
+		return errors.New("content: capture: entry id and artifact id are required")
+	}
+	if in.Seq < 1 {
+		return errors.New("content: capture: seq starts at 1")
+	}
+	if !s.policy.OutputEnabled() {
+		return nil
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		// BEGIN IMMEDIATE for the reason Submit and RecordCompleted state:
+		// the write lock is taken at BEGIN rather than at the first write, so
+		// a second writer waits instead of failing an upgrade (nocx-rtg0.18).
+		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if txErr != nil {
+			return txErr
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var sensitivity string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT sensitivity FROM entries WHERE id = ?`, in.EntryID).Scan(&sensitivity); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNoSuchEntry
+			}
+			return err
+		}
+		if Sensitivity(sensitivity) == SensitivitySensitive {
+			return nil
+		}
+
+		// The entry's own execution — the one RecordCompleted wrote in the
+		// same transaction as the entry. Ordered by attempt so a re-run's
+		// output lands on the run that produced it rather than on the first.
+		var execID int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT id FROM executions WHERE entry_id = ? ORDER BY attempt DESC LIMIT 1`,
+			in.EntryID).Scan(&execID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNoSuchEntry
+			}
+			return err
+		}
+
+		var existingMedia, existingExec sql.NullString
+		lookupErr := tx.QueryRowContext(ctx,
+			`SELECT media_type, execution_id FROM artifacts WHERE id = ?`,
+			in.ArtifactID).Scan(&existingMedia, &existingExec)
+		switch {
+		case errors.Is(lookupErr, sql.ErrNoRows):
+			if insertErr := insertArtifact(ctx, tx, AppendArtifact{
+				ExecutionID: execID, ID: in.ArtifactID, MediaType: in.MediaType,
+				DerivedFrom: in.DerivedFrom, Truncated: in.Truncated,
+				CaptureMethod: in.CaptureMethod, CaptureVersion: in.CaptureVersion,
+				TerminalCols: in.TerminalCols, TerminalRows: in.TerminalRows,
+			}); insertErr != nil {
+				return insertErr
+			}
+		case lookupErr != nil:
+			return lookupErr
+		default:
+			// A replay must find the artifact it wrote. Anything else under
+			// the same id is a different object, and this store never
+			// overwrites one id with another object (§7).
+			if existingMedia.String != string(in.MediaType) ||
+				existingExec.String != strconv.FormatInt(execID, 10) {
+				return ErrIDConflict
+			}
+		}
+		if chunkErr := appendChunkAt(ctx, tx, in.ArtifactID, in.Seq, in.Body); chunkErr != nil {
+			return chunkErr
+		}
+		return tx.Commit()
 	})
-	return in.ID, err
 }
 
 // AppendChunk appends one chunk to an artifact and maintains its byte_len —
 // logical content bytes, the retention budget's unit (open question 6,
 // decided: deliberately excludes FTS, B-tree overhead, WAL and free pages;
 // physical disk use is the separate Budget.DiskCeiling number).
-func (s *sqliteContent) AppendChunk(ctx context.Context, artifactID string, body []byte) error {
+func (s *sqliteContent) AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error {
+	if seq < 1 {
+		return errors.New("content: append chunk: seq starts at 1")
+	}
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		var next int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(MAX(seq), 0) + 1 FROM artifact_chunks WHERE artifact_id = ?`,
-			artifactID).Scan(&next); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO artifact_chunks (artifact_id, seq, body) VALUES (?, ?, ?)`,
-			artifactID, next, body); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE artifacts SET byte_len = byte_len + ? WHERE id = ?`, len(body), artifactID); err != nil {
+		if err := appendChunkAt(ctx, tx, artifactID, seq, body); err != nil {
 			return err
 		}
 		return tx.Commit()

@@ -33,7 +33,11 @@ type AgentService interface {
 	// AppendRunDelta appends one streamed chunk to the answer artifact,
 	// maintaining its byte_len. The delta is persisted BEFORE it is emitted
 	// over the wire — the ledger is the record.
-	AppendRunDelta(ctx context.Context, artifactID string, body []byte) error
+	//
+	// seq is the chunk's position and the caller already has it: it numbers
+	// every agent.runDelta notification. Passing it makes a retried delta a
+	// no-op rather than a duplicated paragraph in the answer (nocx-2f0f).
+	AppendRunDelta(ctx context.Context, artifactID string, seq int, body []byte) error
 	// FrameText returns the referenced frame's durable text (its artifact
 	// body) — the context assembly for the ask (question + referenced
 	// frames, design §4.2).
@@ -90,11 +94,11 @@ func (s *agentService) FinishAgentRun(ctx context.Context, runID int64, in conte
 	return s.ledger.FinishAgentRun(ctx, runID, in)
 }
 
-func (s *agentService) AppendRunDelta(ctx context.Context, artifactID string, body []byte) error {
+func (s *agentService) AppendRunDelta(ctx context.Context, artifactID string, seq int, body []byte) error {
 	if err := s.guard.check(); err != nil {
 		return err
 	}
-	return s.ledger.AppendChunk(ctx, artifactID, body)
+	return s.ledger.AppendChunk(ctx, artifactID, seq, body)
 }
 
 // FrameText reads one frame's durable text: the frame entry's artifact
