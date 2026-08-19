@@ -135,6 +135,11 @@ export interface EditorActions {
    * for the next question (nocx-wmy4).
    */
   handoffToShell?: () => boolean
+  /** Wrap a transition that changes the editor's own box, so the host can
+   *  play the displacement back instead of letting it land in one frame.
+   *  Absent in tests and in any host without a scrollback: the transition
+   *  then simply happens, which is the same result without the animation. */
+  settleAround?: (mutate: () => void) => void
   /** ⌘Enter / Ctrl+Enter: the explicit target switch ADR-0004 §3 requires
    *  — the indicator's keyboard twin, flipping Run ⇄ Ask. The host flips
    *  the registry's active target; the editor stays passive, the draft is
@@ -584,28 +589,50 @@ export class CommandEditor {
     this.commit(plan.sendLine, plan)
   }
 
-  /** The atomic handoff (ADR-0004 §2): clear + suspend input BEFORE sending,
+  /** The atomic handoff (ADR-0004 §2): clear + release input BEFORE sending,
    *  so the committed command is painted once by the shell, not echoed twice.
-   *  Suspension hides the empty composer without removing its flex slot: a
-   *  fast command returns ownership without a layout reflow.
    *  `plan` is present only after a beforeSubmit planner succeeded:
    *  the resolved sendLine goes to the PTY, the reference-intact recordLine
    *  to the ledger.
    *
-   *  The suspension is the handoff's step 1 and belongs to it alone: a commit
+   *  The hide is the handoff's step 1 and belongs to it alone: a commit
    *  whose destination is not the shell (the agent target — routesToShell
-   *  false, read through the handoffToShell seam) suspends nothing, because
+   *  false, read through the handoffToShell seam) hides nothing, because
    *  there is nothing to hand off — the question stays in the editor for
    *  the next one (nocx-wmy4). The clear is unconditional: a submitted
    *  question, like a submitted command, leaves the editor empty. */
   private commit(sendLine: string, plan?: SubmitPlan): void {
-    this.clearDoc()
-    if (this.actions.handoffToShell?.() ?? true) this.suspend()
     // The plan is present only after a beforeSubmit planner succeeded; the
     // plain path keeps the exact one-argument call (no resolution happened,
     // so there is nothing to resolve for the ledger either).
-    if (plan) this.actions.submit(sendLine, plan)
-    else this.actions.submit(sendLine)
+    const submit = (): void => {
+      if (plan) this.actions.submit(sendLine, plan)
+      else this.actions.submit(sendLine)
+    }
+    if (this.actions.handoffToShell?.() ?? true) {
+      // ONE TRANSITION, ONE SETTLE. Emptying the draft, giving up the
+      // composer's box and opening the running block all move the scrollback,
+      // they all run in this task with no paint between them, and to a person
+      // they are a single movement: the block takes the composer's place. Each
+      // used to be animated separately, and the block's own glide then
+      // cancelled the composer's mid-flight — which is what the jitter was.
+      //
+      // The handoff is unchanged and still atomic: hide() runs before
+      // submit(), so the grid is writable before a byte can flow
+      // (nocx-u7uh.23). What the wrapper adds is only how the displacement is
+      // PAINTED. Absent a host that can settle, the mutations simply happen.
+      const settle = this.actions.settleAround ?? ((m: () => void) => m())
+      settle(() => {
+        this.clearDoc()
+        this.hide()
+        submit()
+      })
+      return
+    }
+    // Nothing is handed off — the question stays in the editor and its box
+    // never leaves the layout, so there is no displacement to play back.
+    this.clearDoc()
+    submit()
   }
 
   private onKeydown = (e: KeyboardEvent): void => {
@@ -794,14 +821,13 @@ export class CommandEditor {
   /**
    * Show the input-owning composer.
    *
-   * A suspended composer already reserves this flex slot; showing it merely
-   * returns paint and input ownership. A fully hidden editor
-   * (native/fullscreen presentation, or initial mount) also rejoins layout.
+   * The composer rejoins the layout and takes its flex slot back, which moves
+   * the scrollback by its own height — so the caller settles around this (see
+   * `_syncLifecycleOwnership`), and holds the bottom while it does.
    */
   show(): void {
     this._inputActive = true
     this.root.style.display = ''
-    delete this.root.dataset.suspended
     this.root.removeAttribute('inert')
 
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
@@ -939,53 +965,28 @@ export class CommandEditor {
     return spans.some((s) => s.to > s.from)
   }
   /**
-   * Hide the empty composer WITHOUT releasing its flex slot.
+   * Remove the composer from presentation entirely — its box with it.
    *
-   * This reverses a decision, so the decision is written down rather than
-   * deleted with the comment that held it. `hide()` once used
-   * `visibility: hidden` for exactly this reason — to stop the pane jumping
-   * at every command start and end — and that was removed on purpose: what
-   * the reservation bought in stability it paid for in a strip of dead canvas
-   * below every running command, which the owner reported twice as "space
-   * reserved for an editor that is not there". The note recording it cited a
-   * bead about tab activity indicators, which is a different defect
-   * (nocx-6mwm); the decision itself was real.
+   * The one way the composer leaves, and it leaves whole. It used to have a
+   * second, `suspend()`, which kept the flex slot while hiding the chrome, so
+   * that releasing 77px could not move a scrollback that hangs from the
+   * scroller's bottom edge. That was traded away: the settle glide plays the
+   * displacement back instead, and the reserved box was costing an inline TUI
+   * on the normal buffer four rows of pane while `htop` on the alternate
+   * buffer got all of them (nocx-g6hnk, reversing part of nocx-i4h04).
    *
-   * What changed is the other side of the trade. The live region now grows
-   * with its content and wears the block body's own padding and row pitch, so
-   * the space under a running command belongs to that command's output rather
-   * than to an absent editor — the dead strip the reservation used to leave is
-   * the live region's to fill. The jump it was traded for is not small: the
-   * composer is 77px, and losing it at Enter moved the whole scrollback, which
-   * hangs from its bottom edge, by that much (nocx-i4h04).
-   *
-   * `inert` closes mouse, focus and accessibility entry points while the
-   * running program owns input; `visibility: hidden` removes the misleading
-   * input chrome and keeps the exact box.
+   * The caller that changes layout owns the settle — see `commit`, where
+   * emptying the draft, this call and opening the block are one glided
+   * transition.
    */
-  suspend(): void {
+  hide(): void {
     this._inputActive = false
     // Stopped, not left running. Every tab owns an editor, so a timer that
     // outlives visibility is one wakeup per second per tab for a chip nobody
     // can see — and they accumulate for the life of the window.
     this.stopClock()
     this.view.contentDOM.blur()
-    this.root.dataset.suspended = 'true'
-    this.root.setAttribute('inert', '')
-    this.root.style.visibility = 'hidden'
-  }
-  /** Remove the editor from presentation entirely — its box with it. For the
-   *  presentations that have no composer at all (native, fullscreen, the
-   *  alternate buffer), never for an ordinary command: that is `suspend`,
-   *  and the difference is a 77px jump in the scrollback. */
-  hide(): void {
-    this._inputActive = false
-    // Stopped, not left running — see suspend().
-    this.stopClock()
-    this.view.contentDOM.blur()
-    delete this.root.dataset.suspended
     this.root.removeAttribute('inert')
-    this.root.style.visibility = ''
     this.root.style.display = 'none'
   }
 

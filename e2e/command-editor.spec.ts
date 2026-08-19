@@ -190,7 +190,7 @@ test.describe('command editor (nocx-4ff)', () => {
     expect(roles['tok-path']?.color).not.toBe(roles['tok-operator']?.color)
   })
 
-  test('submit keeps the editor slot stable while output streams', async ({ page }) => {
+  test('submit gives the composer box to the command, and takes it back', async ({ page }) => {
     await waitForPrompt(page)
     await expect(page.locator(EDITOR)).toBeVisible({ timeout: 8000 })
     await page.locator(INPUT).fill("printf 'A\\nB\\nC\\n\\e]0;JIT\\a';read x")
@@ -226,7 +226,11 @@ test.describe('command editor (nocx-4ff)', () => {
 
     const before = await geometry()
     await page.keyboard.press('Enter')
-    await expect(page.locator(EDITOR)).toHaveAttribute('data-suspended', 'true')
+    // The composer LEAVES the layout at submit — `display:none`, box and all.
+    // It kept its box once, so the scrollback would not jump by that height at
+    // every Enter; the settle glide answers that better, and the box is what an
+    // inline TUI on the normal buffer needs (nocx-g6hnk).
+    await expect(page.locator(EDITOR)).toBeHidden()
 
     // The OSC title is emitted after all three rows. Waiting for it makes the
     // running sample content-ordered rather than a timeout/height surrogate.
@@ -246,21 +250,21 @@ test.describe('command editor (nocx-4ff)', () => {
     })
     const running = await geometry()
 
-    // The composer is visually gone and owns no input, but its flex box stays:
-    // Enter therefore changes neither its height nor the scrollback viewport.
-    expect(running.display).toBe('')
-    expect(running.visibility).toBe('hidden')
-    expect(running.editorHeight).toBe(before.editorHeight)
-    expect(running.areaHeight).toBe(before.areaHeight)
+    // The composer is gone and its height has gone to the scroller — the
+    // whole point: `top` on the normal buffer gets the rows `htop` gets on the
+    // alternate one. One pixel of rounding between a rect and a clientHeight.
+    expect(running.display).toBe('none')
+    expect(running.editorHeight).toBe(0)
+    expect(
+      Math.abs(running.areaHeight - (before.areaHeight + before.editorHeight)),
+    ).toBeLessThanOrEqual(1)
     // A short command starts where the prompt was, not at the top of the pane.
     expect(running.blockTop).toBeGreaterThan(running.areaHeight / 2)
 
     // Release the shell-side hold only after observing the running geometry.
     await page.keyboard.press('Enter')
 
-    await expect(page.locator(EDITOR)).not.toHaveAttribute('data-suspended', 'true', {
-      timeout: 5000,
-    })
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 5000 })
     await page.waitForFunction(
       () =>
         (document
@@ -275,8 +279,9 @@ test.describe('command editor (nocx-4ff)', () => {
         (document.querySelector<HTMLElement>('.pane.active .scrollback-inner')?.getAnimations()
           .length ?? 0) === 0,
     )
+    // And the prompt's return gives the box back, exactly.
     const after = await geometry()
-    expect(after.visibility).toBe('')
+    expect(after.display).toBe('')
     expect(after.editorHeight).toBe(before.editorHeight)
     expect(after.areaHeight).toBe(before.areaHeight)
 

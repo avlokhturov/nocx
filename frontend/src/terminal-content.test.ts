@@ -2759,19 +2759,17 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
       readOnlyMock.mockClear()
 
-      // The atomic handoff: the editor suspends input at commit while its
-      // empty box stays reserved in the SAME flex slot. The submit callback
-      // makes the grid writable in the same synchronous step the bytes go
-      // out — keys typed before the running fact lands reach the pty.
+      // The atomic handoff: the editor leaves the layout at commit, box and
+      // all (nocx-g6hnk), and the submit callback makes the grid writable in
+      // the same synchronous step the bytes go out — keys typed before the
+      // running fact lands reach the pty. The ORDER is what this asserts;
+      // where the composer's 77px went is asserted in editor.test.ts.
       ed.insertText('read x')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
       expect(ed.isVisible).toBe(false)
-      expect(ed.root.style.display).toBe('')
-      expect(ed.root.style.visibility).toBe('hidden')
-      expect(ed.root.dataset.suspended).toBe('true')
-      expect(ed.root.hasAttribute('inert')).toBe(true)
+      expect(ed.root.style.display).toBe('none')
       expect(readOnlyMock).toHaveBeenLastCalledWith(false)
 
       // The published attempt opens the running interval; the sync keeps
@@ -2784,10 +2782,11 @@ describe('the projections consume the kernel through the composition root (ADR-0
         epoch: 1,
         attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'read x' },
       })
+      // Still gone, still writable: the lifecycle only RECONCILES here — the
+      // commit already removed the composer — and reconciling must not
+      // resurrect it or take the keyboard back off the program.
       expect(ed.isVisible).toBe(false)
-      expect(ed.root.style.display).toBe('')
-      expect(ed.root.style.visibility).toBe('hidden')
-      expect(ed.root.dataset.suspended).toBe('true')
+      expect(ed.root.style.display).toBe('none')
       expect(readOnlyMock).toHaveBeenLastCalledWith(false)
       // The completion closes the interval, and back at the prompt the
       // editor returns and the grid locks again.

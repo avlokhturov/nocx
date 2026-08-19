@@ -150,12 +150,13 @@
   padding: 10px 14px 12px;
 }
 
-/* A submitted normal-buffer command HIDES this card but keeps its box (the
-   editor's suspend(); the box is what stops the scrollback jumping 77px at
-   every Enter). Native, fullscreen and alternate-buffer presentations have no
-   composer at all and call hide(), which takes the box away. The history of
-   that trade — it was decided the other way once — is in editor.ts on
-   suspend(). */
+/* Every presentation that is not a prompt REMOVES this card and its box: the
+   composer's `hide()` sets `display:none`, and the height goes back to the
+   scroller. It kept its box for a while, so a submit could not move a
+   scrollback that hangs from the scroller's bottom edge — traded away once
+   the settle glide could play that displacement back instead, because the
+   reservation was costing an inline TUI on the normal buffer four rows of
+   pane. The history is in editor.ts on `hide()` (nocx-g6hnk, nocx-i4h04). */
 
 .nocx-editor-chrome {
   display: flex;

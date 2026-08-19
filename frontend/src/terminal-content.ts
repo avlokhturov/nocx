@@ -1472,7 +1472,10 @@ export class TerminalContent extends BasePaneContent {
             // carries both.
             if (this.scrollback && this.renderer) {
               const startLine = this.renderer.cursorLine()
-              this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1)
+              // Not `beginBlock`: this runs inside the settle the editor's
+              // commit opened around the whole transition, and a nested glide
+              // would leave two animations on one element.
+              this.scrollback.beginBlockNow(recordLine, submitCwd, startLine, startLine + 1)
             }
             const st = this.lifecycle.state
             if (st.kind !== 'prompt_ready') {
@@ -1555,6 +1558,11 @@ export class TerminalContent extends BasePaneContent {
            *  registry — the one authority — so the agent target's question
            *  keeps the editor on screen for the next one (nocx-wmy4). */
           handoffToShell: () => this.inputTargets?.active().routesToShell ?? true,
+          settleAround: (mutate: () => void) => {
+            const sb = this.scrollback
+            if (sb) sb.settleAround(mutate)
+            else mutate()
+          },
           // ⌘/Ctrl+Enter: the explicit switch (ADR-0004 §3) — same flip as
           // clicking the caret indicator, and the only thing the chord
           // does. Asking is plain Enter with Ask active.
@@ -3375,19 +3383,41 @@ export class TerminalContent extends BasePaneContent {
     // stdin (read, ssh, less) hangs with no editor and no input surface
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
     if (show) {
-      if (!editor.isVisible) editor.show()
+      // The composer coming BACK is a displacement of its own — the prompt
+      // returns, the box re-enters the layout, and the scrollback moves by its
+      // height. It is glided; the freeze that precedes it has its own.
+      if (!editor.isVisible) {
+        const sb = this.scrollback
+        if (sb) {
+          sb.settleAround(() => {
+            editor.show()
+            // The scroller just lost the composer's height. Inside the
+            // mutation, so the glide measures the settled position once.
+            sb.scrollToBottomIfFollowing()
+          })
+        } else editor.show()
+      }
       this.renderer?.setReadOnly(true)
     } else {
-      // A normal-buffer command keeps the empty composer's box reserved in
-      // its flex slot, but hidden and inert: input belongs to the writable
-      // grid. Native, desynchronized and alternate-buffer presentations have
-      // no composer at all, so those still remove it from layout.
-      const suspend =
-        this.lifecycle.state.kind === 'running' &&
-        this.lifecycle.buffer === 'normal' &&
-        !this.nativeMode
-      if (suspend) editor.suspend()
-      else editor.hide()
+      // The composer leaves the layout entirely, box and all. It used to keep
+      // its 77px reserved while a normal-buffer command ran, so the
+      // scrollback — which hangs from the scroller's bottom edge — would not
+      // jump by that much at every Enter (nocx-i4h04). The settle glide
+      // landed in the very next commit and answers the same question better:
+      // the displacement is played back as a 140ms transform instead of being
+      // designed away. Two answers to one problem, and this was the older
+      // one. What it cost was a strip of dead canvas under every running
+      // command, which is space an inline TUI on the normal buffer needs —
+      // `top` was drawing four rows fewer than the pane could show, while
+      // `htop` on the alternate buffer got the whole pane.
+      // NOT glided, and it is normally a no-op: the editor already left the
+      // layout inside commit's settle, and this call only reconciles. Wrapping
+      // it cost more than it bought — the running fact arrives in a later
+      // task, often while the submit settle is still animating, and `_glide`
+      // cancels in-flight settles before it measures. A no-op mutation would
+      // therefore kill a live animation mid-flight and snap the stack, which
+      // is the jitter it was meant to remove.
+      editor.hide()
       this.renderer?.setReadOnly(false)
     }
   }

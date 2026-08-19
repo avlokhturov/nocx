@@ -524,11 +524,27 @@ export class ScrollbackController {
    * (nocx-4yhi). It defaults to startLine for shell-originated blocks.
    */
   beginBlock(command: string, cwd: string, startLine: number, outputStart?: number): void {
+    this._glide(() => this.beginBlockNow(command, cwd, startLine, outputStart))
+  }
+
+  /**
+   * The same mutation WITHOUT the settle, for a caller whose own glide already
+   * owns the whole transition.
+   *
+   * The app-owned submit is that caller: clearing the draft, releasing the
+   * composer's box and opening the block are one movement to the eye, and they
+   * all run in the keydown task with no paint between them. Nesting `_glide`
+   * inside `_glide` does not compose — the inner call starts an animation on
+   * `scrollbackInner` that the outer one then replaces in `_settleAnimations`
+   * without cancelling, so the element carries two, and `_cancelGlides` at the
+   * top of the inner call kills whatever the outer was retargeting. One
+   * user-visible transition gets one glide, owned by whoever knows every
+   * synchronous mutation in it.
+   */
+  beginBlockNow(command: string, cwd: string, startLine: number, outputStart?: number): void {
     const cmd = command || '(empty)'
-    this._glide(() => {
-      this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
-      this.setRunning()
-    })
+    this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
+    this.setRunning()
   }
 
   /**
@@ -674,6 +690,42 @@ export class ScrollbackController {
    * the next one rather than cancelled first, so a change landing mid-settle
    * retargets instead of snapping (nocx-i4h04.2).
    */
+  /**
+   * Run `mutate` and play its displacement back as the settle glide.
+   *
+   * The public door to `_glide`, for a mutation this controller does not own.
+   * The editor's box is the case that opened it: the composer leaves the
+   * layout at submit — it has to, because the keyboard goes to the program
+   * and nocx may not sniff the stream to find out whether the program wants
+   * it (ADR-0004) — and the scrollback hangs from the scroller's bottom edge,
+   * so its 77px leaves as a jump. Reserving the box instead was the older
+   * answer and cost an inline TUI four rows of pane (nocx-i4h04). The
+   * displacement is not the defect; an UNGLIDED displacement is.
+   */
+  settleAround(mutate: () => void): void {
+    this._glide(mutate)
+  }
+
+  /**
+   * Put the end of the output back at the bottom edge, if that is where the
+   * person was.
+   *
+   * For a caller outside this controller whose mutation SHRINKS the scroller —
+   * the composer returning at the end of a command is the one that needs it.
+   * `overflow-anchor: none` is set on the scroller deliberately (the settle
+   * owns the position, and an anchor would be a second owner), so nothing
+   * holds the bottom for us: the 77px the composer takes back would otherwise
+   * hide the last rows the command printed behind it.
+   *
+   * Call it INSIDE the mutation passed to `settleAround`, never after. The
+   * glide measures where the stack ended up as soon as the mutation returns,
+   * and a scroll landing after that measurement is a displacement it has
+   * already decided not to play back.
+   */
+  scrollToBottomIfFollowing(): void {
+    if (this._following) this._scrollToBottom()
+  }
+
   private _glide(mutate: () => void): void {
     // Measured with any in-flight transform still applied: this is where the
     // stack IS, not where layout says it belongs. A capture taken earlier in
