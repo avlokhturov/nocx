@@ -269,3 +269,42 @@ func TestCaptureOutput_RefusesAnArtifactPastTheCeiling(t *testing.T) {
 		t.Fatalf("byte_len = %d — a refused chunk must change nothing", art.ByteLen)
 	}
 }
+
+// A CRITICAL environment keeps the command and not what it printed (design
+// §7.4, and the epic's own acceptance). It is the third refusal that is not
+// an error, and it is read from the observation the execution PINNED rather
+// than from the environment's latest: what matters is what was true when the
+// command ran, not what somebody marked afterwards.
+func TestCaptureOutput_StoresNothingForACriticalEnvironment(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	if err := led.EnsureEnvironment(ctx, content.Environment{
+		ID: "local", Kind: content.EnvLocal,
+	}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: "local", Criticality: content.CriticalityCritical,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+
+	entryID := recordOne(t, led, "kubectl apply -f prod.yaml")
+	in := aCapture(entryID, "00000000-0000-7000-8000-0000000000a9")
+	stored, err := led.CaptureOutput(ctx, in)
+	if err != nil {
+		t.Fatalf("CaptureOutput in a critical environment: %v, want nil", err)
+	}
+	if stored {
+		t.Fatal("stored = true in a critical environment")
+	}
+	art, _ := led.Artifact(ctx, in.ArtifactID)
+	if art != nil {
+		t.Fatal("a critical environment's output was stored")
+	}
+	// The command itself is still recorded: criticality decides what is kept
+	// ABOUT a command, never whether it happened.
+	if e, _ := led.Entry(ctx, entryID); e == nil {
+		t.Fatal("the entry went with the output")
+	}
+}

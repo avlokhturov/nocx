@@ -956,14 +956,31 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bo
 		// The entry's own execution — the one RecordCompleted wrote in the
 		// same transaction as the entry. Ordered by attempt so a re-run's
 		// output lands on the run that produced it rather than on the first.
+		//
+		// Its PINNED observation comes with it, because criticality is read
+		// from what was true when the command ran rather than from the
+		// environment's latest: marking a host critical afterwards changes
+		// what is kept from then on, and cannot rewrite what a past run was
+		// allowed to keep.
 		var execID int64
+		var criticality string
 		if err := tx.QueryRowContext(ctx,
-			`SELECT id FROM executions WHERE entry_id = ? ORDER BY attempt DESC LIMIT 1`,
-			in.EntryID).Scan(&execID); err != nil {
+			`SELECT e.id, o.criticality
+			   FROM executions e
+			   JOIN environment_observations o ON o.id = e.environment_obs_id
+			  WHERE e.entry_id = ?
+			  ORDER BY e.attempt DESC LIMIT 1`,
+			in.EntryID).Scan(&execID, &criticality); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNoSuchEntry
 			}
 			return err
+		}
+		// A critical environment contributes intent and metadata only
+		// (design §7.4). The command is still recorded: criticality decides
+		// what is kept ABOUT a command, never whether it happened.
+		if Criticality(criticality) == CriticalityCritical {
+			return nil
 		}
 
 		var existingMedia, existingExec sql.NullString
