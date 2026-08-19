@@ -13,6 +13,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"github.com/shady2k/nocx/internal/app"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
@@ -247,7 +248,9 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 	// because WailsApp is itself a registered service.
 	ns := notifications.New()
 	w.notifications = ns
+	notificationsUp := true
 	if err := ns.ServiceStartup(ctx, application.ServiceOptions{}); err != nil {
+		notificationsUp = false
 		w.backend.Logger.Warn("notification service unavailable; banners will fail per raise", "error", err)
 	}
 	//
@@ -264,6 +267,26 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 	host := wailsadapter.New(wailsadapter.Deps{
 		Service: ns,
 		Log:     w.backend.Slog(),
+		// THE ROOT IS THE CALLER WITH REAL KNOWLEDGE, and the adapter's
+		// default says so: v3.0.0-beta.9 exposes no availability probe, so
+		// the default assumes a surface exists and lets every failure land at
+		// send time — "PermissionUnavailable stays reachable through this
+		// seam where a caller has real knowledge" (host.go). This is that
+		// caller. It has just watched ServiceStartup fail and has already
+		// written the reason into the log; passing that verdict on is what
+		// was missing.
+		//
+		// Without it the host was born NotDetermined over a service that had
+		// not started, and the startup resolve then called into it. On macOS
+		// that reaches +[UNUserNotificationCenter currentNotificationCenter],
+		// which throws NSInternalInconsistencyException when the process has
+		// no bundle — an Objective-C exception, so not an error Go can
+		// recover: the whole application aborted. Any unbundled run took it,
+		// which is every `make dev` on a Mac, one line after the log had
+		// stated the service was unavailable. The same call underlies a
+		// raise, so "banners fail loudly per raise" was in fact "the process
+		// dies per raise" on that build.
+		IsAvailable: func() bool { return notificationsUp },
 		Focus: func(sessionID string) error {
 			win, ok := application.Get().Window.GetByName(mainWindowName)
 			if !ok {
@@ -320,6 +343,14 @@ func (w *WailsApp) resolveNotificationPermission(host *wailsadapter.Host) {
 	ctx := context.Background()
 	perm, err := host.Refresh(ctx)
 	if err != nil {
+		// No surface is a STATED outcome, not a failure to read one: the
+		// warning naming the reason has already been logged above, and
+		// repeating it as "could not read" would describe a call that was
+		// deliberately never made.
+		if errors.Is(err, notify.ErrUnavailable) {
+			w.backend.Logger.Info("notifications unavailable; no authorization to resolve")
+			return
+		}
 		w.backend.Logger.Warn("could not read notification authorization", "error", err)
 		return
 	}

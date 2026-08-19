@@ -293,6 +293,21 @@ func TestPermissionStates(t *testing.T) {
 		if _, err := host.RequestAuthorization(context.Background()); !errors.Is(err, notify.ErrUnavailable) {
 			t.Errorf("RequestAuthorization: got %v want ErrUnavailable", err)
 		}
+		// AND THE OS IS NEVER TOUCHED. Every assertion above is about the
+		// answer; this one is about the call not being made, and it is the
+		// one that matters most on macOS, where reading authorization from a
+		// process that has no bundle throws an Objective-C exception and
+		// aborts the application rather than returning an error Go can see.
+		// The startup resolve calls Refresh, so this is the exact path that
+		// killed every unbundled run before the composition root began
+		// passing ServiceStartup's verdict in through IsAvailable.
+		if _, err := host.Refresh(context.Background()); !errors.Is(err, notify.ErrUnavailable) {
+			t.Errorf("Refresh: got %v want ErrUnavailable", err)
+		}
+		if h.checkCalls != 0 || h.requestCalls != 0 {
+			t.Errorf("reached the OS on an unavailable host: %d check(s), %d request(s), want 0 and 0",
+				h.checkCalls, h.requestCalls)
+		}
 	})
 
 	t.Run("never requested", func(t *testing.T) {
