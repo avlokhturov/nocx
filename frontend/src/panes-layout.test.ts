@@ -6,10 +6,12 @@ import {
   createRendererMock,
   resetSessionCounter,
   mountPaneManager,
+  makeClient,
   makeLayoutBackend,
   makeLayoutStore,
   makeUIStateBackend,
 } from './test-support/panes-fixtures'
+import type { SSHProfile } from './profiles'
 import { BasePaneContent, type ContentDescriptor, type ContentViewport } from './pane-content'
 
 // The terminal renderer is mocked exactly as panes.test.ts mocks it: these
@@ -323,54 +325,37 @@ describe('the renderer draws the chain the backend holds', () => {
   })
 })
 
-// ── the chain can hold a row the renderer cannot draw ─────────────────
+// ── the chain can hold a row this window does not draw ────────────────
 //
-// An ssh pane is restored into the chain and NOT reopened: reconnecting needs
-// the profile it was opened from and the chain stores an endpoint. That row is
-// real, it occupies a position, and the renderer has no chrome for it — which
-// is a state every one of these tests is about.
+// It used to be an ssh row: reconnecting needed the profile a pane was opened
+// from and the chain stores an endpoint, so the row sat there with no chrome.
+// It does not any more (nocx-9y4ku) — a stored connection is reopened. What
+// still holds a row the renderer draws no tab for is a CLEAN START: the rows
+// are read, so a tab opened in this session can be recorded beside them, and
+// none of them appears.
 
-/** A chain holding one local tab the renderer can draw and one ssh tab it
- *  cannot, plus however many more local ones are asked for. */
-async function backendWithAnSSHRow(locals = 2): Promise<ReturnType<typeof makeLayoutBackend>> {
-  const backend = makeLayoutBackend()
-  await backend.createTab({
-    id: 'tab-ssh',
-    workspaceId: 'workspace:default',
-    position: 0,
-    firstPane: {
-      id: 'pane-ssh',
-      cwd: '/srv',
-      kind: 'ssh',
-      endpoint: 'deploy@srv-01:22',
-      sizeShare: 1,
-    },
-  })
-  for (let i = 0; i < locals; i++) {
-    await backend.createTab({
-      id: `tab-${i}`,
-      workspaceId: 'workspace:default',
-      position: i + 1,
-      firstPane: { id: `pane-${i}`, cwd: '/', kind: 'local', endpoint: null, sizeShare: 1 },
-    })
-  }
-  return backend
-}
-
-describe('a row the renderer cannot draw', () => {
+describe('a row the renderer does not draw', () => {
   beforeEach(() => {
     resetSessionCounter()
     vi.clearAllMocks()
+    applyRestoreOnStartup(true)
+  })
+
+  afterEach(() => {
+    applyRestoreOnStartup(true)
   })
 
   it('is still named in a reorder, so the backend does not refuse the whole thing', async () => {
-    const backend = await backendWithAnSSHRow()
+    // Two stored tabs the window was told not to open, and two opened in
+    // this session beside them.
+    applyRestoreOnStartup(false)
+    const backend = await seededBackend({ decorate: false })
     const { bar, manager } = await mountPaneManager(undefined, undefined, undefined, undefined, {
       store: makeLayoutStore(backend).store,
       backend,
     })
-    // Two of the three tabs are drawn; the ssh one is not.
-    expect(stripTabs(bar)).toHaveLength(2)
+    manager.newPane()
+    await vi.waitFor(() => expect(stripTabs(bar)).toHaveLength(2))
 
     const [first, second] = stripTabs(bar).map((t) => Number(t.getAttribute('data-pane-id')))
     manager.reorderPane(second, first)
@@ -378,7 +363,8 @@ describe('a row the renderer cannot draw', () => {
     // THE DEFECT THIS PINS: a request naming only the tabs on screen is not a
     // permutation of the workspace's tabs, and the backend refuses the whole
     // reorder — which is what shipped, and what the e2e gate found once a spec
-    // had opened an ssh tab earlier in the run. The strip must move.
+    // had opened a tab the renderer does not draw earlier in the run. The
+    // strip must move.
     await vi.waitFor(() => {
       expect(stripTabs(bar).map((t) => Number(t.getAttribute('data-pane-id')))).toEqual([
         second,
@@ -388,42 +374,10 @@ describe('a row the renderer cannot draw', () => {
     expect(showToastMock).not.toHaveBeenCalledWith(
       expect.objectContaining({ level: 'danger' as const }),
     )
-    // The undrawn row kept its place among the others rather than being
-    // dropped from the order: it is a row the renderer cannot show, not a row
-    // that stopped existing.
-    expect(backend.rows().tabs.map((t) => t.id)).toContain('tab-ssh')
-    expect(backend.rows().tabs).toHaveLength(3)
-  })
-
-  it('is reported once, however many of them there are', async () => {
-    const backend = await backendWithAnSSHRow(1)
-    await backend.createTab({
-      id: 'tab-ssh-2',
-      workspaceId: 'workspace:default',
-      position: 9,
-      firstPane: {
-        id: 'pane-ssh-2',
-        cwd: '/srv',
-        kind: 'ssh',
-        endpoint: 'deploy@srv-02:22',
-        sizeShare: 1,
-      },
-    })
-    await mountPaneManager(undefined, undefined, undefined, undefined, {
-      store: makeLayoutStore(backend).store,
-      backend,
-    })
-
-    // One warning naming the count, not one per pane: four ssh tabs used to
-    // mean four toasts on every load, and in the gate a leftover one sat
-    // beside the toast another spec was asserting on.
-    const warnings = showToastMock.mock.calls.filter(
-      ([t]) => (t as { level?: string }).level === 'warning',
-    )
-    expect(warnings).toHaveLength(1)
-    expect(String((warnings[0][0] as { message: string }).message)).toContain(
-      '2 connections were not reopened',
-    )
+    // The undrawn rows kept their place among the others rather than being
+    // dropped from the order: they are rows the window is not showing, not
+    // rows that stopped existing.
+    expect(backend.rows().tabs).toHaveLength(4)
   })
 
   it('leaves a pane the chain does not hold where it already was', async () => {
@@ -700,5 +654,333 @@ describe('restore.onStartup decides what the window opens with', () => {
     // is a decision about startup, not an instruction to forget: turning it
     // back on restores what was there.
     expect(backend.rows().tabs.length).toBe(before + 1)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// An ssh pane reconnects, or says why it did not (nocx-9y4ku)
+//
+// RESTORING A PANE IS NOT RESURRECTING A PROCESS (D5, ADR-0019 §3). The
+// session died with the backend; what a stored connection gets is a NEW one
+// to the endpoint it applies at, and nothing on screen may suggest otherwise.
+//
+// Three cases and only the first needed code: a pane opened AS ssh reconnects,
+// an INLINE ssh (one typed inside a local pane) comes back as the local shell
+// it always was, and a reconnect that fails keeps its pane and says why.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** A chain holding one stored connection at `endpoint`, plus a local tab. */
+async function backendWithAnSSHRow(
+  endpoint = 'deploy@srv-01:22',
+  id = 'pane-ssh',
+): Promise<ReturnType<typeof makeLayoutBackend>> {
+  const backend = makeLayoutBackend()
+  await backend.createTab({
+    id: `tab-${id}`,
+    workspaceId: 'workspace:default',
+    position: 0,
+    firstPane: { id, cwd: '/srv', kind: 'ssh', endpoint, sizeShare: 1 },
+  })
+  return backend
+}
+
+/** The saved connection the endpoint above names. */
+function savedProfile(over: Partial<SSHProfile['options']> = {}): SSHProfile {
+  return {
+    id: 'profile-srv-01',
+    type: 'ssh',
+    name: 'srv-01',
+    options: { host: 'srv-01', user: 'deploy', port: 22, ...over },
+  }
+}
+
+describe('a stored connection is reopened (nocx-9y4ku)', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+    applyRestoreOnStartup(true)
+  })
+
+  afterEach(() => {
+    applyRestoreOnStartup(true)
+  })
+
+  it('reconnects through the saved connection its endpoint names', async () => {
+    const backend = await backendWithAnSSHRow()
+    const { bar, client } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      [savedProfile()],
+    )
+
+    // The tab is on screen — the row used to be adopted by nothing at all.
+    await vi.waitFor(() => expect(stripTabs(bar)).toHaveLength(1))
+    // Through the PROFILE, so the port, the auth bindings and the jump host
+    // the connection was opened with come back with it. The chain stores an
+    // endpoint and no profile; this is where the two are matched.
+    await vi.waitFor(() => expect(client.openSSHSession).toHaveBeenCalledTimes(1))
+    const [, , profileId, anchor] = client.openSSHSession.mock.calls[0] as unknown[]
+    expect(profileId).toBe('profile-srv-01')
+    // THE SAME PANE, not a new one: its blocks are found by this id, so a
+    // reconnect that minted a fresh identity would restore into nothing.
+    expect(anchor).toEqual({ paneId: 'pane-ssh' })
+    expect(backend.rows().panes.map((p) => p.id)).toEqual(['pane-ssh'])
+    // And never a local shell wearing a remote tab's name.
+    expect(client.openSession).not.toHaveBeenCalled()
+  })
+
+  it('reconnects through the host when no saved connection is that endpoint', async () => {
+    const backend = await backendWithAnSSHRow('ops@srv-02:22')
+    const { client } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      [savedProfile()],
+    )
+
+    // An alias or a bare host never had a profile — it is reopened the way it
+    // was opened, through ~/.ssh/config on the backend.
+    await vi.waitFor(() => expect(client.openSSHSessionByHost).toHaveBeenCalledTimes(1))
+    const [, , host, user, anchor] = client.openSSHSessionByHost.mock.calls[0] as unknown[]
+    expect(host).toBe('srv-02')
+    expect(user).toBe('ops')
+    expect(anchor).toEqual({ paneId: 'pane-ssh' })
+    expect(client.openSSHSession).not.toHaveBeenCalled()
+    expect(client.openSession).not.toHaveBeenCalled()
+  })
+
+  it('does not take a profile that merely shares the host', async () => {
+    // `srv-01:22` and `deploy@srv-01:22` are two destinations. A profile is
+    // the one this pane was opened from only when its canonical identity IS
+    // the stored endpoint — otherwise the reconnect would log in as somebody
+    // the pane never logged in as.
+    const backend = await backendWithAnSSHRow('srv-01:22')
+    const { client } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      [savedProfile()],
+    )
+
+    await vi.waitFor(() => expect(client.openSSHSessionByHost).toHaveBeenCalledTimes(1))
+    expect(client.openSSHSessionByHost.mock.calls[0][2]).toBe('srv-01')
+    expect(client.openSSHSessionByHost.mock.calls[0][3]).toBeUndefined()
+    expect(client.openSSHSession).not.toHaveBeenCalled()
+  })
+
+  it('reads the saved connections BEFORE the chain, or the tab in front is missed', async () => {
+    // Adoption is synchronous so that boot can choose the tab the person left
+    // in front from panes that already exist. A lookup awaited inside
+    // adoption would put the ssh pane on screen after that choice.
+    const backend = await backendWithAnSSHRow()
+    const { manager, profileClient } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      [savedProfile()],
+    )
+    expect(profileClient.listProfiles).toHaveBeenCalled()
+    expect(manager.paneCount).toBe(1)
+  })
+
+  it('a reconnect that fails keeps its tab and says why, and never opens a local shell', async () => {
+    const backend = await backendWithAnSSHRow()
+    const client = makeClient()
+    const down = new Error('ssh: connect to host srv-01 port 22: no route to host')
+    client.openSSHSession.mockRejectedValue(down)
+    client.openSSHSessionByHost.mockRejectedValue(down)
+    const { bar, manager, panes } = await mountPaneManager(
+      client,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      undefined,
+      [savedProfile()],
+    )
+
+    // THE PANE IS STILL THERE. A tab that quietly became a local shell would
+    // be the worst answer available: the strip would say a host and the keys
+    // would go to this machine.
+    await vi.waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: 'warning',
+          message: expect.stringContaining('deploy@srv-01:22') as string,
+        }),
+      ),
+    )
+    expect(stripTabs(bar)).toHaveLength(1)
+    expect(manager.paneCount).toBe(1)
+    expect(client.openSession).not.toHaveBeenCalled()
+    // And the reason is where the person is looking, not only in the toast
+    // that summarises the count: the pane itself says the session did not
+    // start. A degrade that lives only in a log is the anti-pattern; this is
+    // the product saying it.
+    await vi.waitFor(() => {
+      expect(panes.querySelector('.pane-error')?.textContent ?? '').toContain('no route to host')
+    })
+    // And the row is untouched — nothing tidied the chain on the pane's way
+    // down, so the next start tries again.
+    expect(backend.rows().panes.map((p) => p.id)).toEqual(['pane-ssh'])
+  })
+
+  it('says it once, however many did not come back', async () => {
+    const backend = await backendWithAnSSHRow('deploy@srv-01:22', 'pane-ssh')
+    await backend.createTab({
+      id: 'tab-ssh-2',
+      workspaceId: 'workspace:default',
+      position: 1,
+      firstPane: {
+        id: 'pane-ssh-2',
+        cwd: '/srv',
+        kind: 'ssh',
+        endpoint: 'deploy@srv-02:22',
+        sizeShare: 1,
+      },
+    })
+    const client = makeClient()
+    client.openSSHSessionByHost.mockRejectedValue(new Error('host is down'))
+    await mountPaneManager(client, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+
+    // One warning naming the count, not one per pane: four connections behind
+    // a host that is not answering used to mean four toasts on every load,
+    // and in the e2e gate a leftover one sat beside the toast another spec
+    // was asserting on.
+    await vi.waitFor(() => {
+      const warnings = showToastMock.mock.calls.filter(
+        ([t]) => (t as { level?: string }).level === 'warning',
+      )
+      expect(warnings).toHaveLength(1)
+      expect(String((warnings[0][0] as { message: string }).message)).toContain(
+        '2 connections could not be reopened',
+      )
+    })
+  })
+
+  it('opens no connection at all on a clean start', async () => {
+    // The setting is a decision about startup, and a startup that was asked
+    // to open nothing must not reach out to a host — nor raise the vault
+    // unlock that reaching out would raise.
+    applyRestoreOnStartup(false)
+    const backend = await backendWithAnSSHRow()
+    const { bar, client } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+
+    expect(stripTabs(bar)).toHaveLength(1)
+    expect(client.openSSHSession).not.toHaveBeenCalled()
+    expect(client.openSSHSessionByHost).not.toHaveBeenCalled()
+    expect(client.openSession).toHaveBeenCalledTimes(1)
+    // The row is left exactly where it was: turning the setting back on
+    // restores what was there.
+    expect(backend.rows().panes.map((p) => p.id)).toContain('pane-ssh')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// An inline ssh comes back as the local pane it always was (nocx-9y4ku)
+//
+// A pane somebody typed `ssh host` inside is a LOCAL pane and its row says
+// local, so the restore has nothing to decide: it starts a fresh local shell,
+// exactly as D5 requires. What must survive is the provenance of the commands
+// that ran on the far host — and it does, without a line of code for it,
+// because the host is a column on the ENTRY and not a property of the pane
+// (design §7). This is the test the design asked for in place of the code.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('an inline ssh comes back local, and its blocks still say where they ran', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+    applyRestoreOnStartup(true)
+  })
+
+  /** The ledger's answer for one pane: one command that ran on `host`. */
+  function clientWithABlockFrom(host: string, paneId: string) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') {
+        const asked = (params as { paneId?: string }).paneId
+        return Promise.resolve({
+          entries:
+            asked === paneId
+              ? [
+                  {
+                    id: 'entry-1',
+                    seq: 1,
+                    environmentId: 'env-remote',
+                    host,
+                    cwd: '/srv/api',
+                    kind: 'shell',
+                    intent: 'systemctl status api',
+                    phase: 'closed',
+                    status: 'success',
+                    submittedAt: 1,
+                    startedAt: 1,
+                    endedAt: 2,
+                    durationMs: 1200,
+                    exitCode: 0,
+                    maskedCount: 0,
+                    maskedKinds: [],
+                    redactions: [],
+                  },
+                ]
+              : [],
+          scope: 'everywhere',
+          exhausted: true,
+          hasRows: true,
+          coverage: null,
+        })
+      }
+      if (method === 'ledger.get') {
+        return Promise.resolve({ entry: {}, edges: [], artifacts: [] })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  it('starts a local shell, and the block keeps the host it ran on', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const client = clientWithABlockFrom('srv-01', 'pane-b')
+    const { manager, panes } = await mountPaneManager(client, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+
+    // Both rows say local, so both start a fresh local shell. Nothing
+    // reconnects: the ssh was inside the pane, and the pane is not it.
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+    expect(client.openSSHSession).not.toHaveBeenCalled()
+    expect(client.openSSHSessionByHost).not.toHaveBeenCalled()
+
+    // The second tab's past, drawn when the person switches to it.
+    manager.activateByIndex(1)
+    const location = await vi.waitFor(() => {
+      const el = panes.querySelector('[data-restored="true"] .cmd-header-location')
+      expect(el).not.toBeNull()
+      return el!
+    })
+
+    // THE BLOCK SAYS WHERE IT RAN, not where the pane is now. The pane is
+    // this machine again; the command was not run on it.
+    expect(location.textContent).toBe('srv-01')
   })
 })
