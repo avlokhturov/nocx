@@ -20,7 +20,10 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-const captureArtifactID = "0198f2b0-0000-7000-8000-00000000c001"
+const (
+	captureArtifactID = "0198f2b0-0000-7000-8000-00000000c001"
+	otherArtifactID   = "0198f2b0-0000-7000-8000-00000000c002"
+)
 
 // aRecordedCommand puts one finished command in the store the way
 // history.record does, and hands back the entry id a capture hangs on. It
@@ -246,4 +249,120 @@ func TestLedgerCapture_SaysWhenTheBodyIsNotKept(t *testing.T) {
 	if ack.Stored {
 		t.Fatal("stored = true while output retention is off")
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The epic's happy path (nocx-2f0f): the output of a past command is still
+// readable.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// WHY THIS TEST EXISTS at all, when every unit below it passes. `deadcode`
+// cannot report that a feature is wired: on an interface-first tree RTA
+// counts every method a live interface value can hold as reachable, so a
+// write path with no caller is invisible to the ratchet. That is the shape
+// nocx-rtg0 shipped once — an encrypted store, a key lifecycle, a retention
+// policy, and ContentDB.Add with no caller outside its own tests. This is
+// the check that watches the feature happen instead.
+//
+// The restart is REAL: the store is closed and reopened from the same file,
+// so the bytes are read back through the encrypted file rather than out of a
+// process that still remembers writing them.
+func TestCapturedOutputSurvivesAStoreRestart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "content.db")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	open := func() content.ContentDB {
+		db, err := content.Open(context.Background(), content.Config{
+			Path:   path,
+			Key:    key,
+			Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+			Logger: log.NewSlogAdapter(nil),
+		})
+		if err != nil {
+			t.Fatalf("content.Open: %v", err)
+		}
+		return db
+	}
+
+	const bodyA = "\x1b[32mPASS\x1b[0m\n12 tests"
+	const bodyB = "\x1b[31mFAIL\x1b[0m\nsomething else entirely"
+	var entryA, entryB string
+
+	func() {
+		db := open()
+		defer func() { _ = db.Close() }()
+		ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+		defer stop()
+		conn := connectWS(t, ws)
+
+		entryA = aRecordedCommand(t, db, "make test")
+		entryB = aRecordedCommand(t, db, "make lint")
+		if _, rpcErr := captureCall(t, conn, captureParams(entryA, captureArtifactID, 1, bodyA), 1); rpcErr != nil {
+			t.Fatalf("capture A: %+v", rpcErr)
+		}
+		if _, rpcErr := captureCall(t, conn, captureParams(entryB, otherArtifactID, 1, bodyB), 2); rpcErr != nil {
+			t.Fatalf("capture B: %+v", rpcErr)
+		}
+	}()
+
+	// The application restarts. Nothing in the first process survives it.
+	db := open()
+	defer func() { _ = db.Close() }()
+	ctx := context.Background()
+
+	got := artifactBody(t, db, captureArtifactID)
+	if got != bodyA {
+		t.Fatalf("body after the restart = %q, want %q", got, bodyA)
+	}
+	// A's artifact holds A's body and NONE of B's. Two blocks captured back
+	// to back is the case a boundary bug shows up in, and it is the one the
+	// old byte-stream design spent three sections on.
+	if strings.Contains(got, "FAIL") || strings.Contains(got, "entirely") {
+		t.Fatalf("entry A's artifact carries entry B's output:\n%q", got)
+	}
+	if b := artifactBody(t, db, otherArtifactID); b != bodyB {
+		t.Fatalf("entry B's body = %q, want %q", b, bodyB)
+	}
+
+	// And the entry still names it: the restore path reads the artifact
+	// through the entry, so an artifact nothing points at is unreachable
+	// however intact its bytes are.
+	entry, err := db.Ledger().Entry(ctx, entryA)
+	if err != nil || entry == nil {
+		t.Fatalf("Entry(%q): %v", entryA, err)
+	}
+	found := false
+	for _, ex := range entry.Executions {
+		for _, a := range ex.Artifacts {
+			if a.ID == captureArtifactID {
+				found = true
+				if a.CaptureMethod != content.CaptureTerminalCells || a.CaptureVersion != 1 {
+					t.Fatalf("provenance after the restart = %q/%d", a.CaptureMethod, a.CaptureVersion)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the entry does not name its artifact after the restart")
+	}
+}
+
+// artifactBody joins one artifact's chunks in seq order.
+func artifactBody(t *testing.T, db content.ContentDB, id string) string {
+	t.Helper()
+	art, err := db.Ledger().Artifact(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Artifact(%q): %v", id, err)
+	}
+	if art == nil {
+		t.Fatalf("no artifact carries id %q — the capture did not survive", id)
+	}
+	var sb strings.Builder
+	for _, c := range art.Chunks {
+		sb.Write(c)
+	}
+	return sb.String()
 }
