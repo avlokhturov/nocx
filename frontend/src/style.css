@@ -907,6 +907,16 @@
    overflow-x: auto — is the FROZEN contract (nocx-juau) and stays for
    command blocks; this modifier is the same frame with the prose grammar,
    and it must come after the base rule for the cascade. */
+.cmd-output-evicted {
+  /* Where a body used to be. Retention removes an artifact while its entry
+     stays (ADR-0019 §7), and a reconstruction has to state its own horizon:
+     a block whose output was evicted must not read like a command that
+     printed nothing. Dimmed and italic, because it is our sentence and not
+     the program's — the one line in a block's body that nocx wrote. */
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
 .cmd-output-ask {
   white-space: pre-wrap;
   overflow-wrap: break-word;
