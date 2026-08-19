@@ -395,7 +395,8 @@ export class CompletionController {
       this.dismiss()
       return
     }
-    this.apply(c)
+    // A click is a decision, like Enter: it takes the row and stops.
+    this.apply(c, false)
   }
 
   /**
@@ -739,7 +740,9 @@ export class CompletionController {
     const only = completions[0]
     if (only.insertText === this.queryDoc.slice(range.from, range.to)) return false
     if (!this.revisionHolds(only)) return false
-    this.apply(only)
+    // Tab WALKS: the key means "show me what there is", so finishing the one
+    // match and stopping at a directory would answer half the question.
+    this.apply(only, true)
     return true
   }
 
@@ -892,7 +895,8 @@ export class CompletionController {
     const c = s.candidates[s.selectedIndex]
     if (!c) return false
     if (!this.revisionHolds(c)) return false
-    this.apply(c)
+    // Enter STOPS: see `apply`. The walking key is Right/End.
+    this.apply(c, false)
     return true
   }
 
@@ -923,29 +927,41 @@ export class CompletionController {
   private acceptGhost(): void {
     const c = this.ghostBox.candidate
     if (!c) return
-    this.apply(c)
+    // Right/End WALKS: a directory taken here shows what is inside it.
+    this.apply(c, true)
   }
 
   /**
-   * Apply the candidate. Accepting ENDS the completion — except when the
-   * candidate is a directory, which is not an answer but a step: the user
-   * has committed to `Downloads/` and the thing they want next is what is
-   * inside it. Closing there makes them press Tab again to resume a walk
-   * they never left, and closing on the keystroke the footer calls "accept"
-   * is what made this read as the panel dismissing itself.
+   * Apply the candidate.
+   *
+   * `walk` is the difference between the two keys that take a row, and it
+   * exists because they were the same call and the footer named them
+   * differently — one behaviour advertised as two. A DIRECTORY is not an
+   * answer but a step: the person has committed to `Downloads/` and what
+   * they want next is what is inside it, so the walking key re-queries and
+   * the list shows the next level. Closing there makes them press Tab again
+   * to resume a walk they never left, and closing on the keystroke the
+   * footer calls "accept" is what made this read as the panel dismissing
+   * itself.
+   *
+   * But a walk needs a way OUT that is not Escape, or the only way to stop
+   * descending is to dismiss the thing that is helping you. That is Enter:
+   * it takes the row and stops, the list closes, and the next Enter — on a
+   * command now sitting in the line where it can be read — runs it. The same
+   * shape the recall overlay has: the first Enter takes, the second runs.
    *
    * The continuation is a plain re-query against the new document, so the
    * ordinary rules apply to it: if the directory holds nothing this command
    * can take, the list says so rather than vanishing, and a stale generation
    * still cannot open anything.
    */
-  private apply(c: Candidate): void {
+  private apply(c: Candidate, walk: boolean): void {
     if (c.source === 'snippet') {
       this.applySnippet(c)
       return
     }
     this.editor?.applyReplacement(c.replacement.from, c.replacement.to, c.insertText)
-    if (c.kind === 'directory') {
+    if (walk && c.kind === 'directory') {
       this.runQuery(true)
       return
     }

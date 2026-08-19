@@ -1000,6 +1000,64 @@ describe('ghost text', () => {
     expect(file.dropdown.isOpen).toBe(false)
   })
 
+  it('Enter takes the directory and STOPS; Right takes it and keeps walking', async () => {
+    // Two keys took the row and did exactly the same thing, while the footer
+    // named them apart. They are apart now, and the reason is that a walk
+    // needs a way out that is not Escape: Enter ends it with the path in the
+    // line, and the next Enter runs the command — the same shape the recall
+    // overlay has (first Enter takes, second runs).
+    const mk = async (press: 'Enter' | 'ArrowRight') => {
+      const editor = ghostEditor('cd Down')
+      const container = document.createElement('div')
+      document.body.appendChild(container)
+      const dropdown = new CompletionDropdown({ onHover: () => {}, onPick: () => {} })
+      const controller = new CompletionController({
+        providers: [
+          // Two rows, so the list is up and Enter has something to accept —
+          // a single match is taken by Tab before a list ever opens.
+          instantProvider('p', () => [
+            cand({
+              id: 'path:Downloads/',
+              insertText: 'Downloads/',
+              kind: 'directory',
+              replacement: { from: 3, to: 7 },
+            }),
+            cand({
+              id: 'path:Downstream/',
+              insertText: 'Downstream/',
+              kind: 'directory',
+              replacement: { from: 3, to: 7 },
+            }),
+          ]),
+        ],
+        dropdown,
+        env: () => ({ isLocal: true, cwd: '/repo', host: '' }),
+        now: () => 1_750_000_000_000,
+      })
+      controller.attach(editor, container)
+      controller.onDocChanged()
+      await flush()
+      if (press === 'Enter') {
+        // Enter is the list's key, and the list is opened by Tab — a typing
+        // query only ghosts (the panel must not flash open under the
+        // fingers). `open()` is what the editor's Tab calls.
+        controller.open()
+        await flush()
+      }
+      expect(controller.handleKey(key(press))).toBe(true)
+      await flush()
+      return { editor, dropdown }
+    }
+
+    const walked = await mk('ArrowRight')
+    expect(walked.editor.doc).toBe('cd Downloads/')
+    expect(walked.dropdown.isOpen).toBe(true)
+
+    const stopped = await mk('Enter')
+    expect(stopped.editor.doc).toBe('cd Downloads/')
+    expect(stopped.dropdown.isOpen).toBe(false)
+  })
+
   it('End accepts at line end, but stays a caret movement mid-line', async () => {
     const editor = ghostEditor('git sta')
     const container = document.createElement('div')
