@@ -44,6 +44,10 @@ export class ScrollbackController {
   readonly scrollbackInner: HTMLElement
   /** Outer clipping container — height changes with mode. */
   readonly xtermLiveContainer: HTMLElement
+  /** The end of the output, as a one-pixel box a sibling of the stack — the
+   *  follow observer's target. See the constructor for why it is not the live
+   *  region. */
+  readonly followSentinel: HTMLElement
   /** Inner clipping window. It tracks the rows written while the outer box
    *  supplies the same height to flex layout. */
   readonly xtermLiveViewport: HTMLElement
@@ -98,6 +102,16 @@ export class ScrollbackController {
 
     // Blocks live in the inner wrapper.
     this.scrollbackArea.appendChild(this.scrollbackInner)
+
+    // WHERE THE OUTPUT ENDS, as a fact about layout rather than about paint.
+    // It is a sibling of the stack and never moves with it, which is the
+    // whole point: the follow observer used to watch the live region, and the
+    // live region is inside the stack the settle displaces (see `_glide`).
+    // One pixel tall with a matching negative margin, so it occupies a box
+    // the observer can see and no space the layout can feel.
+    this.followSentinel = document.createElement('div')
+    this.followSentinel.className = 'scrollback-follow-sentinel'
+    this.scrollbackArea.appendChild(this.followSentinel)
 
     // The outer container participates in flex layout; the separate inner
     // viewport clips xterm's larger grid. Both follow the written rows so the
@@ -180,7 +194,7 @@ export class ScrollbackController {
       },
       { root: this.scrollbackArea, threshold: 0 },
     )
-    this._followObserver.observe(this.xtermLiveContainer)
+    this._followObserver.observe(this.followSentinel)
   }
 
   /** The element the xterm renderer mounts into. Returns the stable
@@ -609,16 +623,24 @@ export class ScrollbackController {
    * frame of output and never finished, so the scroll aimed at a target that
    * had already moved).
    *
-   * Both elements move by the same delta, because they are one stack: the
-   * blocks and the live region below them. Skipped when the person is not
-   * following the output — movement they did not cause is not theirs to
-   * watch — and under `prefers-reduced-motion`, like every other motion in
-   * this app. An in-flight glide is measured INTO the next one rather than
-   * cancelled first, so a change landing mid-settle retargets instead of
-   * snapping (nocx-i4h04.2).
+   * ONE element carries it, because the stack is one element: the blocks, the
+   * separator and the live region are all inside `.scrollback-inner`. That is
+   * also why "am I following the output" is answered by a sentinel OUTSIDE it
+   * — `IntersectionObserver` reports the TRANSFORMED box, so while the stack
+   * is displaced the live region it used to watch is out of the scroller and
+   * the pane concludes the person scrolled away. That turned following off
+   * silently: no more scroll-to-bottom as output arrives, and every later
+   * glide skipped, which is a jump. It reproduced only where a command
+   * finishes INSIDE the settle it started — the owner's machine at 27ms,
+   * never the container at 900 (nocx-i4h04.3).
+   *
+   * Skipped when the person is not following the output — movement they did
+   * not cause is not theirs to watch — and under `prefers-reduced-motion`,
+   * like every other motion in this app. An in-flight glide is measured INTO
+   * the next one rather than cancelled first, so a change landing mid-settle
+   * retargets instead of snapping (nocx-i4h04.2).
    */
   private _glide(mutate: () => void): void {
-    const moved = [this.scrollbackInner, this.xtermLiveContainer]
     // Measured with any in-flight transform still applied: this is where the
     // stack IS, not where layout says it belongs. A capture taken earlier in
     // this same task wins — see `_captureGlideOrigin`.
@@ -646,7 +668,7 @@ export class ScrollbackController {
     // gliding it would be a second animation over their own gesture.
     if (!Number.isFinite(dy) || Math.abs(dy) < 1) return
     if (Math.abs(dy) > this.scrollbackArea.clientHeight) return
-    for (const el of moved) {
+    for (const el of [this.scrollbackInner]) {
       const anim = el.animate(
         [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0px)' }],
         { duration: SETTLE_MS, easing: SETTLE_EASING },

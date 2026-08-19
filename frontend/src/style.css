@@ -547,6 +547,18 @@
   border-radius: 0;
 }
 
+/* The follow observer's target: where the output ENDS, in layout terms. A
+   sibling of the stack, so the settle's transform never moves it — watching
+   the live region instead made a displaced stack read as "the person scrolled
+   away" (nocx-i4h04.3). The negative margin cancels its own box, so it costs
+   the layout nothing. */
+.scrollback-follow-sentinel {
+  flex: none;
+  height: 1px;
+  margin-top: -1px;
+  pointer-events: none;
+}
+
 /* ── Live region (three layers: flow box + content clip + xterm) ─────── */
 
 .xterm-live-container {

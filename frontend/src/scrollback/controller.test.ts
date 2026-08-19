@@ -591,7 +591,9 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
 
     controller.beginBlock('ls', '~', 0, 1)
 
-    expect(frames.map((f) => f.el)).toEqual(['inner', 'live'])
+    // ONE element, because the stack is one element — and the follow
+    // observer's sentinel is deliberately outside it (nocx-i4h04.3).
+    expect(frames.map((f) => f.el)).toEqual(['inner'])
     for (const f of frames) {
       expect(f.keyframes).toEqual([
         { transform: 'translateY(60px)' },
@@ -599,6 +601,19 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
       ])
     }
     controller.blockManager.clearAll()
+  })
+
+  it('answers "am I following the output" from outside the stack it moves', () => {
+    // The observer reports the TRANSFORMED box. While the settle displaces the
+    // stack, anything inside it is out of the scroller — and the live region,
+    // which used to be the target, is inside it. The pane then concluded the
+    // person had scrolled away and stopped following the output, which is a
+    // defect on its own and skipped every later glide (nocx-i4h04.3).
+    const { controller } = movingController([500, 500])
+
+    expect(controller.followSentinel.parentElement).toBe(controller.scrollbackArea)
+    expect(controller.scrollbackInner.contains(controller.followSentinel)).toBe(false)
+    expect(controller.scrollbackInner.contains(controller.xtermLiveContainer)).toBe(true)
   })
 
   it('moves nothing when the person asked for less motion', () => {
