@@ -189,4 +189,97 @@ test.describe('command editor (nocx-4ff)', () => {
     expect(roles['tok-flag']?.color).not.toBe(roles['tok-operator']?.color)
     expect(roles['tok-path']?.color).not.toBe(roles['tok-operator']?.color)
   })
+
+  test('submit keeps the editor slot stable while output streams', async ({ page }) => {
+    await waitForPrompt(page)
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 8000 })
+    await page.locator(INPUT).fill("printf 'A\\nB\\nC\\n\\e]0;JIT\\a';read x")
+
+    // Everything this test asserts, in one read: the composer's box, the
+    // scroller's box, and where the block's header sits inside it. The header
+    // is measured against the scroller rather than the viewport so a scroll
+    // does not read as a move.
+    const geometry = () =>
+      page.evaluate(() => {
+        const editor = document.querySelector<HTMLElement>('.pane.active .nocx-editor')
+        const area = document.querySelector<HTMLElement>('.pane.active .scrollback-area')
+        const block = document.querySelector<HTMLElement>('.pane.active .cmd-block')
+        const inner = document.querySelector<HTMLElement>('.pane.active .scrollback-inner')
+        if (editor === null || area === null || inner === null) {
+          throw new Error('terminal layout is incomplete')
+        }
+        const areaRect = area.getBoundingClientRect()
+        return {
+          editorHeight: Math.round(editor.getBoundingClientRect().height),
+          areaHeight: area.clientHeight,
+          blockTop: block ? Math.round(block.getBoundingClientRect().top - areaRect.top) : -1,
+          display: editor.style.display,
+          visibility: editor.style.visibility,
+          // The grid's row pitch, published by scrollback/cell-metric.ts. The
+          // tolerance below is stated in ROWS, so it must come from the same
+          // number the layout is built on rather than from a literal.
+          cell: Math.round(
+            parseFloat(getComputedStyle(inner).getPropertyValue('--term-cell-height')) || 0,
+          ),
+        }
+      })
+
+    const before = await geometry()
+    await page.keyboard.press('Enter')
+    await expect(page.locator(EDITOR)).toHaveAttribute('data-suspended', 'true')
+
+    // The OSC title is emitted after all three rows. Waiting for it makes the
+    // running sample content-ordered rather than a timeout/height surrogate.
+    await expect(page.locator(TITLE)).toContainText('JIT')
+    await page.waitForFunction(() => {
+      const clip =
+        document
+          .querySelector<HTMLElement>('.pane.active .xterm-live-viewport')
+          ?.getBoundingClientRect().height ?? 0
+      const live =
+        document
+          .querySelector<HTMLElement>('.pane.active .xterm-live-container')
+          ?.getBoundingClientRect().height ?? 0
+      // The flow box is the clip plus the body padding both halves share, so
+      // it is never smaller — and the rows are in by the time it passes 50px.
+      return clip >= 50 && live >= clip
+    })
+    const running = await geometry()
+
+    // The composer is visually gone and owns no input, but its flex box stays:
+    // Enter therefore changes neither its height nor the scrollback viewport.
+    expect(running.display).toBe('')
+    expect(running.visibility).toBe('hidden')
+    expect(running.editorHeight).toBe(before.editorHeight)
+    expect(running.areaHeight).toBe(before.areaHeight)
+    // A short command starts where the prompt was, not at the top of the pane.
+    expect(running.blockTop).toBeGreaterThan(running.areaHeight / 2)
+
+    // Release the shell-side hold only after observing the running geometry.
+    await page.keyboard.press('Enter')
+
+    await expect(page.locator(EDITOR)).not.toHaveAttribute('data-suspended', 'true', {
+      timeout: 5000,
+    })
+    await page.waitForFunction(
+      () =>
+        (document
+          .querySelector<HTMLElement>('.pane.active .xterm-live-container')
+          ?.getBoundingClientRect().height ?? -1) < 0.5,
+    )
+    const after = await geometry()
+    expect(after.visibility).toBe('')
+    expect(after.editorHeight).toBe(before.editorHeight)
+    expect(after.areaHeight).toBe(before.areaHeight)
+
+    // THE FREEZE MUST NOT PUSH THE HEADER BACK DOWN. The frozen body is the
+    // same box as the live region it replaces — same row pitch, same padding
+    // — so serializing the rows into it changes the pane's height by at most
+    // the one row that is genuinely leaving: the row the grid's cursor sits
+    // on, which is below the fence the block ends at and therefore belongs to
+    // no block at all. Upward movement is unbounded on purpose: output
+    // arriving pushes the header up, exactly as a terminal scrolls.
+    expect(after.cell).toBeGreaterThan(0)
+    expect(after.blockTop - running.blockTop).toBeLessThanOrEqual(after.cell)
+  })
 })

@@ -76,11 +76,15 @@ export interface RendererMock extends TerminalRenderer {
     onBufferChange?: (type: 'normal' | 'alternate') => void
     onSelectionChange?: (text: string) => void
     onClipboardWrite?: (text: string) => void
+    onWriteParsed?: () => void
   }
   _fireBufferChange(type: 'normal' | 'alternate'): void
   _fireTitle(title: string): void
   _fireCwd(host: string, path: string): void
   _fireCommandMarker(marker: Parameters<CommandMarkerCallback>[0]): void
+  /** Fire a parse settle — xterm's onWriteParsed, the event the live region
+   *  measures the grid on. */
+  _fireWriteParsed(): void
   /** Fire an OSC 1337 in-band READY (nocx-ynsx). */
   _fireInBandReady(): void
   _fireBell(): void
@@ -174,6 +178,12 @@ export function createRendererMock(): RendererMock {
     onCellDimsChange: vi.fn(),
     onScroll: vi.fn(),
     onRender: vi.fn(),
+    // The live region measures the grid from here, not from the write:
+    // xterm parses asynchronously, so this is the event that says the rows
+    // exist. Stored so a test can fire it the way a parse pass would.
+    onWriteParsed: vi.fn((cb: () => void) => {
+      cbs.onWriteParsed = cb
+    }),
     paneElement: document.createElement('div'),
     getBufferLine: vi.fn().mockReturnValue(undefined),
     cursorLine: vi.fn().mockReturnValue(0),
@@ -193,6 +203,9 @@ export function createRendererMock(): RendererMock {
     _cbs: cbs,
     _fireBufferChange(type: 'normal' | 'alternate') {
       cbs.onBufferChange?.(type)
+    },
+    _fireWriteParsed() {
+      cbs.onWriteParsed?.()
     },
     _fireTitle(title: string) {
       cbs.onTitle?.(title)

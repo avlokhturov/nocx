@@ -2323,11 +2323,23 @@ export class TerminalContent extends BasePaneContent {
       session.onData((data: string) => {
         log.debug('nocx: session data received', { length: data.length })
         renderer.write(data)
-        this.scheduleLiveResize()
         if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
           host.requestAttention()
         }
       })
+
+      // MEASURE THE GRID WHEN THE GRID HAS CHANGED, which is not when the
+      // bytes were handed over. `write()` parses asynchronously, so the
+      // measure used to be scheduled from `onData` above and ran on the
+      // animation frame BEFORE xterm had applied the chunk — it read the old
+      // grid and sized the live region to it. A command that prints
+      // everything in one chunk therefore ran at the size it had before its
+      // output existed, and the whole output appeared at once when the block
+      // froze: `seq 1 10` measured three rows while running and 11 lines
+      // frozen, and the block leapt 153px up the pane at the end of a command
+      // that had already finished (2026-08-19 frame capture). Nothing else
+      // could correct it, because for a fast command there is no next chunk.
+      renderer.onWriteParsed(() => this.scheduleLiveResize())
 
       // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
       // is enabled (setReadOnly(false)). The editor captures keys while it is
@@ -3228,7 +3240,16 @@ export class TerminalContent extends BasePaneContent {
       if (!editor.isVisible) editor.show()
       this.renderer?.setReadOnly(true)
     } else {
-      if (editor.isVisible) editor.hide()
+      // A normal-buffer command keeps the empty composer's box reserved in
+      // its flex slot, but hidden and inert: input belongs to the writable
+      // grid. Native, desynchronized and alternate-buffer presentations have
+      // no composer at all, so those still remove it from layout.
+      const suspend =
+        this.lifecycle.state.kind === 'running' &&
+        this.lifecycle.buffer === 'normal' &&
+        !this.nativeMode
+      if (suspend) editor.suspend()
+      else editor.hide()
       this.renderer?.setReadOnly(false)
     }
   }

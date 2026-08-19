@@ -150,14 +150,24 @@
   padding: 10px 14px 12px;
 }
 
-/* The rule that collapsed this for a pane-filling program is gone with the
-   reservation it was working around: `hide()` now takes the box away every
-   time, so there is nothing left to collapse (nocx-6w4z). */
+/* A submitted normal-buffer command HIDES this card but keeps its box (the
+   editor's suspend(); the box is what stops the scrollback jumping 77px at
+   every Enter). Native, fullscreen and alternate-buffer presentations have no
+   composer at all and call hide(), which takes the box away. The history of
+   that trade — it was decided the other way once — is in editor.ts on
+   suspend(). */
 
 .nocx-editor-chrome {
   display: flex;
   align-items: center;
   margin-bottom: 8px;
+  /* One chip row, always. The chips in this strip come and go with the
+     lifecycle — the recovery chip appears when a command starts, the location
+     chip only on ssh — and a strip that collapsed when the last one left
+     would take its height out of the scrollback at exactly the moment a
+     command is submitted. The chips themselves are all one height; this is
+     the row's floor when none of them is showing (nocx-i4h04). */
+  min-height: 23px;
   font-family: var(--font-family-ui);
   font-size: var(--font-size-2xs);
   -webkit-user-select: none;
@@ -213,6 +223,17 @@
   -webkit-user-select: none;
   user-select: none;
   flex: none;
+  /* A CHIP IS ONE BOX WHATEVER ELEMENT CARRIES IT. The recovery chip is a
+     <button> — it is pressable — and a button's UA border and metrics made it
+     25px tall against every other chip's 21. That chip appears exactly when a
+     command starts, so the composer's chrome grew 2px at every Enter and the
+     scrollback, which hangs from its bottom edge, moved with it (nocx-i4h04).
+     Reset here rather than on the one chip: the next pressable chip would
+     arrive with the same 4px. */
+  border: 0;
+  font: inherit;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-xs);
 }
 
 .nocx-chip-muted {
@@ -526,15 +547,11 @@
   border-radius: 0;
 }
 
-/* ── Live region (two-layer: clip container + stable inner) ─────────── */
+/* ── Live region (three layers: flow box + content clip + xterm) ─────── */
 
 .xterm-live-container {
   flex: none;
   overflow: hidden;
-  /* No height transition. The height changes on every frame of output, so the
-     animation never finished — and anything measuring this element to position
-     the scroller was reading a value mid-flight, aiming at a target that had
-     moved by the time the scroll landed. */
 }
 
 .xterm-live-container.live-idle {
@@ -542,7 +559,29 @@
 }
 
 .xterm-live-container.live-running {
+  /* Fallback until the renderer can measure its first row. The controller
+     replaces this with the written content height in measurable sessions. */
   height: 140px;
+  /* THE RUNNING REGION IS THE BLOCK'S BODY, so it carries the body's padding
+     (.cmd-output above, one source for both). Without it the region was 8px
+     shorter than the body that replaces it, and the scrollback — which hangs
+     from its bottom edge — moved by that much at every freeze. The controller
+     never hard-codes the 8: it reads the padding off this element and sizes
+     the box to content + padding, so this rule stays the only place the
+     number lives. */
+  padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
+}
+
+/* The flow box and this clip receive the same measured height. The separate
+   clip still keeps xterm's full grid from leaking below a short command. */
+.xterm-live-viewport {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.live-running > .xterm-live-viewport {
+  height: 0;
 }
 
 /* Fills the pane, not the viewport. It was `position: fixed` with all four
@@ -562,11 +601,10 @@
   flex: none;
 }
 
-/* Inner wrapper: always has a stable min-height so xterm.fit() produces
-   a sane grid even when the clip container is 36px tall. xterm mounts
-   into this element, not the clip container. overflow:hidden is
-   defence-in-depth against xterm artifacts leaking below the clip
-   (P1-5: stray bar below tabs). */
+/* Xterm wrapper: always has a stable min-height so xterm.fit() produces a
+   sane grid even when the content clip is one row tall. xterm mounts here,
+   inside the clip; overflow:hidden is defence-in-depth against artifacts
+   leaking below it (P1-5: stray bar below tabs). */
 .xterm-inner {
   min-height: 140px;
   height: 100%;
@@ -777,7 +815,11 @@
 }
 
 .cmd-output {
-  padding: 2px 0 6px 0;
+  /* The block body's own padding, named because the LIVE region wears the
+     same box while the command runs (see .xterm-live-container.live-running):
+     the running region and the frozen body it becomes must occupy the same
+     height, or the pane moves at the moment one replaces the other. */
+  padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
   line-height: 1.2;
@@ -809,7 +851,17 @@
 .term-line {
   display: block;
   font-size: var(--font-size-terminal);
-  min-height: 1.2em;
+  /* ONE FROZEN ROW IS ONE GRID ROW. The pitch is the renderer's measured cell
+     height, published as --term-cell-height beside --term-cell-delta by
+     scrollback/cell-metric.ts; `1.2em` was here before it and was a guess at
+     a number only the renderer can measure. The vertical miss is felt rather
+     than seen: the frozen block replaces the live region at the end of every
+     command, so a pitch that disagrees with the grid's changes the pane's
+     height at that moment and the scrollback — which hangs from its bottom
+     edge — moves. The fallback keeps the old guess for a session whose
+     renderer has not measured yet. */
+  min-height: var(--term-cell-height, 1.2em);
+  line-height: var(--term-cell-height, 1.2em);
   /* N frozen columns must occupy exactly N × the terminal's cell width
      (nocx-yy9g). xterm rasterises at a cell advance snapped to whole
      device pixels; the DOM would otherwise lay the same font out at its

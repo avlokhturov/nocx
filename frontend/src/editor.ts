@@ -176,6 +176,9 @@ export class CommandEditor {
    *  value the way `textarea.value = …` did, which fired no input event, so
    *  they must not fire onInputChange either. */
   private _programmatic = false
+  /** Input ownership is independent of layout: a submitted command leaves
+   *  the empty composer's box reserved while the terminal owns keys. */
+  private _inputActive = false
   /** Optional keyboard arbiter: called (capture phase) BEFORE the editor's
    *  own key handling. Return true to consume the key. One arbiter chain,
    *  composed at the root (terminal-content.ts): recall first, completion
@@ -581,22 +584,23 @@ export class CommandEditor {
     this.commit(plan.sendLine, plan)
   }
 
-  /** The atomic handoff (ADR-0004 §2): clear + hide BEFORE sending, so the
-   *  committed command is painted once by the shell, not echoed twice. The
-   *  observed order from the textarea implementation — value → rows →
-   *  hide() → submit() — is preserved. `plan` is present only after a
-   *  beforeSubmit planner succeeded: the resolved sendLine goes to the PTY,
-   *  the reference-intact recordLine to the ledger.
+  /** The atomic handoff (ADR-0004 §2): clear + suspend input BEFORE sending,
+   *  so the committed command is painted once by the shell, not echoed twice.
+   *  Suspension hides the empty composer without removing its flex slot: a
+   *  fast command returns ownership without a layout reflow.
+   *  `plan` is present only after a beforeSubmit planner succeeded:
+   *  the resolved sendLine goes to the PTY, the reference-intact recordLine
+   *  to the ledger.
    *
-   *  The hide is the handoff's step 1 and belongs to it alone: a commit
+   *  The suspension is the handoff's step 1 and belongs to it alone: a commit
    *  whose destination is not the shell (the agent target — routesToShell
-   *  false, read through the handoffToShell seam) hides nothing, because
+   *  false, read through the handoffToShell seam) suspends nothing, because
    *  there is nothing to hand off — the question stays in the editor for
    *  the next one (nocx-wmy4). The clear is unconditional: a submitted
    *  question, like a submitted command, leaves the editor empty. */
   private commit(sendLine: string, plan?: SubmitPlan): void {
     this.clearDoc()
-    if (this.actions.handoffToShell?.() ?? true) this.hide()
+    if (this.actions.handoffToShell?.() ?? true) this.suspend()
     // The plan is present only after a beforeSubmit planner succeeded; the
     // plain path keeps the exact one-argument call (no resolution happened,
     // so there is nothing to resolve for the ledger either).
@@ -788,19 +792,17 @@ export class CommandEditor {
   // ── visibility ────────────────────────────────────────────────────────
 
   /**
-   * Hiding gives the space back.
+   * Show the input-owning composer.
    *
-   * `hide()` used `visibility: hidden` once the editor had been shown, so its
-   * box stayed in the flex layout — deliberately, to stop the pane jumping on
-   * every command start and end. What that bought in stability it paid for in a
-   * strip of dead canvas below every running command, which the owner reported
-   * twice as "space reserved for an editor that is not there". The reservation
-   * goes; the jump comes back and is the smaller of the two problems now that
-   * the live region grows with its content rather than snapping to a constant
-   * (nocx-6w4z).
+   * A suspended composer already reserves this flex slot; showing it merely
+   * returns paint and input ownership. A fully hidden editor
+   * (native/fullscreen presentation, or initial mount) also rejoins layout.
    */
   show(): void {
+    this._inputActive = true
     this.root.style.display = ''
+    delete this.root.dataset.suspended
+    this.root.removeAttribute('inert')
 
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
     // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
@@ -936,17 +938,63 @@ export class CommandEditor {
     const spans = this.view.state.field(unresolvedRedactionField, false) ?? []
     return spans.some((s) => s.to > s.from)
   }
-  hide(): void {
+  /**
+   * Hide the empty composer WITHOUT releasing its flex slot.
+   *
+   * This reverses a decision, so the decision is written down rather than
+   * deleted with the comment that held it. `hide()` once used
+   * `visibility: hidden` for exactly this reason — to stop the pane jumping
+   * at every command start and end — and that was removed on purpose: what
+   * the reservation bought in stability it paid for in a strip of dead canvas
+   * below every running command, which the owner reported twice as "space
+   * reserved for an editor that is not there". The note recording it cited a
+   * bead about tab activity indicators, which is a different defect
+   * (nocx-6mwm); the decision itself was real.
+   *
+   * What changed is the other side of the trade. The live region now grows
+   * with its content and wears the block body's own padding and row pitch, so
+   * the space under a running command belongs to that command's output rather
+   * than to an absent editor — the dead strip the reservation used to leave is
+   * the live region's to fill. The jump it was traded for is not small: the
+   * composer is 77px, and losing it at Enter moved the whole scrollback, which
+   * hangs from its bottom edge, by that much (nocx-i4h04).
+   *
+   * `inert` closes mouse, focus and accessibility entry points while the
+   * running program owns input; `visibility: hidden` removes the misleading
+   * input chrome and keeps the exact box.
+   */
+  suspend(): void {
+    this._inputActive = false
     // Stopped, not left running. Every tab owns an editor, so a timer that
-    // outlives visibility is one wakeup per second per tab for a chip nobody can
-    // see — and they accumulate for the life of the window.
+    // outlives visibility is one wakeup per second per tab for a chip nobody
+    // can see — and they accumulate for the life of the window.
     this.stopClock()
     this.view.contentDOM.blur()
+    this.root.dataset.suspended = 'true'
+    this.root.setAttribute('inert', '')
+    this.root.style.visibility = 'hidden'
+  }
+  /** Remove the editor from presentation entirely — its box with it. For the
+   *  presentations that have no composer at all (native, fullscreen, the
+   *  alternate buffer), never for an ordinary command: that is `suspend`,
+   *  and the difference is a 77px jump in the scrollback. */
+  hide(): void {
+    this._inputActive = false
+    // Stopped, not left running — see suspend().
+    this.stopClock()
+    this.view.contentDOM.blur()
+    delete this.root.dataset.suspended
+    this.root.removeAttribute('inert')
+    this.root.style.visibility = ''
     this.root.style.display = 'none'
   }
 
   get isVisible(): boolean {
-    return this.root.style.display !== 'none' && this.root.style.visibility !== 'hidden'
+    return (
+      this._inputActive &&
+      this.root.style.display !== 'none' &&
+      this.root.style.visibility !== 'hidden'
+    )
   }
 
   /** Whether the editor's root element contains `el`. Used to scope the

@@ -2763,15 +2763,19 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
       readOnlyMock.mockClear()
 
-      // The atomic handoff: the editor hides ITSELF at commit, and the
-      // submit callback makes the grid writable in the SAME synchronous
-      // step the bytes go out — keys typed before the running fact lands
-      // must reach the pty, never be dropped (the u7uh.23 vanish).
+      // The atomic handoff: the editor suspends input at commit while its
+      // empty box stays reserved in the SAME flex slot. The submit callback
+      // makes the grid writable in the same synchronous step the bytes go
+      // out — keys typed before the running fact lands reach the pty.
       ed.insertText('read x')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
       expect(ed.isVisible).toBe(false)
+      expect(ed.root.style.display).toBe('')
+      expect(ed.root.style.visibility).toBe('hidden')
+      expect(ed.root.dataset.suspended).toBe('true')
+      expect(ed.root.hasAttribute('inert')).toBe(true)
       expect(readOnlyMock).toHaveBeenLastCalledWith(false)
 
       // The published attempt opens the running interval; the sync keeps
@@ -2785,6 +2789,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
         attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'read x' },
       })
       expect(ed.isVisible).toBe(false)
+      expect(ed.root.style.display).toBe('')
+      expect(ed.root.style.visibility).toBe('hidden')
+      expect(ed.root.dataset.suspended).toBe('true')
       expect(readOnlyMock).toHaveBeenLastCalledWith(false)
       // The completion closes the interval, and back at the prompt the
       // editor returns and the grid locks again.
@@ -2803,6 +2810,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(true)
+      expect(ed.root.style.visibility).toBe('')
+      expect(ed.root.dataset.suspended).toBeUndefined()
+      expect(ed.root.hasAttribute('inert')).toBe(false)
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
     } finally {
       Element.prototype.scrollTo = protoScrollTo
@@ -3069,6 +3079,58 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it('sizes the live region when the grid has PARSED the bytes, not when they were handed over', async () => {
+    // xterm parses asynchronously. The measure used to be scheduled from
+    // session.onData, one line after renderer.write(), so it ran on the
+    // animation frame BEFORE the chunk was in the buffer and sized the region
+    // to the grid as it was WITHOUT the output. A command that prints
+    // everything in one chunk has no next chunk to correct it, so it ran at
+    // the wrong size until it finished and then arrived all at once: `seq 1
+    // 10` measured three rows live and froze eleven, and the block leapt
+    // 153px up the pane at the end of a command that had already finished
+    // (2026-08-19 frame capture, e2e container).
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      withScrollback.scrollback.scrollbackArea.scrollTo = vi.fn()
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'seq' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      const before = withScrollback.scrollback.xtermLiveContainer.style.height
+
+      // The bytes arrive and the grid ALREADY reports the taller content —
+      // but they have not been parsed, so nothing may be measured yet.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(200)
+      client._sessions[0].fireData('one\ntwo\nthree\n')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe(before)
+
+      // The parse pass settles: NOW the rows exist and the region is sized.
+      renderer._fireWriteParsed()
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('200px')
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      teardown()
+    }
+  })
+
   it('the running grid is fitted to the live region cap, so a tall inline TUI keeps its last row reachable (nocx-zn4d)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -3135,6 +3197,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // unscrollable inside the box.
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(1000)
       client._sessions[0].fireData('repaint')
+      renderer._fireWriteParsed()
       expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
       expect(fitViewport).toHaveBeenLastCalledWith(
         expect.objectContaining({ width: 800, height: 276 }),
@@ -3212,6 +3275,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // The first sizing sets the height; the box grows to the cap.
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
       client._sessions[0].fireData('top frame')
+      renderer._fireWriteParsed()
       expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
       expect(scrollTo).toHaveBeenCalled()
       scrollTo.mockClear()
@@ -3221,6 +3285,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // reads (nocx-6w4z).
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
       client._sessions[0].fireData('top frame')
+      renderer._fireWriteParsed()
       expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
       expect(scrollTo).not.toHaveBeenCalled()
     } finally {

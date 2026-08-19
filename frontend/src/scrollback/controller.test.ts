@@ -143,9 +143,11 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
       renderer,
       snapshotStore: new CommandSnapshotStore(),
     })
+    controller.scrollbackArea.scrollTo = vi.fn()
     // The block opens at submit and binds to the published attempt.
     controller.blockManager.startBlock('make', '~', 0)
     controller.blockManager.bindAttempt('att-1')
+    controller.setRunning()
 
     // The authenticated completion lands with the fence still in flight:
     // the LOGICAL freeze lands now — status flips, the running slot frees
@@ -153,6 +155,10 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
     expect(controller.blockManager.runningBlock).toBeNull()
     expect(controller.blockManager.blockForAttempt('att-1')?.status).toBe('success')
+    // PromptReady may arrive before the render fence. It must not collapse
+    // the live rows into empty space while their DOM boundary is pending.
+    controller.setIdle()
+    expect(controller.mode).toBe('running')
 
     // The fence bytes land (via the renderer's OSC 1337 handler): the block
     // serializes at the fence's line and the live region settles.
@@ -446,12 +452,18 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.mode).toBe('running')
     expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
 
-    // Output arrives: the box is sized to the measured content and the
-    // echo stays out of view — and the height itself is NOT offset (an
-    // offset moves what is measured, not what is shown).
+    // Output arrives: the flow box and clip reserve only the two shown rows;
+    // the translated echo row occupies neither visible space nor layout.
     controller.setLiveHeight(3 * 16)
-    expect(controller.xtermLiveContainer.style.height).toBe('48px')
+    expect(controller.xtermLiveContainer.style.height).toBe('32px')
+    expect(controller.xtermLiveViewport.style.height).toBe('32px')
     expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+
+    // A measurement no taller than the translated echo must clear, rather
+    // than retain, stale flow space from a previous chunk.
+    controller.setLiveHeight(8)
+    expect(controller.xtermLiveContainer.style.height).toBe('0px')
+    expect(controller.xtermLiveViewport.style.height).toBe('0px')
 
     // The output outgrows the viewport: the echo row scrolls above the
     // grid, and the shift MUST release — a stale shift would clip the
@@ -459,7 +471,8 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     setViewportTop(1)
     controller.setLiveHeight(24 * 16)
     expect(controller.xtermInner.style.transform).toBe('')
-    // The box still clamps to the live-region cap (nocx-zn4d).
+    // Both the content clip and flow box clamp to the live-region cap.
+    expect(controller.xtermLiveViewport.style.height).toBe('360px')
     expect(controller.xtermLiveContainer.style.height).toBe('360px')
 
     // The shift is live, not one-shot: back before the echo scrolled out,
@@ -467,6 +480,8 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     setViewportTop(0)
     controller.setLiveHeight(3 * 16)
     expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+    expect(controller.xtermLiveViewport.style.height).toBe('32px')
+    expect(controller.xtermLiveContainer.style.height).toBe('32px')
 
     // Freeze hands the rows to the DOM and the live region settles: the
     // shift is gone at idle, exactly like the box's height.
@@ -477,6 +492,46 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.xtermInner.style.transform).toBe('')
     expect(clearViewport).toHaveBeenCalledTimes(1)
     controller.blockManager.clearAll()
+  })
+
+  it('reserves the block body padding around the rows, and caps the WHOLE box', () => {
+    // THE RUNNING REGION IS THE BLOCK'S BODY. The frozen body has padding
+    // (`--cmd-output-pad-*`); until the live region wore the same, it was
+    // that much shorter than the body that replaces it, and the scrollback —
+    // which hangs from its bottom edge — moved at every freeze. The number
+    // is never repeated in TypeScript: the controller reads it off the
+    // element, which is what this test writes to it.
+    const { renderer } = rendererWithGeometry()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(pane)
+    controller.xtermLiveContainer.style.paddingTop = '2px'
+    controller.xtermLiveContainer.style.paddingBottom = '6px'
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    controller.beginBlock('ls', '~', 0, 1)
+    // Two shown rows (the third is the translated echo): the clip holds the
+    // rows, the flow box holds the rows plus the body's 8px.
+    controller.setLiveHeight(3 * 16)
+    expect(controller.xtermLiveViewport.style.height).toBe('32px')
+    expect(controller.xtermLiveContainer.style.height).toBe('40px')
+
+    // The cap is a ceiling on the BOX, not on the rows inside it: a grid
+    // taller than the pane must not push the region past the space it shares
+    // with the running block's header (nocx-zn4d), padding included.
+    controller.setLiveHeight(100 * 16)
+    expect(controller.xtermLiveContainer.style.height).toBe('360px')
+    expect(controller.xtermLiveViewport.style.height).toBe('352px')
+    controller.blockManager.clearAll()
+    pane.remove()
   })
 })
 
@@ -564,7 +619,7 @@ describe('the frozen block metric is published from the renderer (nocx-yy9g)', (
     expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-delta')).toBe('')
   })
 })
-describe('the live region is sized on the first frame of a command, not after the first chunk (command-start pop)', () => {
+describe('the running live region follows its written rows', () => {
   const protoScrollTo = Element.prototype.scrollTo?.bind(Element.prototype)
   beforeEach(() => {
     Element.prototype.scrollTo = () => {}
@@ -573,31 +628,34 @@ describe('the live region is sized on the first frame of a command, not after th
     Element.prototype.scrollTo = protoScrollTo
   })
 
-  it('sizes the region to the renderer measurement when the block opens', () => {
+  it('sizes the flow box and clip together as output grows', () => {
     const renderer = makeRenderer()
-    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(96)
+    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(19)
     const pane = document.createElement('div')
     const controller = new ScrollbackController({
       pane,
       renderer,
       snapshotStore: new CommandSnapshotStore(),
     })
-    // jsdom does no layout: give the scroller a real height so the running
-    // cap (clientHeight − block header) is measurable.
     Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
       value: 360,
       configurable: true,
     })
 
-    controller.beginBlock('ls', '~', 0, 1)
+    controller.beginBlock('printf slow', '~', 0, 0)
+    expect(controller.xtermLiveContainer.style.height).toBe('19px')
+    expect(controller.xtermLiveViewport.style.height).toBe('19px')
 
-    // The FIRST frame already shows the measured height — not the class's
-    // 140px placeholder that the next chunk of output would snap down to.
-    expect(controller.xtermLiveContainer.style.height).toBe('96px')
-    expect(controller.mode).toBe('running')
+    controller.setLiveHeight(38)
+    expect(controller.xtermLiveContainer.style.height).toBe('38px')
+    expect(controller.xtermLiveViewport.style.height).toBe('38px')
+
+    controller.setLiveHeight(57)
+    expect(controller.xtermLiveContainer.style.height).toBe('57px')
+    expect(controller.xtermLiveViewport.style.height).toBe('57px')
   })
 
-  it('keeps the 140px class fallback while the renderer cannot measure', () => {
+  it('leaves the CSS fallback in charge before the renderer can measure content', () => {
     const renderer = makeRenderer()
     ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(0)
     const pane = document.createElement('div')
@@ -613,10 +671,8 @@ describe('the live region is sized on the first frame of a command, not after th
 
     controller.beginBlock('ls', '~', 0, 1)
 
-    // Unmeasurable renderer: no inline height, the CSS class's 140px
-    // placeholder stands until the first output arrives.
     expect(controller.xtermLiveContainer.style.height).toBe('')
-    expect(controller.xtermLiveContainer.className).toContain('live-running')
+    expect(controller.xtermLiveViewport.style.height).toBe('')
     expect(controller.mode).toBe('running')
   })
 })

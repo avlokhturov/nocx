@@ -1012,6 +1012,11 @@ export class BlockManager {
     return this._runningBlock
   }
 
+  /** A completed attempt whose DOM output boundary still awaits its fence. */
+  get visualFreezePending(): boolean {
+    return this._pendingFence !== null
+  }
+
   get cmdStartTime(): number | null {
     return this._cmdStartTime
   }

@@ -489,6 +489,27 @@ describe('CommandEditor', () => {
     expect(viewOf(ed).state.doc.toString()).toBe('')
   })
 
+  it('suspends input without removing the painted editor from flex layout', () => {
+    const { ed } = setup()
+    ed.show()
+
+    ed.suspend()
+
+    expect(ed.isVisible).toBe(false)
+    expect(ed.root.style.display).toBe('')
+    expect(ed.root.style.visibility).toBe('hidden')
+    expect(ed.root.dataset.suspended).toBe('true')
+    expect(ed.root.hasAttribute('inert')).toBe(true)
+
+    ed.show()
+
+    expect(ed.isVisible).toBe(true)
+    expect(ed.root.style.display).toBe('')
+    expect(ed.root.style.visibility).toBe('')
+    expect(ed.root.dataset.suspended).toBeUndefined()
+    expect(ed.root.hasAttribute('inert')).toBe(false)
+  })
+
   it('dispose removes the root and leaves the editor inert, not broken', () => {
     const { ed, container } = setup()
     ed.show()

@@ -11,7 +11,7 @@
 import type { TerminalRenderer } from '../renderers/types'
 import { BlockManager, type GetLineFn } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
-import { publishCellMetric } from './cell-metric'
+import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
@@ -36,6 +36,9 @@ export class ScrollbackController {
   readonly scrollbackInner: HTMLElement
   /** Outer clipping container — height changes with mode. */
   readonly xtermLiveContainer: HTMLElement
+  /** Inner clipping window. It tracks the rows written while the outer box
+   *  supplies the same height to flex layout. */
+  readonly xtermLiveViewport: HTMLElement
   /** Inner wrapper with stable min-height — xterm mounts here so its grid
    *  stays sane regardless of the clipping container's CSS height. */
   readonly xtermInner: HTMLElement
@@ -80,15 +83,19 @@ export class ScrollbackController {
     // Blocks live in the inner wrapper.
     this.scrollbackArea.appendChild(this.scrollbackInner)
 
-    // The xterm live container clips the xterm: idle=36px, running=140px,
-    // fullscreen fills the viewport. Its child xterm-inner always keeps
-    // a minimum height so the xterm grid never collapses to 1 row.
+    // The outer container participates in flex layout; the separate inner
+    // viewport clips xterm's larger grid. Both follow the written rows so the
+    // running shape matches the frozen block it becomes.
     this.xtermLiveContainer = document.createElement('div')
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
 
+    this.xtermLiveViewport = document.createElement('div')
+    this.xtermLiveViewport.className = 'xterm-live-viewport'
+
     this.xtermInner = document.createElement('div')
     this.xtermInner.className = 'xterm-inner'
-    this.xtermLiveContainer.appendChild(this.xtermInner)
+    this.xtermLiveViewport.appendChild(this.xtermInner)
+    this.xtermLiveContainer.appendChild(this.xtermLiveViewport)
 
     // Separator between blocks and live region — inserted before the
     // xterm container so blocks stack above it. Hidden when no blocks.
@@ -191,13 +198,14 @@ export class ScrollbackController {
 
   // ── Live region visibility ────────────────────────────────────────────
 
-  /** Collapse the live region when the prompt is idle. */
+  /** Collapse the live region only after its rows belong to the DOM block. */
   setIdle(): void {
-    if (this._mode === 'fullscreen') return
+    if (this._mode === 'fullscreen' || this._blockManager.visualFreezePending) return
     this._mode = 'idle'
-    // The inline height set by setLiveHeight has to go, or it outranks the
-    // class's `height: 0` and an idle region keeps the last command's size.
+    // Both inline heights have to go: running content height and its clip
+    // otherwise outrank the idle/fullscreen mode classes.
     this.xtermLiveContainer.style.height = ''
+    this.xtermLiveViewport.style.height = ''
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
@@ -206,11 +214,15 @@ export class ScrollbackController {
     this._updateSeparator()
   }
 
-  /** Expand the live region while a command runs. */
+  /** Show live output below the running block. */
   setRunning(): void {
     if (this._mode === 'fullscreen') return
+    const entering = this._mode !== 'running'
     this._mode = 'running'
-    this.xtermLiveContainer.style.height = ''
+    if (entering) {
+      this.xtermLiveContainer.style.height = ''
+      this.xtermLiveViewport.style.height = ''
+    }
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-running'
     this.xtermInner.className = 'xterm-inner'
@@ -218,14 +230,10 @@ export class ScrollbackController {
     // shift applies from the first frame (nocx-w1n4).
     this._applyEchoShift()
     this._updateSeparator()
-    // Size the region to what is actually in the grid ON THIS FRAME, not
-    // after the first chunk of output. The class's 140px is a fallback for
-    // "cannot measure yet"; leaving it in charge until the echo arrived
-    // painted a mostly-empty box, then shrank it to one or two lines the
-    // moment output landed and scrolled again — the pop at every command
-    // start. setLiveHeight is a no-op while the renderer cannot measure
-    // (the fallback stands), and when it does size, the scroll below lands
-    // on the same target — the second scroll is a no-op.
+    // Size both layers from the rows that exist now. A short command therefore
+    // opens beside the prompt instead of reserving a pane-high empty window.
+    // Both layers change in the same layout pass: a transition here can still
+    // be half-open when a fast command freezes, creating an extra jump.
     this.setLiveHeight(this._renderer.liveContentHeight())
     this._scrollToBottom()
   }
@@ -240,6 +248,7 @@ export class ScrollbackController {
   setUnstructured(): void {
     if (this._mode === 'fullscreen') return
     this._mode = 'unstructured'
+    this.xtermLiveViewport.style.height = ''
     this.xtermLiveContainer.className = 'xterm-live-container live-unstructured'
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
@@ -249,13 +258,11 @@ export class ScrollbackController {
   }
 
   /**
-   * The height the live region is capped at while a command runs: the
-   * scroller's client height less the running block's header, which share
-   * the viewport (nocx-6w4z). `setLiveHeight` clamps the box to this, and
-   * the grid must be fitted to the SAME number — a grid taller than the
-   * box leaves its last rows outside the clipping container, unreachable
-   * rather than merely off-screen (nocx-zn4d). Null outside `running` or
-   * when the scroller cannot be measured.
+   * Maximum space available to running output: the scroller's client height
+   * less the running block's header, which share the viewport (nocx-6w4z).
+   * The measured content grows only up to this ceiling, and the grid is fitted
+   * to the same cap so tall inline TUIs keep their last rows reachable
+   * (nocx-zn4d). Null outside `running` or while unmeasurable.
    */
   get runningLiveCap(): number | null {
     if (this._mode !== 'running') return null
@@ -265,61 +272,60 @@ export class ScrollbackController {
   }
 
   /**
-   * Size the live region to the output it is showing.
+   * Size the live output to the rows it actually shows.
    *
-   * The height used to be a constant 140px in `style.css`, sized for the few
-   * lines a command normally prints. Anything that repaints a whole screen
-   * WITHOUT the alternate buffer — `top`, `claude`, any TUI that keeps your
-   * scrollback on purpose — got those same 140 pixels of a pane ten times
-   * taller, with the rest blank above it. The alt-screen path was never
-   * involved, which is why it looked like alt-screen was broken and was not:
-   * `top` sends `ESC[?1h ESC= ESC[?25l ESC[H` and no `1049` at all.
-   *
-   * The frozen block already did the right thing — a finished command's block
-   * is as tall as its output. This makes the live half agree with the half that
-   * was already correct.
-   *
-   * Ignored outside `running`: `idle` is a zero-height region by definition and
-   * `fullscreen` is owned by the alt-screen path (nocx-6w4z).
+   * The renderer measures the grid, including the echoed command row that
+   * `_applyEchoShift` translates above the clip. Both the outer flow box and
+   * its inner clip reserve only the remainder. That keeps running geometry
+   * aligned with the frozen body, which omits the same echo row.
+   * Height changes are synchronous: animation can be only 2–4px open when a
+   * fast command freezes, turning one layout change into two movements.
    */
-
   setLiveHeight(px: number): void {
     if (this._mode !== 'running') return
-    // nocx-w1n4: the echoed command line leaves the LIVE region the same
-    // way it leaves the frozen body — the first shown row is the running
-    // block's outputStart. Applied before the height guards so a viewport
-    // scroll that leaves the box size unchanged still releases the shift.
+    // nocx-w1n4: the echoed command line leaves the LIVE region the same way
+    // it leaves the frozen body — the first shown row is the running block's
+    // outputStart. Applied before the height guards so a viewport scroll that
+    // leaves the box size unchanged still releases the shift.
     this._applyEchoShift()
     if (px <= 0) return
-    // The ceiling is the SCROLLER's client height, not the pane's. They are the
-    // same number while a command runs — the editor takes its box away when it
-    // hides — but not at a prompt, and measuring the element that actually
-    // displays the grid is the statement that stays true either way.
-    // Less the running block's header, because the two share the viewport. Sized
-    // against the bare scroller instead, header plus region came to more than
-    // the space available and the last rows of a program that filled the pane
-    // had nowhere to be drawn — the same defect as the editor's reserved box,
-    // one element along. This is `runningLiveCap`, the one number both the box
-    // and the grid fit to (nocx-zn4d).
     const max = this.runningLiveCap
     if (max === null) return
-    const previous = this.xtermLiveContainer.getBoundingClientRect().height
-    const h = Math.min(px, max)
-    if (Math.abs(h - previous) < 0.5) return
-    this.xtermLiveContainer.style.height = `${h}px`
-    // Keep the block's bottom at the bottom of the view — but only on the frames
-    // where the block actually CHANGED SIZE. This runs on every chunk of output,
-    // and a program that repaints in place changes nothing about the layout:
-    // `top` redrawing the same 33 rows every three seconds was moving the
-    // scroll each time for no reason, which is unpleasant if you are reading.
-    // The early return above is the whole guard.
-    //
-    // The rule itself gives both halves of what is wanted, because the region is
-    // capped at "viewport minus this block's header": the block therefore FITS,
-    // so the bottom of the view shows all of it — and once the output is big
-    // enough to fill the pane the header arrives at the top of its own accord
-    // and can go no further (nocx-6w4z).
-    if (this._following) this._scrollToBottom()
+    const pad = this._bodyPaddingPx()
+    // Two subtractions, and both are what makes the running region the same
+    // box as the frozen one. The echo row: the grid still holds the shell's
+    // echo of the command at its top and the transform moves it out of view,
+    // so the flow box must not reserve it. The padding: the block body has
+    // it, this region is that body while the command runs, and the cap is a
+    // ceiling on the whole box rather than on the rows inside it.
+    const content = Math.min(Math.max(0, px - this._echoShiftPx()), Math.max(0, max - pad))
+    const box = `${content + pad}px`
+    // Keep the block's bottom at the bottom of the view — but only on the
+    // frames where the box actually CHANGED SIZE. This runs on every chunk of
+    // output, and a program that repaints in place changes nothing about the
+    // layout: `top` redrawing the same 33 rows every three seconds was moving
+    // the scroll each time for no reason, which is unpleasant if you are
+    // reading. The comparison below is the whole guard.
+    if (this.xtermLiveContainer.style.height !== box) {
+      this.xtermLiveContainer.style.height = box
+      if (this._following) this._scrollToBottom()
+    }
+    const inner = `${content}px`
+    if (this.xtermLiveViewport.style.height !== inner) {
+      this.xtermLiveViewport.style.height = inner
+    }
+  }
+
+  /** The body padding this region wears while it is the running block's body
+   *  — read off the element rather than repeated here, so the stylesheet
+   *  stays the one place the number lives (`--cmd-output-pad-*`). Zero
+   *  wherever there is no layout to read (jsdom), which is the same answer
+   *  the class's own fallback gives. */
+  private _bodyPaddingPx(): number {
+    const cs = getComputedStyle(this.xtermLiveContainer)
+    const top = parseFloat(cs.paddingTop)
+    const bottom = parseFloat(cs.paddingBottom)
+    return (Number.isFinite(top) ? top : 0) + (Number.isFinite(bottom) ? bottom : 0)
   }
 
   /**
@@ -363,12 +369,14 @@ export class ScrollbackController {
     this.xtermInner.style.transform = next
   }
 
-  /** Re-read the renderer's cell width and republish the frozen block
-   *  metric (nocx-yy9g). No-op while the renderer cannot measure; a
-   *  republish is cheap, so it runs on every cell-dims notification
-   *  without trying to detect whether anything actually changed. */
+  /** Re-read the renderer's cell metric — width AND row pitch — and
+   *  republish it for the frozen blocks (nocx-yy9g and its vertical twin).
+   *  No-op while the renderer cannot measure; a republish is cheap, so it
+   *  runs on every cell-dims notification without trying to detect whether
+   *  anything actually changed. */
   private _republishCellMetric(): void {
     publishCellMetric(this.scrollbackInner, this._renderer.cellWidth)
+    publishRowPitch(this.scrollbackInner, this._renderer.cellHeight)
   }
 
   /**
@@ -409,6 +417,7 @@ export class ScrollbackController {
    */
   enterFullscreen(): void {
     this._mode = 'fullscreen'
+    this.xtermLiveViewport.style.height = ''
     this.xtermLiveContainer.className = 'xterm-live-container live-fullscreen'
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
@@ -421,6 +430,7 @@ export class ScrollbackController {
   exitFullscreen(): void {
     this._mode = 'idle'
     this.xtermLiveContainer.style.height = ''
+    this.xtermLiveViewport.style.height = ''
     this._setFilledPane(false)
     this.xtermLiveContainer.className = 'xterm-live-container live-idle'
     this.xtermInner.className = 'xterm-inner'
