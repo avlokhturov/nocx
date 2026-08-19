@@ -668,6 +668,16 @@ export class ScrollbackController {
     // gliding it would be a second animation over their own gesture.
     if (!Number.isFinite(dy) || Math.abs(dy) < 1) return
     if (Math.abs(dy) > this.scrollbackArea.clientHeight) return
+    // NO SCROLLBAR FOR THE SETTLE'S OWN OVERFLOW. The stack hangs from the
+    // scroller's bottom edge, so displacing it downward — which is what the
+    // inverse of a growth IS — puts its last pixels past that edge and makes
+    // the scroller scrollable by exactly the amount the glide is hiding. The
+    // owner saw the bar flash on every command. `hidden` rather than `clip`:
+    // it keeps the scroll offset and the element a scroll container, and
+    // `scrollbar-gutter: stable` means no width changes hands either way. The
+    // cost is named: a wheel during the settle is ignored, for the ~140ms it
+    // lasts, and only when the person was already following the output.
+    this.scrollbackArea.classList.add('is-settling')
     for (const el of [this.scrollbackInner]) {
       const anim = el.animate(
         [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0px)' }],
@@ -677,6 +687,9 @@ export class ScrollbackController {
       anim.finished.then(
         () => {
           if (this._settleAnimations.get(el) === anim) this._settleAnimations.delete(el)
+          if (this._settleAnimations.size === 0) {
+            this.scrollbackArea.classList.remove('is-settling')
+          }
         },
         () => {
           /* cancelled by the next glide — the next one owns the element */
@@ -688,6 +701,7 @@ export class ScrollbackController {
   private _cancelGlides(): void {
     for (const anim of this._settleAnimations.values()) anim.cancel()
     this._settleAnimations.clear()
+    this.scrollbackArea.classList.remove('is-settling')
   }
 
   /**

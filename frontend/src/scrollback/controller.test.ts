@@ -582,7 +582,7 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
       }) as unknown as MediaQueryList
   })
 
-  it('gives the stack the inverse of what it just moved, and releases it', () => {
+  it('gives the stack the inverse of what it just moved, and releases it', async () => {
     // FLIP: the DOM change lands whole, then the stack is put back where it
     // looked to be and let go. What animates is a transform — it takes no part
     // in layout, which is why this is not the height animation that was tried
@@ -594,12 +594,21 @@ describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
     // ONE element, because the stack is one element — and the follow
     // observer's sentinel is deliberately outside it (nocx-i4h04.3).
     expect(frames.map((f) => f.el)).toEqual(['inner'])
+    // And no scrollbar for the settle's own overflow: the displaced stack
+    // hangs past the scroller's bottom edge for as long as this lasts, which
+    // flashed a bar on every command (nocx-i4h04.4).
+    expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(true)
     for (const f of frames) {
       expect(f.keyframes).toEqual([
         { transform: 'translateY(60px)' },
         { transform: 'translateY(0px)' },
       ])
     }
+
+    // The settle ends and the scroller offers its bar again.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(false)
     controller.blockManager.clearAll()
   })
 

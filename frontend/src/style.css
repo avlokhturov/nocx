@@ -533,6 +533,16 @@
   flex-direction: column;
 }
 
+/* While the pane is settling into a new shape, the stack is displaced
+   downward by the amount the glide is hiding (scrollback/controller.ts
+   `_glide`), and the stack hangs from this box's bottom edge — so those
+   pixels are past it and the scroller reports itself scrollable. The bar
+   flashed on every command. `hidden` keeps the scroll offset and keeps this a
+   scroll container, and the stable gutter above means no width moves. */
+.scrollback-area.is-settling {
+  overflow-y: hidden;
+}
+
 .scrollback-inner {
   display: flex;
   flex-direction: column;
