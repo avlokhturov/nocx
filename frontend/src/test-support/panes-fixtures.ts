@@ -32,6 +32,7 @@ import type {
 import type { ClipboardAccess } from '../clipboard'
 import type { ClipboardGate } from '../clipboard'
 import type { ClipboardBanner } from '../banner'
+import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
 import type { SessionLiveness } from '../generated/session.liveness'
@@ -869,6 +870,10 @@ export async function mountPaneManager(
   banner?: BannerFake,
   layout?: ReturnType<typeof makeLayoutStore>,
   uiState?: UIStateClient,
+  /** The saved connections `profiles.list` answers with. Empty is the
+   *  ordinary case; a restore that must reconnect a stored endpoint through
+   *  a saved connection is the test that needs one (nocx-9y4ku). */
+  profiles?: SSHProfile[],
 ): Promise<{
   bar: HTMLElement
   panes: HTMLElement
@@ -881,6 +886,9 @@ export async function mountPaneManager(
   layout: LayoutStore
   backend: ReturnType<typeof makeLayoutBackend>
   uiState: UIStateClient
+  /** The profile client the manager was built with — `listProfiles` is a
+   *  spy, so a test can assert the saved connections were read. */
+  profileClient: { listProfiles: Mock; listGroups: Mock }
 }> {
   const { bar, panes } = setupTabBarDOM()
   const c = client ?? makeClient()
@@ -888,7 +896,7 @@ export async function mountPaneManager(
   const g = gate ?? new (await import('../clipboard')).ClipboardGate()
   const bn = banner ?? makeBanner()
   const pc = {
-    listProfiles: vi.fn().mockResolvedValue([]),
+    listProfiles: vi.fn().mockResolvedValue(profiles ?? []),
     listGroups: vi.fn().mockResolvedValue([]),
   }
   const l = layout ?? makeLayoutStore()
@@ -927,5 +935,6 @@ export async function mountPaneManager(
     layout: l.store,
     backend: l.backend,
     uiState: ui,
+    profileClient: pc,
   }
 }

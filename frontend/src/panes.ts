@@ -25,8 +25,9 @@ import type { WSClient } from './ipc'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
-import type { ProfileClient } from './profiles'
-import { adoptAliasProfile } from './profiles'
+import type { ProfileClient, SSHProfile } from './profiles'
+import { adoptAliasProfile, parseQuickConnect } from './profiles'
+import { resolveSshProfileOverlay } from './quick-connect-assembly'
 import { cardQuote } from './overview/overview-model'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
@@ -598,10 +599,37 @@ export class PaneManager {
    *  "this create has not landed yet" and from a view pane that was never in
    *  the chain at all. */
   private readonly registered = new Set<string>()
-  /** ssh panes already reported as not reopened, so a redraw does not raise
-   *  the same toast again, and the endpoints one redraw has yet to report. */
-  private readonly reportedSSH = new Set<string>()
-  private readonly pendingSSHReport = new Set<string>()
+  /**
+   * THE SAVED CONNECTIONS, read once before the chain is drawn.
+   *
+   * A CACHE and never an authority: it answers exactly one question — which
+   * saved connection a stored endpoint names — so that a restored ssh pane
+   * reconnects the way it was opened, with that connection's port, auth
+   * bindings and jump host, rather than as a bare host the far end has to
+   * guess the rest of.
+   *
+   * It is read BEFORE the layout, and that ordering is not an optimisation.
+   * Adoption is synchronous — a row becomes a pane in the turn the store
+   * hands it over — and boot then chooses which tab is in front from the
+   * panes that exist. A lookup awaited inside adoption would make an ssh
+   * pane appear after that choice, so the tab a person left in front would
+   * never be the one they came back to.
+   *
+   * Empty is a legitimate answer and not a failure: a pane opened on a plain
+   * host or an ssh-config alias never had a profile, and reopens through
+   * ~/.ssh/config exactly as it was opened.
+   */
+  private savedProfiles: SSHProfile[] = []
+  /** The endpoints this turn has yet to report as not reconnected, and
+   *  whether the report is already scheduled. One statement per turn, not
+   *  one per pane: four stored connections behind a host that is not
+   *  answering used to mean four toasts. */
+  private readonly notReconnected = new Set<string>()
+  private notReconnectedScheduled = false
+  /** Whether a row the chain hands over becomes a pane. False only while a
+   *  CLEAN START reads the chain (readLayoutWithoutAdopting): the rows are
+   *  learnt, and none of them is opened. */
+  private adopting = true
   private readonly bar: HTMLElement
   private readonly verticalHost: HTMLElement
   /** MRU stack: most-recently-activated pane ids. */
@@ -750,8 +778,9 @@ export class PaneManager {
    * because none of it was ever here.
    *
    * What does NOT come back is the shell: a session dies with the backend
-   * (D5) and a restored local pane starts a fresh one in its place. Blocks,
-   * cwd and reconnecting an ssh pane are restore's (nocx-l21ib), not this.
+   * (D5) and a restored local pane starts a fresh one in its place. An ssh
+   * pane makes a NEW CONNECTION to the endpoint it applies at, which is not
+   * a resurrection either — nothing of the old session survives it.
    */
   private async boot(): Promise<void> {
     this.tabStrip.mount(this.hostFor(this.tabStrip))
@@ -772,6 +801,9 @@ export class PaneManager {
       if (!(await content.ready)) throw new Error('initial pane failed to start')
       return
     }
+    // THE SAVED CONNECTIONS BEFORE THE CHAIN, because adoption reads them
+    // and adoption happens inside the read (see savedProfiles).
+    await this.primeProfiles()
     await this.readLayout()
     // readLayout's change notification has already adopted whatever the
     // backend holds; an empty chain means a first pane to open.
@@ -798,6 +830,15 @@ export class PaneManager {
       // ever resolve from terminal content.
       throw new Error('initial pane is not a terminal')
     }
+    // A RESTORED CONNECTION IS NOT WHAT "the application started" MEANS, and
+    // the window must not wait on one. Its session is a round trip to another
+    // machine: it can be refused by a host that is down, or take a minute to
+    // say so, and either would be read here as the application having failed
+    // to start — `initialPaneReady` is what reports the app healthy. What did
+    // or did not happen to the connection is the pane's own to report
+    // (watchReconnect), and it reports it whether anybody was in front of it
+    // or not.
+    if (this.layout.panes().find((row) => row.id === front.wireId)?.kind === 'ssh') return
     const ok = await content.ready
     if (!ok) throw new Error('initial pane failed to start')
   }
@@ -813,14 +854,43 @@ export class PaneManager {
    * than by not reading them.
    */
   private async readLayoutWithoutAdopting(): Promise<void> {
-    await this.readLayout()
+    // ADOPTION IS SUPPRESSED FOR THE LENGTH OF THE READ, rather than undone
+    // after it. The rows arrive on the read's own change notification, so a
+    // manager that adopted them and dropped the chrome afterwards would have
+    // opened every one of them for the length of a turn — and now that an
+    // ssh row reconnects on adoption (nocx-9y4ku), that turn is a connection
+    // to every stored host, and a vault unlock behind it, on the one startup
+    // that was asked to open nothing.
+    this.adopting = false
+    try {
+      await this.readLayout()
+    } finally {
+      this.adopting = true
+    }
+    // Named AFTER the read, because that is when the rows are known. From
+    // here on the ordinary skip in renderFromLayout keeps them off screen.
     for (const row of this.layout.panes()) this.notShown.add(row.id)
-    // The read's own change notification has already put them on screen —
-    // this manager renders on every store change — so the chrome goes back
-    // off. DROPPED, not closed: dropChrome removes a pane from the window
-    // and never touches its row.
-    for (const pane of [...this.panes]) {
-      if (this.notShown.has(pane.wireId)) this.dropChrome(pane)
+  }
+
+  /**
+   * Read the saved connections, once, for the reconnects a restore is about
+   * to make (see savedProfiles).
+   *
+   * FAIL-QUIET, and the degrade is real rather than nominal: with no
+   * profiles in hand a stored endpoint is still reopened, through
+   * ~/.ssh/config and the host it names, which is how a pane opened on a
+   * bare host or an alias was opened in the first place. What is lost is a
+   * saved connection's port and auth bindings, and the connection that then
+   * fails says so through the same path any failed reconnect does.
+   */
+  private async primeProfiles(): Promise<void> {
+    try {
+      this.savedProfiles = await this.profileClient.listProfiles()
+    } catch (err) {
+      this.savedProfiles = []
+      log.warn('nocx: the saved connections could not be read before a restore', {
+        error: err instanceof Error ? err.message : String(err),
+      })
     }
   }
 
@@ -968,15 +1038,30 @@ export class PaneManager {
     return pane
   }
 
+  /** Open a connection the user just asked for: mint the identity, ask the
+   *  backend for the tab, and put the chrome up in the same turn. */
   newSSHPane(profileId: string, host: string, user?: string, port?: number, title?: string): Pane {
     log.info('nocx: newSSHPane called', { profileId, host, user, port, title })
-    const sshOpts = { profileId, host, user, port } as const
-    const paneRef = { current: undefined as Pane | undefined }
-    // The endpoint is the canonical user@host:port the pane applies at, which
-    // is what §5 stores on an ssh pane. The profile it was opened from is NOT
-    // stored — the chain has no column for it — which is why a restored ssh
-    // pane cannot be reconnected yet: see adopt().
+    // The endpoint is the canonical user@host:port the pane applies at,
+    // which is what §5 stores on an ssh pane — and what a restore reconnects
+    // through, since the chain has no column for the profile a pane was
+    // opened from (see reopenSSH).
     const identity = this.mintPane('ssh', endpointOf(host, user, port))
+    return this.buildSSHPane(identity, { profileId, host, user, port }, title || host)
+  }
+
+  /** The chrome and content of an SSH pane with a given identity — one
+   *  implementation for a connection the user just opened and one the chain
+   *  already holds, because "an ssh pane" must not mean two things any more
+   *  than "a local pane" may (see buildLocalPane). */
+  private buildSSHPane(
+    identity: PaneIdentity,
+    sshOpts: { profileId: string; host: string; user?: string; port?: number },
+    title: string,
+    activateNow = true,
+  ): Pane {
+    const { host, user, port } = sshOpts
+    const paneRef = { current: undefined as Pane | undefined }
     const content = new TerminalContent(
       this.client,
       identity,
@@ -1014,11 +1099,11 @@ export class PaneManager {
     const descriptor: ContentDescriptor = {
       surfaceType: SURFACE_TERMINAL,
       singletonKey: null,
-      restoreDescriptor: { type: 'ssh', profileId, host, user },
+      restoreDescriptor: { type: 'ssh', profileId: sshOpts.profileId, host, user },
       supportsAttention: true,
-      defaultTitle: title || host,
+      defaultTitle: title,
     }
-    const pane = this.addPane(content, descriptor, identity.paneId)
+    const pane = this.addPane(content, descriptor, identity.paneId, activateNow)
     paneRef.current = pane
     return pane
   }
@@ -1965,11 +2050,12 @@ export class PaneManager {
   private renderFromLayout(): void {
     if (!this.layoutAvailable) return
     const rows = this.layout.panes()
-    for (const row of rows) {
+    // A CLEAN START draws none of what was left (nocx-yejir), and it says so
+    // twice: `adopting` is false for the read that learns the rows, and
+    // `notShown` names them for every render after it. Both are needed —
+    // the second cannot be filled until the read has answered.
+    for (const row of this.adopting ? rows : []) {
       if (this.panes.some((p) => p.wireId === row.id)) continue
-      // A clean start draws none of what was left (nocx-yejir). The rows
-      // stay where they are; what the setting decides is whether the window
-      // opens on them.
       if (this.notShown.has(row.id)) continue
       this.adopt(row)
     }
@@ -1986,7 +2072,6 @@ export class PaneManager {
     }
     this.applyDecoration()
     this.syncStripOrder()
-    this.reportUnreopened()
   }
 
   /**
@@ -1994,23 +2079,19 @@ export class PaneManager {
    *
    * A LOCAL pane starts a fresh shell, which is §8's rule: the process died
    * with the backend and is never resurrected, so what comes back is the
-   * pane, not its shell. Its cwd is not restored here — nothing revises a
-   * pane's cwd yet, so the stored one is whatever it was opened with, and
-   * reopening in it is restore's (nocx-l21ib).
+   * pane, not its shell. That is also the whole of what an INLINE ssh gets —
+   * a pane somebody typed `ssh host` inside is a local pane and its row says
+   * so, so it comes back as its local shell, and the commands that ran on
+   * the far host go on saying where they ran because the entry, not the
+   * pane, is what recorded it (design §7).
    *
-   * AN SSH PANE IS NOT ADOPTED, and the gap is named rather than papered
-   * over: reconnecting needs the profile the pane was opened from, the chain
-   * stores an endpoint and no profile, and opening a LOCAL shell for a row
-   * that says ssh would be a lie about where the user is. Its row is left
-   * exactly where it is — nothing is deleted — and the count is reported, so
-   * restore finds the rows waiting rather than a chain the renderer tidied.
+   * AN SSH PANE MAKES A NEW CONNECTION to the endpoint it applies at
+   * (reopenSSH). Not a resurrection and never allowed to look like one: the
+   * old session died with the backend, and what this opens is another one.
    */
   private adopt(row: PaneRow): void {
     if (row.kind === 'ssh') {
-      if (this.reportedSSH.has(row.id)) return
-      this.reportedSSH.add(row.id)
-      log.warn('nocx: an ssh pane was not reopened', { pane: row.id, endpoint: row.endpoint })
-      this.pendingSSHReport.add(row.endpoint ?? 'a host')
+      this.reopenSSH(row)
       return
     }
     this.registered.add(row.id)
@@ -2025,26 +2106,111 @@ export class PaneManager {
   }
 
   /**
-   * Say ONCE that connections were not reopened, however many there were.
+   * Reopen a stored connection: a NEW session to the endpoint the row says
+   * the pane applies at.
+   *
+   * THE PROFILE IS RESOLVED FROM THE ENDPOINT, because the chain has no
+   * column for one — §5 stores where a pane applies, not which saved
+   * connection it was opened from. The match is the one the product already
+   * makes for a hand-typed destination (resolveSshProfileOverlay), and it
+   * counts only when the profile's canonical identity IS this endpoint:
+   * `deploy@srv-01:22` and `srv-01:22` are two destinations, and a profile
+   * that merely shares the host is not the one this pane was opened from.
+   *
+   * NO MATCH IS THE ORDINARY CASE, not a failure — a pane opened on a plain
+   * host or an ssh-config alias never had a profile. It reopens the way it
+   * was opened, through the host, and the far end's config supplies the rest.
+   *
+   * The pane is built SYNCHRONOUSLY, in the turn the row arrives, so the row
+   * is on screen before boot chooses which tab is in front.
+   */
+  private reopenSSH(row: PaneRow): void {
+    this.registered.add(row.id)
+    const endpoint = row.endpoint ?? ''
+    // The one parser for `user@host:port` in this codebase; an endpoint it
+    // cannot make a host out of leaves `host` empty, and the open is refused
+    // for saying nothing about where to connect — which is the honest answer
+    // to a row that does not say either.
+    const dest = parseQuickConnect(endpoint).options
+    const overlay = dest.host
+      ? resolveSshProfileOverlay(this.savedProfiles, { host: dest.host, user: dest.user })
+      : null
+    const profileId = overlay?.identity === endpoint ? overlay.profileId : ''
+    log.info('nocx: reopening a stored connection', { pane: row.id, endpoint, profileId })
+    const pane = this.buildSSHPane(
+      { paneId: row.id, registered: Promise.resolve(true) },
+      { profileId, host: dest.host, user: dest.user, port: dest.port },
+      // The tab is named after the endpoint until the session names it,
+      // exactly as a connection opened by hand is named after its host.
+      dest.host || endpoint,
+      false,
+    )
+    void this.watchReconnect(pane, endpoint)
+  }
+
+  /**
+   * A reconnect that did not come up SAYS SO, and keeps its pane.
+   *
+   * The pane is never replaced by a local shell: a tab that says a host and
+   * runs your own machine is the worst answer available, and the second
+   * worst is a `slog.Warn` nobody sees. What is left on screen is the tab,
+   * its row in the chain, and the content's own account of why the session
+   * did not start.
+   *
+   * WHAT IS NOT LEFT ON SCREEN YET is the pane's past. A content whose mount
+   * failed replaces the pane's children with its notice, and the scrollback
+   * the restored blocks are drawn into goes with them — so the blocks this
+   * pane has are fetched into a tree nobody can see. The fix is one line in
+   * terminal-content's mount catch (prepend the notice rather than replace
+   * the pane), and that file belongs to nocx-8won8's worker; measured, not
+   * assumed — with that one line the same pane shows both its block and its
+   * reason.
+   *
+   * A pane that was dropped while the connect was in flight — a clean start
+   * naming its rows, a tab the person closed — reports nothing: there is no
+   * pane left to explain.
+   */
+  private async watchReconnect(pane: Pane, endpoint: string): Promise<void> {
+    const content = pane.content
+    if (!(content instanceof TerminalContent)) return
+    if (await content.ready) return
+    if (!this.panes.includes(pane)) return
+    this.reportNotReconnected(endpoint)
+  }
+
+  /**
+   * Say ONCE that connections did not come back, however many there were.
    *
    * One toast per pane was the first version and it was wrong twice over: a
    * user with four ssh tabs got four warnings on every load, and in the e2e
    * gate a warning left over from an earlier spec sat beside the toast a
    * later spec was asserting on, which is a strict-mode locator resolving to
    * two elements (git-panel, three specs). A count is the honest summary, and
-   * the pane ids are in the log for whoever needs them.
+   * the endpoints are in the log for whoever needs them.
+   *
+   * The window is a turn rather than a fixed delay: connections fail at their
+   * own pace, and the tab each one left on screen — with the content's own
+   * account of why the session did not start — is what carries the fact
+   * afterwards. This is the summary, not the record.
    */
-  private reportUnreopened(): void {
-    const hosts = [...this.pendingSSHReport]
-    this.pendingSSHReport.clear()
-    if (hosts.length === 0) return
-    showToast({
-      level: 'warning',
-      message:
-        hosts.length === 1
-          ? `A connection to ${hosts[0]} was not reopened — open it again to reconnect`
-          : `${hosts.length} connections were not reopened — open them again to reconnect`,
-    })
+  private reportNotReconnected(endpoint: string): void {
+    log.warn('nocx: a stored connection was not reopened', { endpoint })
+    this.notReconnected.add(endpoint || 'a host')
+    if (this.notReconnectedScheduled) return
+    this.notReconnectedScheduled = true
+    setTimeout(() => {
+      this.notReconnectedScheduled = false
+      const hosts = [...this.notReconnected]
+      this.notReconnected.clear()
+      if (hosts.length === 0) return
+      showToast({
+        level: 'warning',
+        message:
+          hosts.length === 1
+            ? `Could not reconnect to ${hosts[0]} — its tab is still here`
+            : `${hosts.length} connections could not be reopened — their tabs are still here`,
+      })
+    }, 0)
   }
 
   /** Remove chrome without touching the chain: the row is already gone. */
