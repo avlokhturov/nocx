@@ -4,33 +4,32 @@
 // One row per past command, a relative timestamp on the right, the ladder
 // rung it was drawn from, and a footer with the navigation keys.
 //
-// The rule (brief nocx-w7h.5 reversed the v4 one): with an EMPTY filter,
-// navigating previews the selected command INTO the editor, and Enter
-// executes what you can see — through the editor's own submit path, exactly
-// as if the user had typed it and pressed Enter. The v4 argument ("running
-// from a list is unsafe when the environment changed") applied to running
-// blind; it does not apply to a command sitting in the input line, visible,
-// with its existence check applied. The preview is the safety, so the label
-// says "↵ to execute".
+// THE RULE: Enter TAKES the selected command into the line and never runs
+// it, whichever way the filter stands. The second Enter — on a command now
+// sitting where it can be read and edited — is the run.
 //
-// With a NON-EMPTY filter the same keystroke would be the lie §8.10 forbids:
-// the screen would hold two different texts — the query in the panel and
-// somebody else's command in the line — and Enter would run a command the
-// user never read while staring at their search. So a search hands the
-// input to the field: the selected row is highlighted but NOT previewed,
-// Enter INSERTS it into the line without running it ("↵ to insert"), and a
-// second Enter — now with an empty filter and the command visible — runs
-// it. A blind run from a typed search and a reviewed run of a visible
-// command must not share one keystroke.
+// This has been decided twice and is written down twice for that reason. v4
+// said take-never-run; brief nocx-w7h.5 reversed it for the empty-filter
+// case, on the argument that navigating PREVIEWS the command into the line,
+// so Enter would only run something visible; the footer then said "↵ to
+// execute". The owner reversed it back on 2026-08-19, using it: choosing
+// from a list and running are two decisions, and one keystroke must not make
+// both — a preview you did not ask to read is not the same as a command you
+// typed.
+//
+// With a NON-EMPTY filter this was never in question, and the reason is
+// worth keeping because it generalises: the screen would hold two different
+// texts — the query in the panel and somebody else's command in the line —
+// and Enter would run a command the user never read while staring at their
+// search (design §8.10: "Enter inserts. It never executes.").
 //
 // The state machine is a discriminated union on `state`, never flags on the
 // editor: `closed → opened (draft captured) → navigating (preview in the
 // editor, or highlight only when the filter is active) → accepted | inserted
 // | dismissed | abandoned-to-edit`. `opened` is what an empty history looks
-// like — the panel is up and says so, with nothing to highlight. `accepted`
-// submits the previewed command through the editor; `inserted` replaces the
-// draft with the selected command and closes WITHOUT submitting (the second
-// Enter runs it); `dismissed` restores the draft, the selection and the
+// like — the panel is up and says so, with nothing to highlight. `inserted`
+// replaces the draft with the selected command and closes WITHOUT submitting
+// (the second Enter runs it); `dismissed` restores the draft, the selection and the
 // scroll exactly as they were; the third exit (v8 §1) closes the overlay and
 // KEEPS the previewed command as the new draft when an insertion, a deletion
 // or a caret move arrives while navigating — editing what you recalled is
@@ -125,10 +124,6 @@ export interface RecallEditor {
   replaceDoc(text: string, from?: number, to?: number): void
   setScrollTop(top: number): void
   focus(): void
-  /** Submit the current document through the editor's normal submit path —
-   *  the same one a typed Enter fires. The overlay calls this to execute the
-   *  previewed command; nothing is bypassed, no second route exists. */
-  submit(): void
 }
 
 /** `text` is the search filter (nocx-ms7v): absent or empty means "the rung as
@@ -514,18 +509,15 @@ export class RecallOverlay {
         if (e.key === 'Enter') {
           e.preventDefault()
           e.stopPropagation()
-          // The branch that must never be "simplified" back: Enter INSERTS
-          // when the filter is non-empty and EXECUTES when it is empty.
-          // A typed search makes the row a candidate, not a verdict — the
-          // screen holds the query and the row's text, and Enter would run
-          // a command the user never read (design §8.10: "Enter inserts. It
-          // never executes."). Inserting drops the filter with the command
-          // visible in the line; the SECOND Enter — an empty-filter Enter,
-          // the command read — is the reviewed run. A blind run from a
-          // typed search and a reviewed run of a visible command must not
-          // share one keystroke.
-          if (s.filter !== '') this.insert()
-          else this.accept()
+          // ENTER TAKES, IT NEVER RUNS — in both filter states, which is a
+          // reversal: with an empty filter it used to submit the previewed
+          // command through the editor. The owner asked for it on
+          // 2026-08-19, and the reason is the one design §8.10 gave in the
+          // first place: choosing from a list and running are two decisions,
+          // and one keystroke must not make both. The second Enter, on a
+          // command now sitting in the line where it can be read and edited,
+          // is the run.
+          this.takeSelected()
           return true
         }
         if (e.key === 'ArrowUp' && e.shiftKey) {
@@ -756,39 +748,6 @@ export class RecallOverlay {
     })
   }
 
-  /** Enter with an EMPTY filter: the previewed command is already in the
-   *  editor (navigating previewed it); submit it through the editor's own
-   *  submit path — the same one a typed Enter fires, with the command
-   *  visible in the line. Nothing is bypassed, no second route exists. */
-  private accept(): void {
-    const s = this.state
-    if (s.name !== 'navigating') return
-    // A masked row is not a command. The durable text is the masked one
-    // (ADR-0021), so `curl -H "Bearer sk-p...7890"` looks real and cannot
-    // work — it sends the mask and fails somewhere the user cannot read.
-    // The refusal lives in the editor's beforeSubmit seam (the host's):
-    // the preview already registered this row's redaction spans as
-    // unresolved chips, so Enter reaches the submit path, is vetoed there,
-    // the draft survives, and the host opens resolution on the first chip.
-    // Rows from THIS session never carry spans — they are the real text
-    // (nocx-xkve.4).
-    this.close()
-    this.editor.submit()
-  }
-
-  /** Enter with a NON-EMPTY filter: the row was highlighted, never
-   *  previewed — the line holds the draft. Insert the selected command into
-   *  the editor WITHOUT submitting: the panel closes, the command sits in
-   *  the line, and the second Enter — the empty-filter Enter, the reviewed
-   *  run — executes it. A blind run from a typed search and a reviewed run
-   *  of a visible command must not share one keystroke (see the Enter
-   *  branch). The draft snapshot is deliberately NOT restored: the inserted
-   *  command IS the new draft. */
-  private insert(): void {
-    if (this.state.name !== 'navigating' || this.state.filter === '') return
-    this.takeSelected()
-  }
-
   /**
    * Close the overlay and leave the selected command in the line, unrun.
    *
@@ -963,16 +922,11 @@ export class RecallOverlay {
     const footer: string[] = []
     if (s.name === 'navigating') {
       // The Enter group names what the key ACTUALLY does in this state: a
-      // search hands the input to the field (Enter inserts, never executes);
-      // with the filter cleared the previewed command is in the line and
-      // Enter is the reviewed run.
-      footer.push(s.filter !== '' ? '↵ to insert' : '↵ to execute')
-      // Naming the take-without-running exit is half the point of adding the
-      // key: it already existed through any edit, and nothing said so, which
-      // left execute-or-lose-it as the only visible choice. Only when the
-      // filter is empty, because there Enter already inserts and a second
-      // hint for the same outcome is noise.
-      if (s.filter === '') footer.push('tab to edit')
+      // One answer in both filter states now that Enter takes rather than
+      // runs. Tab still does the same thing and keeps working — it is the
+      // completion dropdown's "take this candidate" — but a second hint for
+      // one outcome is noise, so the footer names the key people reach for.
+      footer.push('↵ to insert')
     }
     footer.push('↑ ↓ to navigate')
     if (s.name !== 'loading' && s.query.exhausted && s.scope !== 'everywhere') {

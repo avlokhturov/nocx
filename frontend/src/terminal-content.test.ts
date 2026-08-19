@@ -527,10 +527,9 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
   // takes — with nothing bypassed. The command text reaches the PTY via the
   // renderer's paste handoff and the trailing '\r' via the session, so both
   // are asserted: a second, parallel route would look different.
-  it('Enter in the recall overlay executes the previewed command through the normal submit path', async () => {
+  it('Enter in the recall overlay takes the command into the line and sends nothing', async () => {
     const { view, ed, content, teardown } = await mountTerminal(makeClipboard())
     const session = (content as unknown as { session: SessionFake }).session
-    const renderer = rendererOf(content)
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
@@ -561,18 +560,15 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       // preview lands when the answer does.
       await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row
 
-      key(view, { key: 'Enter' }) // accept — executes the previewed command
-      // The same two frames again, in the same order and the same shapes as
-      // the typed submit: the recalled command takes the ordinary submit
-      // path, not a second route.
-      expect(session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])).toEqual([
-        'make deploy',
-        sentShape,
-      ])
-      // `paste` is a method declaration on TerminalRenderer, so referencing it
-      // detached trips unbound-method; the mock property type does not.
-      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
-      expect(pasteMock.paste).toHaveBeenLastCalledWith('make deploy')
+      key(view, { key: 'Enter' }) // takes the row — it does not run it
+      // NOTHING went to the pty: the overlay closes with the command in the
+      // line, and the next Enter — on a command the person can now read and
+      // edit — is the one that runs it (the owner's reversal, 2026-08-19).
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+      expect(ed.getDoc()).toBe('make deploy')
+      // The shape the typed submit sent is still the reference for what a
+      // real send looks like; nothing here produced one.
+      expect(sentShape).toBe('\r')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView

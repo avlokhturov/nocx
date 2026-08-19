@@ -1567,9 +1567,10 @@ export class TerminalContent extends BasePaneContent {
       // with source=session, which the panel labels "this session only" —
       // presenting one session as all history is the same lie as marking
       // every command green. The editor's key arbiter gives the overlay
-      // first refusal while it is open; navigating previews into the
-      // editor, and Enter executes through the editor's own submit path
-      // (nocx-w7h.5).
+      // first refusal while it is open; navigating previews into the editor,
+      // and Enter TAKES the command into the line without running it — the
+      // overlay never reaches a submit path (nocx-w7h.5, reversed by the
+      // owner 2026-08-19; the reasoning is on the module's header comment).
       this.recall = new RecallOverlay({
         editor: this.editor,
         query: async (scope, text) => {
