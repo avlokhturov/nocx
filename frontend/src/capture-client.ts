@@ -14,15 +14,16 @@ import type { WSClient } from './ipc'
 import type { LedgerCapture } from './generated/ledger.capture'
 import { SERIALIZER_VERSION } from './scrollback/serializer'
 import { uuidv7 } from './layout/uuid7'
+import { outputCapBytes } from './output-cap'
 import { log } from './log'
 
 /** The transport's own per-message ceiling, matched here so a body is split
  *  before it is refused rather than after (ws_ledger_capture.go). */
 export const CHUNK_BYTES = 64 * 1024
 
-/** What one command's body may be worth by default, in bytes — the head and
- *  the tail of it. The user's own number arrives with the setting; this is
- *  what applies until it does. */
+/** What one command's body may be worth when nobody says otherwise, in bytes.
+ *  The live value is the user's setting (output-cap.ts); this is what the
+ *  tests pin and what applies before the first settings snapshot. */
 export const DEFAULT_CAP_BYTES = 256 * 1024
 
 /** What a frozen block kept, as the serializer produced it. */
@@ -150,7 +151,7 @@ export async function captureBlock(
   client: WSClient,
   entryId: string,
   body: CapturedBody,
-  capBytes: number = DEFAULT_CAP_BYTES,
+  capBytes: number = outputCapBytes(),
 ): Promise<void> {
   try {
     const dims = { cols: body.cols, rows: body.rows }

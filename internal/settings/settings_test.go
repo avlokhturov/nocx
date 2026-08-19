@@ -14,6 +14,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/settings"
 )
@@ -1106,5 +1107,34 @@ func TestSettingsDescribe_DTOConformsToContract(t *testing.T) {
 			}
 			validateSettingsContract(t, schema, raw, "settings.describe DTO ("+name+")")
 		})
+	}
+}
+
+// The per-command output cap (nocx-2f0f): declared, bounded, and the SAME
+// number the store falls back to. Two defaults for one quantity is how a
+// store opened without a registry ends up bounding a command by an amount
+// the settings page never showed.
+func TestHistoryOutputCap_IsDeclaredBoundedAndAgreesWithTheStore(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+
+	v, err := reg.GetNumber(settings.HistoryOutputCapKB)
+	if err != nil {
+		t.Fatalf("GetNumber: %v", err)
+	}
+	if v != 256 {
+		t.Fatalf("default = %v, want 256", v)
+	}
+	if int(v)<<10 != content.DefaultOutputCapBytes {
+		t.Fatalf("settings default %d KB != content.DefaultOutputCapBytes %d bytes",
+			int(v), content.DefaultOutputCapBytes)
+	}
+	if err := reg.SetNumber(settings.HistoryOutputCapKB, 8); err == nil {
+		t.Fatal("8 KB is below the declared floor and must be refused")
+	}
+	if err := reg.SetNumber(settings.HistoryOutputCapKB, 8192); err == nil {
+		t.Fatal("8192 KB is above the declared ceiling and must be refused")
+	}
+	if err := reg.SetNumber(settings.HistoryOutputCapKB, 1024); err != nil {
+		t.Fatalf("a value inside the bounds was refused: %v", err)
 	}
 }

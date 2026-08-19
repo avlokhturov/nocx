@@ -184,6 +184,9 @@ func policyFromSettings(reg *settings.Registry) *content.Policy {
 	if v, err := reg.GetBool(settings.HistoryOutputEnabled); err == nil {
 		p.SetOutputEnabled(v)
 	}
+	if v, err := reg.GetNumber(settings.HistoryOutputCapKB); err == nil {
+		p.SetOutputCapBytes(int(v) << 10)
+	}
 	return p
 }
 
@@ -711,7 +714,7 @@ func New(opts ...Option) (*App, error) {
 		for _, k := range keys {
 			switch k {
 			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
-				settings.HistoryOutputEnabled.Key():
+				settings.HistoryOutputEnabled.Key(), settings.HistoryOutputCapKB.Key():
 				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
 					historyPolicy.SetEnabled(v)
 				}
@@ -720,6 +723,9 @@ func New(opts ...Option) (*App, error) {
 				}
 				if v, err := settingsRegistry.GetBool(settings.HistoryOutputEnabled); err == nil {
 					historyPolicy.SetOutputEnabled(v)
+				}
+				if v, err := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); err == nil {
+					historyPolicy.SetOutputCapBytes(int(v) << 10)
 				}
 			}
 		}

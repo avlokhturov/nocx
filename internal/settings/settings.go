@@ -630,6 +630,31 @@ var HistoryOutputEnabled = MustRegisterBool(BoolSpec{
 	Default:     true,
 })
 
+// HistoryOutputCapKB bounds how much of ONE command's output is kept.
+//
+// The head and the tail are kept and the middle is dropped (design §4.3):
+// errors live in the tail, the invocation and its first diagnostics in the
+// head, and a million lines of progress bar between them are of no value to
+// anyone. A cap on BYTES rather than on lines is what bounds the budget
+// almost independently of what the user runs — a line cap is generous to a
+// program printing long lines and mean to one printing short ones, for no
+// reason either of them can see.
+//
+// It is not the size budget and it is not the age: those are store-wide and
+// belong to nocx-rtg0.30's knobs. This one is per command, and it is what
+// keeps one `cat` of a large file from spending the whole budget.
+var HistoryOutputCapKB = MustRegisterNumber(NumberSpec{
+	Key:         "history.outputCapKB",
+	Section:     "History",
+	Label:       "Keep per command, at most",
+	Description: "How much of one command's output is kept. Past this the beginning and the end are kept, the middle is dropped, and the block says so.",
+	DataClass:   PublicConfig,
+	Default:     256,
+	Min:         fp(16),
+	Max:         fp(4096),
+	Unit:        "KB",
+})
+
 // ClipboardOSC52Suppressed persists the "Don't show again" decision on the
 // OSC 52 clipboard permission banner. Currently in-memory only
 // (ClipboardGate._suppressed in frontend/src/clipboard.ts); making it

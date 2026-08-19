@@ -67,6 +67,7 @@ import {
 } from './sidebar-width'
 import { UIStateClient } from './uistate-client'
 import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
+import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -274,6 +275,10 @@ async function main() {
     // The default wrap for a command block's output — one attribute on the
     // root, read by the CSS; the per-block ⋮ override is not touched by it.
     applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+    // How much of one command's output is kept. Applied here beside the wrap
+    // for the same reason: the renderer is where it is enforced, so it has to
+    // know before the first block freezes.
+    applyOutputCap(snap.values[OUTPUT_CAP_KEY])
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
@@ -645,6 +650,9 @@ async function main() {
         // has overridden, in place, with no restart and no reflow of the
         // blocks that carry their own answer.
         applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+        // The cap is live too: a block frozen after the change is captured
+        // under the new number, and blocks already stored keep what they got.
+        applyOutputCap(snap.values[OUTPUT_CAP_KEY])
         // The sidebar width is deliberately absent from this loop now. It
         // is not a setting, so no settings revision can carry it, and one
         // window is the only thing that changes it — re-reading it here
