@@ -301,6 +301,11 @@ func (s *layoutStub) DeletePane(_ context.Context, id string, next Replacement) 
 	return ErrNotImplemented
 }
 
+func (s *layoutStub) SetPaneCwd(_ context.Context, paneID, cwd string) (Pane, error) {
+	s.log.Info("content stub: LayoutRepository.SetPaneCwd", "pane", paneID, "cwd", cwd)
+	return Pane{}, ErrNotImplemented
+}
+
 func (s *layoutStub) MovePane(_ context.Context, paneID, tabID string) (Pane, error) {
 	s.log.Info("content stub: LayoutRepository.MovePane", "pane", paneID, "tab", tabID)
 	return Pane{}, ErrNotImplemented

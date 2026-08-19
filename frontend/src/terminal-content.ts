@@ -258,6 +258,19 @@ export interface TerminalContentHooks {
    *  onCwdChange: OSC 7 is one cause, and a cwd-only hook would
    *  silently miss the other three. */
   onActiveOriginChange?: () => void
+  /** The pane's own shell reported a VERIFIED directory it had not reported
+   *  before (nocx-zkiv4). This is what a restore reopens the pane in, so it
+   *  fires only for a cwd the shell itself sent (AD-5) and only while the
+   *  pane is LOCAL: a path on a far host is not somewhere a local shell can
+   *  be reopened, and storing one would send a restored pane to a directory
+   *  that does not exist on this machine — or, worse, to a different one
+   *  that does. Locality is read from the projection's own `isLocal`, which
+   *  is inherited from the session and stays conservative, together with an
+   *  empty host; the cwd event's host field is not that answer, because a
+   *  host is written by an authenticated source and never by an OSC (AD-6).
+   *  WHO records it is the caller's — the layout chain belongs to the pane
+   *  manager, not to a pane. */
+  onPaneCwdChange?: (cwd: string) => void
   /** An SSH connection failed because the vault is sealed. */
   onVaultSealed?: () => void
   /** An SSH connection failed because the host key is unknown or changed.
@@ -478,6 +491,11 @@ export class TerminalContent extends BasePaneContent {
    *  §6, protocol §9). `_applyEnvironmentView` copies the projection's
    *  current view into these fields on every environment change. */
   private _cwdVerified = false
+  /** The last cwd reported to the layout chain. A shell prints its prompt
+   *  many times in one directory and every one of them arrives here, so the
+   *  report is on CHANGE — otherwise sitting still would cost a write per
+   *  prompt. */
+  private _reportedCwd = ''
   /** True once the session's exit was observed — the tab is closing, and an
    *  origin that names this session would name a machine that is gone. */
   private _sessionExited = false
@@ -966,6 +984,18 @@ export class TerminalContent extends BasePaneContent {
     // origin-following surfaces (the Files panel's reveal) follow it live,
     // not on the next tab switch.
     this.hooks.onActiveOriginChange?.()
+    // Where a restore will reopen this pane. Verified and local only — see
+    // the hook's own comment for why a far host's path must not be stored.
+    if (
+      view.cwdVerified &&
+      view.isLocal &&
+      view.host === '' &&
+      view.cwd !== '' &&
+      view.cwd !== this._reportedCwd
+    ) {
+      this._reportedCwd = view.cwd
+      this.hooks.onPaneCwdChange?.(view.cwd)
+    }
     // The ports scope follows the pane (nocx-695k.3): entering or leaving
     // a remote child changes the target or the unavailable reason without
     // a tab switch, and the panel must re-scope immediately. Fired on

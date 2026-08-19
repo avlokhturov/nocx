@@ -364,6 +364,14 @@ type paneMoveParams struct {
 	TabID string `json:"tabId"`
 }
 
+// paneCwdParams is panes.setCwd: where the pane's shell IS, reported by the
+// renderer when the shell says so and not before (AD-5 — a verified OSC 7,
+// never the provider's session-open fallback).
+type paneCwdParams struct {
+	ID  string `json:"id"`
+	Cwd string `json:"cwd"`
+}
+
 // ── ingress bounds ────────────────────────────────────────────────────────
 
 const (
@@ -728,6 +736,27 @@ func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare flo
 	return ""
 }
 
+func validatePaneCwdRaw(raw json.RawMessage) string {
+	var p paneCwdParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := layoutID("id", p.ID); msg != "" {
+		return msg
+	}
+	// An EMPTY cwd is refused here, unlike at creation. There it means "wherever
+	// an unconfigured shell lands", which is the honest answer before a session
+	// exists; here it would be a report about a shell that has one, and storing
+	// it would overwrite a real directory with a blank.
+	if strings.TrimSpace(p.Cwd) == "" {
+		return "cwd is required"
+	}
+	if utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
+		return "cwd is bounded"
+	}
+	return ""
+}
+
 func validatePaneMoveRaw(raw json.RawMessage) string {
 	var p paneMoveParams
 	if msg := decodeObject(raw, &p); msg != "" {
@@ -879,6 +908,13 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			h.answer(req, err, func() any {
 				return paneCreateResponse{Pane: wirePane(made.Object), Replayed: made.Replayed}
 			})
+		case "panes.setCwd":
+			var p paneCwdParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			pane, err := svc.SetPaneCwd(ctx, p.ID, p.Cwd)
+			h.answer(req, err, func() any { return paneResponse{Pane: wirePane(pane)} })
 		case "panes.move":
 			var p paneMoveParams
 			if !h.decode(req, &p) {
@@ -998,6 +1034,7 @@ func (s *WSServer) layoutSpecs(contentSub control.Submission, lane control.Admis
 		{"tabs.close", validateLayoutCloseRaw},
 		{"panes.create", validatePaneCreateRaw},
 		{"panes.move", validatePaneMoveRaw},
+		{"panes.setCwd", validatePaneCwdRaw},
 		// panes.close is DeletePane's wire caller, and it takes the same
 		// close params as tabs.close and workspaces.close because it is the
 		// same act one rung down: removing the last pane takes its tab, that

@@ -19,6 +19,7 @@ import type { TabsReorderResult } from '../generated/tabs.reorder'
 import type { TabsCloseResult } from '../generated/tabs.close'
 import type { PanesCreateResult } from '../generated/panes.create'
 import type { PanesCloseResult } from '../generated/panes.close'
+import type { PanesSetCwdResult } from '../generated/panes.setCwd'
 import type { WorkspacesCreateResult } from '../generated/workspaces.create'
 import type { WorkspacesCloseResult } from '../generated/workspaces.close'
 import type { WorkspacesRenameResult } from '../generated/workspaces.rename'
@@ -80,6 +81,7 @@ export interface LayoutClientLike {
     firstPane: PaneFacts
   }): Promise<TabsCreateResult>
   createPane(pane: PaneFacts & { tabId: string }): Promise<PanesCreateResult>
+  setPaneCwd(id: string, cwd: string): Promise<PanesSetCwdResult>
   renameTab(id: string, name: string | null): Promise<TabsRenameResult>
   recolourTab(id: string, colour: string | null): Promise<TabsRecolourResult>
   pinTab(id: string, pinned: boolean): Promise<TabsPinResult>
@@ -187,6 +189,12 @@ export class LayoutClient implements LayoutClientLike {
   /** The SPLIT: a second pane into a tab that already exists. */
   createPane(pane: PaneFacts & { tabId: string }): Promise<PanesCreateResult> {
     return this.dispatcher.call<PanesCreateResult>('panes.create', pane)
+  }
+
+  /** Where the pane's shell IS — the directory a restore reopens it in
+   *  (nocx-zkiv4). Reported only for a VERIFIED local cwd; see the caller. */
+  setPaneCwd(id: string, cwd: string): Promise<PanesSetCwdResult> {
+    return this.dispatcher.call<PanesSetCwdResult>('panes.setCwd', { id, cwd })
   }
 
   /** null is the operation, not the absence of one: clearing the name puts

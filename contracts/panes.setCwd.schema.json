@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/panes.setCwd.schema.json",
+  "title": "PanesSetCwdResult",
+  "description": "Result of the panes.setCwd JSON-RPC method (nocx-zkiv4, design \u00a75): the pane after its recorded directory changed. It is the directory a RESTORE reopens the pane in, which is why the column needed a writer after creation at all \u2014 it was written once, when the pane was created, and a tab that has been working in a repository all afternoon would otherwise come back where it started. The renderer reports only a VERIFIED cwd (AD-5: an OSC 7 the shell sent, never the provider's session-open fallback), and only for a pane whose shell is local: a path on a far host is not somewhere a local shell can be reopened. Idempotent \u2014 the same directory twice answers the same pane.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pane"],
+  "properties": {
+    "pane": {
+      "$ref": "panes.create.schema.json#/$defs/pane"
+    }
+  }
+}

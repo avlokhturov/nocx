@@ -395,6 +395,21 @@ type LayoutRepository interface {
 	// creation that adds a member to a container that already exists. The
 	// first pane of a tab arrives with the tab, through CreateTab.
 	CreatePane(ctx context.Context, pane Pane) (Created[Pane], error)
+	// SetPaneCwd records where the pane's shell IS, which is where a restore
+	// reopens it (design §5). It is the only writer of panes.cwd after
+	// creation, and the delay in having one was deliberate: the column had no
+	// second writer until something read it across a restart.
+	//
+	// The caller must only report a cwd it VERIFIED (AD-5: an OSC 7 the shell
+	// sent, never a provider's session-open fallback, which is a guess). This
+	// method cannot tell the two apart and does not try — one owner of that
+	// distinction, and it is the renderer that holds the evidence.
+	//
+	// Idempotent: the same cwd twice answers the same pane. ErrNoSuchPane for
+	// an id no pane carries, never a silent no-op — a cwd reported for a pane
+	// the chain does not hold is a defect somewhere, and swallowing it hides
+	// which.
+	SetPaneCwd(ctx context.Context, paneID, cwd string) (Pane, error)
 	// MovePane changes which tab a pane is in — §4.4's other direction —
 	// and removes the tab it leaves empty, in the same transaction. The
 	// pane's identity, its cwd, its blocks and its live pipe are untouched,

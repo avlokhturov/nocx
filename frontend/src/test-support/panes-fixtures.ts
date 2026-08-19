@@ -717,6 +717,15 @@ export function makeLayoutBackend(): LayoutClientLike & {
       return Promise.resolve({ pane: row, replayed: false })
     },
 
+    setPaneCwd: (id, cwd) => {
+      const refusal = refuse<never>('setPaneCwd')
+      if (refusal) return refusal
+      panes = panes.map((p) => (p.id === id ? { ...p, cwd } : p))
+      const row = panes.find((p) => p.id === id)
+      if (!row) return Promise.reject(new Error(`no such pane: ${id}`))
+      return Promise.resolve({ pane: row })
+    },
+
     renameTab: (id, name) =>
       refuse<never>('renameTab') ?? Promise.resolve({ tab: patch(id, { name }) }),
     recolourTab: (id, colour) =>

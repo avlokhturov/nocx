@@ -385,6 +385,11 @@
     },
     {
       "kind": "types",
+      "file": "src/generated/panes.setCwd.ts",
+      "symbol": "Pane"
+    },
+    {
+      "kind": "types",
       "file": "src/generated/shell.complete.ts",
       "symbol": "ShellEntry"
     },

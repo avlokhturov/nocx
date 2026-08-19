@@ -305,6 +305,19 @@ export class LayoutStore {
     this.replaceTab((await this.client.renameTab(tabId, name)).tab)
   }
 
+  /**
+   * Record where a pane's shell IS — the directory a restore reopens it in
+   * (nocx-zkiv4).
+   *
+   * The cache is updated from what the BACKEND answers, like every other
+   * mutation here: the renderer reports a fact and does not decide what the
+   * row says. A refused call leaves the cache exactly as it was, so a pane
+   * never shows a directory the store does not hold.
+   */
+  async setPaneCwd(paneId: string, cwd: string): Promise<void> {
+    this.replacePane((await this.client.setPaneCwd(paneId, cwd)).pane)
+  }
+
   async recolour(tabId: string, colour: string | null): Promise<void> {
     this.replaceTab((await this.client.recolourTab(tabId, colour)).tab)
   }
@@ -346,6 +359,14 @@ export class LayoutStore {
     await this.client.closePane(paneId, replacement)
     await this.load()
     return replacement
+  }
+
+  private replacePane(pane: Pane): void {
+    this.state = {
+      ...this.state,
+      panes: this.state.panes.map((p) => (p.id === pane.id ? pane : p)),
+    }
+    this.changed()
   }
 
   private replaceTab(tab: Tab): void {

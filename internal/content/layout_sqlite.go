@@ -757,6 +757,34 @@ func (s *sqliteContent) DeletePane(ctx context.Context, id string, next Replacem
 // live pipe are untouched — only a reference moved. That round trip being
 // lossless is the whole reason the durable object is the pane and the tab is
 // the cheap wrapper (nocx-ehkvy).
+// SetPaneCwd records where the pane's shell is (nocx-zkiv4, design §5). One
+// UPDATE and a read-back through paneByID, which is the same reader every
+// other pane method answers from — a second SELECT here would be a second
+// shape of the same row.
+func (s *sqliteContent) SetPaneCwd(ctx context.Context, paneID, cwd string) (Pane, error) {
+	var out Pane
+	err := s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			res, err := tx.ExecContext(ctx,
+				`UPDATE panes SET cwd = ? WHERE id = ?`, cwd, paneID)
+			if err != nil {
+				return err
+			}
+			// RowsAffected is 0 for a pane that is not there AND for one
+			// already at this cwd, so it cannot be the existence check: the
+			// read below is, and it is the answer either way.
+			_ = res
+			stored, err := paneByID(ctx, tx, paneID)
+			if err != nil {
+				return err
+			}
+			out = stored.Pane
+			return nil
+		})
+	})
+	return out, err
+}
+
 func (s *sqliteContent) MovePane(ctx context.Context, paneID, tabID string) (Pane, error) {
 	var out Pane
 	err := s.run(ctx, func(ctx context.Context) error {

@@ -65,6 +65,10 @@ function fakeClient(over: Partial<LayoutClientLike> = {}): LayoutClientLike & {
       calls.push(['panes.create', p])
       return Promise.resolve({ pane: pane(p.id, p.tabId), replayed: false })
     },
+    setPaneCwd: (id, cwd) => {
+      calls.push(['panes.setCwd', { id, cwd }])
+      return Promise.resolve({ pane: pane(id, 'tab-1', { cwd }) })
+    },
     renameTab: (id, name) => {
       calls.push(['tabs.rename', { id, name }])
       return Promise.resolve({ tab: tab(id, { name }) })

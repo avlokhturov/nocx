@@ -882,6 +882,19 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
+        // Where the pane IS, recorded so a restart reopens it there
+        // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
+        // chain did not take costs the NEXT restore its cwd — it falls back
+        // to the one the pane was created in — and never costs the pane the
+        // person is working in now.
+        onPaneCwdChange: (cwd) => {
+          if (!this.layoutAvailable) return
+          void this.layout.setPaneCwd(identity.paneId, cwd).catch((err: unknown) => {
+            log.warn('nocx: the pane cwd was not recorded', {
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
+        },
       },
     )
     const descriptor: ContentDescriptor = {

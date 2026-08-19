@@ -54,6 +54,9 @@ type LayoutService interface {
 
 	CreatePane(ctx context.Context, pane content.Pane) (content.Created[content.Pane], error)
 	MovePane(ctx context.Context, id, tabID string) (content.Pane, error)
+	// SetPaneCwd records where a pane's shell IS — what a restore reopens
+	// it in. The caller must have verified the cwd (AD-5).
+	SetPaneCwd(ctx context.Context, id, cwd string) (content.Pane, error)
 	// DeletePane takes the replacement for the same reason the other two
 	// closes do: removing the last pane can empty the application, and the
 	// tab that appears then has a durable id, so it is the frontend's.
@@ -164,6 +167,13 @@ func (s *layoutService) CreatePane(ctx context.Context, pane content.Pane) (cont
 		return content.Created[content.Pane]{}, err
 	}
 	return s.layout.CreatePane(ctx, pane)
+}
+
+func (s *layoutService) SetPaneCwd(ctx context.Context, id, cwd string) (content.Pane, error) {
+	if err := s.guard.check(); err != nil {
+		return content.Pane{}, err
+	}
+	return s.layout.SetPaneCwd(ctx, id, cwd)
 }
 
 func (s *layoutService) MovePane(ctx context.Context, id, tabID string) (content.Pane, error) {

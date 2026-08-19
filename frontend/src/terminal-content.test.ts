@@ -5186,3 +5186,60 @@ describe('a frozen block sends what it printed (nocx-2f0f)', () => {
     }
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The pane reports where it IS, so a restore reopens it there (nocx-zkiv4)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the pane reports its directory (nocx-zkiv4)', () => {
+  it('reports a verified local cwd once, and not again for the same directory', async () => {
+    const reported: string[] = []
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onPaneCwdChange: (cwd) => reported.push(cwd) } },
+      client,
+    )
+    const renderer = rendererOf(content)
+    try {
+      // The session-open cwd is a provider's fallback, not a report: nothing
+      // has been verified yet, so nothing may be stored (AD-5).
+      expect(reported).toEqual([])
+
+      renderer._fireCwd('', '/repo/frontend')
+      expect(reported).toEqual(['/repo/frontend'])
+
+      // A shell prints its prompt many times in one directory. The row is
+      // written on CHANGE, or sitting still would cost a write per prompt.
+      renderer._fireCwd('', '/repo/frontend')
+      expect(reported).toEqual(['/repo/frontend'])
+
+      renderer._fireCwd('', '/repo/internal')
+      expect(reported).toEqual(['/repo/frontend', '/repo/internal'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('never reports a directory from an ssh pane, because a local shell cannot reopen there', async () => {
+    const reported: string[] = []
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'p-1', host: 'pi.local' },
+        hooks: { onPaneCwdChange: (cwd) => reported.push(cwd) },
+      },
+      client,
+    )
+    const renderer = rendererOf(content)
+    try {
+      // /home/pi on a Raspberry Pi is not /home/pi here. Storing it would
+      // send the restored pane to a directory that does not exist on this
+      // machine — or, worse, to a different one that does.
+      renderer._fireCwd('pi.local', '/home/pi')
+      expect(reported).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+})
