@@ -76,8 +76,9 @@ type openMachine interface {
 	emitIntegration(sid session.ID)
 }
 
-// openHandlers answers "open". It holds the OpenOperation (config, session
-// gates — the dial runs inside the callback) and the seams the dial needs.
+// openHandlers answers "open". It holds the two-phase OpenOperation — the
+// resolve under the [config, session] gates, the dial under neither — and
+// the seams the dial needs.
 // It needs the connection as identity, not just as a writer: it registers
 // the connection as the session's subscriber, so the handler receives the
 // *wsConn per call.
@@ -201,6 +202,61 @@ func isLineageRefusal(err error) bool {
 		errors.Is(err, session.ErrTooDeep)
 }
 
+// answerOpenFailure maps a failed phase of an open onto the wire. Both
+// phases end here — the resolve's sealed vault and the dial's ssh taxonomy
+// are the same answer to the caller, which asked for a terminal and did not
+// get one — so the mapping lives in one place rather than being written
+// twice and drifting once.
+func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err error) {
+	// A gate refusal: another operation holds the config or session
+	// domain — the request is refused, never queued.
+	if capability.IsRefused(err) {
+		var rej *capability.RefusedError
+		errors.As(err, &rej)
+		// Both sides of the merge: main's refusal now names the method
+		// it refused (nocx-rq9p), and this handler's writes go through
+		// the Responder rather than the raw connection, so the sealed
+		// normalizer sees them (nocx-k41yv).
+		_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
+		return
+	}
+	// A refused parent edge is a bad claim in the params, not a server
+	// fault: nothing the renderer can retry will make it true, and
+	// answering -32603 would invite exactly that retry (nocx-9hu9d).
+	if isLineageRefusal(err) {
+		h.log.Warn("open refused: parent edge", "error", err)
+		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
+		return
+	}
+	h.log.Error("failed to open session", "error", err)
+	// A sealed vault surfaces here for EVERY connection that needs it —
+	// this is still a vault access, and the renderer must get the reason
+	// so the vault-owned unlock prompt appears instead of an error
+	// (the dispatcher intercepts reason="vault-sealed" on any RPC).
+	if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
+		_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
+		return
+	}
+	// Classify the SSH error through the same taxonomy the probe uses
+	// so the user sees what actually failed, not "Internal error".
+	pr := classifyProbeError(err)
+	var msg string
+	if pr.err == nil {
+		msg = string(pr.outcome) + ": " + pr.detail
+	} else {
+		msg = err.Error() // unclassifiable — use the raw wrapped error
+	}
+	resp := newJSONRPCError(req.ID, -32603, msg)
+	// For host-key errors, attach the evidence so the renderer can
+	// offer the accept-on-first-use dialog (the same one the probe
+	// path raises). Without this, open shows "Terminal failed to
+	// start" and the user has no way to accept the key (nocx-shat).
+	if hk := hostKeyInfoFromError(err); hk != nil {
+		resp.Error.Data = hk
+	}
+	_ = respond(r, resp)
+}
+
 // handleOpen creates a new session and output ring.
 //
 // Per AD-7: the server assigns the authoritative session-id. The JSON-RPC
@@ -271,11 +327,14 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 
 	var sess session.Session
 	opened := false
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.OpenService) error {
+	// answered: a resolve step already wrote the response (no resolver
+	// wired, no target named, a sealed vault). Nothing is dialed after one.
+	answered := false
+	// PHASE ONE — resolve, under [config, session]. Store and vault reads
+	// only; both gates are released before anything is dialed (open.go).
+	err := h.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		// SSH session — when kind="ssh", open a remote channel instead of
-		// local PTY. The resolve and the dial both run inside the callback:
-		// the operation holds [config, session] for the whole open
-		// (conservative grain, open.go).
+		// local PTY. Only the RESOLVE runs here.
 		if params.Kind == "ssh" {
 			var host string
 			var remote *ssh.ConnectConfig
@@ -286,6 +345,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 				if _, ok := h.resolver.get(); !ok {
 					resp := newJSONRPCError(req.ID, -32603, "SSH sessions not available (no profile resolver wired)")
 					_ = respond(r, resp)
+					answered = true
 					return nil
 				}
 
@@ -296,6 +356,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					// Resolving reads the stored password, so a sealed vault surfaces
 					// here — the renderer needs the reason to offer an unlock.
 					_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
+					answered = true
 					return nil
 				}
 
@@ -327,6 +388,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 				if h.sshCfg == nil {
 					resp := newJSONRPCError(req.ID, -32603, "SSH config resolver not available")
 					_ = respond(r, resp)
+					answered = true
 					return nil
 				}
 
@@ -372,6 +434,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			} else {
 				resp := newJSONRPCError(req.ID, -32602, "Invalid params: profileId or host required for ssh session")
 				_ = respond(r, resp)
+				answered = true
 				return nil
 			}
 			// Shell pin (nocx-pu4.1): the open may name the far shell the
@@ -390,7 +453,22 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		h.answerOpenFailure(r, req, err)
+		return
+	}
+	if answered {
+		return
+	}
 
+	// PHASE TWO — dial, on the execution lane and no domain gate. The
+	// handshake waits on the network and sometimes on a person (the
+	// password prompt), and a gate held across that wait is what refused
+	// every other pane's open with "the terminal is busy" while one tab
+	// was still connecting.
+	err = h.op.Dial(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		var oerr error
 		sess, oerr = svc.Open(ctx, cfg)
 		if oerr != nil {
@@ -400,53 +478,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		return nil
 	})
 	if err != nil {
-		// A gate refusal: another operation holds the config or session
-		// domain — the request is refused, never queued.
-		if capability.IsRefused(err) {
-			var rej *capability.RefusedError
-			errors.As(err, &rej)
-			// Both sides of the merge: main's refusal now names the method
-			// it refused (nocx-rq9p), and this handler's writes go through
-			// the Responder rather than the raw connection, so the sealed
-			// normalizer sees them (nocx-k41yv).
-			_ = r.TryError(req.ID, saturationRPCError(req.Method, &rej.Rejection))
-			return
-		}
-		// A refused parent edge is a bad claim in the params, not a server
-		// fault: nothing the renderer can retry will make it true, and
-		// answering -32603 would invite exactly that retry (nocx-9hu9d).
-		if isLineageRefusal(err) {
-			h.log.Warn("open refused: parent edge", "error", err)
-			_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
-			return
-		}
-		h.log.Error("failed to open session", "error", err)
-		// A sealed vault surfaces here for EVERY connection that needs it —
-		// this is still a vault access, and the renderer must get the reason
-		// so the vault-owned unlock prompt appears instead of an error
-		// (the dispatcher intercepts reason="vault-sealed" on any RPC).
-		if errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized) {
-			_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
-			return
-		}
-		// Classify the SSH error through the same taxonomy the probe uses
-		// so the user sees what actually failed, not "Internal error".
-		pr := classifyProbeError(err)
-		var msg string
-		if pr.err == nil {
-			msg = string(pr.outcome) + ": " + pr.detail
-		} else {
-			msg = err.Error() // unclassifiable — use the raw wrapped error
-		}
-		resp := newJSONRPCError(req.ID, -32603, msg)
-		// For host-key errors, attach the evidence so the renderer can
-		// offer the accept-on-first-use dialog (the same one the probe
-		// path raises). Without this, open shows "Terminal failed to
-		// start" and the user has no way to accept the key (nocx-shat).
-		if hk := hostKeyInfoFromError(err); hk != nil {
-			resp.Error.Data = hk
-		}
-		_ = respond(r, resp)
+		h.answerOpenFailure(r, req, err)
 		return
 	}
 	if !opened {
