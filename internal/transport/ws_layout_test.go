@@ -352,8 +352,12 @@ func TestLayoutReorderRefusesANonPermutation(t *testing.T) {
 		map[string]any{"ids": []string{wsID2, wsID1}}, 21), &ordered); err != nil {
 		t.Fatalf("decode reorder: %v", err)
 	}
-	if len(ordered.Workspaces) != 2 || ordered.Workspaces[0].ID != wsID2 || ordered.Workspaces[0].Position != 0 {
-		t.Fatalf("reordered = %+v, want ws-2 first", ordered.Workspaces)
+	// Position 1, not 0: the default workspace keeps 0 and is not a member of
+	// the arrangement (nocx-h2xbu), so the user's own workspaces are written
+	// after it. The ORDER is what this asserts — ws-2 ahead of ws-1 — and the
+	// number is where that order starts.
+	if len(ordered.Workspaces) != 2 || ordered.Workspaces[0].ID != wsID2 || ordered.Workspaces[0].Position != 1 {
+		t.Fatalf("reordered = %+v, want ws-2 first at position 1", ordered.Workspaces)
 	}
 	_, rpcErr := layoutCall(t, conn, "workspaces.reorder", map[string]any{"ids": []string{wsID2}}, 22)
 	if rpcErr == nil || rpcErr.Code != -32602 {
