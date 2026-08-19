@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the ledger.query JSON-RPC method (nocx-rtg0.20, design §6.2) — one page of the one authoritative ledger, newest first, already filtered to the requested rung of the recall ladder (§10.6). This method is the ONLY ordering implementation: the frontend cache renders what it holds and never answers a recall query with an ordering of its own, or the same keystroke returns different results depending on which pane it came from. The order is seq DESC — the backend-assigned total order (§6.3) — because two windows submit inside the same millisecond and a wall clock cannot separate them.
+ * Result of the ledger.query JSON-RPC method (nocx-rtg0.20, design §6.2) — one page of the one authoritative ledger, newest first, already filtered to the requested rung of the recall ladder (§10.6). This method is the ONLY ordering implementation: the frontend cache renders what it holds and never answers a recall query with an ordering of its own, or the same keystroke returns different results depending on which pane it came from. The order is seq DESC — the backend-assigned total order (§6.3) — because two windows submit inside the same millisecond and a wall clock cannot separate them. The page can be narrowed to ONE pane with the paneId param — the read restore is made of (nocx-ycla4): a block's durable anchor is its pane, which outlives the session it ran in.
  */
 export interface LedgerQuery {
   /**

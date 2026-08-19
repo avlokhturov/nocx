@@ -616,3 +616,119 @@ func TestLedgerReadMethods_WithoutAContentStore(t *testing.T) {
 		t.Fatalf("ledger.get with no store answered %s", got.Result)
 	}
 }
+
+// The read RESTORE is made of (nocx-ycla4, design §5): a pane's own blocks,
+// asked for by the anchor that survives a restart. The store has honoured
+// PaneID since nocx-rtg0.28; until now the wire could not say it, so the
+// renderer could ask for "everything" and filter — which would have been a
+// second ordering implementation, in the place the ladder's whole point is
+// that there is one.
+func TestLedgerQuery_NarrowsToOnePane(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	ctx := context.Background()
+
+	const paneA = "0198f2b0-0000-7000-8000-0000000000a1"
+	const paneB = "0198f2b0-0000-7000-8000-0000000000b1"
+	seedPaneChain(t, db, paneA, paneB)
+
+	recordInPane(t, db, paneA, "make test")
+	recordInPane(t, db, paneA, "make lint")
+	recordInPane(t, db, paneB, "git status")
+
+	intents := func(paneID string, id int) []string {
+		resp := vaultCall(t, conn, "ledger.query", map[string]any{
+			"scope": "everywhere", "paneId": paneID,
+		}, id)
+		if resp.Error != nil {
+			t.Fatalf("ledger.query paneId=%s: %+v", paneID, resp.Error)
+		}
+		var page struct {
+			Entries []struct {
+				Intent string `json:"intent"`
+			} `json:"entries"`
+		}
+		if err := json.Unmarshal(resp.Result, &page); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		out := make([]string, 0, len(page.Entries))
+		for _, e := range page.Entries {
+			out = append(out, e.Intent)
+		}
+		return out
+	}
+
+	// Newest first, and only this pane's — the other pane's command is not a
+	// near miss, it is a different tab's work.
+	if got := intents(paneA, 1); len(got) != 2 || got[0] != "make lint" || got[1] != "make test" {
+		t.Fatalf("pane A = %v, want [make lint, make test]", got)
+	}
+	if got := intents(paneB, 2); len(got) != 1 || got[0] != "git status" {
+		t.Fatalf("pane B = %v, want [git status]", got)
+	}
+
+	// Absent paneId is unchanged: the ladder without a pane filter still sees
+	// everything, because recall is scoped by environment and directory and
+	// never by pane (ADR-0019 §5).
+	resp := vaultCall(t, conn, "ledger.query", map[string]any{"scope": "everywhere"}, 3)
+	if resp.Error != nil {
+		t.Fatalf("ledger.query without paneId: %+v", resp.Error)
+	}
+	var all struct {
+		Entries []json.RawMessage `json:"entries"`
+	}
+	_ = json.Unmarshal(resp.Result, &all)
+	if len(all.Entries) != 3 {
+		t.Fatalf("unfiltered page = %d entries, want 3", len(all.Entries))
+	}
+
+	// An id that is not a UUIDv7 is refused rather than silently matching
+	// nothing: an empty page is the answer most likely to be believed.
+	if bad := vaultCall(t, conn, "ledger.query", map[string]any{
+		"scope": "everywhere", "paneId": "pane-1",
+	}, 4); bad.Error == nil || bad.Error.Code != -32602 {
+		t.Fatalf("paneId=pane-1 = %+v, want -32602", bad.Error)
+	}
+	_ = ctx
+}
+
+// seedPaneChain records the layout chain two panes hang on: a workspace, its
+// first tab and pane, then a second tab with the other pane. The FK checks
+// it, so the fixture builds the real chain rather than inserting bare rows.
+func seedPaneChain(t *testing.T, db content.ContentDB, paneA, paneB string) {
+	t.Helper()
+	ctx := context.Background()
+	const wsID = "0198f2b0-0000-7000-8000-00000000f001"
+	const tabA = "0198f2b0-0000-7000-8000-00000000f002"
+	const tabB = "0198f2b0-0000-7000-8000-00000000f003"
+	if _, err := db.Layout().CreateWorkspace(ctx,
+		content.Workspace{ID: wsID, Name: "work"},
+		content.Tab{ID: tabA, WorkspaceID: wsID, Layout: content.LayoutRow},
+		content.Pane{ID: paneA, TabID: tabA, Cwd: "/repo", Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	if _, err := db.Layout().CreateTab(ctx,
+		content.Tab{ID: tabB, WorkspaceID: wsID, Position: 1, Layout: content.LayoutRow},
+		content.Pane{ID: paneB, TabID: tabB, Cwd: "/srv", Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("CreateTab: %v", err)
+	}
+}
+
+func recordInPane(t *testing.T, db content.ContentDB, paneID, intent string) {
+	t.Helper()
+	pane := paneID
+	if _, err := db.Ledger().RecordCompleted(context.Background(), content.CompletedCommand{
+		Client: "test-client",
+		Env:    content.Environment{ID: "local", Kind: content.EnvLocal},
+		PaneID: &pane,
+		Cwd:    "/repo",
+		Intent: intent,
+		Status: content.EntrySuccess,
+	}); err != nil {
+		t.Fatalf("RecordCompleted(%q): %v", intent, err)
+	}
+}

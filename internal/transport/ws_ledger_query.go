@@ -153,6 +153,9 @@ type ledgerGetResponse struct {
 //	scope         — required; directory | host | everywhere
 //	environmentId — required for scope=directory and scope=host
 //	cwd           — required for scope=directory
+//	paneId        — optional; narrows the page to ONE pane's blocks — the
+//	                read restore is made of (nocx-ycla4). A UUIDv7, because
+//	                it is the durable frontend-minted anchor (design §6.1)
 //	kind, status  — optional; the closed enums, refused when unknown
 //	text          — optional; the search box, a case-insensitive substring
 //	                over the intent within the rung. history.query's filter
@@ -165,6 +168,7 @@ type ledgerQueryParams struct {
 	Scope         string  `json:"scope"`
 	EnvironmentID *string `json:"environmentId"`
 	Cwd           *string `json:"cwd"`
+	PaneID        *string `json:"paneId"`
 	Kind          *string `json:"kind"`
 	Status        *string `json:"status"`
 	Text          *string `json:"text"`
@@ -439,6 +443,17 @@ func ledgerQueryOf(p ledgerQueryParams) (content.LedgerQuery, string) {
 	}
 	if q.Scope == content.ScopeDirectory && p.Cwd == nil {
 		return q, "cwd is required for scope=directory"
+	}
+	// The pane filter is what makes restore possible, and the id is checked
+	// rather than believed: an id that is not a UUIDv7 could only match
+	// nothing, and an empty page is the answer most likely to be believed —
+	// "that tab never had any blocks" is indistinguishable from "you sent a
+	// malformed id" unless one of them is refused.
+	if p.PaneID != nil {
+		if msg := layoutID("paneId", *p.PaneID); msg != "" {
+			return q, msg
+		}
+		q.PaneID = *p.PaneID
 	}
 	if p.Kind != nil {
 		switch content.EntryKind(*p.Kind) {
