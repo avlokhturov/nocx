@@ -441,6 +441,20 @@ export class ScrollbackController {
     boundary.dataset.restoreBoundary = 'true'
     boundary.textContent = 'Previous session'
     this.scrollbackInner.insertBefore(boundary, anchor)
+    // AND LAND AT THE NEWEST BLOCK, which is where a terminal always puts
+    // you. The insert goes ABOVE everything, so the scroller keeps the
+    // offset it had — 0, on a pane that has just been built — and the person
+    // arrives at the oldest command of the previous session with the prompt
+    // they were about to type at somewhere below the fold.
+    //
+    // UNCONDITIONAL, not `scrollToBottom()`'s follow-guard: the guard asks
+    // whether the person scrolled away from the live end, and nobody has
+    // scrolled anything yet. Worse, the answer is about to be wrong — the
+    // sentinel that answers it sits at the bottom of the stack, and this
+    // insert is exactly what pushes it out of the scroller, so the observer
+    // would report "not following" one frame later for a scroll position the
+    // user never chose.
+    this._scrollToBottom()
   }
 
   /**

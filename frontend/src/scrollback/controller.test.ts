@@ -51,6 +51,62 @@ function makeController() {
   return { pane, controller }
 }
 
+describe('ScrollbackController restorePast (nocx-l21ib.3)', () => {
+  it('lands the pane on the newest restored block, not the oldest', () => {
+    const { controller } = makeController()
+    const scrollTo = vi.fn()
+    controller.scrollbackArea.scrollTo = scrollTo
+    // jsdom does no layout: name the height the restored stack would have.
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 4000,
+      configurable: true,
+    })
+
+    const block = (label: string): HTMLElement => {
+      const el = document.createElement('div')
+      el.dataset.restored = 'true'
+      el.textContent = label
+      return el
+    }
+    controller.restorePast([block('oldest'), block('newest')])
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 4000, behavior: 'instant' })
+  })
+
+  it('scrolls even when the follow sentinel says the person is not at the live end', () => {
+    // The guard on the public scrollToBottom asks whether the person scrolled
+    // AWAY from the live end. At a restore nobody has scrolled anything, and
+    // the sentinel that answers it is exactly what the insert pushes out of
+    // the scroller — so a restore that honoured the guard would leave the
+    // pane at the top for a position the user never chose.
+    const { controller } = makeController()
+    const scrollTo = vi.fn()
+    controller.scrollbackArea.scrollTo = scrollTo
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 2500,
+      configurable: true,
+    })
+    // Not following: the public door must stay shut...
+    ;(controller as unknown as { _following: boolean })._following = false
+    controller.scrollToBottom()
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    // ...and the restore must still land at the bottom.
+    const el = document.createElement('div')
+    controller.restorePast([el])
+    expect(scrollTo).toHaveBeenCalledWith({ top: 2500, behavior: 'instant' })
+  })
+
+  it('does nothing at all when there is no past to draw', () => {
+    const { controller } = makeController()
+    const scrollTo = vi.fn()
+    controller.scrollbackArea.scrollTo = scrollTo
+    controller.restorePast([])
+    expect(scrollTo).not.toHaveBeenCalled()
+    expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+})
+
 describe('ScrollbackController unstructured mode', () => {
   it('fills the pane for a markerless session (plain SSH before any OSC 133)', () => {
     const { controller } = makeController()
