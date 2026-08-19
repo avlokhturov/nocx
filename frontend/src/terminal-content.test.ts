@@ -131,6 +131,11 @@ interface MountOpts {
    *  (nocx-rtg0.29). The default is a pane the chain already holds, which is
    *  what every test that is not about the race wants. */
   pane?: PaneIdentity
+  /** Show the pane BEFORE it mounts — the order the real activation seam
+   *  uses, and the one no test used to model: PaneManager.activate() runs
+   *  between Pane.start() and the renderer being built, so the show lands
+   *  on a pane with no scrollback and no second show ever comes. */
+  visibleBeforeMount?: boolean
 }
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
 async function mountTerminal(
@@ -175,6 +180,7 @@ async function mountTerminal(
   const paneParent = document.createElement('div')
   paneParent.append(tab.pane)
   if (opts.attachToDocument) document.body.append(paneParent)
+  if (opts.visibleBeforeMount) content.setVisible(true)
   await tab.start()
   await expect(content.ready).resolves.toBe(opts.expectedReady ?? true)
 
@@ -5357,6 +5363,59 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       content.setVisible(true)
       await vi.waitFor(() => {
         expect(real!.scrollbackInner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('draws its past when the show arrived before the mount, with no second show', async () => {
+    // THE ORDER THE PRODUCT ACTUALLY RUNS IN, and the one every test above
+    // gets backwards. On a restored pane the log reads: Pane.start(),
+    // PaneManager.activate() -> setVisible(true), and only THEN "creating
+    // renderer". So the one show a restored pane ever gets lands while there
+    // is no scrollback to draw into, and nothing runs the read again — the
+    // tab is active and stays active, so no second setVisible(true) arrives,
+    // and a page load is not a reconnect either.
+    //
+    // The e2e proved neither end was empty: the store held both blocks,
+    // anchored to the right panes, and ledger.query with the restored pane id
+    // answered with them in the second session. The read was simply never
+    // issued. Nothing appeared in the log because "not yet" is silent, which
+    // is correct — the defect was that "not yet" had no "later".
+    const client = storeWith([entry()], 'output')
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { visibleBeforeMount: true },
+      client,
+    )
+    try {
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+      expect(inner.querySelector('[data-restore-boundary="true"]')).not.toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not read the past of a pane nobody has looked at yet', async () => {
+    // The other half of the interval, and the reason the mount cannot simply
+    // read unconditionally: eight panes at fifty blocks is four hundred
+    // blocks of DOM before the first frame. A pane that mounts without being
+    // shown asks nothing, and asks the moment it IS shown.
+    const client = storeWith([entry()], 'output')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await Promise.resolve()
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
+      content.setVisible(true)
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(1)
       })
     } finally {
       teardown()
