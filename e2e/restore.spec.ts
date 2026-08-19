@@ -46,6 +46,82 @@ const RESTORE_ROW = '.ui-settings-row[data-key="restore.onStartup"]'
 
 const test = base
 
+type Endpoint = { port: number; token: string }
+
+/** One JSON-RPC call on a socket of the test's own, against the backend the
+ *  page is bound to. The page's client is the product's and is not reachable
+ *  from here; this asks the same server the same question. */
+async function rpc(
+  page: import('@playwright/test').Page,
+  ep: Endpoint,
+  method: string,
+  params: unknown,
+): Promise<Record<string, unknown>> {
+  return page.evaluate(
+    (a: { p: number; t: string; m: string; par: unknown }) =>
+      new Promise<Record<string, unknown>>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${a.p}/session`, `nocx.token.${a.t}`)
+        const timer = setTimeout(() => reject(new Error('rpc timeout')), 15_000)
+        ws.onopen = () =>
+          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: a.m, params: a.par }))
+        ws.onerror = () => {
+          clearTimeout(timer)
+          reject(new Error('rpc socket error'))
+        }
+        ws.onmessage = (ev) => {
+          if (typeof ev.data !== 'string') return
+          const msg = JSON.parse(ev.data) as Record<string, unknown>
+          if (msg.id !== 1) return
+          clearTimeout(timer)
+          ws.close()
+          resolve((msg.result ?? { error: msg.error }) as Record<string, unknown>)
+        }
+      }),
+    { p: ep.port, t: ep.token, m: method, par: params },
+  )
+}
+
+/**
+ * Wait until the STORE holds this command with the body a restore draws.
+ *
+ * A block on screen is not a row in the store, and the gap is deliberate: the
+ * record goes through the outbox and the body is sent fire-and-forget once the
+ * ack names an entry (history-client.ts, capture-client.ts), because the
+ * terminal is never blocked on a write. A restart that does not wait for the
+ * write is measuring that race, not the restore — and it lost it every time:
+ * the block appears at SUBMIT, so the backend was being killed before `echo`
+ * had even finished, and the first session stored nothing at all.
+ *
+ * Waiting on the record rather than on a duration is AGENTS.md's rule: a spec
+ * that needs a slow machine to pass is broken on a fast one too. Nothing here
+ * is asserted — this is the precondition the restore is about ("what was
+ * stored comes back"), and everything the test CLAIMS is still read off the
+ * screen.
+ */
+async function stored(
+  page: import('@playwright/test').Page,
+  ep: Endpoint,
+  command: string,
+): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const page1 = (await rpc(page, ep, 'ledger.query', {
+          scope: 'everywhere',
+          limit: 100,
+        })) as { entries?: { id: string; intent: string }[] }
+        const row = (page1.entries ?? []).find((e) => e.intent === command)
+        if (!row) return false
+        const detail = (await rpc(page, ep, 'ledger.get', { id: row.id })) as {
+          artifacts?: { mediaType: string }[]
+        }
+        return (detail.artifacts ?? []).some((a) => a.mediaType === 'application/vt')
+      },
+      { timeout: 60_000, message: `the store never took "${command}"` },
+    )
+    .toBe(true)
+}
+
 /** Run one command in the active pane and wait for its block to be there. */
 async function run(page: import('@playwright/test').Page, command: string): Promise<void> {
   await promptReady(page)
@@ -69,20 +145,16 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     backend?.stop()
   })
 
-  // FIXME(nocx-8won8): the restore half does not pass yet and the cause
-  // is not yet known. It is NOT the two defects it already found and which
-  // are fixed — the one-shot spent before the pane was mounted, and a restore
-  // that raced a reconnect being recorded as "there was nothing". After both,
-  // the page still shows no restored block: the panes come back, the socket
-  // reconnects, and the pane's ledger.query answers with nothing, so the next
-  // step is to establish whether the blocks were captured at all in the first
-  // session or whether the read is asking for the wrong pane.
-  //
-  // Marked rather than deleted, and rather than left red: a spec that fails
-  // in CI teaches people to ignore CI, and a spec that is deleted takes the
-  // knowledge with it. Everything below is what the epic promises and is
-  // exactly what must pass before nocx-l21ib closes.
-  test.fixme('the tabs, and the output of what ran in them, come back', async ({ page }) => {
+  // This spec found three defects, and the third is the one it was marked
+  // fixme for (nocx-8won8). Neither end was empty: the first session wrote
+  // both blocks, each anchored to its own pane, each with its vt and
+  // text/plain artifacts, and in the second session ledger.query answered
+  // with them for exactly those pane ids. The read was never issued. A
+  // restored pane is activated BETWEEN Pane.start() and the renderer being
+  // built, so the one show it ever gets finds no scrollback — and "not yet"
+  // had no "later", because the tab stays active and a page load is not a
+  // reconnect. mount() is the later.
+  test('the tabs, and the output of what ran in them, come back', async ({ page }) => {
     const ep1 = await backend.start(FIRST_PORT)
     await bindEndpoint(page, ep1)
     await page.goto('/')
@@ -94,6 +166,11 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     await page.locator(NEW_TAB).click()
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 30_000 })
     await run(page, 'echo SECOND-TAB-OUTPUT')
+
+    // Both commands are in the store, with their bodies, before anything is
+    // killed. See `stored` — without this the restart raced the write.
+    await stored(page, ep1, 'echo FIRST-TAB-OUTPUT')
+    await stored(page, ep1, 'echo SECOND-TAB-OUTPUT')
 
     // The application restarts. Nothing in the first process survives it —
     // including the shells, which is the point: what comes back is the tab.

@@ -2609,6 +2609,18 @@ export class TerminalContent extends BasePaneContent {
         sid: session.sessionId,
       })
 
+      // THE OTHER HALF OF THE SHOW/MOUNT PAIR (nocx-8won8). Drawing the past
+      // needs two things — somebody looking at the pane, and a scrollback to
+      // draw into — and either can arrive last. setVisible covers the case
+      // where the show is last; this covers the case where the MOUNT is, and
+      // that is the case a restored pane always takes: the activation seam
+      // runs between Pane.start() and the renderer being built, so the one
+      // show a restored tab ever gets finds no scrollback, and the tab then
+      // stays active, so no second show comes and a page load is not a
+      // reconnect. The read was never issued at all — not refused, not empty.
+      // The store had both blocks under the right pane ids the whole time.
+      if (this._active) void this.restorePast()
+
       // B.5: replay the latest viewport after async mount completes.
       // The presentation layer delivers viewports via viewportChanged;
       // if one was buffered during mount, apply it now through the
@@ -2856,6 +2868,11 @@ export class TerminalContent extends BasePaneContent {
     // a "done". Spending the one shot here cost the pane its whole past, and
     // no unit test saw it: a test shows a pane that is already mounted, and
     // the real activation does not.
+    //
+    // "Not yet" needs a "later", and mount() is it: on a restored pane the
+    // show ALWAYS lands here first and no second show ever arrives, so
+    // leaving the retry to the next setVisible(true) meant the read was never
+    // issued (nocx-8won8).
     if (!this.scrollback) return
     this._pastRestoring = true
     let blocks
