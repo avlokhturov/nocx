@@ -10,6 +10,8 @@ import {
   attrsToStyle,
   serializeLine,
   serializeRange,
+  serializeRangeSGR,
+  serializeRangeText,
   DEFAULT_SNAPSHOT,
   fromITheme,
 } from './serializer'
@@ -550,5 +552,66 @@ describe('the colour modes a frozen block preserves (nocx-07o7)', () => {
     expect(serializeLine(DEFAULT_SNAPSHOT, line)).toBe(
       '<span class="term-line"><span style="font-style:italic">X</span></span>',
     )
+  })
+})
+
+// ── The three emissions (nocx-2f0f) ────────────────────────────────────────
+// One walk, three emitters. These tests exist to catch the drift a second
+// implementation of the walk would cause: a restored block that does not
+// match the block a person saw.
+
+describe('serializeRangeSGR and serializeRangeText', () => {
+  // ESC is what an SGR sequence starts with, so a rule about accidental
+  // control characters does not apply to the one place deliberately about
+  // them.
+  // eslint-disable-next-line no-control-regex
+  const SGR = /\u001b\[[0-9;]*m/g
+  const stripSGR = (s: string) => s.replace(SGR, '')
+
+  it('gives the characters with no markup and no escape sequences', () => {
+    const lines = [makeLine('ok'), makeLine('done')]
+    const getLine = (y: number) => lines[y]
+    expect(serializeRangeText(getLine, 0, 1)).toBe('ok\ndone')
+  })
+
+  it('emits the colour the program named, and strips back to the plain text', () => {
+    // bgMode 0 deliberately: lineWith defaults a cell's background to the
+    // PALETTE, so without it the fixture is "red on black" and the emitter is
+    // right to say 31;40. The case under test is a foreground on the
+    // terminal's own background.
+    const lines = [
+      lineWith(
+        { chars: 'r', fg: 1, fgMode: XTERM_CM_P16, bgMode: 0 },
+        { chars: 'e', fg: 1, fgMode: XTERM_CM_P16, bgMode: 0 },
+      ),
+    ]
+    const getLine = (y: number) => lines[y]
+    const sgr = serializeRangeSGR(getLine, 0, 0)
+    expect(sgr).toContain('\u001b[31m')
+    expect(stripSGR(sgr)).toBe(serializeRangeText(getLine, 0, 0))
+  })
+
+  it('does not escape HTML entities — that transform belongs to the HTML path', () => {
+    const lines = [makeLine('a<b&c')]
+    const getLine = (y: number) => lines[y]
+    expect(serializeRangeText(getLine, 0, 0)).toBe('a<b&c')
+    expect(stripSGR(serializeRangeSGR(getLine, 0, 0))).toBe('a<b&c')
+    expect(serializeRange(DEFAULT_SNAPSHOT, getLine, 0, 0)).toContain('a&lt;b&amp;c')
+  })
+
+  it('joins wrapped rows and trims the same way in all three modes', () => {
+    const lines = [makeLine(''), makeLine('a'), new BufferLine('b', true), makeLine('')]
+    const getLine = (y: number) => lines[y]
+    expect(serializeRangeText(getLine, 0, 3)).toBe('ab')
+    expect(stripSGR(serializeRangeSGR(getLine, 0, 3))).toBe('ab')
+    const html = serializeRange(DEFAULT_SNAPSHOT, getLine, 0, 3)
+    expect(html.match(/term-line/g)?.length).toBe(1)
+  })
+
+  it('closes an open attribute at the end of a row', () => {
+    const lines = [lineWith({ chars: 'x', fg: 2, fgMode: XTERM_CM_P16, bgMode: 0 }), makeLine('y')]
+    const getLine = (y: number) => lines[y]
+    const sgr = serializeRangeSGR(getLine, 0, 1)
+    expect(sgr.split('\n')[0].endsWith('\u001b[0m')).toBe(true)
   })
 })

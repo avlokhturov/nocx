@@ -11,6 +11,7 @@
 // cells — critical for correct inverse-video fallback.
 
 import type { IBufferLine, ITheme } from '@xterm/xterm'
+import { cellSGRAttrs, sgrParams, sgrEqual, emptySGR, type SGRAttrs } from './sgr'
 
 /** Version of the serializer's row-transform contract. Bump when the
  *  transforms that shape a frozen block's text change: wrapped lines joined,
@@ -318,15 +319,36 @@ interface Run {
  * it wrapped), so its trailing chars are real content, not xterm padding —
  * the caller passes true for every physical line that has a continuation.
  */
-function collectRuns(
-  snapshot: TerminalSnapshot,
+interface GenericRun<A> {
+  chars: string
+  attrs: A
+}
+
+/**
+ * THE cell walk, over whatever an attribute is (nocx-2f0f).
+ *
+ * Three emissions need it — inline CSS for the frozen block, SGR for the
+ * durable body, characters for the derived text — and they differ in what an
+ * attribute IS and in nothing else: the wide-character stride, the
+ * empty-cell-is-a-space rule and the trailing-space trim are one behaviour,
+ * and a second copy of them is a restored block that does not match the block
+ * a person saw.
+ *
+ * `escape` is the one genuinely HTML-only step and stays a parameter rather
+ * than a caller's post-pass: it must happen per cell, before runs are merged,
+ * or a `<` in the middle of a run escapes differently from one at its edge.
+ */
+function collectRunsOf<A>(
   line: IBufferLine,
-  keepTrailingSpace = false,
-): Run[] {
+  attrsOf: (line: IBufferLine, i: number) => A,
+  equal: (a: A, b: A) => boolean,
+  escape: boolean,
+  keepTrailingSpace: boolean,
+): GenericRun<A>[] {
   const len = line.length
   if (len === 0) return []
 
-  const runs: Run[] = []
+  const runs: GenericRun<A>[] = []
   let i = 0
 
   while (i < len) {
@@ -338,10 +360,10 @@ function collectRuns(
 
     const width = cell.getWidth()
     const chars = cell.getChars()
+    const attrs = attrsOf(line, i)
 
     if (chars.length === 0) {
-      const attrs = cellAttrs(snapshot, line, i)
-      if (runs.length > 0 && attrsEqual(runs[runs.length - 1].attrs, attrs)) {
+      if (runs.length > 0 && equal(runs[runs.length - 1].attrs, attrs)) {
         runs[runs.length - 1].chars += ' '
       } else {
         runs.push({ chars: ' ', attrs })
@@ -350,14 +372,14 @@ function collectRuns(
       continue
     }
 
-    const escaped = chars.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const text = escape
+      ? chars.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      : chars
 
-    const attrs = cellAttrs(snapshot, line, i)
-
-    if (runs.length > 0 && attrsEqual(runs[runs.length - 1].attrs, attrs)) {
-      runs[runs.length - 1].chars += escaped
+    if (runs.length > 0 && equal(runs[runs.length - 1].attrs, attrs)) {
+      runs[runs.length - 1].chars += text
     } else {
-      runs.push({ chars: escaped, attrs })
+      runs.push({ chars: text, attrs })
     }
     i += Math.max(1, width)
   }
@@ -368,6 +390,20 @@ function collectRuns(
   }
 
   return runs
+}
+
+function collectRuns(
+  snapshot: TerminalSnapshot,
+  line: IBufferLine,
+  keepTrailingSpace = false,
+): Run[] {
+  return collectRunsOf(
+    line,
+    (l, i) => cellAttrs(snapshot, l, i),
+    attrsEqual,
+    true,
+    keepTrailingSpace,
+  )
 }
 
 // ── Serialization ──────────────────────────────────────────────────────────
@@ -422,12 +458,19 @@ export function serializeLine(snapshot: TerminalSnapshot, line: IBufferLine | un
  * at the bottom of every block renders as stray blank space. Interior blank
  * lines are preserved — they are real output spacing.
  */
-export function serializeRange(
-  snapshot: TerminalSnapshot,
+type RowEmitter = (line: IBufferLine, keepTrailingSpace: boolean) => string
+
+/**
+ * THE row walk: wrapped rows joined into one logical line, trailing empties
+ * trimmed, then leading ones. Every emission shares it, so the three can
+ * never disagree about how many rows a block has or where they end.
+ */
+function walkRange(
   getLine: (y: number) => IBufferLine | undefined,
   startLine: number,
   endLine: number,
-): string {
+  emit: RowEmitter,
+): string[] {
   const groups: string[] = []
   for (let y = startLine; y <= endLine; y++) {
     const line = getLine(y)
@@ -436,13 +479,7 @@ export function serializeRange(
       groups.push('')
       continue
     }
-    const runs = collectRuns(snapshot, line, continuation || (getLine(y + 1)?.isWrapped ?? false))
-    let content = ''
-    for (const run of runs) {
-      if (run.chars.length === 0) continue
-      const style = attrsToStyle(snapshot, run.attrs)
-      content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
-    }
+    const content = emit(line, continuation || (getLine(y + 1)?.isWrapped ?? false))
     if (continuation) {
       groups[groups.length - 1] += content
     } else {
@@ -468,5 +505,79 @@ export function serializeRange(
   let lead = 0
   while (lead < groups.length && groups[lead] === '') lead++
   groups.splice(0, lead)
+  return groups
+}
+
+export function serializeRange(
+  snapshot: TerminalSnapshot,
+  getLine: (y: number) => IBufferLine | undefined,
+  startLine: number,
+  endLine: number,
+): string {
+  const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
+    const runs = collectRuns(snapshot, line, keepTrailingSpace)
+    let content = ''
+    for (const run of runs) {
+      if (run.chars.length === 0) continue
+      const style = attrsToStyle(snapshot, run.attrs)
+      content += style ? `<span style="${style}">${run.chars}</span>` : run.chars
+    }
+    return content
+  })
   return groups.map((g) => `<span class="term-line">${g}</span>`).join('')
+}
+
+/**
+ * The DURABLE body of a block: the same rows, carrying colour as SGR and no
+ * markup at all (nocx-2f0f, design §3). A row closes whatever it opened, so a
+ * reader that starts mid-body — a restore drawing one block — is never left
+ * wearing the previous row's colour.
+ *
+ * No theme snapshot is taken and none may be: resolving a palette index to a
+ * hex colour here is what would freeze a restored block in the palette that
+ * was current when it ran.
+ */
+export function serializeRangeSGR(
+  getLine: (y: number) => IBufferLine | undefined,
+  startLine: number,
+  endLine: number,
+): string {
+  const empty = emptySGR()
+  const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
+    const runs = collectRunsOf<SGRAttrs>(line, cellSGRAttrs, sgrEqual, false, keepTrailingSpace)
+    let content = ''
+    let current = empty
+    for (const run of runs) {
+      if (run.chars.length === 0) continue
+      content += sgrParams(current, run.attrs)
+      current = run.attrs
+      content += run.chars
+    }
+    if (!sgrEqual(current, empty)) content += '\u001b[0m'
+    return content
+  })
+  return groups.join('\n')
+}
+
+/**
+ * The DERIVED body: the same rows as characters. What search, copy and the
+ * agent read — none of them wants an escape-sequence stream, and a needle
+ * spanning a colour change would stop matching in one.
+ */
+export function serializeRangeText(
+  getLine: (y: number) => IBufferLine | undefined,
+  startLine: number,
+  endLine: number,
+): string {
+  const groups = walkRange(getLine, startLine, endLine, (line, keepTrailingSpace) => {
+    const runs = collectRunsOf<null>(
+      line,
+      () => null,
+      () => true,
+      false,
+      keepTrailingSpace,
+    )
+    return runs.map((r) => r.chars).join('')
+  })
+  return groups.join('\n')
 }
