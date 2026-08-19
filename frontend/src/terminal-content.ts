@@ -2641,7 +2641,15 @@ export class TerminalContent extends BasePaneContent {
       const notice = document.createElement('pre')
       notice.className = 'pane-error'
       notice.textContent = `Terminal failed to start:\n\n${err instanceof Error ? err.message : String(err)}`
-      target.replaceChildren(notice)
+      // PREPEND, never replace (nocx-mb3x2). `replaceChildren` took out the
+      // scrollback the restored blocks had just been drawn into, so a pane
+      // whose session cannot start came back with a reason and no past — the
+      // two facts a person needs, made mutually exclusive. Above the past
+      // rather than below it: why the pane is dead is read first, and what it
+      // printed is underneath. Measured on the failure path by nocx-9y4ku's
+      // worker: restored 0 -> 1 with this one call changed, and it is not
+      // ssh-specific — any session that fails to start lost its past this way.
+      target.prepend(notice)
       this._readyResolve(false)
       log.error('nocx: terminal content failed', { error: String(err) })
     }
