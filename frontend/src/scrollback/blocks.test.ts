@@ -2090,6 +2090,25 @@ describe('the visual freeze parks the durable bodies', () => {
     expect(rec?.captured).toEqual({ sgr: '', text: '', cols: 100, rows: 30 })
   })
 
+  it("gives each of two blocks frozen back to back its own rows and none of the other's", () => {
+    // The epic's own criterion, and the one a boundary bug shows up in.
+    // Asserted by FREEZING TWO BLOCKS, not by feeding frames: the boundary is
+    // the block's own line range, and a test that fed bytes would be testing
+    // the recognizer that was deleted rather than the rule that replaced it.
+    const lines = [new BufferLine('first output', false), new BufferLine('second output', false)]
+    const getLine = (y: number) => lines[y] ?? undefined
+
+    manager.startBlock('echo first', '~', 0)
+    const a = manager.freezeBlock(getLine, 0, 0)
+    manager.startBlock('echo second', '~', 1)
+    const b = manager.freezeBlock(getLine, 1, 1)
+
+    expect(a?.captured?.text).toBe('first output')
+    expect(a?.captured?.text).not.toContain('second')
+    expect(b?.captured?.text).toBe('second output')
+    expect(b?.captured?.text).not.toContain('first')
+  })
+
   it('parks nothing when the caller supplies no grid, because provenance is not optional', () => {
     const otherInner = document.createElement('div')
     const otherXterm = document.createElement('div')
