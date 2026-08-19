@@ -105,7 +105,7 @@ init: hooks
 	@echo "=== frontend dependencies ==="
 	cd frontend && npm ci
 	@echo ""
-	@echo "Ready. Run 'wails dev' to start the app, 'bd ready' for the backlog."
+	@echo "Ready. Run 'make dev' to start the app, 'bd ready' for the backlog."
 
 # Per-clone git configuration. Both lines are the same kind of thing: git
 # behaviour this repo needs that a clone cannot carry by itself.

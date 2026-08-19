@@ -161,11 +161,23 @@ git clone <repo-url> && cd nocx
 make init
 
 # Run in development mode
-wails dev
+make dev
 
 # …with the web inspector open, when you need a console
-NOCX_DEVTOOLS=1 wails dev
+NOCX_DEVTOOLS=1 make dev
 ```
+
+> **There is no `wails dev`.** Wails v3 has no dev CLI without a Taskfile, this
+> repository has no Taskfile, and inventing one to replicate the watcher was not
+> worth it (see the `dev` target in the Makefile). `wails3 dev` therefore fails
+> on a missing `build/config.yml` — a file `.gitignore` excludes, so no clone
+> will ever have one. `make dev` builds the frontend, which `//go:embed
+all:frontend/dist` needs populated before the Go compiler runs, and then runs
+> the app against the development profile.
+
+> For iterating on the frontend, `make dev-web` is the faster loop: the same app
+> in an ordinary browser, backed by the real Go backend on a real PTY. It needs
+> no webview and no display.
 
 > The inspector needs the flag because right-click cannot reach it: the window
 > disables the default context menu, and the terminal surface uses the right
