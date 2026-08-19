@@ -684,6 +684,34 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// RestoreOnStartup decides whether the application reopens on what was left
+// (nocx-l21ib): the workspaces, their tabs, the panes with their directories
+// and the blocks those panes printed.
+//
+// It restores a TAB, never a process. The shell died with the backend (D5)
+// and a local pane comes back with a fresh one in the same directory; nothing
+// here resurrects anything, and nothing in the product may suggest otherwise
+// (ADR-0019 §3).
+//
+// OFF LEAVES THE STORED ROWS ALONE. It is a decision about what happens at
+// startup and not an instruction to forget: turning it back on restores what
+// was there, and a person who wanted the history gone has the History
+// settings for that. Deleting the chain on a clean start would also null
+// every block's anchor (entries.pane_id ON DELETE SET NULL), which is a
+// quieter and much larger loss than the one they asked for.
+//
+// In Interface rather than a section of its own: it is a decision about what
+// the window looks like when it opens, beside where the tabs are, and a
+// section holding one setting is a heading rather than a grouping.
+var RestoreOnStartup = MustRegisterBool(BoolSpec{
+	Key:         "restore.onStartup",
+	Section:     "Interface",
+	Label:       "Reopen tabs and panes on startup",
+	Description: "Reopen the workspaces, tabs and panes you left, each with the commands it ran. The shells themselves are new: a local pane starts a fresh shell in the same directory, and nothing that was running comes back. Off gives a clean start and keeps what is stored.",
+	DataClass:   PublicConfig,
+	Default:     true,
+})
+
 // OutputWrap is the DEFAULT wrap for a command block's output. The per-block
 // ⋮ menu override (nocx-ex636) stays what it always was — the exception the
 // kind cannot know about — and a block somebody has overridden ignores this

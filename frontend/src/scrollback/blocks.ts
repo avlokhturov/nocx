@@ -1023,6 +1023,17 @@ export class BlockManager {
     this._dimensions = opts.dimensions
   }
 
+  /** An id for a block this manager did not create: a RESTORED one, built
+   *  from the store and inserted above the live session (nocx-m3fqk).
+   *
+   *  From the same counter as every other block, because the id space is what
+   *  selection and the DOM address blocks by — two spaces would let a
+   *  restored block and a live one answer to the same number, and the
+   *  selection would follow whichever the query found first. */
+  nextRestoredId(): number {
+    return this._nextId++
+  }
+
   get blocks(): readonly BlockRecord[] {
     return this._blocks
   }

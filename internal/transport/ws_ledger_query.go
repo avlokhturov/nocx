@@ -315,6 +315,91 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 	_ = h.r.TryResult(req.ID, mustMarshal(out))
 }
 
+// ledgerArtifactParams is the request: one artifact id.
+type ledgerArtifactParams struct {
+	ID string `json:"id"`
+}
+
+// ledgerArtifactResponse is the body and what a reader needs to know about
+// it. Separate from ledger.get because the recall read must not haul bytes
+// (ADR-0019 §6) — the page carries metadata and whoever wants a body asks.
+type ledgerArtifactResponse struct {
+	ID        string  `json:"id"`
+	MediaType string  `json:"mediaType"`
+	Body      string  `json:"body"`
+	Truncated *string `json:"truncated"`
+	ByteLen   int64   `json:"byteLen"`
+}
+
+func validateLedgerArtifactRaw(raw json.RawMessage) string {
+	var p ledgerArtifactParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if strings.TrimSpace(p.ID) == "" || utf8.RuneCountInString(p.ID) > maxIDRunes {
+		return "id is required and bounded"
+	}
+	return ""
+}
+
+// handleArtifact answers one artifact's body.
+//
+// An id no artifact carries is INVALID PARAMS and not an empty success: the
+// caller asked for a body, and "there is none" is what a restored block
+// renders as a hole. An empty success would say the command printed nothing,
+// which is a different sentence about the same block (ADR-0019 §7).
+func (h ledgerReadHandlers) handleArtifact(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
+		return
+	}
+	var p ledgerArtifactParams
+	if msg := decodeParams(req.Params, &p); msg != "" {
+		h.invalid(req, msg)
+		return
+	}
+	if msg := validateLedgerArtifactRaw(req.Params); msg != "" {
+		h.invalid(req, msg)
+		return
+	}
+
+	var out ledgerArtifactResponse
+	missing := false
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.LedgerService) error {
+		art, err := svc.Artifact(ctx, p.ID)
+		if err != nil {
+			return err
+		}
+		if art == nil {
+			missing = true
+			return nil
+		}
+		var sb strings.Builder
+		for _, c := range art.Chunks {
+			sb.Write(c)
+		}
+		var truncated *string
+		if art.Truncated != nil {
+			v := string(*art.Truncated)
+			truncated = &v
+		}
+		out = ledgerArtifactResponse{
+			ID: art.ID, MediaType: string(art.MediaType), Body: sb.String(),
+			Truncated: truncated, ByteLen: art.ByteLen,
+		}
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+		return
+	}
+	if missing {
+		h.invalid(req, "no artifact carries that id")
+		return
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(out))
+}
+
 func (h ledgerReadHandlers) invalid(req jsonrpcRequest, msg string) {
 	_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 }

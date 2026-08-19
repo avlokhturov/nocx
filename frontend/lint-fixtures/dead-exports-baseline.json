@@ -205,6 +205,11 @@
     },
     {
       "kind": "files",
+      "file": "src/generated/ledger.artifact.ts",
+      "symbol": ""
+    },
+    {
+      "kind": "files",
       "file": "src/generated/ledger.bind.ts",
       "symbol": ""
     },
@@ -376,6 +381,41 @@
     {
       "kind": "types",
       "file": "src/generated/history.record.ts",
+      "symbol": "Redaction"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.get.ts",
+      "symbol": "Artifact"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.get.ts",
+      "symbol": "Edge"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.get.ts",
+      "symbol": "Entry"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.get.ts",
+      "symbol": "Gap"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.get.ts",
+      "symbol": "Redaction"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.query.ts",
+      "symbol": "Entry"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/ledger.query.ts",
       "symbol": "Redaction"
     },
     {

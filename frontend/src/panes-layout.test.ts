@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { NameColourDraft } from './name-colour-dialog'
+import { applyRestoreOnStartup } from './restore-setting'
 import {
   createRendererMock,
   resetSessionCounter,
@@ -654,5 +655,50 @@ describe('the window reopens on the tab that was in front', () => {
 
     expect(stripTabs(bar)).toHaveLength(2)
     expect(activeTabIndex(bar)).toBe(0)
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The setting, and the clean start it promises (nocx-yejir)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('restore.onStartup decides what the window opens with', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+    applyRestoreOnStartup(true)
+  })
+
+  afterEach(() => {
+    applyRestoreOnStartup(true)
+  })
+
+  it('ON: the stored chain is what opens', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const { bar } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+    await vi.waitFor(() => {
+      expect(stripTabs(bar).length).toBeGreaterThan(1)
+    })
+  })
+
+  it('OFF: one fresh tab, and the stored rows are left alone', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const before = backend.rows().tabs.length
+    expect(before).toBeGreaterThan(1)
+
+    applyRestoreOnStartup(false)
+    const { bar } = await mountPaneManager(undefined, undefined, undefined, undefined, {
+      store: makeLayoutStore(backend).store,
+      backend,
+    })
+
+    // One tab on screen: the fresh one, and none of the stored ones.
+    expect(stripTabs(bar).length).toBe(1)
+    // And the chain still holds what it held, PLUS the tab just opened. Off
+    // is a decision about startup, not an instruction to forget: turning it
+    // back on restores what was there.
+    expect(backend.rows().tabs.length).toBe(before + 1)
   })
 })

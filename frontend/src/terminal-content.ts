@@ -64,6 +64,10 @@ import type { BlockRecord } from './scrollback/blocks'
 import { CommandLedger, type CommandRecord, type CommandStatus } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
+import { blocksForPane, bodyForBlock } from './restore-client'
+import { restoredBlock } from './scrollback/restored-block'
+import { fromITheme } from './scrollback/serializer'
+import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
 import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
 import { showConfirm } from './ui/dialog'
@@ -2792,6 +2796,61 @@ export class TerminalContent extends BasePaneContent {
   setVisible(visible: boolean): void {
     super.setVisible(visible)
     if (visible) this.renderer?.refreshAtlas()
+    // The pane's past, drawn the first time somebody looks at it
+    // (nocx-m3fqk). On first SHOW rather than at boot: eight panes at fifty
+    // blocks is four hundred blocks of DOM before the first frame, and a pane
+    // nobody has opened has not been read.
+    if (visible) void this.restorePast()
+  }
+
+  /** One shot. A pane is shown many times — every tab switch — and its past
+   *  is drawn once; the guard is set before the first await so two switches
+   *  in the same turn cannot both start. */
+  private _pastRestored = false
+
+  /**
+   * Draw what this pane printed before the application closed.
+   *
+   * NOTHING HERE IS LIVE and nothing may suggest otherwise (ADR-0019 §3):
+   * the blocks are marked restored, they sit above an explicit boundary, and
+   * the shell below them is a new one that has never seen them.
+   *
+   * A failure costs the past and never the pane. The store being unreachable
+   * is reported once, by the surface that already reports a degraded history,
+   * rather than by fifty silent empty blocks.
+   */
+  private async restorePast(): Promise<void> {
+    if (this._pastRestored) return
+    this._pastRestored = true
+    if (!this.scrollback) return
+    const blocks = await blocksForPane(this.client, this.pane.paneId)
+    if (blocks.length === 0) return
+    const snapshot = fromITheme(getCurrentTheme())
+    const els: HTMLElement[] = []
+    for (const b of blocks) {
+      const body = await bodyForBlock(this.client, b.entryId)
+      els.push(
+        restoredBlock(
+          {
+            id: this.scrollback.blockManager.nextRestoredId(),
+            command: b.command,
+            cwd: b.cwd,
+            // The host the command ran on, not the one the pane is on now: a
+            // block keeps saying where it ran (design §7).
+            location: b.host,
+            durationMs: b.durationMs,
+            exitCode: b.exitCode,
+            status: b.status,
+            body,
+          },
+          snapshot,
+          () => this.scrollback?.scrollbackInner ?? document.createElement('div'),
+          () => {},
+          this.scrollback.snapshotStore,
+        ),
+      )
+    }
+    this.scrollback.restorePast(els)
   }
 
   // ── Capability rail (nocx-4t37.2) ─────────────────────────────────────

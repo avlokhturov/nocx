@@ -907,6 +907,27 @@
    overflow-x: auto — is the FROZEN contract (nocx-juau) and stays for
    command blocks; this modifier is the same frame with the prose grammar,
    and it must come after the base rule for the cascade. */
+.scrollback-restore-boundary {
+  /* Where the previous session ended. ADR-0019 §3 asks for the difference
+     between a restored block and a live one to be VISIBLE, and a rule with a
+     word on it is what a person reads — "is this shell still running" is not
+     answered by blocks that look slightly different. */
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.scrollback-restore-boundary::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--color-border);
+}
+
 .cmd-output-evicted {
   /* Where a body used to be. Retention removes an artifact while its entry
      stays (ADR-0019 §7), and a reconstruction has to state its own horizon:

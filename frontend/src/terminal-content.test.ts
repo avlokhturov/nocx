@@ -5243,3 +5243,131 @@ describe('the pane reports its directory (nocx-zkiv4)', () => {
     }
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A pane draws its past the first time it is shown (nocx-m3fqk)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a pane draws its past (nocx-m3fqk)', () => {
+  function storeWith(entries: unknown[], body: string | null) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') {
+        const p = params as { paneId?: string }
+        return Promise.resolve({
+          entries: p.paneId ? entries : [],
+          scope: 'everywhere',
+          exhausted: true,
+          hasRows: entries.length > 0,
+          coverage: null,
+        })
+      }
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: body === null ? [] : [{ id: 'art-1', mediaType: 'application/vt' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: 'art-1',
+          mediaType: 'application/vt',
+          body: body ?? '',
+          truncated: null,
+          byteLen: (body ?? '').length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: 'e-1',
+    seq: 1,
+    environmentId: 'env',
+    host: null,
+    cwd: '/repo',
+    kind: 'shell',
+    intent: 'make test',
+    phase: 'closed',
+    status: 'success',
+    submittedAt: 1,
+    startedAt: 1,
+    endedAt: 2,
+    durationMs: 1200,
+    exitCode: 0,
+    maskedCount: 0,
+    maskedKinds: [],
+    redactions: [],
+    ...over,
+  })
+
+  it('draws the blocks it ran before, above a boundary, marked as not live', async () => {
+    const client = storeWith([entry({ id: 'e-2', intent: 'make lint' }), entry()], '\u001b[32mPASS')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(2)
+      })
+
+      // Oldest first: the page comes back newest-first and a person reads
+      // their past downwards.
+      const restored = [...inner.querySelectorAll('[data-restored="true"]')]
+      expect(restored[0].textContent).toContain('make test')
+      expect(restored[1].textContent).toContain('make lint')
+
+      // The boundary, and everything restored ABOVE it: what makes "this
+      // shell is a new one" visible rather than implied (ADR-0019 §3).
+      const boundary = inner.querySelector('[data-restore-boundary="true"]')
+      expect(boundary).not.toBeNull()
+      expect(
+        boundary!.compareDocumentPosition(restored[1]) & Node.DOCUMENT_POSITION_PRECEDING,
+      ).toBeTruthy()
+
+      // Drawn ONCE: a pane is shown on every tab switch.
+      content.setVisible(false)
+      content.setVisible(true)
+      await Promise.resolve()
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('says the output is gone when the artifact is, instead of drawing an empty block', async () => {
+    const client = storeWith([entry()], null)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-output-evicted="true"]')).not.toBeNull()
+      })
+      expect(inner.textContent).toContain('Output is no longer kept')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('costs the past and never the pane when the store cannot be read', async () => {
+    const client = makeClient()
+    client.call.mockRejectedValue(new Error('store down'))
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      await Promise.resolve()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
+      // The pane is alive and usable, which is the property that matters.
+      expect(content.shellState).toBeDefined()
+    } finally {
+      teardown()
+    }
+  })
+})

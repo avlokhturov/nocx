@@ -68,6 +68,7 @@ import {
 import { UIStateClient } from './uistate-client'
 import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
+import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -279,6 +280,11 @@ async function main() {
     // for the same reason: the renderer is where it is enforced, so it has to
     // know before the first block freezes.
     applyOutputCap(snap.values[OUTPUT_CAP_KEY])
+    // Whether boot reopens what was left. Read HERE, before the pane manager
+    // exists, because it decides what the first frame contains — and read
+    // once: flipping it mid-session must not make tabs appear or vanish
+    // under the person.
+    applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
   } catch {
     // Backend may not be ready yet — safe fallback.
   }

@@ -53,6 +53,11 @@ type LedgerService interface {
 	// entry, in either direction. It is what makes the ledger a memory
 	// rather than a log (design §3.4).
 	Edges(ctx context.Context, entryID string) ([]content.Edge, error)
+	// Artifact serves ledger.artifact: one body with its chunks, which is
+	// what a restored block's output is drawn from. Nil when no artifact
+	// carries the id — a body retention has evicted, which the caller must
+	// render as a hole rather than as silence (ADR-0019 §7).
+	Artifact(ctx context.Context, id string) (*content.Artifact, error)
 	// CaptureOutput serves ledger.capture: one body of a frozen block,
 	// against the entry's own execution. The bool is whether the body is
 	// kept — false when output retention is off or the entry is sensitive,
@@ -136,6 +141,13 @@ func (s *ledgerService) Edges(ctx context.Context, entryID string) ([]content.Ed
 		return nil, err
 	}
 	return s.ledger.Edges(ctx, entryID)
+}
+
+func (s *ledgerService) Artifact(ctx context.Context, id string) (*content.Artifact, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.ledger.Artifact(ctx, id)
 }
 
 func (s *ledgerService) CaptureOutput(ctx context.Context, in content.CaptureOutput) (bool, error) {

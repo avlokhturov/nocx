@@ -55,6 +55,10 @@ export class ScrollbackController {
    *  stays sane regardless of the clipping container's CSS height. */
   readonly xtermInner: HTMLElement
   readonly separator: HTMLElement
+  /** This tab's OSC 636 store, kept because a block built OUTSIDE the manager
+   *  — a restored one (nocx-m3fqk) — needs the same instance its live
+   *  neighbours judge against, and the manager's copy is private. */
+  readonly snapshotStore: CommandSnapshotStore
 
   private _blockManager: BlockManager
   private _renderer: TerminalRenderer
@@ -88,6 +92,7 @@ export class ScrollbackController {
   constructor(opts: ScrollbackControllerOpts) {
     this._renderer = opts.renderer
     this._onClear = opts.onClear
+    this.snapshotStore = opts.snapshotStore
     const now = opts.now ?? (() => performance.now())
 
     // ── Build the scrollback DOM ─────────────────────────────────────────
@@ -411,6 +416,31 @@ export class ScrollbackController {
   private _republishCellMetric(): void {
     publishCellMetric(this.scrollbackInner, this._renderer.cellWidth)
     publishRowPitch(this.scrollbackInner, this._renderer.cellHeight)
+  }
+
+  /**
+   * Put blocks the STORE holds above everything the live session draws
+   * (nocx-m3fqk), and mark where the past ends.
+   *
+   * Inserted before the first live element rather than appended, so restored
+   * blocks keep the order they are given and a session that has already
+   * printed something does not find its past underneath its present.
+   *
+   * The boundary is an element of its own rather than a class on the last
+   * restored block: ADR-0019 §3 asks for the difference to be VISIBLE, and a
+   * line saying where the previous session ended is what a person reads — a
+   * block that merely looks a little different is not an answer to "is this
+   * shell still running".
+   */
+  restorePast(blocks: HTMLElement[]): void {
+    if (blocks.length === 0) return
+    const anchor = this.scrollbackInner.firstChild
+    for (const el of blocks) this.scrollbackInner.insertBefore(el, anchor)
+    const boundary = document.createElement('div')
+    boundary.className = 'scrollback-restore-boundary'
+    boundary.dataset.restoreBoundary = 'true'
+    boundary.textContent = 'Previous session'
+    this.scrollbackInner.insertBefore(boundary, anchor)
   }
 
   /**

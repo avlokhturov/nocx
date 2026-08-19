@@ -45,6 +45,7 @@ import { workspaceAxis, type GroupAxis } from './layout/strip-groups'
 import { isWorkspaceColour } from './layout/workspace-colours'
 import { workspaceActionRows, type WorkspaceMenuRow } from './workspace-menu'
 import { uuidv7 } from './layout/uuid7'
+import { restoreOnStartup } from './restore-setting'
 import type { Pane as PaneRow, Workspace as WorkspaceRow } from './generated/layout.read'
 import { leftRunningMessage, liveDescendants, type LineageNode } from './lineage'
 import { closingWorkspaceMessage, type WorkspaceMember } from './live-work'
@@ -557,6 +558,19 @@ export class PaneManager {
   private _initialPaneReady: Promise<void> | undefined
   private tabStrip: TabStrip
   /** The chain, as the backend last answered. A cache, never an authority. */
+  /** The panes this window is NOT showing: what the chain held at boot when
+   *  the person asked for a clean start (nocx-yejir).
+   *
+   *  A SET of ids rather than a flag, and the difference is the whole
+   *  correctness of it. A flag would have to be off for the boot and on
+   *  again afterwards, and the first re-render after that — the one the
+   *  clean start's own new tab causes — would put every stored pane on
+   *  screen, which is the opposite of what was asked for. Naming the rows
+   *  says exactly what is meant: these were left over, and a row created
+   *  afterwards is not one of them and appears like any other.
+   *
+   *  Empty when restore is on, which is the normal case. */
+  private readonly notShown = new Set<string>()
   private readonly layout: LayoutStore
   /**
    * WHICH TAB WAS IN FRONT — read once at boot, written on every activation.
@@ -741,6 +755,23 @@ export class PaneManager {
    */
   private async boot(): Promise<void> {
     this.tabStrip.mount(this.hostFor(this.tabStrip))
+    // A CLEAN START, when the person asked for one (nocx-yejir). The chain is
+    // still READ — a tab opened in this session must be recorded, or the
+    // commands run in it have no pane to anchor their blocks to — and the
+    // stored rows simply do not become panes. They are otherwise left alone,
+    // which is what makes this a decision about startup rather than an
+    // instruction to forget: turning the setting back on restores what was
+    // there. Deleting the chain here would null every block's anchor too, a
+    // quieter and much larger loss than the one that was asked for.
+    if (!restoreOnStartup()) {
+      await this.readLayoutWithoutAdopting()
+      const fresh = this.newPane()
+      await this.activate(fresh)
+      const content = fresh.content
+      if (!(content instanceof TerminalContent)) throw new Error('initial pane is not a terminal')
+      if (!(await content.ready)) throw new Error('initial pane failed to start')
+      return
+    }
     await this.readLayout()
     // readLayout's change notification has already adopted whatever the
     // backend holds; an empty chain means a first pane to open.
@@ -769,6 +800,28 @@ export class PaneManager {
     }
     const ok = await content.ready
     if (!ok) throw new Error('initial pane failed to start')
+  }
+
+  /**
+   * Read the chain for a CLEAN START: learn what is there, show none of it.
+   *
+   * The read still happens, because the chain is where a tab opened in this
+   * session is recorded — without it this session's commands would anchor
+   * their blocks to nothing — and because the store learns the default
+   * workspace a new tab belongs in. What the setting removes is the window
+   * opening on what was left, and that is done by naming those rows rather
+   * than by not reading them.
+   */
+  private async readLayoutWithoutAdopting(): Promise<void> {
+    await this.readLayout()
+    for (const row of this.layout.panes()) this.notShown.add(row.id)
+    // The read's own change notification has already put them on screen —
+    // this manager renders on every store change — so the chrome goes back
+    // off. DROPPED, not closed: dropChrome removes a pane from the window
+    // and never touches its row.
+    for (const pane of [...this.panes]) {
+      if (this.notShown.has(pane.wireId)) this.dropChrome(pane)
+    }
   }
 
   /** Read the chain, and say so in the product when it cannot be read. */
@@ -1914,6 +1967,10 @@ export class PaneManager {
     const rows = this.layout.panes()
     for (const row of rows) {
       if (this.panes.some((p) => p.wireId === row.id)) continue
+      // A clean start draws none of what was left (nocx-yejir). The rows
+      // stay where they are; what the setting decides is whether the window
+      // opens on them.
+      if (this.notShown.has(row.id)) continue
       this.adopt(row)
     }
     for (const pane of [...this.panes]) {

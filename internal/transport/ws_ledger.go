@@ -773,6 +773,10 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 		// The capture path (nocx-2f0f). It takes no connection either, for
 		// the same reason: a body belongs to an ENTRY, and an entry outlives
 		// the session it ran in.
+		regResponder(contentSub, "ledger.artifact", params(validateLedgerArtifactRaw), func(r Responder) handlerFunc {
+			h := ledgerReadHandlers{op: op, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleArtifact(ctx, req) }
+		}),
 		regResponder(contentSub, "ledger.capture", params(validateLedgerCaptureRaw), func(r Responder) handlerFunc {
 			h := ledgerCaptureHandlers{op: op, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
