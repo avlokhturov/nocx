@@ -297,6 +297,9 @@ async function main() {
     profileClient,
     tabStrip,
     layout,
+    // Which tab was in front: the UI-state document holds it, and the mirror
+    // is already warm — `load()` above ran before this line (ADR-0033).
+    uiStateClient,
   )
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)

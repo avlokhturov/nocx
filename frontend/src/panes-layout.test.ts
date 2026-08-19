@@ -7,6 +7,7 @@ import {
   mountPaneManager,
   makeLayoutBackend,
   makeLayoutStore,
+  makeUIStateBackend,
 } from './test-support/panes-fixtures'
 import { BasePaneContent, type ContentDescriptor, type ContentViewport } from './pane-content'
 
@@ -577,5 +578,81 @@ describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
     // And the pane that WAS admitted is still named — the refusal of one
     // create does not unanchor the sessions around it.
     expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: admitted })
+  })
+})
+
+// ── WHICH TAB IS IN FRONT (nocx-mqie.4, ADR-0033) ──────────────────────────
+//
+// The chain says which tabs exist; it does not say which one a person was
+// looking at, and it must not — a window is a viewport and two windows on one
+// profile have two answers. That fact lives in the UI-state document, which
+// the app writes without being asked. These tests drive the real client over
+// a stored document and a REAL restart: a fresh mirror that knows nothing
+// until it reads.
+describe('the window reopens on the tab that was in front', () => {
+  beforeEach(() => {
+    resetSessionCounter()
+    vi.clearAllMocks()
+  })
+
+  /** Which row the strip is showing as selected — the only place a person
+   *  can see the answer, so the only place worth asserting it. */
+  function activeTabIndex(bar: HTMLElement): number {
+    return stripTabs(bar).findIndex((t) => t.getAttribute('aria-selected') === 'true')
+  }
+
+  it('records the tab moved to, and opens on it next launch', async () => {
+    const backend = await seededBackend({ decorate: false })
+    const ui = makeUIStateBackend()
+
+    const first = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      ui.newClient(),
+    )
+    // Cmd+2 — a seam a person actually reaches, rather than the private
+    // activate() the implementation happens to expose.
+    first.manager.activateByIndex(1)
+    await vi.waitFor(() => {
+      expect(activeTabIndex(first.bar)).toBe(1)
+    })
+    // A PANE ID and never an index: an index means nothing against a
+    // different tab set, and the set is not what this document restores.
+    await vi.waitFor(() => {
+      expect(ui.stored().activeTab).toBe('pane-b')
+    })
+
+    const second = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      ui.newClient(),
+    )
+
+    expect(activeTabIndex(second.bar)).toBe(1)
+  })
+
+  it('opens the first tab when the remembered pane is gone, and does not throw', async () => {
+    // The tab SET is not restored yet (nocx-l21ib), so a remembered pane can
+    // legitimately have gone. The window still has to open on something.
+    const backend = await seededBackend({ decorate: false })
+    const ui = makeUIStateBackend({ activeTab: 'pane-that-was-closed' })
+
+    const { bar } = await mountPaneManager(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { store: makeLayoutStore(backend).store, backend },
+      ui.newClient(),
+    )
+
+    expect(stripTabs(bar)).toHaveLength(2)
+    expect(activeTabIndex(bar)).toBe(0)
   })
 })

@@ -37,6 +37,7 @@ import {
 } from './name-colour-dialog'
 import type { OverviewPaneFacts, OverviewPort, OverviewSnapshot } from './overview/overview-port'
 import { LayoutStore } from './layout/layout-store'
+import type { UIStateClient } from './uistate-client'
 import { tabLabel } from './layout/tab-label'
 import { stripOrder } from './layout/strip-order'
 import { lineageOrder } from './layout/strip-tree'
@@ -558,6 +559,16 @@ export class PaneManager {
   /** The chain, as the backend last answered. A cache, never an authority. */
   private readonly layout: LayoutStore
   /**
+   * WHICH TAB WAS IN FRONT — read once at boot, written on every activation.
+   *
+   * It is not in the chain and must not be: the chain says which tabs exist,
+   * while "the one I was looking at" is a fact about a VIEWPORT, exactly like
+   * `viewedWorkspaceId` above it. It is not in localStorage either — the
+   * renderer holding a fact of its own is the arrangement the UI-state
+   * document exists to end (ADR-0033).
+   */
+  private readonly uiState: UIStateClient
+  /**
    * Whether the layout store answered at all.
    *
    * False is a real product state: the content store is encrypted and can
@@ -651,6 +662,7 @@ export class PaneManager {
     profileClient: ProfileClient,
     tabStrip: TabStrip,
     layout: LayoutStore,
+    uiState: UIStateClient,
   ) {
     this.panesContainer = panes
     this.client = client
@@ -662,6 +674,7 @@ export class PaneManager {
     this.bar = bar
     this.verticalHost = verticalHost
     this.layout = layout
+    this.uiState = uiState
 
     // Wire TabStrip intents.
     this.wireStrip(tabStrip)
@@ -736,12 +749,17 @@ export class PaneManager {
     // tab is in front" is made once rather than falling out of whichever row
     // the chain handed over last.
     //
-    // The answer is the FIRST pane, and it is a placeholder: the tab the
-    // person actually left is a fact about a viewport, it belongs in the
-    // backend's UI-state store (nocx-mqie), and that store does not exist
-    // yet. It is not kept in localStorage in the meantime — the renderer
-    // holding a fact of its own is the arrangement that store exists to end.
-    const front = this.panes[0] ?? this.newPane()
+    // The answer is the tab the person LEFT, which the UI-state document
+    // holds (nocx-mqie.4): the mirror was filled by the composition root's
+    // `load()` before this manager was built, so it is readable here without
+    // a second round trip and without boot waiting on one.
+    //
+    // A remembered id matching no pane falls through to the first one. That
+    // is not a defect to fix later: the tab SET is not restored yet
+    // (nocx-l21ib), so a pane a person had in front can legitimately be gone
+    // by the next launch, and the window still has to open on something.
+    const remembered = this.uiState.state.activeTab
+    const front = this.panes.find((p) => p.wireId === remembered) ?? this.panes[0] ?? this.newPane()
     await this.activate(front)
     const content = front.content
     if (!(content instanceof TerminalContent)) {
@@ -1714,6 +1732,14 @@ export class PaneManager {
 
     this.removeFromRecent(pane.id)
     this.tabStrip.setActive(pane.id)
+    // Remember it, so the next launch opens here. Recorded BEFORE the content
+    // is started and awaited: what was in front is true from the moment the
+    // tab comes forward, and a start that never finishes must not be able to
+    // cost the person their position. Fire-and-forget with the rejection
+    // swallowed — this is a fact the app writes without being asked, nothing
+    // on screen promises it succeeded, and a failed write costs the next
+    // launch its tab and never this activation.
+    void this.uiState.save({ activeTab: pane.wireId }).catch(() => {})
 
     log.info('nocx: pane.setActive(true) called', {
       paneClasses: pane.pane.className,

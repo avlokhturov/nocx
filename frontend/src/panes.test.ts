@@ -11,6 +11,7 @@ import {
   makeBanner,
   setupTabBarDOM,
   makeLayoutStore,
+  makeUIStateBackend,
   FIXTURE_DIRECTORY_LABEL,
   anchoredPane,
   type RendererMock,
@@ -128,6 +129,7 @@ describe('PaneManager', () => {
       pc as never,
       tabStrip,
       makeLayoutStore().store,
+      makeUIStateBackend().newClient(),
     )
 
     expect(bar.querySelectorAll('.nocx-tab').length).toBe(0)
@@ -1203,6 +1205,7 @@ describe('PaneManager', () => {
       profileClient,
       tabStrip,
       makeLayoutStore().store,
+      makeUIStateBackend().newClient(),
     )
     // Open the initial tab explicitly — the constructor mounts nothing.
     // Don't await: openInitialPane returns the _initialPaneReady promise;

@@ -20,6 +20,9 @@ import type {
 } from '../renderers/types'
 import { CommandSnapshotStore } from '../command-snapshot'
 import { LayoutStore } from '../layout/layout-store'
+import { UIStateClient } from '../uistate-client'
+import type { UIState } from '../generated/uistate'
+import type { Dispatcher } from '../dispatcher'
 import type { LayoutClientLike } from '../layout/layout-client'
 import type {
   Tab as LayoutTab,
@@ -760,6 +763,39 @@ export function makeLayoutBackend(): LayoutClientLike & {
   }
 }
 
+/**
+ * An in-memory UI-state document, and a real UIStateClient over it.
+ *
+ * The double is the SOCKET, never the client: what a restart test has to
+ * watch is the renderer's own merge and the `uistate.get` on the way back, so
+ * `newClient()` mints a fresh mirror over the same stored document — exactly
+ * what a second launch has.
+ */
+export function makeUIStateBackend(seed?: Partial<UIState>): {
+  newClient: () => UIStateClient
+  stored: () => UIState
+} {
+  let doc: UIState = {
+    sidebar: { collapsed: false, activeViewId: '', width: 240 },
+    activeTab: '',
+    ...seed,
+  }
+  const dispatcher = {
+    call: vi.fn((method: string, params: unknown) => {
+      if (method === 'uistate.get') return Promise.resolve(structuredClone(doc))
+      if (method === 'uistate.set') {
+        doc = structuredClone(params as UIState)
+        return Promise.resolve(structuredClone(doc))
+      }
+      return Promise.reject(new Error(`unexpected method ${method}`))
+    }),
+  } as unknown as Dispatcher
+  return {
+    newClient: () => new UIStateClient(dispatcher),
+    stored: () => structuredClone(doc),
+  }
+}
+
 /** A real LayoutStore over the in-memory backend: the tests exercise the
  *  store's own rules, and only the socket is faked. */
 export function makeLayoutStore(backend?: ReturnType<typeof makeLayoutBackend>): {
@@ -793,6 +829,7 @@ export async function mountPaneManager(
   gate?: ClipboardGate,
   banner?: BannerFake,
   layout?: ReturnType<typeof makeLayoutStore>,
+  uiState?: UIStateClient,
 ): Promise<{
   bar: HTMLElement
   panes: HTMLElement
@@ -804,6 +841,7 @@ export async function mountPaneManager(
   tabStrip: import('../tab-strip').TabStrip
   layout: LayoutStore
   backend: ReturnType<typeof makeLayoutBackend>
+  uiState: UIStateClient
 }> {
   const { bar, panes } = setupTabBarDOM()
   const c = client ?? makeClient()
@@ -815,6 +853,11 @@ export async function mountPaneManager(
     listGroups: vi.fn().mockResolvedValue([]),
   }
   const l = layout ?? makeLayoutStore()
+  // Read before the manager is built, exactly as the composition root does:
+  // the tab that was in front is decided at boot, so the mirror has to be
+  // warm before `openInitialPane` reads it.
+  const ui = uiState ?? makeUIStateBackend().newClient()
+  await ui.load()
   const { PaneManager } = await import('../panes')
   const { HorizontalTabStrip } = await import('../tab-strip')
   const tabStrip = new HorizontalTabStrip()
@@ -829,6 +872,7 @@ export async function mountPaneManager(
     pc as unknown as import('../profiles').ProfileClient,
     tabStrip,
     l.store,
+    ui,
   )
   // Open the initial tab explicitly — the constructor mounts nothing.
   await manager.openInitialPane()
@@ -843,5 +887,6 @@ export async function mountPaneManager(
     tabStrip,
     layout: l.store,
     backend: l.backend,
+    uiState: ui,
   }
 }

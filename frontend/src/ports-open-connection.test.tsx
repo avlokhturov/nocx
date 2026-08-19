@@ -24,6 +24,7 @@ import {
   makeClipboard,
   setupTabBarDOM,
   makeLayoutStore,
+  makeUIStateBackend,
 } from './test-support/panes-fixtures'
 import { PaneManager } from './panes'
 import { HorizontalTabStrip } from './tab-strip'
@@ -116,6 +117,7 @@ async function mountManager(createProfile: Mock) {
     profileClient,
     new HorizontalTabStrip(),
     makeLayoutStore().store,
+    makeUIStateBackend().newClient(),
   )
   await manager.openInitialPane()
   return manager

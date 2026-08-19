@@ -133,7 +133,7 @@ value that works.
     "activeViewId": "ports",
     "width": 206, // WHOLE CSS pixels
   },
-  "activeTab": "", // reserved — see §7
+  "activeTab": "", // the durable pane id of the tab in front — see §7
 }
 ```
 
@@ -144,9 +144,12 @@ value that works.
   artefact of storing a `getBoundingClientRect()` result verbatim. Bounds stay where
   they are today (200…640, `frontend/src/sidebar-width.ts`), and the clamp is applied
   on read as well as on write, so a hand-edited file cannot produce an unusable panel.
-- **`activeTab`** is the reserved slot for which tab is in front. Its value is one
-  durable pane id (`Pane.wireId`) and nothing else — not an index, which is invalid
-  the moment the tab set differs.
+- **`activeTab`** is which tab is in front. Its value is one durable pane id
+  (`Pane.wireId`) and nothing else — not an index, which is invalid the moment the tab
+  set differs. `PaneManager` reads it once at boot and writes it on every activation;
+  an id naming no pane leaves the window on the first tab, because the tab **set** is
+  not restored by this document (`nocx-l21ib`) and a remembered pane may legitimately
+  be gone.
 
 **Split justified.** The two halves of this document are written from two different
 sides because they are knowable from two different sides; that is not a split store.
