@@ -1,0 +1,48 @@
+# The landing page. No build step by design: site/ is hand-written static
+# files, and keeping npm out of this job keeps it clear of the containerized
+# runners that already serialize on one Docker daemon (nocx-x6z3).
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - 'scripts/check-site.sh'
+      - 'scripts/site-forbidden-phrases.txt'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. Queue rather than cancel: a superseded run has
+# already been merged to main, so its content is not stale, it is early.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same gate the pre-commit hook runs. A page that fails it must not
+      # reach the public URL just because someone bypassed a local hook.
+      - name: check-site
+        run: ./scripts/check-site.sh
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
