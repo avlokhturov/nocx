@@ -26,6 +26,62 @@ export async function promptReady(page: Page): Promise<void> {
 }
 
 /**
+ * Put the sidebar on `viewId` and leave it there.
+ *
+ * IDEMPOTENT ON PURPOSE, because the activity-bar button is a TOGGLE and the
+ * sidebar's active view is now PERSISTED (nocx-mqie.1, ADR-0033): a spec that
+ * reloads mid-test comes back with its view ALREADY showing, and a second
+ * unconditional click is then the thing that closes the panel it was asked to
+ * open. That is what the notes spec did across its `page.reload()`, and it is
+ * the single-test version of what `resetStand` handles between tests.
+ *
+ * `aria-selected` is the button's own account of whether its view is the one
+ * on screen (ui/icon-button.tsx), so it answers the question directly rather
+ * than by guessing from the panel.
+ */
+export async function showSidebarView(page: Page, viewId: string): Promise<void> {
+  const button = page.locator(`.activity-bar button[data-view="${viewId}"]`)
+  await baseExpect(button).toBeVisible({ timeout: 15_000 })
+  if ((await button.getAttribute('aria-selected')) !== 'true') {
+    await button.click()
+  }
+  await baseExpect(button).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 })
+}
+
+/**
+ * Wait until the Settings page has LOADED, not until it has merely mounted.
+ *
+ * NEVER `.ui-page__scroll` — thirteen specs used to open Settings and wait for
+ * that, and the reason it looked like a readiness signal is the reason it is
+ * the wrong one. Its presence reports the SCROLL MODE, and Settings changes
+ * mode as it loads: with nothing selected the body falls back to `page` mode
+ * and paints a scroller around "Loading settings…", then `settings.describe`
+ * answers, the landing effect selects the first registry page — Connections,
+ * which is `scrollMode: 'contained'` (settings.tsx) — and the scroller is
+ * REPLACED by `.ui-page__contained`. So the element exists only while Settings
+ * is still loading, and a spec waiting for it was racing the load: it passed
+ * when it caught the loading frame and failed when it missed it, which is
+ * exactly the intermittency nocx-rv53x records. The page renders every time —
+ * the error-context snapshot of every failing run shows a fully painted
+ * Connections page — so there is no product defect behind those thirty
+ * failures, only a spec waiting on a frame that is on its way out.
+ *
+ * The rail is the honest signal: `<Show when={loadState() === 'ready'}>` is
+ * what puts it on screen, so it appears when the data has arrived and stays
+ * for every page, in either scroll mode.
+ *
+ * A spec that wants the SCROLLER — the scroll-ownership and settings-scroll
+ * probes do — waits on this first and then opens a `page`-mode section, which
+ * is what a user does and is the only state in which that element is a stable
+ * fact rather than a passing frame.
+ */
+export async function settingsReady(page: Page): Promise<void> {
+  await baseExpect(page.locator('[aria-label="Settings sections"]')).toBeVisible({
+    timeout: 15_000,
+  })
+}
+
+/**
  * Click into the active pane's prompt editor.
  *
  * Six specs used to spell this `page.mouse.click(box.x + box.width / 2, box.y +
@@ -157,14 +213,15 @@ export const test = base.extend<object, { appReady: void }>({
     // the test that is about to run, which is the one whose result depends on
     // it. Whatever the last spec left — including a page that crashed with
     // eight tabs open — this is what the next one starts from.
-    await resetLayout()
+    await resetStand()
     await injectWailsShim(page)
     await use(page)
   },
 })
 
 /**
- * Leave the backend holding exactly one undecorated tab.
+ * Leave the backend holding exactly one undecorated tab, and the UI state at
+ * its declared defaults.
  *
  * THE PRODUCT NOW REMEMBERS TABS (nocx-isoph.4): the backend owns the
  * workspace → tab → pane chain, and a renderer that goes away leaves the rows
@@ -197,7 +254,7 @@ export const test = base.extend<object, { appReady: void }>({
  * "one spec is red for a reason it states" beats "twenty are red for a reason
  * none of them mention".
  */
-async function resetLayout(): Promise<void> {
+async function resetStand(): Promise<void> {
   const stand = readStand()
   const wire = await openControlPlane(stand.port, stand.token)
   try {
@@ -212,6 +269,24 @@ async function resetLayout(): Promise<void> {
         replacement: { tabId: uuidv7(), paneId: uuidv7(), cwd: '' },
       })
     }
+    // AND THE UI STATE, which is a second document and a second way for one
+    // spec to decide the next one's result. Since nocx-mqie.1 the sidebar's
+    // collapse and its ACTIVE VIEW are remembered across a renderer, so a
+    // spec that opened Git leaves Git open — and every view button is a
+    // TOGGLE, so the next spec's `click()` on that view closes the panel
+    // instead of opening it. That is why the git-panel specs alternated
+    // pass/fail down the file: the branch badge was in the DOM and `hidden`,
+    // which is what a toggled-shut panel looks like.
+    //
+    // Written as the whole document, because `uistate.set` takes the whole
+    // renderer half (ADR-0033) — and to the DECLARED defaults rather than to
+    // "no view", because they are what a fresh profile has: the panel open on
+    // the first registered view. `activeViewId: ''` is repaired to that same
+    // first view on mount, so the two agree.
+    await wire.call('uistate.set', {
+      sidebar: { collapsed: false, activeViewId: '', width: 240 },
+      activeTab: '',
+    })
   } finally {
     wire.close()
   }

@@ -7,7 +7,7 @@
  * registration). Without it the Connect button dispatches a no-op and the
  * tab assertion fails.
  */
-import { test, expect, type Page } from './harness'
+import { test, expect, settingsReady, type Page } from './harness'
 
 const PROFILE_NAME = 'Test SSH'
 
@@ -75,7 +75,7 @@ test.describe('Connections inside Settings', () => {
 
     // Open Settings via keyboard shortcut (Meta+,).
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
 
     // Record tab count AFTER Settings is open (Settings is itself a tab).
     const tabsBeforeConnect = await page.locator('.nocx-tab-title').count()

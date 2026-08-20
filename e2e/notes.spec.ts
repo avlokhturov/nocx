@@ -1,4 +1,4 @@
-import { test, expect, promptReady, type Page } from './harness'
+import { test, expect, promptReady, showSidebarView, type Page } from './harness'
 
 /**
  * e2e: write it down without leaving the terminal (nocx-z56hq.7 — the notes
@@ -31,9 +31,10 @@ async function typeIntoTheNote(page: Page, text: string): Promise<void> {
   await page.keyboard.type(text)
 }
 
-/** Open the notes panel from the activity bar. */
+/** Open the notes panel from the activity bar — or leave it open if a reload
+ *  has already brought it back (see showSidebarView). */
 async function openPanel(page: Page): Promise<void> {
-  await page.locator('.activity-bar [data-view="notes"]').click()
+  await showSidebarView(page, 'notes')
   await expect(page.locator(PANEL)).toBeVisible({ timeout: 10_000 })
 }
 

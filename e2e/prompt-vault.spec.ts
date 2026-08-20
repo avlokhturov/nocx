@@ -33,7 +33,7 @@ import { test as base, expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -103,7 +103,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
 
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 10_000 })
+    await settingsReady(page)
     await page.locator('.ui-grouped-nav__item[data-item="secrets"]').click()
     await expect(page.getByRole('button', { name: 'Set up protection' })).toBeVisible({
       timeout: 10_000,

@@ -17,7 +17,7 @@ import { execSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -103,7 +103,7 @@ test.describe('Vault — no keyring, full round trip', () => {
 
     // Open Settings via keyboard shortcut.
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
 
     // Click "Connections" in the left rail.
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
@@ -236,7 +236,7 @@ test.describe('Vault — no keyring, full round trip', () => {
 
     // Re-open Settings and navigate back to Connections.
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
@@ -306,7 +306,7 @@ test.describe('Vault — recovery code unseal', () => {
 
     // Open Settings, Connections, create profile with password (same as case 1).
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
     await page.locator('[role="toolbar"]').getByRole('button', { name: '+ New connection' }).click()
@@ -387,7 +387,7 @@ test.describe('Vault — recovery code unseal', () => {
 
     // Navigate back to Settings → Connections.
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
 
@@ -475,7 +475,7 @@ test.describe('Vault — with keyring, silent setup', () => {
 
       // Open Settings → Connections → create connection with password.
       await page.keyboard.press('Meta+,')
-      await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+      await settingsReady(page)
       await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
       await expect(page.locator('.cm-root')).toBeVisible({ timeout: 5000 })
       await page

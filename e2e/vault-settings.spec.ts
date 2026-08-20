@@ -16,7 +16,7 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -255,7 +255,7 @@ test.describe('Vault settings — change passphrase', () => {
 
     // Phase 4: Connect to profile → vault sealed → unseal with NEW passphrase.
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
 
     // Go to Connections.
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()

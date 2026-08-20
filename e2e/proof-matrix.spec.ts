@@ -12,14 +12,14 @@
  * §5 of .internal/specs/2026-07-27-kit-owns-its-appearance-design.md
  */
 import type { Page } from '@playwright/test'
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, settingsReady } from './harness'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Open settings via keyboard shortcut and wait for the page to render. */
 async function openSettings(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
-  await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 10_000 })
+  await settingsReady(page)
 }
 
 /** Wait for a setting row identified by its data-key to appear. */
@@ -443,6 +443,11 @@ test.describe('4. Scroll ownership — measured', () => {
     await openSettings(page)
     // Navigate to Interface section to see more settings rows
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
+    // The scroller AFTER the navigation, and that order is the assertion.
+    // Interface is a generated section, so it is `scrollMode: 'page'` and owns
+    // a `.ui-page__scroll` for as long as it is the open page. Waiting for it
+    // before the click would be waiting on Settings' loading frame instead
+    // (see settingsReady) — which openSettings has already done properly.
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('.ui-page__body')).toBeAttached()
 
@@ -496,9 +501,12 @@ test.describe('4. Scroll ownership — measured', () => {
     // Navigate to Interface section to see more settings rows
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
-    // Scroll the last setting row into view using the scroll container
+    // Scroll the last setting row into view using the scroll container. The
+    // scroller arrives WITH Interface — Settings opens on Connections, which
+    // is contained and has none — so it is waited for, never assumed.
     const lastRow = page.locator('.ui-settings-row').last()
     const scroller = page.locator('.ui-page__scroll')
+    await expect(scroller).toBeVisible({ timeout: 5_000 })
     await page.evaluate(() => {
       const s = document.querySelector('.ui-page__scroll')
       if (s) {
@@ -506,7 +514,9 @@ test.describe('4. Scroll ownership — measured', () => {
         s.scrollTop = s.scrollHeight
       }
     })
-    await page.waitForTimeout(200)
+    await expect
+      .poll(() => scroller.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+      .toBeGreaterThan(0)
 
     // The row should be visible within the scroll container
     const scrollerBox = await scroller.boundingBox()
@@ -887,16 +897,25 @@ test.describe('6. Page duties', () => {
       // Navigate to Interface section to see more settings rows
       await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
-      // The last row should be scrollable into view
+      // WAIT FOR THE SCROLLER THE NAVIGATION BRINGS. Settings opens on
+      // Connections, which is `scrollMode: 'contained'` and has no
+      // `.ui-page__scroll` at all; the element below belongs to Interface and
+      // exists only once that page is the open one. Without this the evaluate
+      // found null, scrolled nothing, and the boundingBox below timed out.
       const lastRow = page.locator('.ui-settings-row').last()
       const scroller = page.locator('.ui-page__scroll')
+      await expect(scroller).toBeVisible({ timeout: 5_000 })
       await page.evaluate(() => {
         const s = document.querySelector('.ui-page__scroll')
         if (s) {
           s.scrollTop = s.scrollHeight
         }
       })
-      await page.waitForTimeout(200)
+      // The settled scroll position, not a duration: `scrollTop` is the
+      // observable the assignment above is trying to produce.
+      await expect
+        .poll(() => scroller.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+        .toBeGreaterThan(0)
 
       const scrollerBox = await scroller.boundingBox()
       const rowBox = await lastRow.boundingBox()
