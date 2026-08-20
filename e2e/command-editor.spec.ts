@@ -295,4 +295,49 @@ test.describe('command editor (nocx-4ff)', () => {
     expect(after.cell).toBeGreaterThan(0)
     expect(after.blockTop - running.blockTop).toBeLessThanOrEqual(1)
   })
+
+  // THE COMPOSER IS ONE HEIGHT, EMPTY OR NOT. Typing the first character
+  // changed it: the card was 10px taller while the draft was empty and
+  // snapped down at the first keystroke, taking the chip row, the Run token
+  // and the scrollback that hangs above it along (nocx-6c546).
+  //
+  // base.css styles `::-webkit-scrollbar` at 10px, which makes every
+  // scrollbar in this app a CLASSIC one — it takes layout space rather than
+  // floating over the content. CM6's `.cm-scroller` carries
+  // `overflow-x: auto`, and WebKit reserves that 10px horizontal gutter for
+  // the empty document and does not re-evaluate the decision until the
+  // document changes. So the jump was the reservation being dropped.
+  //
+  // It reproduces on the `webkit` project and NOT on `chromium` — which is
+  // the whole reason webkit stays in the matrix, WKWebView being what the
+  // packaged app runs. The assertion is a comparison of the same element in
+  // two states rather than an absolute pixel count, so it says the same
+  // thing whatever the viewport, font or engine.
+  test('the composer keeps its height when the first character is typed', async ({ page }) => {
+    await waitForPrompt(page)
+    await expect(page.locator(EDITOR)).toBeVisible({ timeout: 8000 })
+
+    const cardHeight = () =>
+      page.evaluate(
+        () => document.querySelector<HTMLElement>('.nocx-editor')!.getBoundingClientRect().height,
+      )
+
+    const empty = await cardHeight()
+    expect(empty).toBeGreaterThan(0)
+
+    await page.locator(INPUT).click()
+    await page.keyboard.type('e')
+    // Wait on the state, never on a duration: the character is in the
+    // document before the height is worth reading.
+    await expect(page.locator(INPUT)).toHaveText('e')
+    const typed = await cardHeight()
+
+    expect(typed).toBeCloseTo(empty, 1)
+
+    // And back again when the draft is emptied — the height belongs to the
+    // box, not to whether anything is in it.
+    await page.keyboard.press('Backspace')
+    await expect(page.locator(INPUT)).toHaveText('')
+    expect(await cardHeight()).toBeCloseTo(empty, 1)
+  })
 })
