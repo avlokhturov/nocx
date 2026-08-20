@@ -62,6 +62,189 @@
       </header>
 
       <hr class="rule" />
+
+      <section class="block" id="resume">
+        <p class="block__label">01 / resume</p>
+        <h2>Close it. Open it. Keep working.</h2>
+        <p class="lede">
+          A restart used to cost you everything on screen. Now the tabs come back, each still
+          showing the blocks it had, and the tab that was in front is the tab you land on. The
+          window's size and position return with them, along with the sidebar's width and the panel
+          you had open.
+        </p>
+        <p class="state">
+          What returns is <strong>tabs and the output they captured</strong> — not running
+          processes. A program that was mid-run is not resumed; what it printed is still there to
+          read.
+        </p>
+        <p>
+          Prefer a clean start? Turn it off in Settings under Interface and a restart gives you one
+          fresh tab, as before.
+        </p>
+
+        <figure class="figure figure--placeholder">
+          <div class="figure__frame">
+            Product screenshot — the same window after a restart, for a genuine before and after
+          </div>
+          <figcaption>The same session, reopened.</figcaption>
+        </figure>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="workspace">
+        <p class="block__label">02 / workspace</p>
+        <h2>Your terminal becomes a place you keep things</h2>
+        <p class="lede">
+          A workspace is a set of tabs with a name and a colour, made from the tab strip's menu and
+          arriving with its first tab open. Each is a pill in the strip: one click switches,
+          right-click renames, recolours or closes. Closing asks first, tells you how many tabs go
+          with it, and names anything still running.
+        </p>
+
+        <h3>Four panels, about the machine the tab is on</h3>
+        <ul class="plain">
+          <li>
+            <strong>Files</strong> shows the directory the tab is in and follows it —
+            <code>cd</code> somewhere and the tree moves, with no click and no tab switch.
+          </li>
+          <li>
+            <strong>Git</strong> is the repository the tab is in: changed files with their line
+            counts, staging and unstaging, a commit form, and the log. It refuses what git refuses,
+            visibly.
+          </li>
+          <li>
+            <strong>Ports</strong> lists what something in the tab is listening on, and the tunnels
+            you have forwarded.
+          </li>
+          <li>
+            <strong>Notes</strong> is a library. Press the shortcut and you are typing; the note
+            opens as a tab, saves as you pause, and is found later by any word inside it, not only
+            its title.
+          </li>
+        </ul>
+
+        <h3>History that outlives the window</h3>
+        <p>
+          Commands you run are stored on disk, encrypted. Press Up at the prompt and your history is
+          there after a restart, not only within the session. The recall panel searches it and tells
+          you how far back the store goes, rather than quietly returning less than you expected.
+          Retention in days, a disk ceiling and a per-command output cap all live in Settings;
+          recording output is a separate switch from recording commands.
+        </p>
+
+        <figure class="figure figure--placeholder">
+          <div class="figure__frame">
+            Product screenshot — the sidebar with the Git panel open, changed files and the commit
+            form visible
+          </div>
+          <figcaption>The Git panel, on the repository the tab is in.</figcaption>
+        </figure>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="secrets">
+        <p class="block__label">03 / secrets</p>
+        <h2>A reference where the key used to be</h2>
+        <p class="lede">
+          Type a key into the prompt and run it, and the block offers to store it. The value goes
+          into the vault and the command keeps a reference where the secret was. Recall that command
+          later and the reference comes back, rendered as a chip; run it and the vault asks you to
+          unlock before substituting the real value. You never have to find a settings page first.
+        </p>
+        <p class="state">
+          Precisely: once a secret is saved,
+          <strong>nocx replaces its value in its own record of that command</strong>
+          with a reference, and the value lives in the vault. That is a claim about our record of
+          the command and nothing else.
+        </p>
+        <p>Connection passwords and key passphrases live there too.</p>
+
+        <figure class="figure figure--placeholder">
+          <div class="figure__frame">
+            Product screenshot — a command block showing a reference chip where the secret was
+          </div>
+          <figcaption>The stored command, with the value gone from it.</figcaption>
+        </figure>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="ask">
+        <p class="block__label">04 / ask</p>
+        <h2>Ask about the output, without leaving the scrollback</h2>
+        <p class="lede">
+          Select the output of a finished command and a chip naming that command appears in your
+          input line, so you can see what you are about to send while you type the question. Beside
+          the prompt is a switch reading Run; flip it, or press the shortcut, and the line goes to
+          the assistant instead of the shell. The answer streams back as a block in the same
+          scrollback, your question as its header. There is no chat pane and no mode to leave.
+        </p>
+
+        <h3>What is sent, exactly</h3>
+        <p>
+          nocx ships an integration, not a model: you configure the endpoint under Settings →
+          Assistant → Endpoints, and until you do, the surfaces say so rather than failing when you
+          ask. What goes to that endpoint is a system rule stating that frame content is data rather
+          than instructions, your question, and the text of the frames you attached, labelled as
+          data.
+          <strong class="mono"
+            >A question with no attached frames carries only the question.</strong
+          >
+          Retention is your provider's, not ours.
+        </p>
+        <p class="constraint">
+          Over plain http, nocx will only reach loopback and private addresses, and it checks the
+          address it actually resolved and connected to on every request and every redirect — not
+          the text you typed. Credentials are dropped on any change of scheme, host or port.
+        </p>
+
+        <figure class="figure figure--placeholder">
+          <div class="figure__frame">
+            Product screenshot — an assistant answer as a block, with the command chip and the Run
+            switch visible
+          </div>
+          <figcaption>The question, the attached command, and the answer — one flow.</figcaption>
+        </figure>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="edit">
+        <p class="block__label">05 / edit</p>
+        <h2>The command line is an editor</h2>
+        <p class="lede">
+          The prompt is built on CodeMirror. Shell syntax is highlighted as you type, Tab completes
+          commands and paths — directories complete with a trailing slash and Tab again walks into
+          them — and the top candidate appears as ghost text that Right accepts. When nothing
+          matches, the panel says so instead of going blank.
+        </p>
+        <p>
+          Enter takes the highlighted completion and stops, leaving the command in the line where
+          you can read it before running it. Tab, Right or End walk into it.
+        </p>
+        <p>
+          Snippets are the other half: save a phrase once and fire it into whatever is currently
+          taking input, including a program in the middle of reading stdin. A multi-line body is
+          refused when the program has not enabled bracketed paste, rather than being pasted line by
+          line into something that cannot handle it.
+        </p>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="connect">
+        <p class="block__label">06 / connect</p>
+        <h2>Your hosts, brought in rather than retyped</h2>
+        <p class="lede">
+          Import existing connections from <code>~/.ssh/config</code> or a Tabby export. Passwords
+          and key passphrases go to the vault with everything else, so a connection references a
+          secret rather than carrying one.
+        </p>
+      </section>
+
+      <hr class="rule" />
     </main>
   </body>
 </html>
