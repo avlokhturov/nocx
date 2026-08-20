@@ -80,6 +80,20 @@ test.describe('the window reopens on the tab you left (nocx-mqie.5)', () => {
     await page.goto('/')
     await promptReady(page)
 
+    // THE BOOT'S OWN RECORD FIRST, and it is what this test used to mistake
+    // for the one it wanted. Bringing a tab forward writes the document
+    // (PaneManager.activate), and boot brings the first tab forward — so the
+    // file holds an id before the second tab exists. A poll for "truthy"
+    // accepts that one, and then `remembered` is the FIRST tab while the
+    // assertions above are about the second. The restart then restored the
+    // second tab correctly and the comparison called it a failure: the
+    // product was right and the spec was reading the wrong record. It failed
+    // on webkit and passed on chromium, which is the signature of a race
+    // rather than of a defect (uuid7 is time-ordered, and the id it captured
+    // was the older of the two).
+    await expect.poll(() => persistedActiveTab(backend)).toBeTruthy()
+    const atBoot = persistedActiveTab(backend)
+
     // Two tabs, the SECOND in front — the state a boot that activates
     // panes[0] would get wrong, and the reason this is not asserted on one
     // tab.
@@ -89,8 +103,17 @@ test.describe('the window reopens on the tab you left (nocx-mqie.5)', () => {
     await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')
 
     // The write must land in the durable store BEFORE the restart, or the
-    // restart proves nothing about persistence.
-    await expect.poll(() => persistedActiveTab(backend)).toBeTruthy()
+    // restart proves nothing about persistence. Waiting for it to CHANGE is
+    // what "the tab in front is recorded" looks like from out here: a second
+    // tab came forward, so the record cannot still be the boot's — and this
+    // waits on that state change rather than on a duration or on a weaker
+    // predicate than the one meant.
+    await expect
+      .poll(() => persistedActiveTab(backend), {
+        timeout: 15_000,
+        message: 'the second tab coming forward was never recorded',
+      })
+      .not.toBe(atBoot)
     const remembered = persistedActiveTab(backend)
 
     // The application restarts. Nothing in the first process survives it.
