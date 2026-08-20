@@ -112,12 +112,20 @@ jobs:
           # (info.productVersion -> CFBundleShortVersionString/CFBundleVersion)
           # is now a build-assets flag. The CLI also embeds the icon and
           # generates the Info.plist template the .app assembly copies.
+          # THE FLAG NAMES ARE THE STRUCT FIELDS, LOWERCASED, and nothing
+          # else: clir derives them with `strings.ToLower(field.Name)`
+          # whenever the field carries no `name:` tag (clir@v1.3.0
+          # command.go:258), and BuildAssetsOptions tags only `description:`
+          # and `default:`. So there are no word separators to insert —
+          # `-binary-name` is not a spelling of `-binaryname`, it is a flag
+          # that does not exist, and parsing stops at the first unknown one.
+          # The icons step below is the same convention read correctly.
           wails3 generate build-assets \
             -dir build/assets \
-            -binary-name nocx \
-            -product-name nocx \
-            -product-identifier com.shady2k.nocx \
-            -product-version "$VERSION"
+            -binaryname nocx \
+            -productname nocx \
+            -productidentifier com.shady2k.nocx \
+            -productversion "$VERSION"
 
       - name: Generate macOS icon bundle
         run: |
