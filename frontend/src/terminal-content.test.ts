@@ -28,6 +28,7 @@ const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).path
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 
 import type { PaneIdentity } from './terminal-content'
+import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
 import {
   createRendererMock,
@@ -4282,6 +4283,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     status: {
       endpointConfigured?: boolean
       credential?: ('resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable') | null
+      answering?: AgentStatusResult['answering']
     } = {},
   ) {
     const client = makeClient()
@@ -4302,10 +4304,21 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
         return Promise.resolve({ runId: nextRun, answerEntryId: `entry-${nextRun}` })
       }
       if (method === 'agent.status') {
+        // `answering` is not optional on the wire (nocx-rikz5, Task 3):
+        // readiness is a fact about the ROLE, so every status carries
+        // either a resolution or the reason there is none. This fixture
+        // predated that field and omitted it, which is a payload the
+        // backend cannot send.
         return Promise.resolve({
           endpointConfigured: status.endpointConfigured ?? true,
           credential: status.credential ?? 'resolvable',
           lastProbe: null,
+          answering: status.answering ?? {
+            ready: true,
+            reason: null,
+            endpoint: 'openrouter',
+            model: 'm-a',
+          },
         })
       }
       // lifecycle.submitAttempt and anything else the shell path opens.
@@ -5949,6 +5962,279 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
       // The pane is alive and usable, which is the property that matters.
       expect(content.shellState).toBeDefined()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// The model chip in the composer (nocx-rikz5). The composer names the model
+// that will answer, and it is the way to change it. The chain here is the
+// real one: real registry, real editor, real AgentReadiness over the fake
+// dispatcher — because the defect this task exists to prevent is a chip
+// that is CORRECT ONCE and then stops moving.
+//
+// The height claim (the chrome row does not grow a second line when a
+// 40-character model id arrives) is deliberately NOT here: jsdom computes
+// no layout, so getBoundingClientRect returns zeroes and the assertion
+// would pass vacuously. It belongs to the Playwright spec.
+describe('the model chip in the composer (nocx-rikz5)', () => {
+  const READY_ANSWERING: AgentStatusResult['answering'] = {
+    ready: true,
+    reason: null,
+    endpoint: 'openrouter',
+    model: 'm-a',
+  }
+  const UNASSIGNED_ANSWERING: AgentStatusResult['answering'] = {
+    ready: false,
+    reason: 'unassigned',
+    endpoint: null,
+    model: null,
+  }
+  const NO_ENDPOINTS_ANSWERING: AgentStatusResult['answering'] = {
+    ready: false,
+    reason: 'no-endpoints',
+    endpoint: null,
+    model: null,
+  }
+
+  /** A client whose agent.status answer is whatever `answering` currently
+   *  holds — so a test can change the FACTS and then make the surface ask
+   *  again, exactly as adding an endpoint does. */
+  function statusClient(initial: AgentStatusResult['answering']) {
+    const client = makeClient()
+    const state = { answering: initial, asks: 0 }
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.status') {
+        state.asks += 1
+        return Promise.resolve({
+          endpointConfigured: state.answering.ready,
+          credential: state.answering.ready ? 'resolvable' : null,
+          lastProbe: null,
+          answering: state.answering,
+        })
+      }
+      return Promise.resolve({
+        id: 'att-0',
+        domain: 'd1',
+        state: 'open',
+        command: '',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+    })
+    return { client, state }
+  }
+
+  const chipEls = (content: TerminalContent): HTMLElement[] =>
+    Array.from(editorOf(content).root.querySelectorAll<HTMLElement>('.nocx-editor-model')).filter(
+      (el) => el.style.display !== 'none',
+    )
+
+  const chipsOf = (content: TerminalContent): string[] =>
+    chipEls(content).map((el) => el.textContent ?? '')
+
+  const clickChip = (content: TerminalContent, text: string): void => {
+    const el = chipEls(content).find((c) => c.textContent === text)
+    if (!el) throw new Error(`no model chip reading ${JSON.stringify(text)}`)
+    el.click()
+  }
+
+  /** The person's own explicit switch — ⌘Enter, the same gesture the
+   *  indicator's click performs. */
+  const switchToAsk = (content: TerminalContent): void => {
+    const ed = editorOf(content)
+    viewOf(ed).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        bubbles: true,
+        cancelable: true,
+        metaKey: true,
+      }),
+    )
+  }
+
+  it('shows no model chip while Enter goes to the shell', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      expect(chipsOf(content)).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the model that will answer once the target is the assistant', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('takes the chip away again when the person switches back to Run', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      switchToAsk(content) // the switch is a toggle
+      expect(chipsOf(content)).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('offers the rung, not the model, when nothing is chosen', async () => {
+    const { client } = statusClient(UNASSIGNED_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('opens the page the rung names', async () => {
+    const opened: string[] = []
+    const { client } = statusClient(NO_ENDPOINTS_ANSWERING)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        hooks: {
+          onCreateEndpoint: () => opened.push('endpoints'),
+          onOpenRoles: () => opened.push('roles'),
+        },
+      },
+      client,
+    )
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Add an endpoint first']))
+      clickChip(content, 'Add an endpoint first')
+      expect(opened).toEqual(['endpoints'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('opens Endpoints from the provider and Roles from the model', async () => {
+    const opened: string[] = []
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        hooks: {
+          onCreateEndpoint: () => opened.push('endpoints'),
+          onOpenRoles: () => opened.push('roles'),
+        },
+      },
+      client,
+    )
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      clickChip(content, 'openrouter')
+      clickChip(content, 'm-a')
+      expect(opened).toEqual(['endpoints', 'roles'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('repaints when the facts change, not only on mount', async () => {
+    // Without this the end-to-end path cannot pass: the chip would still
+    // read "Add an endpoint first" after an endpoint had been added. The
+    // pane coming back to the front is the moment the facts can have
+    // changed — the Endpoints form lives in another pane.
+    const { client, state } = statusClient(NO_ENDPOINTS_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Add an endpoint first']))
+
+      // An endpoint was added and a model chosen on the Settings pane;
+      // the person comes back to the composer.
+      state.answering = READY_ANSWERING
+      content.setVisible(true)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('asks again when the socket comes back', async () => {
+    const { client, state } = statusClient(UNASSIGNED_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+      state.answering = READY_ANSWERING
+      client._fireReconnect()
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not ask while Enter goes to the shell — a Run pane pays no readiness call', async () => {
+    const { client, state } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      client._fireReconnect()
+      await Promise.resolve()
+      expect(state.asks).toBe(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('discards a late reply that would repaint an older state', async () => {
+    // Two refreshes racing is the ORDINARY case here: adding an endpoint
+    // and immediately choosing a model is one gesture apart.
+    const client = makeClient()
+    const pending: Array<(v: unknown) => void> = []
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.status') {
+        return new Promise((resolve) => pending.push(resolve))
+      }
+      return Promise.resolve({
+        id: 'att-0',
+        domain: 'd1',
+        state: 'open',
+        command: '',
+        cwd: '',
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content) // ask #0 — the OLD facts
+      content.setVisible(true) // ask #1 — the NEW facts
+      await vi.waitFor(() => expect(pending.length).toBe(2))
+
+      const body = (answering: AgentStatusResult['answering']) => ({
+        endpointConfigured: answering.ready,
+        credential: answering.ready ? 'resolvable' : null,
+        lastProbe: null,
+        answering,
+      })
+      pending[1](body(READY_ANSWERING)) // the newer ask answers FIRST
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      pending[0](body(NO_ENDPOINTS_ANSWERING)) // the older ask answers LAST
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(chipsOf(content)).toEqual(['openrouter', 'm-a'])
     } finally {
       teardown()
     }

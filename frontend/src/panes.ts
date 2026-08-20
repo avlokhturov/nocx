@@ -674,6 +674,10 @@ export class PaneManager {
    *  Endpoints with the editor up on a blank one, so the refusal carries
    *  its repair. */
   onCreateEndpoint?: () => void
+  /** The composer's model chip, clicked on the model — opens Settings →
+   *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
+   *  beside onCreateEndpoint, which the chip's other destination reuses. */
+  onOpenRoles?: () => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -1020,6 +1024,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
+        onOpenRoles: this.onOpenRoles,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         // Where the pane IS, recorded so a restart reopens it there
         // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
@@ -1110,6 +1115,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
+        onOpenRoles: this.onOpenRoles,
       },
     )
     const descriptor: ContentDescriptor = {

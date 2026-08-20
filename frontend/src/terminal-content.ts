@@ -24,6 +24,7 @@ import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './in
 import { AgentInputTarget } from './agent-ask'
 import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
+import { AgentReadiness, modelChipState } from './agent-readiness'
 import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
@@ -315,8 +316,14 @@ export interface TerminalContentHooks {
 
   /** A question was refused because no endpoint is configured: open the
    *  endpoint editor so the refusal comes with its repair — wired by
-   *  main.tsx to the Settings tab's Endpoints page. */
+   *  main.tsx to the Settings tab's Endpoints page. Reused, not duplicated,
+   *  by the model chip's `endpoints` destination (nocx-rikz5). */
   onCreateEndpoint?: () => void
+  /** The model chip's other destination: the Roles page, where the model
+   *  that answers is chosen (nocx-rikz5). Beside onCreateEndpoint because
+   *  it is the same idea — a state names one page that repairs it — and
+   *  wired by main.tsx to the Settings tab's Roles page. */
+  onOpenRoles?: () => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -493,6 +500,16 @@ export class TerminalContent extends BasePaneContent {
   /** Unsubscribe from the reconnect report, which is what gives a restore
    *  that raced a dropped socket its second chance (nocx-m3fqk). */
   private _restoreRetryUnsub: (() => void) | null = null
+  /** The pane's readiness store (nocx-rikz5): the ONE holder of
+   *  agent.status in this renderer (AD-8). The ask target's refusal path
+   *  and the composer's model chip both read it; neither calls the method
+   *  itself. */
+  private readiness: AgentReadiness | null = null
+  private _readinessUnsub: (() => void) | null = null
+  /** Unsubscribe from the reconnect report for the readiness refresh — its
+   *  own registration rather than a second statement inside the restore's,
+   *  so removing either leaves the other alone. */
+  private _readinessRetryUnsub: (() => void) | null = null
   /** The pending restoration episode (ADR-0024 decision 8): the fence the
    *  shell must write to the pty and the generation to acknowledge, captured
    *  from the lost fact. Non-null from the moment the channel is declared
@@ -1288,6 +1305,15 @@ export class TerminalContent extends BasePaneContent {
       // the mode. The agent target is constructed with this tab's seams:
       // the session id is read per submit (a reconnect mints a new
       // session — the target must never capture against a stale one).
+      // The readiness store, built BEFORE the registry that reads it: one
+      // owner for agent.status in this pane (AD-8, nocx-rikz5). What used
+      // to be here was `() => new AgentClient(…).status()` handed to the
+      // ask target — a function called at refusal time, which no surface
+      // can render and nothing can repaint.
+      const readiness = new AgentReadiness(new AgentClient(this.client.dispatcher))
+      this.readiness = readiness
+      this._readinessUnsub = readiness.subscribe(() => this.renderModelChip())
+
       this.inputTargets = createRegistry((target) => {
         // The per-target draft swap (nocx-4ff.7): snapshot the editor
         // under the OUTGOING target's id, restore the INCOMING target's
@@ -1328,6 +1354,12 @@ export class TerminalContent extends BasePaneContent {
         // as a command with an operator in it. One authority decides
         // both — the registry — and the editor stays passive.
         this.editor?.setTargetExtensions(target.editorExtensions?.() ?? [])
+        // Entering Ask is the moment the person asks "what will answer
+        // this?", so it is a moment to ask the backend rather than to
+        // repaint a fact that may be minutes old. Leaving Ask only
+        // repaints — a Run pane pays no readiness call.
+        if (target.id === this.agentTarget?.id) this.refreshReadiness()
+        this.renderModelChip()
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
@@ -1370,7 +1402,11 @@ export class TerminalContent extends BasePaneContent {
         onRefusal: (message) => showToast({ level: 'warning', message }),
         // The typed readiness fact behind a refusal (agent.status), so the
         // target never has to read the reason out of the message text.
-        status: () => new AgentClient(this.client.dispatcher).status(),
+        // Through the store, not around it: a refusal is exactly when the
+        // facts are freshest and the chip most needs to catch up, and a
+        // second caller of agent.status would be a second owner of the
+        // answer (AD-8).
+        status: () => readiness.refresh(),
         // No endpoint: the toast says what is wrong and this opens where it
         // is fixed. A refusal with nowhere to go is how a person concludes
         // the feature is broken rather than unconfigured.
@@ -1598,6 +1634,16 @@ export class TerminalContent extends BasePaneContent {
       )
       // The layer of the target Enter goes to right now (shell at start).
       this.editor.setTargetExtensions(this.inputTargets.active().editorExtensions?.() ?? [])
+      // The model chip's two destinations (nocx-rikz5). The endpoints one
+      // is the seam a refusal already uses — one owner for "open where an
+      // endpoint is fixed", reused rather than duplicated.
+      this.editor.onModelChipClick((page) => {
+        if (page === 'endpoints') this.hooks.onCreateEndpoint?.()
+        else this.hooks.onOpenRoles?.()
+      })
+      // Shell is active at start, so this paints the chip's absence — the
+      // state a Run pane is in, and the one the row was built for.
+      this.renderModelChip()
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
@@ -2029,6 +2075,13 @@ export class TerminalContent extends BasePaneContent {
       // connection — and restorePast is a no-op once the past is drawn.
       this._restoreRetryUnsub = this.client.onReconnectResult(() => {
         void this.restorePast()
+      })
+      // A returning socket may be a returning BACKEND, whose endpoints and
+      // roles are not the ones this pane last read. The report fires once
+      // per reconnect, after every attach has settled, so the refresh
+      // cannot race a half-open connection.
+      this._readinessRetryUnsub = this.client.onReconnectResult(() => {
+        if (this.inputTargets?.active().id === this.agentTarget?.id) this.refreshReadiness()
       })
 
       // The kernel starts Native and onChange may not fire for the initial
@@ -2870,11 +2923,58 @@ export class TerminalContent extends BasePaneContent {
   setVisible(visible: boolean): void {
     super.setVisible(visible)
     if (visible) this.renderer?.refreshAtlas()
+    // The pane coming back to the front is when the facts behind the model
+    // chip can have changed: an endpoint is created, a role assigned and a
+    // default set on the SETTINGS pane, which is a different pane — so the
+    // person cannot see this chip while they do it, and this is the moment
+    // it must catch up. Named triggers per write (endpoints.create,
+    // roles.assign, roles.setDefault) would each have to be installed in a
+    // surface this task does not own, and there is no backend notification
+    // for them; the show is the one seam that covers all of them at once
+    // and is not a poll. Only while Enter goes to the assistant — a Run
+    // pane has no chip to refresh, and pays no call for one.
+    if (visible && this.inputTargets?.active().id === this.agentTarget?.id) {
+      this.refreshReadiness()
+    }
     // The pane's past, drawn the first time somebody looks at it
     // (nocx-m3fqk). On first SHOW rather than at boot: eight panes at fifty
     // blocks is four hundred blocks of DOM before the first frame, and a pane
     // nobody has opened has not been read.
     if (visible) void this.restorePast()
+  }
+
+  /**
+   * Ask the readiness store for fresh facts, fire and forget.
+   *
+   * A failed read costs the refresh and never the chip: the store keeps the
+   * last fact, so the composer goes on naming the model it last knew rather
+   * than blanking on a dropped socket. The failure is a log line and not a
+   * toast on purpose — nothing the person did has been refused, and the ask
+   * path raises its own visible refusal when a question actually fails.
+   */
+  private refreshReadiness(): void {
+    const readiness = this.readiness
+    if (!readiness) return
+    void readiness.refresh().catch((err: unknown) => {
+      log.warn('nocx: the assistant readiness could not be read', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
+  }
+
+  /**
+   * The model chip's ONE writer in this pane: both facts it needs — which
+   * target Enter goes to, and what the readiness store holds — are read
+   * here, so no other site has to remember to combine them.
+   *
+   * No chip at all unless the assistant is what a submit reaches: a Run
+   * pane names no model, because none answers anything.
+   */
+  private renderModelChip(): void {
+    if (!this.editor) return
+    const active = this.inputTargets?.active()
+    const isAsk = active !== undefined && active.id === this.agentTarget?.id
+    this.editor.setModelChip(isAsk ? modelChipState(this.readiness?.status ?? null) : null)
   }
 
   /** One shot. A pane is shown many times — every tab switch — and its past
@@ -3584,6 +3684,11 @@ export class TerminalContent extends BasePaneContent {
     this._titleReconcileUnsub = null
     this._restoreRetryUnsub?.()
     this._restoreRetryUnsub = null
+    this._readinessRetryUnsub?.()
+    this._readinessRetryUnsub = null
+    this._readinessUnsub?.()
+    this._readinessUnsub = null
+    this.readiness = null
     this._projections = null
     this.env?.detach()
     this.env = null
