@@ -495,7 +495,13 @@ deliberately accepts an assignment naming no endpoint, which
 `internal/profile/role_test.go:199` pins as intended. There is no existing
 shared rule to follow, and this plan does not pretend otherwise.
 
-`roles.setDefault` DOES validate existence, and the asymmetry is Task 1's: a
+`roles.setDefault` DOES validate — that the endpoint exists **and that it
+offers the model**, both inside the store's write critical section against the
+one loaded document, so a concurrent delete cannot slip between the check and
+the write. (Corrected 2026-08-21 after review: an earlier draft validated only
+existence and validated it a lock away from the write, which stored a default
+naming a model nobody offers and then reported `model-gone` about a selection
+that should never have been accepted.) The asymmetry with assignments is Task 1's: a
 per-role assignment is a statement about one role the person is entitled to be
 told about when it breaks, so a dangling one is a feature. The default is a
 global convenience every unassigned role inherits silently, so a dangling one
@@ -686,16 +692,23 @@ The new order: resolve the role first, then ask about THAT endpoint's key.
 		// and sending a person to choose from an empty list is the one answer
 		// worse than saying nothing (spec §3).
 		res.Answering = answeringWire{Reason: strPtr(reasonNoEndpoints)}
-	case !anyEndpointOffersAModel(eps):
-		// The endpoint exists and offers nothing. "Choose a model" would open
-		// a picker with no options — a repair the person cannot perform.
-		res.Answering = answeringWire{Reason: strPtr(reasonNoModels)}
-	case errors.Is(resolveErr, profile.ErrRoleUnassigned):
-		res.Answering = answeringWire{Reason: strPtr(reasonUnassigned)}
+	// THE SPECIFIC REFUSALS COME FIRST. Corrected 2026-08-21 after review: with
+	// no-models above them, a default naming a deleted endpoint reported
+	// "that endpoint offers no models" whenever the surviving endpoint
+	// happened to be empty — and sent the person to Endpoints when the repair
+	// was in Roles. A dangling selection keeps its own error whatever the
+	// rest of the fleet looks like.
 	case errors.Is(resolveErr, profile.ErrRoleEndpointGone):
 		res.Answering = answeringWire{Reason: strPtr(reasonEndpointGone)}
 	case errors.Is(resolveErr, profile.ErrRoleModelGone):
 		res.Answering = answeringWire{Reason: strPtr(reasonModelGone)}
+	case errors.Is(resolveErr, profile.ErrRoleUnassigned) && !anyEndpointOffersAModel(eps):
+		// Nothing is selected AND there is nothing to select. "Choose a model"
+		// would open a picker with no options — a repair the person cannot
+		// perform, so the rung points at Endpoints instead.
+		res.Answering = answeringWire{Reason: strPtr(reasonNoModels)}
+	case errors.Is(resolveErr, profile.ErrRoleUnassigned):
+		res.Answering = answeringWire{Reason: strPtr(reasonUnassigned)}
 	default:
 		// Includes a role-store read failure surfaced through ResolveRole.
 		res.Answering = answeringWire{Reason: strPtr(reasonUnavailable)}
