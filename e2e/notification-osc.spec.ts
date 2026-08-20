@@ -59,10 +59,21 @@ async function raises(page: Page): Promise<RaisedNotification[]> {
   return page.evaluate(() => window.__nocxRaises ?? [])
 }
 
-/** Write one shell line and press Enter. */
+/**
+ * Write one shell line, press Enter, and WAIT FOR THE PROMPT TO COME BACK.
+ *
+ * The wait is the fix rather than politeness. Submitting hands the composer's
+ * box to the command, so the editor is not taking input while it runs — and
+ * this helper is called several times in a row. Without the wait the next
+ * line is typed into a surface that is busy, and the keystrokes that reach
+ * the shell are whatever survived; the sentinel that proves the pipeline was
+ * awake then never arrives, and the failure is reported as a timeout on the
+ * sentinel rather than at the line that was dropped.
+ */
 async function run(page: Page, line: string): Promise<void> {
   await page.keyboard.type(line)
   await page.keyboard.press('Enter')
+  await promptReady(page)
 }
 
 // The sentinel discipline the unit tests use, for the same reason: a claim
@@ -73,8 +84,15 @@ const SENTINEL_TITLE = 'sentinel'
 
 async function waitForSentinel(page: Page): Promise<void> {
   await run(page, `printf '\\033]777;notify;${SENTINEL_TITLE};flush\\007'`)
+  // An explicit budget, because the default expect timeout is 5 s and this
+  // predicate spans a real pty, the OSC parser and a round trip to the
+  // backend's notifier. The predicate is the observable and the number is a
+  // hang detector — not an expectation about how fast a shared runner is.
   await expect
-    .poll(async () => (await raises(page)).some((r) => r.title === SENTINEL_TITLE))
+    .poll(async () => (await raises(page)).some((r) => r.title === SENTINEL_TITLE), {
+      timeout: 30_000,
+      message: 'the sentinel notification never reached the backend',
+    })
     .toBe(true)
 }
 

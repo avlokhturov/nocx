@@ -1,4 +1,6 @@
+import path from 'node:path'
 import { test, expect, promptReady, type Page } from './harness'
+import { readStand } from './stand'
 
 /**
  * e2e: THE EPIC'S HEADLINE (nocx-isoph.4, design §4.1 and §4.5).
@@ -166,7 +168,16 @@ test.describe('a decorated strip survives the renderer', () => {
     // label is its pane's title, which is the cwd until something in the pane
     // says otherwise (§4.5, nocx-n8n82).
     const title = page.locator(`${TAB} .nocx-tab-title`).first()
-    await expect(title).not.toHaveText('', { timeout: 15_000 })
+    // WAIT FOR THE DERIVED LABEL TO SETTLE, not merely to be non-empty. The
+    // pane reports its cwd over OSC 7 after it starts, so the label is "~"
+    // first and the resolved directory a moment later — and a spec that
+    // captures on `not.toHaveText('')` captures whichever it happened to see.
+    // Comparing that against the label restored at the end then asserts the
+    // two are equal when the first was a placeholder: "~" against
+    // ".e2e/home". The stand publishes the disposable home, so its basename
+    // is what the settled label must contain, and that is a state to wait for
+    // rather than a moment to hope for (git-panel waits the same way).
+    await expect(title).toContainText(path.basename(readStand().home), { timeout: 15_000 })
     const derived = await title.textContent()
 
     // A name the user types wins over it…
