@@ -221,7 +221,7 @@ export const test = base.extend<object, { appReady: void }>({
 
 /**
  * Leave the backend holding exactly one undecorated tab, the UI state at its
- * declared defaults, and no notes.
+ * declared defaults, and neither notes nor snippets.
  *
  * THE PRODUCT NOW REMEMBERS TABS (nocx-isoph.4): the backend owns the
  * workspace → tab → pane chain, and a renderer that goes away leaves the rows
@@ -301,6 +301,19 @@ async function resetStand(): Promise<void> {
     const notes = (await wire.call('notes.list', {})) as { notes: { id: string }[] }
     for (const row of notes.notes) {
       await wire.call('notes.delete', { id: row.id })
+    }
+    // AND THE SNIPPET LIBRARY, for the same reason and one more. Snippets are
+    // durable the way notes are, so they cross a spec boundary the same way —
+    // "e2e fill" resolved to three rows in a local run, one per suite run that
+    // had gone before. Until now nothing noticed because snippets.spec.ts
+    // deletes what it made, and that is exactly the fragility: a spec that
+    // fails in the middle never reaches its own tidy-up, and it poisons every
+    // later run against the same home rather than only its own. A precondition
+    // that depends on the previous test having succeeded is not a
+    // precondition.
+    const snips = (await wire.call('snippets.list', {})) as { snippets: { id: string }[] }
+    for (const row of snips.snippets) {
+      await wire.call('snippets.delete', { id: row.id })
     }
   } finally {
     wire.close()
