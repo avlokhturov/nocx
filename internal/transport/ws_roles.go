@@ -63,12 +63,13 @@ func (h roleHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 				return nil
 			}
-			// The endpoint's EXISTENCE is the service's check, not this
-			// handler's: it guards the write, so it belongs beside it
-			// (AD-8). An id naming no endpoint comes back as
-			// profile.ErrEndpointNotFound, which endpointMethodErrorCode
-			// already spells -32602 — the same code an endpoints.* method
-			// answers for the same mistake.
+			// The endpoint's EXISTENCE and whether it offers the MODEL are
+			// the store's checks, not this handler's: they happen under the
+			// same lock as the write, so validate-and-write is one
+			// operation (AD-8 — one owner per behaviour, and the owner is
+			// whoever holds the lock). Both come back as sentinels
+			// endpointMethodErrorCode already spells -32602, the same code
+			// an endpoints.* method answers for the same mistake.
 			err := svc.SetDefaultModel(profile.DefaultModel{EndpointID: params.EndpointID, Model: params.Model})
 			if err != nil {
 				_ = h.r.TryError(req.ID, RPCError{Code: endpointMethodErrorCode(err), Message: err.Error()})
@@ -193,9 +194,10 @@ type roleSetDefaultParams struct {
 }
 
 // validateRoleSetDefault checks the SHAPE — both present, or both empty.
-// Whether the endpoint exists is the service's question (it guards the
-// write); whether the model still exists is resolution's, which refuses
-// rather than repairing the pair into a neighbouring model.
+// Whether the endpoint exists, and whether it offers the model, are the
+// STORE's questions: it answers both against the document it is about to
+// write. Resolution still refuses a pair that dangles later, and neither
+// place ever repairs the pair into a neighbouring model.
 func validateRoleSetDefault(p roleSetDefaultParams) string {
 	if err := profile.ValidateDefaultModel(profile.DefaultModel{EndpointID: p.EndpointID, Model: p.Model}); err != nil {
 		return err.Error()

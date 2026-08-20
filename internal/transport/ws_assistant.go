@@ -187,21 +187,30 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 				res.LastProbe = nil
 			}
 		case len(eps) == 0:
-			// Before `unassigned`: with no endpoints there is nothing to
-			// assign, and sending a person to choose from an empty list is
-			// the one answer worse than saying nothing.
+			// Before every other refusal: with no endpoints there is
+			// nothing to assign, nothing to repair and nothing to name, and
+			// sending a person to choose from an empty list is the one
+			// answer worse than saying nothing.
 			res.Answering = answeringWire{Reason: reasonPtr(reasonNoEndpoints)}
-		case !anyEndpointOffersAModel(eps):
-			// The endpoint exists and offers nothing. "Choose a model"
-			// would open a picker with no options — a repair the person
-			// cannot perform.
-			res.Answering = answeringWire{Reason: reasonPtr(reasonNoModels)}
-		case errors.Is(resolveErr, profile.ErrRoleUnassigned):
-			res.Answering = answeringWire{Reason: reasonPtr(reasonUnassigned)}
 		case errors.Is(resolveErr, profile.ErrRoleEndpointGone):
 			res.Answering = answeringWire{Reason: reasonPtr(reasonEndpointGone)}
 		case errors.Is(resolveErr, profile.ErrRoleModelGone):
 			res.Answering = answeringWire{Reason: reasonPtr(reasonModelGone)}
+		case errors.Is(resolveErr, profile.ErrRoleUnassigned):
+			// `no-models` is a REFINEMENT of "you have not chosen yet", not
+			// a rung competing with the two above it: it is the case where
+			// "choose a model" would open a picker with no options — a
+			// repair the person cannot perform. It is nested here rather
+			// than tested first because a fleet-wide fact must never
+			// outrank a selection the person actually made: a default
+			// naming a deleted endpoint, next to a surviving endpoint that
+			// happens to offer nothing, used to report `no-models` and sent
+			// them to add a model to an endpoint they never chose.
+			if !anyEndpointOffersAModel(eps) {
+				res.Answering = answeringWire{Reason: reasonPtr(reasonNoModels)}
+			} else {
+				res.Answering = answeringWire{Reason: reasonPtr(reasonUnassigned)}
+			}
 		default:
 			// Includes a role-store read failure surfaced through
 			// ResolveRole, and a role name this build does not know.
@@ -256,11 +265,15 @@ func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref str
 }
 
 // anyEndpointOffersAModel reports whether any stored endpoint offers at
-// least one model. It is the difference between "you have not chosen yet"
-// and "there is nothing to choose": ValidateEndpoint refuses a zero-model
-// record at create and at update, so this is reachable only from a document
-// written underneath us — and a rung that reads "choose a model" over an
-// empty picker is a repair instruction a person cannot follow.
+// least one model. It splits the UNASSIGNED case in two — "you have not
+// chosen yet" from "there is nothing to choose" — and is asked ONLY there:
+// it is a fact about the fleet, and a fact about the fleet must never
+// outrank a selection the person made, which is why a dangling endpoint or
+// a removed model is answered before this is consulted at all.
+// ValidateEndpoint refuses a zero-model record at create and at update, so
+// a false answer here is reachable only from a document written underneath
+// us — and a rung that reads "choose a model" over an empty picker is a
+// repair instruction a person cannot follow.
 func anyEndpointOffersAModel(eps []profile.Endpoint) bool {
 	for _, ep := range eps {
 		if len(ep.Models) > 0 {

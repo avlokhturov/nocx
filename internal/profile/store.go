@@ -417,10 +417,17 @@ func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
 
 // ErrEndpointIDRequired, ErrEndpointExists and ErrEndpointNotFound make
 // endpoint create and update distinguishable.
+// ErrEndpointModelNotFound is the same class one step further in: the
+// endpoint is there and does not offer the named model. It is separate from
+// ErrEndpointNotFound because the two send a person to different repairs
+// ("that endpoint is gone" vs "that endpoint no longer lists that model"),
+// and it is deliberately NOT ErrRoleModelGone — that one is resolution
+// REPORTING a dangle it found, this one is a write being REFUSED.
 var (
-	ErrEndpointIDRequired = errors.New("endpoint ID is required")
-	ErrEndpointExists     = errors.New("endpoint already exists")
-	ErrEndpointNotFound   = errors.New("endpoint not found")
+	ErrEndpointIDRequired    = errors.New("endpoint ID is required")
+	ErrEndpointExists        = errors.New("endpoint already exists")
+	ErrEndpointNotFound      = errors.New("endpoint not found")
+	ErrEndpointModelNotFound = errors.New("endpoint does not offer this model")
 )
 
 func (s *JSONStore) LoadEndpoints() ([]Endpoint, error) {
@@ -556,6 +563,26 @@ func (s *JSONStore) LoadDefaultModel() (DefaultModel, error) {
 // it, returning every role without its own assignment to the visible
 // "no model assigned" failure state; a half-set pair is refused
 // (ValidateDefaultModel), because it names nothing.
+//
+// The EXISTENCE checks live HERE, inside the lock, against the one loaded
+// document — not in the capability layer above (bead nocx-rikz5). The store
+// is what holds the lock, so only the store can make "check the endpoint,
+// check the model, write" a single operation; a caller that loads the
+// endpoint list, decides, and then calls this leaves a window in which a
+// DeleteEndpoint lands between the two and the write stores a default
+// naming an endpoint that is gone — the exact state the design forbids
+// ("the default must never point at nothing"). This is the same shape
+// DeleteEndpoint already has, where the removal and the clearing of a
+// default naming it are one write.
+//
+// The asymmetry with AssignRole is deliberate and unchanged: a per-role
+// assignment is a statement about one role, so a dangling one must survive
+// to be reported against that role. The default is a global convenience
+// every unassigned role inherits silently, so a dangling one breaks all of
+// them at once with nothing naming the choice that did it — it is refused
+// at the moment it is written. Resolution still refuses at read time: the
+// endpoint can be deleted a moment later, and ResolveRole is the
+// truth-teller for that.
 func (s *JSONStore) SetDefaultModel(m DefaultModel) error {
 	if err := ValidateDefaultModel(m); err != nil {
 		return err
@@ -568,8 +595,32 @@ func (s *JSONStore) SetDefaultModel(m DefaultModel) error {
 	if err != nil {
 		return err
 	}
+	if m.IsSet() {
+		if err := offersModelLocked(d, m.EndpointID, m.Model); err != nil {
+			return err
+		}
+	}
 	d.DefaultModel = m
 	return s.writeLocked(d)
+}
+
+// offersModelLocked reports whether the loaded document holds an endpoint
+// with this id that offers this model, naming which half is missing. The
+// caller MUST hold s.mu, and MUST pass the document it is about to write —
+// that identity is the whole point of the check living here.
+func offersModelLocked(d *storeData, endpointID, model string) error {
+	for i := range d.Endpoints {
+		if d.Endpoints[i].ID != endpointID {
+			continue
+		}
+		for _, offered := range d.Endpoints[i].Models {
+			if offered.Name == model {
+				return nil
+			}
+		}
+		return fmt.Errorf("default model: endpoint %s: %q: %w", endpointID, model, ErrEndpointModelNotFound)
+	}
+	return fmt.Errorf("default model: %s: %w", endpointID, ErrEndpointNotFound)
 }
 
 // AssignRole upserts ONE role's assignment (bead nocx-e6kn2): a role has at

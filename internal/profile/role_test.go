@@ -282,22 +282,30 @@ func TestResolveRole_ADefaultPointingAtNothingRefusesRatherThanRepairs(t *testin
 // failure state. "Unset" is a value, never an error, on the way back out.
 func TestSetDefaultModel_TheEmptyPairClearsAndAHalfSetPairIsRefused(t *testing.T) {
 	s := newTestStore(t)
+	// The endpoint must EXIST for the pair to be storable at all: the store
+	// refuses a default naming one it does not hold, so the fixture is a
+	// real endpoint rather than two invented ids.
+	ep := validTestEndpoint()
+	if err := s.CreateEndpoint(ep); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+	chosen := DefaultModel{EndpointID: ep.ID, Model: ep.Models[0].Name}
 
 	if def, err := s.LoadDefaultModel(); err != nil || def.IsSet() {
 		t.Fatalf("fresh store: default = %+v, err = %v, want the zero value and no error", def, err)
 	}
-	if err := s.SetDefaultModel(DefaultModel{EndpointID: "e1", Model: "m-a"}); err != nil {
+	if err := s.SetDefaultModel(chosen); err != nil {
 		t.Fatalf("SetDefaultModel: %v", err)
 	}
-	if def, _ := s.LoadDefaultModel(); def != (DefaultModel{EndpointID: "e1", Model: "m-a"}) {
-		t.Fatalf("default = %+v, want e1/m-a", def)
+	if def, _ := s.LoadDefaultModel(); def != chosen {
+		t.Fatalf("default = %+v, want %+v", def, chosen)
 	}
-	for _, half := range []DefaultModel{{EndpointID: "e2"}, {Model: "m-b"}} {
+	for _, half := range []DefaultModel{{EndpointID: ep.ID}, {Model: ep.Models[0].Name}} {
 		if err := s.SetDefaultModel(half); err == nil {
 			t.Errorf("SetDefaultModel(%+v) succeeded, want a refusal", half)
 		}
 	}
-	if def, _ := s.LoadDefaultModel(); def.EndpointID != "e1" || def.Model != "m-a" {
+	if def, _ := s.LoadDefaultModel(); def != chosen {
 		t.Fatalf("a refused write changed the stored default to %+v", def)
 	}
 	if err := s.SetDefaultModel(DefaultModel{}); err != nil {
@@ -311,11 +319,16 @@ func TestSetDefaultModel_TheEmptyPairClearsAndAHalfSetPairIsRefused(t *testing.T
 func TestDefaultModel_SurvivesReload(t *testing.T) {
 	path := t.TempDir() + "/p.json"
 	s := NewJSONStore(path)
-	if err := s.SetDefaultModel(DefaultModel{EndpointID: "e1", Model: "m-a"}); err != nil {
+	ep := validTestEndpoint()
+	if err := s.CreateEndpoint(ep); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+	chosen := DefaultModel{EndpointID: ep.ID, Model: ep.Models[0].Name}
+	if err := s.SetDefaultModel(chosen); err != nil {
 		t.Fatalf("SetDefaultModel: %v", err)
 	}
 	got, err := NewJSONStore(path).LoadDefaultModel()
-	if err != nil || got != (DefaultModel{EndpointID: "e1", Model: "m-a"}) {
+	if err != nil || got != chosen {
 		t.Fatalf("reloaded default = %+v (err %v), want the stored pair", got, err)
 	}
 }
@@ -361,5 +374,57 @@ func TestDeleteEndpoint_ClearsADefaultNamingItButLeavesAssignmentsDangling(t *te
 	// what it named is gone.
 	if _, _, err := ResolveRole(RoleClassifier, as, def, nil); !errors.Is(err, ErrRoleEndpointGone) {
 		t.Fatalf("the dangling assignment: err = %v, want ErrRoleEndpointGone", err)
+	}
+}
+
+// A default names an endpoint AND a model, and the store refuses a pair
+// whose model that endpoint does not offer — the same refusal, at the same
+// moment, as a pair whose endpoint does not exist (bead nocx-rikz5). The
+// claim under test is "nothing was stored": a store that ALREADY HOLDS a
+// valid default must still hold exactly that one afterwards, which an
+// assertion on the error alone cannot show.
+func TestSetDefaultModel_RefusesAModelTheEndpointDoesNotOfferAndKeepsTheStoredOne(t *testing.T) {
+	s := newTestStore(t)
+	ep := validTestEndpoint()
+	if err := s.CreateEndpoint(ep); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+	good := DefaultModel{EndpointID: ep.ID, Model: ep.Models[0].Name}
+	if err := s.SetDefaultModel(good); err != nil {
+		t.Fatalf("SetDefaultModel(valid): %v", err)
+	}
+
+	invented := DefaultModel{EndpointID: ep.ID, Model: "a-model-this-endpoint-never-offered"}
+	err := s.SetDefaultModel(invented)
+	if !errors.Is(err, ErrEndpointModelNotFound) {
+		t.Fatalf("SetDefaultModel(%+v) = %v, want ErrEndpointModelNotFound", invented, err)
+	}
+	if def, _ := s.LoadDefaultModel(); def != good {
+		t.Fatalf("the refused write left the default as %+v, want the original %+v — nothing may be stored on a refusal", def, good)
+	}
+}
+
+// The endpoint's existence is checked against the SAME loaded document the
+// write goes to, so validate-and-write is one operation under one lock: a
+// concurrent DeleteEndpoint cannot land between a check and a write and
+// leave a default naming an endpoint that is gone.
+func TestSetDefaultModel_RefusesAnEndpointThatDoesNotExistAndKeepsTheStoredOne(t *testing.T) {
+	s := newTestStore(t)
+	ep := validTestEndpoint()
+	if err := s.CreateEndpoint(ep); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+	good := DefaultModel{EndpointID: ep.ID, Model: ep.Models[0].Name}
+	if err := s.SetDefaultModel(good); err != nil {
+		t.Fatalf("SetDefaultModel(valid): %v", err)
+	}
+
+	ghost := DefaultModel{EndpointID: "endpoint:custom:ghost:9", Model: ep.Models[0].Name}
+	err := s.SetDefaultModel(ghost)
+	if !errors.Is(err, ErrEndpointNotFound) {
+		t.Fatalf("SetDefaultModel(%+v) = %v, want ErrEndpointNotFound", ghost, err)
+	}
+	if def, _ := s.LoadDefaultModel(); def != good {
+		t.Fatalf("the refused write left the default as %+v, want the original %+v", def, good)
 	}
 }

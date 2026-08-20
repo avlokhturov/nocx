@@ -427,3 +427,32 @@ func TestRolesSetDefault_RefusesAHalfPair(t *testing.T) {
 		t.Fatalf("a refused half pair stored %+v, want default null", d)
 	}
 }
+
+// A default names an endpoint AND a model, so a model the endpoint does not
+// offer is refused at the wire with the SAME code the missing endpoint gets
+// (-32602, invalid params), and nothing is stored. Starting from a default
+// that is ALREADY SET is the point: the claim is "nothing was stored", and
+// a store that was empty before cannot tell an untouched default from a
+// cleared one.
+func TestRolesSetDefault_RefusesAModelTheEndpointDoesNotOffer(t *testing.T) {
+	h := newEndpointHarness(t)
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, endpointParams("Local", "http://127.0.0.1:11434/v1", "sk-test-123"))
+
+	if raw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{
+		"endpointId": created.ID, "model": "gpt-4o-mini",
+	}); isErrorResponse(t, raw) {
+		t.Fatalf("roles.setDefault (the valid one): %s", raw)
+	}
+
+	raw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{
+		"endpointId": created.ID, "model": "a-model-this-endpoint-never-offered",
+	})
+	if !strings.Contains(string(raw), "-32602") {
+		t.Fatalf("roles.setDefault with an invented model = %s, want -32602", raw)
+	}
+	d := wireDefault(t, h.rolesListRaw(t))
+	if d == nil || d.EndpointID != created.ID || d.Model != "gpt-4o-mini" {
+		t.Fatalf("after the refusal the default is %+v, want the original %s/gpt-4o-mini — a refused write stores nothing", d, created.ID)
+	}
+}

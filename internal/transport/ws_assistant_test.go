@@ -400,6 +400,26 @@ func (h *assistantHarness) mustSetDefault(endpointID, model string) {
 	}
 }
 
+// mustForceDefault writes a DANGLING default straight into the document,
+// bypassing SetDefaultModel — which now refuses one, because the store owns
+// the invariant "a stored default names an endpoint that exists and a model
+// it offers" (bead nocx-rikz5). The state is still reachable in the product:
+// another process deletes the endpoint, or an update drops the model, after
+// the default was written. That is exactly what these rungs report, so the
+// tests have to be able to produce it — the same reason scriptedEndpoints
+// exists for an endpoint offering no models.
+func (h *assistantHarness) mustForceDefault(endpointID, model string) {
+	h.t.Helper()
+	d, err := h.ps.LoadAll()
+	if err != nil {
+		h.t.Fatalf("LoadAll: %v", err)
+	}
+	d.DefaultModel = profile.DefaultModel{EndpointID: endpointID, Model: model}
+	if err := h.ps.WriteAll(d); err != nil {
+		h.t.Fatalf("WriteAll: %v", err)
+	}
+}
+
 // endpointParamsWithModel extends the existing endpointParams (which pins
 // one model id for every endpoint it makes) with the model NAMED: a role
 // resolves to one (endpoint, model) pair, so these tests need the two
@@ -528,7 +548,7 @@ func TestAgentStatus_ADefaultWhoseEndpointIsGoneSaysEndpointGone(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{})
 	h.setupAndUnseal()
 	h.createEndpoint(t, testEndpointParams())
-	h.mustSetDefault("endpoint:custom:gone:0000", "qwen3")
+	h.mustForceDefault("endpoint:custom:gone:0000", "qwen3")
 
 	got, _ := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
 	if got.Answering.Ready || reasonOf(got.Answering) != "endpoint-gone" {
@@ -543,7 +563,7 @@ func TestAgentStatus_ADefaultNamingARemovedModelSaysModelGone(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{})
 	h.setupAndUnseal()
 	e := h.createEndpoint(t, testEndpointParams())
-	h.mustSetDefault(e.ID, "a-model-this-endpoint-never-offered")
+	h.mustForceDefault(e.ID, "a-model-this-endpoint-never-offered")
 
 	got, _ := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
 	if got.Answering.Ready || reasonOf(got.Answering) != "model-gone" {
@@ -571,6 +591,52 @@ func TestAgentStatus_AnEndpointOfferingNoModelsSaysSo(t *testing.T) {
 	}
 	if got.Answering.Ready || reasonOf(got.Answering) != "no-models" {
 		t.Fatalf("answering = %+v, want reason no-models", got.Answering)
+	}
+}
+
+// `no-models` may not shadow `endpoint-gone`. A default naming an endpoint
+// that is gone, while the surviving endpoint happens to offer no models,
+// used to report `no-models` — which sends the person to add a model to an
+// endpoint they never chose, instead of to the choice that actually broke.
+func TestAgentStatus_ADanglingEndpointOutranksNoModels(t *testing.T) {
+	h := newAssistantHarnessWith(t, &stubAssistantClient{}, &scriptedEndpoints{
+		list: []profile.Endpoint{{
+			ID: "e-empty", Name: "empty", BaseURL: "http://127.0.0.1:11434/v1",
+			Schema: profile.EndpointSchemaOpenAICompatible,
+		}},
+	})
+	h.setupAndUnseal()
+	h.mustForceDefault("endpoint:custom:gone:0000", "qwen3")
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if got.Answering.Ready || reasonOf(got.Answering) != "endpoint-gone" {
+		t.Fatalf("reason = %s, want endpoint-gone — an explicit dangling selection keeps its own rung", reasonOf(got.Answering))
+	}
+}
+
+// And `no-models` may not shadow `model-gone`. The chosen endpoint survives
+// but no longer offers the chosen model, and it is the only endpoint there,
+// so nothing offers a model at all — the answer is still what broke, not
+// the fleet-wide fact.
+func TestAgentStatus_ARemovedModelOutranksNoModels(t *testing.T) {
+	h := newAssistantHarnessWith(t, &stubAssistantClient{}, &scriptedEndpoints{
+		list: []profile.Endpoint{{
+			ID: "e1", Name: "stripped", BaseURL: "http://127.0.0.1:11434/v1",
+			Schema: profile.EndpointSchemaOpenAICompatible,
+		}},
+	})
+	h.setupAndUnseal()
+	h.mustForceDefault("e1", "qwen3")
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if got.Answering.Ready || reasonOf(got.Answering) != "model-gone" {
+		t.Fatalf("reason = %s, want model-gone — the selected endpoint is still there, its model is not", reasonOf(got.Answering))
 	}
 }
 

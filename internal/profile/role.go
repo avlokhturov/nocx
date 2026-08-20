@@ -232,7 +232,14 @@ type RoleRepository interface {
 	// LoadDefaultModel returns the stored default, or the zero value when
 	// none has been chosen. Never an error for "unset" — unset is a value.
 	LoadDefaultModel() (DefaultModel, error)
-	// SetDefaultModel replaces the default. The empty pair clears it.
+	// SetDefaultModel replaces the default. The empty pair clears it. A
+	// set pair must name an endpoint the store holds AND a model that
+	// endpoint offers, or the write is REFUSED with nothing stored
+	// (ErrEndpointNotFound / ErrEndpointModelNotFound) — unlike
+	// AssignRole, which lets a per-role assignment dangle on purpose. The
+	// check belongs to the implementation because it must happen under the
+	// same lock as the write: a default that names nothing must not be
+	// storable through a window between a caller's check and this call.
 	SetDefaultModel(d DefaultModel) error
 }
 
