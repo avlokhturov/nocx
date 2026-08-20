@@ -560,9 +560,22 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # THE NOTES ARE A FILE IN THE REPOSITORY when one exists for this
+          # version, so what a release says is written, reviewed and diffed
+          # like everything else that ships. The fallback is the sentence this
+          # step used to carry alone: it is the install caveat, which is true
+          # of every build and belongs in every release whether or not anybody
+          # wrote notes for that one.
+          notes_file="docs/release-notes/v${VERSION}.md"
+          if [ -f "$notes_file" ]; then
+            notes_arg=(--notes-file "$notes_file")
+          else
+            echo "::warning::no $notes_file — publishing with the install caveat alone"
+            notes_arg=(--notes "Automated release. macOS: first launch needs the manual quarantine step. Linux: chmod +x the AppImage. See the README for both.")
+          fi
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
-            --notes "Automated release. macOS: first launch needs the manual quarantine step. Linux: chmod +x the AppImage. See the README for both." \
+            "${notes_arg[@]}" \
             "dist/nocx-${VERSION}-darwin-universal.dmg" \
             "dist/nocx-${VERSION}-darwin-universal.zip" \
             "dist/nocx-${VERSION}-linux-amd64.AppImage" \
