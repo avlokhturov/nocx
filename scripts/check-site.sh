@@ -52,21 +52,64 @@ for f in $pages; do
   fi
 done
 
-# 2. Every referenced local asset exists. A hero that 404s is worse than no
-#    hero, and it survives review because the alt text still reads fine.
+# 2. Every referenced local asset exists, resolved from the page's OWN
+#    directory rather than from site/ — site/ru/index.html reaches its
+#    stylesheet as ../style.css, and a check anchored at the site root would
+#    silently skip every reference the translated page makes.
 for f in $pages; do
-  refs="$(grep -oE '(src|href)="\./[^"]+"' "$f" |
-    sed -E 's/^(src|href)="\.\///; s/"$//' || true)"
+  dir="$(dirname "$f")"
+  refs="$(grep -oE '(src|href)="\.\.?/[^"]+"' "$f" |
+    sed -E 's/^(src|href)="//; s/"$//' || true)"
   for rel in $refs; do
     [ -n "$rel" ] || continue
-    if [ ! -f "$site/$rel" ]; then
+    # A link is not always a file: the language switcher points at a directory
+    # and carries ?lang=, which the server never sees as part of a path.
+    target="${rel%%\?*}"
+    target="${target%%#*}"
+    case "$target" in
+      */) target="${target}index.html" ;;
+    esac
+    if [ ! -f "$dir/$target" ]; then
       echo "FAIL: ${f#$root/} references a missing asset: $rel"
       fail=1
     fi
   done
 done
 
-# 3. Forbidden phrasings (spec §7).
+# 3. The version on the page is the version that was released. Both pages
+#    carry it in data-version / data-released, the deploy workflow rewrites
+#    those from the newest tag, and this compares the committed text with the
+#    same tag — so the repository cannot quietly fall behind its own release
+#    while the deployed page looks current.
+tag="$(git -C "$root" describe --tags --abbrev=0 2>/dev/null || true)"
+if [ -n "$tag" ]; then
+  for f in $pages; do
+    shown="$(grep -oE '<b data-version>[^<]+</b>' "$f" |
+      sed -E 's/<[^>]+>//g' | head -1 || true)"
+    if [ -n "$shown" ] && [ "$shown" != "$tag" ]; then
+      echo "FAIL: ${f#$root/} shows $shown; the newest tag is $tag"
+      echo "       Update data-version and data-released, or tag the release."
+      fail=1
+    fi
+  done
+fi
+
+# 4. The translated page carries the same sections as the canonical one. Two
+#    near-identical files drift, and the safety caveats drift first.
+en="$site/index.html"
+ru="$site/ru/index.html"
+if [ -f "$ru" ]; then
+  ids_en="$(grep -oE 'id="[^"]+"' "$en" | sort)"
+  ids_ru="$(grep -oE 'id="[^"]+"' "$ru" | sort)"
+  if [ "$ids_en" != "$ids_ru" ]; then
+    echo "FAIL: site/index.html and site/ru/index.html have different sections"
+    diff <(printf '%s\n' "$ids_en") <(printf '%s\n' "$ids_ru") |
+      sed 's/^/       /' || true
+    fail=1
+  fi
+fi
+
+# 5. Forbidden phrasings (spec §7).
 if [ ! -f "$phrases" ]; then
   echo "FAIL: $phrases is missing"
   exit 1

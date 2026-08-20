@@ -326,6 +326,36 @@ a returning author six months from now will reach for.
 When RU lands (§12) a fourth check compares the set of section `id`s across the two files
 and fails on any difference.
 
+## 11a. Amended 2026-08-20 — the page's graphics are terminal material
+
+Text-only and complete was correct against "no screenshots"; it was not correct
+against "make it obvious this is about a terminal". Nothing but the words said
+terminal, and ten identically-shaped chapters read as a document rather than a
+product page. Reviewed with codex a second time; the direction taken is its
+framing, an **engineering terminal artefact** — the page's main graphic is real
+terminal material and real state, never a drawing of the interface.
+
+**The honest line, restated, because it is the whole design.** A real transcript
+rendered as text is honest and announces what it is. A CSS reconstruction of
+nocx's tabs, sidebar, workspace pills or assistant block is a screenshot we
+never took, and is forbidden exactly as a drawn placeholder was. Between them
+sit window ornaments — a title bar, three traffic-light dots — which are not
+literally false and are not used: beside the product's name they read as
+"this is nocx's window", and they buy nothing.
+
+So the hero carries a shell transcript that is **genuinely captured from this
+repository** (`git log --oneline -3`, `go test ./internal/session/
+./internal/settings/`), captioned as text rather than a screenshot and
+reproducible by any reader. Its container names the artefact — `SHELL
+TRANSCRIPT · EXIT 0` — rather than imitating a window. It stays in English on
+the Russian page: translating real output would forge it.
+
+Behaviour is shown rather than described. Restore is a state table whose last
+row is the warning-coloured one (a running process does not resume). Secrets is
+a transformation with a synthetic `<value>`, labelled as nocx's own record of
+the command. The assistant is its payload in three columns. That replaces the
+prose that asked a visitor to build the product in their head.
+
 ## 12. Russian second, not simultaneously
 
 EN is canonical and ships first. RU is translated from the finished page rather than
