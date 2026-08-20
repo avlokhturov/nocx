@@ -79,6 +79,15 @@ type storeData struct {
 	// removed model); resolution reports the dangle instead of resolving
 	// to a neighbour.
 	Roles []RoleAssignment `json:"roles,omitempty"`
+	// DefaultModel is the one pair every role WITHOUT its own assignment
+	// resolves through (bead nocx-rikz5). It rides this document for the
+	// same reason Roles does — it names an endpoint, and DeleteEndpoint
+	// clears it in the endpoint's own write. No `omitempty`: encoding/json
+	// does not omit an empty struct, so the tag would claim an absence the
+	// encoder never produces. The zero value IS "no default", and an absent
+	// key decodes to it, so a document written before this field existed
+	// reads back as a person who has chosen nothing — which they had not.
+	DefaultModel DefaultModel `json:"defaultModel"`
 }
 
 func (s *JSONStore) load() (*storeData, error) {
@@ -499,6 +508,18 @@ func (s *JSONStore) DeleteEndpoint(id string) (string, error) {
 			ref := existing.CredentialRef
 			d.Endpoints = append(d.Endpoints[:i], d.Endpoints[i+1:]...)
 			clearSecretRefLocked(d, ref)
+			// The default is a single global convenience with nothing to
+			// reassign, so it goes with the endpoint it named (bead
+			// nocx-rikz5): it must never point at nothing. A per-role
+			// ASSIGNMENT deliberately does NOT go: it is a statement about
+			// one role that the person made, and they are entitled to be
+			// told it broke rather than to find it silently forgotten
+			// (role.go's dangle rule, tested at role_test.go:199). This is
+			// the SAME write as the removal — a second write could fail in
+			// between and leave the state the interval forbids.
+			if d.DefaultModel.EndpointID == id {
+				d.DefaultModel = DefaultModel{}
+			}
 			if err := s.writeLocked(d); err != nil {
 				return "", err
 			}
@@ -517,6 +538,38 @@ func (s *JSONStore) LoadRoleAssignments() ([]RoleAssignment, error) {
 		return nil, err
 	}
 	return d.Roles, nil
+}
+
+// LoadDefaultModel returns the chosen default, or the zero value when none
+// has been chosen (bead nocx-rikz5) — "unset" is a value here, never an
+// error, so a caller can tell a person who chose nothing from a store that
+// could not answer.
+func (s *JSONStore) LoadDefaultModel() (DefaultModel, error) {
+	d, err := s.load()
+	if err != nil {
+		return DefaultModel{}, err
+	}
+	return d.DefaultModel, nil
+}
+
+// SetDefaultModel replaces the default in ONE write. The empty pair clears
+// it, returning every role without its own assignment to the visible
+// "no model assigned" failure state; a half-set pair is refused
+// (ValidateDefaultModel), because it names nothing.
+func (s *JSONStore) SetDefaultModel(m DefaultModel) error {
+	if err := ValidateDefaultModel(m); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	d.DefaultModel = m
+	return s.writeLocked(d)
 }
 
 // AssignRole upserts ONE role's assignment (bead nocx-e6kn2): a role has at

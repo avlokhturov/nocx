@@ -65,7 +65,10 @@ func ParseModelRole(s string) (ModelRole, error) {
 // An assignment may reference an endpoint or model that no longer exists:
 // DeleteEndpoint and UpdateEndpoint do not chase assignments (the delete's
 // reference sweep is about SECRETS, and a role names an endpoint, not a
-// credential). The dangle is deliberate — a deleted endpoint or removed
+// credential). A DefaultModel is the exception and is cleared by the delete
+// — it is one global convenience with nothing to reassign, while an
+// assignment is a statement about one role that the person made and is
+// entitled to be told about. The dangle is deliberate — a deleted endpoint or removed
 // model leaves the role RESOLUTION a refusal that names what disappeared,
 // never a silent hop to a neighbour — and the roles surface shows the row
 // as no longer assignable. Resolution is the truth-teller; see ResolveRole.
@@ -97,6 +100,38 @@ func ValidateRoleAssignment(a RoleAssignment) error {
 	return nil
 }
 
+// DefaultModel is the ONE (endpoint, model) pair a person names once, used
+// by every role that has no assignment of its own (bead nocx-rikz5). It is
+// not a fallback the product invents — that is what nocx-e6kn2 forbids,
+// because then nobody can say which model answered. It is a choice the
+// person made, reused; the distinction is the whole reason this is a stored
+// value rather than "the first model of the first endpoint".
+//
+// The zero value means "no default", and it is the state a fresh profile is
+// in. Both fields set or neither: a half-set default names nothing.
+type DefaultModel struct {
+	EndpointID string `json:"endpointId"`
+	Model      string `json:"model"`
+}
+
+// IsSet reports whether a default has been chosen. Both fields are required
+// together, so a half-set value is not "partly set" — it is not set.
+func (d DefaultModel) IsSet() bool { return d.EndpointID != "" && d.Model != "" }
+
+// ValidateDefaultModel checks the SHAPE before storing: both present, or
+// both empty. The empty pair is the CLEAR write — it removes the default and
+// returns every unassigned role to the visible failure state. Whether the
+// endpoint and model still exist is deliberately NOT this check's question,
+// for the same reason ValidateRoleAssignment does not ask it: resolution
+// answers it, once, so a deletion cannot race a write into a
+// validated-but-stale default.
+func ValidateDefaultModel(d DefaultModel) error {
+	if (d.EndpointID == "") != (d.Model == "") {
+		return errors.New("default model: endpoint id and model must be provided together (or both empty to clear the default)")
+	}
+	return nil
+}
+
 // The resolution refusals. Each names WHAT is missing so the ask surface can
 // repeat it to a person; a role is never silently re-pointed at something
 // else (bead acceptance: a model or endpoint that disappears leaves the role
@@ -119,8 +154,11 @@ var (
 
 // ResolveRole is THE ONE role resolver in the product (bead nocx-e6kn2:
 // "a role resolves in one place"). It maps a role to its assigned
-// (endpoint, model) pair, or refuses with a reason naming exactly what is
-// missing. Every consumer — the ask transaction, the classifier, the roles
+// (endpoint, model) pair — the role's own assignment, or failing that the
+// person's default (bead nocx-rikz5) — or refuses with a reason naming
+// exactly what is missing. The default is a new INPUT, never a second
+// resolution path: it is read once by the caller and handed in, so there is
+// still exactly one place where a role becomes an (endpoint, model) pair. Every consumer — the ask transaction, the classifier, the roles
 // surface's preview — goes through here, so a reassignment is picked up by
 // every feature at once and no feature can grow a private second answer
 // that disagrees with the first the day the role is reassigned.
@@ -129,24 +167,35 @@ var (
 //
 //   - unknown role      → a feature asked for a name the build does not
 //     know; that is a bug in the caller, and it is told so.
-//   - unassigned        -> the product's rule: a role with no model is a
-//     VISIBLE failure where the feature is used. Falling back to some
-//     other model would make it unknowable which model answered.
+//   - unassigned        -> the product's rule: a role with no model of its
+//     own AND no default is a VISIBLE failure where the feature is used.
+//     Falling back to some other model would make it unknowable which
+//     model answered; the default is not that fallback, because the person
+//     authored it.
 //   - endpoint gone     -> the assigned endpoint was deleted. Resolving to
 //     a neighbour endpoint would quietly change the provider behind the
 //     person's back.
 //   - model gone        -> the assigned model was removed from the
 //     endpoint. Resolving to the next model on the list is the same lie.
-func ResolveRole(role ModelRole, assignments []RoleAssignment, endpoints []Endpoint) (Endpoint, string, error) {
+func ResolveRole(role ModelRole, assignments []RoleAssignment, def DefaultModel, endpoints []Endpoint) (Endpoint, string, error) {
 	if !ValidModelRole(role) {
 		return Endpoint{}, "", fmt.Errorf("role %q: %w", role, ErrRoleUnknown)
 	}
+	// The role's own assignment first: an override is only an override if it
+	// outranks the thing it overrides.
 	var a *RoleAssignment
 	for i := range assignments {
 		if assignments[i].Role == role {
 			a = &assignments[i]
 			break
 		}
+	}
+	// Then the default, as an assignment this role did not write. Below this
+	// point the two are indistinguishable ON PURPOSE: an endpoint that is
+	// gone is gone whichever named it, and a default is never repaired into a
+	// neighbour any more than an assignment is.
+	if a == nil && def.IsSet() {
+		a = &RoleAssignment{Role: role, EndpointID: def.EndpointID, Model: def.Model}
 	}
 	if a == nil {
 		return Endpoint{}, "", fmt.Errorf("role %q: %w", role, ErrRoleUnassigned)
@@ -180,6 +229,11 @@ type RoleRepository interface {
 	// AssignRole upserts ONE role's assignment: a role has at most one
 	// (endpoint, model) pair. Shape-validates the assignment first.
 	AssignRole(a RoleAssignment) error
+	// LoadDefaultModel returns the stored default, or the zero value when
+	// none has been chosen. Never an error for "unset" — unset is a value.
+	LoadDefaultModel() (DefaultModel, error)
+	// SetDefaultModel replaces the default. The empty pair clears it.
+	SetDefaultModel(d DefaultModel) error
 }
 
 // RoleDTO is the wire form of one role row (contracts/roles.list.schema.json

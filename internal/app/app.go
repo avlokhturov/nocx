@@ -756,7 +756,7 @@ func New(opts ...Option) (*App, error) {
 			switch k {
 			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
 				settings.HistoryOutputEnabled.Key(), settings.HistoryOutputCapKB.Key():
-				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
+				if v, getErr := settingsRegistry.GetBool(settings.HistoryEnabled); getErr == nil {
 					historyPolicy.SetEnabled(v)
 				}
 				if v, getErr := settingsRegistry.GetNumber(settings.HistoryRetentionDays); getErr == nil {
@@ -765,7 +765,7 @@ func New(opts ...Option) (*App, error) {
 				if v, getErr := settingsRegistry.GetBool(settings.HistoryOutputEnabled); getErr == nil {
 					historyPolicy.SetOutputEnabled(v)
 				}
-				if v, err := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); err == nil {
+				if v, getErr := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); getErr == nil {
 					historyPolicy.SetOutputCapBytes(int(v) << 10)
 				}
 			}
