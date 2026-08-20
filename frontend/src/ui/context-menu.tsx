@@ -62,6 +62,38 @@ const EDGE_MARGIN_PX = 8
 
 export function ContextMenu(props: ContextMenuProps) {
   let element: HTMLDivElement | undefined
+  /** Whoever held the keyboard when the menu took it. */
+  let opener: HTMLElement | null = null
+
+  /**
+   * Hand the keyboard back to the opener.
+   *
+   * THE MENU TAKES FOCUS ON OPEN — it must, the rows are keyboard-walkable —
+   * so it owes it back, and it used to keep it. Nothing noticed while every
+   * row did its work and vanished: focus fell to <body> and the terminal's
+   * document-level rescue picked up the next keystroke. It became visible the
+   * moment a row started opening ANOTHER overlay, which the tab-strip rework
+   * did by making "Quick connect…" a row here. The picker records
+   * `document.activeElement` as the thing to restore when it closes; that was
+   * the menu item, which is unmounted by then, and `focus()` on a detached
+   * node is a silent no-op. So escaping the picker left the caret out of the
+   * prompt the person had been typing in.
+   *
+   * Which is why this runs BEFORE the row's `onSelect`: the action is what
+   * opens the next overlay, and the next overlay reads the focus this restores.
+   */
+  function releaseFocus(): void {
+    const el = opener
+    opener = null
+    if (el === null || !el.isConnected) return
+    // Only while the menu still HOLDS the keyboard. An outside pointerdown is
+    // on its way to a new owner — the element it lands on takes focus itself,
+    // and pulling it back to the opener over the top of that would make a
+    // click somewhere else land somewhere else again.
+    const active = document.activeElement
+    if (element && !element.contains(active)) return
+    el.focus({ preventScroll: true })
+  }
 
   // Position and focus on open. The anchor does not move while the menu is
   // up, so both are measured once per open — never re-derived per change.
@@ -82,6 +114,7 @@ export function ContextMenu(props: ContextMenuProps) {
     )
     el.style.left = `${x}px`
     el.style.top = `${y}px`
+    opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     el.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
   })
 
@@ -98,6 +131,7 @@ export function ContextMenu(props: ContextMenuProps) {
     const onKeyDown = (e: KeyboardEvent): void => {
       if (e.key === 'Escape') {
         e.stopPropagation()
+        releaseFocus()
         props.onClose()
         return
       }
@@ -141,6 +175,7 @@ export function ContextMenu(props: ContextMenuProps) {
                 class="ui-context-menu__item"
                 role="menuitem"
                 onClick={() => {
+                  releaseFocus()
                   props.onClose()
                   item.onSelect()
                 }}
