@@ -1,0 +1,357 @@
+/* nocx landing page.
+ *
+ * The page is a scrollback you can read: sections are blocks in one journal,
+ * separated by pause and a hairline, never by cards and shadows. Two voices —
+ * a grotesque for claims, monospace for anything that denotes observable
+ * system state (a command, a version, a platform floor). Colour is semantic
+ * exactly as in a terminal, and the palette is the app's own default theme so
+ * page and product read as one thing.
+ *
+ * Spec: .internal/specs/2026-08-20-github-landing-design.md §5.
+ */
+
+:root {
+  /* Verbatim from frontend/src/styles/themes/tokyo-night.css — the app's
+   * default. Changing a value here without changing it there breaks the one
+   * thing this palette is for.
+   *
+   * This is the subset the page uses, not the theme's whole ramp. The theme
+   * also defines --chrome, --surface-raised and --danger; none has a job here
+   * (the page has no window chrome, no raised control, and nothing on it
+   * fails), and carrying them unused would be three values that drift out of
+   * step with the app while looking authoritative. Add one when a rule needs
+   * it. */
+  --canvas: #1a1b26;
+  --surface: #1f2335;
+  --divider: #2a2b3d;
+  --text: #c0caf5;
+  --text-muted: #a9b1d6;
+  --text-dim: #9098bd;
+  --border: #5f6590;
+  --accent: #7aa2f7;
+  --success: #9ece6a;
+  --warning: #e0af68;
+
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --measure: 62ch;
+  --gutter: clamp(1.25rem, 4vw, 3rem);
+  --rhythm: clamp(3.5rem, 9vw, 7rem);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+main {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+/* --- the mark ------------------------------------------------------------ */
+
+/* The app's own icon, at the size it is actually displayed rather than scaled
+ * down by the browser from 1024px. It sits beside the wordmark and is
+ * decorative: the name is right next to it in text, so the image carries an
+ * empty alt and screen readers are not made to say "nocx" twice. */
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  margin: 0 0 0.75rem;
+}
+
+.logo img {
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+}
+
+.logo__word {
+  font-family: var(--mono);
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+/* --- the block: one hairline axis, metadata, then content ---------------- */
+
+.block {
+  /* One variable, because the prompt marker is positioned against this same
+   * value. Hard-coding --rhythm in both leaves the marker floating when a
+   * block wants different spacing, which is exactly what the first one does. */
+  --block-top: var(--rhythm);
+
+  position: relative;
+  padding: var(--block-top) 0 0 clamp(1rem, 3vw, 2.25rem);
+  border-left: 1px solid var(--divider);
+}
+
+/* The first block opens the page; the full rhythm above it is a gap with
+ * nothing before it to separate from. */
+header.block {
+  --block-top: clamp(2rem, 5vw, 3.5rem);
+}
+
+.block::before {
+  /* The prompt marker. Purely decorative — every block also carries a real
+   * label in .block__label, so a reader who never sees this loses nothing. */
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: calc(var(--block-top) + 0.62em);
+  width: 5px;
+  height: 5px;
+  background: var(--accent);
+}
+
+.block__label {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 0 0 0.75rem;
+}
+
+.block h2 {
+  font-size: clamp(1.65rem, 1.2rem + 2vw, 2.5rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  margin: 0 0 1rem;
+  max-width: 24ch;
+  font-weight: 620;
+}
+
+.block h3 {
+  font-size: 1.0625rem;
+  font-weight: 620;
+  margin: 2rem 0 0.35rem;
+}
+
+.lede {
+  max-width: var(--measure);
+  color: var(--text-muted);
+  margin: 0 0 1.25rem;
+}
+
+.block p,
+.block li {
+  max-width: var(--measure);
+}
+
+/* Monospace means "observable system state", never emphasis. */
+code,
+kbd,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+code {
+  color: var(--text);
+  background: var(--surface);
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+}
+
+pre {
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  background: var(--surface);
+  border: 1px solid var(--divider);
+  border-radius: 4px;
+  padding: 1rem 1.15rem;
+  overflow-x: auto;
+  max-width: var(--measure);
+  line-height: 1.6;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  text-decoration-thickness: 2px;
+}
+
+.rule {
+  border: 0;
+  border-top: 1px solid var(--divider);
+  margin: var(--rhythm) 0 0;
+}
+
+/* --- constraints: the reader must not be able to miss these -------------- */
+
+.constraint {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  line-height: 1.55;
+  color: var(--warning);
+  border-left: 2px solid var(--warning);
+  padding: 0.15rem 0 0.15rem 0.75rem;
+  margin: 0.5rem 0 0;
+  max-width: var(--measure);
+}
+
+.constraint a {
+  color: inherit;
+}
+
+.state {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--text-dim);
+  margin: 0.5rem 0 0;
+}
+
+.state strong {
+  color: var(--success);
+  font-weight: inherit;
+}
+
+/* --- calls to action ----------------------------------------------------- */
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1.75rem 0 0;
+}
+
+.cta {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.7rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  text-decoration: none;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.cta:hover {
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.cta--primary {
+  border-color: var(--accent);
+}
+
+.cta__label {
+  font-weight: 620;
+}
+
+.cta__detail {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+/* --- the technical strip -------------------------------------------------- */
+
+.strip {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--text-dim);
+  line-height: 1.9;
+  max-width: 72ch;
+}
+
+.strip dt {
+  color: var(--text-muted);
+}
+
+.strip dd {
+  margin: 0 0 0.6rem;
+}
+
+/* --- lists ---------------------------------------------------------------- */
+
+.plain {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+}
+
+.plain li {
+  padding: 0 0 0 1.25rem;
+  position: relative;
+  margin: 0 0 0.5rem;
+}
+
+.plain li::before {
+  content: '—';
+  position: absolute;
+  left: 0;
+  color: var(--text-dim);
+}
+
+.plain--negative li::before {
+  content: '\00d7';
+  color: var(--text-dim);
+}
+
+/* --- footer --------------------------------------------------------------- */
+
+footer {
+  margin: var(--rhythm) 0 0;
+  padding: 2rem 0 4rem;
+  border-top: 1px solid var(--divider);
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--text-dim);
+}
+
+footer a {
+  color: var(--text-muted);
+}
+
+/* --- narrow --------------------------------------------------------------- */
+
+@media (max-width: 40rem) {
+  .block {
+    padding-left: 1rem;
+  }
+
+  .cta {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
