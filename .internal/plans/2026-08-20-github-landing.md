@@ -22,6 +22,7 @@
 - **`prefers-reduced-motion: reduce` disables every transition and animation**, and no meaning depends on motion.
 - **Version strings are `v0.2.0`** and the release date is `2026-08-20`.
 - **Forbidden phrasings** are enforced literally by `scripts/site-forbidden-phrases.txt` (Task 2). Adding a phrase there is cheap; removing one requires changing spec §7.
+- **AMENDED 2026-08-20 — there are no placeholder figures.** Tasks 3 to 6 below still describe `.figure--placeholder` frames, because that is what they built and this document records what was done. They were removed afterwards, CSS included: the owner deferred the screenshots indefinitely, and a frame reading `Product screenshot` stops being a placeholder and becomes the page's impression once it is not about to be filled. **Do not rebuild them.** Task 8 restores the figure markup and the figure CSS together, with real images.
 
 ---
 
@@ -1468,12 +1469,15 @@ Spec §10. Blocked on the owner; everything before it ships without it.
 
 **Interfaces:**
 
-- Consumes: the `.figure--placeholder` blocks from Tasks 4–6.
+- Consumes: nothing — the placeholder figures and every `.figure*` rule were **removed**
+  in `site: the page has no frames waiting to be filled` once the screenshots became
+  indefinite. This task restores **both the markup and the CSS**; the stylesheet block is
+  in that commit's parent and the markup shape is below.
 - Produces: the finished page.
 
 **Acceptance Criteria:**
 
-- Every `.figure--placeholder` is replaced by a `<picture>` with a WebP source and a PNG fallback, and the `figure--placeholder` class appears nowhere in the file.
+- The `.figure`, `.figure img`, `.figure figcaption` rules are restored to `site/style.css`, and every screenshot is a `<picture>` with a WebP source and a PNG fallback.
 - The hero image is at most 400 KB after compression.
 - No frame shows a real hostname, a username in a path, a key, or the contents of a private repository.
 - `og.png` is 1200×630 and referenced from `<head>` with `og:image`, `og:title`, `og:description` and `twitter:card`.
@@ -1489,10 +1493,13 @@ Open every frame and look for a real hostname, a username in a path, an API key,
 
 - [ ] **Step 3: Produce WebP and check the weight**
 
+This environment has no image tooling at all — no ImageMagick, no `cwebp`, no Pillow. The
+icon was resized with a one-off `npx sharp-cli`, and that is the route here too.
+
 ```bash
 cd site/assets
 for f in hero resume sidebar-git vault-chip assistant-block; do
-  cwebp -q 82 "$f.png" -o "$f.webp"
+  npx --yes sharp-cli --input "$f.png" --output "$f.webp" --format webp --quality 82
 done
 ls -lh *.webp *.png | awk '{print $5, $9}'
 ```

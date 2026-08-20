@@ -273,9 +273,28 @@ maintained.
 ## 10. Screenshots — the owner's part
 
 Taken by the owner on macOS; nothing in this repository can produce them (the container
-path is Linux WebKit at a container viewport, which is not the shipped chrome). Until they
-exist the layout ships with framed placeholders at the exact final dimensions, labelled
-`Product screenshot` — **never a drawn imitation of the UI**.
+path is Linux WebKit at a container viewport, which is not the shipped chrome).
+
+**Amended 2026-08-20, after the first attempt: the page ships with no figures at all.**
+The original plan was framed placeholders reading `Product screenshot`, which is honest
+while the frames are days from being filled and reads as an unfinished page once they are
+not. The owner decided the screenshots wait indefinitely, so the frames came out along with
+their CSS rather than sitting empty on a public URL — and their caption text was written as
+a brief for the photographer, not for a reader. The page is text-only and complete; §11's
+asset check has nothing to check until the figures return.
+
+The first attempt is worth recording because it will recur. The frame offered was an
+**empty window** — one unnamed tab, closed sidebar, nothing in the scrollback. A hero
+screenshot is evidence for the claim printed above it, and this page's claim is that a
+restart no longer costs you your work, which an empty scrollback is precisely unable to
+show. So the brief below is about the **state of the session**, not the framing of the
+window: what has to be on screen is a session somebody is already living in.
+
+Two smaller things that attempt surfaced. The app was running a theme that is not
+`tokyo-night`, and the page is painted in `tokyo-night` so that page and product read as
+one thing — either the capture uses that theme, or the page is repainted to match whatever
+the owner actually runs, which is arguably the more honest of the two. And the block
+timestamps rendered in Russian on what is an English page.
 
 - `hero` — the whole window, 1440×900 logical, captured on a retina display (2880×1800),
   theme `tokyo-night` to match the page. The frame must legibly show the tab strip with a
