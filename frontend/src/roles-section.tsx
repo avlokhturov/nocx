@@ -111,7 +111,11 @@ export function RolesSection(props: RolesSectionProps) {
   async function load() {
     if (!props.client) return
     try {
-      const [rs, eps] = await Promise.all([props.client.listRoles(), props.client.listEndpoints()])
+      const [table, eps] = await Promise.all([
+        props.client.listRoles(),
+        props.client.listEndpoints(),
+      ])
+      const rs = table?.roles
       setRoles(rs ?? [])
       setEndpoints(eps ?? [])
       setDrafts(draftFromWire(rs ?? []))
@@ -140,8 +144,8 @@ export function RolesSection(props: RolesSectionProps) {
     setBusyRole(role)
     try {
       const table = await props.client.assignRole({ role, endpointId, model: modelId })
-      setRoles(table)
-      setDrafts(draftFromWire(table))
+      setRoles(table.roles)
+      setDrafts(draftFromWire(table.roles))
     } catch (err) {
       const message = (err as Error).message
       log.error('Failed to assign a model role', { role, message })

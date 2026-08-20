@@ -1,7 +1,8 @@
 package transport
 
-// The model-role methods (bead nocx-e6kn2): roles.list and roles.assign —
-// the wire half of "a feature asks for a role, never for a model id".
+// The model-role methods (bead nocx-e6kn2): roles.list, roles.assign and
+// roles.setDefault (bead nocx-rikz5) — the wire half of "a feature asks for
+// a role, never for a model id".
 //
 // The handler holds only its seams — a ConfigOperation and the Responder —
 // exactly like the endpoint handlers. The RESOLUTION (role → endpoint +
@@ -34,16 +35,7 @@ func (h roleHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
 		switch req.Method {
 		case "roles.list":
-			assignments, err := svc.ListRoleAssignments()
-			if err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
-				return nil
-			}
-			// The wire lists EVERY role in the closed set: an unassigned
-			// role is a null row, never an absent one (the surface's
-			// "no model assigned" state is an assignment the product shows,
-			// not a role the product hides).
-			_ = h.r.TryResult(req.ID, mustMarshal(rolesListResponse{Roles: wireRoles(assignments)}))
+			h.respondWithTable(req, svc)
 		case "roles.assign":
 			var params roleAssignParams
 			if err := json.Unmarshal(req.Params, &params); err != nil {
@@ -60,18 +52,84 @@ func (h roleHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "", err))
 				return nil
 			}
-			assignments, err := svc.ListRoleAssignments()
-			if err != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+			h.respondWithTable(req, svc)
+		case "roles.setDefault":
+			var params roleSetDefaultParams
+			if err := json.Unmarshal(req.Params, &params); err != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
 				return nil
 			}
-			_ = h.r.TryResult(req.ID, mustMarshal(rolesListResponse{Roles: wireRoles(assignments)}))
+			if msg := validateRoleSetDefault(params); msg != "" {
+				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
+				return nil
+			}
+			// The endpoint's EXISTENCE is the service's check, not this
+			// handler's: it guards the write, so it belongs beside it
+			// (AD-8). An id naming no endpoint comes back as
+			// profile.ErrEndpointNotFound, which endpointMethodErrorCode
+			// already spells -32602 — the same code an endpoints.* method
+			// answers for the same mistake.
+			err := svc.SetDefaultModel(profile.DefaultModel{EndpointID: params.EndpointID, Model: params.Model})
+			if err != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: endpointMethodErrorCode(err), Message: err.Error()})
+				return nil
+			}
+			h.respondWithTable(req, svc)
 		}
 		return nil
 	})
 	if err != nil {
 		answerOperationRefusal(h.r, req, err)
 	}
+}
+
+// respondWithTable answers with the ONE shape roles.list, roles.assign and
+// roles.setDefault all return: the whole role table AND the default, read
+// back after any write. Both fields come from one answer so the surface
+// can never render a table from one moment and a default from another —
+// the reason the write returns the state rather than an acknowledgement.
+func (h roleHandlers) respondWithTable(req jsonrpcRequest, svc capability.ConfigService) {
+	assignments, err := svc.ListRoleAssignments()
+	if err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
+	def, err := svc.DefaultModel()
+	if err != nil {
+		// RETURNED, never swallowed into "no default": a store that
+		// cannot answer must not look like a person who chose nothing,
+		// or an unreadable file renders as an honest "choose a model"
+		// and sends someone to re-choose what they already chose.
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: err.Error()})
+		return
+	}
+	// The wire lists EVERY role in the closed set: an unassigned role is a
+	// null row, never an absent one (the surface's "no model assigned"
+	// state is an assignment the product shows, not a role the product
+	// hides).
+	_ = h.r.TryResult(req.ID, mustMarshal(rolesListResponse{
+		Roles:   wireRoles(assignments),
+		Default: wireDefaultModel(def),
+	}))
+}
+
+// wireDefaultModel is the default's wire form: the pair, or null when
+// nobody has chosen one. Null is the state a fresh profile is in and the
+// state in which the assistant is not ready — never a pair the product
+// invented on the person's behalf.
+func wireDefaultModel(d profile.DefaultModel) *defaultModelWire {
+	if !d.IsSet() {
+		return nil
+	}
+	return &defaultModelWire{EndpointID: d.EndpointID, Model: d.Model}
+}
+
+// defaultModelWire is the default (endpoint, model) pair on the wire. A
+// pointer in the response so "unset" marshals as null rather than as a
+// pair of empty strings, which the contract refuses.
+type defaultModelWire struct {
+	EndpointID string `json:"endpointId"`
+	Model      string `json:"model"`
 }
 
 // rolesListResponse is the wire shape of BOTH roles.list and roles.assign
@@ -81,6 +139,11 @@ func (h roleHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 // the renderer's single shape is the source of truth it renders from.
 type rolesListResponse struct {
 	Roles []profile.RoleDTO `json:"roles"`
+	// Default is the pair every role WITHOUT an assignment of its own
+	// resolves through (bead nocx-rikz5), null when nobody has chosen
+	// one. It rides the SAME result as the roles because the surface
+	// adopts both from one answer.
+	Default *defaultModelWire `json:"default"`
 }
 
 // roleAssignParams is the wire form of one assignment write. Params are not
@@ -119,6 +182,43 @@ func validateRoleAssignRaw(raw json.RawMessage) string {
 		return msg
 	}
 	return validateRoleAssign(p)
+}
+
+// roleSetDefaultParams is the wire form of the default write. Unlike an
+// assignment's pair these are plain strings: BOTH empty is the CLEAR write,
+// which is a value a person can choose, not an absence.
+type roleSetDefaultParams struct {
+	EndpointID string `json:"endpointId"`
+	Model      string `json:"model"`
+}
+
+// validateRoleSetDefault checks the SHAPE — both present, or both empty.
+// Whether the endpoint exists is the service's question (it guards the
+// write); whether the model still exists is resolution's, which refuses
+// rather than repairing the pair into a neighbouring model.
+func validateRoleSetDefault(p roleSetDefaultParams) string {
+	if err := profile.ValidateDefaultModel(profile.DefaultModel{EndpointID: p.EndpointID, Model: p.Model}); err != nil {
+		return err.Error()
+	}
+	if p.EndpointID != "" {
+		if msg := configIDRunes("endpointId", p.EndpointID); msg != "" {
+			return msg
+		}
+		if msg := boundedRunes("model", p.Model, maxConfigNameRunes); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
+// validateRoleSetDefaultRaw is the registered validator for
+// roles.setDefault.
+func validateRoleSetDefaultRaw(raw json.RawMessage) string {
+	var p roleSetDefaultParams
+	if msg := decodeObject(raw, &p); msg != "" {
+		return msg
+	}
+	return validateRoleSetDefault(p)
 }
 
 func roleAssignParamsToStored(p roleAssignParams) profile.RoleAssignment {

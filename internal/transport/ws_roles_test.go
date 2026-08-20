@@ -159,11 +159,45 @@ func TestRolesList_DTOConformsToContract(t *testing.T) {
 			{Role: profile.RoleAnswering, EndpointID: ep, Model: "qwen3"},
 			{Role: profile.RoleClassifier, EndpointID: ep, Model: "gpt-4o-mini"},
 		})},
+		// The default is a field with two shapes, and BOTH are the DTO's
+		// (bead nocx-rikz5): the chosen pair, and the null a fresh profile
+		// reports. A case for only one of them is a case for the shape
+		// that happened to be written first.
+		"a default and nothing else": {
+			Roles:   wireRoles(nil),
+			Default: wireDefaultModel(profile.DefaultModel{EndpointID: ep, Model: "qwen3"}),
+		},
+		"a default beside an assignment": {
+			Roles: wireRoles([]profile.RoleAssignment{
+				{Role: profile.RoleAnswering, EndpointID: ep, Model: "qwen3"},
+			}),
+			Default: wireDefaultModel(profile.DefaultModel{EndpointID: ep, Model: "gpt-4o-mini"}),
+		},
 	}
 	for name, dto := range cases {
 		t.Run(name, func(t *testing.T) {
 			validateJSON(t, schema, mustMarshal(dto), "roles.list DTO ("+name+")")
 		})
+	}
+}
+
+// The contract's teeth: a payload the DTO could never marshal, but a
+// hand-rolled handler could, is REFUSED. Half a default names nothing, and
+// a default is a required field — without both assertions the schema would
+// accept a table that has quietly lost the pair.
+func TestRolesList_ContractRefusesAHalfDefaultAndAMissingOne(t *testing.T) {
+	schema := loadSchema(t, "roles.list.schema.json")
+	table := `"roles":[{"role":"answering","endpointId":null,"model":null},` +
+		`{"role":"classifier","endpointId":null,"model":null}]`
+	for name, raw := range map[string]string{
+		"endpoint without model": `{` + table + `,"default":{"endpointId":"e1"}}`,
+		"model without endpoint": `{` + table + `,"default":{"model":"m-a"}}`,
+		"a field nobody named":   `{` + table + `,"default":{"endpointId":"e1","model":"m-a","label":"x"}}`,
+		"no default at all":      `{` + table + `}`,
+	} {
+		if err := validateJSONErr(schema, []byte(raw)); err == nil {
+			t.Errorf("%s: the contract accepted %s, want a refusal", name, raw)
+		}
 	}
 }
 
@@ -206,4 +240,190 @@ func TestRoles_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("roles.assign (clear): %v", err)
 	}
 	validateJSON(t, assignSchema, clearEnv.Result, "roles.assign clear result (real socket)")
+
+	// roles.setDefault returns the SAME shape — the table plus the default
+	// it just wrote — so it is validated against the same contract (bead
+	// nocx-rikz5). Validated in BOTH states: with a default chosen, and
+	// after the clear that returns it to null.
+	setRaw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{
+		"endpointId": created.ID, "model": "gpt-4o-mini",
+	})
+	var setEnv struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(setRaw, &setEnv); err != nil || setEnv.Result == nil {
+		t.Fatalf("roles.setDefault: %v\nraw: %s", err, setRaw)
+	}
+	validateJSON(t, listSchema, setEnv.Result, "roles.setDefault result (real socket)")
+	if d := wireDefault(t, setEnv.Result); d == nil {
+		t.Fatalf("roles.setDefault result carried no default: %s", setEnv.Result)
+	}
+	// And roles.list, whose default is now the populated shape rather than
+	// the null the first assertion above saw.
+	validateJSON(t, listSchema, h.rolesListRaw(t), "roles.list result with a default (real socket)")
+
+	clearDefaultRaw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{"endpointId": "", "model": ""})
+	var clearDefaultEnv struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(clearDefaultRaw, &clearDefaultEnv); err != nil || clearDefaultEnv.Result == nil {
+		t.Fatalf("roles.setDefault (clear): %v\nraw: %s", err, clearDefaultRaw)
+	}
+	validateJSON(t, listSchema, clearDefaultEnv.Result, "roles.setDefault clear result (real socket)")
+}
+
+// ── the default (bead nocx-rikz5) ───────────────────────────────────────
+
+// rolesListRaw returns roles.list's whole result. The roles-only helper
+// above cannot see the default at all — which is the shape of the defect
+// this task exists to prevent: a reader that names only the field it
+// already knows about reports nothing when a new one is missing.
+func (h *endpointHarness) rolesListRaw(t *testing.T) json.RawMessage {
+	t.Helper()
+	raw := jsonrpcCall(t, h.conn, "roles.list", nil)
+	var env struct {
+		Error  *struct{ Code int } `json:"error"`
+		Result json.RawMessage     `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("roles.list unmarshal: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil {
+		t.Fatalf("roles.list: code %d\nraw: %s", env.Error.Code, raw)
+	}
+	if env.Result == nil {
+		t.Fatalf("roles.list returned no result: %s", raw)
+	}
+	return env.Result
+}
+
+// wireDefault decodes the default off a roles.list/roles.assign/
+// roles.setDefault result. nil is the "nobody has chosen one" state.
+func wireDefault(t *testing.T, result json.RawMessage) *profile.DefaultModel {
+	t.Helper()
+	var got struct {
+		Default *profile.DefaultModel `json:"default"`
+	}
+	if err := json.Unmarshal(result, &got); err != nil {
+		t.Fatalf("decode default: %v\nresult: %s", err, result)
+	}
+	return got.Default
+}
+
+// The default a person chooses on this surface is what roles.list reports
+// back — the field the whole task exists for. A fresh profile has none.
+func TestRolesSetDefault_IsReadBackByRolesList(t *testing.T) {
+	h := newEndpointHarness(t)
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, endpointParams("Local", "http://127.0.0.1:11434/v1", "sk-test-123"))
+
+	fresh := h.rolesListRaw(t)
+	if d := wireDefault(t, fresh); d != nil {
+		t.Fatalf("a fresh profile reported default %+v, want null\nresult: %s", d, fresh)
+	}
+
+	setRaw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{
+		"endpointId": created.ID, "model": "gpt-4o-mini",
+	})
+	if isErrorResponse(t, setRaw) {
+		t.Fatalf("roles.setDefault: %s", setRaw)
+	}
+
+	after := wireDefault(t, h.rolesListRaw(t))
+	if after == nil || after.EndpointID != created.ID || after.Model != "gpt-4o-mini" {
+		t.Fatalf("default read back as %+v, want %s/gpt-4o-mini", after, created.ID)
+	}
+}
+
+// The write's own result carries the same table and the same default, so
+// the surface adopts both from one answer and cannot render a default and
+// a role table from two different moments.
+func TestRolesSetDefault_ReturnsTheTableAndTheDefaultItJustWrote(t *testing.T) {
+	h := newEndpointHarness(t)
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, endpointParams("Local", "http://127.0.0.1:11434/v1", "sk-test-123"))
+
+	raw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{
+		"endpointId": created.ID, "model": "gpt-4o-mini",
+	})
+	var env struct {
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || env.Result == nil {
+		t.Fatalf("roles.setDefault: %v\nraw: %s", err, raw)
+	}
+	var got struct {
+		Roles []profile.RoleDTO `json:"roles"`
+	}
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatalf("decode roles: %v", err)
+	}
+	if len(got.Roles) != 2 {
+		t.Fatalf("roles.setDefault returned %d rows, want the closed role set", len(got.Roles))
+	}
+	if d := wireDefault(t, env.Result); d == nil || d.Model != "gpt-4o-mini" {
+		t.Fatalf("roles.setDefault result default = %+v, want the pair it just wrote", d)
+	}
+}
+
+// An endpoint id naming no endpoint is refused at the wire, and nothing is
+// stored: a dangling default would break EVERY unassigned role at once,
+// with nothing on screen naming which choice did it.
+func TestRolesSetDefault_RefusesAnEndpointThatDoesNotExist(t *testing.T) {
+	h := newEndpointHarness(t)
+	h.setupAndUnseal()
+	h.createEndpoint(t, endpointParams("Local", "http://127.0.0.1:11434/v1", "sk-test-123"))
+
+	raw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{
+		"endpointId": "endpoint:custom:ghost:00000000000000000000000000000009",
+		"model":      "gpt-4o-mini",
+	})
+	if !strings.Contains(string(raw), "-32602") {
+		t.Fatalf("roles.setDefault with a ghost endpoint = %s, want -32602", raw)
+	}
+	if d := wireDefault(t, h.rolesListRaw(t)); d != nil {
+		t.Fatalf("a refused write stored %+v, want default null", d)
+	}
+}
+
+// The empty pair is the CLEAR write: it returns every unassigned role to
+// the visible "choose a model" failure rather than to another model.
+func TestRolesSetDefault_TheEmptyPairClearsIt(t *testing.T) {
+	h := newEndpointHarness(t)
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, endpointParams("Local", "http://127.0.0.1:11434/v1", "sk-test-123"))
+
+	if raw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{
+		"endpointId": created.ID, "model": "gpt-4o-mini",
+	}); isErrorResponse(t, raw) {
+		t.Fatalf("roles.setDefault: %s", raw)
+	}
+	clearRaw := jsonrpcCall(t, h.conn, "roles.setDefault", map[string]any{"endpointId": "", "model": ""})
+	if isErrorResponse(t, clearRaw) {
+		t.Fatalf("roles.setDefault (clear): %s", clearRaw)
+	}
+	if d := wireDefault(t, h.rolesListRaw(t)); d != nil {
+		t.Fatalf("default after the clear = %+v, want null", d)
+	}
+}
+
+// A half pair names nothing, so it is refused rather than stored as half a
+// choice — the same shape rule roles.assign applies to an assignment.
+func TestRolesSetDefault_RefusesAHalfPair(t *testing.T) {
+	h := newEndpointHarness(t)
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, endpointParams("Local", "http://127.0.0.1:11434/v1", "sk-test-123"))
+
+	for name, params := range map[string]map[string]any{
+		"endpoint without model": {"endpointId": created.ID, "model": ""},
+		"model without endpoint": {"endpointId": "", "model": "gpt-4o-mini"},
+	} {
+		raw := jsonrpcCall(t, h.conn, "roles.setDefault", params)
+		if !strings.Contains(string(raw), "-32602") {
+			t.Errorf("%s: roles.setDefault = %s, want -32602", name, raw)
+		}
+	}
+	if d := wireDefault(t, h.rolesListRaw(t)); d != nil {
+		t.Fatalf("a refused half pair stored %+v, want default null", d)
+	}
 }
