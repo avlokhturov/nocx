@@ -144,10 +144,13 @@ type ConfigService interface {
 	// of its own resolves through (bead nocx-rikz5), or the zero value
 	// when the person has chosen none. Unset is a value, not an error.
 	DefaultModel() (profile.DefaultModel, error)
-	// SetDefaultModel replaces the default; the empty pair clears it. The
-	// endpoint is checked to EXIST here rather than in the store: a
+	// SetDefaultModel replaces the default; the empty pair clears it. A
+	// pair naming an endpoint that does not exist, or a model that
+	// endpoint does not offer, is REFUSED and nothing is stored: a
 	// dangling default breaks every unassigned role at once, and nothing
-	// on screen names which choice did it.
+	// on screen names which choice did it. The refusal comes from the
+	// store, which checks and writes under one lock — see
+	// profile.RoleRepository.SetDefaultModel.
 	SetDefaultModel(d profile.DefaultModel) error
 }
 
@@ -691,33 +694,27 @@ func (s *configService) DefaultModel() (profile.DefaultModel, error) {
 }
 
 // SetDefaultModel replaces the default in one write, refusing a pair whose
-// endpoint does not exist (bead nocx-rikz5).
+// endpoint does not exist or whose model that endpoint does not offer
+// (bead nocx-rikz5).
 //
-// The EXISTENCE check lives here and NOT in AssignRole, and the asymmetry
-// is deliberate: a per-role assignment is a statement about one role that
-// the person made, so a dangling one must survive to be reported against
-// that role (profile.ResolveRole's ErrRoleEndpointGone, pinned by
-// internal/profile/role_test.go). The default is a global convenience every
-// unassigned role inherits silently — a dangling one breaks all of them at
-// once with nothing naming the choice that did it, so it is refused at the
-// moment it is written. Resolution still refuses at read time: this check
-// is the tidy path, never the safety net, and cannot close the window
-// between the check and a concurrent endpoint delete.
+// Those two refusals are the STORE's, not this layer's, and that is the
+// correction: this method used to load the endpoint list, decide, and then
+// call the store, which reloads and writes under its own lock. Between the
+// decision and the write a concurrent DeleteEndpoint could land, and the
+// write would then store a default naming an endpoint that is gone — the
+// state the design's interval forbids. Only the holder of the lock can make
+// the checks and the write one operation, so the invariant lives with the
+// lock (profile.JSONStore.SetDefaultModel) and this layer keeps what is
+// genuinely its own: the config guard and the wiring check. In-process
+// callers are serialized by ConfigOperation, so the window needed an
+// external writer to bite; an invariant that holds only because somebody
+// else takes a lock is not held.
 func (s *configService) SetDefaultModel(d profile.DefaultModel) error {
 	if err := s.guard.check(); err != nil {
 		return err
 	}
 	if s.roles == nil {
 		return errors.New("role store not wired")
-	}
-	if d.IsSet() {
-		ep, err := s.loadEndpoint(d.EndpointID)
-		if err != nil {
-			return err
-		}
-		if ep == nil {
-			return fmt.Errorf("default model: %s: %w", d.EndpointID, profile.ErrEndpointNotFound)
-		}
 	}
 	return s.roles.SetDefaultModel(d)
 }
