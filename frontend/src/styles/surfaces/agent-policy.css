@@ -19,6 +19,19 @@
   font-weight: 600;
 }
 
+/* The third column, as ONE cell (nocx-c72pl): every scope of a row plus its
+   add control stack here. Before this wrapper the scopes were direct grid
+   children, so the second one wrapped into the next grid row's first column —
+   the 12rem effect-label column — and rendered squeezed under another
+   effect's name. Column-flex rather than more grid columns: the number of
+   scopes is unbounded and a track count cannot follow it. */
+.st-policy__scopes {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  min-width: 0;
+}
+
 .st-policy__scope {
   display: flex;
   gap: 0.5rem;

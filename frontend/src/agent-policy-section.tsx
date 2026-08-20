@@ -118,31 +118,38 @@ export function AgentPolicySection(props: AgentPolicySectionProps) {
               options={DECISIONS.map((d) => ({ value: d.value, label: d.label }))}
               onChange={(v) => setRow(key, { decision: v as 'permit' | 'ask' | 'refuse' })}
             />
-            <For each={matrix()[key].scopes}>
-              {(scope, i) => (
-                <div class="st-policy__scope">
-                  <Select
-                    value={scope.kind}
-                    options={SCOPE_KINDS.map((k) => ({ value: k, label: k }))}
-                    onChange={(v) => patchScope(key, i(), { kind: v as ScopeKind })}
-                  />
-                  <TextField
-                    value={scope.id}
-                    placeholder="/workspace or a session id"
-                    onInput={(v) => patchScope(key, i(), { id: v })}
-                  />
-                  <IconButton
-                    ariaLabel={`Remove ${EFFECT_LABELS[key]} scope`}
-                    onClick={() => removeScope(key, i())}
-                  >
-                    <TrashIcon />
-                  </IconButton>
-                </div>
-              )}
-            </For>
-            <Button variant="ghost" onClick={() => addScope(key)}>
-              <PlusIcon /> Scope
-            </Button>
+            {/* The row's scopes and their add control are ONE grid cell
+                (nocx-c72pl). Emitted as direct children of the three-column
+                row, the second scope wrapped into the next grid row's first
+                column — the effect-label column — and rendered squeezed and
+                misfiled under a different effect's name. */}
+            <div class="st-policy__scopes">
+              <For each={matrix()[key].scopes}>
+                {(scope, i) => (
+                  <div class="st-policy__scope">
+                    <Select
+                      value={scope.kind}
+                      options={SCOPE_KINDS.map((k) => ({ value: k, label: k }))}
+                      onChange={(v) => patchScope(key, i(), { kind: v as ScopeKind })}
+                    />
+                    <TextField
+                      value={scope.id}
+                      placeholder="/workspace or a session id"
+                      onInput={(v) => patchScope(key, i(), { id: v })}
+                    />
+                    <IconButton
+                      ariaLabel={`Remove ${EFFECT_LABELS[key]} scope`}
+                      onClick={() => removeScope(key, i())}
+                    >
+                      <TrashIcon />
+                    </IconButton>
+                  </div>
+                )}
+              </For>
+              <Button variant="ghost" onClick={() => addScope(key)}>
+                <PlusIcon /> Scope
+              </Button>
+            </div>
           </div>
         )}
       </For>

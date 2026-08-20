@@ -47,6 +47,36 @@ function mockedClient(overrides?: { get?: PolicyMatrix; setError?: Error }): Pol
 }
 
 describe('agent policy surface', () => {
+  // THE ROW IS THREE COLUMNS AND THE SCOPES ARE ONE OF THEM (nocx-c72pl).
+  // Emitted as direct children of the grid, the second scope wrapped into the
+  // next grid row's FIRST column — the 12rem effect-label column — so it
+  // rendered visibly narrower than the first and read as though it belonged
+  // to a different effect. The scopes and their add control are one group and
+  // must share one cell, so the assertion is structural: every scope of a row
+  // has the same parent, and that parent is not the row itself.
+  it('keeps every scope of a row in one container, not spread across grid cells', async () => {
+    const twoScopes: PolicyMatrix = {
+      ...LOADED,
+      observe: {
+        decision: 'permit',
+        scopes: [
+          { kind: 'path', id: '/workspace' },
+          { kind: 'path', id: '/srv' },
+        ],
+      },
+    }
+    const client = mockedClient({ get: twoScopes })
+    const container = mount(client)
+    const row = container.querySelector('[data-effect="observe"]') as HTMLElement
+    await vi.waitFor(() => {
+      expect(row.querySelectorAll('.st-policy__scope')).toHaveLength(2)
+    })
+    const scopes = Array.from(row.querySelectorAll('.st-policy__scope'))
+    const parents = new Set(scopes.map((s) => s.parentElement))
+    expect(parents.size).toBe(1)
+    expect(scopes[0].parentElement).not.toBe(row)
+  })
+
   it('renders the seven effect rows from the wire', async () => {
     const client = mockedClient({ get: LOADED })
     const container = mount(client)
