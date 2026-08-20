@@ -3,7 +3,7 @@
 A local-first terminal with GPU-accelerated rendering and a built-in SSH
 manager — no cloud, no login, no telemetry.
 **Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
-Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data
+Wails v3 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
 
 **Status:** MVP in progress. Local PTY over WebSocket works; SSH client, tabs,
@@ -21,7 +21,7 @@ dependency.
 
 Released builds are on the [Releases page](https://github.com/shady2k/nocx/releases). Download the `.dmg`, open it, and drag **nocx** into Applications.
 
-There is no Apple Developer ID, so the build is unsigned and macOS quarantines it on download. Clear that once, on first install:
+There is no Apple Developer ID, so the build is ad-hoc signed rather than signed by an identity Apple can attest, and it is not notarized — macOS quarantines it on download. Clear that once, on first install:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/nocx.app
