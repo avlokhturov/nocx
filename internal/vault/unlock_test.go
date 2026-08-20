@@ -572,3 +572,44 @@ func TestEnsureUnsealed_JoinedWaiterNamedBeforeSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// TestEnsureUnsealed_PromptIsRetiredBeforeAnyWaiterIsReleased asserts the
+// invariant at the one instant it can be falsified.
+//
+// The behavioural test above drives two real requests and catches this only
+// when the second happens to land inside the window: it survived 400
+// iterations on an idle machine and failed on CI, which makes it a report
+// about the machine's speed rather than about the code. The invariant itself
+// has no window — the moment a waiter is released, the prompt it waited on
+// must no longer be the pending one, or the next user action joins something
+// that is already over and is answered without anything being raised.
+//
+// Read through a hook at exactly that moment, so the assertion cannot pass by
+// scheduling luck: before the fix the pointer still names this prompt here.
+func TestEnsureUnsealed_PromptIsRetiredBeforeAnyWaiterIsReleased(t *testing.T) {
+	v := sealedVault(t, &fakeUnlockRequester{
+		entered: make(chan struct{}, 4),
+		release: make(chan error, 4),
+	})
+	req, ok := v.unlockReq.(*fakeUnlockRequester)
+	if !ok {
+		t.Fatal("the sealed vault does not hold the fake requester")
+	}
+
+	stillPending := make(chan bool, 1)
+	v.beforeResolve = func() {
+		v.mu.Lock()
+		stillPending <- v.unlockPending != nil
+		v.mu.Unlock()
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- v.EnsureUnsealed(context.Background(), "first attempt") }()
+	<-req.entered
+	req.release <- errors.New("unlock cancelled by user")
+	<-done
+
+	if <-stillPending {
+		t.Fatal("a waiter was released while its prompt was still the pending one: the next user action joins a prompt that is over and is answered with nothing raised")
+	}
+}

@@ -112,12 +112,20 @@ jobs:
           # (info.productVersion -> CFBundleShortVersionString/CFBundleVersion)
           # is now a build-assets flag. The CLI also embeds the icon and
           # generates the Info.plist template the .app assembly copies.
+          # THE FLAG NAMES ARE THE STRUCT FIELDS, LOWERCASED, and nothing
+          # else: clir derives them with `strings.ToLower(field.Name)`
+          # whenever the field carries no `name:` tag (clir@v1.3.0
+          # command.go:258), and BuildAssetsOptions tags only `description:`
+          # and `default:`. So there are no word separators to insert —
+          # `-binary-name` is not a spelling of `-binaryname`, it is a flag
+          # that does not exist, and parsing stops at the first unknown one.
+          # The icons step below is the same convention read correctly.
           wails3 generate build-assets \
             -dir build/assets \
-            -binary-name nocx \
-            -product-name nocx \
-            -product-identifier com.shady2k.nocx \
-            -product-version "$VERSION"
+            -binaryname nocx \
+            -productname nocx \
+            -productidentifier com.shady2k.nocx \
+            -productversion "$VERSION"
 
       - name: Generate macOS icon bundle
         run: |
@@ -155,9 +163,29 @@ jobs:
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
           # v3 has no -platform flag: build each slice and join with lipo (§4).
-          GOOS=darwin GOARCH=amd64 go build -tags "release production" -ldflags "$LDFLAGS" \
+          #
+          # CGO_ENABLED=1 AND THE -arch FLAGS ARE BOTH REQUIRED, and leaving
+          # them out is not a slow build, it is a broken one. Naming GOARCH
+          # explicitly makes this a CROSS build even on a Mac building for a
+          # Mac, and Go turns cgo OFF for a cross build unless told otherwise
+          # — so wails v3's darwin implementation, which is Objective-C
+          # behind cgo, was excluded from the compile and the package it
+          # belongs to failed on every symbol it defines: `undefined:
+          # macosApp`, `undefined: newPlatformApp`, `undefined:
+          # smAppServiceRegister`.
+          #
+          # With cgo back on, the C half still has to be told which slice it
+          # is building; clang defaults to the host's architecture and would
+          # otherwise hand arm64 objects to the amd64 link. Apple's clang
+          # cross-compiles both from either host, so `-arch` on the CFLAGS
+          # and the LDFLAGS is the whole of what it needs.
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
             -o build/bin/darwin-amd64/nocx .
-          GOOS=darwin GOARCH=arm64 go build -tags "release production" -ldflags "$LDFLAGS" \
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
             -o build/bin/darwin-arm64/nocx .
           mkdir -p build/bin/nocx.app/Contents/MacOS build/bin/nocx.app/Contents/Resources
           lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx \
@@ -552,9 +580,22 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # THE NOTES ARE A FILE IN THE REPOSITORY when one exists for this
+          # version, so what a release says is written, reviewed and diffed
+          # like everything else that ships. The fallback is the sentence this
+          # step used to carry alone: it is the install caveat, which is true
+          # of every build and belongs in every release whether or not anybody
+          # wrote notes for that one.
+          notes_file="docs/release-notes/v${VERSION}.md"
+          if [ -f "$notes_file" ]; then
+            notes_arg=(--notes-file "$notes_file")
+          else
+            echo "::warning::no $notes_file — publishing with the install caveat alone"
+            notes_arg=(--notes "Automated release. macOS: first launch needs the manual quarantine step. Linux: chmod +x the AppImage. See the README for both.")
+          fi
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
-            --notes "Automated release. macOS: first launch needs the manual quarantine step. Linux: chmod +x the AppImage. See the README for both." \
+            "${notes_arg[@]}" \
             "dist/nocx-${VERSION}-darwin-universal.dmg" \
             "dist/nocx-${VERSION}-darwin-universal.zip" \
             "dist/nocx-${VERSION}-linux-amd64.AppImage" \
