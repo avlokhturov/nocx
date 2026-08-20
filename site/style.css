@@ -1,28 +1,27 @@
 /* nocx landing page.
  *
- * The page is a scrollback you can read: sections are blocks in one journal,
- * separated by pause and a hairline, never by cards and shadows. Two voices —
- * a grotesque for claims, monospace for anything that denotes observable
- * system state (a command, a version, a platform floor). Colour is semantic
- * exactly as in a terminal, and the palette is the app's own default theme so
- * page and product read as one thing.
+ * The page's graphics are terminal material and state, never a drawing of the
+ * product's interface. That line is load-bearing: a real transcript rendered
+ * as text is honest, a CSS reconstruction of nocx's tabs and sidebar is a
+ * screenshot we did not take. So there is no title bar, no traffic-light
+ * dots, no tab strip and no fake chrome anywhere below — every container here
+ * announces what kind of artefact it holds.
+ *
+ * Two voices: a grotesque for claims, monospace for anything a reader could
+ * go and verify — a command, its output, a version, a platform floor. Colour
+ * is semantic exactly as in a terminal, taken from tokyo-night, the app's own
+ * default theme, so page and product read as one thing.
  *
  * Spec: .internal/specs/2026-08-20-github-landing-design.md §5.
  */
 
 :root {
-  /* Verbatim from frontend/src/styles/themes/tokyo-night.css — the app's
-   * default. Changing a value here without changing it there breaks the one
-   * thing this palette is for.
-   *
-   * This is the subset the page uses, not the theme's whole ramp. The theme
-   * also defines --chrome, --surface-raised and --danger; none has a job here
-   * (the page has no window chrome, no raised control, and nothing on it
-   * fails), and carrying them unused would be three values that drift out of
-   * step with the app while looking authoritative. Add one when a rule needs
-   * it. */
+  /* Verbatim from frontend/src/styles/themes/tokyo-night.css. Changing a
+   * value here without changing it there breaks the one thing this palette is
+   * for. This is the subset the page uses, not the theme's whole ramp. */
   --canvas: #1a1b26;
   --surface: #1f2335;
+  --sunken: #16171f;
   --divider: #2a2b3d;
   --text: #c0caf5;
   --text-muted: #a9b1d6;
@@ -35,9 +34,10 @@
   --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
 
-  --measure: 62ch;
-  --gutter: clamp(1.25rem, 4vw, 3rem);
-  --rhythm: clamp(3.5rem, 9vw, 7rem);
+  --measure: 58ch;
+  --gutter: clamp(1.25rem, 4vw, 4rem);
+  --rhythm: clamp(4rem, 8vw, 7.5rem);
+  --hair: 1px solid var(--divider);
 }
 
 *,
@@ -56,137 +56,60 @@ body {
   color: var(--text);
   font-family: var(--sans);
   font-size: clamp(1rem, 0.96rem + 0.2vw, 1.0625rem);
-  line-height: 1.65;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
 
-main {
-  max-width: 64rem;
+.wrap {
+  max-width: 78rem;
   margin: 0 auto;
-  padding: 0 var(--gutter);
+  /* Longhand on purpose. `.wrap` is combined with `.hero` and with `section`,
+   * which both set top spacing; a `padding` shorthand in either of those would
+   * silently reset these gutters and pull that block out of alignment with
+   * every other one. */
+  padding-left: var(--gutter);
+  padding-right: var(--gutter);
 }
 
-/* --- the mark ------------------------------------------------------------ */
+/* --- section scaffolding -------------------------------------------------- */
 
-/* The app's own icon, at the size it is actually displayed rather than scaled
- * down by the browser from 1024px. It sits beside the wordmark and is
- * decorative: the name is right next to it in text, so the image carries an
- * empty alt and screen readers are not made to say "nocx" twice. */
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  margin: 0 0 0.75rem;
+section {
+  padding-top: var(--rhythm);
 }
 
-.logo img {
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
-}
-
-.logo__word {
+.eyebrow {
   font-family: var(--mono);
-  font-size: 1rem;
-  letter-spacing: 0.02em;
-  color: var(--text-muted);
-}
-
-/* --- the block: one hairline axis, metadata, then content ---------------- */
-
-.block {
-  /* One variable, because the prompt marker is positioned against this same
-   * value. Hard-coding --rhythm in both leaves the marker floating when a
-   * block wants different spacing, which is exactly what the first one does. */
-  --block-top: var(--rhythm);
-
-  position: relative;
-  padding: var(--block-top) 0 0 clamp(1rem, 3vw, 2.25rem);
-  border-left: 1px solid var(--divider);
-}
-
-/* The first block opens the page; the full rhythm above it is a gap with
- * nothing before it to separate from. */
-header.block {
-  --block-top: clamp(2rem, 5vw, 3.5rem);
-}
-
-.block::before {
-  /* The prompt marker. Purely decorative — every block also carries a real
-   * label in .block__label, so a reader who never sees this loses nothing. */
-  content: '';
-  position: absolute;
-  left: -3px;
-  top: calc(var(--block-top) + 0.62em);
-  width: 5px;
-  height: 5px;
-  background: var(--accent);
-}
-
-.block__label {
-  font-family: var(--mono);
-  font-size: 0.8125rem;
-  letter-spacing: 0.06em;
+  font-size: 0.75rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--text-dim);
-  margin: 0 0 0.75rem;
+  margin: 0 0 1.25rem;
+  max-width: none;
 }
 
-.block h2 {
-  font-size: clamp(1.65rem, 1.2rem + 2vw, 2.5rem);
-  line-height: 1.15;
+h2 {
+  font-size: clamp(1.55rem, 1.1rem + 1.6vw, 2.15rem);
+  line-height: 1.12;
   letter-spacing: -0.02em;
-  margin: 0 0 1rem;
-  max-width: 24ch;
   font-weight: 620;
+  margin: 0 0 0.85rem;
+  max-width: 22ch;
 }
 
-.block h3 {
-  font-size: 1.0625rem;
+h3 {
+  font-size: 0.9375rem;
   font-weight: 620;
-  margin: 2rem 0 0.35rem;
+  margin: 0 0 0.4rem;
+}
+
+p {
+  margin: 0 0 1rem;
+  max-width: var(--measure);
 }
 
 .lede {
-  max-width: var(--measure);
   color: var(--text-muted);
-  margin: 0 0 1.25rem;
-}
-
-.block p,
-.block li {
-  max-width: var(--measure);
-}
-
-/* Monospace means "observable system state", never emphasis. */
-code,
-kbd,
-.mono {
-  font-family: var(--mono);
-  font-size: 0.9em;
-}
-
-code {
-  color: var(--text);
-  background: var(--surface);
-  padding: 0.1em 0.35em;
-  border-radius: 3px;
-}
-
-pre {
-  font-family: var(--mono);
-  font-size: 0.875rem;
-  background: var(--surface);
-  border: 1px solid var(--divider);
-  border-radius: 4px;
-  padding: 1rem 1.15rem;
-  overflow-x: auto;
-  max-width: var(--measure);
-  line-height: 1.6;
-}
-
-pre code {
-  background: none;
-  padding: 0;
+  font-size: 1.0625rem;
 }
 
 a {
@@ -194,139 +117,465 @@ a {
   text-underline-offset: 0.2em;
 }
 
-a:hover {
-  text-decoration-thickness: 2px;
-}
-
-.rule {
-  border: 0;
-  border-top: 1px solid var(--divider);
-  margin: var(--rhythm) 0 0;
-}
-
-/* --- constraints: the reader must not be able to miss these -------------- */
-
-.constraint {
+code,
+.mono {
   font-family: var(--mono);
-  font-size: 0.8125rem;
-  line-height: 1.55;
-  color: var(--warning);
-  border-left: 2px solid var(--warning);
-  padding: 0.15rem 0 0.15rem 0.75rem;
-  margin: 0.5rem 0 0;
-  max-width: var(--measure);
+  font-size: 0.9em;
 }
 
-.constraint a {
-  color: inherit;
+/* --- hero ----------------------------------------------------------------- */
+
+.hero {
+  padding-top: clamp(2.5rem, 6vw, 4.5rem);
 }
 
-.state {
+.hero__grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: clamp(2.5rem, 5vw, 4rem);
+  align-items: start;
+}
+
+@media (min-width: 62rem) {
+  .hero__grid {
+    grid-template-columns: minmax(0, 29rem) minmax(0, 1fr);
+    gap: clamp(3rem, 5vw, 5rem);
+  }
+}
+
+.mark {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0 0 2rem;
+  max-width: none;
+}
+
+.mark img {
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+}
+
+.mark span {
   font-family: var(--mono);
-  font-size: 0.8125rem;
+  font-size: 0.9375rem;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.hero h1 {
+  font-size: clamp(2.25rem, 1.4rem + 3.4vw, 3.4rem);
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  font-weight: 650;
+  margin: 0 0 1.15rem;
+  max-width: 15ch;
+  text-wrap: balance;
+}
+
+.hero .lede {
+  /* Deliberately not `.hero p`: that also caught the note under the
+   * transcript in the other column, whose 0-1-1 specificity quietly beat the
+   * note's own rule and squeezed it to a third of the width it sits under. */
+  max-width: 42ch;
+}
+
+/* --- the transcript: real output, and nothing pretending to be a window --- */
+
+.transcript {
+  background: var(--sunken);
+  border: var(--hair);
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.66rem + 0.28vw, 0.875rem);
+  line-height: 1.75;
+}
+
+/* Not a title bar. It names the kind of artefact this is, which is the whole
+ * reason it is allowed to exist: a strip drawing window controls, or naming a
+ * machine, would be impersonating an interface we have not photographed. */
+.transcript__kind {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 1rem;
+  border-bottom: var(--hair);
   color: var(--text-dim);
-  margin: 0.5rem 0 0;
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
-.state strong {
-  color: var(--success);
+.transcript__body {
+  margin: 0;
+  padding: 1.1rem 1rem 1.35rem;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text-muted);
+}
+
+.transcript__body b {
   font-weight: inherit;
+  color: var(--text);
 }
 
-/* --- calls to action ----------------------------------------------------- */
+.cwd {
+  color: var(--accent);
+}
+
+.ok {
+  color: var(--success);
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: blink 1.15s steps(1, end) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.transcript__note {
+  margin: 0.8rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  max-width: none;
+}
+
+/* --- calls to action ------------------------------------------------------ */
 
 .cta-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
-  margin: 1.75rem 0 0;
+  align-items: center;
+  gap: 0.85rem 1.25rem;
+  margin: 1.75rem 0 1.1rem;
 }
 
 .cta {
-  display: inline-flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.7rem 1.1rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
+  display: inline-block;
+  padding: 0.7rem 1.35rem;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #10121c;
+  font-weight: 650;
   text-decoration: none;
-  transition:
-    border-color 120ms ease,
-    background-color 120ms ease;
+  transition: filter 120ms ease;
 }
 
 .cta:hover {
+  filter: brightness(1.1);
+}
+
+.cta--quiet {
+  background: none;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.cta--quiet:hover {
   border-color: var(--accent);
-  background: var(--surface);
+  color: var(--text);
+  filter: none;
 }
 
-.cta--primary {
-  border-color: var(--accent);
-}
+/* --- spec rows: the small print that must not read as small print -------- */
 
-.cta__label {
-  font-weight: 620;
-}
-
-.cta__detail {
+.spec {
   font-family: var(--mono);
   font-size: 0.75rem;
+  line-height: 1.85;
   color: var(--text-dim);
+  margin: 0;
+  max-width: none;
 }
 
-/* --- the technical strip -------------------------------------------------- */
+.spec b {
+  color: var(--success);
+  font-weight: inherit;
+}
 
-.strip {
+.warn {
   font-family: var(--mono);
-  font-size: 0.8125rem;
-  color: var(--text-dim);
-  line-height: 1.9;
-  max-width: 72ch;
+  font-size: 0.75rem;
+  line-height: 1.7;
+  color: var(--warning);
+  border-left: 2px solid var(--warning);
+  padding: 0.1rem 0 0.1rem 0.7rem;
+  margin: 1.15rem 0 0;
+  max-width: 48ch;
 }
 
-.strip dt {
+.warn a {
+  color: inherit;
+}
+
+/* --- the state table: what comes back, and what does not ------------------ */
+
+.states {
+  border-top: var(--hair);
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.68rem + 0.2vw, 0.875rem);
+}
+
+.states__head,
+.states__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 1.5rem minmax(0, 1fr);
+  gap: 0.5rem 1rem;
+  align-items: baseline;
+  padding: 0.7rem 0;
+  border-bottom: var(--hair);
+}
+
+.states__head {
+  color: var(--text-dim);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.states__row span {
+  color: var(--text-dim);
+}
+
+.states__row .what {
+  color: var(--text);
+}
+
+.states__row .to {
+  color: var(--border);
+}
+
+.states__row .after {
+  color: var(--success);
+}
+
+.states__row--not .after,
+.states__row--not .what {
+  color: var(--warning);
+}
+
+@media (max-width: 40rem) {
+  .states__head {
+    display: none;
+  }
+
+  .states__row {
+    grid-template-columns: 1fr;
+    gap: 0.1rem;
+  }
+
+  .states__row .to {
+    display: none;
+  }
+}
+
+/* --- the panel matrix ----------------------------------------------------- */
+
+.matrix {
+  border-top: var(--hair);
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.68rem + 0.2vw, 0.875rem);
+}
+
+.matrix__row {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.25rem 1.25rem;
+  padding: 0.7rem 0;
+  border-bottom: var(--hair);
+}
+
+.matrix__row dt {
+  color: var(--accent);
+  letter-spacing: 0.06em;
+}
+
+.matrix__row dd {
+  margin: 0;
   color: var(--text-muted);
 }
 
-.strip dd {
-  margin: 0 0 0.6rem;
+@media (max-width: 40rem) {
+  .matrix__row {
+    grid-template-columns: 1fr;
+  }
 }
 
-/* --- lists ---------------------------------------------------------------- */
+/* --- the flow: a transformation, shown rather than described -------------- */
 
-.plain {
+.flow {
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: clamp(0.75rem, 0.68rem + 0.2vw, 0.875rem);
+  line-height: 1.9;
+  background: var(--sunken);
+  border: var(--hair);
+  border-radius: 6px;
+  padding: 1.15rem 1.25rem;
+  overflow-x: auto;
+}
+
+.flow__row {
+  display: grid;
+  grid-template-columns: 12rem minmax(0, 1fr);
+  gap: 1.25rem;
+}
+
+.flow__row dt {
+  color: var(--text-dim);
+}
+
+.flow__row dd {
+  margin: 0;
+  color: var(--text);
+}
+
+.flow__step {
+  color: var(--text-dim);
+  padding: 0.25rem 0 0.25rem 12rem;
+}
+
+@media (max-width: 40rem) {
+  .flow__row {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .flow__step {
+    padding-left: 0;
+  }
+}
+
+/* --- columns: parallel things, read across rather than down -------------- */
+
+.cols {
+  display: grid;
+  gap: 1.75rem;
+  margin: 2rem 0 0;
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 48rem) {
+  .cols {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2rem;
+  }
+
+  .cols--two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.cols h3 {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 500;
+  padding-bottom: 0.6rem;
+  border-bottom: var(--hair);
+  margin: 0 0 0.75rem;
+}
+
+.cols p {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: var(--text-muted);
+  max-width: none;
+}
+
+.cols ul {
   list-style: none;
+  margin: 0;
   padding: 0;
-  margin: 1rem 0 0;
 }
 
-.plain li {
-  padding: 0 0 0 1.25rem;
-  position: relative;
-  margin: 0 0 0.5rem;
+.cols li {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  margin: 0 0 0.35rem;
 }
 
-.plain li::before {
-  content: '—';
-  position: absolute;
-  left: 0;
+/* --- the install zone: documentation, in a visibly different register ---- */
+
+.zone {
+  background: var(--sunken);
+  border-top: var(--hair);
+  border-bottom: var(--hair);
+  margin: var(--rhythm) 0 0;
+}
+
+.zone section {
+  padding-top: clamp(3rem, 6vw, 4.5rem);
+}
+
+.zone section:last-of-type {
+  padding-bottom: clamp(3rem, 6vw, 4.5rem);
+}
+
+pre.cmd {
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+  background: var(--canvas);
+  border: var(--hair);
+  border-radius: 5px;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  margin: 0 0 1rem;
+  color: var(--text);
+}
+
+/* --- the passport --------------------------------------------------------- */
+
+.passport {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 1.5rem 2rem;
+  margin: 2rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.8125rem;
+}
+
+.passport dt {
   color: var(--text-dim);
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0 0 0.3rem;
 }
 
-.plain--negative li::before {
-  content: '\00d7';
-  color: var(--text-dim);
+.passport dd {
+  margin: 0;
+  color: var(--text-muted);
 }
 
 /* --- footer --------------------------------------------------------------- */
 
 footer {
-  margin: var(--rhythm) 0 0;
-  padding: 2rem 0 4rem;
-  border-top: 1px solid var(--divider);
+  padding: 2.5rem 0 4rem;
   font-family: var(--mono);
-  font-size: 0.8125rem;
+  font-size: 0.75rem;
   color: var(--text-dim);
 }
 
@@ -334,16 +583,8 @@ footer a {
   color: var(--text-muted);
 }
 
-/* --- narrow --------------------------------------------------------------- */
-
-@media (max-width: 40rem) {
-  .block {
-    padding-left: 1rem;
-  }
-
-  .cta {
-    width: 100%;
-  }
+footer p {
+  max-width: none;
 }
 
 @media (prefers-reduced-motion: reduce) {

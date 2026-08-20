@@ -1,4 +1,4 @@
-<img src="site/assets/icon-256.png" alt="" width="96" align="left" hspace="16" vspace="4">
+<img src="site/assets/icon-256.png" alt="" width="80">
 
 # nocx
 
@@ -7,8 +7,6 @@ manager. No account, no cloud service of its own, no product telemetry — the
 network it touches is the network you point it at.
 
 **[shady2k.github.io/nocx](https://shady2k.github.io/nocx/)** — what it does, and how to install it.
-
-<br clear="left">
 
 **Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
 Wails v3 desktop shell, connected over one WebSocket carrying a raw binary data
@@ -64,9 +62,17 @@ No package manager or root access needed — the AppImage is a single self-conta
 
 ### Support envelope
 
-The AppImage bundles its own GTK 3 and WebKitGTK (via `linuxdeploy-plugin-gtk`),
-so it does **not** depend on the host's `libgtk-3` or `libwebkit2gtk-4.1`. It
-links against **glibc 2.35** (the floor set by building on ubuntu-22.04).
+The AppImage carries its own GTK 3 and WebKitGTK — the library **and** WebKitGTK's
+helper processes, which is what lets it run where the host has no
+`libwebkit2gtk-4.1` at all, and not only on Debian-shaped filesystems
+([ADR-0035](docs/decisions/0035-appimage-carries-webkits-helper-processes.md)).
+It links against **glibc 2.35** (the floor set by building on ubuntu-22.04).
+
+It is self-contained in its **application** stack, not independent of a Linux
+desktop: fonts and text shaping come from the host, deliberately, so that text
+renders in your fonts rather than ours. In practice that means `fontconfig`,
+`freetype`, `fribidi` and `harfbuzz` — present on every desktop install, absent
+in a bare container, where the app will not start.
 
 **This means it runs on distributions at or above that baseline**, including
 Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+, and Arch (rolling). It is
