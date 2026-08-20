@@ -205,7 +205,7 @@ func TestLayoutOverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, loadSchema(t, "panes.create.schema.json"),
 		mustLayoutCall(t, conn, "panes.create", map[string]any{
 			"id": paneID4, "tabId": tabID1, "cwd": "/srv", "kind": "ssh",
-			"endpoint": "deploy@srv-01:22", "sizeShare": 0.5,
+			"endpoint": "deploy@srv-01:22", "sizeShare": 0.5, "ephemeral": false,
 		}, 13),
 		"panes.create result (ssh)")
 	validateJSON(t, loadSchema(t, "panes.move.schema.json"),

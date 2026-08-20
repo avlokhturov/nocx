@@ -301,3 +301,73 @@ func TestClearWindowClosesEveryLeftoverAndKeepsWhatComesAfter(t *testing.T) {
 		t.Fatalf("tabs after the restart = %+v, want tab-3 alone — the leftovers came back", back.Tabs)
 	}
 }
+
+// An ephemeral pane is recorded so its blocks and workspace provenance have a
+// durable anchor while it is alive, but it is not part of the next window.
+// The startup sweep closes only that pane: ordinary local/SSH panes remain
+// restorable, and closing never deletes the row that the ledger references.
+func TestCloseEphemeralPanesLeavesOnlyRestorablePanesInTheWindow(t *testing.T) {
+	ctx := context.Background()
+	db, led, path := newLedgerAt(t)
+	layout := db.Layout()
+
+	ephemeral := aPane("pane-sandbox", "tab-sandbox", "/workspace")
+	ephemeral.Ephemeral = true
+	if _, err := layout.CreateWorkspace(ctx,
+		content.Workspace{ID: "ws-sandbox", Name: "sandbox"},
+		aTab("tab-sandbox", "ws-sandbox"), ephemeral); err != nil {
+		t.Fatalf("CreateWorkspace sandbox: %v", err)
+	}
+	if _, err := layout.CreateWorkspace(ctx,
+		content.Workspace{ID: "ws-ordinary", Name: "ordinary"},
+		aTab("tab-ordinary", "ws-ordinary"),
+		aPane("pane-ordinary", "tab-ordinary", "/repo")); err != nil {
+		t.Fatalf("CreateWorkspace ordinary: %v", err)
+	}
+
+	isEphemeral, queryErr := layout.IsPaneEphemeral(ctx, "pane-sandbox")
+	if queryErr != nil || !isEphemeral {
+		t.Fatalf("IsPaneEphemeral(sandbox) = %v, %v; want true, nil", isEphemeral, queryErr)
+	}
+	isEphemeral, queryErr = layout.IsPaneEphemeral(ctx, "pane-ordinary")
+	if queryErr != nil || isEphemeral {
+		t.Fatalf("IsPaneEphemeral(ordinary) = %v, %v; want false, nil", isEphemeral, queryErr)
+	}
+
+	envReady(t, led, "local")
+	const block = "00000000-0000-7000-8000-0000000c4001"
+	aBlockIn(t, led, block, "pane-sandbox")
+
+	if closeErr := layout.CloseEphemeralPanes(ctx); closeErr != nil {
+		t.Fatalf("CloseEphemeralPanes: %v", closeErr)
+	}
+	snap, snapshotErr := layout.Snapshot(ctx)
+	if snapshotErr != nil {
+		t.Fatalf("Snapshot: %v", snapshotErr)
+	}
+	if len(snap.Panes) != 1 || snap.Panes[0].ID != "pane-ordinary" {
+		t.Fatalf("window panes = %+v, want pane-ordinary alone", snap.Panes)
+	}
+	if _, closedErr := layout.IsPaneEphemeral(ctx, "pane-sandbox"); !errors.Is(closedErr, content.ErrNoSuchPane) {
+		t.Fatalf("IsPaneEphemeral(closed sandbox) error = %v, want ErrNoSuchPane", closedErr)
+	}
+	if page := entriesForPane(t, led, "pane-sandbox"); len(page.Entries) != 1 {
+		t.Fatalf("sandbox blocks after sweep = %+v, want the anchored entry", page.Entries)
+	}
+
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+	again, reopenErr := reopenStore(t, path)
+	if reopenErr != nil {
+		t.Fatalf("reopen: %v", reopenErr)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	back, snapshotErr := again.Layout().Snapshot(ctx)
+	if snapshotErr != nil {
+		t.Fatalf("Snapshot after reopen: %v", snapshotErr)
+	}
+	if len(back.Panes) != 1 || back.Panes[0].ID != "pane-ordinary" {
+		t.Fatalf("panes after restart = %+v, want pane-ordinary alone", back.Panes)
+	}
+}

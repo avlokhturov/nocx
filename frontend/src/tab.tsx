@@ -68,6 +68,8 @@ export interface TabProps {
    *  cannot say what it is about is a mark people learn to ignore. Falls
    *  back to the generic wording when nothing more specific is known. */
   warningLabel?: string
+  /** Native sandbox readiness was confirmed for this pane. */
+  sandboxed?: boolean
   /** The tab's colour, as the backend stores it (nocx-isoph.4): one of the
    *  closed set in layout/workspace-colours.ts, or undefined for an undecorated
    *  tab, which is the normal state. It renders as a swatch on the row and
@@ -152,6 +154,7 @@ export function Tab(props: TabProps) {
       data-colour={props.colour || undefined}
       data-group-colour={props.groupColour || undefined}
       data-pinned={props.pinned === true ? 'true' : undefined}
+      data-sandboxed={props.sandboxed === true ? 'true' : undefined}
       data-hidden={props.hidden === true ? 'true' : undefined}
       data-depth={(props.depth ?? 0) > 0 ? String(props.depth) : undefined}
       // Kept in BOTH orientations. The vertical row shows the same text as a
@@ -257,6 +260,15 @@ export function Tab(props: TabProps) {
               aria-label={props.warningLabel ?? 'Environment degraded'}
               title={props.warningLabel ?? 'Shell integration degraded or uncertain'}
             />
+          </Show>
+          <Show when={props.sandboxed === true}>
+            <span
+              class="nocx-tab-sandboxed-marker"
+              aria-label="Sandboxed"
+              title="Filesystem-isolated"
+            >
+              {'\u26e8'}
+            </span>
           </Show>
           <span class="nocx-tab-title">{props.title}</span>
         </span>

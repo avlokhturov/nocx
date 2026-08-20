@@ -2217,3 +2217,66 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
     expect(message).not.toContain('Still running')
   })
 })
+
+describe('sandbox marker ownership', () => {
+  it('never marks an ordinary pane as sandboxed', async () => {
+    const { manager, client } = await mountPaneManager()
+    const pane = manager.newPane()
+
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+    expect(pane.sandboxed).toBe(false)
+  })
+})
+
+describe('newSandboxedPane', () => {
+  it('persists non-restorable identity, copies launch deltas, and marks the pane once', async () => {
+    const openSandboxedSession = vi.fn(() =>
+      Promise.resolve(
+        makeSession({
+          sandbox: {
+            backend: 'landlock',
+            workspace: '/w',
+            writableRoots: ['/w'],
+            readOnlyRoots: ['/usr', '/opt'],
+            homeProjections: [],
+          },
+        }),
+      ),
+    )
+    const client = makeClient({ openSandboxedSession })
+    const { manager, backend } = await mountPaneManager(client)
+    const launch = {
+      settingsRevision: 1,
+      addWritable: ['/a'],
+      removeWritable: ['/b'],
+      addReadOnly: ['/r1'],
+      removeReadOnly: ['/r2'],
+    }
+
+    const pane = manager.newSandboxedPane('/w', launch)
+    launch.addWritable.push('/mutated')
+    launch.removeWritable.pop()
+    launch.addReadOnly.push('/mutated-ro')
+    launch.removeReadOnly.pop()
+
+    await vi.waitFor(() => expect(openSandboxedSession).toHaveBeenCalledTimes(1))
+    expect(openSandboxedSession).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.any(Number),
+      {
+        workspace: '/w',
+        settingsRevision: 1,
+        addWritable: ['/a'],
+        removeWritable: ['/b'],
+        addReadOnly: ['/r1'],
+        removeReadOnly: ['/r2'],
+      },
+      { paneId: pane.wireId },
+    )
+    expect(backend.rows().panes.find((row) => row.id === pane.wireId)?.ephemeral).toBe(true)
+    await vi.waitFor(() => expect(pane.sandboxed).toBe(true))
+    pane.setSandboxed()
+    expect(pane.sandboxed).toBe(true)
+    expect(pane.descriptor.restoreDescriptor).toBeNull()
+  })
+})

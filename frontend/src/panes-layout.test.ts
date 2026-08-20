@@ -71,13 +71,27 @@ async function seededBackend({ decorate = true } = {}): Promise<
     id: 'tab-a',
     workspaceId: 'workspace:default',
     position: 0,
-    firstPane: { id: 'pane-a', cwd: '/repos/nocx', kind: 'local', endpoint: null, sizeShare: 1 },
+    firstPane: {
+      id: 'pane-a',
+      cwd: '/repos/nocx',
+      kind: 'local',
+      endpoint: null,
+      sizeShare: 1,
+      ephemeral: false,
+    },
   })
   await backend.createTab({
     id: 'tab-b',
     workspaceId: 'workspace:default',
     position: 1,
-    firstPane: { id: 'pane-b', cwd: '/srv', kind: 'local', endpoint: null, sizeShare: 1 },
+    firstPane: {
+      id: 'pane-b',
+      cwd: '/srv',
+      kind: 'local',
+      endpoint: null,
+      sizeShare: 1,
+      ephemeral: false,
+    },
   })
   if (decorate) {
     await backend.renameTab('tab-b', 'release')
@@ -679,7 +693,7 @@ async function backendWithAnSSHRow(
     id: `tab-${id}`,
     workspaceId: 'workspace:default',
     position: 0,
-    firstPane: { id, cwd: '/srv', kind: 'ssh', endpoint, sizeShare: 1 },
+    firstPane: { id, cwd: '/srv', kind: 'ssh', endpoint, sizeShare: 1, ephemeral: false },
   })
   return backend
 }
@@ -850,6 +864,7 @@ describe('a stored connection is reopened (nocx-9y4ku)', () => {
         kind: 'ssh',
         endpoint: 'deploy@srv-02:22',
         sizeShare: 1,
+        ephemeral: false,
       },
     })
     const client = makeClient()

@@ -20,6 +20,7 @@ import {
   PencilIcon,
   PinIcon,
   PlugIcon,
+  ShieldIcon,
   PlusIcon,
   TextQuoteIcon,
 } from './ui/icons'
@@ -81,6 +82,8 @@ export interface PaneView {
   /** Whether the backend has this tab pinned. The strip draws the mark and
    *  places the tab (layout/strip-order.ts); the flag is stored. */
   readonly pinned?: boolean
+  /** True only after the backend confirms native sandbox readiness. */
+  readonly sandboxed?: boolean
   readonly paneId: string
   /** Which group this row is drawn under (nocx-isoph.5). The AXIS is the
    *  caller's — workspace here, `descriptor.surfaceType` in nocx-jv3q.1,
@@ -116,6 +119,7 @@ interface PaneDisplayRecord {
   pinned: boolean
   groupKey: string
   depth: number
+  sandboxed: boolean
 }
 
 /** What stands above one group of rows, or null for a group that draws no
@@ -164,6 +168,7 @@ export interface TabStrip {
   removePane(paneId: number): void
   setActive(paneId: number): void
   reorder(tabs: readonly PaneView[]): void
+  setSandboxEnabled(enabled: boolean): void
   /** What to write above each group. The strip cuts its rows by the key each
    *  row carries and looks the heading up here, so a group nobody named draws
    *  none — and no row can go missing for want of a heading. */
@@ -220,6 +225,7 @@ export interface TabStrip {
   onActivate: ((paneId: number) => void) | null
   onClose: ((paneId: number) => void) | null
   onNewPane: (() => void) | null
+  onNewSandboxedTab: (() => void) | null
   onReorder: ((fromId: number, toId: number, before: boolean) => void) | null
   /** The tab's decoration, asked for from its context menu (nocx-isoph.4).
    *  Three intents rather than one "update": a patch where a missing field
@@ -265,6 +271,8 @@ abstract class TabStripBase implements TabStrip {
   private _setDisplay!: (...args: unknown[]) => void
   private _setGroupHeadings!: Setter<StripGroupHeading[]>
   private _setExpandedGroup!: Setter<string | null>
+  private _setSandboxEnabled: Setter<boolean> | null = null
+  private sandboxEnabled = false
   /** What the strip was told before it was mounted. A caller that sets the
    *  expanded group or the headings first and mounts second must not lose
    *  them — the composition root replaces the whole strip when the placement
@@ -278,6 +286,7 @@ abstract class TabStripBase implements TabStrip {
   onActivate: ((paneId: number) => void) | null = null
   onClose: ((paneId: number) => void) | null = null
   onNewPane: (() => void) | null = null
+  onNewSandboxedTab: (() => void) | null = null
   onReorder: ((fromId: number, toId: number, before: boolean) => void) | null = null
   onRename: ((paneId: number) => void) | null = null
   onRecolour: ((paneId: number, colour: string | null) => void) | null = null
@@ -309,6 +318,7 @@ abstract class TabStripBase implements TabStrip {
         activeId: number
       }>({ records: {}, activeId: -1 })
       const [searchQuery, setSearchQuery] = createSignal('')
+      const [sandboxEnabled, setSandboxEnabled] = createSignal(this.sandboxEnabled)
       // The tab menu: which tab it belongs to and where it was opened. One
       // menu for the whole strip rather than one per row — a menu is a
       // singleton on screen, and a component per tab would be N listeners
@@ -356,6 +366,7 @@ abstract class TabStripBase implements TabStrip {
       this._setDisplay = setDisplay
       this._setGroupHeadings = setGroupHeadings
       this._setExpandedGroup = setExpandedGroup
+      this._setSandboxEnabled = setSandboxEnabled
 
       /**
        * What the strip draws, top to bottom: headings and rows in one list.
@@ -661,6 +672,7 @@ abstract class TabStripBase implements TabStrip {
             adoptable={display.records[item.id]?.adoptable === true}
             warning={display.records[item.id]?.warning === true}
             warningLabel={display.records[item.id]?.warningLabel || undefined}
+            sandboxed={display.records[item.id]?.sandboxed === true}
             onAdopt={item.onAdopt ?? undefined}
             title={display.records[item.id]?.title ?? ''}
             tooltip={display.records[item.id]?.tooltip ?? ''}
@@ -861,14 +873,19 @@ abstract class TabStripBase implements TabStrip {
                 x={open.x}
                 y={open.y}
                 items={[
+                  ...(sandboxEnabled()
+                    ? [
+                        {
+                          id: 'new-sandboxed-tab',
+                          label: 'New sandboxed tab',
+                          icon: ShieldIcon,
+                          onSelect: () => this.onNewSandboxedTab?.(),
+                        },
+                      ]
+                    : []),
                   {
                     id: 'quick-connect',
                     label: 'Quick connect…',
-                    // The marks are the ones each action already wears
-                    // elsewhere in the product — the key that opens the
-                    // secret picker, the layers that stand for a workspace —
-                    // so the menu teaches the glyph a person will next meet
-                    // on a button rather than inventing a second set.
                     icon: PlugIcon,
                     onSelect: () => this.onQuickConnect?.(),
                   },
@@ -995,6 +1012,7 @@ abstract class TabStripBase implements TabStrip {
         pinned: tab.pinned === true,
         groupKey: tab.groupKey ?? '',
         depth: tab.depth ?? 0,
+        sandboxed: tab.sandboxed === true,
       })
     }
 
@@ -1015,6 +1033,7 @@ abstract class TabStripBase implements TabStrip {
       pinned: tab.pinned === true,
       groupKey: tab.groupKey ?? '',
       depth: tab.depth ?? 0,
+      sandboxed: tab.sandboxed === true,
     })
 
     // Link pane to button (aria-labelledby)
@@ -1035,6 +1054,11 @@ abstract class TabStripBase implements TabStrip {
       delete next[paneId]
       return next
     })
+  }
+
+  setSandboxEnabled(enabled: boolean): void {
+    this.sandboxEnabled = enabled
+    this._setSandboxEnabled?.(enabled)
   }
 
   setActive(paneId: number): void {

@@ -77,28 +77,80 @@ describe('ActionsQuickConnectProvider', () => {
     expect(items.some((i) => i.label === 'Ports')).toBe(false)
   })
 
-  it('calls newPane when the local-shell item runs', () => {
+  it('calls newPane when the local-shell item runs', async () => {
     const newPane = vi.fn()
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
-    provider.getItems()[0].run()
+    const items = await provider.getItems()
+    items[0].run()
 
     expect(newPane).toHaveBeenCalledOnce()
     expect(newConnection).not.toHaveBeenCalled()
   })
 
-  it('opens the connection editor when the new-connection item runs', () => {
+  it('opens the connection editor when the new-connection item runs', async () => {
     const newPane = vi.fn()
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
-    provider.getItems()[1].run()
+    const items = await provider.getItems()
+    items[1].run()
 
-    // Not a tab: this entry used to be an unconfigured profile, and running it
-    // opened a terminal on an empty host that failed to start.
     expect(newConnection).toHaveBeenCalledOnce()
     expect(newPane).not.toHaveBeenCalled()
+  })
+
+  it('hides the sandbox action while the feature flag is off', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), undefined, {
+      state: vi.fn().mockResolvedValue({ enabled: false, status: null }),
+      open: vi.fn(),
+    })
+    expect((await provider.getItems()).map((item) => item.id)).toEqual([
+      '__local__',
+      '__new_connection__',
+    ])
+  })
+
+  it('offers the stable sandbox action and invokes its flow when available', async () => {
+    const open = vi.fn()
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), undefined, {
+      state: vi.fn().mockResolvedValue({
+        enabled: true,
+        status: { available: true, backend: 'landlock', abi: 9 },
+      }),
+      open,
+    })
+    const items = await provider.getItems()
+    const item = items[items.length - 1]
+    expect(item).toMatchObject({
+      id: '__sandboxed_local__',
+      label: 'Sandboxed shell…',
+      disabled: false,
+    })
+    item?.run()
+    expect(open).toHaveBeenCalledOnce()
+  })
+
+  it('renders an unavailable backend as a disabled sandbox action', async () => {
+    const provider = new ActionsQuickConnectProvider(vi.fn(), vi.fn(), undefined, {
+      state: vi.fn().mockResolvedValue({
+        enabled: true,
+        status: {
+          available: false,
+          backend: 'landlock',
+          reason: 'landlock-abi-too-old',
+          abi: 2,
+        },
+      }),
+      open: vi.fn(),
+    })
+    const items = await provider.getItems()
+    expect(items[items.length - 1]).toMatchObject({
+      id: '__sandboxed_local__',
+      disabled: true,
+      detail: 'Sandbox unavailable (landlock-abi-too-old)',
+    })
   })
 })
 

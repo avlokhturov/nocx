@@ -63,6 +63,7 @@ import {
 import { render } from 'solid-js/web'
 import { parseQuickConnect, type ProfileClient } from './profiles'
 import type { Pane } from './panes'
+import type { SandboxStatus } from './generated/sandbox.status'
 import { Dialog } from './ui/dialog'
 import { SearchField } from './ui/search-field'
 import { VAULT_OFFER_SETUP, VAULT_OFFER_UNSEAL, addSecretLabel } from './ui/secret-picker'
@@ -110,6 +111,7 @@ export interface QuickConnectItem {
   /** When present, activating this command drills into its steps inside the
    *  same surface instead of running (nocx-4t37). */
   readonly drill?: DrillCommand
+  readonly disabled?: boolean
   /** Invoked when the item is activated (click or Enter). */
   readonly run: () => void
 }
@@ -232,9 +234,13 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     /** Optional target-needing command ("Forward a port"): activating it
      *  drills into its steps inside the palette. */
     private drillCommand?: DrillCommand,
+    private sandbox?: {
+      state: () => Promise<{ enabled: boolean; status: SandboxStatus | null }>
+      open: () => void
+    },
   ) {}
 
-  getItems(): QuickConnectItem[] {
+  async getItems(): Promise<QuickConnectItem[]> {
     const items: QuickConnectItem[] = [
       {
         id: '__local__',
@@ -263,6 +269,27 @@ export class ActionsQuickConnectProvider implements QuickConnectProvider {
     if (this.drillCommand) {
       items.push(drillItem(this.drillCommand))
     }
+    if (!this.sandbox) return items
+    let state: { enabled: boolean; status: SandboxStatus | null }
+    try {
+      state = await this.sandbox.state()
+    } catch {
+      return items
+    }
+    if (!state.enabled) return items
+    const backend = state.status?.backend ?? 'unknown'
+    const reason = state.status?.reason ?? ''
+    const unavailable = !state.status?.available
+    items.push({
+      id: '__sandboxed_local__',
+      kind: 'command',
+      label: 'Sandboxed shell…',
+      detail: unavailable
+        ? `Sandbox unavailable (${reason})`
+        : `Open a filesystem-isolated local shell (${backend})`,
+      disabled: unavailable,
+      run: () => this.sandbox?.open(),
+    })
     return items
   }
 }
@@ -861,18 +888,16 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   })
 
   function activate(index: number) {
-    // Whatever this is — a row, a drill step, a walk-back — the person has
-    // moved past the refusal that was on screen.
-    props.onNoticeDone?.()
     if (drill()) {
       const choice = drillFiltered()[index]
       if (!choice) return
+      props.onNoticeDone?.()
       chooseStep(choice)
       return
     }
-    const list = filteredItems()
-    const item = list[index]
-    if (!item) return
+    const item = filteredItems()[index]
+    if (!item || item.disabled) return
+    props.onNoticeDone?.()
     if (item.drill) {
       // A command that needs a target drills in — no second dialog, no
       // dead end (nocx-4t37).
@@ -1015,9 +1040,11 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     classList={{
                       'quick-connect__item--selected': selectedIndex() === index(),
                       'quick-connect__item--system': item.system === true,
+                      'quick-connect__item--disabled': item.disabled === true,
                     }}
                     role="option"
                     aria-selected={selectedIndex() === index()}
+                    aria-disabled={item.disabled === true}
                     // The row is not a focus target: the field is. Without
                     // this the mouse silently moves the caret out of the
                     // one place this surface takes input, and the next

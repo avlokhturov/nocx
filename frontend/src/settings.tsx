@@ -28,6 +28,7 @@ import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
+import { SandboxAccessSettings, type SandboxAccessClient } from './sandbox-access-settings'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
@@ -71,6 +72,7 @@ import {
   type GroupedRailItem,
   IconButton,
   StatusCard,
+  EditableRowList,
 } from './ui'
 import { ResetIcon } from './ui/icons'
 import {
@@ -175,6 +177,7 @@ export interface SettingsComponentProps {
    *  exist survives a release. Absent in an embedding with no backend; the
    *  section then makes no claim either way. */
   historyStatus?: HistoryStatusStore
+  sandboxAccessClient?: SandboxAccessClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -518,6 +521,14 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+    const sandboxAccessPage: SettingsPage = {
+      kind: 'component',
+      id: 'sandbox-access',
+      title: 'Sandbox access',
+      groupId: 'developer',
+      scrollMode: 'page',
+      renderContent: () => <SandboxAccessSettings client={props.sandboxAccessClient} />,
+    }
     return [
       connectionPage,
       ...generated,
@@ -526,6 +537,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
+      sandboxAccessPage,
     ]
   })
 
@@ -624,6 +636,34 @@ export function SettingsComponent(props: SettingsComponentProps) {
     }
     const nextState = recordSaveOutcome(toMirror(), key, outcome)
     applyMirror(nextState)
+  }
+
+  async function addPath(decl: Declaration): Promise<void> {
+    if (!props.dialogClient) return
+    try {
+      const picked = await props.dialogClient.openDirectoryDialog()
+      if (!picked.path) return
+      const peerKey = sandboxPeerKey(decl.key)
+      if (peerKey !== null && pathsValue(peerKey).includes(picked.path)) {
+        setErrors(decl.key, 'This path is already active in the peer sandbox list')
+        return
+      }
+      setErrors(decl.key, undefined as never)
+      const current = pathsValue(decl.key)
+      await saveSetting(
+        decl.key,
+        current.includes(picked.path) ? current : [...current, picked.path],
+      )
+    } catch (err) {
+      setErrors(decl.key, (err as Error).message)
+    }
+  }
+
+  async function removePath(decl: Declaration, index: number): Promise<void> {
+    await saveSetting(
+      decl.key,
+      pathsValue(decl.key).filter((_, itemIndex) => itemIndex !== index),
+    )
   }
 
   async function resetSetting(key: string): Promise<void> {
@@ -805,6 +845,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return values[key]
   }
 
+  function pathsValue(key: string): string[] {
+    const value = effectiveValue(key)
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : []
+  }
+
+  function sandboxPeerKey(key: string): string | null {
+    if (key === 'sandbox.allowedWritablePaths') return 'sandbox.allowedReadOnlyPaths'
+    if (key === 'sandbox.allowedReadOnlyPaths') return 'sandbox.allowedWritablePaths'
+    return null
+  }
+
   /**
    * Has the user actually changed this setting away from its default?
    *
@@ -972,71 +1025,90 @@ export function SettingsComponent(props: SettingsComponentProps) {
           {/* One line: the control and its reset affordance, side by side. The
               wrapper is the surface's own, so the reset sits level with the
               control without the surface reaching into Field's column. */}
-          <div class="ui-settings-control-line">
-            <Show when={decl.control === 'toggle'}>
-              <Checkbox
-                variant="switch"
-                checked={!!eff()}
-                ariaLabel={decl.label}
-                onChange={(c) => void saveSetting(decl.key, c)}
-              />
-            </Show>
+          <Show when={decl.control !== 'paths'}>
+            <div class="ui-settings-control-line">
+              <Show when={decl.control === 'toggle'}>
+                <Checkbox
+                  variant="switch"
+                  checked={!!eff()}
+                  ariaLabel={decl.label}
+                  onChange={(c) => void saveSetting(decl.key, c)}
+                />
+              </Show>
 
-            <Show when={decl.control === 'text'}>
-              <TextField
-                value={displayValue(eff(), decl)}
-                onInput={(v) => void saveSetting(decl.key, v)}
-              />
-            </Show>
+              <Show when={decl.control === 'text'}>
+                <TextField
+                  value={displayValue(eff(), decl)}
+                  onInput={(v) => void saveSetting(decl.key, v)}
+                />
+              </Show>
 
-            <Show when={decl.control === 'number'}>
-              <TextField
-                type="number"
-                value={displayValue(eff(), decl)}
-                min={decl.min}
-                max={decl.max}
-                unit={decl.unit}
-                caption={numberRangeCaption(decl, numeric())}
-                captionAlign="end"
-                error={numberRangeError(decl, numeric())}
-                onInput={(v) => {
-                  const n = Number(v)
-                  void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
-                }}
-              />
-            </Show>
-
-            <Show when={decl.control === 'select'}>
-              <Select
-                value={displayValue(eff(), decl)}
-                onChange={(v) => void saveSetting(decl.key, v)}
-                options={decl.options ?? []}
-              />
-            </Show>
-
-            <Show when={decl.control === 'secret'}>
-              <div class="ui-settings-secret">
-                <span class="ui-settings-secret-status">
-                  {secretStates[decl.key] ? 'Configured' : 'Not configured'}
-                </span>
-                <Button
-                  variant="default"
-                  onClick={() => {
-                    const value = prompt('Enter new value for "' + decl.label + '":')
-                    if (value === null) return
-                    void saveSecret(decl.key, value)
+              <Show when={decl.control === 'number'}>
+                <TextField
+                  type="number"
+                  value={displayValue(eff(), decl)}
+                  min={decl.min}
+                  max={decl.max}
+                  unit={decl.unit}
+                  caption={numberRangeCaption(decl, numeric())}
+                  captionAlign="end"
+                  error={numberRangeError(decl, numeric())}
+                  onInput={(v) => {
+                    const n = Number(v)
+                    void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
                   }}
-                >
-                  Replace
-                </Button>
-                <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
-                  Clear
-                </Button>
-              </div>
-            </Show>
+                />
+              </Show>
 
-            <ProvenanceBadge decl={decl} />
-          </div>
+              <Show when={decl.control === 'select'}>
+                <Select
+                  value={displayValue(eff(), decl)}
+                  onChange={(v) => void saveSetting(decl.key, v)}
+                  options={decl.options ?? []}
+                />
+              </Show>
+
+              <Show when={decl.control === 'secret'}>
+                <div class="ui-settings-secret">
+                  <span class="ui-settings-secret-status">
+                    {secretStates[decl.key] ? 'Configured' : 'Not configured'}
+                  </span>
+                  <Button
+                    variant="default"
+                    onClick={() => {
+                      const value = prompt('Enter new value for "' + decl.label + '":')
+                      if (value === null) return
+                      void saveSecret(decl.key, value)
+                    }}
+                  >
+                    Replace
+                  </Button>
+                  <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
+                    Clear
+                  </Button>
+                </div>
+              </Show>
+
+              <ProvenanceBadge decl={decl} />
+            </div>
+          </Show>
+
+          <Show when={decl.control === 'paths'}>
+            <div class="ui-settings-paths">
+              <EditableRowList
+                rows={pathsValue(decl.key)}
+                ariaLabel={decl.label}
+                addLabel="Add folder"
+                emptyLabel="No folders — the sandboxed pane is limited to its workspace."
+                removeLabel={(index) => `Remove folder ${index + 1}`}
+                onRemove={(index) => void removePath(decl, index)}
+                onAdd={() => void addPath(decl)}
+                renderRow={(path) => <span class="ui-settings-paths-row">{path()}</span>}
+                error={err()}
+              />
+              <ProvenanceBadge decl={decl} />
+            </div>
+          </Show>
 
           <Show when={fieldSaveError(decl, numeric(), err())}>
             <div class="ui-settings-error">{err()}</div>

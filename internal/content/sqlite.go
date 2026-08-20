@@ -385,7 +385,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 11
+const schemaVersion = 12
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -674,6 +674,7 @@ CREATE TABLE IF NOT EXISTS panes (
   endpoint   TEXT,                         -- canonical user@host:port; NULL local
   size_share REAL NOT NULL DEFAULT 1.0 CHECK (size_share > 0),
   closed_at  INTEGER,                      -- NULL: in the window
+  ephemeral INTEGER NOT NULL DEFAULT 0 CHECK (ephemeral IN (0,1)),
   digest     TEXT NOT NULL DEFAULT ''      -- the create key's content binding
 ) STRICT;
 

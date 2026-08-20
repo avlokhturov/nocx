@@ -111,4 +111,8 @@ export interface Pane {
    * This pane's share of its tab's extent. Size is a property of the MEMBER, direction a property of the set (§5).
    */
   sizeShare: number
+  /**
+   * Whether this pane is explicitly non-restorable. True only for a sandboxed local shell: the backend startup sweep closes it and the renderer refuses to adopt it, so it can never return as an ordinary unsandboxed local pane. Always present; this is independent of kind because its pipe is still local.
+   */
+  ephemeral: boolean
 }

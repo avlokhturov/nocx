@@ -801,3 +801,10 @@
 .nocx-tab.dragging {
   opacity: 0.4;
 }
+
+.nocx-tab-sandboxed-marker {
+  flex: none;
+  align-self: center;
+  font-size: 0.7em;
+  color: var(--color-text-muted);
+}

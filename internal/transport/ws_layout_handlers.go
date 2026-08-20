@@ -105,6 +105,7 @@ type paneWire struct {
 	Kind      string  `json:"kind"`
 	Endpoint  *string `json:"endpoint"`
 	SizeShare float64 `json:"sizeShare"`
+	Ephemeral bool    `json:"ephemeral"`
 }
 
 func wireWorkspace(ws content.Workspace) workspaceWire {
@@ -122,7 +123,7 @@ func wireTab(t content.Tab) tabWire {
 func wirePane(p content.Pane) paneWire {
 	return paneWire{
 		ID: p.ID, TabID: p.TabID, Cwd: p.Cwd, Kind: string(p.Kind),
-		Endpoint: p.Endpoint, SizeShare: p.SizeShare,
+		Endpoint: p.Endpoint, SizeShare: p.SizeShare, Ephemeral: p.Ephemeral,
 	}
 }
 
@@ -259,6 +260,7 @@ type firstPaneParams struct {
 	Kind      string  `json:"kind"`
 	Endpoint  *string `json:"endpoint"`
 	SizeShare float64 `json:"sizeShare"`
+	Ephemeral *bool   `json:"ephemeral"`
 }
 
 func (p firstTabParams) tab(workspaceID string, parentID *string) content.Tab {
@@ -272,7 +274,7 @@ func (p firstTabParams) tab(workspaceID string, parentID *string) content.Tab {
 func (p firstPaneParams) pane(tabID string) content.Pane {
 	return content.Pane{
 		ID: p.ID, TabID: tabID, Cwd: p.Cwd, Kind: content.PaneKind(p.Kind),
-		Endpoint: p.Endpoint, SizeShare: p.SizeShare,
+		Endpoint: p.Endpoint, SizeShare: p.SizeShare, Ephemeral: p.Ephemeral != nil && *p.Ephemeral,
 	}
 }
 
@@ -357,6 +359,7 @@ type paneCreateParams struct {
 	Kind      string  `json:"kind"`
 	Endpoint  *string `json:"endpoint"`
 	SizeShare float64 `json:"sizeShare"`
+	Ephemeral *bool   `json:"ephemeral"`
 }
 
 type paneMoveParams struct {
@@ -544,7 +547,10 @@ func validateFirstPane(p firstPaneParams) string {
 	if msg := layoutID("firstPane.id", p.ID); msg != "" {
 		return msg
 	}
-	return validatePaneFacts("firstPane", p.Cwd, p.Kind, p.Endpoint, p.SizeShare)
+	if p.Ephemeral == nil {
+		return "firstPane.ephemeral is required"
+	}
+	return validatePaneFacts("firstPane", p.Cwd, p.Kind, p.Endpoint, p.SizeShare, *p.Ephemeral)
 }
 
 func validateWorkspaceRenameRaw(raw json.RawMessage) string {
@@ -692,13 +698,16 @@ func validatePaneCreateRaw(raw json.RawMessage) string {
 	if msg := layoutID("tabId", p.TabID); msg != "" {
 		return msg
 	}
-	return validatePaneFacts("", p.Cwd, p.Kind, p.Endpoint, p.SizeShare)
+	if p.Ephemeral == nil {
+		return "ephemeral is required"
+	}
+	return validatePaneFacts("", p.Cwd, p.Kind, p.Endpoint, p.SizeShare, *p.Ephemeral)
 }
 
 // validatePaneFacts is the pane's own shape, wherever a pane arrives: on its
 // own through panes.create, or as the first member of a container. One
 // implementation, because two would agree until the day they did not.
-func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare float64) string {
+func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare float64, ephemeral bool) string {
 	if prefix != "" {
 		prefix += "."
 	}
@@ -714,6 +723,9 @@ func validatePaneFacts(prefix, cwd, kind string, endpoint *string, sizeShare flo
 	}
 	if msg := nullableBounded(prefix+"endpoint", endpoint, maxLayoutEndpointRunes); msg != "" {
 		return msg
+	}
+	if ephemeral && content.PaneKind(kind) != content.PaneLocal {
+		return prefix + "ephemeral is only admitted on kind = local"
 	}
 	switch content.PaneKind(kind) {
 	case content.PaneLocal:
@@ -904,6 +916,7 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 			made, err := svc.CreatePane(ctx, content.Pane{
 				ID: p.ID, TabID: p.TabID, Cwd: p.Cwd, Kind: content.PaneKind(p.Kind),
 				Endpoint: p.Endpoint, SizeShare: p.SizeShare,
+				Ephemeral: p.Ephemeral != nil && *p.Ephemeral,
 			})
 			h.answer(req, err, func() any {
 				return paneCreateResponse{Pane: wirePane(made.Object), Replayed: made.Replayed}

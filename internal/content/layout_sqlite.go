@@ -126,7 +126,7 @@ func tabFields(t Tab) []any {
 }
 
 func paneFields(p Pane) []any {
-	return []any{p.ID, p.TabID, p.Cwd, string(p.Kind), p.Endpoint, p.SizeShare}
+	return []any{p.ID, p.TabID, p.Cwd, string(p.Kind), p.Ephemeral, p.Endpoint, p.SizeShare}
 }
 
 func workspaceDigest(ws Workspace, firstTab Tab, firstPane Pane) string {
@@ -472,6 +472,60 @@ func dissolveWorkspaceIfEmpty(ctx context.Context, tx *sql.Tx, workspaceID strin
 	return err
 }
 
+// CloseEphemeralPanes is the startup sweep for panes that may not be
+// restored. It marks rows rather than deleting them so ledger entries keep
+// their durable pane anchor, then unwinds any tab/workspace left empty.
+func (s *sqliteContent) CloseEphemeralPanes(ctx context.Context) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			rows, err := tx.QueryContext(ctx,
+				`SELECT id, tab_id FROM panes
+				  WHERE ephemeral = 1 AND closed_at IS NULL`)
+			if err != nil {
+				return err
+			}
+			var paneIDs, tabIDs []string
+			for rows.Next() {
+				var paneID, tabID string
+				if err := rows.Scan(&paneID, &tabID); err != nil {
+					_ = rows.Close()
+					return err
+				}
+				paneIDs = append(paneIDs, paneID)
+				tabIDs = append(tabIDs, tabID)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+
+			at := closedNow()
+			for _, paneID := range paneIDs {
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE panes SET closed_at = ?
+					  WHERE id = ? AND ephemeral = 1 AND closed_at IS NULL`,
+					at, paneID); err != nil {
+					return err
+				}
+			}
+			seenTabs := make(map[string]struct{}, len(tabIDs))
+			for _, tabID := range tabIDs {
+				if _, seen := seenTabs[tabID]; seen {
+					continue
+				}
+				seenTabs[tabID] = struct{}{}
+				if err := dissolveTabIfEmpty(ctx, tx, tabID); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+}
+
 // ClearWindow is the CLEAN START (restore.onStartup off): everything the last
 // session left the window holding leaves it, in ONE transaction, and nothing
 // is deleted but the workspaces that are then holding no open tab.
@@ -793,9 +847,10 @@ func (s *sqliteContent) CreatePane(ctx context.Context, pane Pane) (Created[Pane
 
 func insertPane(ctx context.Context, db execer, pane Pane, digest string) error {
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO panes (id, tab_id, cwd, kind, endpoint, size_share, digest)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		pane.ID, pane.TabID, pane.Cwd, string(pane.Kind), pane.Endpoint, pane.SizeShare, digest)
+		`INSERT INTO panes (id, tab_id, cwd, kind, endpoint, size_share, ephemeral, digest)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		pane.ID, pane.TabID, pane.Cwd, string(pane.Kind), pane.Endpoint, pane.SizeShare,
+		boolToInt(pane.Ephemeral), digest)
 	return err
 }
 
@@ -804,7 +859,7 @@ func (s *sqliteContent) Panes(ctx context.Context, tabID string) ([]Pane, error)
 		return nil, ErrClosed
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, tab_id, cwd, kind, endpoint, size_share
+		`SELECT id, tab_id, cwd, kind, endpoint, size_share, ephemeral
 		   FROM panes WHERE tab_id = ? AND closed_at IS NULL ORDER BY id`, tabID)
 	if err != nil {
 		return nil, err
@@ -813,15 +868,17 @@ func (s *sqliteContent) Panes(ctx context.Context, tabID string) ([]Pane, error)
 	out := []Pane{}
 	for rows.Next() {
 		var (
-			p        Pane
-			kind     string
-			endpoint sql.NullString
+			p         Pane
+			kind      string
+			endpoint  sql.NullString
+			ephemeral int
 		)
-		if err := rows.Scan(&p.ID, &p.TabID, &p.Cwd, &kind, &endpoint, &p.SizeShare); err != nil {
+		if err := rows.Scan(&p.ID, &p.TabID, &p.Cwd, &kind, &endpoint, &p.SizeShare, &ephemeral); err != nil {
 			return nil, err
 		}
 		p.Kind = PaneKind(kind)
 		p.Endpoint = nullableString(endpoint)
+		p.Ephemeral = ephemeral != 0
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -1192,6 +1249,21 @@ func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (st
 	return workspaceID, err
 }
 
+func (s *sqliteContent) IsPaneEphemeral(ctx context.Context, paneID string) (bool, error) {
+	if s.closed.Load() {
+		return false, ErrClosed
+	}
+	var ephemeral int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT ephemeral FROM panes WHERE id = ? AND closed_at IS NULL`,
+		paneID,
+	).Scan(&ephemeral)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
+	}
+	return ephemeral != 0, err
+}
+
 // ── row readers ──────────────────────────────────────────────────────────
 //
 // Each returns the row PLUS the digest its create was bound to. The digest
@@ -1283,13 +1355,14 @@ type paneRow struct {
 
 func paneByID(ctx context.Context, q rowQuerier, id string) (paneRow, error) {
 	var (
-		row      paneRow
-		kind     string
-		endpoint sql.NullString
+		row       paneRow
+		kind      string
+		endpoint  sql.NullString
+		ephemeral int
 	)
 	err := q.QueryRowContext(ctx,
-		`SELECT id, tab_id, cwd, kind, endpoint, size_share, digest FROM panes WHERE id = ?`, id,
-	).Scan(&row.ID, &row.TabID, &row.Cwd, &kind, &endpoint, &row.SizeShare, &row.digest)
+		`SELECT id, tab_id, cwd, kind, endpoint, size_share, ephemeral, digest FROM panes WHERE id = ?`, id,
+	).Scan(&row.ID, &row.TabID, &row.Cwd, &kind, &endpoint, &row.SizeShare, &ephemeral, &row.digest)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return paneRow{}, fmt.Errorf("%w: %s", ErrNoSuchPane, id)
@@ -1298,6 +1371,7 @@ func paneByID(ctx context.Context, q rowQuerier, id string) (paneRow, error) {
 	}
 	row.Kind = PaneKind(kind)
 	row.Endpoint = nullableString(endpoint)
+	row.Ephemeral = ephemeral != 0
 	return row, nil
 }
 

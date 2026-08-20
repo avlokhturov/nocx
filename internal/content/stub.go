@@ -316,6 +316,16 @@ func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string,
 	return "", ErrNotImplemented
 }
 
+func (s *layoutStub) IsPaneEphemeral(_ context.Context, paneID string) (bool, error) {
+	s.log.Info("content stub: LayoutRepository.IsPaneEphemeral", "pane", paneID)
+	return false, ErrNotImplemented
+}
+
+func (s *layoutStub) CloseEphemeralPanes(_ context.Context) error {
+	s.log.Info("content stub: LayoutRepository.CloseEphemeralPanes")
+	return ErrNotImplemented
+}
+
 func (s *layoutStub) ClearWindow(_ context.Context) error {
 	s.log.Info("content stub: LayoutRepository.ClearWindow")
 	return ErrNotImplemented

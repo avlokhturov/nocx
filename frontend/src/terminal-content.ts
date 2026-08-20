@@ -69,7 +69,7 @@ import { restoredBlock } from './scrollback/restored-block'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor, SessionSandboxInfo, SandboxRequest } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { hasOpenOverlays } from './ui/overlay/stack'
 import { isSnippetChord } from './snippets/chord'
@@ -308,6 +308,10 @@ export interface TerminalContentHooks {
    *  endpoint editor so the refusal comes with its repair — wired by
    *  main.tsx to the Settings tab's Endpoints page. */
   onCreateEndpoint?: () => void
+  /** Backend-authorized filesystem sandbox request for this local pane. */
+  sandbox?: SandboxRequest
+  /** Reports the immutable sandbox state from the open result. */
+  onSandboxedChange?: (sandboxed: boolean) => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -1054,7 +1058,14 @@ export class TerminalContent extends BasePaneContent {
    * the open goes out exactly as it did before this bead, unanchored.
    */
   private async openRequestedSession(): Promise<SessionHandle> {
-    const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
+    const registered = await this.pane.registered
+    if (!this.sshOpts && this.hooks.sandbox) {
+      if (!registered) throw new Error('sandbox pane was not recorded')
+      return this.client.openSandboxedSession(this.cols, this.rows, this.hooks.sandbox, {
+        paneId: this.pane.paneId,
+      })
+    }
+    const anchor: OpenAnchor = registered ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
       return this.client.openSession(this.cols, this.rows, anchor)
     }
@@ -2332,6 +2343,22 @@ export class TerminalContent extends BasePaneContent {
         if (fact.sessionId !== session.sessionId) return
         this._applyIntegration(fact)
       })
+      const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
+      this.hooks.onSandboxedChange?.(sandboxInfo != null)
+      if (sandboxInfo) {
+        const writable = sandboxInfo.writableRoots.join(', ')
+        const readOnly = sandboxInfo.readOnlyRoots.join(', ')
+        const home =
+          sandboxInfo.homeProjections.length === 0
+            ? 'Home: isolated; no host folders projected'
+            : `Home projections: ${sandboxInfo.homeProjections
+                .map(({ relativePath, hostPath }) => `~/${relativePath} -> ${hostPath}`)
+                .join(', ')}`
+        this.host.setTitle(sandboxInfo.workspace || session.cwd || '')
+        this.host.updateTooltip(
+          `${session.cwd ? `${session.cwd} (initial cwd)\n` : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable} — read-only: ${readOnly}\n${home}`,
+        )
+      }
       // The statement is OBSERVED: until the first marker arrives, an auto
       // session honestly reads "Native input" — the launcher may be
       // mid-start, and the first prompt flips it to command blocks.
@@ -2637,6 +2664,14 @@ export class TerminalContent extends BasePaneContent {
           this._readyResolve(false)
           return
         }
+      }
+      if (this.hooks.sandbox) {
+        const message = err instanceof Error ? err.message : String(err)
+        showToast({ level: 'danger', message: `Sandboxed shell failed to start: ${message}` })
+        this._readyResolve(false)
+        log.error('nocx: sandboxed terminal failed', { error: message })
+        host.requestClose()
+        return
       }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'

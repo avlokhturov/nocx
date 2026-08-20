@@ -39,7 +39,7 @@ func createWorkspaceOverWS(t *testing.T, conn *websocket.Conn, id int, wsID, tab
 		},
 		"firstPane": map[string]any{
 			"id": paneID, "cwd": "/srv", "kind": "local",
-			"endpoint": nil, "sizeShare": 1,
+			"endpoint": nil, "sizeShare": 1, "ephemeral": false,
 		},
 	}, id)
 	if resp.Error != nil {
