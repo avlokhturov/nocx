@@ -64,19 +64,24 @@
 - A role with its own assignment resolves to that assignment even when a default exists.
 - A role with no assignment resolves to the default.
 - With neither, `ResolveRole` returns `ErrRoleUnassigned`, unchanged.
-- A default naming a deleted endpoint returns `ErrRoleEndpointGone`; one naming a removed model returns `ErrRoleModelGone`. The default is never silently repaired.
+- A default naming a **removed model** returns `ErrRoleModelGone` — the default is never silently repaired into a neighbouring model.
+- **Deleting an endpoint CLEARS a default that names it, in the same write** (spec §6's interval: the default exists until it is overwritten or its endpoint is deleted, and must never point at nothing). After the delete, an unassigned role reports `ErrRoleUnassigned` — the ladder's _Choose a model_ — not `ErrRoleEndpointGone`.
+- **A per-role assignment naming a deleted endpoint is left dangling**, and still reports `ErrRoleEndpointGone`. That asymmetry is deliberate and is existing, tested behaviour (`internal/profile/role.go:66`, `internal/profile/role_test.go:199`): an assignment is a statement about one role that the person made and must be told about, while the default is a single global convenience with nothing to reassign.
 - `SetDefaultModel` with an empty pair clears the default; a half-set pair is refused.
+- A default whose endpoint is deleted **by another process between load and resolve** still refuses with `ErrRoleEndpointGone` rather than resolving — the clear-on-delete is the tidy path, not the safety net.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```go
-// internal/profile/role_test.go
+// internal/profile/role_test.go — package profile (NOT profile_test): the
+// existing file is in-package, so names are unqualified. Adding a `profile.`
+// qualifier here does not compile, because a package cannot import itself.
 func TestResolveRole_FallsBackToTheDefault(t *testing.T) {
-	eps := []profile.Endpoint{{ID: "e1", Name: "openrouter", Models: []profile.EndpointModel{{Name: "m-a"}, {Name: "m-b"}}}}
-	def := profile.DefaultModel{EndpointID: "e1", Model: "m-a"}
+	eps := []Endpoint{{ID: "e1", Name: "openrouter", Models: []EndpointModel{{Name: "m-a"}, {Name: "m-b"}}}}
+	def := DefaultModel{EndpointID: "e1", Model: "m-a"}
 
 	// No assignment at all: the default answers.
-	ep, model, err := profile.ResolveRole(profile.RoleAnswering, nil, def, eps)
+	ep, model, err := ResolveRole(RoleAnswering, nil, def, eps)
 	if err != nil {
 		t.Fatalf("resolve with only a default: %v", err)
 	}
@@ -85,8 +90,8 @@ func TestResolveRole_FallsBackToTheDefault(t *testing.T) {
 	}
 
 	// An explicit assignment OUTRANKS the default — the override is the point.
-	as := []profile.RoleAssignment{{Role: profile.RoleAnswering, EndpointID: "e1", Model: "m-b"}}
-	_, model, err = profile.ResolveRole(profile.RoleAnswering, as, def, eps)
+	as := []RoleAssignment{{Role: RoleAnswering, EndpointID: "e1", Model: "m-b"}}
+	_, model, err = ResolveRole(RoleAnswering, as, def, eps)
 	if err != nil {
 		t.Fatalf("resolve with an assignment: %v", err)
 	}
@@ -96,23 +101,28 @@ func TestResolveRole_FallsBackToTheDefault(t *testing.T) {
 }
 
 func TestResolveRole_NoDefaultAndNoAssignmentStaysUnassigned(t *testing.T) {
-	eps := []profile.Endpoint{{ID: "e1", Name: "openrouter", Models: []profile.EndpointModel{{Name: "m-a"}}}}
-	_, _, err := profile.ResolveRole(profile.RoleAnswering, nil, profile.DefaultModel{}, eps)
-	if !errors.Is(err, profile.ErrRoleUnassigned) {
+	eps := []Endpoint{{ID: "e1", Name: "openrouter", Models: []EndpointModel{{Name: "m-a"}}}}
+	_, _, err := ResolveRole(RoleAnswering, nil, DefaultModel{}, eps)
+	if !errors.Is(err, ErrRoleUnassigned) {
 		t.Fatalf("err = %v, want ErrRoleUnassigned", err)
 	}
 }
 
 func TestResolveRole_ADefaultPointingAtNothingRefusesRatherThanRepairs(t *testing.T) {
-	eps := []profile.Endpoint{{ID: "e1", Name: "openrouter", Models: []profile.EndpointModel{{Name: "m-a"}}}}
+	eps := []Endpoint{{ID: "e1", Name: "openrouter", Models: []EndpointModel{{Name: "m-a"}}}}
 
-	gone := profile.DefaultModel{EndpointID: "deleted", Model: "m-a"}
-	if _, _, err := profile.ResolveRole(profile.RoleAnswering, nil, gone, eps); !errors.Is(err, profile.ErrRoleEndpointGone) {
+	// A default naming an endpoint that is not there refuses. This is the
+	// RACE path, not the ordinary one: DeleteEndpoint clears the default in
+	// the same write (Step 4b), so in the ordinary case there is no default
+	// left to dangle. Kept because clearing is the tidy path, never the
+	// safety net — another process may delete between load and resolve.
+	gone := DefaultModel{EndpointID: "deleted", Model: "m-a"}
+	if _, _, err := ResolveRole(RoleAnswering, nil, gone, eps); !errors.Is(err, ErrRoleEndpointGone) {
 		t.Fatalf("deleted endpoint: err = %v, want ErrRoleEndpointGone", err)
 	}
 
-	stale := profile.DefaultModel{EndpointID: "e1", Model: "m-removed"}
-	if _, _, err := profile.ResolveRole(profile.RoleAnswering, nil, stale, eps); !errors.Is(err, profile.ErrRoleModelGone) {
+	stale := DefaultModel{EndpointID: "e1", Model: "m-removed"}
+	if _, _, err := ResolveRole(RoleAnswering, nil, stale, eps); !errors.Is(err, ErrRoleModelGone) {
 		t.Fatalf("removed model: err = %v, want ErrRoleModelGone", err)
 	}
 }
@@ -256,13 +266,104 @@ func (s *JSONStore) SetDefaultModel(m DefaultModel) error {
 }
 ```
 
-- [ ] **Step 5: Fix every existing caller of `ResolveRole`**
+- [ ] **Step 4b: Clear the default when its endpoint is deleted**
 
-Run: `grep -rn "ResolveRole(" --include=*.go internal/ | grep -v _test`
-Each call site gains the default, loaded from the same repository. In
-`internal/capability/config.go:634` that is `s.roles.LoadDefaultModel()`; a
-load error is returned, never swallowed into "no default", because a store
-that cannot answer must not look like a person who chose nothing.
+`DeleteEndpoint` (`internal/profile/store.go:489`) is already ONE atomic
+document write that removes the endpoint and clears its credential reference
+from every remaining record. The default joins that same write — a second
+write could fail in between and leave a default naming an endpoint that is
+gone, which is precisely the state spec §6 forbids:
+
+```go
+	for i, existing := range d.Endpoints {
+		if existing.ID == id {
+			ref := existing.CredentialRef
+			d.Endpoints = append(d.Endpoints[:i], d.Endpoints[i+1:]...)
+			clearSecretRefLocked(d, ref)
+			// The default is a single global convenience with nothing to
+			// reassign, so it goes with the endpoint it named (spec §6). A
+			// per-role ASSIGNMENT deliberately does NOT: it is a statement
+			// about one role that the person made, and they are entitled to
+			// be told it broke rather than to find it silently forgotten
+			// (role.go:66, already tested at role_test.go:199).
+			if d.DefaultModel.EndpointID == id {
+				d.DefaultModel = DefaultModel{}
+			}
+			if err := s.writeLocked(d); err != nil {
+				return "", err
+			}
+			return ref, nil
+		}
+	}
+```
+
+Test both halves, because the asymmetry is the point:
+
+```go
+func TestDeleteEndpoint_ClearsADefaultNamingItButLeavesAssignmentsDangling(t *testing.T) {
+	s := newTestStore(t)
+	mustSaveEndpoint(t, s, Endpoint{ID: "e1", Name: "openrouter", Models: []EndpointModel{{Name: "m-a"}}})
+	if err := s.SetDefaultModel(DefaultModel{EndpointID: "e1", Model: "m-a"}); err != nil {
+		t.Fatalf("SetDefaultModel: %v", err)
+	}
+	if err := s.AssignRole(RoleAssignment{Role: RoleClassifier, EndpointID: "e1", Model: "m-a"}); err != nil {
+		t.Fatalf("AssignRole: %v", err)
+	}
+	if _, err := s.DeleteEndpoint("e1"); err != nil {
+		t.Fatalf("DeleteEndpoint: %v", err)
+	}
+
+	def, err := s.LoadDefaultModel()
+	if err != nil {
+		t.Fatalf("LoadDefaultModel: %v", err)
+	}
+	if def.IsSet() {
+		t.Fatalf("the default survived its endpoint as %+v — it now points at nothing", def)
+	}
+
+	as, err := s.LoadRoleAssignments()
+	if err != nil {
+		t.Fatalf("LoadRoleAssignments: %v", err)
+	}
+	if len(as) != 1 || as[0].EndpointID != "e1" {
+		t.Fatalf("assignments = %+v, want the classifier's kept so the person is told it broke", as)
+	}
+
+	// And the product consequence, which is the criterion that matters: an
+	// unassigned role is back at "choose a model", not "endpoint gone".
+	if _, _, err := ResolveRole(RoleAnswering, as, def, nil); !errors.Is(err, ErrRoleUnassigned) {
+		t.Fatalf("after the delete: err = %v, want ErrRoleUnassigned", err)
+	}
+}
+```
+
+- [ ] **Step 5: Fix EVERY existing caller — the tests are callers too**
+
+Go has no overloading, so the six in-package test calls break the build the
+moment the signature changes. `grep -v _test` would hide exactly the calls
+that stop `go test ./internal/profile/...` from running at all.
+
+Run: `grep -rn "ResolveRole(" --include=*.go internal/`
+
+The complete list at the time of writing, and the argument each gains:
+
+| Site                                | Add                                     |
+| ----------------------------------- | --------------------------------------- |
+| `internal/capability/config.go:657` | `def` from `s.roles.LoadDefaultModel()` |
+| `internal/profile/role_test.go:126` | `DefaultModel{}`                        |
+| `internal/profile/role_test.go:142` | `DefaultModel{}`                        |
+| `internal/profile/role_test.go:158` | `DefaultModel{}`                        |
+| `internal/profile/role_test.go:180` | `DefaultModel{}`                        |
+| `internal/profile/role_test.go:190` | `DefaultModel{}`                        |
+
+Every existing test passes the zero default deliberately: they assert the
+behaviour of a store with no default, which is still a state the product has,
+and rewriting them to carry one would delete that coverage.
+
+In `internal/capability/config.go` a `LoadDefaultModel` error is **returned**,
+never swallowed into "no default" — a store that cannot answer must not look
+like a person who chose nothing, or an unreadable file renders as an honest
+_Choose a model_ and sends someone to re-choose what they already chose.
 
 - [ ] **Step 6: Run the tests**
 
@@ -382,12 +483,25 @@ Expected: FAIL — `method not found: roles.setDefault`.
 - [ ] **Step 4: Implement the handler**
 
 In `internal/transport/ws_roles.go`, `rolesListResponse` grows
-`Default *defaultModelWire \`json:"default"\``, filled from
-`svc.DefaultModel()`. Add the `roles.setDefault`arm beside`roles.assign`,
-validating that the named endpoint exists and offers the model **before**
-storing — the same rule `roles.assign`already follows, so the two cannot
-drift. Register it in`ws_config_handlers.go`next to`roles.assign`, on the
-same `configSub` queue.
+`Default *defaultModelWire` with a `json:"default"` tag, filled from
+`svc.DefaultModel()`. Add the `roles.setDefault` arm beside `roles.assign` and
+register it in `ws_config_handlers.go` on the same `configSub` queue.
+
+**Validation, decided here rather than inherited.** `roles.assign` does NOT
+check that the endpoint exists — `validateRoleAssign`
+(`internal/transport/ws_roles.go:97`) checks the role name, the pair shape,
+the id's rune class and the model's length, and nothing else; the store
+deliberately accepts an assignment naming no endpoint, which
+`internal/profile/role_test.go:199` pins as intended. There is no existing
+shared rule to follow, and this plan does not pretend otherwise.
+
+`roles.setDefault` DOES validate existence, and the asymmetry is Task 1's: a
+per-role assignment is a statement about one role the person is entitled to be
+told about when it breaks, so a dangling one is a feature. The default is a
+global convenience every unassigned role inherits silently, so a dangling one
+breaks every role at once with nothing naming which choice did it. Refused at
+the wire — and resolution still refuses at read time for the
+delete-between-load-and-resolve race (Task 1, Step 1).
 
 - [ ] **Step 5: Regenerate and run**
 
@@ -428,7 +542,11 @@ git commit -m "feat(transport): the default model is set and read back on the wi
 ```
 
 with `answeringWire{ Ready bool; Reason *string; Endpoint *string; Model *string }` and the reason enum
-`"no-endpoints" | "unassigned" | "endpoint-gone" | "model-gone"`.
+`"no-endpoints" | "no-models" | "unassigned" | "endpoint-gone" | "model-gone" | "unavailable"`.
+
+Six values, not four: `no-models` and `unavailable` are states the real system
+reaches and the four-value vocabulary answered wrongly (see the acceptance
+criteria).
 
 **Acceptance Criteria:**
 
@@ -436,7 +554,11 @@ with `answeringWire{ Ready bool; Reason *string; Endpoint *string; Model *string
 - An endpoint with a key but no default and no assignment → `ready=false`, `reason="unassigned"`. **This is the case that reports "Ready" today and is the reason this task exists.**
 - A default set → `ready=true`, with `endpoint` and `model` naming what will answer.
 - A default whose endpoint was deleted → `ready=false`, `reason="endpoint-gone"`.
-- `endpointConfigured`, `credential` and `lastProbe` keep their current meanings — this task adds a fact, it does not repurpose one.
+- **The credential reported is the RESOLVED endpoint's, not the fleet's.** Today `handleAgentStatus` (`internal/transport/ws_assistant.go:123-152`) scans every endpoint and reports `resolvable` if ANY one resolves. That makes "the selected endpoint's key was deleted while an unrelated endpoint holds a valid one" report ready. Once readiness is about a role, the credential must be classified for exactly `ep.CredentialRef` of the endpoint the role resolved to. Fleet-wide endpoint health belongs on the Endpoints page, not here.
+- `credential` is null when the role does not resolve — there is no endpoint the question is about.
+- **An endpoint that offers zero models** reports `reason="no-models"`, not `unassigned`: _Choose a model_ would send a person to a picker with nothing in it.
+- **A store that cannot answer** (`ListEndpoints`, `LoadDefaultModel` or `ListRoleAssignments` failing) reports `reason="unavailable"` rather than an RPC error, because the ladder must have a rung for it — an error toast is the soft degrade with no repair path.
+- `endpointConfigured` and `lastProbe` keep their current meanings. `lastProbe` is reported ONLY when its endpoint and model match the current resolution — a probe from another model advertising success or failure for this one is a lie the person cannot see through.
 - Validated over the real socket.
 
 - [ ] **Step 1: Write the failing test — the exact lie, first**
@@ -524,35 +646,115 @@ reports the role's resolvability, not endpoint existence.
 
 - [ ] **Step 4: Implement**
 
-In `handleAgentStatus`, after the existing credential loop, resolve the role
-through the service and map the error:
+The handler is **restructured**, not extended. Today it decides the credential
+by scanning every endpoint (`internal/transport/ws_assistant.go:128-153`) and
+returns early when there are none (`:121-123`) — the early return would skip
+the answering fact entirely, in the very case that most needs a reason.
+
+The new order: resolve the role first, then ask about THAT endpoint's key.
 
 ```go
-		ep, model, resolveErr := svc.ResolveRole(profile.RoleAnswering)
-		switch {
-		case resolveErr == nil:
-			name, id := ep.Name, model
-			res.Answering = answeringWire{Ready: true, Endpoint: &name, Model: &id}
-		case len(eps) == 0:
-			// Checked BEFORE unassigned: with no endpoints there is nothing to
-			// assign, and sending a person to choose from an empty list is the
-			// one answer worse than saying nothing (spec §3).
-			res.Answering = answeringWire{Reason: strPtr(reasonNoEndpoints)}
-		case errors.Is(resolveErr, profile.ErrRoleUnassigned):
-			res.Answering = answeringWire{Reason: strPtr(reasonUnassigned)}
-		case errors.Is(resolveErr, profile.ErrRoleEndpointGone):
-			res.Answering = answeringWire{Reason: strPtr(reasonEndpointGone)}
-		case errors.Is(resolveErr, profile.ErrRoleModelGone):
-			res.Answering = answeringWire{Reason: strPtr(reasonModelGone)}
-		default:
-			return resolveErr
+	eps, err := svc.ListEndpoints()
+	if err != nil {
+		// A store that cannot answer is a rung, not an RPC error: an error
+		// toast leaves a person with nothing to do next.
+		res.Answering = answeringWire{Reason: strPtr(reasonUnavailable)}
+		return nil
+	}
+	res.EndpointConfigured = len(eps) > 0
+
+	ep, model, resolveErr := svc.ResolveRole(profile.RoleAnswering)
+	switch {
+	case resolveErr == nil:
+		name := ep.Name
+		res.Answering = answeringWire{Ready: true, Endpoint: &name, Model: &model}
+		// THE CREDENTIAL OF THE ENDPOINT THAT WILL ANSWER, and of no other.
+		// The old aggregate ("any endpoint resolves") reported ready when the
+		// selected endpoint's key was gone and an unrelated one was fine —
+		// which is the same shape of lie as reporting readiness from endpoint
+		// existence, one level down.
+		cred := h.credentialStateFor(ctx, ep.CredentialRef)
+		res.Credential = &cred
+		// A probe describes ONE endpoint and model. Reported only when it
+		// describes this one; otherwise "Last test ok" is about something the
+		// person is not asking.
+		if res.LastProbe != nil && !probeDescribes(res.LastProbe, ep, model) {
+			res.LastProbe = nil
 		}
+	case len(eps) == 0:
+		// Before `unassigned`: with no endpoints there is nothing to assign,
+		// and sending a person to choose from an empty list is the one answer
+		// worse than saying nothing (spec §3).
+		res.Answering = answeringWire{Reason: strPtr(reasonNoEndpoints)}
+	case !anyEndpointOffersAModel(eps):
+		// The endpoint exists and offers nothing. "Choose a model" would open
+		// a picker with no options — a repair the person cannot perform.
+		res.Answering = answeringWire{Reason: strPtr(reasonNoModels)}
+	case errors.Is(resolveErr, profile.ErrRoleUnassigned):
+		res.Answering = answeringWire{Reason: strPtr(reasonUnassigned)}
+	case errors.Is(resolveErr, profile.ErrRoleEndpointGone):
+		res.Answering = answeringWire{Reason: strPtr(reasonEndpointGone)}
+	case errors.Is(resolveErr, profile.ErrRoleModelGone):
+		res.Answering = answeringWire{Reason: strPtr(reasonModelGone)}
+	default:
+		// Includes a role-store read failure surfaced through ResolveRole.
+		res.Answering = answeringWire{Reason: strPtr(reasonUnavailable)}
+	}
+	return nil
 ```
 
-Note the early `return nil` at `ws_assistant.go:122` ("credential stays null")
-must no longer skip this block — with no endpoints the answering fact is still
-required. Move the resolution above that return, or drop the early return and
-guard the credential loop instead.
+`credential` stays nil on every refusal arm: with no resolved endpoint there is
+no key the question is about, and the old "first other endpoint's fact" would
+be a sentence about an endpoint nobody chose.
+
+- [ ] **Step 4b: The paired tests for the two new arms and the credential scope**
+
+```go
+func TestAgentStatus_TheCredentialIsTheResolvedEndpointsAndNoOther(t *testing.T) {
+	// The defect: an unrelated healthy endpoint used to make the whole thing
+	// report resolvable while the endpoint that would actually answer had no
+	// key at all.
+	store := storeWithEndpoints(t,
+		keyedEndpoint("e1", "chosen", "m-a", noKey),
+		keyedEndpoint("e2", "unrelated", "m-b", validKey),
+	)
+	mustSetDefault(t, store, "e1", "m-a")
+	ws, stop := newAssistantWSServer(t, store)
+	defer stop()
+
+	resp := vaultCall(t, connectWS(t, ws), "agent.status", nil, 1)
+	var got struct {
+		Credential *string `json:"credential"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Credential == nil || *got.Credential != "none" {
+		t.Fatalf("credential = %v, want none — e1 answers and e1 has no key", got.Credential)
+	}
+}
+
+func TestAgentStatus_AnEndpointOfferingNoModelsSaysSo(t *testing.T) {
+	ws, stop := newAssistantWSServer(t, storeWithEndpoints(t, endpointWithNoModels("e1", "empty")))
+	defer stop()
+	resp := vaultCall(t, connectWS(t, ws), "agent.status", nil, 1)
+	if !bytes.Contains(resp.Result, []byte(`"reason":"no-models"`)) {
+		t.Fatalf("status = %s, want no-models — Choose a model would open an empty picker", resp.Result)
+	}
+}
+
+func TestAgentStatus_AStoreThatCannotAnswerIsARungNotAnError(t *testing.T) {
+	ws, stop := newAssistantWSServer(t, failingStore(t, errors.New("disk gone")))
+	defer stop()
+	resp := vaultCall(t, connectWS(t, ws), "agent.status", nil, 1)
+	if resp.Error != nil {
+		t.Fatalf("error = %+v; a store failure must be a reported state, not an RPC error", resp.Error)
+	}
+	if !bytes.Contains(resp.Result, []byte(`"reason":"unavailable"`)) {
+		t.Fatalf("status = %s, want unavailable", resp.Result)
+	}
+}
+```
 
 - [ ] **Step 5: Run**
 
@@ -591,17 +793,30 @@ export interface AgentStatusLine {
 
 The exact copy, used verbatim by Tasks 5 and 6:
 
-| reason          | text                                               | fix.page    |
-| --------------- | -------------------------------------------------- | ----------- |
-| `no-endpoints`  | `Add an endpoint first`                            | `endpoints` |
-| `unassigned`    | `Choose a model`                                   | `roles`     |
-| `endpoint-gone` | `The model's endpoint is gone — choose another`    | `roles`     |
-| `model-gone`    | `That model is no longer offered — choose another` | `roles`     |
+| reason          | text                                                        | tone    | fix.page    |
+| --------------- | ----------------------------------------------------------- | ------- | ----------- |
+| `no-endpoints`  | `Add an endpoint first`                                     | neutral | `endpoints` |
+| `no-models`     | `That endpoint offers no models — check it`                 | warning | `endpoints` |
+| `unassigned`    | `Choose a model`                                            | warning | `roles`     |
+| `endpoint-gone` | `The model's endpoint is gone — choose another`             | danger  | `roles`     |
+| `model-gone`    | `That model is no longer offered — choose another`          | danger  | `roles`     |
+| `unavailable`   | `Settings could not be read — the assistant is unavailable` | danger  | _(none)_    |
+
+**Precedence, stated because both halves can be broken at once.** The role
+comes first and the credential second, and the order is not arbitrary: an
+unresolved role has no endpoint, so there is no credential to have an opinion
+about — the sentence would name an endpoint nobody chose. Once the role
+resolves, the credential of THAT endpoint outranks any probe result, because a
+key that is gone stops the ask whatever the last probe said. `unavailable`
+carries no `fix`: no page repairs an unreadable store, and a button that leads
+nowhere is worse than no button.
 
 **Acceptance Criteria:**
 
 - Role-first: an unready role produces its sentence even when `endpointConfigured` is true and the credential resolves.
-- Each rung carries the `fix.page` from the table, exactly.
+- Each rung carries the `fix.page` and the tone from the table, exactly.
+- **A test per rung — all six, not three.** Each asserts the sentence AND the target, because a rung that says the right thing and opens the wrong page is the defect the ladder exists to prevent.
+- `unavailable` produces no `fix`.
 - A ready role keeps today's behaviour: probe result, or `Ready`.
 - Credential problems still win over a ready role (a resolvable role with a deleted key is not usable).
 - `null` status still returns `null` — a surface shows its placeholder, not a lie.
@@ -724,14 +939,31 @@ git commit -m "feat(frontend): the readiness line names the rung and where it is
 **Interfaces:**
 
 - Consumes: `roles.list`'s `default` and `roles.setDefault` (Task 2).
-- The TS `DefaultModel` type is **not hand-written**: it is
-  `RolesListResult['default']` from the generated
-  `frontend/src/generated/roles.list.ts`, regenerated in Task 2 step 5.
-  Hand-writing it here is what put a field in the renderer's type that the
-  backend never sent (the `vault.status` defect in AGENTS.md).
-- Produces: `EndpointClient.setDefault(input: { endpointId: string; model: string }) => Promise<RoleDTO[]>`
-  — returns the refreshed rows, as `assignRole` already does, so the page has
-  one refresh path rather than two.
+- **Type names, read from the files rather than recalled.** The page's row
+  type is `WireRole` and the endpoint type is `Endpoint`, both exported from
+  `frontend/src/endpoints.ts:37,47` — there is no `RoleDTO` in the frontend.
+  The default's type is `RolesListResult['default']` from the generated
+  `frontend/src/generated/roles.list.ts` (regenerated in Task 2 step 5) and is
+  never hand-written: a hand-written renderer type carrying a field the
+  backend does not send is the `vault.status` defect in AGENTS.md.
+- **The helper is `roleStateLine`** (`frontend/src/roles-section.tsx:60`),
+  already exported and unit-tested. It is EXTENDED, not replaced by a new
+  name — the page and the ask must never grow two answers to "what does this
+  role mean".
+- Produces, and this is a **signature change to two existing methods**:
+  - `EndpointClient.listRoles(): Promise<RolesListResult>` — today it returns
+    `Promise<RolesListResult['roles']>` (`frontend/src/endpoints.ts:97`) and
+    its `.then((r) => r.roles)` throws the default away before the page can
+    ever see it. Same for `assignRole` at `:105`.
+  - `EndpointClient.setDefault(input): Promise<RolesListResult>` where input is
+    `{ endpointId: string; model: string }`.
+  - Callers read `.roles` at the call site instead. Run
+    `grep -rn "listRoles\|assignRole" frontend/src` — `roles-section.tsx` is
+    the only production caller.
+
+  Returning the whole result rather than adding a second `default` accessor is
+  what makes load and write adopt both fields **atomically**: two calls would
+  let the page render a default and a role table from different moments.
 
 **Acceptance Criteria:**
 
@@ -741,6 +973,8 @@ git commit -m "feat(frontend): the readiness line names the rung and where it is
 - The line **is** present, naming endpoint and model, when the role resolves through the default.
 - The line names the failure when the role cannot resolve.
 - A person can reach a working assistant from this page alone: set the default, and every role reads "As default".
+- **The write's test goes through the dispatcher seam and observes adoption**, not a spy call count: after choosing the default, the page shows it AND every unassigned role visibly resolves through it. A test asserting only that `setDefault` was called stays green when the returned state is dropped on the floor, when the control never updates, and when the method name is wrong.
+- Partial failure: when `roles.setDefault` rejects, the previous default stays on screen and a toast says so — the page never shows a default the store did not take.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -768,18 +1002,39 @@ it('names the model when the role resolves through the default, because the sele
   expect(row.textContent).toContain('m-a')
 })
 
-it('sets the default through the wire and shows it', async () => {
-  const client = mockedClient({
-    roles: [{ role: 'answering', endpointId: null, model: null }],
-    default: null,
-    endpoints: [{ id: 'e1', name: 'openrouter', models: [{ name: 'm-a' }] }],
+it('adopts the default the wire returns, and every unassigned role then reads through it', async () => {
+  // Through the dispatcher seam, not a spy on the client: the assertion is
+  // that the PAGE changed, which is the thing a person can see.
+  const dispatcher = new Dispatcher()
+  vi.spyOn(dispatcher, 'call').mockImplementation((method: string) => {
+    if (method === 'roles.list') {
+      return Promise.resolve({
+        roles: [{ role: 'answering', endpointId: null, model: null }],
+        default: null,
+      })
+    }
+    if (method === 'roles.setDefault') {
+      return Promise.resolve({
+        roles: [{ role: 'answering', endpointId: null, model: null }],
+        default: { endpointId: 'e1', model: 'm-a' },
+      })
+    }
+    if (method === 'endpoints.list') {
+      return Promise.resolve({
+        endpoints: [{ id: 'e1', name: 'openrouter', models: [{ name: 'm-a' }] }],
+      })
+    }
+    return Promise.reject(new Error(`unexpected ${method}`))
   })
-  const spy = vi.spyOn(client, 'setDefault').mockResolvedValue(undefined)
-  const container = mount(client)
+  const container = mount(new EndpointClient(dispatcher))
   const control = await findDefaultControl(container)
   fireEvent.change(within(control).getByLabelText('Endpoint'), { target: { value: 'e1' } })
   fireEvent.change(within(control).getByLabelText('Model'), { target: { value: 'm-a' } })
-  await vi.waitFor(() => expect(spy).toHaveBeenCalledWith({ endpointId: 'e1', model: 'm-a' }))
+
+  // The role row now resolves THROUGH the default, and says so — which the
+  // two selects cannot, because they read "As default".
+  const row = await findRow(container, 'answering')
+  await vi.waitFor(() => expect(row.textContent).toContain('As default: openrouter · m-a'))
 })
 ```
 
@@ -795,24 +1050,53 @@ Expected: FAIL — no default control, and the status line renders for every row
  *  role names its own endpoint and model, the selects already show both and a
  *  sentence repeating them is noise — so there is no line at all. The line
  *  speaks when resolution goes somewhere the controls do not show: through the
- *  default (the select reads "As default"), or nowhere. */
-function roleLine(
-  row: RoleDTO,
-  def: DefaultModel | null,
+ *  default (the select reads "As default"), or nowhere.
+ *
+ *  This EXTENDS the existing roleStateLine rather than adding a second
+ *  resolver beside it: the page and the ask may never disagree about what a
+ *  role means, which is the reason that function was written pure and
+ *  unit-tested in the first place. Note the return type gains `| null` — the
+ *  silence is a value, not an empty string.
+ */
+export function roleStateLine(
+  row: WireRole,
+  def: RolesListResult['default'],
   endpoints: Endpoint[],
 ): { tone: StatusDotTone; text: string } | null {
-  const assigned = row.endpointId !== null && row.model !== null
-  if (assigned) {
-    const problem = resolutionProblem(row.endpointId!, row.model!, endpoints)
-    return problem ?? null // resolves to exactly what the selects show → silence
+  // An explicit assignment: the two selects already show it, so a healthy row
+  // says nothing and a broken one keeps today's three sentences verbatim.
+  if (row.endpointId !== null && row.model !== null) {
+    return brokenLine(row.endpointId, row.model, endpoints)
   }
   if (!def) {
     return { tone: 'warning', text: 'No model assigned — the role cannot be used until it is' }
   }
-  const problem = resolutionProblem(def.endpointId, def.model, endpoints)
-  if (problem) return problem
+  const broken = brokenLine(def.endpointId, def.model, endpoints)
+  if (broken) return broken
   const ep = endpoints.find((e) => e.id === def.endpointId)!
-  return { tone: 'ok', text: `As default: ${ep.name} · ${def.model}` }
+  const model = ep.models.find((m) => m.name === def.model)!
+  return { tone: 'ok', text: `As default: ${ep.name} · ${model.alias ?? model.name}` }
+}
+
+/** The two refusals a stored pair can carry, worded exactly as they are
+ *  today. Null when the pair resolves. */
+function brokenLine(
+  endpointId: string,
+  modelName: string,
+  endpoints: Endpoint[],
+): { tone: StatusDotTone; text: string } | null {
+  const ep = endpoints.find((e) => e.id === endpointId)
+  if (!ep) {
+    return { tone: 'error', text: 'The assigned endpoint no longer exists — reassign this role' }
+  }
+  const model = ep.models.find((m) => m.name === modelName)
+  if (!model) {
+    return {
+      tone: 'error',
+      text: `The assigned model "${modelName}" is no longer offered by ${ep.name} — reassign this role`,
+    }
+  }
+  return null
 }
 ```
 
@@ -846,21 +1130,39 @@ git commit -m "feat(frontend): the default model is chosen here, and the line st
 **Interfaces:**
 
 - Consumes: `agentStatusLine`'s `fix` (Task 4) and `AgentStatusResult.answering` (Task 3).
-- Produces: `Editor.setModelChip(state: ModelChipState | null): void` where
+- **There is no status STATE in the renderer today, and the plan previously
+  claimed there was.** `terminal-content.ts:1373` passes
+  `status: () => new AgentClient(this.client.dispatcher).status()` into
+  `AgentInputTarget` — a function called at refusal time, not a stored,
+  refreshable fact. This task creates the owner.
+- Produces:
+  - `AgentReadiness` in a new `frontend/src/agent-readiness.ts`: one store
+    holding the last `AgentStatusResult`, a `refresh()` and a subscribe seam.
+    **One owner** (AD-8) — the chip and any later surface read the same store
+    rather than each calling `agent.status`.
+  - `Editor.setModelChip(state: ModelChipState | null): void`
+  - `Editor.onModelChipClick(handler: (page: 'endpoints' | 'roles') => void)`
+  - A new host hook `onOpenRoles?: () => void` beside the existing
+    `onCreateEndpoint` (`terminal-content.ts:319`), wired in `main.tsx` to
+    `openSettingsPane()` on the Roles page. `onCreateEndpoint` already exists
+    and is reused for the `endpoints` target rather than duplicated.
+- Produces `ModelChipState` where
 
 ```ts
 export type ModelChipState =
   | { kind: 'ready'; endpoint: string; model: string }
-  | { kind: 'action'; text: string; page: 'endpoints' | 'roles' }
+  | { kind: 'action'; text: string; page: 'endpoints' | 'roles' | null }
 ```
 
 **Acceptance Criteria:**
 
 - The chip is present only when the active input target is the assistant (Ask); switching to Run removes it.
-- Ready → two chips: the endpoint (click → Endpoints) and the model (click → Roles).
-- Not ready → one chip carrying the ladder's sentence, click → that rung's page.
+- Ready → two chips: the endpoint (click → Endpoints) and the model (click → Roles). **Both destinations are tested**, not only the unready one.
+- Not ready → one chip carrying the ladder's sentence, click → that rung's page. A rung with no `fix` (`unavailable`) renders a chip that is not a button.
 - The model id is truncated to one line, with the full value in `title` and the accessible name.
-- The composer's height does not change when the chip appears or disappears.
+- **The chip refreshes when the facts change**, not only on mount. `AgentReadiness.refresh()` is called after: endpoint create/update/delete, `roles.assign`, `roles.setDefault`, entering Ask mode, and socket reconnect. Without this the end-to-end path in Task 7 cannot pass — the chip would still read _Add an endpoint first_ after an endpoint was added.
+- **A late response never repaints a newer state.** Each refresh carries a monotonically increasing sequence; a reply whose sequence is below the last applied one is discarded. Two refreshes racing (add an endpoint, then immediately set a default) must not leave the older answer on screen.
+- **The composer's height does not change** when the chip appears or disappears — asserted by measuring, not assumed: capture the chrome row's height in Run, switch to Ask with a 40-character model id, assert the height is unchanged and the chip is one line.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -896,10 +1198,70 @@ it('opens the page the rung names', async () => {
 })
 ```
 
+```ts
+it('opens Endpoints from the provider and Roles from the model', async () => {
+  const opened: string[] = []
+  const { content } = await mountTerminal(
+    makeClipboard(),
+    { onCreateEndpoint: () => opened.push('endpoints'), onOpenRoles: () => opened.push('roles') },
+    clientWithStatus(READY_STATUS),
+  )
+  switchToAsk(content)
+  await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+  clickChip(content, 'openrouter')
+  clickChip(content, 'm-a')
+  expect(opened).toEqual(['endpoints', 'roles'])
+})
+
+it('repaints when the facts change, not only on mount', async () => {
+  // Without this the end-to-end path cannot pass: the chip would still read
+  // "Add an endpoint first" after an endpoint had been added.
+  const readiness = new AgentReadiness(clientWithStatus(NO_ENDPOINTS_STATUS))
+  const { content } = await mountTerminal(makeClipboard(), { readiness }, undefined)
+  switchToAsk(content)
+  await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Add an endpoint first']))
+  readiness._setStatusForTest(UNASSIGNED_STATUS)
+  await vi.waitFor(() => expect(chipsOf(content)).toEqual(['Choose a model']))
+})
+
+it('discards a late reply that would repaint an older state', async () => {
+  const readiness = new AgentReadiness(slowThenFastClient(NO_ENDPOINTS_STATUS, READY_STATUS))
+  const { content } = await mountTerminal(makeClipboard(), { readiness }, undefined)
+  switchToAsk(content)
+  void readiness.refresh() // slow, resolves LAST with the older facts
+  void readiness.refresh() // fast, resolves first with the newer facts
+  await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+  await flushAll()
+  expect(chipsOf(content)).toEqual(['openrouter', 'm-a'])
+})
+
+it('does not change the composer height when the chip appears', async () => {
+  // Measured, not assumed: a chip that wraps pushes the chrome to a second
+  // row, and every text assertion above stays green while it does.
+  const { content } = await mountTerminal(
+    makeClipboard(),
+    { attachToDocument: true },
+    clientWithStatus(statusWithModel('deepseek/deepseek-v4-flash-0731-preview')),
+  )
+  const chrome = chromeRowOf(content)
+  const before = chrome.getBoundingClientRect().height
+  switchToAsk(content)
+  await vi.waitFor(() => expect(chipsOf(content).length).toBe(2))
+  expect(chrome.getBoundingClientRect().height).toBe(before)
+})
+```
+
 - [ ] **Step 2: Run and watch them fail**
 
 Run: `cd frontend && npx vitest run src/terminal-content.test.ts -t "model chip"`
 Expected: FAIL — `chipsOf` finds no `.nocx-editor-model` element.
+
+**On the height test and jsdom.** jsdom computes no layout, so
+`getBoundingClientRect` returns zeroes there and the assertion passes
+vacuously. Put THIS one in the Playwright suite (Task 7's file), where a real
+engine measures, and leave the text assertions in vitest. A layout claim
+asserted in jsdom is the green-suite-over-a-broken-product shape AGENTS.md
+opens with.
 
 - [ ] **Step 3: Implement the chip**
 
@@ -916,11 +1278,22 @@ this.modelEndpointChip = document.createElement('button')
 this.modelEndpointChip.type = 'button'
 this.modelEndpointChip.className = 'nocx-chip nocx-editor-model'
 this.modelEndpointChip.style.display = 'none'
+// The listener is installed ONCE and reads a slot, exactly as recoveryChip
+// does at editor.ts:317/445. Re-adding a listener on every state change is
+// how one click ends up firing three times.
+this.modelEndpointChip.addEventListener('click', () => {
+  const t = this._modelChipTargets.endpoint
+  if (t) this._onModelChipClick?.(t)
+})
 
 this.modelChip = document.createElement('button')
 this.modelChip.type = 'button'
 this.modelChip.className = 'nocx-chip nocx-editor-model'
 this.modelChip.style.display = 'none'
+this.modelChip.addEventListener('click', () => {
+  const t = this._modelChipTargets.model
+  if (t) this._onModelChipClick?.(t)
+})
 
 this.chromeLeft.append(
   this.recoveryChip,
@@ -936,12 +1309,16 @@ this.chromeLeft.append(
    *  target is in, where no model answers anything and a chip claiming one
    *  would be decoration. */
   setModelChip(state: ModelChipState | null): void {
+    // Targets are STORED, never captured in a closure: the chips' meaning
+    // changes with every state while the listeners above are permanent.
+    this._modelChipTargets = { endpoint: null, model: null }
     if (state === null) {
       this.modelEndpointChip.style.display = 'none'
       this.modelChip.style.display = 'none'
       return
     }
     if (state.kind === 'ready') {
+      this._modelChipTargets = { endpoint: 'endpoints', model: 'roles' }
       this.modelEndpointChip.style.display = ''
       this.modelEndpointChip.textContent = state.endpoint
       this.modelEndpointChip.title = state.endpoint
@@ -954,6 +1331,11 @@ this.chromeLeft.append(
       this.modelChip.setAttribute('aria-label', `Answers with the model ${state.model}. Open Roles.`)
       return
     }
+    // An action rung. A rung with no destination (`unavailable`) is not a
+    // control: a button that leads nowhere invites a click that does nothing,
+    // which reads as the app being broken rather than the store unreadable.
+    this._modelChipTargets = { endpoint: null, model: state.page }
+    this.modelChip.disabled = state.page === null
     this.modelEndpointChip.style.display = 'none'
     this.modelChip.style.display = ''
     this.modelChip.textContent = state.text
@@ -996,52 +1378,98 @@ git commit -m "feat(frontend): the composer names the model that will answer, an
 **Files:**
 
 - Create: `e2e/assistant-readiness.spec.ts`
+- Modify: `e2e/harness.ts` (extend `bindEndpoint` with a "leave the model
+  unchosen" mode, and add `setDefaultModel`)
 
 **Interfaces:**
 
 - Consumes: everything above, through the real backend and the real socket.
+- **The fixtures already exist and are reused, not reinvented.**
+  `e2e/agent-ask.spec.ts:67-73` is the pattern: `FakeOpenAI` from
+  `e2e/fake-openai.ts` is a real local server that answers
+  `/chat/completions`, and `bindEndpoint` / `settingsReady` from
+  `e2e/harness.ts` configure an endpoint against it. Without `FakeOpenAI`
+  there is no model to answer and "an answer arrives" cannot be made true by
+  `cmd/devharness` alone.
 - Produces: the epic's proof.
 
 **Acceptance Criteria:**
 
-- Runs against `cmd/devharness` (no Wails, no display) on a disposable `$HOME`.
-- Watches the whole path: no endpoint → _Add an endpoint first_ → add one with a key → _Choose a model_, **never** _Ready_ → set the default from that control → ask → an answer arrives.
-- Asserts on observable state changes (a chip's text, a row appearing), never on a duration — a spec that needs a slow machine is broken on a fast one.
+- Runs against `cmd/devharness` on a disposable `$HOME`, in the container
+  (`e2e/run-in-container.sh`).
+- Watches the whole path: no endpoint → _Add an endpoint first_ → add one with
+  a key, model unchosen → _Choose a model_, **never** _Ready_ → set the
+  default from the chip's own destination → ask → the answer's text arrives.
+- Asserts on observable state changes, never on a duration.
+- Carries the composer-height assertion that jsdom cannot make (Task 6).
 
-- [ ] **Step 1: Write the spec**
+- [ ] **Step 1: Extend the harness**
+
+`bindEndpoint` today configures an endpoint AND assigns the role, because
+until now there was no way to have one without the other. Split it: a
+`bindEndpoint(page, { assignRole: false })` mode that stops after the
+endpoint, plus
 
 ```ts
-test('a person reaches a working assistant without discovering the Roles page unaided', async ({
+/** Chooses the default model on Settings → Roles — the one choice the whole
+ *  ladder exists to lead a person to. Separate from bindEndpoint because the
+ *  point of the readiness spec is the state BETWEEN the two. */
+export async function setDefaultModel(page: Page, model: string): Promise<void> {
+  await page.getByRole('button', { name: 'Roles' }).click()
+  const control = page.locator('.roles-default')
+  await control.getByLabel('Model').selectOption(model)
+  await expect(page.locator('.roles-default__state')).toContainText(model)
+}
+```
+
+- [ ] **Step 2: Write the spec**
+
+```ts
+test('a person reaches a working assistant without discovering Roles unaided', async ({
   page,
+  fake,
 }) => {
   await page.goto(BASE_URL)
   await switchToAsk(page)
 
-  // The first rung: no endpoints, and the product says which door to open.
   const chip = page.locator('.nocx-editor-model')
   await expect(chip).toHaveText('Add an endpoint first')
 
+  // The chip is the door, not a label: clicking it must land on Endpoints.
   await chip.click()
-  await addEndpointWithKey(page, { name: 'openrouter', model: 'm-a' })
+  await bindEndpoint(page, { baseURL: fake.url, model: 'm-a', assignRole: false })
 
-  // The second rung — and the assertion this whole epic exists for: an
-  // endpoint with a key is NOT readiness.
+  // THE ASSERTION THIS EPIC EXISTS FOR: an endpoint with a valid key is not
+  // readiness. Before this work the line here read "Ready" and the refusal
+  // arrived at the first question.
   await expect(chip).toHaveText('Choose a model')
-  await expect(chip).not.toHaveText('Ready')
 
   await chip.click()
-  await setDefaultModel(page, { endpoint: 'openrouter', model: 'm-a' })
+  await setDefaultModel(page, 'm-a')
 
-  // Ready means the model is named, not that a box was ticked.
+  // Ready means the model is NAMED, not that a box was ticked.
   await expect(page.locator('.nocx-editor-model').first()).toHaveText('openrouter')
   await expect(page.locator('.nocx-editor-model').last()).toHaveText('m-a')
 
   await askAQuestion(page, 'hello')
-  await expect(page.locator('.answer-block')).toBeVisible()
+  // The answer's CONTENT, not merely a container becoming visible: an empty
+  // answer block is exactly what a broken stream produces.
+  await expect(page.locator('[data-answered-by]')).toContainText(fake.reply)
+})
+
+test('the chip does not change the composer height', async ({ page, fake }) => {
+  // The layout claim jsdom cannot make (Task 6): a real engine measures here.
+  await page.goto(BASE_URL)
+  await bindEndpoint(page, { baseURL: fake.url, model: 'deepseek/deepseek-v4-flash-0731-preview' })
+  const chrome = page.locator('.nocx-editor-chrome')
+  const before = await chrome.boundingBox()
+  await switchToAsk(page)
+  await expect(page.locator('.nocx-editor-model')).toHaveCount(2)
+  expect((await chrome.boundingBox())?.height).toBe(before?.height)
 })
 ```
 
-- [ ] **Step 2: Run it in the container**
+- [ ] **Step 3: Run it in the container**
 
 ```bash
 PW_PROJECTS=chromium e2e/run-in-container.sh e2e/assistant-readiness.spec.ts
@@ -1049,12 +1477,13 @@ PW_PROJECTS=chromium e2e/run-in-container.sh e2e/assistant-readiness.spec.ts
 
 Expected: PASS. A failure that is only red in the container is checked against
 CI before being "fixed" — the container is Linux WebKit at a container
-viewport and its failure set is not CI's.
+viewport and its failure set is not CI's. The height spec is exactly the kind
+that can differ, so confirm it in CI before touching it.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add e2e/assistant-readiness.spec.ts
+git add e2e/assistant-readiness.spec.ts e2e/harness.ts
 git commit -m "test(e2e): a person reaches a working assistant without finding Roles unaided (nocx-rikz5)"
 ```
 
@@ -1073,17 +1502,55 @@ git commit -m "test(e2e): a person reaches a working assistant without finding R
 
 ## Spec coverage
 
-| Spec requirement                                                                      | Task                          |
-| ------------------------------------------------------------------------------------- | ----------------------------- |
-| §1 readiness is role resolvability; `agent.status` grows the role                     | 3                             |
-| §1 `agentStatusLine` inverts to role-first                                            | 4                             |
-| §2 the default as an input to the one resolver                                        | 1                             |
-| §2 the default is set at the top of the Roles page                                    | 5                             |
-| §2 per-role override, "As default" as the initial value                               | 5                             |
-| §3 the ladder's five states, each with one fix location                               | 4 (copy), 5 + 6 (surfaces)    |
-| §4 the chip: Ask-only, provider → Endpoints, model → Roles, truncation                | 6                             |
-| §5 the green line says only what the controls cannot                                  | 5                             |
-| §6 the end-to-end check                                                               | 7                             |
-| §6 one test per rung                                                                  | 4                             |
-| §6 the interval: deleting a default's endpoint returns the ladder to "choose a model" | 1 (resolution) + 3 (reported) |
-| §6 contracts asserted over the socket                                                 | 2, 3                          |
+| Spec requirement                                                                      | Task                                                                     |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| §1 readiness is role resolvability; `agent.status` grows the role                     | 3                                                                        |
+| §1 endpoint and credential become reasons, not the headline                           | 3 (credential scoped to the resolved endpoint)                           |
+| §1 `agentStatusLine` inverts to role-first                                            | 4                                                                        |
+| §2 the default as an input to the one resolver                                        | 1                                                                        |
+| §2 the default is set at the top of the Roles page                                    | 5                                                                        |
+| §2 per-role override, "As default" as the initial value                               | 5                                                                        |
+| §3 the ladder's states, each with one fix location                                    | 4 (copy + precedence), 5 + 6 (surfaces)                                  |
+| §4 the chip: Ask-only, provider → Endpoints, model → Roles, truncation                | 6                                                                        |
+| §4 the chip stays current as the facts change                                         | 6 (`AgentReadiness`, refresh events, stale-reply ordering)               |
+| §5 the green line says only what the controls cannot                                  | 5 (`roleStateLine` extended, returns null for silence)                   |
+| §6 the end-to-end check                                                               | 7                                                                        |
+| §6 one test per rung                                                                  | 4 (all six rungs, sentence AND target)                                   |
+| §6 the interval: deleting a default's endpoint returns the ladder to "choose a model" | 1, Step 4b — **cleared inside `DeleteEndpoint`'s existing single write** |
+| §6 contracts asserted over the socket                                                 | 2, 3                                                                     |
+| §6 the composer's height is unchanged                                                 | 7 (a real engine measures; jsdom cannot)                                 |
+
+## Corrections applied after review
+
+Codex reviewed this plan against the code on 2026-08-21. Nine findings were
+verified against the files and applied above. Two are worth naming because
+they were the plan asserting something false about the codebase:
+
+- The plan claimed `roles.assign` validates that the endpoint exists. It does
+  not (`ws_roles.go:97`), and the store deliberately accepts a dangling
+  assignment (`role_test.go:199`). Task 2 now decides the policy explicitly
+  instead of inheriting one that was never there.
+- The plan claimed `terminal-content.ts` already holds an `agent.status`
+  read it could feed the chip from. It holds a per-refusal callback
+  (`:1373`), not state. Task 6 now creates the owner, and without that the
+  end-to-end path could not have passed.
+
+Task 1 also contradicted this plan's own spec: it left a default pointing at
+a deleted endpoint, while spec §6 requires the ladder to return to _choose a
+model_. The coverage row above said "covered". Fixed in Step 4b.
+
+**One finding is REJECTED, with evidence.** The review argued the default
+violates `nocx-e6kn2` because "after asking there is no immutable model
+attribution on the answer block", and that the closed decision must therefore
+be reopened. That is false in two places: `content.RunFacts`
+(`internal/content/ledger.go:703`) persists `EndpointID` and `Model` on the
+run so that "a later endpoint change never reinterprets what the run used",
+and `frontend/src/agent-ask.ts:241` sets `dataset.answeredBy = ask.model` on
+the answer element, in a comment that cites `nocx-e6kn2` by name. The
+attribution mechanism the review says is missing was built for this decision.
+
+What survives of that finding is smaller and is filed separately rather than
+smuggled in here: `data-answered-by` is an attribute, not visible text, so a
+person can read which model answered only by inspecting the DOM. Whether the
+answer block should SHOW it is a real question — and a display task, not a
+reason to reopen a closed decision or to block this epic.
