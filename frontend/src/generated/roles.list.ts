@@ -17,6 +17,19 @@ export interface RolesListResult {
    * Every role of the closed set, in product order. Never null: an empty store still lists the roles, null-assigned.
    */
   roles: Role[]
+  /**
+   * The one (endpoint, model) pair every role with no assignment of its own resolves through (bead nocx-rikz5). Null when the person has chosen none — which is the state a fresh profile is in, and the state in which the assistant is not ready. It is never a pair the product picked: a default the product invented is the silent fallback nocx-e6kn2 forbids. Declared here once and referenced cross-file by roles.assign, whose result is this same table after a write; roles.setDefault returns this shape too.
+   */
+  default: {
+    /**
+     * The default endpoint's backend-minted id. The endpoint EXISTS at the moment of the write — roles.setDefault refuses an id naming no endpoint, because a dangling default breaks every unassigned role at once with nothing on screen naming which choice did it.
+     */
+    endpointId: string
+    /**
+     * The default model id the endpoint's API understands (never the picker alias). A model that later disappears leaves the default unresolvable and says so; it is never repaired into a neighbouring model.
+     */
+    model: string
+  } | null
 }
 export interface Role {
   /**

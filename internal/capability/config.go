@@ -140,6 +140,15 @@ type ConfigService interface {
 	// ErrRoleModelGone) — resolution is the truth-teller: a deleted
 	// endpoint or removed model stays a refusal, never a neighbour hop.
 	ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error)
+	// DefaultModel returns the one pair every role WITHOUT an assignment
+	// of its own resolves through (bead nocx-rikz5), or the zero value
+	// when the person has chosen none. Unset is a value, not an error.
+	DefaultModel() (profile.DefaultModel, error)
+	// SetDefaultModel replaces the default; the empty pair clears it. The
+	// endpoint is checked to EXIST here rather than in the store: a
+	// dangling default breaks every unassigned role at once, and nothing
+	// on screen names which choice did it.
+	SetDefaultModel(d profile.DefaultModel) error
 }
 
 // ConfigOperation is the typed operation for the config domain. Its gates
@@ -666,6 +675,51 @@ func (s *configService) ResolveRole(role profile.ModelRole) (profile.Endpoint, s
 		return profile.Endpoint{}, "", err
 	}
 	return profile.ResolveRole(role, assignments, def, eps)
+}
+
+// DefaultModel returns the chosen default, or the zero value when nobody
+// has chosen one (bead nocx-rikz5). It is a plain config read: the pair
+// names an endpoint and a model by identity, nothing secret.
+func (s *configService) DefaultModel() (profile.DefaultModel, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.DefaultModel{}, err
+	}
+	if s.roles == nil {
+		return profile.DefaultModel{}, errors.New("role store not wired")
+	}
+	return s.roles.LoadDefaultModel()
+}
+
+// SetDefaultModel replaces the default in one write, refusing a pair whose
+// endpoint does not exist (bead nocx-rikz5).
+//
+// The EXISTENCE check lives here and NOT in AssignRole, and the asymmetry
+// is deliberate: a per-role assignment is a statement about one role that
+// the person made, so a dangling one must survive to be reported against
+// that role (profile.ResolveRole's ErrRoleEndpointGone, pinned by
+// internal/profile/role_test.go). The default is a global convenience every
+// unassigned role inherits silently — a dangling one breaks all of them at
+// once with nothing naming the choice that did it, so it is refused at the
+// moment it is written. Resolution still refuses at read time: this check
+// is the tidy path, never the safety net, and cannot close the window
+// between the check and a concurrent endpoint delete.
+func (s *configService) SetDefaultModel(d profile.DefaultModel) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if s.roles == nil {
+		return errors.New("role store not wired")
+	}
+	if d.IsSet() {
+		ep, err := s.loadEndpoint(d.EndpointID)
+		if err != nil {
+			return err
+		}
+		if ep == nil {
+			return fmt.Errorf("default model: %s: %w", d.EndpointID, profile.ErrEndpointNotFound)
+		}
+	}
+	return s.roles.SetDefaultModel(d)
 }
 
 // loadEndpoint returns the stored endpoint with the given id, or nil when

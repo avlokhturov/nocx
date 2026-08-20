@@ -17,6 +17,7 @@ import { EndpointClient, type Endpoint, type RoleAssignInput } from './endpoints
 import { Dispatcher } from './dispatcher'
 import { clearToasts } from './ui'
 import type { Role } from './generated/roles.list'
+import type { RolesAssignResult } from './generated/roles.assign'
 
 afterEach(() => {
   clearToasts()
@@ -51,20 +52,24 @@ function mountRoles(
   roles: Role[],
 ): {
   client: EndpointClient
-  assignRole: MockInstance<(input: RoleAssignInput) => Promise<Role[]>>
+  assignRole: MockInstance<(input: RoleAssignInput) => Promise<RolesAssignResult>>
   container: HTMLElement
 } {
   const client = new EndpointClient(new Dispatcher())
-  const assignRole = vi
-    .spyOn(client, 'assignRole')
-    .mockImplementation((input) =>
-      Promise.resolve(
-        [...roles].map((r) =>
-          r.role === input.role ? { ...r, endpointId: input.endpointId, model: input.model } : r,
-        ),
+  // The client returns the WHOLE result now (bead nocx-rikz5) — the table
+  // AND the default in one answer — so the mocks return it too. `default`
+  // is null here: these cases predate the default and say nothing about it.
+  const assignRole = vi.spyOn(client, 'assignRole').mockImplementation((input) =>
+    Promise.resolve({
+      roles: [...roles].map((r) =>
+        r.role === input.role ? { ...r, endpointId: input.endpointId, model: input.model } : r,
       ),
-    )
-  vi.spyOn(client, 'listRoles').mockImplementation(() => Promise.resolve([...roles]))
+      default: null,
+    }),
+  )
+  vi.spyOn(client, 'listRoles').mockImplementation(() =>
+    Promise.resolve({ roles: [...roles], default: null }),
+  )
   vi.spyOn(client, 'listEndpoints').mockImplementation(() => Promise.resolve([...endpoints]))
   const container = document.body.appendChild(document.createElement('div'))
   render(() => <RolesSection client={client} />, { container })

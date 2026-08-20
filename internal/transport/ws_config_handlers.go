@@ -2327,13 +2327,20 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
-		// The role methods (bead nocx-e6kn2): roles.list and roles.assign
-		// ride the same config operation as the endpoints they reference.
+		// The role methods (beads nocx-e6kn2, nocx-rikz5): roles.list,
+		// roles.assign and roles.setDefault ride the same config operation
+		// as the endpoints they reference — one queue, so a default and an
+		// assignment can never be written against two different endpoint
+		// tables.
 		regResponder(configSub, "roles.list", noParams(), func(r Responder) handlerFunc {
 			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		regResponder(configSub, "roles.assign", params(validateRoleAssignRaw), func(r Responder) handlerFunc {
+			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "roles.setDefault", params(validateRoleSetDefaultRaw), func(r Responder) handlerFunc {
 			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
