@@ -13,7 +13,7 @@ From the owner's first real use of the Roles page (screenshot, 2026-08-21):
 3. It is **not obvious** a person has to go into Roles at all. With many
    endpoints, each offering many models, the current shape does not scale.
 4. The green line under each role — `Answers with openrouter ·
-   deepseek/deepseek-v4-flash-0731` — repeats what the two selects above it
+deepseek/deepseek-v4-flash-0731` — repeats what the two selects above it
    already say.
 5. And, said plainly mid-discussion: **"нам всё равно есть соединения или нет,
    нам важно выбрана ли роль."**
@@ -27,12 +27,12 @@ Named before anything is proposed, per AGENTS.md.
 - **AD-8, one owner per behaviour.** `profile.ResolveRole` (internal/profile/role.go:140)
   is the single place a role becomes an (endpoint, model) pair. Everything
   below reads it; nothing below adds a second resolver. The default is a new
-  *input* to that function, never a second function.
+  _input_ to that function, never a second function.
 - **`nocx-e6kn2` (closed, "Model roles: a feature asks for a role, never for a
-  model id").** Its acceptance criterion is binding here: *"A role with no
+  model id").** Its acceptance criterion is binding here: _"A role with no
   model assigned is a VISIBLE failure where the feature is used, never a
   silent fallback to some other model — a silent fallback means a person
-  cannot tell which model answered."* The default in this design does **not**
+  cannot tell which model answered."_ The default in this design does **not**
   violate it, and §2 states exactly why.
 - **ADR-0028 / `nocx-6bo1` (the agent loop is ours; the model client is
   replaceable).** Model selection stays above the client seam. No part of this
@@ -55,16 +55,16 @@ and the person discovers otherwise only when a question is refused with
 `ErrRoleUnassigned`. That is a readiness line contradicted by the product one
 keystroke later.
 
-**The change.** The status answers a different question: *can the role the
-feature will ask for resolve, and if not, why?* The vocabulary is not invented
+**The change.** The status answers a different question: _can the role the
+feature will ask for resolve, and if not, why?_ The vocabulary is not invented
 — `internal/profile/role.go` already returns it:
 
-| Error | Meaning |
-|---|---|
-| `ErrRoleUnassigned` | no model chosen for this role |
-| `ErrRoleEndpointGone` | the assigned endpoint no longer exists |
-| `ErrRoleModelGone` | the endpoint no longer offers that model |
-| `ErrRoleUnknown` | not a role the product defines |
+| Error                 | Meaning                                  |
+| --------------------- | ---------------------------------------- |
+| `ErrRoleUnassigned`   | no model chosen for this role            |
+| `ErrRoleEndpointGone` | the assigned endpoint no longer exists   |
+| `ErrRoleModelGone`    | the endpoint no longer offers that model |
+| `ErrRoleUnknown`      | not a role the product defines           |
 
 **Consequences.**
 
@@ -73,7 +73,7 @@ feature will ask for resolve, and if not, why?* The vocabulary is not invented
   carries `additionalProperties: false` plus an explicit `required`, and is
   asserted both as a DTO and **over the real socket**.
 - Endpoint and credential facts stay, but stop being the headline. They become
-  *reasons a role cannot resolve*, not a separate top-level state.
+  _reasons a role cannot resolve_, not a separate top-level state.
 - `agentStatusLine`'s branch order inverts: role first, endpoint and credential
   as detail underneath.
 
@@ -105,7 +105,7 @@ would make two names for one place mid-change. The person is not expected to
 find this page unaided — §3 and §4 are what bring them here.
 
 **Overrides stay per role**, as they are today: the owner confirmed the role
-*is* the task. Each role's select gains the value **"As default"**, and that is
+_is_ the task. Each role's select gains the value **"As default"**, and that is
 its initial state — so the Roles page opens already working and demands
 nothing.
 
@@ -119,13 +119,13 @@ Each state names a single next action and points at a single surface. This is
 the answer to "it is not obvious you must go into Roles" — the person never has
 to deduce it.
 
-| State | What the product says | Where the fix is |
-|---|---|---|
-| No endpoints at all | Add an endpoint first | Settings → Endpoints |
-| Endpoints exist, no default and no assignment | Choose a model | Settings → Roles |
-| The role's endpoint is gone | Assign a model again | Settings → Roles |
-| The role's model is gone | Assign a model again | Settings → Roles |
-| The endpoint has no key | (the existing `credentialLine` vocabulary) | Settings → Endpoints |
+| State                                         | What the product says                      | Where the fix is     |
+| --------------------------------------------- | ------------------------------------------ | -------------------- |
+| No endpoints at all                           | Add an endpoint first                      | Settings → Endpoints |
+| Endpoints exist, no default and no assignment | Choose a model                             | Settings → Roles     |
+| The role's endpoint is gone                   | Assign a model again                       | Settings → Roles     |
+| The role's model is gone                      | Assign a model again                       | Settings → Roles     |
+| The endpoint has no key                       | (the existing `credentialLine` vocabulary) | Settings → Endpoints |
 
 "No endpoints at all" and "nothing assigned" are **two states, not one**,
 because they are fixed in different places. Collapsing them would send a person
@@ -143,7 +143,7 @@ arrives — so the chip does not disturb the composer's single height
 (`nocx-6c546`).
 
 **Visibility.** The chip is shown **only in Ask mode**, and it shows the model
-that will answer *this* question — the `answering` role's resolution. In Run
+that will answer _this_ question — the `answering` role's resolution. In Run
 mode there is no chip: no model answers a shell command, and a chip claiming
 otherwise would be decoration.
 
@@ -191,8 +191,8 @@ to discover it was required, and without ever being told "Ready" by an
 assistant that is not.
 
 **The end-to-end check** (`cmd/devharness`, real backend, real socket): clean
-profile → the readiness line says *add an endpoint* → add an endpoint with a
-key → the line becomes *choose a model*, **not** *Ready* → choose the default
+profile → the readiness line says _add an endpoint_ → add an endpoint with a
+key → the line becomes _choose a model_, **not** _Ready_ → choose the default
 from that line's own control → ask → the answer arrives.
 
 **Failure paths — one test per rung of §3**, because each points somewhere
@@ -202,7 +202,7 @@ assigned, the role resolves.
 
 **Interval, both ends.** The default exists from the moment it is written until
 it is either overwritten or its endpoint is deleted. Deleting the endpoint a
-default names must return the ladder to *choose a model* — it must not leave a
+default names must return the ladder to _choose a model_ — it must not leave a
 default pointing at nothing. Endpoint deletion is an ordinary action, not an
 edge, so it is tested.
 
