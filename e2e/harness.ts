@@ -26,6 +26,62 @@ export async function promptReady(page: Page): Promise<void> {
 }
 
 /**
+ * Put the sidebar on `viewId` and leave it there.
+ *
+ * IDEMPOTENT ON PURPOSE, because the activity-bar button is a TOGGLE and the
+ * sidebar's active view is now PERSISTED (nocx-mqie.1, ADR-0033): a spec that
+ * reloads mid-test comes back with its view ALREADY showing, and a second
+ * unconditional click is then the thing that closes the panel it was asked to
+ * open. That is what the notes spec did across its `page.reload()`, and it is
+ * the single-test version of what `resetStand` handles between tests.
+ *
+ * `aria-selected` is the button's own account of whether its view is the one
+ * on screen (ui/icon-button.tsx), so it answers the question directly rather
+ * than by guessing from the panel.
+ */
+export async function showSidebarView(page: Page, viewId: string): Promise<void> {
+  const button = page.locator(`.activity-bar button[data-view="${viewId}"]`)
+  await baseExpect(button).toBeVisible({ timeout: 15_000 })
+  if ((await button.getAttribute('aria-selected')) !== 'true') {
+    await button.click()
+  }
+  await baseExpect(button).toHaveAttribute('aria-selected', 'true', { timeout: 10_000 })
+}
+
+/**
+ * Wait until the Settings page has LOADED, not until it has merely mounted.
+ *
+ * NEVER `.ui-page__scroll` — thirteen specs used to open Settings and wait for
+ * that, and the reason it looked like a readiness signal is the reason it is
+ * the wrong one. Its presence reports the SCROLL MODE, and Settings changes
+ * mode as it loads: with nothing selected the body falls back to `page` mode
+ * and paints a scroller around "Loading settings…", then `settings.describe`
+ * answers, the landing effect selects the first registry page — Connections,
+ * which is `scrollMode: 'contained'` (settings.tsx) — and the scroller is
+ * REPLACED by `.ui-page__contained`. So the element exists only while Settings
+ * is still loading, and a spec waiting for it was racing the load: it passed
+ * when it caught the loading frame and failed when it missed it, which is
+ * exactly the intermittency nocx-rv53x records. The page renders every time —
+ * the error-context snapshot of every failing run shows a fully painted
+ * Connections page — so there is no product defect behind those thirty
+ * failures, only a spec waiting on a frame that is on its way out.
+ *
+ * The rail is the honest signal: `<Show when={loadState() === 'ready'}>` is
+ * what puts it on screen, so it appears when the data has arrived and stays
+ * for every page, in either scroll mode.
+ *
+ * A spec that wants the SCROLLER — the scroll-ownership and settings-scroll
+ * probes do — waits on this first and then opens a `page`-mode section, which
+ * is what a user does and is the only state in which that element is a stable
+ * fact rather than a passing frame.
+ */
+export async function settingsReady(page: Page): Promise<void> {
+  await baseExpect(page.locator('[aria-label="Settings sections"]')).toBeVisible({
+    timeout: 15_000,
+  })
+}
+
+/**
  * Click into the active pane's prompt editor.
  *
  * Six specs used to spell this `page.mouse.click(box.x + box.width / 2, box.y +
@@ -117,20 +173,213 @@ export const test = base.extend<object, { appReady: void }>({
       try {
         await injectWailsShim(page)
         await page.goto('/')
-        await baseExpect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 90_000 })
+        // AT LEAST ONE, not exactly one. This is a readiness probe — the
+        // question it asks is "can the backend serve a session yet", and a tab
+        // is the observable proof. It is not an assertion about how many tabs
+        // there are, and it never could be from here: this fixture is
+        // worker-scoped, so it runs BEFORE the first test and therefore before
+        // the layout reset that establishes that precondition.
+        //
+        // toHaveCount(1) held only while a fresh renderer always drew exactly
+        // one tab. Since nocx-isoph.4 the strip is restored from the backend
+        // and the stand keeps one home for the whole run, so webkit's worker
+        // opens on whatever chromium's left behind — "Received: 2", 182 polls,
+        // ninety seconds, every webkit test failing at 0ms behind it.
+        await baseExpect(page.locator('.nocx-tab').first()).toBeVisible({ timeout: 90_000 })
       } finally {
         await context.close()
       }
       await use()
     },
-    { scope: 'worker', auto: true },
+    // THE FIXTURE NEEDS ITS OWN BUDGET, and this line is why. Without an
+    // explicit timeout Playwright caps a fixture's setup at the TEST timeout —
+    // so the 90 seconds asked for above were silently whatever `timeout:` in
+    // playwright.config.ts happened to be. That was invisible while the test
+    // ceiling was 60s and the cold start usually finished sooner; lowering the
+    // ceiling to 30s cut this fixture in half and every webkit test in the run
+    // failed at 0ms with "Fixture appReady timeout of 30000ms exceeded during
+    // setup" (2026-08-18).
+    //
+    // A test ceiling and a cold start are different measurements and must not
+    // share a number. The ceiling is short on purpose — nothing in this suite
+    // legitimately takes thirty seconds — while this runs ONCE per worker and
+    // is waiting on a process to boot.
+    { scope: 'worker', auto: true, timeout: 120_000 },
   ],
 
   page: async ({ page }, use) => {
+    // BEFORE the test, not after it. A teardown answers for the test that has
+    // just run and is skipped when that test dies badly; a setup answers for
+    // the test that is about to run, which is the one whose result depends on
+    // it. Whatever the last spec left — including a page that crashed with
+    // eight tabs open — this is what the next one starts from.
+    await resetStand()
     await injectWailsShim(page)
     await use(page)
   },
 })
+
+/**
+ * Leave the backend holding exactly one undecorated tab, the UI state at its
+ * declared defaults, and neither notes nor snippets.
+ *
+ * THE PRODUCT NOW REMEMBERS TABS (nocx-isoph.4): the backend owns the
+ * workspace → tab → pane chain, and a renderer that goes away leaves the rows
+ * where they are — which is the whole feature, and is what a renderer reload
+ * brings back. The suite runs ONE stand for the entire run
+ * (playwright.config.ts globalSetup), so without this every spec would inherit
+ * the tabs the previous one opened, and the `toHaveCount(1)` every spec opens
+ * with would fail in file order.
+ *
+ * IT TALKS TO THE BACKEND, NOT TO THE PAGE, and the first version did the
+ * opposite: it clicked the close control on every tab, swallowed its own
+ * failures, and therefore had two ways of quietly doing nothing. The gate
+ * found both. A click cannot reach an SSH pane, because the renderer restores
+ * that row into the chain and does not draw it (PaneManager.adopt) — so those
+ * rows accumulated all run, and the specs that later reordered a strip were
+ * refused with "not a permutation" while the ones asserting on a toast found
+ * a leftover "connection was not reopened" warning beside their own.
+ *
+ * So it opens the control plane the way the renderer does — same URL, same
+ * token subprotocol — reads the chain and closes every pane in it. Node's
+ * WebSocket sends no Origin, which LoopbackOriginPolicy admits precisely
+ * because a non-browser caller still has to present the token.
+ *
+ * Closing the last pane makes the backend mint a replacement, so this ends on
+ * one tab nobody has named, coloured or pinned — the state a fresh profile is
+ * in, and the state every spec's first assertion describes.
+ *
+ * IT THROWS. This is the precondition of every test in the suite, not a
+ * tidy-up: a reset that failed silently is how a spec inherits state, and
+ * "one spec is red for a reason it states" beats "twenty are red for a reason
+ * none of them mention".
+ */
+async function resetStand(): Promise<void> {
+  const stand = readStand()
+  const wire = await openControlPlane(stand.port, stand.token)
+  try {
+    const layout = (await wire.call('layout.read', {})) as { panes: { id: string }[] }
+    for (const pane of layout.panes) {
+      await wire.call('panes.close', {
+        id: pane.id,
+        // The replacement is consulted only if this close would leave the
+        // application with no tab at all — which the last one does. Its ids
+        // are durable and therefore the caller's to mint (§7), exactly as
+        // they are for the renderer.
+        replacement: { tabId: uuidv7(), paneId: uuidv7(), cwd: '' },
+      })
+    }
+    // AND THE UI STATE, which is a second document and a second way for one
+    // spec to decide the next one's result. Since nocx-mqie.1 the sidebar's
+    // collapse and its ACTIVE VIEW are remembered across a renderer, so a
+    // spec that opened Git leaves Git open — and every view button is a
+    // TOGGLE, so the next spec's `click()` on that view closes the panel
+    // instead of opening it. That is why the git-panel specs alternated
+    // pass/fail down the file: the branch badge was in the DOM and `hidden`,
+    // which is what a toggled-shut panel looks like.
+    //
+    // Written as the whole document, because `uistate.set` takes the whole
+    // renderer half (ADR-0033) — and to the DECLARED defaults rather than to
+    // "no view", because they are what a fresh profile has: the panel open on
+    // the first registered view. `activeViewId: ''` is repaired to that same
+    // first view on mount, so the two agree.
+    await wire.call('uistate.set', {
+      sidebar: { collapsed: false, activeViewId: '', width: 240 },
+      activeTab: '',
+    })
+    // AND THE NOTES LIBRARY, which is the third durable document a spec can
+    // leave behind (nocx-9jcx7). A note outlives the renderer that wrote it —
+    // that IS the feature — and the suite keeps ONE stand for the whole run,
+    // so chromium's notes spec left its "Standup notes" where webkit's would
+    // find it and match two rows: "strict mode violation … resolved to 2
+    // elements", failing in the full suite and passing when the file is run
+    // alone. That signature is a shared store, not a defect in what notes do.
+    //
+    // Deleting is right here and would be wrong anywhere else: this is a
+    // disposable home (`$HOME` is moved for the whole run, e2e/preflight.ts),
+    // and the state a spec's first assertion describes is an empty library.
+    const notes = (await wire.call('notes.list', {})) as { notes: { id: string }[] }
+    for (const row of notes.notes) {
+      await wire.call('notes.delete', { id: row.id })
+    }
+    // AND THE SNIPPET LIBRARY, for the same reason and one more. Snippets are
+    // durable the way notes are, so they cross a spec boundary the same way —
+    // "e2e fill" resolved to three rows in a local run, one per suite run that
+    // had gone before. Until now nothing noticed because snippets.spec.ts
+    // deletes what it made, and that is exactly the fragility: a spec that
+    // fails in the middle never reaches its own tidy-up, and it poisons every
+    // later run against the same home rather than only its own. A precondition
+    // that depends on the previous test having succeeded is not a
+    // precondition.
+    const snips = (await wire.call('snippets.list', {})) as { snippets: { id: string }[] }
+    for (const row of snips.snippets) {
+      await wire.call('snippets.delete', { id: row.id })
+    }
+  } finally {
+    wire.close()
+  }
+}
+
+/** One JSON-RPC call at a time over a socket opened for this purpose. The
+ *  data plane is not touched: every frame here is text. */
+async function openControlPlane(
+  port: number,
+  token: string,
+): Promise<{ call: (method: string, params: unknown) => Promise<unknown>; close: () => void }> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, `nocx.token.${token}`)
+  await new Promise<void>((resolve, reject) => {
+    const failed = (): void => reject(new Error(`e2e: control plane refused on port ${port}`))
+    ws.addEventListener('open', () => resolve(), { once: true })
+    ws.addEventListener('error', failed, { once: true })
+    ws.addEventListener('close', failed, { once: true })
+  })
+  let nextId = 0
+  const call = (method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const id = ++nextId
+      const onMessage = (ev: MessageEvent): void => {
+        if (typeof ev.data !== 'string') return
+        const msg = JSON.parse(ev.data) as {
+          id?: number
+          result?: unknown
+          error?: { message?: string }
+        }
+        if (msg.id !== id) return
+        ws.removeEventListener('message', onMessage)
+        if (msg.error) reject(new Error(`e2e: ${method} refused: ${msg.error.message ?? ''}`))
+        else resolve(msg.result)
+      }
+      ws.addEventListener('message', onMessage)
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+    })
+  return { call, close: () => ws.close() }
+}
+
+/**
+ * A UUIDv7, because the layout wire validates the version nibble and the
+ * variant and refuses anything else — crypto.randomUUID is a v4.
+ *
+ * A second implementation of frontend/src/layout/uuid7.ts, and deliberately
+ * so: importing renderer source into the harness would pull Solid and the
+ * frontend's module graph into Playwright's Node process for four lines of
+ * bit-twiddling. This one needs no monotonicity — the ids it mints are for a
+ * replacement tab nobody sorts.
+ */
+function uuidv7(): string {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  const now = Date.now()
+  bytes[0] = Math.floor(now / 2 ** 40) & 0xff
+  bytes[1] = Math.floor(now / 2 ** 32) & 0xff
+  bytes[2] = Math.floor(now / 2 ** 24) & 0xff
+  bytes[3] = Math.floor(now / 2 ** 16) & 0xff
+  bytes[4] = Math.floor(now / 2 ** 8) & 0xff
+  bytes[5] = now & 0xff
+  bytes[6] = 0x70 | (bytes[6] & 0x0f)
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
 
 // ── Vault e2e helper: managed devharness lifecycle ───────────────────
 //

@@ -106,23 +106,21 @@ func TestOpenRebuildsADatabaseWrittenByAnOlderSchema(t *testing.T) {
 
 	// The store WORKS — this is the assertion that used to fail, and it fails
 	// on a write as well as on a read, so both are exercised.
-	if _, err := db.CommandHistory().Add(context.Background(), CommandRecord{
-		Command: "echo new", Cwd: "/srv", Host: "", Status: StatusSuccess,
-	}); err != nil {
+	if _, err := db.Ledger().RecordCompleted(context.Background(), aRecordedCommand("echo new")); err != nil {
 		t.Fatalf("Add after rebuild: %v", err)
 	}
-	page, err := db.CommandHistory().Query(context.Background(), ScopeEverywhere, "", "", 50, nil, "")
+	page, err := db.Ledger().QueryEntries(context.Background(), LedgerQuery{Scope: ScopeEverywhere, Limit: 50})
 	if err != nil {
 		t.Fatalf("Query after rebuild: %v", err)
 	}
-	if len(page.Entries) != 1 || page.Entries[0].Command != "echo new" {
+	if len(page.Entries) != 1 || page.Entries[0].Intent != "echo new" {
 		t.Fatalf("entries = %+v, want only the row written after the rebuild", page.Entries)
 	}
 	// The old row is gone by design: it belongs to a shape this build cannot
 	// read, and keeping it would need the migration this project does not
 	// carry.
 	for _, e := range page.Entries {
-		if e.Command == "echo old" {
+		if e.Intent == "echo old" {
 			t.Fatal("a row from the discarded schema survived the rebuild")
 		}
 	}
@@ -138,9 +136,7 @@ func TestReopeningACurrentDatabaseKeepsItsRows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.db")
 
 	first := openStore(t, path)
-	if _, err := first.CommandHistory().Add(context.Background(), CommandRecord{
-		Command: "echo keep", Cwd: "/srv", Host: "", Status: StatusSuccess,
-	}); err != nil {
+	if _, err := first.Ledger().RecordCompleted(context.Background(), aRecordedCommand("echo keep")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := first.Close(); err != nil {
@@ -149,11 +145,11 @@ func TestReopeningACurrentDatabaseKeepsItsRows(t *testing.T) {
 
 	for i := range 2 {
 		again := openStore(t, path)
-		page, err := again.CommandHistory().Query(context.Background(), ScopeEverywhere, "", "", 50, nil, "")
+		page, err := again.Ledger().QueryEntries(context.Background(), LedgerQuery{Scope: ScopeEverywhere, Limit: 50})
 		if err != nil {
 			t.Fatalf("Query on reopen %d: %v", i, err)
 		}
-		if len(page.Entries) != 1 || page.Entries[0].Command != "echo keep" {
+		if len(page.Entries) != 1 || page.Entries[0].Intent != "echo keep" {
 			t.Fatalf("reopen %d: entries = %+v, want the row to survive", i, page.Entries)
 		}
 		if err := again.Close(); err != nil {
@@ -351,5 +347,61 @@ func TestRebuildRefusesAFileWithTablesItDoesNotKnow(t *testing.T) {
 	}
 	if warned != 0 {
 		t.Fatalf("the refusal logged %d warnings — nothing was discarded", warned)
+	}
+}
+
+// The rebuild survives the layout chain (nocx-isoph.1), with the shape that
+// could plausibly have broken it: tabs.parent_id references tabs, so the
+// implicit DELETE FROM behind DROP TABLE meets the table's own rows on the way
+// out. A DROP that failed there would leave the file half destroyed — the
+// exact state TestRebuildFailureMidwayLeavesTheOldFileWhole exists to
+// prevent — so it is exercised rather than reasoned about. (The cascades
+// happen to make the order of panes and tabs within rebuildDropOrder
+// immaterial; they are listed children-first anyway, because that is the
+// property the list claims and the next table added may not cascade.)
+//
+// The discard itself is deliberate and accepted: nocx is greenfield, no
+// migration is written, and the warning stays loud because "your history was
+// discarded" is a fact the user is entitled to.
+func TestRebuildDropsTheLayoutChainIncludingSelfReferencingTabs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	db := openStore(t, path)
+	ctx := context.Background()
+	layout := db.Layout()
+	if _, err := layout.CreateWorkspace(ctx, Workspace{ID: "ws-1", Name: "work"},
+		Tab{ID: "tab-1", WorkspaceID: "ws-1", Layout: LayoutRow},
+		Pane{ID: "pane-0", TabID: "tab-1", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	parent := "tab-1"
+	if _, err := layout.CreateTab(ctx, Tab{ID: "tab-2", WorkspaceID: "ws-1", ParentID: &parent, Layout: LayoutRow},
+		Pane{ID: "pane-1", TabID: "tab-2", Cwd: "/", Kind: PaneLocal, SizeShare: 1}); err != nil {
+		t.Fatalf("CreateTab child: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Stamp the file as an earlier schema: the next Open must rebuild it.
+	rawExec(t, path, "PRAGMA user_version=4")
+
+	again := openStore(t, path)
+	if got := rawUserVersion(t, path); got != schemaVersion {
+		t.Fatalf("user_version = %d, want %d — the rebuild did not complete", got, schemaVersion)
+	}
+	spaces, err := again.Layout().Workspaces(ctx)
+	if err != nil {
+		t.Fatalf("Workspaces after the rebuild: %v", err)
+	}
+	if len(spaces) != 0 {
+		t.Fatalf("workspaces after the rebuild = %+v, want none — the file was discarded", spaces)
+	}
+	// And the tables are back, empty rather than missing: a rebuild that
+	// dropped without recreating opens perfectly and fails every statement.
+	if _, err := again.Layout().Tabs(ctx, "ws-1"); err != nil {
+		t.Fatalf("Tabs after the rebuild: %v", err)
+	}
+	if _, err := again.Layout().Panes(ctx, "tab-1"); err != nil {
+		t.Fatalf("Panes after the rebuild: %v", err)
 	}
 }

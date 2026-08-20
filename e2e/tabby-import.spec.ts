@@ -12,7 +12,7 @@ import { test as base, expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 const test = base
@@ -128,7 +128,7 @@ test.describe('Tabby import preview + execute', () => {
 
     // Open Settings via keyboard shortcut.
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
 
     // Click "Connections" in the left rail.
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()

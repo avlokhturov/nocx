@@ -51,7 +51,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "author": "shell",
 		// The capture scope is (connection, tab): a pending capture belongs to
 		// the tab that submitted it and dies with that tab (nocx-tsajw).
-		"tabId":     "tab-acceptance",
+		"paneId":    "pane-acceptance",
 		"startedAt": int64(1_750_000_000_000), "endedAt": int64(1_750_000_000_100), "trusted": true,
 	}, 2)
 	if record.Error != nil {
@@ -140,7 +140,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "author": "shell",
 		// The capture scope is (connection, tab): a pending capture belongs to
 		// the tab that submitted it and dies with that tab (nocx-tsajw).
-		"tabId":     "tab-acceptance",
+		"paneId":    "pane-acceptance",
 		"startedAt": int64(1_750_000_000_200), "endedAt": int64(1_750_000_000_300), "trusted": true,
 	}, 5)
 	if record2.Error != nil {
@@ -169,7 +169,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "author": "shell",
 		// The capture scope is (connection, tab): a pending capture belongs to
 		// the tab that submitted it and dies with that tab (nocx-tsajw).
-		"tabId":     "tab-acceptance",
+		"paneId":    "pane-acceptance",
 		"startedAt": int64(1_750_000_000_400), "endedAt": int64(1_750_000_000_500), "trusted": true,
 	}, 8)
 	if record3.Error != nil {

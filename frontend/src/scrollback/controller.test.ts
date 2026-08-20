@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TerminalRenderer, RenderFenceEvent } from '../renderers/types'
 import { ScrollbackController } from './controller'
 import { CommandSnapshotStore } from '../command-snapshot'
+import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
 
@@ -24,6 +25,10 @@ function makeRenderer(): TerminalRenderer {
     // 0 = "cannot measure", which the frozen-block metric publisher treats
     // as "publish nothing" — existing tests are unaffected by the metric.
     cellWidth: 0,
+    // 0 = "cannot measure yet"; setRunning sizes the live region from this
+    // on the first frame (the command-start pop), so tests that want the
+    // sizing path override it.
+    liveContentHeight: vi.fn(() => 0),
     getBufferLine: vi.fn(() => null),
     cursorLine: vi.fn(() => 0),
     reset: vi.fn(),
@@ -45,6 +50,62 @@ function makeController() {
   })
   return { pane, controller }
 }
+
+describe('ScrollbackController restorePast (nocx-l21ib.3)', () => {
+  it('lands the pane on the newest restored block, not the oldest', () => {
+    const { controller } = makeController()
+    const scrollTo = vi.fn()
+    controller.scrollbackArea.scrollTo = scrollTo
+    // jsdom does no layout: name the height the restored stack would have.
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 4000,
+      configurable: true,
+    })
+
+    const block = (label: string): HTMLElement => {
+      const el = document.createElement('div')
+      el.dataset.restored = 'true'
+      el.textContent = label
+      return el
+    }
+    controller.restorePast([block('oldest'), block('newest')])
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 4000, behavior: 'instant' })
+  })
+
+  it('scrolls even when the follow sentinel says the person is not at the live end', () => {
+    // The guard on the public scrollToBottom asks whether the person scrolled
+    // AWAY from the live end. At a restore nobody has scrolled anything, and
+    // the sentinel that answers it is exactly what the insert pushes out of
+    // the scroller — so a restore that honoured the guard would leave the
+    // pane at the top for a position the user never chose.
+    const { controller } = makeController()
+    const scrollTo = vi.fn()
+    controller.scrollbackArea.scrollTo = scrollTo
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 2500,
+      configurable: true,
+    })
+    // Not following: the public door must stay shut...
+    ;(controller as unknown as { _following: boolean })._following = false
+    controller.scrollToBottom()
+    expect(scrollTo).not.toHaveBeenCalled()
+
+    // ...and the restore must still land at the bottom.
+    const el = document.createElement('div')
+    controller.restorePast([el])
+    expect(scrollTo).toHaveBeenCalledWith({ top: 2500, behavior: 'instant' })
+  })
+
+  it('does nothing at all when there is no past to draw', () => {
+    const { controller } = makeController()
+    const scrollTo = vi.fn()
+    controller.scrollbackArea.scrollTo = scrollTo
+    controller.restorePast([])
+    expect(scrollTo).not.toHaveBeenCalled()
+    expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+})
 
 describe('ScrollbackController unstructured mode', () => {
   it('fills the pane for a markerless session (plain SSH before any OSC 133)', () => {
@@ -138,9 +199,11 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
       renderer,
       snapshotStore: new CommandSnapshotStore(),
     })
+    controller.scrollbackArea.scrollTo = vi.fn()
     // The block opens at submit and binds to the published attempt.
     controller.blockManager.startBlock('make', '~', 0)
     controller.blockManager.bindAttempt('att-1')
+    controller.setRunning()
 
     // The authenticated completion lands with the fence still in flight:
     // the LOGICAL freeze lands now — status flips, the running slot frees
@@ -148,6 +211,10 @@ describe('ScrollbackController render-fence rendezvous (nocx-u7uh.8)', () => {
     expect(controller.freezeFromAttempt(completedAttempt(FENCE), 2)).toBe(false)
     expect(controller.blockManager.runningBlock).toBeNull()
     expect(controller.blockManager.blockForAttempt('att-1')?.status).toBe('success')
+    // PromptReady may arrive before the render fence. It must not collapse
+    // the live rows into empty space while their DOM boundary is pending.
+    controller.setIdle()
+    expect(controller.mode).toBe('running')
 
     // The fence bytes land (via the renderer's OSC 1337 handler): the block
     // serializes at the fence's line and the live region settles.
@@ -441,12 +508,18 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.mode).toBe('running')
     expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
 
-    // Output arrives: the box is sized to the measured content and the
-    // echo stays out of view — and the height itself is NOT offset (an
-    // offset moves what is measured, not what is shown).
+    // Output arrives: the flow box and clip reserve only the two shown rows;
+    // the translated echo row occupies neither visible space nor layout.
     controller.setLiveHeight(3 * 16)
-    expect(controller.xtermLiveContainer.style.height).toBe('48px')
+    expect(controller.xtermLiveContainer.style.height).toBe('32px')
+    expect(controller.xtermLiveViewport.style.height).toBe('32px')
     expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+
+    // A measurement no taller than the translated echo must clear, rather
+    // than retain, stale flow space from a previous chunk.
+    controller.setLiveHeight(8)
+    expect(controller.xtermLiveContainer.style.height).toBe('0px')
+    expect(controller.xtermLiveViewport.style.height).toBe('0px')
 
     // The output outgrows the viewport: the echo row scrolls above the
     // grid, and the shift MUST release — a stale shift would clip the
@@ -454,7 +527,8 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     setViewportTop(1)
     controller.setLiveHeight(24 * 16)
     expect(controller.xtermInner.style.transform).toBe('')
-    // The box still clamps to the live-region cap (nocx-zn4d).
+    // Both the content clip and flow box clamp to the live-region cap.
+    expect(controller.xtermLiveViewport.style.height).toBe('360px')
     expect(controller.xtermLiveContainer.style.height).toBe('360px')
 
     // The shift is live, not one-shot: back before the echo scrolled out,
@@ -462,6 +536,8 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     setViewportTop(0)
     controller.setLiveHeight(3 * 16)
     expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+    expect(controller.xtermLiveViewport.style.height).toBe('32px')
+    expect(controller.xtermLiveContainer.style.height).toBe('32px')
 
     // Freeze hands the rows to the DOM and the live region settles: the
     // shift is gone at idle, exactly like the box's height.
@@ -471,6 +547,166 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     expect(controller.mode).toBe('idle')
     expect(controller.xtermInner.style.transform).toBe('')
     expect(clearViewport).toHaveBeenCalledTimes(1)
+    controller.blockManager.clearAll()
+  })
+
+  it('reserves the block body padding around the rows, and caps the WHOLE box', () => {
+    // THE RUNNING REGION IS THE BLOCK'S BODY. The frozen body has padding
+    // (`--cmd-output-pad-*`); until the live region wore the same, it was
+    // that much shorter than the body that replaces it, and the scrollback —
+    // which hangs from its bottom edge — moved at every freeze. The number
+    // is never repeated in TypeScript: the controller reads it off the
+    // element, which is what this test writes to it.
+    const { renderer } = rendererWithGeometry()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(pane)
+    controller.xtermLiveContainer.style.paddingTop = '2px'
+    controller.xtermLiveContainer.style.paddingBottom = '6px'
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    controller.beginBlock('ls', '~', 0, 1)
+    // Two shown rows (the third is the translated echo): the clip holds the
+    // rows, the flow box holds the rows plus the body's 8px.
+    controller.setLiveHeight(3 * 16)
+    expect(controller.xtermLiveViewport.style.height).toBe('32px')
+    expect(controller.xtermLiveContainer.style.height).toBe('40px')
+
+    // The cap is a ceiling on the BOX, not on the rows inside it: a grid
+    // taller than the pane must not push the region past the space it shares
+    // with the running block's header (nocx-zn4d), padding included.
+    controller.setLiveHeight(100 * 16)
+    expect(controller.xtermLiveContainer.style.height).toBe('360px')
+    expect(controller.xtermLiveViewport.style.height).toBe('352px')
+    controller.blockManager.clearAll()
+    pane.remove()
+  })
+})
+
+describe('the pane moves rather than jumping (nocx-i4h04.2)', () => {
+  /** A controller whose stack reports a position the test controls, and whose
+   *  two moving elements record what they were asked to animate. */
+  function movingController(tops: number[]): {
+    controller: ScrollbackController
+    frames: Array<{ el: string; keyframes: unknown }>
+  } {
+    const renderer = makeRenderer()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 600,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+    // jsdom lays nothing out, so the stack's position is the test's to say:
+    // one answer per measurement, in the order `_glide` takes them.
+    const queue = [...tops]
+    controller.scrollbackInner.getBoundingClientRect = () =>
+      ({ top: queue.length > 1 ? (queue.shift() as number) : queue[0] }) as DOMRect
+    const frames: Array<{ el: string; keyframes: unknown }> = []
+    for (const [name, el] of [
+      ['inner', controller.scrollbackInner],
+      ['live', controller.xtermLiveContainer],
+    ] as const) {
+      ;(el as unknown as { animate: unknown }).animate = (keyframes: unknown) => {
+        frames.push({ el: name, keyframes })
+        return { cancel: () => {}, finished: Promise.resolve() } as unknown as Animation
+      }
+    }
+    return { controller, frames }
+  }
+
+  beforeEach(() => {
+    window.matchMedia = (query: string) =>
+      ({
+        matches: false,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList
+  })
+
+  it('gives the stack the inverse of what it just moved, and releases it', async () => {
+    // FLIP: the DOM change lands whole, then the stack is put back where it
+    // looked to be and let go. What animates is a transform — it takes no part
+    // in layout, which is why this is not the height animation that was tried
+    // and removed.
+    const { controller, frames } = movingController([500, 440])
+
+    controller.beginBlock('ls', '~', 0, 1)
+
+    // ONE element, because the stack is one element — and the follow
+    // observer's sentinel is deliberately outside it (nocx-i4h04.3).
+    expect(frames.map((f) => f.el)).toEqual(['inner'])
+    // And no scrollbar for the settle's own overflow: the displaced stack
+    // hangs past the scroller's bottom edge for as long as this lasts, which
+    // flashed a bar on every command (nocx-i4h04.4).
+    expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(true)
+    for (const f of frames) {
+      expect(f.keyframes).toEqual([
+        { transform: 'translateY(60px)' },
+        { transform: 'translateY(0px)' },
+      ])
+    }
+
+    // The settle ends and the scroller offers its bar again.
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(controller.scrollbackArea.classList.contains('is-settling')).toBe(false)
+    controller.blockManager.clearAll()
+  })
+
+  it('answers "am I following the output" from outside the stack it moves', () => {
+    // The observer reports the TRANSFORMED box. While the settle displaces the
+    // stack, anything inside it is out of the scroller — and the live region,
+    // which used to be the target, is inside it. The pane then concluded the
+    // person had scrolled away and stopped following the output, which is a
+    // defect on its own and skipped every later glide (nocx-i4h04.3).
+    const { controller } = movingController([500, 500])
+
+    expect(controller.followSentinel.parentElement).toBe(controller.scrollbackArea)
+    expect(controller.scrollbackInner.contains(controller.followSentinel)).toBe(false)
+    expect(controller.scrollbackInner.contains(controller.xtermLiveContainer)).toBe(true)
+  })
+
+  it('moves nothing when the person asked for less motion', () => {
+    window.matchMedia = (query: string) =>
+      ({
+        matches: true,
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList
+    const { controller, frames } = movingController([500, 440])
+
+    controller.beginBlock('ls', '~', 0, 1)
+
+    expect(frames).toEqual([])
+    controller.blockManager.clearAll()
+  })
+
+  it('moves nothing while the person is reading further up', () => {
+    // Movement they did not cause is not theirs to watch: a pane scrolled away
+    // from the bottom keeps its position, and the glide would be a second
+    // owner of it.
+    const { controller, frames } = movingController([500, 440])
+    ;(controller as unknown as { _following: boolean })._following = false
+
+    controller.beginBlock('ls', '~', 0, 1)
+
+    expect(frames).toEqual([])
     controller.blockManager.clearAll()
   })
 })
@@ -557,5 +793,90 @@ describe('the frozen block metric is published from the renderer (nocx-yy9g)', (
     renderer._fireCellDimsChange()
     expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-width')).toBe('')
     expect(controller.scrollbackInner.style.getPropertyValue('--term-cell-delta')).toBe('')
+  })
+})
+describe('the running live region follows its written rows', () => {
+  const protoScrollTo = Element.prototype.scrollTo?.bind(Element.prototype)
+  beforeEach(() => {
+    Element.prototype.scrollTo = () => {}
+  })
+  afterEach(() => {
+    Element.prototype.scrollTo = protoScrollTo
+  })
+
+  it('sizes the flow box and clip together as output grows', () => {
+    const renderer = makeRenderer()
+    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(19)
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+
+    controller.beginBlock('printf slow', '~', 0, 0)
+    expect(controller.xtermLiveContainer.style.height).toBe('19px')
+    expect(controller.xtermLiveViewport.style.height).toBe('19px')
+
+    controller.setLiveHeight(38)
+    expect(controller.xtermLiveContainer.style.height).toBe('38px')
+    expect(controller.xtermLiveViewport.style.height).toBe('38px')
+
+    controller.setLiveHeight(57)
+    expect(controller.xtermLiveContainer.style.height).toBe('57px')
+    expect(controller.xtermLiveViewport.style.height).toBe('57px')
+  })
+
+  it('leaves the CSS fallback in charge only while the renderer cannot measure', () => {
+    // NULL, not zero. Zero is a grid nobody has written to — which is every
+    // command between the keypress and its first byte of output, and sizing
+    // the region to the fallback there opened a 140px box that collapsed on
+    // the first row: a bounce at the start of every command (nocx-i4h04.2).
+    const renderer = makeRenderer()
+    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(null)
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+
+    controller.beginBlock('ls', '~', 0, 1)
+
+    expect(controller.xtermLiveContainer.style.height).toBe('')
+    expect(controller.xtermLiveViewport.style.height).toBe('')
+    expect(controller.mode).toBe('running')
+  })
+
+  it('opens at nothing but the body padding for a command that has printed nothing yet', () => {
+    const renderer = makeRenderer()
+    ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(0)
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    document.body.appendChild(pane)
+    controller.xtermLiveContainer.style.paddingTop = '2px'
+    controller.xtermLiveContainer.style.paddingBottom = '6px'
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+
+    controller.beginBlock('ls', '~', 0, 1)
+
+    expect(controller.xtermLiveContainer.style.height).toBe('8px')
+    expect(controller.xtermLiveViewport.style.height).toBe('0px')
+    pane.remove()
   })
 })

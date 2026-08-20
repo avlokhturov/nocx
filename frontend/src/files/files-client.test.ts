@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Dispatcher } from '../dispatcher'
 import { createFilesPanelServices } from './files-client'
 import { createFilesTreeStore } from './files-store'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import type { FilesListResult } from '../generated/files.list'
 
 class MockSocket {
@@ -104,7 +104,7 @@ async function settle(): Promise<void> {
 }
 
 const LOCAL_A: ActiveOrigin = {
-  tabId: 1,
+  paneId: 1,
   sessionId: 'session-a',
   kind: 'local',
   cwd: '/',

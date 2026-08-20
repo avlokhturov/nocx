@@ -1,12 +1,22 @@
 /**
  * sidebar-width — the shell's width policy for the sidebar panel (nocx-qmcu).
  *
- * One clamped number, applied to #sidebar as the `--sidebar-width` CSS
- * variable, and persisted through the product's settings pipeline — the
- * registered `sidebar.width` number on the Go side, read at bootstrap and
- * live-applied through SettingsObserver. This module owns the frontend half:
- * the bounds, the application, and the controller that is the single owner
- * of the value between the drag and the observer.
+ * One clamped WHOLE number of CSS pixels, applied to #sidebar as the
+ * `--sidebar-width` variable and persisted in the UI-state document on the Go
+ * side (ADR-0033). This module owns the frontend half: the bounds, the
+ * rounding, the application, and the controller that is the single owner of
+ * the value between the drag and the persistence seam.
+ *
+ * ## It used to be a setting, and that was the bug
+ *
+ * The width was registered as `sidebar.width` in the settings registry, which
+ * put a "Sidebar width" row on Settings → Interface reading `206.3828125 px`
+ * and badged the section "Modified" as soon as anybody dragged the edge. Two
+ * symptoms, one cause: a setting is something a user DELIBERATELY CHOOSES, and
+ * a width produced by dragging a panel edge is not a decision — it is what the
+ * app must remember without being asked. Wrong owner; both symptoms follow.
+ * The fractional pixels are gone here, at the clamp, because that is the one
+ * place the number is decided (nocx-mqie.3).
  *
  * ## The bounds, measured rather than guessed
  *
@@ -31,22 +41,29 @@
  * window the app runs on.
  *
  * The default is 240px — today's width, unchanged for the user who never
- * drags. MIN/MAX/DEFAULT are mirrored in internal/settings/settings.go's
- * SidebarWidth NumberSpec, which is what actually validates the persisted
- * value; move the numbers in both places.
+ * drags. MIN/MAX/DEFAULT are mirrored in internal/uistate's ClampSidebarWidth,
+ * which is what actually validates the persisted value; move the numbers in
+ * both places.
  */
 
-export const SIDEBAR_WIDTH_KEY = 'sidebar.width'
 export const SIDEBAR_WIDTH_MIN = 200
 export const SIDEBAR_WIDTH_MAX = 640
 export const SIDEBAR_WIDTH_STEP = 8
 export const SIDEBAR_WIDTH_DEFAULT = 240
 
-/** Clamp a width to the declared bounds. Non-finite values (a corrupted
- *  persisted value) fall back to the default rather than corrupting layout. */
+/** Clamp a width to the declared bounds and round it to a whole pixel.
+ *  Non-finite values (a corrupted persisted value) fall back to the default
+ *  rather than corrupting layout.
+ *
+ *  The rounding is here rather than at the persistence seam because this is
+ *  the single place the width is decided: a pointer position is a fraction,
+ *  and every consumer — the CSS variable, the handle's aria-valuenow, the
+ *  document — should see the same whole number. Rounding only on the way out
+ *  would leave the screen and the file disagreeing by half a pixel, and put a
+ *  value back on screen that nothing else in the app would ever produce. */
 export function clampSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return SIDEBAR_WIDTH_DEFAULT
-  return Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, width))
+  return Math.round(Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, width)))
 }
 
 /** Apply a width to the panel. The stylesheet reads `--sidebar-width` with
@@ -57,15 +74,15 @@ export function applySidebarWidth(panel: HTMLElement, width: number): void {
 }
 
 /** The persistence seam the composition root hands the controller: write
- *  the width through the settings pipeline, fire-and-forget, and surface a
+ *  the width into the UI-state document, fire-and-forget, and surface a
  *  failed write as a warning — a soft degrade must be visible in the
  *  product, not only in a log (AGENTS.md). The failure never propagates
  *  into the drag: the width is already applied and stays on screen, and the
- *  next commit retries. `setSetting` is passed as a function because the
- *  client method is `this`-bound; a synchronous throw from it is caught
- *  here just like a rejected promise. */
+ *  next commit retries. `save` is passed as a function because the client
+ *  method is `this`-bound; a synchronous throw from it is caught here just
+ *  like a rejected promise. */
 export function persistSidebarWidth(
-  setSetting: (key: string, value: unknown) => Promise<unknown>,
+  save: (width: number) => Promise<unknown>,
   onFailure: (message: string) => void,
   width: number,
 ): void {
@@ -73,7 +90,7 @@ export function persistSidebarWidth(
     onFailure('Could not save the sidebar width — it will not survive a restart')
   }
   try {
-    void Promise.resolve(setSetting(SIDEBAR_WIDTH_KEY, width)).catch(fail)
+    void Promise.resolve(save(width)).catch(fail)
   } catch {
     fail()
   }
@@ -82,8 +99,9 @@ export function persistSidebarWidth(
 export interface SidebarWidthController {
   /** The current applied width, px, clamped. */
   readonly width: number
-  /** True while a pointer drag is in flight — the settings observer must
-   *  not clobber the live position with a refetched value. */
+  /** True while a pointer drag is in flight — the live pointer position is
+   *  the truth until the release commits it, so nothing may clobber it with
+   *  a value fetched from elsewhere. */
   isDragging(): boolean
   setDragging(dragging: boolean): void
   /** Apply a new width: clamp, paint, notify. `persist` also pushes the
@@ -95,7 +113,7 @@ export interface SidebarWidthController {
 }
 
 /** The single owner of the sidebar width. Created by the composition root
- *  with the bootstrap snapshot's value and the persistence seam; passed to
+ *  with the UI-state document's value and the persistence seam; passed to
  *  mountSidebar, which binds the kit ResizeHandle to it. */
 export function createSidebarWidthController(
   panel: HTMLElement,

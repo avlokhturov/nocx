@@ -64,12 +64,17 @@ const KIND_LABEL: Record<string, string> = {
  *  names the section. */
 const GROUP_LABEL = 'History'
 
-/** The key hints the footer carries for a selectable list. */
+/** The key hints the footer carries for a selectable list.
+ *
+ *  Two keys take the selected row and they do NOT do the same thing, which
+ *  is why they are named apart: Enter takes it and stops, Right takes it and
+ *  keeps going — a directory taken with Right shows what is inside it, so a
+ *  path is walked with one key. They were one call behind two words once. */
 const FOOTER_HINTS = [
   '↵ to insert',
   'tab ↹ to cycle',
   '↑ ↓ to navigate',
-  '→ to accept',
+  '→ to accept and continue',
   'esc to dismiss',
 ] as const
 

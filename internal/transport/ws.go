@@ -39,7 +39,9 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/tunnel"
+	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/version"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -179,6 +181,15 @@ type WSServer struct {
 	// notes is the notes library service backing the notes.* JSON-RPC
 	// methods. When nil, those methods return -32601.
 	notes *note.Service
+	// uiState owns what the app remembers without being asked (ADR-0033);
+	// it backs the uistate.* JSON-RPC methods. When nil, those return
+	// -32601 and the shell keeps its declared defaults.
+	uiState *uistate.Store
+	// build is what app.about answers with: what this binary is. Zero-valued
+	// unless the composition root passes one, and the zero value is honest —
+	// every field then reads "unknown" rather than claiming a version this
+	// build does not have (see WithBuildInfo).
+	build version.BuildInfo
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
 	backupService   *backup.Service
@@ -355,10 +366,17 @@ type WSServer struct {
 	profileUsage session.ProfileUsageTracker
 
 	// contentDB is the durable content store backing history.query. When
-	// nil, the method answers source=session — the overlay then labels what
-	// it shows "this session only" instead of presenting the in-memory
+	// nil, the method answers source=unavailable — the overlay then says
+	// durable history is not running instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+
+	// historyStatus is the raise/clear state of durable command history:
+	// whether it is running and, when it is not, why. It answers
+	// history.status and pushes history.statusChanged. When nil the server
+	// makes no claim and reports history as running — the composition root
+	// is what says otherwise (ws_history_status.go).
+	historyStatus *HistoryStatus
 
 	// filesys is the binding registry backing the files.* control plane
 	// (fm-w8). When nil, those methods return -32601. The provider
@@ -832,6 +850,28 @@ func WithNotes(svc *note.Service) WSServerOption {
 	return func(s *WSServer) { s.notes = svc }
 }
 
+// WithUIState attaches the UI-state store, enabling the uistate.* JSON-RPC
+// methods. When nil, those methods return -32601 and the shell falls back to
+// its declared defaults — a sidebar at 240px that does not survive a restart,
+// which is what the product looked like before ADR-0033.
+func WithUIState(store *uistate.Store) WSServerOption {
+	return func(s *WSServer) { s.uiState = store }
+}
+
+// WithBuildInfo attaches the running binary's description, which is what
+// app.about answers with. The transport is told rather than reading
+// internal/version itself: that package's vars are link-time state, and a
+// second reader of them inside the transport would be a second place the
+// answer lives — and would leave no way for a test to assert what this method
+// sends for a build nobody can produce on demand.
+//
+// Not attaching it is not a failure mode with a hole in it: the descriptor's
+// fields are then the zero value, and the DTO says "unknown" in each, which is
+// what the About page is built to render.
+func WithBuildInfo(b version.BuildInfo) WSServerOption {
+	return func(s *WSServer) { s.build = b }
+}
+
 // WithCaptureRegistry injects the pending-capture registry. Test seam:
 // production constructs its own. The injected registry must not be shared
 // across servers.
@@ -1040,8 +1080,15 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
+	// history.status rides the plain lane, not the content queue: it is a
+	// mutex read of in-memory state and must stay answerable while the
+	// content domain is exactly what is broken.
+	specs = append(specs, s.historyStatusSpecs(s.lane)...)
 	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
+	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
+	specs = append(specs, s.aboutSpecs()...)
 	specs = append(specs, s.lifecycleSpecs()...)
 	specs = append(specs, s.policySpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
@@ -1211,10 +1258,35 @@ func (s *WSServer) getOrCreateRx(id session.ID) *sessionRx {
 	return rx
 }
 
-func (s *WSServer) removeRx(id session.ID) {
+// removeRx drops a session's receiver and returns it, or nil when another
+// goroutine removed it first.
+//
+// The return value is a CLAIM, not a convenience. A session has two teardown
+// owners — monitorExit, when the shell exits or the channel drops, and
+// closeSession, when the user closes the tab — and on an explicit close BOTH
+// run, because closing the session through the registry is what wakes the
+// monitor. Deleting a session's files/git bindings is also the only chance to
+// ANNOUNCE them: the destination is resolved at emit time from the receiver
+// being removed here, so an owner captures the subscriber and then deletes.
+// Two owners doing that is one of them deleting the bindings the other was
+// about to announce, and the terminal notification is lost with no trace
+// (nocx-2h08: git.changed(reason=sessionClosed) never arrived, and whichever
+// test was waiting for a notification reported the package's 30-second bound).
+//
+// So the receiver is the token. Whoever removes it captured the subscriber
+// from it and owns the binding teardown; the other leaves the bindings alone.
+// The interval, both ends named: the session is claimed from the moment this
+// returns non-nil until that owner's gitSessionClosed has enqueued the last
+// terminal notification.
+func (s *WSServer) removeRx(id session.ID) *sessionRx {
 	s.ringsMu.Lock()
 	defer s.ringsMu.Unlock()
+	rx, ok := s.rx[id]
+	if !ok {
+		return nil
+	}
 	delete(s.rx, id)
+	return rx
 }
 
 // Responder is the outbound capability handed to control-plane handlers:
@@ -1489,6 +1561,43 @@ type openParams struct {
 	// meaningless pin, and the launcher refuses unmapped kinds rather
 	// than guessing if one slips past).
 	Shell string `json:"shell,omitempty"`
+	// Parent names the session this one is being opened FROM (nocx-9hu9d):
+	// the tab the user was in when they asked for another one. Absent for a
+	// root session, which is every session the product opens today.
+	//
+	// It is a CLAIM, not a fact: the renderer says where the open came from,
+	// and the session registry decides whether that could be true (a live
+	// session of this backend instance, at that epoch, whose own ancestry
+	// does not reach the new session). A refused claim opens nothing.
+	//
+	// It carries provenance only. Nothing about this session's capabilities,
+	// gates or lanes reads it — the parent gains no right over the child by
+	// being named here (ADR-0020 §5).
+	Parent *openParentParams `json:"parent,omitempty"`
+	// PaneID names the PANE this session is the pipe of (nocx-isoph.2). It
+	// is the durable identity — client-minted, UUIDv7, and UNTRUSTED like
+	// every other id in the layout chain (design §7) — and it is what the
+	// backend walks pane → tab → workspace to answer the ack's workspaceId
+	// with. A pane and its session are two objects because D5 says so: the
+	// process dies with the backend and the pane does not, so the session id
+	// is minted here (AD-7) and the pane id can only come from the renderer.
+	//
+	// Absent means "this session is not attached to a recorded pane", which
+	// is every open until the renderer starts minting them (nocx-isoph.4),
+	// and the workspace is then the default. Present but naming no pane is
+	// refused: the two are different facts.
+	PaneID string `json:"paneId,omitempty"`
+}
+
+// openParentParams is the claimed parent edge: the FULL identity of the
+// opener, never a bare session id. The id alone re-resolves to whatever holds
+// it now, which is exactly the ambiguity (instanceId, sessionEpoch) exists to
+// remove (nocx-3oupk) — and the edge is written once and never revisited, so
+// an ambiguity admitted here is permanent.
+type openParentParams struct {
+	SessionID    string `json:"sessionId"`
+	InstanceID   string `json:"instanceId"`
+	SessionEpoch uint64 `json:"sessionEpoch"`
 }
 
 // resizeParams is the payload of the "resize" RPC method.
@@ -1995,8 +2104,8 @@ func desiredModeForAck(remote *ssh.ConnectConfig) string {
 // slow connector acquire cannot delay the ack.
 //
 // Every result with a tunnel record is registered in the transport ledger
-// WITHOUT a tab owner (spec §7.3): stored forwards are connection-owned
-// and must survive tab close. A row that failed to start is still
+// WITHOUT a pane owner (spec §7.3): stored forwards are connection-owned
+// and must survive pane close. A row that failed to start is still
 // registered so ports.status shows it — the panel must not contradict a
 // forward the backend knows failed (AGENTS.md: a soft degrade must be
 // visible in the product, not only in a log). One row's failure never
@@ -2228,7 +2337,11 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		state.remove(sess.ID())
 	}
 	rx.ring.close()
-	s.removeRx(sess.ID())
+	// The claim on the binding teardown (removeRx). On an explicit close the
+	// handler's closeSession is running the same teardown on its own
+	// goroutine; exactly one of us may delete the bindings, because deleting
+	// them is also the one chance to announce them.
+	owns := s.removeRx(sess.ID()) != nil
 	_ = s.registry.Close(sess.ID())
 
 	// The two responsibilities this path used to drop. closeSession has had
@@ -2255,16 +2368,17 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// profile, forget the target and release its lease.
 	s.discoverySessionClosed(sess)
 
-	// Files (fm-w8): closing the terminal closes its bindings (spec
-	// §5.1). Idempotent — a session that reaches this twice cleans up
-	// once.
-	s.filesSessionClosed(sess.ID())
-
-	// Git (spec §5.5): the session's git bindings die with it, and their
-	// subscriber was captured above — the one deliverable moment, because
-	// removeRx already ran and an emit-time lookup would find nobody
-	// (spec §5.2, nocx-lzfb).
-	s.gitSessionClosed(sess.ID(), wconn)
+	// Files (fm-w8) and git (spec §5.5): closing the terminal closes its
+	// bindings (spec §5.1), and closing a binding is also the moment it is
+	// announced — to the subscriber captured above, because removeRx has
+	// already run and an emit-time lookup would find nobody (spec §5.2,
+	// nocx-lzfb). Only the claimant does this: the other owner captured the
+	// same subscriber and will announce with it, and both running is how the
+	// announcement got lost (nocx-2h08).
+	if owns {
+		s.filesSessionClosed(sess.ID())
+		s.gitSessionClosed(sess.ID(), wconn)
+	}
 
 	if wconn == nil {
 		return
@@ -2321,11 +2435,37 @@ func (s *WSServer) notifyInputStalled(sid session.ID) {
 	}
 	wconn, _ := rx.getSubscriber()
 	if wconn == nil {
+		// Nobody is attached to be told. Drop the latch so the tab that
+		// attaches next is told by the next refused frame — a stall that
+		// began while the renderer was away is still in force when it
+		// returns, and the flag only clears when the queue ACCEPTS a frame,
+		// which a stuck channel never does.
+		rx.inputStalled.Store(false)
 		return
 	}
 	if err := wconn.TryNotify("inputStalled", mustMarshal(map[string]string{
 		"sessionId": string(sid),
 	})); err != nil {
+		// THE LATCH MUST NOT OUTLIVE A NOTIFICATION THAT WAS NOT SENT.
+		// TryNotify is the droppable path, and its own contract says why
+		// that is safe: "the frame is dropped, which is safe because a
+		// notification is refreshable state the renderer re-syncs from the
+		// next one" (outbound.TryEnqueue). This one is not refreshable.
+		// It fires once per stall and the flag clears only when the write
+		// queue ACCEPTS a frame, which is exactly what a stalled session
+		// never does — so a dropped frame here meant the tab was never
+		// told, for the whole life of the stall.
+		//
+		// And the moment it is most likely to be dropped is the moment it
+		// matters: the outbound queue is full when the connection is
+		// drowning, which is the same trouble that stalls the session.
+		//
+		// Clearing the latch costs at most a duplicate notification — the
+		// renderer already treats this as a state, not an event — and buys
+		// the promise the message exists to keep. Without it the warning
+		// stays a slog.Warn nobody reads while the product presents a
+		// terminal that looks alive and ignores every key (nocx-o2le).
+		rx.inputStalled.Store(false)
 		s.log.Debug("write inputStalled notification", "error", err)
 	}
 }
@@ -2339,17 +2479,20 @@ func (s *WSServer) notifyInputStalled(sid session.ID) {
 // close finding). sess is the pre-close registry value, needed by the
 // discovery teardown; nil is tolerated (callers without it).
 func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
-	// The subscriber is captured BEFORE removeRx — the git teardown below
-	// writes its notification to this capture, because at that moment an
-	// emit-time lookup finds nobody (spec §5.2, nocx-lzfb). monitorExit
-	// already captured; the explicit-close path captures nothing today.
-	var wconn *wsConn
-	rx := s.getRx(sid)
-	if rx != nil {
-		wconn, _ = rx.getSubscriber()
-		rx.ring.close()
+	// Removing the receiver is the claim (removeRx), and the subscriber comes
+	// off the receiver this goroutine removed — so the git teardown below
+	// always has a destination, which an emit-time lookup no longer would.
+	// A nil claim means monitorExit got there first: an explicit close wakes
+	// it through the registry close, so both owners run on every hand-closed
+	// tab. It captured the same subscriber and will announce with it; running
+	// the teardown here as well would delete the bindings it is about to
+	// announce and lose the notification (spec §5.2, nocx-lzfb, nocx-2h08).
+	rx := s.removeRx(sid)
+	if rx == nil {
+		return
 	}
-	s.removeRx(sid)
+	wconn, _ := rx.getSubscriber()
+	rx.ring.close()
 	// Session death wins (decision 8): cancel any pending restoration
 	// episode as teardown begins, so a late ack is rejected and no
 	// recovery is promised over a dead connection. The registry close is
@@ -2573,13 +2716,13 @@ func (s *WSServer) registerConn(wc *wsConn) {
 
 // unregisterConn removes a connection from the broadcast set and destroys
 // every pending capture it owns: a transport disconnect is on the capture
-// contract's destruction list, and one WebSocket carries every tab in a
+// contract's destruction list, and one WebSocket carries every pane in a
 // window, so the connection's death takes all of them (DestroyConnection —
-// tab closure is a separate, per-tab trigger the renderer fires through
-// tab.close). It also stops the tunnels the
-// tab opened — tab-scoped teardown (spec §7.3): each forward holds its OWN
-// pooled reference, so stopping this tab's forwards never touches another
-// tab's on the same shared connection.
+// pane closure is a separate, per-pane trigger the renderer fires through
+// pane.close). It also stops the tunnels the
+// pane opened — pane-scoped teardown (spec §7.3): each forward holds its OWN
+// pooled reference, so stopping this pane's forwards never touches another
+// pane's on the same shared connection.
 func (s *WSServer) unregisterConn(wc *wsConn) {
 	s.connsMu.Lock()
 	delete(s.conns, wc)

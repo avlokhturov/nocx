@@ -38,51 +38,10 @@ func (s *convStub) List(_ context.Context, limit int) ([]Conversation, error) {
 	return nil, ErrNotImplemented
 }
 
-// histStub implements CommandHistoryRepository for the stub.
-type histStub struct {
-	log log.Logger
-}
-
-func (s *histStub) Add(_ context.Context, record CommandRecord) (int64, error) {
-	s.log.Info("content stub: CommandHistoryRepository.Add", "command", record.Command)
-	return 0, ErrNotImplemented
-}
-
-func (s *histStub) List(_ context.Context, limit int) ([]CommandRecord, error) {
-	s.log.Info("content stub: CommandHistoryRepository.List", "limit", limit)
-	return nil, ErrNotImplemented
-}
-
-func (s *histStub) GetByID(_ context.Context, id int64) (*CommandRecord, error) {
-	s.log.Info("content stub: CommandHistoryRepository.GetByID", "id", id)
-	return nil, ErrNotImplemented
-}
-
-func (s *histStub) FindByPrefix(_ context.Context, prefix string, limit int) ([]CommandRecord, error) {
-	s.log.Info("content stub: CommandHistoryRepository.FindByPrefix", "prefix", prefix, "limit", limit)
-	return nil, ErrNotImplemented
-}
-
-func (s *histStub) RewriteRedaction(_ context.Context, id int64, span Redaction, reference string) error {
-	s.log.Info("content stub: CommandHistoryRepository.RewriteRedaction", "id", id, "span", span, "reference", reference)
-	return ErrNotImplemented
-}
-
-func (s *histStub) Query(_ context.Context, scope Scope, cwd, host string, limit int, _ *int64, text string) (HistoryPage, error) {
-	s.log.Info("content stub: CommandHistoryRepository.Query", "scope", scope, "cwd", cwd, "host", host, "limit", limit, "text", text)
-	return HistoryPage{}, ErrNotImplemented
-}
-
 // Conversations returns a stub ConversationRepository.
 func (s *Stub) Conversations() ConversationRepository {
 	s.log.Info("content stub: Conversations called (no-op)")
 	return &convStub{log: s.log}
-}
-
-// CommandHistory returns a stub CommandHistoryRepository.
-func (s *Stub) CommandHistory() CommandHistoryRepository {
-	s.log.Info("content stub: CommandHistory called (no-op)")
-	return &histStub{log: s.log}
 }
 
 // Ledger returns a stub LedgerRepository.
@@ -91,15 +50,15 @@ func (s *Stub) Ledger() LedgerRepository {
 	return &ledgerStub{log: s.log}
 }
 
+// Layout returns a stub LayoutRepository.
+func (s *Stub) Layout() LayoutRepository {
+	s.log.Info("content stub: Layout called (no-op)")
+	return &layoutStub{log: s.log}
+}
+
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {
 	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)
-	return ErrNotImplemented
-}
-
-// RestorePrivate returns ErrNotImplemented: the stub stores nothing.
-func (s *Stub) RestorePrivate(_ context.Context, conversations []Conversation, history []CommandRecord) error {
-	s.log.Info("content stub: RestorePrivate called (no-op)", "conversations", len(conversations), "history", len(history))
 	return ErrNotImplemented
 }
 
@@ -114,11 +73,6 @@ var _ LedgerRepository = (*ledgerStub)(nil)
 // ledgerStub implements LedgerRepository for the stub.
 type ledgerStub struct {
 	log log.Logger
-}
-
-func (s *ledgerStub) CreateWorkspace(_ context.Context, ws Workspace) error {
-	s.log.Info("content stub: LedgerRepository.CreateWorkspace", "id", ws.ID)
-	return ErrNotImplemented
 }
 
 func (s *ledgerStub) CreateSession(_ context.Context, sess Session) error {
@@ -141,6 +95,11 @@ func (s *ledgerStub) RecordObservation(_ context.Context, obs Observation) (int6
 	return 0, ErrNotImplemented
 }
 
+func (s *ledgerStub) RecordCompleted(_ context.Context, in CompletedCommand) (string, error) {
+	s.log.Info("content stub: LedgerRepository.RecordCompleted", "intent", in.Intent)
+	return "", ErrNotImplemented
+}
+
 func (s *ledgerStub) Submit(_ context.Context, in SubmitEntry) (SubmitResult, error) {
 	s.log.Info("content stub: LedgerRepository.Submit", "id", in.ID, "intent", in.Intent)
 	return SubmitResult{}, ErrNotImplemented
@@ -156,9 +115,29 @@ func (s *ledgerStub) ListEntries(_ context.Context, limit int) ([]LedgerEntrySum
 	return nil, ErrNotImplemented
 }
 
+func (s *ledgerStub) QueryEntries(_ context.Context, q LedgerQuery) (LedgerPage, error) {
+	s.log.Info("content stub: LedgerRepository.QueryEntries", "scope", q.Scope, "limit", q.Limit)
+	return LedgerPage{Entries: []LedgerEntrySummary{}}, ErrNotImplemented
+}
+
+func (s *ledgerStub) RewriteRedaction(_ context.Context, entryID string, span Redaction, reference string) error {
+	s.log.Info("content stub: LedgerRepository.RewriteRedaction", "entry", entryID, "span", span, "reference", reference)
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) DeleteEntry(_ context.Context, id string) error {
 	s.log.Info("content stub: LedgerRepository.DeleteEntry", "id", id)
 	return ErrNotImplemented
+}
+
+func (s *ledgerStub) EvictEntries(_ context.Context, req EvictionRequest) (EvictionResult, error) {
+	s.log.Info("content stub: LedgerRepository.EvictEntries", "before", req.Before, "max", req.Max)
+	return EvictionResult{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) Watermark(_ context.Context) (RetentionWatermark, error) {
+	s.log.Info("content stub: LedgerRepository.Watermark")
+	return RetentionWatermark{}, ErrNotImplemented
 }
 
 func (s *ledgerStub) StartExecution(_ context.Context, in StartExecution) (int64, error) {
@@ -176,8 +155,15 @@ func (s *ledgerStub) AppendArtifact(_ context.Context, in AppendArtifact) (strin
 	return "", ErrNotImplemented
 }
 
-func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, body []byte) error {
-	s.log.Info("content stub: LedgerRepository.AppendChunk", "artifact", artifactID, "bytes", len(body))
+func (s *ledgerStub) CaptureOutput(_ context.Context, in CaptureOutput) (bool, error) {
+	s.log.Info("content stub: LedgerRepository.CaptureOutput",
+		"artifact", in.ArtifactID, "seq", in.Seq, "bytes", len(in.Body))
+	return false, nil
+}
+
+func (s *ledgerStub) AppendChunk(_ context.Context, artifactID string, seq int, body []byte) error {
+	s.log.Info("content stub: LedgerRepository.AppendChunk",
+		"artifact", artifactID, "seq", seq, "bytes", len(body))
 	return ErrNotImplemented
 }
 
@@ -218,5 +204,119 @@ func (s *ledgerStub) TransitionRun(_ context.Context, runID int64, to RunState) 
 
 func (s *ledgerStub) FinishAgentRun(_ context.Context, runID int64, in FinishAgentRun) error {
 	s.log.Info("content stub: LedgerRepository.FinishAgentRun", "run", runID, "state", string(in.State))
+	return ErrNotImplemented
+}
+
+var _ LayoutRepository = (*layoutStub)(nil)
+
+// layoutStub implements LayoutRepository for the stub.
+type layoutStub struct {
+	log log.Logger
+}
+
+func (s *layoutStub) CreateWorkspace(_ context.Context, ws Workspace, firstTab Tab, firstPane Pane) (Created[NewWorkspace], error) {
+	s.log.Info("content stub: LayoutRepository.CreateWorkspace",
+		"id", ws.ID, "first_tab", firstTab.ID, "first_pane", firstPane.ID)
+	return Created[NewWorkspace]{}, ErrNotImplemented
+}
+
+func (s *layoutStub) Snapshot(_ context.Context) (LayoutSnapshot, error) {
+	s.log.Info("content stub: LayoutRepository.Snapshot")
+	return LayoutSnapshot{}, ErrNotImplemented
+}
+
+func (s *layoutStub) Workspaces(_ context.Context) ([]Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.Workspaces")
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) RenameWorkspace(_ context.Context, id, name string) (Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.RenameWorkspace", "id", id, "name", name)
+	return Workspace{}, ErrNotImplemented
+}
+
+func (s *layoutStub) RecolourWorkspace(_ context.Context, id string, colour *string) (Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.RecolourWorkspace", "id", id, "set", colour != nil)
+	return Workspace{}, ErrNotImplemented
+}
+
+func (s *layoutStub) ReorderWorkspaces(_ context.Context, ids []string) ([]Workspace, error) {
+	s.log.Info("content stub: LayoutRepository.ReorderWorkspaces", "count", len(ids))
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) DeleteWorkspace(_ context.Context, id string, next Replacement) error {
+	s.log.Info("content stub: LayoutRepository.DeleteWorkspace", "id", id, "replacement_tab", next.TabID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) CreateTab(_ context.Context, tab Tab, firstPane Pane) (Created[NewTab], error) {
+	s.log.Info("content stub: LayoutRepository.CreateTab",
+		"id", tab.ID, "workspace", tab.WorkspaceID, "first_pane", firstPane.ID)
+	return Created[NewTab]{}, ErrNotImplemented
+}
+
+func (s *layoutStub) Tabs(_ context.Context, workspaceID string) ([]Tab, error) {
+	s.log.Info("content stub: LayoutRepository.Tabs", "workspace", workspaceID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) RenameTab(_ context.Context, id string, _ *string) (Tab, error) {
+	s.log.Info("content stub: LayoutRepository.RenameTab", "id", id)
+	return Tab{}, ErrNotImplemented
+}
+
+func (s *layoutStub) RecolourTab(_ context.Context, id string, _ *string) (Tab, error) {
+	s.log.Info("content stub: LayoutRepository.RecolourTab", "id", id)
+	return Tab{}, ErrNotImplemented
+}
+
+func (s *layoutStub) PinTab(_ context.Context, id string, pinned bool) (Tab, error) {
+	s.log.Info("content stub: LayoutRepository.PinTab", "id", id, "pinned", pinned)
+	return Tab{}, ErrNotImplemented
+}
+
+func (s *layoutStub) ReorderTabs(_ context.Context, workspaceID string, ids []string) ([]Tab, error) {
+	s.log.Info("content stub: LayoutRepository.ReorderTabs", "workspace", workspaceID, "count", len(ids))
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) DeleteTab(_ context.Context, id string, next Replacement) error {
+	s.log.Info("content stub: LayoutRepository.DeleteTab", "id", id, "replacement_tab", next.TabID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) CreatePane(_ context.Context, pane Pane) (Created[Pane], error) {
+	s.log.Info("content stub: LayoutRepository.CreatePane", "id", pane.ID, "tab", pane.TabID)
+	return Created[Pane]{}, ErrNotImplemented
+}
+
+func (s *layoutStub) Panes(_ context.Context, tabID string) ([]Pane, error) {
+	s.log.Info("content stub: LayoutRepository.Panes", "tab", tabID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) DeletePane(_ context.Context, id string, next Replacement) error {
+	s.log.Info("content stub: LayoutRepository.DeletePane", "id", id, "replacement_tab", next.TabID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) SetPaneCwd(_ context.Context, paneID, cwd string) (Pane, error) {
+	s.log.Info("content stub: LayoutRepository.SetPaneCwd", "pane", paneID, "cwd", cwd)
+	return Pane{}, ErrNotImplemented
+}
+
+func (s *layoutStub) MovePane(_ context.Context, paneID, tabID string) (Pane, error) {
+	s.log.Info("content stub: LayoutRepository.MovePane", "pane", paneID, "tab", tabID)
+	return Pane{}, ErrNotImplemented
+}
+
+func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string, error) {
+	s.log.Info("content stub: LayoutRepository.WorkspaceForPane", "pane", paneID)
+	return "", ErrNotImplemented
+}
+
+func (s *layoutStub) ClearWindow(_ context.Context) error {
+	s.log.Info("content stub: LayoutRepository.ClearWindow")
 	return ErrNotImplemented
 }

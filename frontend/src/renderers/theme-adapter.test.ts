@@ -176,7 +176,7 @@ describe('theme-adapter: mount/dispose counters', () => {
     expect(subscriber).toHaveBeenCalledWith(newTheme)
 
     // No terminals were created or disposed by the theme change itself.
-    // (Actual terminal lifecycle is managed by TabManager/terminal-content,
+    // (Actual terminal lifecycle is managed by PaneManager/terminal-content,
     // which are outside this test scope.)
   })
 

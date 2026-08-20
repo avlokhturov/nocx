@@ -56,6 +56,80 @@ describe('ContextMenu', () => {
     expect(document.activeElement).toBe(menuItems()[0])
   })
 
+  // ── Handing the keyboard back (nocx-rv53x follow-up) ────────────────────
+  //
+  // The menu TAKES focus on open — it has to, the rows are keyboard-walkable —
+  // so it owes it back. It did not, and the cost was only visible once a menu
+  // row started opening another overlay: the strip rework made "Quick connect…"
+  // a row here, the picker it opens remembered the MENU ITEM as the element to
+  // restore, and by the time the picker closed that button had been unmounted.
+  // `focus()` on a detached node is a no-op, so Escape out of the picker left
+  // the keyboard on <body> — the caret gone from the prompt the person had
+  // been typing in.
+  //
+  // Restoring BEFORE the row's action runs is the load-bearing half: the
+  // action is what opens the next overlay, and that overlay reads
+  // document.activeElement to decide where to return focus later.
+
+  it('hands focus back to the opener when an item is activated, before the action runs', () => {
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    opener.focus()
+
+    let activeWhenSelected: Element | null = null
+    render(() => (
+      <ContextMenu
+        open
+        x={10}
+        y={20}
+        items={items({
+          copy: {
+            id: 'copy',
+            label: 'Copy path',
+            onSelect: () => {
+              activeWhenSelected = document.activeElement
+            },
+          },
+        })}
+        onClose={() => undefined}
+      />
+    ))
+    expect(document.activeElement).toBe(menuItems()[0])
+
+    fireEvent.click(menuItems()[0])
+    expect(activeWhenSelected).toBe(opener)
+    opener.remove()
+  })
+
+  it('hands focus back to the opener on Escape', () => {
+    const opener = document.createElement('button')
+    document.body.append(opener)
+    opener.focus()
+
+    render(() => <ContextMenu open x={10} y={20} items={ITEMS} onClose={() => undefined} />)
+    expect(document.activeElement).toBe(menuItems()[0])
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.activeElement).toBe(opener)
+    opener.remove()
+  })
+
+  it('does not overrule an outside click, which is on its way to a new owner', () => {
+    const opener = document.createElement('button')
+    const elsewhere = document.createElement('button')
+    document.body.append(opener, elsewhere)
+    opener.focus()
+
+    render(() => <ContextMenu open x={10} y={20} items={ITEMS} onClose={() => undefined} />)
+    // The pointer lands outside and takes focus with it: the menu must not
+    // yank the keyboard back to the opener over the top of that.
+    elsewhere.focus()
+    fireEvent.pointerDown(elsewhere)
+    expect(document.activeElement).toBe(elsewhere)
+    opener.remove()
+    elsewhere.remove()
+  })
+
   it('activates an item through its button and dismisses the menu', () => {
     const onCopy = vi.fn()
     const close = vi.fn()

@@ -11,7 +11,6 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"time"
 
 	sqlite3 "github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
@@ -54,21 +53,12 @@ func newTestStore(t *testing.T) (content.ContentDB, string) {
 	return db, dir
 }
 
-func markerRecord(marker string) content.CommandRecord {
-	return content.CommandRecord{
-		Command: marker,
-		Cwd:     "/srv/api",
-		Host:    "",
-		Status:  content.StatusSuccess,
-	}
-}
-
 // The file, its WAL and its SHM are 0600 inside a 0700 directory, carry no
 // SQLite header and no plaintext of a row we wrote, and reopen with the key.
 func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if _, addErr := db.CommandHistory().Add(ctx, markerRecord("canary-51e21c88-command")); addErr != nil {
+	if _, addErr := db.Ledger().RecordCompleted(ctx, aCompletedCommand("canary-51e21c88-command")); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
 
@@ -132,38 +122,39 @@ func TestOpenCreatesEncryptedStoreWithAtRestPosture(t *testing.T) {
 		t.Fatalf("reopen: %v", reopenErr)
 	}
 	defer func() { _ = db2.Close() }()
-	recs, listErr := db2.CommandHistory().List(ctx, 10)
+	recs, listErr := db2.Ledger().ListEntries(ctx, 10)
 	if listErr != nil {
 		t.Fatalf("List: %v", listErr)
 	}
-	if len(recs) != 1 || recs[0].Command != "canary-51e21c88-command" {
+	if len(recs) != 1 || recs[0].Intent != "canary-51e21c88-command" {
 		t.Fatalf("reopened store read %+v, want the marker record", recs)
 	}
 }
 
+// The author a command was submitted under is DURABLE — it is the entry's own
+// kind (design §3.1, nocx-iadtt/nocx-e5vsc), so a restart must read back which
+// of the two authors ran each line. Written against the reopened store rather
+// than the live one: an author kept only in memory would satisfy every
+// in-process assertion and lose the fact on the next launch, which is the one
+// state this feature exists for.
 func TestHistoryRecordAuthorSurvivesRestartInLedger(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
 
-	records := []content.CommandRecord{
+	for _, rec := range []content.CompletedCommand{
 		{
-			Author:  string(content.EntryAgent),
-			Command: "agent-cmd",
-			Cwd:     "/srv/api",
-			Host:    "",
-			Status:  content.StatusSuccess,
+			Client: "test-client", Env: content.Environment{ID: "local", Kind: content.EnvLocal},
+			Cwd: "/srv/api", Intent: "agent-cmd", Status: content.EntrySuccess,
+			Author: content.EntryAgent,
 		},
 		{
-			Author:  string(content.EntryShell),
-			Command: "shell-cmd",
-			Cwd:     "/srv/api",
-			Host:    "",
-			Status:  content.StatusSuccess,
+			Client: "test-client", Env: content.Environment{ID: "local", Kind: content.EnvLocal},
+			Cwd: "/srv/api", Intent: "shell-cmd", Status: content.EntrySuccess,
+			Author: content.EntryShell,
 		},
-	}
-	for _, rec := range records {
-		if _, err := db.CommandHistory().Add(ctx, rec); err != nil {
-			t.Fatalf("Add %q: %v", rec.Command, err)
+	} {
+		if _, err := db.Ledger().RecordCompleted(ctx, rec); err != nil {
+			t.Fatalf("RecordCompleted %q: %v", rec.Intent, err)
 		}
 	}
 
@@ -189,24 +180,44 @@ func TestHistoryRecordAuthorSurvivesRestartInLedger(t *testing.T) {
 		t.Fatalf("entries after reopen = %+v, want 2 durable rows", entries)
 	}
 	if entries[0].Kind != content.EntryShell || entries[0].Intent != "shell-cmd" {
-		t.Fatalf("newest ledger entry = %+v, want shell-cmd", entries[0])
+		t.Fatalf("newest ledger entry = %+v, want shell-cmd under the shell author", entries[0])
 	}
 	if entries[1].Kind != content.EntryAgent || entries[1].Intent != "agent-cmd" {
-		t.Fatalf("older ledger entry = %+v, want agent-cmd", entries[1])
+		t.Fatalf("older ledger entry = %+v, want agent-cmd under the agent author", entries[1])
 	}
+}
 
-	history, err := db2.CommandHistory().List(ctx, 10)
+// An author outside the two command-bearing kinds is refused rather than
+// written: `action` is a no-block effect and can never be a command's author,
+// and an unknown kind would meet the CHECK constraint halfway through the
+// transaction instead of at the seam that can name the vocabulary.
+func TestRecordCompleted_RefusesAnAuthorThatIsNotACommandKind(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, author := range []content.EntryKind{content.EntryAction, "robot"} {
+		rec := aCompletedCommand("x")
+		rec.Author = author
+		if _, err := db.Ledger().RecordCompleted(ctx, rec); err == nil {
+			t.Fatalf("author %q was accepted; want a refusal naming shell or agent", author)
+		}
+	}
+}
+
+// And the ordinary caller that names no author is the shell path — which is
+// what every caller was before the author existed, so the default must not
+// leave a row with an empty kind.
+func TestRecordCompleted_DefaultsAnUnnamedAuthorToTheShell(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("unnamed")); err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+	entries, err := db.Ledger().ListEntries(ctx, 10)
 	if err != nil {
-		t.Fatalf("List after reopen: %v", err)
+		t.Fatalf("ListEntries: %v", err)
 	}
-	if len(history) != 2 {
-		t.Fatalf("history after reopen = %+v, want 2 rows", history)
-	}
-	if history[0].Author != string(content.EntryShell) || history[0].Command != "shell-cmd" {
-		t.Fatalf("newest history row = %+v, want shell author", history[0])
-	}
-	if history[1].Author != string(content.EntryAgent) || history[1].Command != "agent-cmd" {
-		t.Fatalf("older history row = %+v, want agent author", history[1])
+	if len(entries) != 1 || entries[0].Kind != content.EntryShell {
+		t.Fatalf("entries = %+v, want one row under the shell author", entries)
 	}
 }
 
@@ -215,7 +226,7 @@ func TestHistoryRecordAuthorSurvivesRestartInLedger(t *testing.T) {
 func TestWrongKeyFailsCleanly(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if _, err := db.CommandHistory().Add(ctx, markerRecord("wrongkey-marker")); err != nil {
+	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("wrongkey-marker")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if closeErr := db.Close(); closeErr != nil {
@@ -273,7 +284,7 @@ func TestWrongKeyFailsCleanly(t *testing.T) {
 		t.Fatalf("reopen with right key after wrong-key attempt: %v", err)
 	}
 	defer func() { _ = db2.Close() }()
-	recs, err := db2.CommandHistory().List(ctx, 10)
+	recs, err := db2.Ledger().ListEntries(ctx, 10)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -295,307 +306,14 @@ func dirEntries(t *testing.T, dir string) []string {
 	return out
 }
 
-func TestAddListGetByIDFindByPrefix(t *testing.T) {
-	db, _ := newTestStore(t)
-	ctx := context.Background()
-	hist := db.CommandHistory()
-
-	recs := []content.CommandRecord{
-		{Command: "kubectl get pods", Cwd: "/repo", Host: "", Status: content.StatusSuccess},
-		{Command: "kubectl get svc", Cwd: "/repo", Host: "", Status: content.StatusRunning},
-		{Command: "ssh prod deploy", Cwd: "/srv/api", Host: "prod.example.com", Status: content.StatusFailure},
-	}
-	for _, r := range recs {
-		if _, err := hist.Add(ctx, r); err != nil {
-			t.Fatalf("Add %q: %v", r.Command, err)
-		}
-	}
-
-	got, err := hist.List(ctx, 2)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(got) != 2 || got[0].Command != "ssh prod deploy" || got[1].Command != "kubectl get svc" {
-		t.Fatalf("List(2) = %+v, want the two newest, newest first", got)
-	}
-
-	one, err := hist.GetByID(ctx, got[0].ID)
-	if err != nil {
-		t.Fatalf("GetByID: %v", err)
-	}
-	if one == nil || one.Command != "ssh prod deploy" || one.Host != "prod.example.com" {
-		t.Fatalf("GetByID = %+v", one)
-	}
-	missing, err := hist.GetByID(ctx, 99999)
-	if err != nil || missing != nil {
-		t.Fatalf("GetByID(missing) = %v, %v; want nil, nil", missing, err)
-	}
-
-	prefixed, err := hist.FindByPrefix(ctx, "kubectl", 10)
-	if err != nil {
-		t.Fatalf("FindByPrefix: %v", err)
-	}
-	if len(prefixed) != 2 || prefixed[0].Command != "kubectl get svc" {
-		t.Fatalf("FindByPrefix(kubectl) = %+v", prefixed)
-	}
-	// A literal % in the prefix must not act as a wildcard.
-	lit, err := hist.FindByPrefix(ctx, "ssh %", 10)
-	if err != nil {
-		t.Fatalf("FindByPrefix literal: %v", err)
-	}
-	if len(lit) != 0 {
-		t.Fatalf("FindByPrefix(ssh %%) matched %d rows, want 0 (wildcards escaped)", len(lit))
-	}
-}
-
-// The rungs: directory is the exact (cwd, host) pair (the overlay's own
-// semantics), host is the exact host, everywhere is unfiltered. The store
-// answers from the asked rung and never widens it.
-func TestQueryScopesPagingAndHasRows(t *testing.T) {
-	db, _ := newTestStore(t)
-	ctx := context.Background()
-	hist := db.CommandHistory()
-
-	// A fresh store: HasRows=false — the transport answers source=session.
-	page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query on fresh store: %v", err)
-	}
-	if page.HasRows || page.Exhausted != true || len(page.Entries) != 0 {
-		t.Fatalf("fresh store page = %+v, want no rows, exhausted, empty", page)
-	}
-
-	add := func(cmd, cwd, host string) {
-		t.Helper()
-		if _, addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess}); addErr != nil {
-			t.Fatalf("Add %q: %v", cmd, addErr)
-		}
-	}
-	add("cd /srv/api", "/srv/api", "")
-	add("ls -la", "/srv/api", "")
-	add("kubectl get pods", "/srv/api", "prod.example.com")
-	add("ssh deploy", "/srv/api", "prod.example.com")
-	add("make test", "/repo", "")
-
-	// directory = (cwd, host). Remote rows are not in the local directory
-	// rung even though the cwd matches; local rows in other dirs are not.
-	page, err = hist.Query(ctx, content.ScopeDirectory, "/srv/api", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query directory: %v", err)
-	}
-	if len(page.Entries) != 2 || !page.Exhausted || !page.HasRows {
-		t.Fatalf("directory(local /srv/api) = %+v", page)
-	}
-	for _, e := range page.Entries {
-		if e.Host != "" {
-			t.Fatalf("directory rung leaked a remote row: %+v", e)
-		}
-	}
-
-	page, err = hist.Query(ctx, content.ScopeDirectory, "/srv/api", "prod.example.com", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query directory remote: %v", err)
-	}
-	if len(page.Entries) != 2 {
-		t.Fatalf("directory(prod /srv/api) = %d rows, want 2", len(page.Entries))
-	}
-
-	// host rung: "" is the local machine.
-	page, err = hist.Query(ctx, content.ScopeHost, "", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query host local: %v", err)
-	}
-	if len(page.Entries) != 3 || page.Entries[0].Command != "make test" {
-		t.Fatalf("host(local) = %+v, want 3 rows newest first", page.Entries)
-	}
-
-	// everywhere, newest first.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 2, nil, "")
-	if err != nil {
-		t.Fatalf("Query everywhere: %v", err)
-	}
-	if len(page.Entries) != 2 || page.Exhausted {
-		t.Fatalf("everywhere page(2) = %+v, want 2 rows, not exhausted", page)
-	}
-	if page.Entries[0].Command != "make test" || page.Entries[1].Command != "ssh deploy" {
-		t.Fatalf("everywhere order = %q, %q", page.Entries[0].Command, page.Entries[1].Command)
-	}
-
-	// paging: before = last id of the previous page; only strictly older rows.
-	// Five rows, page size 2: page 1 is rows 5,4; page 2 is rows 3,2 and is
-	// NOT exhausted (row 1 remains); page 3 is row 1 and is exhausted.
-	before := page.Entries[1].ID
-	page2, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 2, &before, "")
-	if err != nil {
-		t.Fatalf("Query page 2: %v", err)
-	}
-	if len(page2.Entries) != 2 || page2.Exhausted {
-		t.Fatalf("page 2 = %+v, want 2 rows, not exhausted (one row remains)", page2)
-	}
-	if page2.Entries[0].ID >= before || page2.Entries[1].ID >= before {
-		t.Fatalf("page 2 contains rows not strictly older than the cursor")
-	}
-	before = page2.Entries[1].ID
-	page3, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 2, &before, "")
-	if err != nil {
-		t.Fatalf("Query page 3: %v", err)
-	}
-	if len(page3.Entries) != 1 || !page3.Exhausted {
-		t.Fatalf("page 3 = %+v, want the last row, exhausted", page3)
-	}
-}
-
 // ── text filter (nocx-ms7v) and coverage ────────────────────────────────
-
-// The filter is a case-insensitive substring over command, applied WITHIN the
-// rung the caller asked for — the server never silently widens. instr() has
-// no wildcard grammar, so "%" and "_" in the search text match literally.
-func TestQueryTextFilterWithinRung(t *testing.T) {
-	db, _ := newTestStore(t)
-	ctx := context.Background()
-	hist := db.CommandHistory()
-
-	add := func(cmd, cwd, host string) {
-		t.Helper()
-		if _, addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess}); addErr != nil {
-			t.Fatalf("Add %q: %v", cmd, addErr)
-		}
-	}
-	add("make deploy", "/srv/api", "")
-	add("Make Deploy PROD", "/srv/api", "")
-	add("rm -rf build", "/srv/api", "")
-	add("make deploy", "/srv/api", "prod.example.com") // same cwd, remote host
-	add("make test", "/repo", "")
-	add("grep '100%_done'", "/repo", "") // the % and _ are literal
-
-	// Within the directory rung: the remote row and the other cwd are out,
-	// even though their commands match the filter.
-	page, err := hist.Query(ctx, content.ScopeDirectory, "/srv/api", "", 50, nil, "deploy")
-	if err != nil {
-		t.Fatalf("Query directory+deploy: %v", err)
-	}
-	got := make([]string, 0, len(page.Entries))
-	for _, e := range page.Entries {
-		got = append(got, e.Command)
-	}
-	if len(got) != 2 || got[0] != "Make Deploy PROD" || got[1] != "make deploy" {
-		t.Fatalf("directory+deploy = %q, want the two local /srv/api matches newest first", got)
-	}
-
-	// Case-insensitive: an upper-case needle finds the lower-case command.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "DEPLOY")
-	if err != nil {
-		t.Fatalf("Query everywhere+DEPLOY: %v", err)
-	}
-	if len(page.Entries) != 3 {
-		t.Fatalf("everywhere+DEPLOY = %d rows, want 3 (both /srv/api dirs + remote)", len(page.Entries))
-	}
-
-	// The empty filter is no filter: the whole rung, same as omitting text.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query everywhere+empty: %v", err)
-	}
-	if len(page.Entries) != 6 {
-		t.Fatalf("everywhere+empty = %d rows, want 6 (no filter)", len(page.Entries))
-	}
-
-	// % and _ are literals, not LIKE wildcards: the needle matches the
-	// command that contains it and nothing else.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "100%_done")
-	if err != nil {
-		t.Fatalf("Query everywhere+literal: %v", err)
-	}
-	if len(page.Entries) != 1 || page.Entries[0].Command != "grep '100%_done'" {
-		t.Fatalf("everywhere+literal = %+v, want only the literal row", page.Entries)
-	}
-
-	// A needle with no matches is an empty page from a store that has rows:
-	// HasRows stays true, so the transport still answers source=store — the
-	// empty answer and the unanswerable question must not look alike.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "zzz-no-such-command")
-	if err != nil {
-		t.Fatalf("Query everywhere+miss: %v", err)
-	}
-	if len(page.Entries) != 0 || !page.HasRows || !page.Exhausted {
-		t.Fatalf("everywhere+miss = %+v, want empty page, HasRows, exhausted", page)
-	}
-}
-
-// Coverage is the store-wide horizon — the oldest retained entry's ended_at —
-// independent of the rung and the filter: retention is store-wide, so the
-// answer's horizon is too. A fresh store reports no horizon.
-func TestQueryCoverageIsStoreWideHorizon(t *testing.T) {
-	db, _ := newTestStore(t)
-	ctx := context.Background()
-	hist := db.CommandHistory()
-
-	// A fresh store holds nothing: no horizon to state.
-	page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query on fresh store: %v", err)
-	}
-	if page.Coverage != nil {
-		t.Fatalf("fresh store coverage = %v, want nil", *page.Coverage)
-	}
-
-	old := int64(1_000)
-	mid := int64(2_000)
-	newest := int64(3_000)
-	add := func(cmd, cwd, host string, endedAt int64) {
-		t.Helper()
-		if _, addErr := hist.Add(ctx, content.CommandRecord{Command: cmd, Cwd: cwd, Host: host, Status: content.StatusSuccess, EndedAt: &endedAt}); addErr != nil {
-			t.Fatalf("Add %q: %v", cmd, addErr)
-		}
-	}
-	add("oldest", "/old", "", old)
-	// A running entry (ended_at NULL) must not corrupt the MIN — NULLs are
-	// ignored, so the horizon stays the oldest completed row.
-	if _, addErr := hist.Add(ctx, content.CommandRecord{Command: "running", Cwd: "/old", Host: "", Status: content.StatusRunning}); addErr != nil {
-		t.Fatalf("Add running: %v", addErr)
-	}
-	add("newest", "/new", "", newest)
-	add("middle", "/old", "", mid)
-
-	// Store-wide: the oldest row lives in /old; a query on the /new rung —
-	// whose own rows are all recent — still reports the store's horizon.
-	page, err = hist.Query(ctx, content.ScopeDirectory, "/new", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query /new: %v", err)
-	}
-	if page.Coverage == nil || *page.Coverage != old {
-		t.Fatalf("/new rung coverage = %v, want store-wide %d", page.Coverage, old)
-	}
-
-	// The filter does not narrow the horizon either: a needle matching only
-	// the newest row still reports the oldest retained entry.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "newest")
-	if err != nil {
-		t.Fatalf("Query filter=newest: %v", err)
-	}
-	if page.Coverage == nil || *page.Coverage != old {
-		t.Fatalf("filtered coverage = %v, want store-wide %d", page.Coverage, old)
-	}
-	if len(page.Entries) != 1 || page.Entries[0].Command != "newest" {
-		t.Fatalf("filter=newest entries = %+v, want only the newest row", page.Entries)
-	}
-
-	// And the unfiltered everywhere page reports the same horizon.
-	page, err = hist.Query(ctx, content.ScopeEverywhere, "", "", 50, nil, "")
-	if err != nil {
-		t.Fatalf("Query everywhere: %v", err)
-	}
-	if page.Coverage == nil || *page.Coverage != old {
-		t.Fatalf("everywhere coverage = %v, want %d", page.Coverage, old)
-	}
-}
 
 // ── concurrency: one writer, many readers, no lost rows ──────────────────
 
 func TestConcurrentReadersWithOneWriter(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
-	hist := db.CommandHistory()
+	hist := db.Ledger()
 
 	const total = 1000
 	var wg sync.WaitGroup
@@ -605,9 +323,7 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := range total {
-			if _, err := hist.Add(ctx, content.CommandRecord{
-				Command: fmt.Sprintf("cmd-%d", i), Cwd: "/repo", Host: "", Status: content.StatusSuccess,
-			}); err != nil {
+			if _, err := hist.RecordCompleted(ctx, aCompletedCommand(fmt.Sprintf("cmd-%d", i))); err != nil {
 				errCh <- fmt.Errorf("writer: %w", err)
 				return
 			}
@@ -619,7 +335,7 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 100 {
-				page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 10, nil, "")
+				page, err := hist.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
 				if err != nil {
 					errCh <- fmt.Errorf("reader: %w", err)
 					return
@@ -634,7 +350,7 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	recs, err := hist.List(ctx, total+1)
+	recs, err := hist.ListEntries(ctx, total+1)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -651,7 +367,7 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 func TestDiskFullProducesActionableError(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
-	hist := db.CommandHistory()
+	hist := db.Ledger()
 
 	var lim syscall.Rlimit
 	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &lim); err != nil {
@@ -668,21 +384,21 @@ func TestDiskFullProducesActionableError(t *testing.T) {
 	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original) })
 
 	big := strings.Repeat("x", 2<<20) // 2 MiB row, far over the cap
-	if _, err := hist.Add(ctx, content.CommandRecord{Command: big, Cwd: "/", Host: "", Status: content.StatusSuccess}); err == nil {
+	if _, err := hist.RecordCompleted(ctx, aCompletedCommand(big)); err == nil {
 		t.Fatal("oversized write succeeded, want a disk-full-class error")
 	}
 
 	// The store is intact: after the limit is lifted, small writes work and
 	// the failed write left nothing behind.
 	_ = syscall.Setrlimit(syscall.RLIMIT_FSIZE, &original)
-	if _, err := hist.Add(ctx, markerRecord("after-full")); err != nil {
+	if _, err := hist.RecordCompleted(ctx, aCompletedCommand("after-full")); err != nil {
 		t.Fatalf("Add after the condition cleared: %v", err)
 	}
-	recs, err := hist.List(ctx, 10)
+	recs, err := hist.ListEntries(ctx, 10)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(recs) != 1 || recs[0].Command != "after-full" {
+	if len(recs) != 1 || recs[0].Intent != "after-full" {
 		t.Fatalf("records after disk-full = %+v, want exactly the one clean row", recs)
 	}
 }
@@ -741,7 +457,7 @@ func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 	if closeErr := db.Close(); closeErr != nil {
 		t.Fatalf("Close: %v", closeErr)
 	}
-	_, err := db.CommandHistory().Add(ctx, markerRecord("late"))
+	_, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("late"))
 	if !errors.Is(err, content.ErrClosed) {
 		t.Fatalf("Add after Close = %v, want ErrClosed", err)
 	}
@@ -755,7 +471,7 @@ func TestAddAfterCloseReturnsErrClosed(t *testing.T) {
 func TestAutoVacuumDecidedAtCreation(t *testing.T) {
 	db, dir := newTestStore(t)
 	ctx := context.Background()
-	if _, err := db.CommandHistory().Add(ctx, markerRecord("av")); err != nil {
+	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("av")); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if closeErr := db.Close(); closeErr != nil {
@@ -823,13 +539,13 @@ func TestAddHonorsDisabledHistory(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer func() { _ = db.Close() }()
-	hist := db.CommandHistory()
+	hist := db.Ledger()
 
 	// A command runs while history is off: no row appears, no error.
-	if _, addErr := hist.Add(context.Background(), markerRecord("off-1")); addErr != nil {
+	if _, addErr := hist.RecordCompleted(context.Background(), aCompletedCommand("off-1")); addErr != nil {
 		t.Fatalf("Add while disabled returned an error: %v", addErr)
 	}
-	recs, err := hist.List(context.Background(), 10)
+	recs, err := hist.ListEntries(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -839,256 +555,16 @@ func TestAddHonorsDisabledHistory(t *testing.T) {
 
 	// Live toggle: enabled again, the next command is recorded.
 	policy.SetEnabled(true)
-	if _, addErr := hist.Add(context.Background(), markerRecord("on-1")); addErr != nil {
+	if _, addErr := hist.RecordCompleted(context.Background(), aCompletedCommand("on-1")); addErr != nil {
 		t.Fatalf("Add: %v", addErr)
 	}
-	recs, err = hist.List(context.Background(), 10)
+	recs, err = hist.ListEntries(context.Background(), 10)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(recs) != 1 || recs[0].Command != "on-1" {
+	if len(recs) != 1 || recs[0].Intent != "on-1" {
 		t.Fatalf("after re-enable rows = %+v, want exactly the new command", recs)
 	}
 }
 
-// Retention by age: the transition is what is proven. An old command added
-// while retention is off survives; turning retention on and recording a new
-// command sweeps the old one — removed from nocx, not hidden.
-func TestRetentionSweepRemovesOldCommands(t *testing.T) {
-	policy := content.NewPolicy() // retention off (0 = unbounded)
-	dir := t.TempDir()
-	db, err := content.Open(context.Background(), content.Config{
-		Path:   filepath.Join(dir, "content.db"),
-		Key:    testKey(),
-		Budget: testBudget,
-		Policy: policy,
-		Logger: log.NewSlogAdapter(nil),
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	hist := db.CommandHistory()
-	ctx := context.Background()
-
-	old := time.Now().Add(-48 * time.Hour).UnixMilli()
-	oldRec := content.CommandRecord{Command: "old-command", Cwd: "/old", Host: "", Status: content.StatusSuccess, EndedAt: &old}
-	if _, addErr := hist.Add(ctx, oldRec); addErr != nil {
-		t.Fatalf("Add old: %v", addErr)
-	}
-
-	// Retention is off: the old command survives.
-	recs, err := hist.List(ctx, 10)
-	if err != nil || len(recs) != 1 {
-		t.Fatalf("before retention: %d rows (err %v), want the old command kept", len(recs), err)
-	}
-
-	// Turn retention on (1 day) and record a fresh command: the sweep runs
-	// in that writer turn and removes the old one.
-	policy.SetRetentionDays(1)
-	now := time.Now().UnixMilli()
-	fresh := content.CommandRecord{Command: "fresh-command", Cwd: "/new", Host: "", Status: content.StatusSuccess, EndedAt: &now}
-	if _, addErr := hist.Add(ctx, fresh); addErr != nil {
-		t.Fatalf("Add fresh: %v", addErr)
-	}
-
-	recs, err = hist.List(ctx, 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(recs) != 1 || recs[0].Command != "fresh-command" {
-		t.Fatalf("after sweep rows = %+v, want only the fresh command (old one removed)", recs)
-	}
-}
-
-// The nocx-rtg0.16 guard: a row recorded NOW survives the age sweep that
-// runs in the same writer turn as the INSERT when retention is 30 days (the
-// owner's value). The defect this pins: a caller clocking in
-// performance.now() units made every ended_at land in January 1970, so the
-// sweep deleted each row microseconds after it was written. The store
-// cannot tell a 1970 timestamp from a real one — the sweep must only ever
-// see wall-clock epoch milliseconds, which is the transport's boundary
-// check. What the store itself must never regress is this: a fresh
-// epoch-millisecond row survives a retention sweep.
-func TestRetentionSweepKeepsFreshRowAt30Days(t *testing.T) {
-	policy := content.NewPolicy()
-	policy.SetRetentionDays(30)
-	dir := t.TempDir()
-	db, err := content.Open(context.Background(), content.Config{
-		Path:   filepath.Join(dir, "content.db"),
-		Key:    testKey(),
-		Budget: testBudget,
-		Policy: policy,
-		Logger: log.NewSlogAdapter(nil),
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	hist := db.CommandHistory()
-	ctx := context.Background()
-
-	now := time.Now().UnixMilli()
-	rec := content.CommandRecord{Command: "recorded-now", Cwd: "/now", Host: "", Status: content.StatusSuccess, EndedAt: &now}
-	if _, addErr := hist.Add(ctx, rec); addErr != nil {
-		t.Fatalf("Add: %v", addErr)
-	}
-
-	recs, err := hist.List(ctx, 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(recs) != 1 || recs[0].Command != "recorded-now" {
-		t.Fatalf("rows after Add with retention 30d = %+v, want the fresh row to survive the same-turn sweep", recs)
-	}
-}
-
-// The mask facts ride the row: a record written with masked_count and
-// masked_kinds reads them back identically through List and Query, and a
-// record without them reads back 0/[] — the durable facts describe the
-// masked command, never the secret itself.
-func TestMaskFactsRoundTrip(t *testing.T) {
-	db, _ := newTestStore(t)
-	hist := db.CommandHistory()
-	ctx := context.Background()
-
-	withFacts := markerRecord("curl -H \"Authorization: Bearer sk-p...7890\" https://api")
-	withFacts.MaskedCount = 1
-	withFacts.MaskedKinds = []string{"openai"}
-	if _, addErr := hist.Add(ctx, withFacts); addErr != nil {
-		t.Fatalf("Add: %v", addErr)
-	}
-
-	plain := markerRecord("echo hello")
-	if _, addErr := hist.Add(ctx, plain); addErr != nil {
-		t.Fatalf("Add plain: %v", addErr)
-	}
-
-	recs, err := hist.List(ctx, 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(recs) != 2 {
-		t.Fatalf("List = %d rows, want 2", len(recs))
-	}
-	if recs[0].Command != "echo hello" {
-		t.Fatalf("newest row = %q, want the plain record", recs[0].Command)
-	}
-	if recs[0].MaskedCount != 0 || len(recs[0].MaskedKinds) != 0 {
-		t.Errorf("plain record facts = %d %v, want 0 nil", recs[0].MaskedCount, recs[0].MaskedKinds)
-	}
-	if recs[1].MaskedCount != 1 || len(recs[1].MaskedKinds) != 1 || recs[1].MaskedKinds[0] != "openai" {
-		t.Errorf("masked record facts = %d %v, want 1 [openai]", recs[1].MaskedCount, recs[1].MaskedKinds)
-	}
-
-	page, err := hist.Query(ctx, content.ScopeEverywhere, "", "", 10, nil, "")
-	if err != nil {
-		t.Fatalf("Query: %v", err)
-	}
-	if page.Entries[0].MaskedCount != 0 || page.Entries[1].MaskedCount != 1 {
-		t.Errorf("query facts = %d %d, want 0 then 1", page.Entries[0].MaskedCount, page.Entries[1].MaskedCount)
-	}
-}
-
 // ── atomic private-content restore (the export restore operation's seam) ─
-
-// A normal machine: a private-content block with history rows is restored
-// whole, and the rows keep their timestamps and facts.
-func TestRestorePrivate_RestoresHistoryRows(t *testing.T) {
-	db, _ := newTestStore(t)
-	ctx := context.Background()
-	started := int64(1700000000000)
-	ended := int64(1700000001000)
-	records := []content.CommandRecord{
-		{
-			Command: "ssh prod", Cwd: "/home/dev", Host: "local", Status: content.StatusSuccess,
-			StartedAt: &started, EndedAt: &ended, Trusted: true,
-		},
-		{Command: "git push", Cwd: "/home/dev/nocx", Host: "local", Status: content.StatusFailure},
-	}
-	if err := db.RestorePrivate(ctx, nil, records); err != nil {
-		t.Fatalf("RestorePrivate: %v", err)
-	}
-
-	recs, err := db.CommandHistory().List(ctx, 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(recs) != 2 {
-		t.Fatalf("rows after restore = %d, want 2", len(recs))
-	}
-	// List is newest first; find the ssh prod row by command.
-	var found *content.CommandRecord
-	for i := range recs {
-		if recs[i].Command == "ssh prod" {
-			found = &recs[i]
-		}
-	}
-	if found == nil {
-		t.Fatal("restored row 'ssh prod' missing")
-	}
-	if found.StartedAt == nil || *found.StartedAt != started || found.EndedAt == nil || *found.EndedAt != ended {
-		t.Errorf("restored timestamps not preserved: %+v", found)
-	}
-	if !found.Trusted {
-		t.Errorf("restored row lost Trusted: %+v", found)
-	}
-}
-
-// A block that carries conversations is refused on the SQLite backing (they
-// are stubbed until agent mode) — and the refusal must leave the store
-// untouched: refusing after writing the history rows would be the partial
-// restore the atomicity contract exists to prevent.
-func TestRestorePrivate_ConversationsRefusedAtomically(t *testing.T) {
-	db, _ := newTestStore(t)
-	ctx := context.Background()
-	err := db.RestorePrivate(ctx, []content.Conversation{{ID: "conv-1", Title: "t"}}, []content.CommandRecord{
-		{Command: "ssh prod", Cwd: "/", Host: "local", Status: content.StatusSuccess},
-	})
-	if !errors.Is(err, content.ErrNotImplemented) {
-		t.Fatalf("err = %v, want ErrNotImplemented", err)
-	}
-	recs, err := db.CommandHistory().List(ctx, 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(recs) != 0 {
-		t.Errorf("history rows written despite conversation refusal: %d", len(recs))
-	}
-}
-
-// Cancellation before the writer accepts the request changes nothing on
-// disk — the pre-commit half of the restore operation's interval.
-func TestRestorePrivate_CancelledBeforeAcceptanceChangesNothing(t *testing.T) {
-	db, _ := newTestStore(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := db.RestorePrivate(ctx, nil, []content.CommandRecord{
-		{Command: "ssh prod", Cwd: "/", Host: "local", Status: content.StatusSuccess},
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-	recs, err := db.CommandHistory().List(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(recs) != 0 {
-		t.Errorf("rows written despite pre-acceptance cancellation: %d", len(recs))
-	}
-}
-
-// A closed store refuses the restore cleanly — and a restore of nothing is
-// still a no-op success, never a write to a closed store.
-func TestRestorePrivate_ClosedStoreRefuses(t *testing.T) {
-	db, _ := newTestStore(t)
-	if closeErr := db.Close(); closeErr != nil {
-		t.Fatalf("Close: %v", closeErr)
-	}
-	err := db.RestorePrivate(context.Background(), nil, []content.CommandRecord{
-		{Command: "ssh prod", Cwd: "/", Host: "local", Status: content.StatusSuccess},
-	})
-	if !errors.Is(err, content.ErrClosed) {
-		t.Fatalf("err = %v, want ErrClosed", err)
-	}
-}

@@ -37,9 +37,33 @@ docker build -q -f "$repo_root/e2e/Dockerfile" -t "$image" "$repo_root/e2e" >/de
 # "Cannot find module '@rollup/rollup-darwin-arm64'", because it was holding
 # @rollup/rollup-linux-arm64-gnu instead. `npm test` on the host broke after
 # every container run until this line existed.
-docker volume create nocx-e2e-node >/dev/null
-docker volume create nocx-e2e-fenode >/dev/null
+# AND KEYED BY WORKTREE (nocx-x6z3) — the two node_modules trees, not the Go
+# cache. The split is what the volume holds, not which runner owns it. A
+# node_modules tree is the PRODUCT OF ONE LOCKFILE, two branches need not agree
+# on that lockfile, and `npm ci` writes it by deleting the directory and
+# reinstalling; two worktrees doing that at once tear the tree out from under
+# each other's running test process, and the symptom is ERR_MODULE_NOT_FOUND on
+# a module that existed a second earlier. Go's build cache is content-addressed
+# — one key always means the same bytes, writers only add — so concurrent access
+# is its normal operating mode, and keying it per worktree would buy nothing and
+# cost every new worktree a cold first run. Observed 2026-08-17: two worktrees'
+# hooks fighting over one install, twice in one session.
+WORKTREE_KEY="$(printf '%s' "$repo_root" | cksum | cut -d' ' -f1)"
+NODE_VOL="nocx-e2e-node-${WORKTREE_KEY}"
+FENODE_VOL="nocx-e2e-fenode-${WORKTREE_KEY}"
+docker volume create "$NODE_VOL" >/dev/null
+docker volume create "$FENODE_VOL" >/dev/null
 docker volume create nocx-e2e-gocache >/dev/null
+# AND THE MODULE CACHE, which was missing and made every run need the network.
+# globalSetup builds cmd/devharness before a single spec runs, so with no
+# /root/go/pkg/mod the build re-downloads the whole module graph each time and
+# the suite dies in globalSetup when DNS blinks — three times on 2026-08-18,
+# each one indistinguishable at a glance from a real failure:
+#   proxy.golang.org ... server misbehaving
+#   Error: Command failed: go build -o /work/.e2e/devharness ./cmd/devharness
+# Content-addressed like the build cache, so it is shared across worktrees on
+# purpose (nocx-x6z3 keyed the install trees, not the caches).
+docker volume create nocx-e2e-gomod >/dev/null
 
 # -t only when there is a terminal to attach: the same script runs from a
 # scripted context, where docker refuses "the input device is not a TTY".
@@ -130,9 +154,10 @@ exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   ${cpu_flag[@]+"${cpu_flag[@]}"} \
   ${git_flag[@]+"${git_flag[@]}"} \
   -v "$repo_root:/work" \
-  -v nocx-e2e-node:/work/node_modules \
-  -v nocx-e2e-fenode:/work/frontend/node_modules \
+  -v "$NODE_VOL":/work/node_modules \
+  -v "$FENODE_VOL":/work/frontend/node_modules \
   -v nocx-e2e-gocache:/root/.cache/go-build \
+  -v nocx-e2e-gomod:/root/go/pkg/mod \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \
   -e PW_WORKERS="${PW_WORKERS:-}" \
   -e NOCX_LOG_LEVEL="${NOCX_LOG_LEVEL:-}" \

@@ -382,6 +382,7 @@ var coarseMethodClasses = map[string]string{
 	"groups":      "config",
 	"endpoints":   "config",
 	"settings":    "config",
+	"uistate":     "config",
 	"secrets":     "secrets",
 	"vault":       "vault",
 	"git":         "git",

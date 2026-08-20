@@ -6,15 +6,50 @@
 GO ?= go
 GOFUMPT ?= gofumpt
 GOLANGCI_LINT ?= golangci-lint
-WAILS ?= wails
 PKG_CONFIG ?= pkg-config
 
-# Wails owns the WebKitGTK API split through the webkit2_41 build tag. Prefer
-# the supported 4.1 surface when this Linux host provides it; otherwise retain
-# Wails' 4.0 default. This avoids linking an orphaned 4.0 package against a
-# libjxl SONAME that the current distribution no longer ships (nocx-v3yw).
+# The Linux build targets webkit2gtk-4.1, the surface ADR-0007 decided for
+# this product. Wails v3 defaults to GTK4/WebKitGTK-6.0; the `gtk3` build tag
+# selects its WebKitGTK-4.1 path, which is the 4.1 surface this repo already
+# ships. It keeps the same nocx-v3yw rationale as the old webkit2_41 tag: a
+# build against an installed 4.1 surface rather than a default that may not
+# match the distribution. When 4.1 is absent (a GTK4-only host), the tag is
+# empty and v3's GTK4 default is used.
 HOST_GOOS ?= $(shell $(GO) env GOOS)
-WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf webkit2_41; fi)
+WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf gtk3; fi)
+
+# v3 dropped the `wails build` wrapper: the project builds with plain go
+# build. Wails v2 used to run the frontend build (wails.json frontend:build);
+# the repository now owns that step, because //go:embed all:frontend/dist
+# requires a populated dist before the Go compiler runs.
+FRONTEND_BUILD := cd frontend && npm run build
+
+# BUILD METADATA, stamped at link time so the About page (nocx-8bbp) reads it
+# out of the binary rather than out of a constant somebody has to remember to
+# bump. The -X paths are documented in internal/version/version.go, which is the
+# source of truth for them; the release workflow builds the same three.
+#
+# VERSION IS NOT SET HERE, AND THAT IS THE POINT. `internal/version.Version`
+# defaults to "dev", and the updater treats that exact string as "this is a
+# development build, never check for updates". A local build that stamped a
+# version guessed from `git describe` would be a build that offers to replace
+# itself with a release. Commit and date are honest about any build, so they
+# are always stamped; pass VERSION explicitly to make a build that claims to be
+# a release:
+#
+#   make build-release VERSION=0.3.0
+#
+# `git describe` is not used even then. The release number is the tag the
+# workflow was triggered by, and deriving it locally would be a second answer to
+# a question the release pipeline already answers.
+VERSION ?=
+BUILD_COMMIT := $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+VERSION_PKG := github.com/shady2k/nocx/internal/version
+LDFLAGS := -X $(VERSION_PKG).Commit=$(BUILD_COMMIT) -X $(VERSION_PKG).Date=$(BUILD_DATE)
+ifneq ($(VERSION),)
+LDFLAGS += -X $(VERSION_PKG).Version=$(VERSION)
+endif
 
 all: lint test build
 
@@ -23,16 +58,26 @@ all: lint test build
 # (internal/storage/appdir.go). Use build-release to produce the shipped
 # artefact; CI does that from a tag.
 build:
-	$(WAILS) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)")
+	$(FRONTEND_BUILD)
+	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
 # without it costs a developer an empty profile, never a user their data.
+# `production` is v3's tag for production build semantics (devtools off).
 build-release:
-	$(WAILS) build -tags "$(strip release $(WAILS_PLATFORM_TAGS))"
+	$(FRONTEND_BUILD)
+	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 
+# A local dev loop: build the embedded frontend and run the app with the dev
+# profile. `wails dev` used to provide a hot-reloading asset server; v3 has
+# no dev CLI without a Taskfile, and replicating the watcher is not worth
+# inventing one for — the dev-web target is the iteration path for frontend
+# work, this target is for exercising the real shell.
 dev:
-	$(WAILS) dev $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)")
+	$(FRONTEND_BUILD)
+	$(GO) run -tags "$(strip $(WAILS_PLATFORM_TAGS))" .
+
 
 # The same app in an ordinary browser instead of the Wails webview: backend
 # (cmd/devharness, real PTY) plus vite with the Wails bindings shimmed. Needs no
@@ -50,9 +95,10 @@ format:
 	$(GOFUMPT) -l -w .
 
 test:
-	$(GO) test -v -race -count=1 ./...
+	$(GO) test -v -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./...
 	@echo "=== go test -tags release (the shipped profile directory) ==="
 	$(GO) test -race -count=1 -tags release ./internal/storage/...
+
 
 # Conformance against the real ssh binary. Skipped by the ordinary suite on
 # purpose: it needs an ssh on PATH and reads a config it writes itself, so it
@@ -86,7 +132,7 @@ init: hooks
 	@echo "=== frontend dependencies ==="
 	cd frontend && npm ci
 	@echo ""
-	@echo "Ready. Run 'wails dev' to start the app, 'bd ready' for the backlog."
+	@echo "Ready. Run 'make dev' to start the app, 'bd ready' for the backlog."
 
 # Per-clone git configuration. Both lines are the same kind of thing: git
 # behaviour this repo needs that a clone cannot carry by itself.
@@ -377,7 +423,7 @@ lint-ci:
 
 test-ci:
 	@echo "=== go test -race ==="
-	$(GO) test -race -count=1 ./...
+	$(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./...
 	@echo ""
 	@echo "=== go test -race -tags release (the shipped profile directory) ==="
 	@# The shipped profile directory lives behind `-tags release`
@@ -388,7 +434,7 @@ test-ci:
 
 build-ci:
 	@echo "=== go build ./... ==="
-	$(GO) build ./...
+	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./...
 
 # The repo-root gates: a different eslint config and a different tree from
 # frontend/'s, covering e2e/, the hooks and the config files. They ran ONLY in

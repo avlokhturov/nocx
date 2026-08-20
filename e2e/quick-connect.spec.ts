@@ -1,18 +1,37 @@
-import { test, expect } from './harness'
+import { test, expect, type Page } from './harness'
 
-const CARET = '[aria-label="Quick connect"]'
+const MORE = '[aria-label="More"]'
+const MENU_ITEM = '.ui-context-menu__item'
 const QUICK_CONNECT_ITEM = '.quick-connect__item'
 const QUICK_CONNECT_SEARCH = '.quick-connect__search input'
 
+/**
+ * Open the picker the way the strip now offers it.
+ *
+ * THERE IS NO CARET OF ITS OWN ANY MORE. Quick connect used to be an
+ * IconButton beside `+` with `aria-label="Quick connect"`; the tab-strip
+ * rework cut five same-weight marks in the row down to three — the overview,
+ * the new tab and this menu — and everything else became a NAMED ROW under
+ * it (tab-strip.tsx). A named row is also the thing that made the two
+ * placements stop meaning different things by the same glyph.
+ *
+ * So the path is two clicks, and the spec spells both rather than reaching
+ * past the menu: what a person can reach is the whole assertion.
+ */
+async function openQuickConnect(page: Page): Promise<void> {
+  await page.locator(MORE).first().click()
+  await page.locator(MENU_ITEM, { hasText: 'Quick connect' }).first().click()
+}
+
 test.describe('quick-connect picker', () => {
-  test('the caret lists "New connection" — the one command admitted to the server list', async ({
+  test('the strip menu lists "New connection" — the one command admitted to the server list', async ({
     page,
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
-    // Click the caret beside +.
-    await page.locator(CARET).click()
+    // Open it from the strip's menu.
+    await openQuickConnect(page)
 
     // The caret's presentation is the plain server list, with exactly one
     // command admitted to it: "New connection" (nocx-d4us). Creating a
@@ -34,12 +53,12 @@ test.describe('quick-connect picker', () => {
     await expect(page.locator(QUICK_CONNECT_ITEM)).not.toContainText('Local shell')
   })
 
-  test('Escape closes the picker and restores focus to the caret', async ({ page }) => {
+  test('Escape closes the picker and restores focus to the prompt', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
-    // Click the caret to open the picker.
-    await page.locator(CARET).click()
+    // Open the picker from the strip's menu.
+    await openQuickConnect(page)
     await expect(page.locator(QUICK_CONNECT_SEARCH)).toBeVisible()
 
     // Press Escape to close.
@@ -120,7 +139,7 @@ test.describe('quick-connect picker', () => {
     await expect(pane).toBeVisible()
 
     // Open the picker.
-    await page.locator(CARET).click()
+    await openQuickConnect(page)
     await expect(page.locator(QUICK_CONNECT_SEARCH)).toBeVisible()
 
     // The terminal host is still in the DOM.

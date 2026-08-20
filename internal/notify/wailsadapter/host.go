@@ -1,16 +1,17 @@
 // Package wailsadapter implements the AttentionHost port (spec §2.2) with the
-// Wails desktop runtime (spec §8): banners via runtime.SendNotification with
-// a routing payload in opts.Data, click-to-tab via OnNotificationResponse,
+// Wails desktop runtime (spec §8): banners via the v3 notifications service
+// with a routing payload in opts.Data, click-to-tab via OnNotificationResponse,
 // and the three permission states of spec §6.4.
 //
 // The dock badge and the attention bounce are deliberately NOT here: Wails
-// v2.13 exposes neither, and they are the nocx-3a40 cgo task. Host.Badge and
-// Host.Bounce report that absence loudly rather than pretending to deliver.
+// v3.0.0-beta.9 exposes neither, and they are the nocx-3a40 cgo task. Host.Badge
+// and Host.Bounce report that absence loudly rather than pretending to deliver.
 //
 // The banner body is passed to the runtime verbatim — it is never spliced
 // into any other syntax. The old osascript path in pkg/mac sprintfed the
 // body into an AppleScript string literal, so a body containing a double
-// quote broke the banner; runtime.SendNotification treats the body as data.
+// quote broke the banner; the v3 notifications service treats the body as
+// data (absence_test.go guards the path).
 package wailsadapter
 
 import (
@@ -19,8 +20,9 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
+
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // The three permission states of spec §6.4, as observed through the Wails
@@ -29,43 +31,45 @@ import (
 type Permission int
 
 const (
-	// PermissionUnavailable: this host has no notification surface
-	// (IsNotificationAvailable is false) — the banner row is unavailable
-	// and says why.
+	// PermissionUnavailable means no notification surface exists at all.
 	PermissionUnavailable Permission = iota
-
-	// PermissionNotDetermined: the host is available but authorization has
-	// never been requested. The control requests it — RequestAuthorization
-	// is the only path that prompts macOS.
+	// PermissionNotDetermined means the surface exists and authorization has
+	// never been requested.
 	PermissionNotDetermined
-
-	// PermissionDenied: authorization was requested and refused. macOS
-	// suppresses display and nocx cannot re-prompt after a denial; only
-	// System Settings can change this state.
-	PermissionDenied
-
-	// PermissionGranted: banners deliver.
+	// PermissionGranted means banners may be presented.
 	PermissionGranted
+	// PermissionDenied means the user refused; macOS will not re-prompt.
+	PermissionDenied
 )
+
+// String names the state for a log line. The composition root records which
+// state it resolved at startup, and a bare integer there is unreadable.
+func (p Permission) String() string {
+	switch p {
+	case PermissionUnavailable:
+		return "unavailable"
+	case PermissionNotDetermined:
+		return "not-determined"
+	case PermissionGranted:
+		return "granted"
+	case PermissionDenied:
+		return "denied"
+	}
+	return "unknown"
+}
 
 // Errors the host reports per permission state, and for the surfaces Wails
 // does not implement. Each is distinct so the product can render each state
 // differently instead of swallowing it.
 var (
-	// ErrNotRequested is the NotDetermined failure: the banner is refused
-	// because authorization has never been requested — sending anyway would
-	// be a silent no-op, since macOS drops notifications from unauthorized
-	// apps. The settings control requests it.
-	ErrNotRequested = errors.New("notify: notification authorization has not been requested; request it from the settings control")
-
-	// ErrDenied is the Denied failure: macOS is suppressing display and the
-	// app cannot re-prompt. The only fix is System Settings.
-	ErrDenied = errors.New("notify: macOS is suppressing notification display — enable notifications for nocx in System Settings")
-
-	// ErrBadgeBounce is the dock badge and attention bounce: Wails v2.13
-	// exposes neither, and they are the nocx-3a40 cgo task. The absence is
-	// loud, not silent.
-	ErrBadgeBounce = errors.New("notify: dock badge and attention bounce are not implemented by the Wails host")
+	// ErrDenied is returned when the user has refused authorization.
+	ErrDenied = errors.New("notification authorization denied")
+	// ErrNotRequested is returned when a banner is attempted before any
+	// authorization request.
+	ErrNotRequested = errors.New("notification authorization not requested")
+	// ErrBadgeBounce is returned for the dock badge and attention bounce,
+	// which the Wails runtime does not implement.
+	ErrBadgeBounce = errors.New("dock badge and attention bounce are not implemented by the Wails host (nocx-3a40)")
 )
 
 // payloadKey is the Data/UserInfo key carrying the event's addressing session
@@ -73,41 +77,45 @@ var (
 // not attribution (AD-7 — session-id is server-authoritative).
 const payloadKey = "sessionId"
 
-// defaultActionIdentifier is the Wails-normalized identifier of a click on
-// the banner body (the macOS default action). Categories are never registered
-// by this adapter, so any other identifier is unknown and must not focus a
-// tab.
-const defaultActionIdentifier = "DEFAULT_ACTION"
-
 // Deps are the host's dependencies. Send, IsAvailable, RequestAuthorization,
 // CheckAuthorization and RegisterResponse default to their runtime
-// counterparts; Lookup and Focus come from the composition root, which owns
-// the session registry and tab focus.
+// counterparts; Focus comes from the composition root, which owns the shell
+// and the only channel to the renderer.
+//
+// Service is the v3 notifications service the default seams bind to. It may
+// be nil only when every func seam is supplied: the defaults resolve through
+// it, and New falls back to the package singleton.
 type Deps struct {
-	// Send presents one banner. The adapter passes the app context, which
-	// the Wails runtime uses to locate its frontend; the invocation's
-	// deadline is enforced by the adapter, not by the runtime call.
-	Send func(ctx context.Context, opts runtime.NotificationOptions) error
+	// Service is the v3 notifications service the default seams bind to.
+	Service *notifications.NotificationService
+
+	// Send presents one banner.
+	Send func(opts notifications.NotificationOptions) error
 
 	// IsAvailable reports whether this host has a notification surface.
-	IsAvailable func(ctx context.Context) bool
+	IsAvailable func() bool
 
 	// RequestAuthorization asks the OS for authorization (spec §6.4: "the
 	// control requests it"). Returns granted and any transport error.
-	RequestAuthorization func(ctx context.Context) (bool, error)
+	RequestAuthorization func() (bool, error)
 
 	// CheckAuthorization re-reads the current authorization status.
-	CheckAuthorization func(ctx context.Context) (bool, error)
+	CheckAuthorization func() (bool, error)
 
 	// RegisterResponse installs the notification click callback.
-	RegisterResponse func(ctx context.Context, callback func(result runtime.NotificationResult))
+	RegisterResponse func(callback func(result notifications.NotificationResult))
 
-	// Lookup resolves a session id to the tab that owns it. Required: a
-	// click cannot focus without it.
-	Lookup func(sessionID string) (tab string, ok bool)
-
-	// Focus brings the tab to the foreground. Required.
-	Focus func(tabID string) error
+	// Focus brings the clicked notification's session to the foreground.
+	// Required: without it a click has nowhere to land.
+	//
+	// It takes the session id the banner carried and nothing else. The
+	// backend has no tab id: sessionId is the addressing identity on the
+	// wire (AD-7 — session-id is server-authoritative) and the renderer is
+	// what resolves it to a tab. A sessionID→tab step inside this adapter
+	// would be a second addressing identity that no part of the backend can
+	// own, which is why the earlier Lookup seam was unsuppliable and every
+	// click was therefore discarded.
+	Focus func(sessionID string) error
 
 	// Log receives click-callback diagnostics. Defaults to slog.Default().
 	Log *slog.Logger
@@ -115,66 +123,71 @@ type Deps struct {
 
 // Host is the Wails implementation of notify.AttentionHost.
 type Host struct {
-	appCtx context.Context
-	log    *slog.Logger
+	log *slog.Logger
 
-	send             func(ctx context.Context, opts runtime.NotificationOptions) error
-	isAvailable      func(ctx context.Context) bool
-	requestAuth      func(ctx context.Context) (bool, error)
-	checkAuth        func(ctx context.Context) (bool, error)
-	registerResponse func(ctx context.Context, callback func(result runtime.NotificationResult))
-	lookup           func(sessionID string) (tab string, ok bool)
-	focus            func(tabID string) error
+	send             func(opts notifications.NotificationOptions) error
+	isAvailable      func() bool
+	requestAuth      func() (bool, error)
+	checkAuth        func() (bool, error)
+	registerResponse func(callback func(result notifications.NotificationResult))
+	focus            func(sessionID string) error
 
 	mu        sync.Mutex
 	perm      Permission
 	requested bool // authorization has been requested through this host and answered
 }
 
-// New builds the host. ctx must be the context from the Wails lifecycle
-// hooks — the runtime functions locate the frontend through a context value,
-// so a bare context.Background() is a fatal error in the default seams.
-func New(ctx context.Context, deps Deps) *Host {
-	h := &Host{appCtx: ctx, log: deps.Log}
+// New builds the host.
+func New(deps Deps) *Host {
+	h := &Host{log: deps.Log}
 	if h.log == nil {
 		h.log = slog.Default()
+	}
+	if deps.Service == nil {
+		deps.Service = notifications.New()
 	}
 	if deps.Send != nil {
 		h.send = deps.Send
 	} else {
-		h.send = runtime.SendNotification
+		h.send = deps.Service.SendNotification
 	}
 	if deps.IsAvailable != nil {
 		h.isAvailable = deps.IsAvailable
 	} else {
-		h.isAvailable = runtime.IsNotificationAvailable
+		// v3.0.0-beta.9 exposes no availability probe — the notifications
+		// service folds unavailability into ServiceStartup (macOS) and
+		// per-call send errors (Linux, where a missing org.freedesktop
+		// Notifications daemon makes SendNotification fail). The default
+		// therefore reports available and every failure surfaces at send
+		// time, loudly; PermissionUnavailable stays reachable through this
+		// seam where a caller has real knowledge.
+		h.isAvailable = func() bool { return true }
 	}
 	if deps.RequestAuthorization != nil {
 		h.requestAuth = deps.RequestAuthorization
 	} else {
-		h.requestAuth = runtime.RequestNotificationAuthorization
+		h.requestAuth = deps.Service.RequestNotificationAuthorization
 	}
 	if deps.CheckAuthorization != nil {
 		h.checkAuth = deps.CheckAuthorization
 	} else {
-		h.checkAuth = runtime.CheckNotificationAuthorization
+		h.checkAuth = deps.Service.CheckNotificationAuthorization
 	}
 	if deps.RegisterResponse != nil {
 		h.registerResponse = deps.RegisterResponse
 	} else {
-		h.registerResponse = runtime.OnNotificationResponse
+		h.registerResponse = deps.Service.OnNotificationResponse
 	}
-	h.lookup = deps.Lookup
 	h.focus = deps.Focus
 
-	if !h.isAvailable(ctx) {
+	if !h.isAvailable() {
 		h.perm = PermissionUnavailable
 	} else {
 		// Available and never requested: the initial state of spec §6.4.
 		h.perm = PermissionNotDetermined
 	}
 
-	h.registerResponse(ctx, h.handleResponse)
+	h.registerResponse(h.handleResponse)
 	return h
 }
 
@@ -206,7 +219,7 @@ func (h *Host) RequestAuthorization(ctx context.Context) (Permission, error) {
 		return h.perm, ErrDenied
 	}
 
-	granted, err := h.requestAuth(h.appCtx)
+	granted, err := h.requestAuth()
 	if err != nil {
 		// A transport failure is not a denial: the state stays
 		// NotDetermined and the caller may ask again.
@@ -232,7 +245,7 @@ func (h *Host) Refresh(ctx context.Context) (Permission, error) {
 	if h.Permission() == PermissionUnavailable {
 		return h.Permission(), notify.ErrUnavailable
 	}
-	granted, err := h.checkAuth(h.appCtx)
+	granted, err := h.checkAuth()
 	if err != nil {
 		return h.Permission(), err
 	}
@@ -266,12 +279,12 @@ func (h *Host) Banner(ctx context.Context, ev notify.Event) error {
 		return ErrDenied
 	}
 
-	opts := runtime.NotificationOptions{
+	opts := notifications.NotificationOptions{
 		Title: ev.Title,
 		Body:  ev.Body,
 		Data:  map[string]interface{}{payloadKey: ev.SessionID},
 	}
-	return h.send(h.appCtx, opts)
+	return h.send(opts)
 }
 
 // Badge reports the dock badge as unimplemented by the Wails host. The badge
@@ -285,7 +298,7 @@ func (h *Host) Bounce(context.Context) error { return ErrBadgeBounce }
 // handleResponse decodes a notification click and focuses the originating
 // tab. Every malformed or unknown payload is logged and ignored — never
 // panicked on, never allowed to focus an arbitrary tab.
-func (h *Host) handleResponse(result runtime.NotificationResult) {
+func (h *Host) handleResponse(result notifications.NotificationResult) {
 	if result.Error != nil {
 		h.log.Warn("notification response error", "error", result.Error)
 		return
@@ -295,7 +308,7 @@ func (h *Host) handleResponse(result runtime.NotificationResult) {
 	// Only a click on the banner body is "focus the tab". This adapter
 	// never registers categories, so any action identifier other than the
 	// default is unknown.
-	if resp.ActionIdentifier != "" && resp.ActionIdentifier != defaultActionIdentifier {
+	if resp.ActionIdentifier != "" && resp.ActionIdentifier != notifications.DefaultActionIdentifier {
 		h.log.Warn("notification response has an unknown action", "action", resp.ActionIdentifier)
 		return
 	}
@@ -305,16 +318,11 @@ func (h *Host) handleResponse(result runtime.NotificationResult) {
 		h.log.Warn("notification response carries no usable session id", "userInfo", resp.UserInfo)
 		return
 	}
-	if h.lookup == nil || h.focus == nil {
-		h.log.Error("notification click cannot be honored: no tab resolver is wired")
+	if h.focus == nil {
+		h.log.Error("notification click cannot be honored: no focus path is wired", "sessionId", sessionID)
 		return
 	}
-	tab, ok := h.lookup(sessionID)
-	if !ok {
-		h.log.Warn("notification response names an unknown session", "sessionId", sessionID)
-		return
-	}
-	if err := h.focus(tab); err != nil {
-		h.log.Warn("focus failed after notification click", "tab", tab, "error", err)
+	if err := h.focus(sessionID); err != nil {
+		h.log.Warn("focus failed after notification click", "sessionId", sessionID, "error", err)
 	}
 }

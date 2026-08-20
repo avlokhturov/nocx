@@ -77,6 +77,29 @@ type Vault struct {
 	closeOnce          sync.Once
 	autoSealEpoch      uint64                  // incremented on each Activity/SetAutoSeal
 	autoSealDurationFn func(int) time.Duration // minutes→duration; overridden by tests
+
+	// unlockReq carries a sealed vault's raise-unlock prompt to a renderer.
+	// nil until the composition root attaches it (unlock.go); a vault without
+	// one answers a sealed call with ErrVaultSealed, exactly as it always has.
+	unlockReq UnlockRequester
+	// unlockPending is non-nil while one unlock ask is outstanding. It is the
+	// state "I am sealed and one unlock is already pending" — the whole point
+	// of the coalescing seam: every caller that finds it non-nil joins the
+	// ask instead of raising a second (unlock.go).
+	unlockPending *unlockPrompt
+	// beforeResolve runs immediately before an unlock prompt's answer is
+	// handed to its waiters. It is the one instant at which "no waiter is
+	// ever released while this prompt is still the pending one" can be
+	// falsified, so it is where the test asserts it — the alternative is
+	// racing the scheduler with two real requests and calling a green run
+	// proof. Nothing outside this package's tests sets it; it is nil in
+	// every shipped build.
+	beforeResolve func()
+	// promptCtx is the vault-owned lifetime of every unlock ask: cancelled by
+	// Close, so a renderer that vanished mid-prompt cannot keep an ask (and
+	// its waiters) alive past the vault's own end.
+	promptCtx    context.Context
+	promptCancel context.CancelFunc
 }
 
 // New loads the vault document, decides the initial state, and runs
@@ -97,6 +120,7 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 		autoSealQuit:       make(chan struct{}),
 		autoSealDurationFn: defaultAutoSealDuration,
 	}
+	v.promptCtx, v.promptCancel = context.WithCancel(context.Background())
 	if found {
 		// Reconcile before returning — provider calls happen here, outside any
 		// vault lock (this is construction, no lock to hold).
@@ -696,6 +720,14 @@ func (v *Vault) wakeAutoSeal() {
 func (v *Vault) Close() {
 	v.closeOnce.Do(func() {
 		close(v.autoSealQuit)
+		// Cancel any outstanding unlock ask. The ask's own goroutine observes
+		// the cancellation, resolves every waiter with context.Canceled and
+		// clears v.unlockPending — so Close releases waiters and drops the
+		// transport's pending ask instead of leaving both alive past the
+		// vault's end.
+		if v.promptCancel != nil {
+			v.promptCancel()
+		}
 	})
 	v.Seal()
 }

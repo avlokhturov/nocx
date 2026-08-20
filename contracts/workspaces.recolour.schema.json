@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/workspaces.recolour.schema.json",
+  "title": "WorkspacesRecolourResult",
+  "description": "Result of the workspaces.recolour JSON-RPC method: the workspace as stored AFTER the change, read back inside the write's own transaction rather than echoed, so what the renderer draws is what the backend holds. Null clears the colour, which is an operation a person can ask for and not an omitted field — the same distinction tabs.recolour draws, and this method has the shape it has because it is the same act one rung up. A recolour never creates: an id naming no workspace is refused with -32602, because a create is the only thing that may fix an id.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspace"],
+  "properties": {
+    "workspace": {
+      "$ref": "workspaces.create.schema.json#/$defs/workspace"
+    }
+  }
+}

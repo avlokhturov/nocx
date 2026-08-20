@@ -923,35 +923,63 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /**
-   * Height in CSS pixels of the rows that have actually been written to.
+   * Height in CSS pixels of the rows that have actually been WRITTEN to.
    *
    * Scans the viewport upward for the last non-blank line rather than
    * multiplying `rows` by the cell height. The two differ by the whole point of
    * this method: the grid is as tall as the pane, so `rows * cell` would give a
    * full-pane live region to a command that printed one line.
    *
-   * The cursor is included on purpose. A program that clears the screen and
-   * parks the cursor at row 30 is using thirty rows even though twenty-nine of
-   * them are blank; sizing to the text alone would clip it.
+   * THE CURSOR IS NOT COUNTED, and it used to be — deliberately, for a program
+   * that clears the screen and parks the cursor thirty rows down while writing
+   * only five. That reading was reversed on 2026-08-19 by the owner, against a
+   * frame capture of his own machine, and the reason is that the row the cursor
+   * sits on is the row the two halves of a block disagree about. A finished
+   * command's block ends at its render fence; the shell has by then moved the
+   * cursor one row past it, onto the row the NEXT prompt will occupy. Counting
+   * it made the live region exactly one row taller than the frozen block it
+   * becomes, so the pane rose while the command ran and dropped back one row
+   * the instant it finished — the twitch this method was measured for
+   * (nocx-i4h04.1). Neither side could give the row up alone: the block cannot
+   * keep it without swallowing the row the next command's echo lands on
+   * (nocx-4yhi).
+   *
+   * What that costs, stated rather than discovered later: a program waiting for
+   * input on a row it has written nothing to shows no cursor until the first
+   * keystroke — `read x` with no prompt is the case; `read -p 'name: '` writes
+   * to the row and is unaffected. It is not a new class of blindness. The rows
+   * still exist and are still drawn: the grid is fitted to `runningLiveCap`,
+   * not to this number, so nothing about what a program may paint changed —
+   * only how much of it the box reserves. And between Enter and the first byte
+   * of output the cursor sits on the echo row, which the live region already
+   * translates out of view, so this is the same behaviour a moment earlier.
+   *
+   * NULL is "cannot measure", and it is not the same answer as 0. Zero is a
+   * grid nobody has written to — a real height, and the one the live region
+   * must take between the keypress and the first byte of output. Null is a
+   * renderer with no terminal or no cell dimensions yet, where the class's
+   * own fallback height has to stand instead. They were one value, and the
+   * moment the cursor stopped counting they became indistinguishable: a
+   * command that had printed nothing yet read as unmeasurable and opened the
+   * region at the 140px fallback, which then collapsed to nothing on the
+   * first row of output — a bounce at the start of every command.
    *
    * Bounded by `rows`, so the cost is one pass over the visible grid — this runs
    * per animation frame while a command produces output.
    */
-  liveContentHeight(): number {
+  liveContentHeight(): number | null {
     const t = this.term
-    if (!t) return 0
+    if (!t) return null
     const cell = this._getCellDims()
-    if (!cell) return 0
+    if (!cell) return null
     const buf = t.buffer.active
-    let last = buf.cursorY
-    for (let y = t.rows - 1; y > last; y--) {
+    for (let y = t.rows - 1; y >= 0; y--) {
       const line = buf.getLine(buf.baseY + y)
       if (line && line.translateToString(true).length > 0) {
-        last = y
-        break
+        return (y + 1) * cell.height
       }
     }
-    return (last + 1) * cell.height
+    return 0
   }
 
   // ── Marker/geometry API (ADR-0008 command-ledger gutter) ──────────────

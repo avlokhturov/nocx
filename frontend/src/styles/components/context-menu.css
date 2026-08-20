@@ -26,7 +26,9 @@
    focus between items). The label is one line that ellipsises — a path
    must never wrap the menu wider than its ceiling. */
 .ui-context-menu__item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   width: 100%;
   box-sizing: border-box;
   padding: var(--space-2) var(--space-3);
@@ -37,6 +39,41 @@
   font: inherit;
   font-size: var(--font-size-sm);
   text-align: start;
+}
+
+/* The mark's column, RESERVED WHETHER OR NOT THE ROW HAS ONE. A menu that
+   only indents the rows that carry a glyph puts its labels on two different
+   left edges, and the eye reads that as two lists. Dim, because the label is
+   what is read and the glyph is what is recognised — they are not competing
+   for the same attention. */
+.ui-context-menu__icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--color-text-dim);
+}
+
+/* AND THE SLOT SIZES THE GLYPH, because the glyph has no size of its own.
+   The kit's icons are inline `<svg viewBox>` with no width or height
+   attribute — that is what lets one component serve a 12px row and a 24px
+   button — so every slot in this kit says how big its svg is, and this one
+   did not. The svg then fell back to its intrinsic size, which Chromium
+   resolves against the slot and WebKit resolves to zero: every menu in the
+   packaged macOS app showed a reserved, empty icon column, while the dev
+   stand showed the marks (nocx-8830c). */
+.ui-context-menu__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* The label is one line that ellipsises — a path must never wrap the menu
+   wider than its ceiling. */
+.ui-context-menu__label {
+  flex: 1 1 auto;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

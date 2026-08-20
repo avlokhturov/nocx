@@ -12,7 +12,7 @@
 // pattern, files-store.test.ts).
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RpcError } from '../dispatcher'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import type { Status, GitStatusResult } from '../generated/git.status'
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitHeadMessageResult } from '../generated/git.headMessage'
@@ -25,7 +25,7 @@ import { createGitStore, type GitStore } from './git-store'
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
 const LOCAL_ORIGIN: ActiveOrigin = {
-  tabId: 1,
+  paneId: 1,
   sessionId: 's1',
   kind: 'local',
   cwd: '/home/dev/repo',
@@ -39,7 +39,7 @@ const LOCAL_ORIGIN: ActiveOrigin = {
 const NEW_CWD_ORIGIN: ActiveOrigin = { ...LOCAL_ORIGIN, cwd: '/home/dev/repo/sub' }
 
 const OTHER_ORIGIN: ActiveOrigin = {
-  tabId: 2,
+  paneId: 2,
   sessionId: 's2',
   kind: 'local',
   cwd: '/home/dev/other',
@@ -49,7 +49,7 @@ const OTHER_ORIGIN: ActiveOrigin = {
 }
 
 const SSH_ORIGIN: ActiveOrigin = {
-  tabId: 3,
+  paneId: 3,
   sessionId: 's3',
   kind: 'ssh',
   cwd: '/home/bob',
@@ -62,7 +62,7 @@ const NO_CWD_ORIGIN: ActiveOrigin = { ...LOCAL_ORIGIN, cwd: null, cwdVerified: f
 
 /** A diff tab's frozen origin: the same machine, NO opinion about where we
  *  are now — the store must never re-bind for it (design §5.4). */
-const FROZEN_ORIGIN: ActiveOrigin = { ...LOCAL_ORIGIN, tabId: 9, cwdFollow: false }
+const FROZEN_ORIGIN: ActiveOrigin = { ...LOCAL_ORIGIN, paneId: 9, cwdFollow: false }
 
 const statusFixture = (over: Partial<Status> = {}): Status => ({
   branch: 'main',
@@ -198,10 +198,10 @@ afterEach(() => {
 // ── The eight states ──────────────────────────────────────────────────────
 
 describe('the eight states', () => {
-  it('noTab: no origin — nothing is asked of the backend', () => {
+  it('noPane: no origin — nothing is asked of the backend', () => {
     const services = makeServices()
     const store = track(createGitStore(services))
-    expect(store.state()).toBe('noTab')
+    expect(store.state()).toBe('noPane')
     expect(mockHandle(services, 'open')).not.toHaveBeenCalled()
   })
 
@@ -710,12 +710,12 @@ describe('the commit form', () => {
 // ── The notification and lifecycle ───────────────────────────────────────
 
 describe('git.changed and dispose', () => {
-  it('a session-close notification for our binding drops the panel to noTab', async () => {
+  it('a session-close notification for our binding drops the panel to noPane', async () => {
     const { store, services } = await openStore()
     const handler = (services.subscribeGitChanged as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as (p: { bindingId: string; reason: 'sessionClosed' }) => void
     handler({ bindingId: 'b1', reason: 'sessionClosed' })
-    expect(store.state()).toBe('noTab')
+    expect(store.state()).toBe('noPane')
     expect(store.binding()).toBeNull()
   })
 
@@ -731,7 +731,7 @@ describe('git.changed and dispose', () => {
     const { store, services } = await openStore()
     store.dispose()
     expect(mockHandle(services, 'close')).toHaveBeenCalledWith('b1')
-    expect(store.state()).toBe('noTab')
+    expect(store.state()).toBe('noPane')
     // Reusable: the next rescope re-opens.
     store.rescope(LOCAL_ORIGIN)
     await settle()
@@ -1002,7 +1002,7 @@ describe('the collapsible sections', () => {
     expect(store.sectionOpen('commits')).toBe(false)
     // Same session, same verified cwd, live binding: rescope keeps
     // everything, collapse state included (design §5.5).
-    store.rescope({ ...LOCAL_ORIGIN, tabId: 2 })
+    store.rescope({ ...LOCAL_ORIGIN, paneId: 2 })
     await settle()
     expect(store.sectionOpen('commits')).toBe(false)
   })

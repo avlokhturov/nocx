@@ -46,7 +46,12 @@ frontend/dist/*
 # ignored, so it never churns. Negation must follow the ignore — last match wins.
 !frontend/dist/.gitkeep
 frontend/node_modules/
-nocx
+# Root-anchored, like /e2e-sshd and /devharness below and for the same reason:
+# a bare `go build .` drops the binary in the working directory. Unanchored it
+# also matched every PATH COMPONENT named nocx, which silently swallowed
+# frontend/bindings/github.com/shady2k/nocx/ — the generated bindings for our
+# own module. They existed on the machine that generated them and nowhere else.
+/nocx
 node_modules/
 # The other two cmd/ binaries, for the same reason as `nocx` above: a bare
 # `go build ./cmd/e2e-sshd` drops its output in the working directory, and a
@@ -75,3 +80,7 @@ playwright-report/
 
 # Disposable home for e2e runs (playwright.config.ts home boundary, nocx-ti8w)
 .e2e/
+
+# Python bytecode from the AppImage packaging scripts
+__pycache__/
+*.pyc

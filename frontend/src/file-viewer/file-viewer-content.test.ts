@@ -7,7 +7,7 @@
 // asserted as a count, not inferred from the absence of a message.
 import { afterEach, describe, expect, it } from 'vitest'
 import type { FilesReadResult } from '../generated/files.read'
-import type { TabHost } from '../tab-content'
+import type { PaneHost } from '../pane-content'
 import {
   FileViewerContent,
   type FileViewerDeps,
@@ -119,7 +119,7 @@ async function mount(binding: FakeBinding = new FakeBinding()): Promise<Mounted>
   const host = document.createElement('div')
   document.body.append(host)
   const signal = new AbortController().signal
-  await content.mount(host, {} as TabHost, signal)
+  await content.mount(host, {} as PaneHost, signal)
   return { content, binding, host }
 }
 
@@ -168,7 +168,7 @@ describe('FileViewerContent — the read', () => {
 })
 
 describe('FileViewerContent — the activeOrigin capability (design §5.4)', () => {
-  it('answers the origin the viewer was opened with, minus the tabId', async () => {
+  it('answers the origin the viewer was opened with, minus the paneId', async () => {
     const { content } = await mount()
     expect(content.activeOrigin()).toEqual({
       sessionId: 'sess-1',

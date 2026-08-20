@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // artifactChunkSize bounds one artifact_chunks row: the frame body arrives
@@ -106,7 +108,12 @@ func askDigest(in AgentAsk) string {
 // session, which is the exact failure the marker exists to prevent. Re-
 // parenting is a plain FK update; session identities are the PK and never
 // move.
-const DefaultWorkspaceID = "workspace:default"
+// It is DERIVED from workspace.Default rather than restated: one id with
+// two declarations is two owners of one fact, and nocx-49d4 — the bug
+// this constant belongs to — says in as many words that nothing mints a
+// second permanent home under another id. internal/workspace owns the
+// domain concept; the store looks at it.
+const DefaultWorkspaceID = string(workspace.Default)
 
 // captureEnsuredSessionMarker is written into the payload of a session row
 // THIS ensure created (the fallback workspace's child). A session recorded

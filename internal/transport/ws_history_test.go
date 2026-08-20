@@ -13,72 +13,80 @@ import (
 // ── fakeHistoryDB ─────────────────────────────────────────────────────────
 //
 // Implements the whole content.ContentDB seam so the socket tests can serve
-// a real history.query with a canned store. Records what the handler asked
-// for, because the rung must be passed through verbatim — never widened.
+// a real history.query with a canned store. Since nocx-rtg0.19 that seam is
+// the LEDGER: history.query keeps its wire shape and answers from
+// LedgerRepository.QueryEntries.
+//
+// Only QueryEntries and RecordCompleted are genuinely exercised through this
+// fake — the embedded nil content.LedgerRepository turns any other call into
+// a loud panic rather than a quiet zero value.
+//
+// It records the query it was asked for, because the rung must be passed
+// through verbatim — never widened.
 type fakeHistoryDB struct {
-	mu        sync.Mutex
-	page      content.HistoryPage
-	err       error
-	gotScope  content.Scope
-	gotCwd    string
-	gotHost   string
-	gotLimit  int
-	gotBefore *int64
-	gotText   string
-	calls     int
+	content.LedgerRepository
+	mu       sync.Mutex
+	page     content.LedgerPage
+	err      error
+	gotQuery content.LedgerQuery
+	calls    int
 }
 
-func (f *fakeHistoryDB) CommandHistory() content.CommandHistoryRepository { return f }
-func (f *fakeHistoryDB) Conversations() content.ConversationRepository    { return nil }
-func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error         { return content.ErrNotImplemented }
-func (f *fakeHistoryDB) Close() error                                     { return nil }
-func (f *fakeHistoryDB) RestorePrivate(_ context.Context, _ []content.Conversation, _ []content.CommandRecord) error {
-	return content.ErrNotImplemented
-}
-func (f *fakeHistoryDB) Ledger() content.LedgerRepository { return nil }
+func (f *fakeHistoryDB) Conversations() content.ConversationRepository { return nil }
+func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error      { return content.ErrNotImplemented }
+func (f *fakeHistoryDB) Close() error                                  { return nil }
+func (f *fakeHistoryDB) Ledger() content.LedgerRepository              { return f }
+func (f *fakeHistoryDB) Layout() content.LayoutRepository              { return nil }
 
-func (f *fakeHistoryDB) Add(_ context.Context, _ content.CommandRecord) (int64, error) {
-	return 0, content.ErrNotImplemented
-}
-
-func (f *fakeHistoryDB) RewriteRedaction(_ context.Context, _ int64, _ content.Redaction, _ string) error {
-	return nil
+// RecordCompleted keeps no row: this fake is the STORE-FAILURE arm of the
+// write path (TestHistoryRecord_StoreErrorIsRPCError). The fake that actually
+// stores what it is handed is fakeRecordHistoryDB.
+func (f *fakeHistoryDB) RecordCompleted(_ context.Context, _ content.CompletedCommand) (string, error) {
+	return "", content.ErrNotImplemented
 }
 
-func (f *fakeHistoryDB) List(_ context.Context, _ int) ([]content.CommandRecord, error) {
-	return nil, content.ErrNotImplemented
-}
-
-func (f *fakeHistoryDB) GetByID(_ context.Context, _ int64) (*content.CommandRecord, error) {
-	return nil, content.ErrNotImplemented
-}
-
-func (f *fakeHistoryDB) FindByPrefix(_ context.Context, _ string, _ int) ([]content.CommandRecord, error) {
-	return nil, content.ErrNotImplemented
-}
-
-func (f *fakeHistoryDB) Query(_ context.Context, scope content.Scope, cwd, host string, limit int, before *int64, text string) (content.HistoryPage, error) {
+func (f *fakeHistoryDB) QueryEntries(_ context.Context, q content.LedgerQuery) (content.LedgerPage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	f.gotScope, f.gotCwd, f.gotHost, f.gotLimit, f.gotBefore, f.gotText = scope, cwd, host, limit, before, text
+	f.gotQuery = q
 	return f.page, f.err
 }
 
-func (f *fakeHistoryDB) recorded() (content.Scope, string, string, int, *int64, string, int) {
+func (f *fakeHistoryDB) recorded() (content.LedgerQuery, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.gotScope, f.gotCwd, f.gotHost, f.gotLimit, f.gotBefore, f.gotText, f.calls
+	return f.gotQuery, f.calls
+}
+
+// ledgerRow builds one recall row the way the store returns it: the entry's
+// own columns plus the RESOLVED environment, which is how a row says which
+// host it ran on. A row carrying none is not answerable on this wire at all
+// (the host rule in ws_history_ledger.go), so the fake always carries one.
+func ledgerRow(id, command, cwd, host string, status content.EntryStatus) content.LedgerEntrySummary {
+	env := environmentForHost(host)
+	return content.LedgerEntrySummary{
+		ID:            id,
+		EnvironmentID: env.ID,
+		Environment:   &env,
+		Cwd:           cwd,
+		Kind:          content.EntryShell,
+		Intent:        command,
+		Phase:         content.PhaseClosed,
+		Status:        status,
+	}
 }
 
 // newHistoryWSServer builds a server with the given store wired. A nil db
-// leaves the store absent — the source=session state.
-func newHistoryWSServer(t *testing.T, db content.ContentDB) (*WSServer, func()) {
+// leaves the store absent — the source=unavailable state. Extra options let
+// a test wire the durable-history status (ws_history_status_test.go).
+func newHistoryWSServer(t *testing.T, db content.ContentDB, extra ...WSServerOption) (*WSServer, func()) {
 	t.Helper()
 	opts := []WSServerOption{}
 	if db != nil {
 		opts = append(opts, WithContentDB(db))
 	}
+	opts = append(opts, extra...)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
@@ -122,9 +130,10 @@ func decodeHistoryResult(t *testing.T, resp *vaultRPCResult) historyQueryResult 
 
 // ── source semantics ──────────────────────────────────────────────────────
 
-// With no store wired the method must answer session, never store: an empty
-// answer and an unanswerable question must not look alike.
-func TestHistoryQuery_NoStoreAnswersSession(t *testing.T) {
+// With no store wired the method must answer unavailable — neither store
+// (nothing looked) nor session (the store looked and holds nothing): an
+// empty answer and an unanswerable question must not look alike.
+func TestHistoryQuery_NoStoreAnswersUnavailable(t *testing.T) {
 	ws, stop := newHistoryWSServer(t, nil)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -133,8 +142,8 @@ func TestHistoryQuery_NoStoreAnswersSession(t *testing.T) {
 	}, 1)
 
 	got := decodeHistoryResult(t, resp)
-	if got.Source != "session" {
-		t.Fatalf("source = %q, want session", got.Source)
+	if got.Source != "unavailable" {
+		t.Fatalf("source = %q, want unavailable", got.Source)
 	}
 	if got.Scope != "directory" {
 		t.Fatalf("scope = %q, want directory echoed", got.Scope)
@@ -153,7 +162,7 @@ func TestHistoryQuery_NoStoreAnswersSession(t *testing.T) {
 // A store that has never recorded anything is "empty": session, so the
 // overlay says "this session only" rather than presenting nothing as history.
 func TestHistoryQuery_EmptyStoreAnswersSession(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{}} // HasRows defaults false
+	fake := &fakeHistoryDB{page: content.LedgerPage{}} // HasRows defaults false
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -168,7 +177,7 @@ func TestHistoryQuery_EmptyStoreAnswersSession(t *testing.T) {
 // The store answered and the rung had no matches: source=store with entries
 // [] — the empty answer, distinct from the unanswerable one above.
 func TestHistoryQuery_EmptyRungAnswersStore(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Entries: nil, Exhausted: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Entries: nil, Exhausted: true}}
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -189,11 +198,13 @@ func TestHistoryQuery_EmptyRungAnswersStore(t *testing.T) {
 func TestHistoryQuery_AnswersFromAskedRung(t *testing.T) {
 	ended := int64(1_750_000_000_000)
 	exit := 2
-	fake := &fakeHistoryDB{page: content.HistoryPage{
-		Entries: []content.CommandRecord{
-			{ID: 42, Command: "ls -la", Cwd: "/srv/api", Host: "", Status: content.StatusSuccess, ExitCode: &exit, EndedAt: &ended},
-			{ID: 41, Command: "cd /srv/api", Cwd: "/srv/api", Host: "", Status: content.StatusRunning},
-		},
+	const doneID = "0192f0aa-0000-7000-8000-0000000000ls"
+	done := ledgerRow(doneID, "ls -la", "/srv/api", "", content.EntrySuccess)
+	done.EndedAt = &ended
+	done.Payload = content.ShellPayloadJSON(&exit)
+	running := ledgerRow("0192f0aa-0000-7000-8000-0000000000cd", "cd /srv/api", "/srv/api", "", content.EntryRunning)
+	fake := &fakeHistoryDB{page: content.LedgerPage{
+		Entries:   []content.LedgerEntrySummary{done, running},
 		HasRows:   true,
 		Exhausted: false,
 	}}
@@ -218,7 +229,10 @@ func TestHistoryQuery_AnswersFromAskedRung(t *testing.T) {
 		t.Fatalf("entries = %d, want 2", len(got.Entries))
 	}
 	first := got.Entries[0]
-	if first.ID != "42" || first.Command != "ls -la" || first.Cwd != "/srv/api" || first.Host != "" {
+	// The handle is the store's own id, echoed verbatim and never reshaped:
+	// it is opaque on this wire, so the assertion is equality with what the
+	// store said, not a check that it parses as anything.
+	if first.ID != doneID || first.Command != "ls -la" || first.Cwd != "/srv/api" || first.Host != "" {
 		t.Fatalf("first entry = %+v, want the opaque row handle and verbatim fields", first)
 	}
 	if first.Status != "success" {
@@ -237,18 +251,20 @@ func TestHistoryQuery_AnswersFromAskedRung(t *testing.T) {
 	// The directory rung is the exact (cwd, host) pair — the overlay's own
 	// semantics (frontend/src/recall.ts). The handler must forward BOTH to
 	// the store, or a remote command in the same cwd leaks into the local
-	// directory rung.
-	scope, cwd, host, limit, _, _, calls := fake.recorded()
-	if calls != 1 || scope != content.ScopeDirectory || cwd != "/srv/api" || host != "" || limit != 10 {
-		t.Fatalf("store asked with scope=%q cwd=%q host=%q limit=%d calls=%d, want directory /srv/api \"\" 10 1",
-			scope, cwd, host, limit, calls)
+	// directory rung. The host crosses as its ENVIRONMENT id, which is the
+	// ledger's name for the same coordinate.
+	q, calls := fake.recorded()
+	wantEnv := environmentForHost("").ID
+	if calls != 1 || q.Scope != content.ScopeDirectory || q.Cwd != "/srv/api" || q.EnvironmentID != wantEnv || q.Limit != 10 {
+		t.Fatalf("store asked with %+v calls=%d, want directory /srv/api env=%s limit=10 calls=1",
+			q, calls, wantEnv)
 	}
 }
 
 // The directory rung carries a remote host when the caller is on one: the
 // host is forwarded verbatim, never dropped.
 func TestHistoryQuery_DirectoryRungForwardsHost(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -259,9 +275,14 @@ func TestHistoryQuery_DirectoryRungForwardsHost(t *testing.T) {
 	if got := decodeHistoryResult(t, resp); got.Source != "store" {
 		t.Fatalf("source = %q, want store", got.Source)
 	}
-	_, cwd, host, _, _, _, _ := fake.recorded()
-	if cwd != "/srv/api" || host != "prod.example.com" {
-		t.Fatalf("directory rung forwarded cwd=%q host=%q, want /srv/api prod.example.com", cwd, host)
+	q, _ := fake.recorded()
+	wantEnv := environmentForHost("prod.example.com").ID
+	if q.Cwd != "/srv/api" || q.EnvironmentID != wantEnv {
+		t.Fatalf("directory rung forwarded cwd=%q env=%q, want /srv/api %s (the remote host's environment)",
+			q.Cwd, q.EnvironmentID, wantEnv)
+	}
+	if q.EnvironmentID == environmentForHost("").ID {
+		t.Fatal("the remote host collapsed to the local environment — the rung would leak")
 	}
 }
 
@@ -269,7 +290,7 @@ func TestHistoryQuery_DirectoryRungForwardsHost(t *testing.T) {
 // legitimate host rung, so the field's presence — not its value — is what
 // makes the request valid.
 func TestHistoryQuery_HostRungPassesHostVerbatim(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -279,15 +300,15 @@ func TestHistoryQuery_HostRungPassesHostVerbatim(t *testing.T) {
 	if got.Scope != "host" || got.Source != "store" {
 		t.Fatalf("scope=%q source=%q, want host store", got.Scope, got.Source)
 	}
-	_, _, host, _, _, _, _ := fake.recorded()
-	if host != "" {
-		t.Fatalf("host = %q, want the local-machine rung '' passed through", host)
+	q, _ := fake.recorded()
+	if q.EnvironmentID != environmentForHost("").ID {
+		t.Fatalf("environmentId = %q, want the local machine's — '' is a rung, not an absent filter", q.EnvironmentID)
 	}
 }
 
 // everywhere: no rung fields are forwarded.
 func TestHistoryQuery_EverywhereSendsNoRung(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -296,29 +317,30 @@ func TestHistoryQuery_EverywhereSendsNoRung(t *testing.T) {
 	if got := decodeHistoryResult(t, resp); got.Source != "store" {
 		t.Fatalf("source = %q, want store", got.Source)
 	}
-	scope, cwd, host, _, _, _, _ := fake.recorded()
-	if scope != content.ScopeEverywhere || cwd != "" || host != "" {
-		t.Fatalf("store asked with scope=%q cwd=%q host=%q, want everywhere '' ''", scope, cwd, host)
+	q, _ := fake.recorded()
+	if q.Scope != content.ScopeEverywhere || q.Cwd != "" || q.EnvironmentID != "" {
+		t.Fatalf("store asked with scope=%q cwd=%q env=%q, want everywhere '' '' — a rung's coordinate on a rung that has none is a filter the user cannot see",
+			q.Scope, q.Cwd, q.EnvironmentID)
 	}
 }
 
 // ── paging ────────────────────────────────────────────────────────────────
 
 func TestHistoryQuery_PagesWithBeforeCursor(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
 	resp := vaultCall(t, conn, "history.query", map[string]any{
-		"scope": "everywhere", "before": "77",
+		"scope": "everywhere", "before": "0192f0aa-0000-7000-8000-00000000cafe",
 	}, 1)
 
 	if got := decodeHistoryResult(t, resp); got.Exhausted != true {
 		t.Fatal("exhausted = false, want the fake's answer")
 	}
-	_, _, _, _, before, _, _ := fake.recorded()
-	if before == nil || *before != 77 {
-		t.Fatalf("before = %v, want 77 passed through", before)
+	q, _ := fake.recorded()
+	if q.BeforeID != "0192f0aa-0000-7000-8000-00000000cafe" {
+		t.Fatalf("beforeId = %q, want the previous page's last row id passed through", q.BeforeID)
 	}
 }
 
@@ -328,7 +350,7 @@ func TestHistoryQuery_PagesWithBeforeCursor(t *testing.T) {
 // store's problem, not the handler's. Absent and empty are the same state:
 // no filter.
 func TestHistoryQuery_TextFilterForwardedVerbatim(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -338,15 +360,15 @@ func TestHistoryQuery_TextFilterForwardedVerbatim(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %+v", resp.Error)
 	}
-	if _, _, _, _, _, text, _ := fake.recorded(); text != "DePlOy" {
-		t.Fatalf("text = %q, want the filter passed through verbatim", text)
+	if q, _ := fake.recorded(); q.Text != "DePlOy" {
+		t.Fatalf("text = %q, want the filter passed through verbatim", q.Text)
 	}
 }
 
 // No text on the wire is no filter: the store receives "" — the same state
 // the client uses when it has nothing to filter by.
 func TestHistoryQuery_AbsentTextForwardsEmpty(t *testing.T) {
-	fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+	fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
 	ws, stop := newHistoryWSServer(t, fake)
 	defer stop()
 	conn := connectWS(t, ws)
@@ -356,8 +378,8 @@ func TestHistoryQuery_AbsentTextForwardsEmpty(t *testing.T) {
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %+v", resp.Error)
 	}
-	if _, _, _, _, _, text, _ := fake.recorded(); text != "" {
-		t.Fatalf("text = %q, want the empty no-filter state", text)
+	if q, _ := fake.recorded(); q.Text != "" {
+		t.Fatalf("text = %q, want the empty no-filter state", q.Text)
 	}
 }
 
@@ -369,7 +391,7 @@ func TestHistoryQuery_AbsentTextForwardsEmpty(t *testing.T) {
 func TestHistoryQuery_CoverageOverTheWire(t *testing.T) {
 	t.Run("store horizon reaches the result", func(t *testing.T) {
 		horizon := int64(1_750_000_000_000)
-		fake := &fakeHistoryDB{page: content.HistoryPage{
+		fake := &fakeHistoryDB{page: content.LedgerPage{
 			HasRows:   true,
 			Exhausted: true,
 			Coverage:  &horizon,
@@ -384,8 +406,20 @@ func TestHistoryQuery_CoverageOverTheWire(t *testing.T) {
 		}
 	})
 
-	t.Run("empty store reports null, not absence", func(t *testing.T) {
+	t.Run("no store reports null, not absence", func(t *testing.T) {
 		ws, stop := newHistoryWSServer(t, nil)
+		defer stop()
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)
+		got := decodeHistoryResult(t, resp)
+		if got.Source != "unavailable" || got.Coverage != nil {
+			t.Fatalf("unavailable answer coverage = %v, want null (no horizon to state)", got.Coverage)
+		}
+	})
+
+	t.Run("empty store reports null, not absence", func(t *testing.T) {
+		fake := &fakeHistoryDB{page: content.LedgerPage{Exhausted: true}} // HasRows false
+		ws, stop := newHistoryWSServer(t, fake)
 		defer stop()
 		conn := connectWS(t, ws)
 		resp := vaultCall(t, conn, "history.query", map[string]any{"scope": "everywhere"}, 1)
@@ -396,16 +430,45 @@ func TestHistoryQuery_CoverageOverTheWire(t *testing.T) {
 	})
 }
 
-func TestHistoryQuery_RejectsMalformedBefore(t *testing.T) {
-	ws, stop := newHistoryWSServer(t, nil)
-	defer stop()
-	conn := connectWS(t, ws)
-	resp := vaultCall(t, conn, "history.query", map[string]any{
-		"scope": "everywhere", "before": "not-a-row-handle",
-	}, 1)
-	if resp.Error == nil || resp.Error.Code != -32602 {
-		t.Fatalf("error = %+v, want -32602 for a malformed cursor", resp.Error)
-	}
+// The cursor is OPAQUE — and since nocx-rtg0.19 it is opaque in fact and not
+// only in the contract's word: it used to be parsed as the interim table's
+// decimal rowid, and it is now the entry's own id, which the store resolves
+// to a position. So the handler inspects nothing about its shape and hands it
+// over verbatim; the only cursor it can refuse is the empty one, which names
+// no row at all.
+func TestHistoryQuery_CursorIsOpaque(t *testing.T) {
+	t.Run("a handle of any shape reaches the store verbatim", func(t *testing.T) {
+		fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
+		ws, stop := newHistoryWSServer(t, fake)
+		defer stop()
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{
+			"scope": "everywhere", "before": "not-a-row-handle",
+		}, 1)
+		if resp.Error != nil {
+			t.Fatalf("error = %+v, want the handle accepted — the transport does not read it", resp.Error)
+		}
+		q, _ := fake.recorded()
+		if q.BeforeID != "not-a-row-handle" {
+			t.Fatalf("beforeId = %q, want the handle passed through unchanged", q.BeforeID)
+		}
+	})
+
+	t.Run("the empty cursor is refused", func(t *testing.T) {
+		fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
+		ws, stop := newHistoryWSServer(t, fake)
+		defer stop()
+		conn := connectWS(t, ws)
+		resp := vaultCall(t, conn, "history.query", map[string]any{
+			"scope": "everywhere", "before": "",
+		}, 1)
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Fatalf("error = %+v, want -32602 for a cursor naming no row", resp.Error)
+		}
+		if _, calls := fake.recorded(); calls != 0 {
+			t.Fatalf("store consulted %d times for a refused cursor, want 0", calls)
+		}
+	})
 }
 
 // limit clamps: <1 becomes the default, >200 becomes 200, in-range passes.
@@ -417,7 +480,7 @@ func TestHistoryQuery_LimitClamp(t *testing.T) {
 		{0, 50}, {-5, 50}, {7, 7}, {200, 200}, {1000, 200},
 	}
 	for _, c := range cases {
-		fake := &fakeHistoryDB{page: content.HistoryPage{HasRows: true, Exhausted: true}}
+		fake := &fakeHistoryDB{page: content.LedgerPage{HasRows: true, Exhausted: true}}
 		ws, stop := newHistoryWSServer(t, fake)
 		conn := connectWS(t, ws)
 		resp := vaultCall(t, conn, "history.query", map[string]any{
@@ -426,9 +489,9 @@ func TestHistoryQuery_LimitClamp(t *testing.T) {
 		if resp.Error != nil {
 			t.Fatalf("limit=%d: unexpected error %+v", c.sent, resp.Error)
 		}
-		_, _, _, limit, _, _, _ := fake.recorded()
-		if limit != c.want {
-			t.Fatalf("limit=%d: store asked with %d, want %d", c.sent, limit, c.want)
+		q, _ := fake.recorded()
+		if q.Limit != c.want {
+			t.Fatalf("limit=%d: store asked with %d, want %d", c.sent, q.Limit, c.want)
 		}
 		stop()
 	}

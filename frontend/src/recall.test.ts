@@ -82,7 +82,7 @@ function mkQuery(
 }
 
 function emptyQuery(
-  source: 'store' | 'session' = 'session',
+  source: HistoryQuery['source'] = 'session',
 ): (scope: RecallScope) => Promise<HistoryQuery> {
   return (scope) => Promise.resolve({ entries: [], scope, exhausted: true, source, coverage: null })
 }
@@ -91,7 +91,7 @@ function emptyQuery(
  *  typing-narrows tests, where a static fixture would ignore the filter. */
 function filteringQuery(
   commands: string[],
-  source: 'store' | 'session' = 'session',
+  source: HistoryQuery['source'] = 'session',
 ): (scope: RecallScope, text?: string) => Promise<HistoryQuery> {
   return (scope, text) => {
     const needle = text ?? ''
@@ -136,8 +136,12 @@ const fieldValue = (container: HTMLElement): string =>
   container.querySelector<HTMLElement>('.ui-floating-panel__search .ui-search-field__input')
     ?.textContent ?? ''
 
-describe('recall: Enter executes the previewed command', () => {
-  it('Enter while navigating submits the previewed command and closes the overlay', async () => {
+describe('recall: Enter takes the command, it does not run it', () => {
+  it('Enter while navigating leaves the command in the line and submits nothing', async () => {
+    // Decided twice: v4 said take-never-run, nocx-w7h.5 made the
+    // empty-filter Enter execute the previewed command, and the owner
+    // reversed it back on 2026-08-19 while using it. Choosing from a list
+    // and running are two decisions, and one keystroke must not make both.
     const { container, ed, view, recall, submit } = setupRecall({
       query: mkQuery(['rm -rf build']),
     })
@@ -151,10 +155,8 @@ describe('recall: Enter executes the previewed command', () => {
 
     key(view, { key: 'Enter' })
     expect(recall.isOpen).toBe(false)
-    // The previewed command went out through the editor's own submit action —
-    // the same one a typed Enter fires — not through a second route.
-    expect(submit).toHaveBeenCalledTimes(1)
-    expect(submit).toHaveBeenCalledWith('rm -rf build')
+    expect(ed.getDoc()).toBe('rm -rf build')
+    expect(submit).not.toHaveBeenCalled()
   })
 
   it('previewing a MASKED row reports its redaction spans to the host', async () => {
@@ -581,14 +583,14 @@ describe('recall: a search hands the input to the field (brief search-ui)', () =
     )
   })
 
-  it('the footer names the Enter action: execute on an empty filter, insert on a search', async () => {
+  it('the footer names the Enter action, and it is the same one on both sides of a search', async () => {
     const { container, view } = setupRecall({
       query: filteringQuery(['make deploy', 'git status']),
     })
     key(view, { key: 'ArrowUp' })
     await settled(container)
-    expect(panelOf(container).textContent).toContain('↵ to execute')
-    expect(panelOf(container).textContent).not.toContain('↵ to insert')
+    expect(panelOf(container).textContent).toContain('↵ to insert')
+    expect(panelOf(container).textContent).not.toContain('↵ to execute')
     key(view, { key: 'g' })
     await vi.waitFor(() => expect(fieldValue(container)).toBe('g'))
     expect(panelOf(container).textContent).toContain('↵ to insert')
@@ -1108,23 +1110,23 @@ describe('recall: the footer and the labels say what the keys do', () => {
     // out on one line with a real gap (white-space: nowrap; display: flex),
     // so no hint gets its own row and none can wrap apart from the others.
     const groups = footer?.querySelectorAll<HTMLElement>(':scope > span') ?? []
-    expect(groups.length).toBe(5)
-    expect(groups[0]?.textContent).toBe('↵ to execute')
-    expect(groups[1]?.textContent).toBe('tab to edit')
-    expect(groups[2]?.textContent).toBe('↑ ↓ to navigate')
-    expect(groups[3]?.textContent).toBe('shift+↑ widen')
-    expect(groups[4]?.textContent).toBe('esc to dismiss')
+    expect(groups.length).toBe(4)
+    expect(groups[0]?.textContent).toBe('↵ to insert')
+    expect(groups[1]?.textContent).toBe('↑ ↓ to navigate')
+    expect(groups[2]?.textContent).toBe('shift+↑ widen')
+    expect(groups[3]?.textContent).toBe('esc to dismiss')
     expect(footer?.querySelector('br')).toBeNull()
   })
 
-  it('Enter is labelled as executing the previewed command', async () => {
+  it('Enter is labelled as taking the command into the line, never as running it', async () => {
     const { container, view } = setupRecall({
       query: mkQuery(['rm -rf build', 'ls', 'git status']),
     })
     key(view, { key: 'ArrowUp' })
     await settled(container)
     const text = panelOf(container).textContent ?? ''
-    expect(text).toContain('↵ to execute')
+    expect(text).toContain('↵ to insert')
+    expect(text).not.toContain('↵ to execute')
     expect(text).not.toContain('fill the line')
   })
 
@@ -1345,5 +1347,74 @@ describe('queryLedgerHistory: the session fallback behind the generated types', 
     ledger.open('only', '/a', 'h1', () => undefined, 'shell') // still running
     const q = queryLedgerHistory(ledger, 'everywhere', '/a', 'h1')
     expect(q.coverage).toBe(null)
+  })
+})
+
+// ── Durable history is not running (nocx-rtg0.15) ───────────────────────
+//
+// Three states of `source`, not two. Before this the panel showed the same
+// "no history yet / commands you run will appear here" whether the store had
+// answered with nothing or there was no store to answer from — so a terminal
+// that is keeping nothing looked exactly like a brand new one, and the
+// description was a promise nothing behind it could keep.
+describe('recall: the store is not there', () => {
+  it('an unavailable store reads as not being kept, never as "no history yet"', async () => {
+    const { container, ed, view } = setupRecall({ query: emptyQuery('unavailable') })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+
+    const panel = panelOf(container)
+    const title = panel.querySelector<HTMLElement>('.ui-empty-state__title')?.textContent
+    const desc = panel.querySelector<HTMLElement>('.ui-empty-state__desc')?.textContent
+    expect(title).toBe('history is not being kept')
+    expect(desc).toBe('see Settings → History for why')
+    // The promise that used to be made here.
+    expect(panel.textContent).not.toContain('commands you run will appear here')
+  })
+
+  it('an empty store still reads as "no history yet" — the two must not be one', async () => {
+    const { container, ed, view } = setupRecall({ query: emptyQuery('session') })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+
+    const panel = panelOf(container)
+    expect(panel.querySelector<HTMLElement>('.ui-empty-state__title')?.textContent).toBe(
+      'no history yet',
+    )
+    expect(panel.querySelector<HTMLElement>('.ui-empty-state__desc')?.textContent).toBe(
+      'commands you run will appear here',
+    )
+  })
+
+  it('the header badge names which of the two it is', async () => {
+    const unavailable = setupRecall({ query: emptyQuery('unavailable') })
+    unavailable.ed.show()
+    key(unavailable.view, { key: 'ArrowUp' })
+    await settled(unavailable.container)
+    const gone = panelOf(unavailable.container).querySelector<HTMLElement>(
+      '.ui-floating-panel__source',
+    )
+    expect(gone?.textContent).toBe('not being kept')
+    expect(gone?.dataset.tone).toBe('danger')
+
+    const empty = setupRecall({ query: emptyQuery('session') })
+    empty.ed.show()
+    key(empty.view, { key: 'ArrowUp' })
+    await settled(empty.container)
+    const session = panelOf(empty.container).querySelector<HTMLElement>(
+      '.ui-floating-panel__source',
+    )
+    expect(session?.textContent).toBe('this session only')
+    expect(session?.dataset.tone).toBe('warning')
+  })
+
+  it('a store that answered carries no source badge at all', async () => {
+    const { container, ed, view } = setupRecall({ query: emptyQuery('store') })
+    ed.show()
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+    expect(panelOf(container).querySelector<HTMLElement>('.ui-floating-panel__source')).toBeNull()
   })
 })

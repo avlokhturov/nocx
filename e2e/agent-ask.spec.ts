@@ -68,7 +68,7 @@ import { test as base, expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint } from './harness'
+import { VaultBackend, bindEndpoint, settingsReady } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 
@@ -156,7 +156,7 @@ async function openApp(page: Page): Promise<void> {
  *  (the connections-settings.spec.ts walk). */
 async function openAIEndpoints(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
-  await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 10_000 })
+  await settingsReady(page)
   await page.locator(SETTINGS_AI_NAV).click()
   // Wait on the page root, not on the readiness badge: the badge appears
   // only once an endpoint is configured, so waiting on it would make this

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // The Git view, through the REAL mountSidebar — the deliverable is an
 // activity-bar view (rule 1: a user opens it from the rail and does the
-// things below). The origin values are fixtures (the TabContent capability
+// things below). The origin values are fixtures (the PaneContent capability
 // is another worker's), while the whole mechanism around them — the signal,
 // re-scope, staleness guards — is real.
 //
@@ -21,7 +21,7 @@ import type { GitDiffTarget } from './git-diff/open-git-diff'
 import type { Status } from '../generated/git.status'
 import type { GitOpenResult } from '../generated/git.open'
 import type { GitLogResult } from '../generated/git.log'
-import type { ActiveOrigin } from '../tab-content'
+import type { ActiveOrigin } from '../pane-content'
 import type { ClipboardAccess } from '../clipboard'
 import type { UrlOpener } from '../open-url'
 import { ToastHost, clearToasts } from '../ui/toast'
@@ -29,7 +29,7 @@ import { ToastHost, clearToasts } from '../ui/toast'
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
 const LOCAL_ORIGIN: ActiveOrigin = {
-  tabId: 1,
+  paneId: 1,
   sessionId: 's1',
   kind: 'local',
   cwd: '/home/dev/repo',
@@ -39,7 +39,7 @@ const LOCAL_ORIGIN: ActiveOrigin = {
 }
 
 const OTHER_ORIGIN: ActiveOrigin = {
-  tabId: 2,
+  paneId: 2,
   sessionId: 's2',
   kind: 'local',
   cwd: '/home/dev/other',
@@ -49,7 +49,7 @@ const OTHER_ORIGIN: ActiveOrigin = {
 }
 
 const SSH_ORIGIN: ActiveOrigin = {
-  tabId: 3,
+  paneId: 3,
   sessionId: 's3',
   kind: 'ssh',
   cwd: '/home/bob',
@@ -238,7 +238,7 @@ const stagedFile = statusFixture({
 // ── The states a user can land in ────────────────────────────────────────
 
 describe('the panel renders what the store says', () => {
-  it('noTab: no origin — the empty state', () => {
+  it('noPane: no origin — the empty state', () => {
     const { panel } = mountApp(fakeServices())
     expect(panel.textContent).toContain('No repository to show')
   })

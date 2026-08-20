@@ -26,7 +26,7 @@ func sinkLimits() notify.Limits {
 func TestHostSinkUnavailableHostRecordsFailedDelivery(t *testing.T) {
 	r, err := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: wailsadapter.HostSink{Host: notify.UnavailableHost{}}},
+			{Sink: notify.HostSink{Host: notify.UnavailableHost{}}},
 		},
 	}, sinkLimits())
 	if err != nil {
@@ -56,7 +56,7 @@ func TestHostSinkNotRequestedRecordsFailedDelivery(t *testing.T) {
 	_, host := newHarness(t)
 	r, err := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: wailsadapter.HostSink{Host: host}},
+			{Sink: notify.HostSink{Host: host}},
 		},
 	}, sinkLimits())
 	if err != nil {
@@ -83,7 +83,7 @@ func TestHostSinkDeniedRecordsFailedDelivery(t *testing.T) {
 	}
 	r, err := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: wailsadapter.HostSink{Host: host}},
+			{Sink: notify.HostSink{Host: host}},
 		},
 	}, sinkLimits())
 	if err != nil {
@@ -109,7 +109,7 @@ func TestHostSinkDeliversThroughHost(t *testing.T) {
 	grant(t, host)
 	r, err := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: wailsadapter.HostSink{Host: host}},
+			{Sink: notify.HostSink{Host: host}},
 		},
 	}, sinkLimits())
 	if err != nil {
@@ -142,7 +142,7 @@ func TestHostSinkSendFailureRecordsFailedDelivery(t *testing.T) {
 	grant(t, host)
 	r, err := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: wailsadapter.HostSink{Host: host}},
+			{Sink: notify.HostSink{Host: host}},
 		},
 	}, sinkLimits())
 	if err != nil {
@@ -162,7 +162,7 @@ func TestHostSinkSendFailureRecordsFailedDelivery(t *testing.T) {
 // TestHostSinkLeavesMachineFalse: a banner leaves the machine nowhere, so the
 // heuristic trust bound (ADR-0029 §3) never blocks it.
 func TestHostSinkLeavesMachineFalse(t *testing.T) {
-	if (wailsadapter.HostSink{}).LeavesMachine() {
+	if (notify.HostSink{}).LeavesMachine() {
 		t.Error("HostSink.LeavesMachine() = true, want false")
 	}
 }

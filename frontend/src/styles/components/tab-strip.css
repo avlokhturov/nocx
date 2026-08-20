@@ -39,11 +39,65 @@
    and `htop` was erasing the tab strip and the activity bar while `top`, the
    same kind of program in the other buffer, left them alone (nocx-6w4z). */
 
+/* THE ROW SCROLLS; IT DOES NOT SPILL. Without an overflow rule of its own
+   this box let its children overrun it — `.tabbar` clips at the far edge, but
+   long before that the last tabs were painted straight over the strip's
+   action buttons, because those are a SIBLING of this box and not inside it.
+
+   It matters now in a way it did not before: the horizontal strip used to
+   draw one workspace's tabs and was bounded by that filter. It holds every
+   unfolded tab today, so "more tabs than fit" is an ordinary state and needs
+   an answer rather than a clip.
+
+   The scrollbar is hidden and the scroll is not: a 12px bar across a 38px
+   chrome row would cost more than it tells, and the wheel, the trackpad and
+   `scrollIntoView` all still work. */
 .tabs-container {
   flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: stretch;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.tabs-container::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── The edges say there is more ──────────────────────────────────────────
+
+   A hidden scrollbar removes the one thing that told a reader the row runs
+   past its box, and the eighth tab then simply is not there — no bar, no
+   arrow, no clipped sliver, nothing. The fade is what puts that fact back:
+   a tab dissolving into the chrome reads as "this continues", which a tab cut
+   off at a hard edge does not.
+
+   THE ATTRIBUTES ARE MEASURED (tab-strip.tsx `updateOverflow`), never assumed.
+   CSS cannot ask whether a box is scrolled, and a fade painted unconditionally
+   would announce hidden tabs to someone with four tabs in a wide window — an
+   edge that says "there is more" when there is not cannot be checked by
+   looking, so it is worse than no edge.
+
+   Each side is its own rule rather than one rule with two stops, so a row
+   scrolled to its end fades only where it is actually cut. */
+.tabs-container[data-overflow-start] {
+  mask-image: linear-gradient(to right, transparent, #000 24px);
+}
+
+.tabs-container[data-overflow-end] {
+  mask-image: linear-gradient(to left, transparent, #000 24px);
+}
+
+.tabs-container[data-overflow-start][data-overflow-end] {
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 24px,
+    #000 calc(100% - 24px),
+    transparent
+  );
 }
 
 /* ── Flexible spacer ── absorbs leftover width so tabs never stretch ── */
@@ -58,7 +112,12 @@
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  width: 240px;
+  /* Dragged, not fixed — the strip's own handle writes this variable
+     (tab-strip.tsx). The fallback is the width it had before it could be
+     dragged, so a strip nothing has resized looks exactly as it did. */
+  width: var(--tabstrip-width, 240px);
+  /* The positioning context for that handle. */
+  position: relative;
   background: var(--color-chrome);
   border-right: 1px solid var(--color-divider);
   font-family: var(--font-family-ui);
@@ -69,6 +128,16 @@
   overflow: hidden;
 }
 
+/* The handle spans the strip's trailing edge, full height. A column has no
+   trailing slot to put it in, so the surface PLACES it — position only; the
+   paint, the hit area and the keyboard are the kit component's own. */
+.tabstrip-vertical > .ui-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+}
+
 .tabstrip-vertical .tabs-container {
   flex: 1 1 auto;
   display: flex;
@@ -76,6 +145,33 @@
   overflow-y: auto;
   min-height: 0;
 }
+/* ── The head of the row ──────────────────────────────────────────────────
+
+   "New workspace" sits before the tabs rather than among the actions at the
+   far end, because that is where the thing it makes appears. A workspace is a
+   run of tabs beginning at the left of the row; the control that mints one
+   belongs at the head of that row, not in a cluster of unrelated actions
+   twelve hundred pixels away from its own result.
+
+   It is a SIBLING of `.tabs-container`, so it never scrolls: the tabs move
+   under it and it stays. */
+
+.tabstrip-lead {
+  flex: none;
+  display: flex;
+}
+
+/* Both placements keep the lead beside what it leads: the head of the row in
+   one, the head of the rail's filter line in the other. */
+.tabstrip-header .tabstrip-lead {
+  align-items: center;
+}
+
+.tabbar .tabstrip-lead > .ui-icon-button {
+  flex: none;
+  align-self: center;
+}
+
 /* ── The strip's actions ──────────────────────────────────────────────── */
 
 .tabstrip-actions {
@@ -84,10 +180,29 @@
   align-items: stretch;
 }
 
+/* SQUARE, AND NOT FULL-HEIGHT. `height: 100%` of a 38px bar made every one of
+   these a 30x37 rectangle — the shape said "column of the strip", which is
+   what a tab is, so the buttons read as tabs that had lost their labels. The
+   kit's `md` size is already 30x30; letting it apply is all that is needed,
+   and centring plus the gap between them is placement, which is this surface's
+   to declare.
+
+   THEY STAY TRANSPARENT AT REST. A resting background was tried and withdrawn
+   by the owner on sight: five filled chips at the end of a 38px chrome row
+   read as a control panel bolted to the strip, and they competed with the tabs
+   — which are the things the row exists for — instead of standing quietly
+   beside them. The square shape and the gap do the separating; the hover
+   state does the rest. */
+.tabbar .tabstrip-lead,
+.tabbar .tabstrip-actions {
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+  align-items: center;
+}
+
 .tabbar .tabstrip-actions > .ui-icon-button {
   flex: none;
-  width: 30px;
-  height: 100%;
+  align-self: center;
 }
 
 /* Square corners are `square` on IconButton now, not a shape this surface imposes
@@ -132,4 +247,149 @@
 .tabstrip-header .tabstrip-actions > .ui-icon-button {
   width: 24px;
   height: 24px;
+}
+
+/* ── Group headings (nocx-isoph.5) ────────────────────────────────────────
+
+   The vertical strip cuts its rows into groups and writes a heading over each
+   one that has a name (tab-strip.tsx). What the heading IS belongs to the kit
+   — it is the Caption, the one owner of the group-caption register — and this
+   rule only positions it in the column: the padding a caption needs inside
+   its rail is the caller's wrapper, never the caption itself.
+
+   A group with NO heading draws no element at all, so there is nothing here
+   for the default workspace to match: its tabs are top-level rows (§4.2), and
+   the absence is in the markup rather than in a rule that hides something. */
+
+/* The band is symmetrical and the SEPARATION IS A MARGIN. The padding used to
+   carry both jobs — space above to part this group from the one before it,
+   less below to bind the heading to its own rows — which was invisible while
+   the heading painted nothing and became a visible defect the moment it had
+   a ground: the name and the close mark sat above the middle of their own
+   band. A margin separates the groups and the padding centres the contents,
+   which is the same rhythm with the two jobs given to the two properties
+   that mean them. */
+.tabstrip-group-heading {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  padding: var(--space-1) 10px;
+}
+
+/* Where a dragged workspace will land — the same marks a tab's row wears
+   (tab.css), because it is the same gesture on the same rail and a second
+   vocabulary for it would be one to learn twice. */
+.tabstrip-group-heading[data-drop-edge='before'] {
+  box-shadow:
+    inset 0 3px var(--color-accent),
+    0 -4px 10px -4px var(--color-accent);
+}
+
+.tabstrip-group-heading[data-drop-edge='after'] {
+  box-shadow:
+    inset 0 -3px var(--color-accent),
+    0 4px 10px -4px var(--color-accent);
+}
+
+/* The name hugs its own text. `flex: 1 1 auto` was the first version and it
+   made the heading's hover reach across the whole rail — a control's
+   highlight has to describe the control, and a wash the width of the strip
+   says "all of this is one button", which is a claim about a target the
+   pointer does not actually have. */
+.tabstrip-group-heading > .ui-button {
+  flex: 0 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+/* The close mark sits at the end of the row rather than beside the name: it
+   is the row's action, and an action that moves with the length of a name is
+   one a person has to look for every time. */
+.tabstrip-group-heading > .ui-icon-button {
+  margin-left: auto;
+}
+
+/* Shown on approach, like a tab's own close mark: a column of six workspaces
+   would otherwise carry six standing invitations to close one, and the mark
+   that destroys the most in one click would be the most permanent thing on
+   the rail. Focus counts as approach, or the control would exist for the
+   mouse only. */
+.tabstrip-group-heading > .ui-icon-button {
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.tabstrip-group-heading:hover > .ui-icon-button,
+.tabstrip-group-heading > .ui-icon-button:focus-visible {
+  opacity: 1;
+}
+
+/* ── The workspace's colour, in the orientation that has no pill ─────────
+
+   Identity, not grouping. Which run a row belongs to is already answered by
+   the heading standing above it, and tab.css suppresses the wash here for
+   exactly that reason — but "which workspace is this" is a different
+   question, and the horizontal strip answers it with the pill's colour. The
+   column answered it with nothing: six workspaces, six identical grey
+   captions.
+
+   THE BAND, NOT A DOT. A dot was the first version and it put the colour
+   beside the name as one more small mark in a column that already carries
+   several — an index, a status dot, an unread bar — so the eye had to find
+   it before it could use it. Colouring the heading's own ground instead
+   makes the workspace's colour the widest thing on the row: a run of tabs
+   now begins with a band you cannot miss at arm's length, which is what
+   identity is for.
+
+   The ground, never the type: the caption inside is the kit's
+   group-caption register, and a surface may place a kit component and never
+   repaint one. This rule paints only the wrapper it owns.
+
+   The mix is heavy on the strip's own chrome, for the reason the tab wash is:
+   at full strength the band would compete with the tabs it introduces, and
+   the question it answers ("which workspace") needs recognition, not shouting.
+
+   An uncoloured workspace gets no band at all — a workspace nobody coloured
+   has no colour, and inventing one is what the pill refuses to do too. */
+.tabstrip-group-heading[data-colour] {
+  background: color-mix(in srgb, var(--ws-heading-colour), var(--color-chrome) 76%);
+}
+
+.tabstrip-group-heading[data-colour='grey'] {
+  --ws-heading-colour: var(--ws-grey);
+}
+
+.tabstrip-group-heading[data-colour='blue'] {
+  --ws-heading-colour: var(--ws-blue);
+}
+
+.tabstrip-group-heading[data-colour='cyan'] {
+  --ws-heading-colour: var(--ws-cyan);
+}
+
+.tabstrip-group-heading[data-colour='green'] {
+  --ws-heading-colour: var(--ws-green);
+}
+
+.tabstrip-group-heading[data-colour='yellow'] {
+  --ws-heading-colour: var(--ws-yellow);
+}
+
+.tabstrip-group-heading[data-colour='orange'] {
+  --ws-heading-colour: var(--ws-orange);
+}
+
+.tabstrip-group-heading[data-colour='red'] {
+  --ws-heading-colour: var(--ws-red);
+}
+
+.tabstrip-group-heading[data-colour='pink'] {
+  --ws-heading-colour: var(--ws-pink);
+}
+
+.tabstrip-group-heading[data-colour='purple'] {
+  --ws-heading-colour: var(--ws-purple);
 }

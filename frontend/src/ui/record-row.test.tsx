@@ -56,6 +56,23 @@ describe("RecordRow — the kit's record grammar", () => {
     expect(container.querySelectorAll('.ui-badge').length).toBe(0)
     expect(container.querySelector('.ui-record-row__meta-text')).toBeNull()
     expect(container.querySelector('.ui-status-dot')).toBeNull()
+    expect(container.querySelector('.ui-record-row__detail')).toBeNull()
+  })
+
+  it('renders one line of the record’s own words under the meta line', () => {
+    // The `detail` slot (nocx-edhcu): verbatim evidence — the last line a
+    // pane printed. Typed as a string, so it cannot become a second
+    // free-form `info` slot by another name.
+    const { container } = render(() => (
+      <RecordRow
+        title="claude"
+        meta="deploy@srv-01"
+        detail="Should I drop the column?"
+        actions={null}
+      />
+    ))
+    const detail = container.querySelector('.ui-record-row__detail')
+    expect(detail?.textContent).toBe('Should I drop the column?')
   })
 
   it('compiles only with a typed kind: a JSX badge in the slot is refused', () => {

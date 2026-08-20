@@ -21,8 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/capability"
@@ -196,13 +194,19 @@ func (h captureDismissHandlers) handleCaptureDismiss(ctx context.Context, req js
 	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
 }
 
-// rewriteLinks rewrites every linked history row's redaction segment to the
-// reference through the operation's service. The rows are addressed by their
-// stable ids. A row the retention sweep removed is skipped — the rewrite is
-// moot, the secret still exists; anything else fails the rewrite set. When
-// the content store is not wired the old dispatcher's "history store
-// unavailable" failure is reported, which settles the save as a partial
-// result exactly like a real rewrite failure.
+// rewriteLinks rewrites every linked row's redaction segment to the
+// reference through the operation's service. The rows are addressed by the
+// stable id the link carries, and this handler deliberately does not know
+// which store that id belongs to: the service holds both repositories and
+// routes on the id's own provenance (capability/capture_tabby.go). It used to
+// parse the id to an int64 here, which is precisely what made the flow unable
+// to address a ledger row at all — the ledger's key is a UUIDv7.
+//
+// A row the retention sweep removed is skipped — the rewrite is moot, the
+// secret still exists; anything else fails the rewrite set. When the content
+// store is not wired the old dispatcher's "history store unavailable" failure
+// is reported, which settles the save as a partial result exactly like a real
+// rewrite failure.
 func (h captureSaveHandlers) rewriteLinks(ctx context.Context, svc capability.CaptureSaveService, links []credential.CaptureLink, reference string) error {
 	if !h.contentWired {
 		return errors.New("history store unavailable")
@@ -212,16 +216,7 @@ func (h captureSaveHandlers) rewriteLinks(ctx context.Context, svc capability.Ca
 		if l.EntryID == "" {
 			continue
 		}
-		id, err := strconv.ParseInt(l.EntryID, 10, 64)
-		if err != nil {
-			// The entry id is the store's numeric id in string form; a
-			// non-numeric one is internal corruption, not a caller fact.
-			if firstErr == nil {
-				firstErr = fmt.Errorf("bad entry id %q: %w", l.EntryID, err)
-			}
-			continue
-		}
-		if err := svc.RewriteRedaction(ctx, id, l.Redaction, reference); err != nil {
+		if err := svc.RewriteRedaction(ctx, l.EntryID, l.Redaction, reference); err != nil {
 			if errors.Is(err, content.ErrNotFound) {
 				continue // swept away — nothing to rewrite
 			}

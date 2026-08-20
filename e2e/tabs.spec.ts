@@ -112,7 +112,7 @@ test.describe('vertical tab placement', () => {
    * nocx-zudj: with two tabs open, switching to vertical left the strip listing no tabs
    * at all — the swap mounted the new strip without repopulating its display records.
    * The test above cannot catch it: it switches with ONE tab and adds the second while
-   * already vertical, so the populate path it exercises is addTab and not replaceStrip.
+   * already vertical, so the populate path it exercises is addPane and not replaceStrip.
    *
    * Asserted by measured geometry rather than by presence: a strip with rows that exist
    * at zero height would satisfy any assertion about the DOM while showing nothing (the
@@ -226,27 +226,101 @@ test.describe('vertical tab placement', () => {
 
     const tab = page.locator(TAB).first()
     const title = tab.locator('.nocx-tab-title')
-    const tabBox = await tab.boundingBox()
+    const paneBox = await tab.boundingBox()
     const titleBox = await title.boundingBox()
 
     // Title's left edge should be near the tab's left content edge:
     // 10px tab padding + 10px pill left + 22px pill width + 10px gap = 52px.
     // This is well left of centre (which would be ~80+ px for a 240px strip).
-    expect(titleBox!.x - tabBox!.x).toBeLessThan(60)
+    expect(titleBox!.x - paneBox!.x).toBeLessThan(60)
   })
 
-  test('horizontal label text is centred (not near the left edge)', async ({ page }) => {
+  /**
+   * …AND IT RUNS TO THE OTHER EDGE (nocx-lfsw4). The label used to stop 36px
+   * short of the row's right edge — a 26px margin plus the row's own 10px
+   * padding — held for a close button that is `position: absolute` and
+   * `opacity: 0` until the row is hovered. Out of flow and invisible, it takes
+   * width from every label in the strip and gives it back to none of them.
+   *
+   * The measurement is geometric rather than textual on purpose: a title short
+   * enough to fit satisfies any assertion about the rendered string, whatever
+   * the margin is, and the defect is exactly the one jsdom cannot see
+   * (nocx-4wbx). The tolerance is 12px: the row's own 10px padding, which the
+   * label may not eat into, plus a pixel of rounding.
+   */
+  test('the vertical label runs to the row edge, reserving nothing for the hidden close button (nocx-lfsw4)', async ({
+    page,
+  }) => {
+    await switchPlacement(page, 'vertical')
+
+    // The pointer must be over nothing — the claim is about the row NOBODY is
+    // hovering, which is every row in the strip nearly all of the time.
+    await page.mouse.move(2, 2)
+
+    const tab = page.locator(TAB).first()
+    const close = tab.locator('.ui-icon-button')
+    await expect(close).toHaveCSS('opacity', '0')
+
+    const rowBox = await tab.boundingBox()
+    const labelBox = await tab.locator('.nocx-tab-label').boundingBox()
+    expect(rowBox).not.toBeNull()
+    expect(labelBox).not.toBeNull()
+    const rightGap = rowBox!.x + rowBox!.width - (labelBox!.x + labelBox!.width)
+    console.log(`vertical label right gap = ${rightGap}`)
+    expect(rightGap, `the label stops ${rightGap}px short of the row's edge`).toBeLessThanOrEqual(
+      12,
+    )
+
+    // And the button the width was being held for is still reachable, and
+    // still closes the tab it belongs to.
+    await page.keyboard.press('Meta+t')
+    await expect(page.locator(TAB)).toHaveCount(2)
+    const second = page.locator(TAB).nth(1)
+    await second.hover()
+    await expect(second.locator('.ui-icon-button')).toHaveCSS('opacity', '1')
+    await second.locator('.ui-icon-button').click()
+    await expect(page.locator(TAB)).toHaveCount(1)
+  })
+
+  test('horizontal labels all start in the same column, left of centre', async ({ page }) => {
     // beforeEach already reset to horizontal, but make sure.
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/)
 
-    const tab = page.locator(TAB).first()
-    const title = tab.locator('.nocx-tab-title')
-    const tabBox = await tab.boundingBox()
-    const titleBox = await title.boundingBox()
+    // THE HORIZONTAL LABEL IS LEFT-ALIGNED TOO, and this test used to assert
+    // the opposite — "well past 40px from the tab's left edge (centered text
+    // in a 200px tab)". Centring was withdrawn deliberately, with the reason
+    // written where the rule is (styles/components/tab.css): "A centred label
+    // starts at a different x in every tab, so reading the strip means
+    // saccading to a new position per tab instead of running the eye down one
+    // column — and with width now following content, the starting positions
+    // were about to become arbitrary as well."
+    //
+    // So the assertion is the promise that replaced it: ONE COLUMN. It is the
+    // stronger check of the two — a fixed offset can be satisfied by a single
+    // tab, while "every tab agrees" is a claim about the strip — and it is
+    // what a reader actually gets.
+    await page.locator('[aria-label="New tab"]').click()
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 15_000 })
 
-    // In horizontal with centering, the title's left edge should be well
-    // past 40px from the tab's left edge (centered text in a 200px tab).
-    expect(titleBox!.x - tabBox!.x).toBeGreaterThan(40)
+    const offsets: number[] = []
+    for (const tab of await page.locator(TAB).all()) {
+      const tabBox = await tab.boundingBox()
+      const titleBox = await tab.locator('.nocx-tab-title').boundingBox()
+      expect(tabBox).not.toBeNull()
+      expect(titleBox).not.toBeNull()
+      offsets.push(titleBox!.x - tabBox!.x)
+    }
+
+    expect(offsets.length).toBeGreaterThanOrEqual(2)
+    // The label clears the index digit and nothing else: tab padding plus the
+    // label's 20px left margin. Left of centre in any tab the strip draws.
+    for (const offset of offsets) {
+      expect(offset).toBeLessThan(60)
+    }
+    // …and every tab agrees, to the pixel.
+    for (const offset of offsets) {
+      expect(Math.abs(offset - offsets[0])).toBeLessThanOrEqual(1)
+    }
   })
 
   // Reset placement to horizontal after each vertical test so the

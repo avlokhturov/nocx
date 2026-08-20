@@ -43,9 +43,22 @@
   position: relative;
   display: flex;
   align-items: center;
-  flex: 0 1 200px;
-  width: 200px;
-  min-width: 0;
+  /* WIDTH FOLLOWS CONTENT, between a floor and a ceiling. A fixed 200px made
+     every tab the same slab whatever was in it, so four idle shells in one
+     directory took as much of the row as four different jobs would — and a
+     strip where width carries no information is a strip you have to read
+     rather than scan.
+
+     THE FLOOR IS WHERE THE LABEL STOPS BEING A LABEL, and 96px was below it:
+     with eleven tabs open every one of them shrank to the floor and read
+     `ho…`, which is a strip that has kept its geometry and thrown away its
+     content. 150px is the narrowest a tab can be and still show enough of a
+     path or a command to tell it from its neighbour. Past that the row
+     SCROLLS (tab-strip.css) rather than shrinking further — an unreadable tab
+     on screen is worth less than a readable one a wheel-click away. */
+  flex: 0 1 auto;
+  min-width: 150px;
+  max-width: 220px;
   padding: 0 10px;
   cursor: pointer;
   background: var(--color-surface-sunken);
@@ -87,35 +100,39 @@
   opacity: 1;
 }
 
+/* The keyboard position of the tab.
+
+   IT IS A HINT, NOT A BADGE. Drawn as a filled circle it was four
+   high-contrast objects in a row of four tabs, competing for the eye with the
+   titles — and with the workspace marks — to say something a person consults
+   a few times a day and never scans for. So the disc is gone and the digit is
+   dim: still there when you look for it, no longer the first thing you see.
+
+   The absolute position stays: the digit must not shift the label, or every
+   title in the strip would move when a tab was added past the ninth and the
+   numbering stopped. */
 .nocx-tab-index {
   position: absolute;
-  left: 10px;
+  left: 8px;
   top: 50%;
   transform: translateY(-50%);
   flex: none;
-  font-weight: 700;
+  font-weight: 500;
   font-size: var(--font-size-2xs);
-  width: 22px;
-  height: 22px;
-  line-height: 22px;
-  border-radius: 10px;
+  width: 12px;
+  line-height: 1;
   text-align: center;
   color: var(--color-text-dim);
-  align-self: center;
-  /* The pill's shape belongs to the base state. It used to be painted only on
-     the active tab, so the circle appeared and vanished as the selection moved
-     and the digit read as unaligned rather than as a badge. What activation
-     changes is the colour, not whether the badge exists. */
-  background: color-mix(in srgb, var(--color-text-dim), transparent 88%);
+  opacity: 0.55;
 }
 
 .nocx-tab[aria-selected='true'] .nocx-tab-index {
-  color: var(--color-accent);
-  background: color-mix(in srgb, var(--color-accent), transparent 90%);
+  color: var(--color-text-muted);
+  opacity: 1;
 }
 
 .nocx-tab:hover .nocx-tab-index {
-  color: var(--color-text-muted);
+  opacity: 1;
 }
 
 /* Filtered out by the strip's search. `data-*` rather than a modifier class,
@@ -142,13 +159,26 @@
   line-height: 1.2;
 }
 
+/* LEFT-ALIGNED, and it is not a preference. A centred label starts at a
+   different x in every tab, so reading the strip means saccading to a new
+   position per tab instead of running the eye down one column — and with
+   width now following content, the starting positions were about to become
+   arbitrary as well. The margins are asymmetric for the same reason they
+   exist: the left one clears the index digit, the right one clears the close
+   button, and they were only equal before to keep a centred label centred. */
 .nocx-tab-label {
   flex: auto;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   min-width: 0;
-  margin: 0 26px;
+  /* The left margin clears the index digit. The right one does NOT reserve
+     room for the close button — that button is `opacity: 0` until the tab is
+     hovered and it sits absolutely on top, with the hover gradient behind it
+     to lift it off whatever it covers. Reserving 24px for something invisible
+     was 24px taken from every label in the strip, permanently, and it is what
+     turned a narrow tab into `ho…`. */
+  margin: 0 8px 0 20px;
 }
 
 /* The title and the agent-status dot share one line, so the vertical row's label
@@ -320,6 +350,15 @@
 .tabstrip-vertical .nocx-tab {
   flex: 0 0 auto;
   width: 100%;
+  /* THE HORIZONTAL BOUNDS ARE RELEASED HERE. `.nocx-tab`'s 150–220px range
+     is the rule for a row where width follows content and carries meaning;
+     in a column it is the STRIP that decides the width and every row is as
+     wide as the strip. The ceiling survived unnoticed only because the strip
+     was a fixed 240px, which is 220px of row plus its padding — the two
+     numbers agreed by accident. The moment the strip could be dragged, the
+     rows stopped at 220 while the headings above them went full width. */
+  min-width: 0;
+  max-width: none;
   height: 52px;
   border-right: none;
   border-bottom: 1px solid color-mix(in srgb, white, transparent 90%);
@@ -376,13 +415,25 @@
   align-items: flex-start;
   justify-content: center;
   min-width: 0;
-  /* Derived from the pill's geometry, and the row's own padding is already in it:
-     `.nocx-tab` has `padding: 0 10px`, so the label's margin starts at the same x
-     the pill does. The pill is 22px wide, so 22 + 10 puts the text exactly 10px
-     clear of it — the same 10px that separates the pill from the row's edge.
+  /* LEFT: derived from the pill's geometry, and the row's own padding is already
+     in it: `.nocx-tab` has `padding: 0 10px`, so the label's margin starts at the
+     same x the pill does. The pill is 22px wide, so 22 + 10 puts the text exactly
+     10px clear of it — the same 10px that separates the pill from the row's edge.
      Counting the pill's `left: 10px` again here made the right-hand gap 20px
-     against the left's 10, which is what the owner saw. */
-  margin: 0 26px 0 calc(22px + 10px);
+     against the left's 10, which is what the owner saw.
+
+     RIGHT: nothing, which leaves the row's own 10px padding as the gap — the same
+     10px again. It held 26px for the close button, and the horizontal rule above
+     says why that is wrong: the button is `position: absolute; right: 4px;
+     opacity: 0` (`.nocx-tab > .ui-icon-button`), out of flow and invisible until
+     the row is hovered, so the reservation was 26px + 10px taken from EVERY label
+     in the strip, permanently, for something that is never in the flow. A title
+     ellipsed with 36px of empty row beside it (nocx-lfsw4). On hover the button
+     comes back over the text with `.nocx-tab::after`'s gradient behind it, which
+     is the same trade the horizontal strip has been making since it dropped its
+     own reservation — and the row keeps its native tooltip, so the full text is
+     one hover away either way. */
+  margin: 0 0 0 calc(22px + 10px);
   gap: 1px;
   padding: 4px 0;
 }
@@ -456,4 +507,302 @@
 
 .tabstrip-vertical .nocx-tab-index {
   left: 10px;
+}
+
+/* ── Decoration the backend stores (nocx-isoph.4, design §4.5) ────────── */
+
+/* The tab's colour is a KEY, never a hex (layout/tab-colours.ts): a tab
+   coloured under one theme must still read under another, so the key resolves
+   to a token every shipped theme defines and the tab follows the theme. It
+   draws as a stripe down the row's leading edge rather than as a wash over the
+   tab: the colour is a mark the user put on this tab, and a repainted tab
+   would compete with the active-tab and activity indicators for the same
+   meaning. */
+/* ONE PALETTE FOR EVERYTHING A PERSON COLOURS IN THE STRIP. A tab used to
+   carry four THEME accents (success, warning, danger, accent-secondary) on the
+   argument that a decorated tab must still read after a theme change, while a
+   workspace carried the nine fixed `--ws-*` hues because a container's
+   identity may not shift under it. That left one act — "colour this thing in
+   the strip" — with two palettes and two vocabularies, a distinction nobody
+   outside this file could see a reason for. The workspace's set is the one
+   that survives: identity is what a colour on a tab is for as well, and the
+   hues are declared identically in every shipped theme (ADR-0013), so nothing
+   loses its colour when the theme changes.
+
+   An unrecognised value still draws the neutral rather than nothing: what is
+   stored belongs to the store, and a colour this renderer does not know is a
+   fact about a newer one. */
+.nocx-tab[data-colour] {
+  --tab-colour: var(--color-text-dim);
+}
+
+.nocx-tab[data-colour='grey'] {
+  --tab-colour: var(--ws-grey);
+}
+
+.nocx-tab[data-colour='blue'] {
+  --tab-colour: var(--ws-blue);
+}
+
+.nocx-tab[data-colour='cyan'] {
+  --tab-colour: var(--ws-cyan);
+}
+
+.nocx-tab[data-colour='green'] {
+  --tab-colour: var(--ws-green);
+}
+
+.nocx-tab[data-colour='yellow'] {
+  --tab-colour: var(--ws-yellow);
+}
+
+.nocx-tab[data-colour='orange'] {
+  --tab-colour: var(--ws-orange);
+}
+
+.nocx-tab[data-colour='red'] {
+  --tab-colour: var(--ws-red);
+}
+
+.nocx-tab[data-colour='pink'] {
+  --tab-colour: var(--ws-pink);
+}
+
+.nocx-tab[data-colour='purple'] {
+  --tab-colour: var(--ws-purple);
+}
+
+.nocx-tab[data-colour]::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--tab-colour);
+  pointer-events: none;
+}
+
+/* The vertical strip's rows are stacked, so the leading edge is the same one
+   the horizontal strip uses — the stripe needs no orientation of its own. */
+
+.nocx-tab-pin {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  width: 12px;
+  height: 12px;
+  margin: 0 5px 0 0;
+  color: var(--color-text-muted);
+}
+
+.nocx-tab-pin svg {
+  width: 100%;
+  height: 100%;
+}
+
+.nocx-tab[aria-selected='true'] .nocx-tab-pin {
+  color: var(--color-text);
+}
+
+/* ── Lineage depth (nocx-isoph.5) ─────────────────────────────────────────
+
+   A tab spawned by another is drawn UNDER it in the vertical strip, indented
+   one step per generation (layout/strip-tree.ts). The indent is added to the
+   row's own 10px padding, so a top-level row is exactly where it always was
+   and `data-depth` is absent on it — an indent nobody asked for is not
+   something a strip full of unrelated tabs should pay for.
+
+   Enumerated rather than computed from the number: a surface may not set an
+   inline style (nocx/no-inline-markup), and the strip clamps what it draws at
+   six generations, so six rules is the whole of it. Deeper rows share the
+   sixth indent — a 240px column cannot indent forever, and a label squeezed
+   to nothing is worse than a generation drawn beside its parent's. */
+
+.tabstrip-vertical .nocx-tab[data-depth='1'] {
+  padding-left: calc(10px + 1 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='2'] {
+  padding-left: calc(10px + 2 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='3'] {
+  padding-left: calc(10px + 3 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='4'] {
+  padding-left: calc(10px + 4 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='5'] {
+  padding-left: calc(10px + 5 * var(--space-3));
+}
+
+.tabstrip-vertical .nocx-tab[data-depth='6'] {
+  padding-left: calc(10px + 6 * var(--space-3));
+}
+
+/* ── The run a tab belongs to (workspaces UX rework) ──────────────────────
+
+   A workspace is drawn as a RUN OF TABS with its pill attached in front, the
+   shape Chrome and Edge use for tab groups. The first attempt marked the run
+   with a 2px rule along the tab tops and it was invisible on screen — a group
+   is not established by a shared border. What establishes it is a shared
+   GROUND that the pill carries too (workspace-chip.css) plus space before the
+   region and after it, so the run has two edges the eye can find.
+
+   THE WASH IS THE CONTAINER'S AND THE STRIPE IS THE USER'S. `[data-colour]`
+   — a colour the person put on ONE tab — keeps the leading edge it has always
+   had, because most tabs live inside a workspace and both marks have to stay
+   readable at once. Down the side is yours; behind the run is the container's. */
+.nocx-tab[data-group-colour] {
+  --tab-group-colour: var(--color-text-dim);
+  background: color-mix(in srgb, var(--tab-group-colour), var(--color-surface-sunken) 84%);
+  box-shadow: inset 0 -2px var(--tab-group-colour);
+  border-radius: 0;
+}
+
+.nocx-tab[data-group-colour='grey'] {
+  --tab-group-colour: var(--ws-grey);
+}
+
+.nocx-tab[data-group-colour='blue'] {
+  --tab-group-colour: var(--ws-blue);
+}
+
+.nocx-tab[data-group-colour='cyan'] {
+  --tab-group-colour: var(--ws-cyan);
+}
+
+.nocx-tab[data-group-colour='green'] {
+  --tab-group-colour: var(--ws-green);
+}
+
+.nocx-tab[data-group-colour='yellow'] {
+  --tab-group-colour: var(--ws-yellow);
+}
+
+.nocx-tab[data-group-colour='orange'] {
+  --tab-group-colour: var(--ws-orange);
+}
+
+.nocx-tab[data-group-colour='red'] {
+  --tab-group-colour: var(--ws-red);
+}
+
+.nocx-tab[data-group-colour='pink'] {
+  --tab-group-colour: var(--ws-pink);
+}
+
+.nocx-tab[data-group-colour='purple'] {
+  --tab-group-colour: var(--ws-purple);
+}
+
+/* Hover and selection still win: the wash is the quietest layer here, and a
+   tab inside a workspace must not become harder to pick than one outside it.
+   Both are single-attribute selectors like this rule, so they are restated
+   rather than relied on to cascade. */
+.nocx-tab[data-group-colour]:hover {
+  background: color-mix(in srgb, var(--tab-group-colour), var(--color-surface-hover) 90%);
+}
+
+.nocx-tab[data-group-colour][aria-selected='true'] {
+  background: color-mix(in srgb, var(--tab-group-colour), var(--color-tab-active) 90%);
+}
+
+/* WHERE THE RUN ENDS. The pill supplies the region's left edge; this supplies
+   the right one — the first thing that is not in the run stands off from it.
+   Without it a workspace's last tab and the next ungrouped tab would touch,
+   and the wash alone would have to carry a boundary that a gap states
+   outright. */
+.nocx-tab[data-group-colour] + .nocx-tab:not([data-group-colour]) {
+  margin-left: var(--space-2);
+}
+
+/* A pill following a run needs no rule of its own — workspace-chip.css already
+   puts the gap on its own leading edge, which is where a region's opening
+   boundary belongs. */
+
+/* The vertical strip draws every workspace under its own heading, in a column
+   where the heading sits directly above its rows — the region is already
+   built out of position. A wash there would be a second, noisier answer to a
+   question the column has answered.
+
+   THE SPINE IS NOT THE WASH. What the column had no answer for is which
+   workspace a row belongs to when the heading has scrolled off the top, and
+   — the reason the owner asked — what colour this workspace even is: the
+   pill carries that in the other orientation and there is no pill here. A
+   2px edge down the run says it in the same colour the pill would, and costs
+   the row neither its background nor its legibility.
+
+   ON THE TRAILING EDGE, AND THAT IS THE WHOLE POINT. The leading edge of a
+   vertical row is already spoken for twice — the selection bar and the
+   unread-activity bar are both 2px on the left — so a third 2px mark there
+   would mean identity on an inactive row, be covered by the accent on the
+   selected one, and be indistinguishable from unread output either way. One
+   edge, one question: the left says what this row's STATE is, the right says
+   which workspace it BELONGS to. */
+.tabstrip-vertical .nocx-tab[data-group-colour] {
+  background: var(--color-surface-sunken);
+  box-shadow: inset -2px 0 var(--tab-group-colour);
+}
+
+.tabstrip-vertical .nocx-tab[data-group-colour]:hover {
+  background: var(--color-surface-hover);
+  box-shadow: inset -2px 0 var(--tab-group-colour);
+}
+
+.tabstrip-vertical .nocx-tab[data-group-colour][aria-selected='true'] {
+  background: var(--color-tab-active);
+  box-shadow: inset -2px 0 var(--tab-group-colour);
+}
+
+/* ── Where a dragged tab will land ────────────────────────────────────────
+
+   A 3px accent line on the edge the drop inserts at, plus a soft glow that
+   spills OUT of the row into the seam beside it. Both are box-shadows, so
+   nothing about the row's size or position changes while a drag crosses it:
+   the obvious alternative — opening a slot by growing a margin — moves the
+   row under the pointer, which lands the pointer on the neighbour, which
+   moves the slot, which moves the pointer back. A drop mark that flickers is
+   worse than a thin one.
+
+   IT IS DRAWN LAST IN THIS FILE ON PURPOSE. The group-colour spine
+   (`.tabstrip-vertical .nocx-tab[data-group-colour]`) is a box-shadow of
+   exactly the same specificity, so whichever comes later wins — and while a
+   drag is in flight the edge has one question to answer, not two.
+
+   A row that will refuse the drop draws nothing at all (Tab.dropAllowed): an
+   insertion line where the tab cannot land is worse than no line, because the
+   person believes it, lets go, and nothing happens. */
+.nocx-tab[data-drop-edge='before'] {
+  box-shadow:
+    inset 3px 0 var(--color-accent),
+    -4px 0 10px -4px var(--color-accent);
+}
+
+.nocx-tab[data-drop-edge='after'] {
+  box-shadow:
+    inset -3px 0 var(--color-accent),
+    4px 0 10px -4px var(--color-accent);
+}
+
+/* In a column the run goes downward, so the edges are horizontal. */
+.tabstrip-vertical .nocx-tab[data-drop-edge='before'] {
+  box-shadow:
+    inset 0 3px var(--color-accent),
+    0 -4px 10px -4px var(--color-accent);
+}
+
+.tabstrip-vertical .nocx-tab[data-drop-edge='after'] {
+  box-shadow:
+    inset 0 -3px var(--color-accent),
+    0 4px 10px -4px var(--color-accent);
+}
+
+/* The row being carried is faded, so the strip shows what is moving as well
+   as where it will go. */
+.nocx-tab.dragging {
+  opacity: 0.4;
 }

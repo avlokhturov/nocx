@@ -76,6 +76,12 @@ const (
 // host and session it came from. Stamped by nocx from its session registry
 // — never carried on the wire (ADR-0029 §2.2, §4.6).
 type Attribution struct {
+	// Tab keeps the old word on purpose (nocx-ehkvy). Everything else that
+	// held the shell-bearing object is now a pane, but this field is not
+	// filled with one: ws_notify.go stamps it from the WebSocket connection
+	// id. Renaming it to Pane would not make it honest, it would make it
+	// claim something it does not hold. nocx-wyp3p is that defect, and the
+	// word moves when the value does.
 	Tab     string
 	Host    string
 	Session string

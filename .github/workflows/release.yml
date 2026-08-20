@@ -99,22 +99,61 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
-      # Pinned to the version in go.mod, like the e2e job: the CLI builds the
-      # app, so drift between the two is a build no developer can reproduce.
+      # Pinned to the version in go.mod, like the e2e job. The macOS job still
+      # needs the CLI (build-assets generates the Info.plist and icon bundle;
+      # the Linux job builds with plain go build and does not).
       - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
 
-      - name: Patch wails.json product version
+      - name: Generate macOS bundle assets
         run: |
           set -euo pipefail
-          # wails.json has no info object today, so 1.0.0 is Wails' default, not
-          # a value in the file. Wails writes info.productVersion into both
-          # CFBundleShortVersionString and CFBundleVersion, and there is no build
-          # flag for it, so the object is created here before the build (§4).
-          tmp="$(mktemp)"
-          jq --arg v "$VERSION" '.info = {productName: "nocx", productVersion: $v}' wails.json > "$tmp"
-          mv "$tmp" wails.json
-          cat wails.json
+          # v3 has no wails.json; the version that used to be patched into it
+          # (info.productVersion -> CFBundleShortVersionString/CFBundleVersion)
+          # is now a build-assets flag. The CLI also embeds the icon and
+          # generates the Info.plist template the .app assembly copies.
+          # THE FLAG NAMES ARE THE STRUCT FIELDS, LOWERCASED, and nothing
+          # else: clir derives them with `strings.ToLower(field.Name)`
+          # whenever the field carries no `name:` tag (clir@v1.3.0
+          # command.go:258), and BuildAssetsOptions tags only `description:`
+          # and `default:`. So there are no word separators to insert —
+          # `-binary-name` is not a spelling of `-binaryname`, it is a flag
+          # that does not exist, and parsing stops at the first unknown one.
+          # The icons step below is the same convention read correctly.
+          wails3 generate build-assets \
+            -dir build/assets \
+            -binaryname nocx \
+            -productname nocx \
+            -productidentifier com.shady2k.nocx \
+            -productversion "$VERSION"
+
+      - name: Generate macOS icon bundle
+        run: |
+          set -euo pipefail
+          # build/appicon.png is the ONE committed icon in the repository, and
+          # the Linux job already derives its AppImage icon from it. macOS
+          # derives its .icns from the same master here rather than expecting a
+          # second asset to exist: `generate build-assets` above writes plists
+          # and never an icon, so the assembly step below used to copy a file
+          # that nothing in the pipeline had produced.
+          #
+          # -windowsfilename "" is load-bearing rather than tidiness: the flag
+          # defaults to build/windows/icon.ico and the generator writes it with
+          # a plain os.WriteFile, so leaving the default in place fails this
+          # step on a directory this repo does not have.
+          #
+          # icons.icns, not the tool's default icon.icns: the Info.plist sets
+          # CFBundleIconFile to "icons", so that is the name the bundle has to
+          # carry. Wails' own Taskfile passes the same override.
+          wails3 generate icons \
+            -input build/appicon.png \
+            -macfilename build/darwin/icons.icns \
+            -windowsfilename ""
+          test -s build/darwin/icons.icns
+
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
 
       - name: Build universal bundle
         run: |
@@ -123,9 +162,53 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
-          # Wails v2.13 passes -ldflags to the Go compiler for both slices and
-          # joins them with lipo (§4).
-          wails build -platform darwin/universal -tags release -ldflags "$LDFLAGS"
+          # v3 has no -platform flag: build each slice and join with lipo (§4).
+          #
+          # CGO_ENABLED=1 AND THE -arch FLAGS ARE BOTH REQUIRED, and leaving
+          # them out is not a slow build, it is a broken one. Naming GOARCH
+          # explicitly makes this a CROSS build even on a Mac building for a
+          # Mac, and Go turns cgo OFF for a cross build unless told otherwise
+          # — so wails v3's darwin implementation, which is Objective-C
+          # behind cgo, was excluded from the compile and the package it
+          # belongs to failed on every symbol it defines: `undefined:
+          # macosApp`, `undefined: newPlatformApp`, `undefined:
+          # smAppServiceRegister`.
+          #
+          # With cgo back on, the C half still has to be told which slice it
+          # is building; clang defaults to the host's architecture and would
+          # otherwise hand arm64 objects to the amd64 link. Apple's clang
+          # cross-compiles both from either host, so `-arch` on the CFLAGS
+          # and the LDFLAGS is the whole of what it needs.
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-amd64/nocx .
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-arm64/nocx .
+          mkdir -p build/bin/nocx.app/Contents/MacOS build/bin/nocx.app/Contents/Resources
+          lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx \
+            build/bin/darwin-amd64/nocx build/bin/darwin-arm64/nocx
+          cp build/assets/darwin/Info.plist build/bin/nocx.app/Contents/Info.plist
+          cp build/darwin/icons.icns build/bin/nocx.app/Contents/Resources/icons.icns
+          # Ad-hoc sign the assembled bundle. This is not an extra hardening
+          # step, it is the one the CLI used to perform: v2.13 ran
+          # `codesign --force --deep --sign -` itself at the end of every
+          # darwin build ("self-sign the .app bundle so notifications work" —
+          # pkg/commands/build/build.go), and v3's own generated darwin
+          # Taskfile ends `create:app:bundle` with the identical command.
+          # Assembling the bundle by hand is what dropped it, and nothing
+          # downstream would have said so gently: `codesign --verify --deep
+          # --strict` below, the updater's VerifyExtracted (§9,
+          # internal/update/platform_darwin.go) and ADR-0003's no-Developer-ID
+          # position all rest on the ad-hoc signature existing.
+          #
+          # It must be the LAST thing that touches the bundle: the signature
+          # seals Info.plist, the icon and the binary, so any copy after this
+          # line invalidates it. The steps that follow only read, execute and
+          # copy the tree wholesale.
+          codesign --force --deep --sign - build/bin/nocx.app
 
       - name: Smoke checks
         run: |
@@ -149,8 +232,11 @@ jobs:
           reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
-          # 4. Wails' ad-hoc signature must be intact — the baseline the payload
-          #    round trip (§9) asserts is preserved through packaging.
+          # 4. The ad-hoc signature must be intact — the baseline the payload
+          #    round trip (§9) asserts is preserved through packaging. Applied
+          #    by the signing command at the end of the assembly step above;
+          #    under v2 the wails CLI applied it, which is why this check long
+          #    predates any explicit codesign call in this file.
           codesign --verify --deep --strict "$APP"
 
       - name: Package .dmg and .zip
@@ -208,8 +294,12 @@ jobs:
           # not depend on something GitHub can drop.
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev imagemagick
 
-      - name: Install Wails CLI
-        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
+      # The Linux job builds with plain `go build` — v3 has no build wrapper
+      # without a Taskfile, which this repo does not use — so no Wails CLI is
+      # needed here.
+      - name: Build frontend
+        run: npm ci && npm run build
+        working-directory: frontend
 
       - name: Build Linux binary
         run: |
@@ -218,14 +308,16 @@ jobs:
           LDFLAGS="-X github.com/shady2k/nocx/internal/version.Version=${VERSION}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
-          # `webkit2_41` is not optional here, it is what makes the step above
-          # mean anything: Wails v2 defaults its cgo pkg-config to
-          # webkit2gtk-4.0, so a job that installs libwebkit2gtk-4.1-dev and
-          # says nothing else fails at "Package webkit2gtk-4.0 was not found"
-          # AFTER the whole CI gate has run. 4.1 is the decided target — ADR-0007
-          # and the README support envelope both name it — so the tag states the
-          # decision rather than the apt line implying it (nocx-xy9z).
-          wails build -platform linux/amd64 -tags release,webkit2_41 -ldflags "$LDFLAGS"
+          # `gtk3` is not optional here, it is what makes the step above
+          # mean anything: Wails v3 defaults to GTK4/WebKitGTK-6.0, so a job
+          # that installs libwebkit2gtk-4.1-dev and says nothing else links a
+          # different webkit than the envelope promises. 4.1 is the decided
+          # target — ADR-0007 and the README support envelope both name it —
+          # and the tag states the decision rather than the apt line implying
+          # it (nocx-xy9z, nocx-v3yw). `production` is v3's tag for
+          # production semantics; `release` selects the shipped profile
+          # directory (appdir.go).
+          go build -tags "release production gtk3" -ldflags "$LDFLAGS" -o build/bin/nocx .
 
       - name: Smoke checks (binary)
         run: |
@@ -237,100 +329,15 @@ jobs:
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
 
+      # The packaging itself lives in scripts/appimage/package-appimage.sh so it
+      # can be run against a real build outside a tag push. Packaging that only
+      # exists inside a workflow cannot be tested before it ships, and this step
+      # is exactly where nocx-azxe.7 shipped from.
       - name: Package AppImage
-        run: |
-          set -euo pipefail
-          BIN="build/bin/nocx"
-          base="nocx-${VERSION}-linux-amd64"
-          mkdir -p dist
+        run: scripts/appimage/package-appimage.sh
 
-          # ── AppDir skeleton ──────────────────────────────────────────
-          mkdir -p AppDir/usr/bin
-          cp "$BIN" AppDir/usr/bin/nocx
-
-          # .desktop file — required for linuxdeploy to recognise the app.
-          # `Icon` is not decoration: appimagetool refuses to package without
-          # one ("Icon entry not found in desktop file"), and the value must
-          # name an icon actually installed in the AppDir. It is `nocx`, and
-          # the resize below writes nocx.png so the basename answers it
-          # (nocx-zvd7).
-          cat > AppDir/nocx.desktop << 'DESKTOP'
-          [Desktop Entry]
-          Name=nocx
-          Exec=nocx
-          Icon=nocx
-          Type=Application
-          Categories=Utility;TerminalEmulator;
-          DESKTOP
-
-          # AppRun — the entry point the AppImage executes at runtime.
-          cat > AppDir/AppRun << 'APPRUN'
-          #!/bin/bash
-          HERE="$(dirname "$(readlink -f "$0")")"
-          export PATH="$HERE/usr/bin:$PATH"
-          export LD_LIBRARY_PATH="$HERE/usr/lib:$LD_LIBRARY_PATH"
-          exec "$HERE/usr/bin/nocx" "$@"
-          APPRUN
-          chmod +x AppDir/AppRun
-
-          # ── linuxdeploy + GTK plugin ─────────────────────────────────
-          # The GTK plugin bundles libgtk-3, libwebkit2gtk-4.1 and their
-          # transitive dependencies into the AppDir, so the AppImage is
-          # self-contained (the whole point vs a bare tarball — ADR-0007).
-          wget -q -O linuxdeploy.AppImage \
-            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          chmod +x linuxdeploy.AppImage
-
-          wget -q -O linuxdeploy-plugin-gtk.sh \
-            https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
-          chmod +x linuxdeploy-plugin-gtk.sh
-
-          # linuxdeploy deploys icons into hicolor, so it accepts only that
-          # spec's resolutions and refuses anything else outright: "Icon
-          # build/appicon.png has invalid x resolution: 1024 … Valid
-          # resolutions are 8x8 … 512x512". The master is 1024x1024 because
-          # that is what macOS wants.
-          #
-          # Derived here rather than committed as a second file: build/appicon.png
-          # stays the one icon in the repository, and a resize cannot drift from
-          # its master the way a checked-in copy silently would. The basename is
-          # what answers the desktop file's Icon=nocx — linuxdeploy resolves the
-          # NAME, not the path — so it is nocx.png and needs no --icon-filename.
-          icondir="$(mktemp -d)"
-          convert build/appicon.png -resize 512x512 "$icondir/nocx.png"
-
-          export LDAI_OUTPUT="${base}.AppImage"
-          # --desktop-file and --icon-file are what INSTALL the two files
-          # linuxdeploy then links into the AppDir root; dropping the .desktop
-          # into AppDir/ by hand is not the same thing, and linuxdeploy said so
-          # ("Could not find desktop file in AppDir") right before appimagetool
-          # refused for want of an icon. --icon-filename renames appicon.png to
-          # `nocx` so it answers the desktop file's Icon= key — appimagetool
-          # resolves that name, not the path.
-          #
-          # build/appicon.png is in git precisely so a clean CI checkout has it
-          # (nocx-azxe.4); until now nothing on the Linux path used it, so even
-          # a successful AppImage would have carried no icon.
-          ./linuxdeploy.AppImage --appdir AppDir \
-            --desktop-file AppDir/nocx.desktop \
-            --icon-file "$icondir/nocx.png" \
-            --plugin gtk --output appimage
-          mv "${base}.AppImage" dist/
-
-          # ── Verify the result ────────────────────────────────────────
-          test -f "dist/${base}.AppImage"
-          test -x "dist/${base}.AppImage"
-
-          # Version check: --appimage-extract-and-run bypasses FUSE and
-          # works even when the kernel module is absent.
-          echo "=== version check ==="
-          "./dist/${base}.AppImage" --appimage-extract-and-run --version 2>&1 | tee /dev/stderr | grep -qw "$VERSION"
-
-          # Confirm WebKitGTK was bundled (the support-envelope commitment).
-          echo "=== bundled libs ==="
-          "./dist/${base}.AppImage" --appimage-extract-and-run ls /usr/lib 2>&1 | head -20 || true
-
-          shasum -a 256 dist/*
+      - name: Verify the AppImage on a foreign distribution
+        run: scripts/appimage/verify-appimage.sh "dist/nocx-${VERSION}-linux-amd64.AppImage"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -488,9 +495,22 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # THE NOTES ARE A FILE IN THE REPOSITORY when one exists for this
+          # version, so what a release says is written, reviewed and diffed
+          # like everything else that ships. The fallback is the sentence this
+          # step used to carry alone: it is the install caveat, which is true
+          # of every build and belongs in every release whether or not anybody
+          # wrote notes for that one.
+          notes_file="docs/release-notes/v${VERSION}.md"
+          if [ -f "$notes_file" ]; then
+            notes_arg=(--notes-file "$notes_file")
+          else
+            echo "::warning::no $notes_file — publishing with the install caveat alone"
+            notes_arg=(--notes "Automated release. macOS: first launch needs the manual quarantine step. Linux: chmod +x the AppImage. See the README for both.")
+          fi
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
-            --notes "Automated release. macOS: first launch needs the manual quarantine step. Linux: chmod +x the AppImage. See the README for both." \
+            "${notes_arg[@]}" \
             "dist/nocx-${VERSION}-darwin-universal.dmg" \
             "dist/nocx-${VERSION}-darwin-universal.zip" \
             "dist/nocx-${VERSION}-linux-amd64.AppImage" \

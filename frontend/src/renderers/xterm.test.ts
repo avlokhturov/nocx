@@ -898,6 +898,44 @@ describe('XtermRenderer cellHeight is the grid row pitch (nocx-rnrl)', () => {
     term!._core._renderService = { dimensions: { css: { cell } } }
   }
 
+  it('measures the rows the block will keep, and not the row the cursor moved to', async () => {
+    // The row the cursor sits on after a newline is the row the NEXT prompt
+    // will occupy: the frozen block ends at its render fence, one row above
+    // it. Counting it made the live region one row taller than the block it
+    // becomes, and the pane dropped by exactly that at every freeze
+    // (nocx-i4h04.1). Two written rows, cursor parked on the third: two.
+    const r = await mountRenderer()
+    // The rows go in BEFORE the dimensions are published: `publishDims`
+    // replaces the render service with a measurement stub, and xterm's write
+    // path calls into the real one.
+    // The 133 marker after the text is the stream-order sync point this file
+    // already uses: writes are async, and when the marker lands the rows
+    // before it are in the buffer.
+    let markerDone: () => void
+    const marker = new Promise<void>((resolve) => {
+      markerDone = resolve
+    })
+    r.onCommandMarker(() => markerDone())
+    r.write('one\r\ntwo\r\n')
+    r.write('\x1b]133;A\x07')
+    await marker
+    publishDims(r, { width: 8.5, height: 20 })
+
+    expect(r.liveContentHeight()).toBe(40)
+    r.dispose()
+  })
+
+  it('reports nothing for a grid nobody has written to', async () => {
+    // A blank grid with the cursor in its corner is not one row of content —
+    // it is none, and the live region must not reserve a row for it between
+    // the keypress and the first byte of output.
+    const r = await mountRenderer()
+    publishDims(r, { width: 8.5, height: 20 })
+
+    expect(r.liveContentHeight()).toBe(0)
+    r.dispose()
+  })
+
   it('reports the pitch the grid is fitted to, not the char box', async () => {
     const r = await mountRenderer()
     publishDims(r, { width: 8.5, height: 20 })

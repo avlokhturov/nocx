@@ -2,6 +2,8 @@
 // jsdom does not provide ResizeObserver, so we supply a minimal stub
 // that never fires — enough for unit tests that don't depend on layout.
 
+import { afterAll, beforeAll } from 'vitest'
+
 if (typeof window !== 'undefined' && typeof window.localStorage === 'undefined') {
   let values = new Map<string, string>()
   const storage = {
@@ -77,3 +79,131 @@ if (typeof Element !== 'undefined') {
 if (typeof Range !== 'undefined' && !Range.prototype.getClientRects) {
   Range.prototype.getClientRects = () => []
 }
+
+// Side effects of loading the module graph, undone before they can reach a
+// test. Two mechanisms, both bought by @wailsio/runtime, both found one red
+// gate at a time — see the note at the end about what this does NOT cover.
+//
+// ── 1. Timers ──
+// A timer armed while the module graph loads must not outlive the jsdom it
+// was armed in. @wailsio/runtime bought this: importing it arms a 50 ms
+// polling interval (dist/drag.js, waiting for the window environment) and a
+// frame callback (dist/appregion.js). Neither belongs to any test and
+// nothing ever clears them, so a file that finishes in under 50 ms — most
+// of them — is torn down with the interval still armed. The tick then runs
+// against a dead environment, throws "window is not defined" as an uncaught
+// exception, and the runner attributes it to whichever file happened to be
+// in flight while every test in the run passes. Measured on this tree: 28
+// jsdom files reach the real runtime through log.ts and clipboard.ts and
+// every one of them arms both timers, so the file the runner names is a
+// lottery rather than the defect.
+//
+// The sweep is deliberately confined to what module evaluation armed, and
+// the natives go back before the first test runs. A timer a TEST arms
+// belongs to the product, and one left running there is a real defect —
+// exactly the kind this same uncaught-exception report is how we find out
+// about. So this must never grow into a general "clear every timer at the
+// end", which would make that whole class invisible.
+if (typeof window !== 'undefined') {
+  const armedIntervals = new Map<number, () => void>()
+  const armedTimeouts = new Map<number, () => void>()
+
+  const nativeSetInterval = window.setInterval.bind(window)
+  const nativeClearInterval = window.clearInterval.bind(window)
+  const nativeSetTimeout = window.setTimeout.bind(window)
+  const nativeClearTimeout = window.clearTimeout.bind(window)
+
+  // Recording stops when the first test starts. The wrappers stay installed
+  // rather than being swapped back, so nothing here writes to a global after
+  // setup — which is what keeps it clear of a file that installs fake timers
+  // while it loads, and of vi.useFakeTimers() inside a test.
+  let recording = true
+
+  window.setInterval = ((...args: Parameters<typeof nativeSetInterval>) => {
+    const id = nativeSetInterval(...args)
+    if (recording) armedIntervals.set(id, () => nativeClearInterval(id))
+    return id
+  }) as typeof window.setInterval
+
+  window.setTimeout = ((...args: Parameters<typeof nativeSetTimeout>) => {
+    const id = nativeSetTimeout(...args)
+    if (recording) armedTimeouts.set(id, () => nativeClearTimeout(id))
+    return id
+  }) as typeof window.setTimeout
+
+  window.clearInterval = ((id?: number) => {
+    if (typeof id === 'number') armedIntervals.delete(id)
+    nativeClearInterval(id)
+  }) as typeof window.clearInterval
+
+  window.clearTimeout = ((id?: number) => {
+    if (typeof id === 'number') armedTimeouts.delete(id)
+    nativeClearTimeout(id)
+  }) as typeof window.clearTimeout
+
+  // ── 2. DOM event listeners ──
+  // Importing @wailsio/runtime also registers global listeners: four file-drop
+  // handlers on <html> (dist/window.js, "Initialize listeners when the script
+  // loads") plus a DOMContentLoaded hook. The drop handlers read
+  // `event.dataTransfer.types.includes(...)` behind an optional chain that
+  // guards only `dataTransfer` itself, so any test firing a drag event with a
+  // dataTransfer stub — testing-library's fireEvent.dragOver, say — throws
+  // "Cannot read properties of undefined" from inside the library, as an
+  // unhandled error with every test still green.
+  //
+  // Unlike the timers, these do damage DURING the run, so they are removed
+  // before the first test rather than after the last.
+  //
+  // Only listeners registered from inside the package are removed, identified
+  // by the registration stack. That is not fastidiousness: measured on this
+  // tree, module evaluation also registers 48 `click`, 41 `keydown`, 36
+  // `input` and 28 `mousedown` listeners on `document` from PRODUCT modules,
+  // and tests depend on every one of them. "Remove what module evaluation
+  // registered" would have torn those out; "remove what this package
+  // registered while loading" is the rule that is actually safe, and it
+  // covers the package's next listener without naming this one.
+  const listenerOwner = '@wailsio/runtime'
+  const registered: { target: EventTarget; args: Parameters<typeof nativeAddEventListener> }[] = []
+  // Captured unbound on purpose: it is re-applied to whatever target the
+  // caller used, so binding it here would be the bug the rule warns about.
+  // eslint-disable-next-line @typescript-eslint/unbound-method
+  const nativeAddEventListener = EventTarget.prototype.addEventListener
+
+  EventTarget.prototype.addEventListener = function (
+    this: EventTarget,
+    ...args: Parameters<typeof nativeAddEventListener>
+  ) {
+    if (recording && (new Error('stack probe').stack ?? '').includes(listenerOwner)) {
+      registered.push({ target: this, args })
+    }
+    return nativeAddEventListener.apply(this, args)
+  }
+
+  // Module evaluation is over once the first hook runs.
+  beforeAll(() => {
+    recording = false
+    for (const { target, args } of registered) {
+      // removeEventListener matches on capture, which the original options
+      // carry either as a boolean or on the object — so pass them through.
+      target.removeEventListener(args[0], args[1], args[2])
+    }
+    registered.length = 0
+  })
+
+  // The last thing that happens before jsdom goes away.
+  afterAll(() => {
+    for (const disarm of armedIntervals.values()) disarm()
+    for (const disarm of armedTimeouts.values()) disarm()
+    armedIntervals.clear()
+    armedTimeouts.clear()
+  })
+}
+
+// What this does NOT cover, so nobody reads the two blocks above as a fence:
+// they undo the side effects that RUN CODE LATER — a timer and a listener.
+// Importing the runtime also mutates globals as it loads (`window._wails`,
+// a module-scope `new Window('')`), and a future version could register a
+// custom element, patch a prototype or start a fetch. Those are inert here
+// only because nothing reads them. This is a quarantine for two known
+// mechanisms, not a general one, and the next red gate of this shape should
+// be read as a third mechanism rather than as a hole in these two.

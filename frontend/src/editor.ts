@@ -135,6 +135,11 @@ export interface EditorActions {
    * for the next question (nocx-wmy4).
    */
   handoffToShell?: () => boolean
+  /** Wrap a transition that changes the editor's own box, so the host can
+   *  play the displacement back instead of letting it land in one frame.
+   *  Absent in tests and in any host without a scrollback: the transition
+   *  then simply happens, which is the same result without the animation. */
+  settleAround?: (mutate: () => void) => void
   /** ⌘Enter / Ctrl+Enter: the explicit target switch ADR-0004 §3 requires
    *  — the indicator's keyboard twin, flipping Run ⇄ Ask. The host flips
    *  the registry's active target; the editor stays passive, the draft is
@@ -176,6 +181,9 @@ export class CommandEditor {
    *  value the way `textarea.value = …` did, which fired no input event, so
    *  they must not fire onInputChange either. */
   private _programmatic = false
+  /** Input ownership is independent of layout: a submitted command leaves
+   *  the empty composer's box reserved while the terminal owns keys. */
+  private _inputActive = false
   /** Optional keyboard arbiter: called (capture phase) BEFORE the editor's
    *  own key handling. Return true to consume the key. One arbiter chain,
    *  composed at the root (terminal-content.ts): recall first, completion
@@ -590,12 +598,11 @@ export class CommandEditor {
     this.commit(plan.sendLine, plan)
   }
 
-  /** The atomic handoff (ADR-0004 §2): clear + hide BEFORE sending, so the
-   *  committed command is painted once by the shell, not echoed twice. The
-   *  observed order from the textarea implementation — value → rows →
-   *  hide() → submit() — is preserved. `plan` is present only after a
-   *  beforeSubmit planner succeeded: the resolved sendLine goes to the PTY,
-   *  the reference-intact recordLine to the ledger.
+  /** The atomic handoff (ADR-0004 §2): clear + release input BEFORE sending,
+   *  so the committed command is painted once by the shell, not echoed twice.
+   *  `plan` is present only after a beforeSubmit planner succeeded:
+   *  the resolved sendLine goes to the PTY, the reference-intact recordLine
+   *  to the ledger.
    *
    *  The hide is the handoff's step 1 and belongs to it alone: a commit
    *  whose destination is not the shell (the agent target — routesToShell
@@ -604,13 +611,37 @@ export class CommandEditor {
    *  the next one (nocx-wmy4). The clear is unconditional: a submitted
    *  question, like a submitted command, leaves the editor empty. */
   private commit(sendLine: string, plan?: SubmitPlan): void {
-    this.clearDoc()
-    if (this.actions.handoffToShell?.() ?? true) this.hide()
     // The plan is present only after a beforeSubmit planner succeeded; the
     // plain path keeps the exact one-argument call (no resolution happened,
     // so there is nothing to resolve for the ledger either).
-    if (plan) this.actions.submit(sendLine, plan)
-    else this.actions.submit(sendLine)
+    const submit = (): void => {
+      if (plan) this.actions.submit(sendLine, plan)
+      else this.actions.submit(sendLine)
+    }
+    if (this.actions.handoffToShell?.() ?? true) {
+      // ONE TRANSITION, ONE SETTLE. Emptying the draft, giving up the
+      // composer's box and opening the running block all move the scrollback,
+      // they all run in this task with no paint between them, and to a person
+      // they are a single movement: the block takes the composer's place. Each
+      // used to be animated separately, and the block's own glide then
+      // cancelled the composer's mid-flight — which is what the jitter was.
+      //
+      // The handoff is unchanged and still atomic: hide() runs before
+      // submit(), so the grid is writable before a byte can flow
+      // (nocx-u7uh.23). What the wrapper adds is only how the displacement is
+      // PAINTED. Absent a host that can settle, the mutations simply happen.
+      const settle = this.actions.settleAround ?? ((m: () => void) => m())
+      settle(() => {
+        this.clearDoc()
+        this.hide()
+        submit()
+      })
+      return
+    }
+    // Nothing is handed off — the question stays in the editor and its box
+    // never leaves the layout, so there is no displacement to play back.
+    this.clearDoc()
+    submit()
   }
 
   private onKeydown = (e: KeyboardEvent): void => {
@@ -797,19 +828,16 @@ export class CommandEditor {
   // ── visibility ────────────────────────────────────────────────────────
 
   /**
-   * Hiding gives the space back.
+   * Show the input-owning composer.
    *
-   * `hide()` used `visibility: hidden` once the editor had been shown, so its
-   * box stayed in the flex layout — deliberately, to stop the pane jumping on
-   * every command start and end. What that bought in stability it paid for in a
-   * strip of dead canvas below every running command, which the owner reported
-   * twice as "space reserved for an editor that is not there". The reservation
-   * goes; the jump comes back and is the smaller of the two problems now that
-   * the live region grows with its content rather than snapping to a constant
-   * (nocx-6w4z).
+   * The composer rejoins the layout and takes its flex slot back, which moves
+   * the scrollback by its own height — so the caller settles around this (see
+   * `_syncLifecycleOwnership`), and holds the bottom while it does.
    */
   show(): void {
+    this._inputActive = true
     this.root.style.display = ''
+    this.root.removeAttribute('inert')
 
     // CLEARED, not set to 'visible'. An inactive pane is hidden with
     // `visibility: hidden` on purpose (base.css) so its renderer keeps measuring
@@ -945,17 +973,38 @@ export class CommandEditor {
     const spans = this.view.state.field(unresolvedRedactionField, false) ?? []
     return spans.some((s) => s.to > s.from)
   }
+  /**
+   * Remove the composer from presentation entirely — its box with it.
+   *
+   * The one way the composer leaves, and it leaves whole. It used to have a
+   * second, `suspend()`, which kept the flex slot while hiding the chrome, so
+   * that releasing 77px could not move a scrollback that hangs from the
+   * scroller's bottom edge. That was traded away: the settle glide plays the
+   * displacement back instead, and the reserved box was costing an inline TUI
+   * on the normal buffer four rows of pane while `htop` on the alternate
+   * buffer got all of them (nocx-g6hnk, reversing part of nocx-i4h04).
+   *
+   * The caller that changes layout owns the settle — see `commit`, where
+   * emptying the draft, this call and opening the block are one glided
+   * transition.
+   */
   hide(): void {
+    this._inputActive = false
     // Stopped, not left running. Every tab owns an editor, so a timer that
-    // outlives visibility is one wakeup per second per tab for a chip nobody can
-    // see — and they accumulate for the life of the window.
+    // outlives visibility is one wakeup per second per tab for a chip nobody
+    // can see — and they accumulate for the life of the window.
     this.stopClock()
     this.view.contentDOM.blur()
+    this.root.removeAttribute('inert')
     this.root.style.display = 'none'
   }
 
   get isVisible(): boolean {
-    return this.root.style.display !== 'none' && this.root.style.visibility !== 'hidden'
+    return (
+      this._inputActive &&
+      this.root.style.display !== 'none' &&
+      this.root.style.visibility !== 'hidden'
+    )
   }
 
   /** Whether the editor's root element contains `el`. Used to scope the

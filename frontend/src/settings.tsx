@@ -13,7 +13,16 @@
  */
 
 import type { JSX } from 'solid-js'
-import { For, Show, createSignal, createMemo, createEffect, onMount, onCleanup } from 'solid-js'
+import {
+  For,
+  Show,
+  untrack,
+  createSignal,
+  createMemo,
+  createEffect,
+  onMount,
+  onCleanup,
+} from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
@@ -48,6 +57,9 @@ import {
   type SettingsSnapshot,
 } from './settings-domain'
 import { BackupRestoreSection } from './backup-restore-section'
+import { AboutSection } from './about-section'
+import type { AboutClient } from './about-client'
+import type { ClipboardAccess } from './clipboard'
 import { VaultSection } from './vault'
 import { log } from './log'
 import {
@@ -64,8 +76,31 @@ import {
   GroupedRail,
   type GroupedRailItem,
   IconButton,
+  StatusCard,
 } from './ui'
 import { ResetIcon } from './ui/icons'
+import {
+  historyDiscardSentence,
+  historyUnavailableSentence,
+  type HistoryStatus,
+  type HistoryStatusStore,
+} from './history-status'
+
+/** The section whose controls the history degrade contradicts. It is the
+ *  Go-declared section string (internal/settings/settings.go), matched here
+ *  rather than carried on settings.describe: the wire has no section object
+ *  at all, and inventing one so that one section can carry one notice would
+ *  make every future section-level fact a schema change. */
+const HISTORY_SECTION = 'History'
+
+/** The clipboard an embedding without one hands the About page. It refuses
+ *  rather than resolving: a Copy button that reports success while nothing was
+ *  written is the silent degrade AGENTS.md forbids, and the page already
+ *  surfaces a refusal. */
+const unavailableClipboard: ClipboardAccess = {
+  readText: () => Promise.reject(new Error('no clipboard in this window')),
+  writeText: () => Promise.reject(new Error('no clipboard in this window')),
+}
 
 export type SettingsPage =
   | { kind: 'generated'; id: string; title: string; groupId?: string }
@@ -148,6 +183,21 @@ export interface SettingsComponentProps {
    *  a snippet saved here is in the next fire without a notification on the
    *  wire (design §6). Absent in an embedding with no snippets service. */
   snippetsStore?: SnippetsStore
+  /** Whether durable command history is actually running (nocx-rtg0.15).
+   *  The History section's five controls all describe a store, so when
+   *  there is no store the section has to say so where the user is looking
+   *  — a soft degrade visible only in a log is how a feature that does not
+   *  exist survives a release. Absent in an embedding with no backend; the
+   *  section then makes no claim either way. */
+  historyStatus?: HistoryStatusStore
+  /** Reads what build this is, for the About page (nocx-8bbp). Absent in an
+   *  embedding with no backend; the page then says it could not read the
+   *  build rather than drawing rows of nothing. */
+  aboutClient?: AboutClient
+  /** The clipboard the About page's Copy diagnostics writes through. Injected
+   *  rather than reached for, because the platform seam is what a test
+   *  substitutes and what refuses in a non-secure context. */
+  clipboard?: ClipboardAccess
   /** The agent policy client (ADR-0020 §7 as amended). Absent in
    *  embeddings that never configure the agent; the page then says so. */
   policyClient?: PolicyClient
@@ -183,6 +233,25 @@ export function SettingsComponent(props: SettingsComponentProps) {
   // lookup table in the frontend (nocx-dgsp).
   const [groups, setGroups] = createSignal<SettingsGroup[]>([])
   const [sectionGroups, setSectionGroups] = createSignal<Record<string, string>>({})
+  // Durable-history availability, mirrored from the store so the section can
+  // render it. null is "not read yet" and renders nothing — a surface shows
+  // its placeholder rather than a lie in either direction.
+  const [historyStatus, setHistoryStatus] = createSignal<HistoryStatus | null>(null)
+  onMount(() => {
+    const store = props.historyStatus
+    if (store === undefined) return
+    setHistoryStatus(store.status())
+    onCleanup(store.subscribe((s) => setHistoryStatus(s)))
+  })
+  /** The two lines of the History notice, or null when there is nothing to
+   *  say. One owner for the words (history-status.ts) — the recall panel
+   *  tells the same person the same thing a moment later. */
+  const historyNotice = createMemo(() => historyUnavailableSentence(historyStatus()))
+  /** And the other thing the History section may have to say: history is
+   *  running and starts from nothing, because the storage format changed.
+   *  A separate memo because it is a separate fact — the notice above says a
+   *  feature is down, this says a working one lost what it had. */
+  const discardNotice = createMemo(() => historyDiscardSentence(historyStatus()))
 
   // Promise that resolves when the initial data load finishes.
   let resolveReady: () => void
@@ -516,16 +585,43 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+
+    // LAST IN THE RAIL, and in the 'application' group with Backup and
+    // Snippets. It is the page nobody navigates to on purpose until something
+    // has gone wrong, which is exactly why it must be findable in the obvious
+    // place rather than clever about where it sits.
+    const aboutPage: SettingsPage = {
+      kind: 'component',
+      id: 'about',
+      title: 'About',
+      groupId: 'application',
+      scrollMode: 'page',
+      // Registered unconditionally, like the pages above it: a surface that
+      // appears only once some other state exists is how a feature ships
+      // unreachable. Without a client it says so, which is a state the page
+      // already has for an unreachable backend.
+      renderContent: () => (
+        <AboutSection
+          load={() =>
+            props.aboutClient
+              ? props.aboutClient.load()
+              : Promise.reject(new Error('the build description is not available in this window'))
+          }
+          clipboard={props.clipboard ?? unavailableClipboard}
+        />
+      ),
+    }
     return [
+      connectionPage,
       ...generated,
       backupPage,
-      connectionPage,
       vaultPage,
       secretsPage,
       endpointsPage,
       snippetsPage,
       rolesPage,
       policyPage,
+      aboutPage,
     ]
   })
 
@@ -566,16 +662,26 @@ export function SettingsComponent(props: SettingsComponentProps) {
    * Open on the first page rather than on everything at once.
    *
    * With no selection the body listed every section end to end and the rail
-   * showed nothing as current, so the rail read as decoration. Runs once, when
-   * the sections first arrive, and only while the user has not already chosen —
-   * a later re-render must not yank them back to the top of the list.
+   * showed nothing as current, so the rail read as decoration. The first page
+   * is the first REGISTRY page (settingsPages()[0]) — the top-level
+   * Connections page — not sections()[0], which is the first generated
+   * section and can sit deep inside a group (History under Application).
+   * Runs once, when the sections first arrive, and only while the user has
+   * not already chosen — a later re-render must not yank them back to the
+   * top of the list.
    */
   createEffect(() => {
-    const first = sections()[0]
+    if (sections().length === 0) return
+    const first = settingsPages()[0]
     if (first === undefined) return
-    if (sectionFilter() !== null || activeComponentPage() !== null) return
-    if (searchQuery() !== '') return
-    setSectionFilter(first)
+    // The guard reads are untracked: the effect must fire only when the data
+    // arrives, never in reaction to the user's own navigation. Tracking
+    // activeComponentPage here let a click's first write (acp → null) re-run
+    // the effect BEFORE sectionFilter was set, re-selecting Connections and
+    // yanking the click back to the top of the rail.
+    if (untrack(() => sectionFilter() !== null || activeComponentPage() !== null)) return
+    if (untrack(() => searchQuery() !== '')) return
+    handleNavClick(first)
   })
 
   const modifiedCount = createMemo(() => {
@@ -1131,6 +1237,34 @@ export function SettingsComponent(props: SettingsComponentProps) {
                       title={section}
                       divided
                     >
+                      {/* The degrade notice, above the controls it
+                          contradicts. A kit StatusCard, placed and never
+                          repainted: a state plus what to do about it is
+                          exactly what it is for, and hand-rolling a
+                          coloured div here is the defect two epics spent
+                          themselves unwinding (ui/README.md). */}
+                      <Show when={section === HISTORY_SECTION && historyNotice() !== null}>
+                        <StatusCard
+                          tone="warning"
+                          title={historyNotice()!.title}
+                          description={historyNotice()!.description}
+                        />
+                      </Show>
+                      {/* The discard is `neutral`, not `warning`: nothing is
+                          wrong and there is nothing to fix — it is a thing
+                          that happened, which the person is entitled to know
+                          because an empty history after an update is
+                          otherwise indistinguishable from a fresh install.
+                          The kit has no `info` tone and does not need one;
+                          neutral is what "a fact, not a fault" already
+                          means here. */}
+                      <Show when={section === HISTORY_SECTION && discardNotice() !== null}>
+                        <StatusCard
+                          tone="neutral"
+                          title={discardNotice()!.title}
+                          description={discardNotice()!.description}
+                        />
+                      </Show>
                       <For each={sectionDecls()}>
                         {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
                       </For>

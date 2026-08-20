@@ -5,10 +5,13 @@ package content
 // §5.2. Every mutation goes through the single writer goroutine (run in
 // sqlite.go — design §5.3); every read goes through the pool directly.
 //
-// The v1 write path has NO PRODUCTION CALLER until nocx-rtg0.3 cuts the wire
-// over to ledger.* — only tests exercise these methods today. Stated loudly
-// because the same shape shipped once before (a reachable read path hid an
-// unreachable write path in the same package).
+// The entry lifecycle — Submit, StartExecution, FinishExecution — is driven
+// in production by the ledger.* control methods (nocx-rtg0.3,
+// internal/transport/ws_ledger.go); the ask transaction drives CaptureFrame,
+// SubmitAgentAsk, TransitionRun and FinishAgentRun. The methods with no
+// production caller yet are named in ledger.go's header, which is where that
+// list is kept — deadcode cannot answer the question for this package, since
+// RTA calls every method here reflection-reachable.
 
 import (
 	"context"
@@ -18,21 +21,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 )
 
-var _ LedgerRepository = (*sqliteContent)(nil)
+// The v1 methods hang off *sqliteContent and are promoted into ledgerRepo,
+// which adds the one method whose key is the ledger's own (sqlite.go).
 
 // ── identity and narrative scope ─────────────────────────────────────────
 
-func (s *sqliteContent) CreateWorkspace(ctx context.Context, ws Workspace) error {
-	return s.run(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)`,
-			ws.ID, ws.Name, time.Now().UnixMilli())
-		return err
-	})
-}
+// CreateWorkspace moved to layout_sqlite.go with nocx-isoph.1: the workspace
+// is the head of the layout chain the backend now owns, and one table with two
+// repository owners is the defect that design exists to avoid. What the ledger
+// keeps is the reference — sessions.workspace_id — and the fallback default
+// row ensureSessionRecorded writes for a session nobody has recorded yet.
 
 func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 	return s.run(ctx, func(ctx context.Context) error {
@@ -163,13 +166,25 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 		).Scan(&next); err != nil {
 			return fmt.Errorf("content: assign ingest_seq: %w", err)
 		}
+		// The anchor is RESOLVED before the write, not left to the foreign
+		// key — the same rule the layout chain follows when it inserts a tab
+		// (layout_sqlite.go): the FK would refuse a dangling pane_id anyway,
+		// but a driver's constraint text does not say WHICH reference was
+		// missing, and entries has three. ErrNoSuchPane is the answer this
+		// repository already gives to "that pane does not exist"; a second
+		// name for it would be a second owner of one fact.
+		if in.PaneID != nil {
+			if _, err := paneByID(ctx, tx, *in.PaneID); err != nil {
+				return err
+			}
+		}
 		submittedAt = time.Now().UnixMilli()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, intent,
 			 phase, status, conversation_id, submitted_at, started_at, ended_at, duration_ms,
 			 sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending', ?, ?, ?, ?, ?, ?, ?)`,
-			in.ID, next, in.Client, digest, in.EnvironmentID, in.SessionID, in.Cwd,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+			in.ID, next, in.Client, digest, in.EnvironmentID, in.PaneID, in.SessionID, in.Cwd,
 			string(in.Kind), in.Intent, in.ConversationID, submittedAt, in.StartedAt,
 			in.EndedAt, in.DurationMs, string(in.Sensitivity), in.Payload,
 		); err != nil {
@@ -179,6 +194,13 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 			return err
 		}
 		out = SubmitResult{ID: in.ID, IngestSeq: next, SubmittedAt: submittedAt}
+		// Age retention, in the same writer turn and after the entry is
+		// durable — the placement the command-history sweep already uses
+		// (doAdd). It runs here rather than on a timer because this is the
+		// one moment the ledger is known to have grown, and it is
+		// best-effort: the submit above has committed, so an eviction
+		// failure must not turn it into an error the caller would retry.
+		s.evictOnWrite(ctx)
 		return nil
 	})
 	return out, err
@@ -194,33 +216,89 @@ func entryDigest(in SubmitEntry) string {
 	_ = enc.Encode(struct {
 		Client, EnvironmentID, Cwd, Intent, Payload string
 		Kind, Sensitivity                           string
-		SessionID, ConversationID                   *string
+		PaneID, SessionID, ConversationID           *string
 	}{
 		Client: in.Client, EnvironmentID: in.EnvironmentID, Cwd: in.Cwd, Intent: in.Intent,
 		Payload: in.Payload, Kind: string(in.Kind), Sensitivity: string(in.Sensitivity),
-		SessionID: in.SessionID, ConversationID: in.ConversationID,
+		PaneID: in.PaneID, SessionID: in.SessionID, ConversationID: in.ConversationID,
 	})
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Entry is the recall read: the entry, its executions, each execution's
-// pinned observation and grant, and its artifacts (metadata only — the
-// recall read never hauls chunk bodies; Artifact fetches those).
+// ── the environment an entry ran in (nocx-rtg0.25) ───────────────────────
+
+// environmentColumns is the environment half of every entry read, LEFT
+// JOINed as `env`. It is a const so the two reads below cannot drift into
+// two shapes, and so the join stays part of the entry query rather than
+// something a caller adds per row: nocx-rtg0.20's ledger.query is built on
+// ListEntries, and one lookup per row is how a page of history becomes a
+// page of queries.
+//
+// LEFT, not INNER: entries.environment_id has a foreign key, so a missing
+// environment cannot happen through this seam — but an INNER join would
+// answer a vanished environment by dropping the entry, which is the one
+// answer worse than "unknown".
+const environmentColumns = `env.id, env.kind, env.endpoint, env.profile_id, env.payload`
+
+// environmentJoin resolves the environment for the entry table aliased `e`.
+const environmentJoin = `LEFT JOIN environments env ON env.id = e.environment_id`
+
+// environmentScan holds the joined columns. Every one is nullable here
+// because the join itself can miss, so the whole record is nil-or-present:
+// the read never fills in a default, which for `endpoint` would be the
+// empty string — a real value meaning the local machine.
+type environmentScan struct {
+	id        sql.NullString
+	kind      sql.NullString
+	endpoint  *string
+	profileID *string
+	payload   sql.NullString
+}
+
+// dest is the scan target list, in environmentColumns order.
+func (r *environmentScan) dest() []any {
+	return []any{&r.id, &r.kind, &r.endpoint, &r.profileID, &r.payload}
+}
+
+// value is the resolved environment, or nil when no environment row carries
+// the entry's environment_id.
+func (r *environmentScan) value() *Environment {
+	if !r.id.Valid {
+		return nil
+	}
+	return &Environment{
+		ID:        r.id.String,
+		Kind:      EnvironmentKind(r.kind.String),
+		Endpoint:  r.endpoint,
+		ProfileID: r.profileID,
+		Payload:   r.payload.String,
+	}
+}
+
+// Entry is the recall read: the entry, its environment, its executions, each
+// execution's pinned observation and grant, and its artifacts (metadata only
+// — the recall read never hauls chunk bodies; Artifact fetches those).
 func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, error) {
 	e := &LedgerEntry{}
-	err := s.db.QueryRowContext(ctx, `SELECT id, ingest_seq, client, digest, environment_id,
-		session_id, cwd, kind, intent, phase, status, conversation_id, submitted_at,
-		started_at, ended_at, duration_ms, sensitivity, reviewed_at, payload
-		FROM entries WHERE id = ?`, id).Scan(
-		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.SessionID, &e.Cwd,
+	var env environmentScan
+	dest := []any{
+		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.PaneID, &e.SessionID, &e.Cwd,
 		&e.Kind, &e.Intent, &e.Phase, &e.Status, &e.ConversationID, &e.SubmittedAt,
-		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.ReviewedAt, &e.Payload)
+		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.ReviewedAt, &e.Payload,
+	}
+	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.ingest_seq, e.client, e.digest,
+		e.environment_id, e.pane_id, e.session_id, e.cwd, e.kind, e.intent, e.phase, e.status,
+		e.conversation_id, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
+		e.sensitivity, e.reviewed_at, e.payload, `+environmentColumns+`
+		FROM entries e `+environmentJoin+` WHERE e.id = ?`, id).
+		Scan(append(dest, env.dest()...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	e.Environment = env.value()
 	execs, err := s.executionsFor(ctx, id)
 	if err != nil {
 		return nil, err
@@ -229,27 +307,320 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 	return e, nil
 }
 
-// ListEntries returns the limit newest entries, newest first, ordered by
-// ingest_seq — commit order, never by wall clock (two entries in the same
-// millisecond still have an order).
-func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, ingest_seq, environment_id, cwd, kind,
-		intent, phase, status, submitted_at
-		FROM entries ORDER BY ingest_seq DESC LIMIT ?`, limit)
+// ── the recall read (nocx-rtg0.20) ───────────────────────────────────────
+
+// entryPageColumns is the timeline row: the entry's own facts plus the
+// environment half of the join. One const, so ListEntries and QueryEntries
+// cannot drift into two row shapes.
+const entryPageColumns = `e.id, e.ingest_seq, e.environment_id, e.cwd, e.kind, e.intent,
+	e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms, e.payload, ` +
+	environmentColumns
+
+// rowQuerier is the read seam both the pool and a transaction satisfy, so
+// the page statement is written once and runs in either — ListEntries reads
+// straight off the pool, QueryEntries reads inside the transaction that also
+// carries HasRows and the horizon.
+//
+// QueryRowContext is on it for the same reason: the layout chain's single-row
+// reads (layout_sqlite.go) run standalone and inside the transaction that
+// wrote the row. One seam for "something rows can be read through" is the
+// point of the type; a second interface with one method would be a second
+// name for one concept.
+type rowQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// entryPage runs the ONE page statement: the filter, the order and the join,
+// in a single query however many rows and however many hosts it spans. cond
+// is built by ledgerWhere out of package constants — never out of user text.
+func entryPage(ctx context.Context, q rowQuerier, cond string, args []any, limit int) ([]LedgerEntrySummary, error) {
+	rows, err := q.QueryContext(ctx, //nolint:gosec // constant fragments; every value is bound
+		`SELECT `+entryPageColumns+` FROM entries e `+environmentJoin+cond+
+			` ORDER BY e.ingest_seq DESC LIMIT ?`, append(args, limit)...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var out []LedgerEntrySummary
+	out := []LedgerEntrySummary{}
 	for rows.Next() {
 		var e LedgerEntrySummary
-		if err := rows.Scan(&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind,
-			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt); err != nil {
+		var env environmentScan
+		dest := []any{
+			&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind,
+			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
+			&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Payload,
+		}
+		if err := rows.Scan(append(dest, env.dest()...)...); err != nil {
 			return nil, err
 		}
+		e.Environment = env.value()
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ledgerWhere is the rung and the filters, in SQL. It is the counterpart of
+// scopeWhere on the interim table (sqlite.go) and obeys the same rule: the
+// server answers from the rung it was asked for and never silently widens.
+// The rung's coordinates are the environment identity and the directory —
+// which is what entries_by_env(environment_id, cwd, ingest_seq DESC) is for.
+func ledgerWhere(q LedgerQuery) (string, []any) {
+	var conds []string
+	var args []any
+	switch q.Scope {
+	case ScopeDirectory:
+		conds = append(conds, "e.environment_id = ?", "e.cwd = ?")
+		args = append(args, q.EnvironmentID, q.Cwd)
+	case ScopeHost:
+		conds = append(conds, "e.environment_id = ?")
+		args = append(args, q.EnvironmentID)
+	case ScopeEverywhere:
+		// No rung filter. environmentId and cwd are the rung's own
+		// coordinates, so they are not applied here — the rung is echoed
+		// back to the caller, which is how "everywhere" stays visible.
+	}
+	if q.Kind != "" {
+		conds = append(conds, "e.kind = ?")
+		args = append(args, string(q.Kind))
+	}
+	if q.Status != "" {
+		conds = append(conds, "e.status = ?")
+		args = append(args, string(q.Status))
+	}
+	// One pane's blocks (design §8): the restore read, served by
+	// entries_by_pane. It composes with the rung rather than replacing it,
+	// so "this pane, on this host" is one query and not two semantics.
+	if q.PaneID != "" {
+		conds = append(conds, "e.pane_id = ?")
+		args = append(args, q.PaneID)
+	}
+	// The search box, and it is the SAME predicate the interim path answers
+	// (sqlite.go's Query, nocx-ms7v) — one matching semantics for one product
+	// object, extended to the ledger's column rather than reinvented beside
+	// it. instr() over lower(), not LIKE: there is no wildcard grammar, so a
+	// search for "100%_done" matches that literal intent and nothing else.
+	// lower(?) is bound once; lower(e.intent) is computed per row, since no
+	// index can serve a substring anyway. Empty is no filter, the state an
+	// absent field arrives as.
+	if q.Text != "" {
+		conds = append(conds, "instr(lower(e.intent), lower(?)) > 0")
+		args = append(args, q.Text)
+	}
+	if q.Since != nil {
+		conds = append(conds, "e.submitted_at >= ?")
+		args = append(args, *q.Since)
+	}
+	if q.Before != nil {
+		conds = append(conds, "e.ingest_seq < ?")
+		args = append(args, *q.Before)
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// validateLedgerQuery refuses what the store cannot answer honestly. Every
+// one of these would otherwise come back as an empty page, and an empty page
+// is the answer most likely to be believed: "nothing ever failed on this
+// host" is indistinguishable from "you misspelled the status".
+func validateLedgerQuery(q LedgerQuery) error {
+	switch q.Scope {
+	case ScopeDirectory, ScopeHost:
+		if q.EnvironmentID == "" {
+			return fmt.Errorf("content: query: scope %q needs an environment id — a rung with no coordinates matches nothing", q.Scope)
+		}
+	case ScopeEverywhere:
+	default:
+		return fmt.Errorf("content: query: unknown scope %q", q.Scope)
+	}
+	switch q.Kind {
+	case "", EntryShell, EntryAgent, EntryAction:
+	default:
+		return fmt.Errorf("content: query: unknown kind %q", q.Kind)
+	}
+	switch q.Status {
+	case "", EntryPending, EntryRunning, EntrySuccess, EntryFailure, EntryInterrupted, EntryUnknown:
+	default:
+		return fmt.Errorf("content: query: unknown status %q", q.Status)
+	}
+	if q.Limit < 1 || q.Limit > MaxLedgerPageLimit {
+		return fmt.Errorf("content: query: limit %d is outside [1, %d]", q.Limit, MaxLedgerPageLimit)
+	}
+	if q.BeforeID != "" && q.Before != nil {
+		return fmt.Errorf("content: query: before and beforeId are two answers to where the page starts; send one")
+	}
+	if q.Before != nil && *q.Before < 1 {
+		return fmt.Errorf("content: query: before %d is not an ingest_seq", *q.Before)
+	}
+	if q.Since != nil && *q.Since < 0 {
+		return fmt.Errorf("content: query: since %d is not a wall clock", *q.Since)
+	}
+	return nil
+}
+
+// QueryEntries is the recall read and the only ordering implementation
+// (design §6.2). One page of the rung asked for, newest first by ingest_seq
+// — the backend-assigned total order, so two entries submitted in the same
+// millisecond still have one — plus the three facts that keep the answer
+// honest.
+//
+// The page, HasRows and the horizon are read in ONE read transaction, for
+// the reason the interim Query states and this one inherits: a HasRows taken
+// after the page could report a store that emptied or filled in between, and
+// a horizon that disagrees with its page is worse than no horizon.
+//
+// limit+1 rows are fetched and the extra one is dropped: the row that is not
+// returned is what proves the rung is not exhausted, and it costs one row
+// rather than a second count over the same predicate.
+func (s *sqliteContent) QueryEntries(ctx context.Context, q LedgerQuery) (LedgerPage, error) {
+	if err := validateLedgerQuery(q); err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// The cursor, resolved INSIDE the read transaction so the page and the
+	// position it starts from cannot disagree about what the store holds
+	// (nocx-rtg0.19). One primary-key lookup; the ordering is still
+	// ingest_seq and only ingest_seq.
+	if q.BeforeID != "" {
+		var seq int64
+		switch cursorErr := tx.QueryRowContext(ctx,
+			`SELECT ingest_seq FROM entries WHERE id = ?`, q.BeforeID).Scan(&seq); {
+		case errors.Is(cursorErr, sql.ErrNoRows):
+			return LedgerPage{Entries: []LedgerEntrySummary{}},
+				fmt.Errorf("%w: cursor %q", ErrNotFound, q.BeforeID)
+		case cursorErr != nil:
+			return LedgerPage{Entries: []LedgerEntrySummary{}}, cursorErr
+		}
+		q.Before = &seq
+	}
+
+	cond, args := ledgerWhere(q)
+	entries, err := entryPage(ctx, tx, cond, args, q.Limit+1)
+	if err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	exhausted := len(entries) <= q.Limit
+	if !exhausted {
+		entries = entries[:q.Limit]
+	}
+
+	// HasRows is EXISTS rather than a count: the question is whether the
+	// ledger has anything to answer from, and a count would read every row
+	// to answer a yes/no.
+	var hasRows bool
+	if existsErr := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM entries)`).Scan(&hasRows); existsErr != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, existsErr
+	}
+	// Coverage has TWO sources, and which one is honest depends on whether
+	// this store has ever evicted (§5.4, nocx-rtg0.12).
+	//
+	// Once it has, the watermark owns the answer: the rows that would have
+	// carried the horizon are deleted, so no query over the survivors can
+	// recover it. MIN(ended_at) would then report the oldest row eviction
+	// happened to leave — and would report NO horizon at all for a store
+	// evicted empty, which reads as "nothing was ever here". That is the
+	// failure this field exists to prevent.
+	//
+	// Until it has, the surviving rows ARE the whole store, so the oldest
+	// one is the honest horizon — and it is the better answer, because it is
+	// exact where the watermark would still be null.
+	//
+	// Read in the same transaction as the page: a horizon that disagrees
+	// with its page is worse than no horizon. MIN ignores NULL ended_at
+	// (entries still running), so a ledger holding nothing but live commands
+	// reports no horizon rather than a misleading one. No rung and no filter
+	// appear on either path: retention is store-wide, so the horizon it
+	// leaves is store-wide too.
+	wm, err := s.watermark(ctx, tx)
+	if err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	coverage := wm.Horizon
+	if wm.EvictedCount == 0 {
+		if minErr := tx.QueryRowContext(ctx, `SELECT MIN(ended_at) FROM entries`).Scan(&coverage); minErr != nil {
+			return LedgerPage{Entries: []LedgerEntrySummary{}}, minErr
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return LedgerPage{Entries: []LedgerEntrySummary{}}, err
+	}
+	return LedgerPage{Entries: entries, Exhausted: exhausted, HasRows: hasRows, Coverage: coverage}, nil
+}
+
+// ListEntries returns the limit newest entries, newest first, ordered by
+// ingest_seq — commit order, never by wall clock (two entries in the same
+// millisecond still have an order). Each row carries its environment, joined
+// in this one statement: a page costs one query whatever its length and
+// however many hosts it spans.
+//
+// It runs QueryEntries' page statement with no rung and no filter, so the
+// ordering has ONE implementation; it stops there because the timeline read
+// has no honesty facts to state — a caller that needs the horizon or wants
+// to know whether the store holds anything asks the query for them.
+func (s *sqliteContent) ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error) {
+	return entryPage(ctx, s.db, "", nil, limit)
+}
+
+// RewriteRedaction turns one masked span on a ledger row into a vault
+// reference: the intent gets the reference, the receipt in entries.payload
+// loses the segment. Read-modify-write runs inside ONE writer turn (s.run),
+// so no other mutation can interleave between the read and the update.
+//
+// The entry's digest is deliberately NOT recomputed. It binds the untrusted
+// client id to the content as SUBMITTED, and a replay from the renderer's
+// outbox re-sends the original command, which masks back to the original
+// intent — recomputing the digest here would turn every such replay into
+// ErrIDConflict. A rewrite is a later event on a recorded row, not a second
+// submission of one intent (the same reasoning FinishExecution's header
+// gives for keeping the close off Submit).
+func (s *sqliteContent) RewriteRedaction(ctx context.Context, entryID string, span Redaction, reference string) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var intent, payload string
+		err = tx.QueryRowContext(ctx,
+			`SELECT intent, payload FROM entries WHERE id = ?`, entryID).Scan(&intent, &payload)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		masking, err := EntryMaskingOf(payload)
+		if err != nil {
+			return err
+		}
+		newIntent, kept, matched, err := applyRedactionRewrite(
+			intent, masking.Redactions, span, reference, entryID)
+		if err != nil {
+			return err
+		}
+		if !matched {
+			return nil
+		}
+		masking.Redactions = kept
+		newPayload, err := WithEntryMasking(payload, masking)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE entries SET intent = ?, payload = ? WHERE id = ?`,
+			newIntent, newPayload, entryID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // DeleteEntry removes an entry; its edges, executions, artifacts, chunks and
@@ -375,11 +746,37 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 
 // FinishExecution closes the run with its termination reason (the five
 // outcomes one status plus exit code cannot separate — ADR-0020 §4) and
-// closes the entry with its final status. For an agent run (state IS NOT
-// NULL) it also maps the termination to the terminal run state the renderer
-// draws — completed | cancelled | failed | interrupted — in the SAME
-// update, so the run is never reported terminal in one vocabulary and not
-// the other. Executions without a state (a frame capture) are untouched.
+// closes the entry with its final status AND its terminal facts: the start
+// if this is what learns it, the end, the measured duration and the kind
+// payload. For an agent run (state IS NOT NULL) it also maps the termination
+// to the terminal run state the renderer draws — completed | cancelled |
+// failed | interrupted — in the SAME update, so the run is never reported
+// terminal in one vocabulary and not the other. Executions without a state
+// (a frame capture) are untouched.
+//
+// The entry's facts are written HERE, inside the run's own transaction,
+// rather than through Submit (nocx-rtg0.23). Two reasons, and the second is
+// the one that decided it. Submit is write-once: its id is an idempotency
+// key bound to a digest of the submitted content, so a later fact routed
+// through it would change the digest and make every replay of the original
+// open an ErrIDConflict. And a close is one commit or none: a crash between
+// the run's end and the entry's payload would leave a closed entry with no
+// exit code, which is exactly the state a reader cannot tell from "the
+// command produced none".
+//
+// COALESCE is the "fills what is missing, overwrites nothing" rule in SQL:
+// started_at keeps a start the row already knew and duration_ms keeps what it
+// holds when the close carries none. ended_at is assigned outright because a
+// close always knows when it ended.
+//
+// payload is MERGED rather than assigned (json_patch, RFC 7396), because two
+// writers own different keys of that one column (nocx-rtg0.24): the close
+// writes the kind arm, and the open wrote the redaction receipt that a
+// capture save then rewrites. Assigning here would have the close erase the
+// receipt — or, if the close carried its own copy, resurrect a span a save
+// had already settled, which is precisely the stale-offset replacement the
+// rewrite's idempotency rule exists to prevent. A NULL payload still touches
+// nothing at all.
 func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error {
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -405,8 +802,14 @@ func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, 
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE entries SET phase = 'closed', status = ? WHERE id = ?`,
-			string(end.Status), entryID); err != nil {
+			`UPDATE entries SET phase = 'closed', status = ?,
+			   started_at = COALESCE(started_at, ?),
+			   ended_at = ?,
+			   duration_ms = COALESCE(?, duration_ms),
+			   payload = CASE WHEN ? IS NULL THEN payload ELSE json_patch(payload, ?) END
+			 WHERE id = ?`,
+			string(end.Status), end.StartedAt, end.EndedAt, end.DurationMs,
+			end.Payload, end.Payload, entryID); err != nil {
 			return err
 		}
 		// An ASK run (an entry with a caused-by answer) closes its answer
@@ -450,6 +853,21 @@ func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (
 	if in.ID == "" {
 		return "", errors.New("content: append artifact: id is required")
 	}
+	err := s.run(ctx, func(ctx context.Context) error {
+		return insertArtifact(ctx, s.db, in)
+	})
+	return in.ID, err
+}
+
+// insertArtifact and appendChunkAt take the `execer` sqlite.go already
+// declares — the surface *sql.DB and *sql.Tx share — so the artifact and
+// chunk statements are written ONCE and run either way: AppendArtifact on the
+// store's own connection, CaptureOutput inside a transaction, with no second
+// copy of the column list to drift from the first.
+//
+// insertArtifact is THE artifact insert. Its defaults live here rather than at
+// a caller, so an artifact written by any path has the same shape.
+func insertArtifact(ctx context.Context, q execer, in AppendArtifact) error {
 	if in.CaptureMethod == "" {
 		in.CaptureMethod = CaptureNone
 	}
@@ -460,7 +878,7 @@ func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (
 	if len(in.Gaps) > 0 {
 		b, err := json.Marshal(in.Gaps)
 		if err != nil {
-			return "", err
+			return err
 		}
 		gaps = string(b)
 	}
@@ -474,44 +892,178 @@ func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (
 		v := string(*in.Truncated)
 		truncated = &v
 	}
-	err := s.run(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx, `INSERT INTO artifacts
-			(id, execution_id, media_type, derived_from, pinned, truncated, capture_method,
-			 capture_version, terminal_cols, terminal_rows, stream, byte_offset, byte_end,
-			 encoding, gaps, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			in.ID, in.ExecutionID, string(in.MediaType), in.DerivedFrom, in.Pinned, truncated,
-			string(in.CaptureMethod), in.CaptureVersion, in.TerminalCols, in.TerminalRows,
-			stream, in.ByteOffset, in.ByteEnd, in.Encoding, gaps, in.Payload)
+	payload := in.Payload
+	if payload == "" {
+		payload = "{}"
+	}
+	_, err := q.ExecContext(ctx, `INSERT INTO artifacts
+		(id, execution_id, media_type, derived_from, pinned, truncated, capture_method,
+		 capture_version, terminal_cols, terminal_rows, stream, byte_offset, byte_end,
+		 encoding, gaps, payload)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.ID, in.ExecutionID, string(in.MediaType), in.DerivedFrom, in.Pinned, truncated,
+		string(in.CaptureMethod), in.CaptureVersion, in.TerminalCols, in.TerminalRows,
+		stream, in.ByteOffset, in.ByteEnd, in.Encoding, gaps, payload)
+	return err
+}
+
+// appendChunkAt is THE chunk insert, and the idempotency point of the whole
+// capture path: (artifact_id, seq) is the table's key, so a replayed chunk
+// inserts nothing, and byte_len moves only when a row actually appeared.
+func appendChunkAt(ctx context.Context, q execer, artifactID string, seq int, body []byte) error {
+	res, err := q.ExecContext(ctx,
+		`INSERT INTO artifact_chunks (artifact_id, seq, body) VALUES (?, ?, ?)
+		 ON CONFLICT (artifact_id, seq) DO NOTHING`,
+		artifactID, seq, body)
+	if err != nil {
 		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return nil
+	}
+	_, err = q.ExecContext(ctx,
+		`UPDATE artifacts SET byte_len = byte_len + ? WHERE id = ?`, len(body), artifactID)
+	return err
+}
+
+// CaptureOutput records one body of a frozen block (nocx-2f0f, design §4):
+// the artifact if it is not there yet, then the chunk at its seq, in ONE
+// transaction against the entry's own execution.
+//
+// The two refusals-that-are-not-errors are decided before the transaction
+// opens, so nothing is written for a body nobody wants: output retention off
+// is the user's setting, and a sensitive entry is the store's own rule about
+// what a command's text says about its output.
+func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error) {
+	if in.EntryID == "" || in.ArtifactID == "" {
+		return false, errors.New("content: capture: entry id and artifact id are required")
+	}
+	if in.Seq < 1 {
+		return false, errors.New("content: capture: seq starts at 1")
+	}
+	if !s.policy.OutputEnabled() {
+		return false, nil
+	}
+	stored := false
+	err := s.run(ctx, func(ctx context.Context) error {
+		// BEGIN IMMEDIATE for the reason Submit and RecordCompleted state:
+		// the write lock is taken at BEGIN rather than at the first write, so
+		// a second writer waits instead of failing an upgrade (nocx-rtg0.18).
+		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if txErr != nil {
+			return txErr
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		var sensitivity string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT sensitivity FROM entries WHERE id = ?`, in.EntryID).Scan(&sensitivity); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNoSuchEntry
+			}
+			return err
+		}
+		if Sensitivity(sensitivity) == SensitivitySensitive {
+			return nil
+		}
+
+		// The entry's own execution — the one RecordCompleted wrote in the
+		// same transaction as the entry. Ordered by attempt so a re-run's
+		// output lands on the run that produced it rather than on the first.
+		//
+		// Its PINNED observation comes with it, because criticality is read
+		// from what was true when the command ran rather than from the
+		// environment's latest: marking a host critical afterwards changes
+		// what is kept from then on, and cannot rewrite what a past run was
+		// allowed to keep.
+		var execID int64
+		var criticality string
+		if err := tx.QueryRowContext(ctx,
+			`SELECT e.id, o.criticality
+			   FROM executions e
+			   JOIN environment_observations o ON o.id = e.environment_obs_id
+			  WHERE e.entry_id = ?
+			  ORDER BY e.attempt DESC LIMIT 1`,
+			in.EntryID).Scan(&execID, &criticality); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNoSuchEntry
+			}
+			return err
+		}
+		// A critical environment contributes intent and metadata only
+		// (design §7.4). The command is still recorded: criticality decides
+		// what is kept ABOUT a command, never whether it happened.
+		if Criticality(criticality) == CriticalityCritical {
+			return nil
+		}
+
+		var existingMedia, existingExec sql.NullString
+		lookupErr := tx.QueryRowContext(ctx,
+			`SELECT media_type, execution_id FROM artifacts WHERE id = ?`,
+			in.ArtifactID).Scan(&existingMedia, &existingExec)
+		switch {
+		case errors.Is(lookupErr, sql.ErrNoRows):
+			if insertErr := insertArtifact(ctx, tx, AppendArtifact{
+				ExecutionID: execID, ID: in.ArtifactID, MediaType: in.MediaType,
+				DerivedFrom: in.DerivedFrom, Truncated: in.Truncated,
+				CaptureMethod: in.CaptureMethod, CaptureVersion: in.CaptureVersion,
+				TerminalCols: in.TerminalCols, TerminalRows: in.TerminalRows,
+			}); insertErr != nil {
+				return insertErr
+			}
+		case lookupErr != nil:
+			return lookupErr
+		default:
+			// A replay must find the artifact it wrote. Anything else under
+			// the same id is a different object, and this store never
+			// overwrites one id with another object (§7).
+			if existingMedia.String != string(in.MediaType) ||
+				existingExec.String != strconv.FormatInt(execID, 10) {
+				return ErrIDConflict
+			}
+		}
+		// The ceiling is read INSIDE the transaction, against what the
+		// artifact already holds: a caller splitting a body into legal chunks
+		// must not be able to assemble an illegal artifact out of them.
+		var held int64
+		if sizeErr := tx.QueryRowContext(ctx,
+			`SELECT byte_len FROM artifacts WHERE id = ?`, in.ArtifactID).Scan(&held); sizeErr != nil {
+			return sizeErr
+		}
+		if held+int64(len(in.Body)) > MaxArtifactBytes {
+			return ErrArtifactTooLarge
+		}
+		if chunkErr := appendChunkAt(ctx, tx, in.ArtifactID, in.Seq, in.Body); chunkErr != nil {
+			return chunkErr
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return commitErr
+		}
+		stored = true
+		return nil
 	})
-	return in.ID, err
+	return stored, err
 }
 
 // AppendChunk appends one chunk to an artifact and maintains its byte_len —
 // logical content bytes, the retention budget's unit (open question 6,
 // decided: deliberately excludes FTS, B-tree overhead, WAL and free pages;
 // physical disk use is the separate Budget.DiskCeiling number).
-func (s *sqliteContent) AppendChunk(ctx context.Context, artifactID string, body []byte) error {
+func (s *sqliteContent) AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error {
+	if seq < 1 {
+		return errors.New("content: append chunk: seq starts at 1")
+	}
 	return s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		var next int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(MAX(seq), 0) + 1 FROM artifact_chunks WHERE artifact_id = ?`,
-			artifactID).Scan(&next); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO artifact_chunks (artifact_id, seq, body) VALUES (?, ?, ?)`,
-			artifactID, next, body); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE artifacts SET byte_len = byte_len + ? WHERE id = ?`, len(body), artifactID); err != nil {
+		if err := appendChunkAt(ctx, tx, artifactID, seq, body); err != nil {
 			return err
 		}
 		return tx.Commit()

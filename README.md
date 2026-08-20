@@ -1,27 +1,45 @@
+<img src="site/assets/icon-256.png" alt="" width="80">
+
 # nocx
 
 A local-first terminal with GPU-accelerated rendering and a built-in SSH
-manager — no cloud, no login, no telemetry.
+manager. No account, no cloud service of its own, no product telemetry — the
+network it touches is the network you point it at.
+
+**[shady2k.github.io/nocx](https://shady2k.github.io/nocx/)** — what it does, and how to install it.
+
 **Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
-Wails v2 desktop shell, connected over one WebSocket carrying a raw binary data
+Wails v3 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
 
-**Status:** MVP in progress. Local PTY over WebSocket works; SSH client, tabs,
-and cwd features are under active development. macOS + Linux (AppImage).
+**Status:** `v0.2.0`, early release, no formal support. macOS (universal) and
+Linux (x86_64 AppImage). Tabs and workspaces, session restore, the sidebar
+(Files, Git, Ports, Notes), encrypted command history, the vault, snippets and
+the assistant all ship — see
+[the v0.2.0 notes](docs/release-notes/v0.2.0.md) for what each one does.
+
+> An earlier version of this line said SSH, tabs and cwd were "under active
+> development" long after they shipped. It is named rather than quietly
+> replaced because a status line is the one part of a README a reader trusts
+> without checking, and this one was wrong for two releases.
 
 ## What makes it different
 
 Flawless rendering of modern agent TUIs (Claude Code, aider, …) is table-stakes;
-the wedge is the _combination_, all local in one app: Ghostty-grade rendering +
-an integrated SSH manager + (later) a secrets vault + (later) shell-integration
-blocks, completions, and input-editor in nested shells — with no cloud
-dependency.
+the wedge is the _combination_, all local in one app: Ghostty-grade rendering,
+an integrated SSH manager, a secrets vault that leaves a reference in the
+command instead of the value, command blocks with completions and a real
+editor at the prompt, and an assistant that answers into the same scrollback —
+without an account or a cloud service of ours.
+
+Everything in that list ships as of `v0.2.0`; the vault, the blocks and the
+completions carried a "(later)" here for two releases after they landed.
 
 ## Install (macOS)
 
 Released builds are on the [Releases page](https://github.com/shady2k/nocx/releases). Download the `.dmg`, open it, and drag **nocx** into Applications.
 
-There is no Apple Developer ID, so the build is unsigned and macOS quarantines it on download. Clear that once, on first install:
+There is no Apple Developer ID, so the build is ad-hoc signed rather than signed by an identity Apple can attest, and it is not notarized — macOS quarantines it on download. Clear that once, on first install:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/nocx.app
@@ -44,9 +62,17 @@ No package manager or root access needed — the AppImage is a single self-conta
 
 ### Support envelope
 
-The AppImage bundles its own GTK 3 and WebKitGTK (via `linuxdeploy-plugin-gtk`),
-so it does **not** depend on the host's `libgtk-3` or `libwebkit2gtk-4.1`. It
-links against **glibc 2.35** (the floor set by building on ubuntu-22.04).
+The AppImage carries its own GTK 3 and WebKitGTK — the library **and** WebKitGTK's
+helper processes, which is what lets it run where the host has no
+`libwebkit2gtk-4.1` at all, and not only on Debian-shaped filesystems
+([ADR-0035](docs/decisions/0035-appimage-carries-webkits-helper-processes.md)).
+It links against **glibc 2.35** (the floor set by building on ubuntu-22.04).
+
+It is self-contained in its **application** stack, not independent of a Linux
+desktop: fonts and text shaping come from the host, deliberately, so that text
+renders in your fonts rather than ours. In practice that means `fontconfig`,
+`freetype`, `fribidi` and `harfbuzz` — present on every desktop install, absent
+in a bare container, where the app will not start.
 
 **This means it runs on distributions at or above that baseline**, including
 Ubuntu 22.04+, Debian 12+, Fedora 39+, RHEL 9+, and Arch (rolling). It is
@@ -118,14 +144,14 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 
 ## Prerequisites
 
-| Tool          | Version     | Install                                                                  |
-| ------------- | ----------- | ------------------------------------------------------------------------ |
-| Go            | 1.26        | [go.dev](https://go.dev/dl/)                                             |
-| Node          | 24          | [nodejs.org](https://nodejs.org/)                                        |
-| Wails CLI     | v2          | `go install github.com/wailsapp/wails/v2/cmd/wails@latest`               |
-| gofumpt       | latest      | `go install mvdan.cc/gofumpt@latest`                                     |
-| golangci-lint | **v1.64.8** | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
-| bd (beads)    | **≥ 1.1.0** | `brew install beads`                                                     |
+| Tool          | Version           | Install                                                                  |
+| ------------- | ----------------- | ------------------------------------------------------------------------ |
+| Go            | 1.26              | [go.dev](https://go.dev/dl/)                                             |
+| Node          | 24                | [nodejs.org](https://nodejs.org/)                                        |
+| Wails CLI     | **^3.0.0-beta.9** | `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9`       |
+| gofumpt       | latest            | `go install mvdan.cc/gofumpt@latest`                                     |
+| golangci-lint | **v1.64.8**       | `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8` |
+| bd (beads)    | **≥ 1.1.0**       | `brew install beads`                                                     |
 
 > ⚠️ golangci-lint **must** be v1.64.8 — the config (`.golangci.yml`) uses the v1
 > schema, and golangci-lint v2 rejects it. Pinning is enforced in CI.
@@ -142,7 +168,7 @@ and `uv` from nixpkgs, put `~/go/bin` and `~/.local/bin` on your `PATH`, then ge
 the rest through the language toolchains:
 
 ```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.9
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8   # exactly this — nixpkgs ships v2, which rejects .golangci.yml
 CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest        # server-mode bd; add gcc only for the embedded cgo build
 ```
@@ -161,11 +187,23 @@ git clone <repo-url> && cd nocx
 make init
 
 # Run in development mode
-wails dev
+make dev
 
 # …with the web inspector open, when you need a console
-NOCX_DEVTOOLS=1 wails dev
+NOCX_DEVTOOLS=1 make dev
 ```
+
+> **There is no `wails dev`.** Wails v3 has no dev CLI without a Taskfile, this
+> repository has no Taskfile, and inventing one to replicate the watcher was not
+> worth it (see the `dev` target in the Makefile). `wails3 dev` therefore fails
+> on a missing `build/config.yml` — a file `.gitignore` excludes, so no clone
+> will ever have one. `make dev` builds the frontend, which `//go:embed
+all:frontend/dist` needs populated before the Go compiler runs, and then runs
+> the app against the development profile.
+
+> For iterating on the frontend, `make dev-web` is the faster loop: the same app
+> in an ordinary browser, backed by the real Go backend on a real PTY. It needs
+> no webview and no display.
 
 > The inspector needs the flag because right-click cannot reach it: the window
 > disables the default context menu, and the terminal surface uses the right

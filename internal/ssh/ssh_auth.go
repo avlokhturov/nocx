@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/vault"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -72,11 +73,15 @@ func (rc *RealClient) buildAuthChain(ctx context.Context, resolved *resolvedConf
 	}
 
 	if mode == "" || mode == "password" {
-		rc.addPasswordMethods(ctx, &chain, cfg)
+		if err := rc.addPasswordMethods(ctx, &chain, cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	if mode == "" || mode == "keyboardInteractive" {
-		rc.addKeyboardInteractiveMethods(ctx, &chain, cfg)
+		if err := rc.addKeyboardInteractiveMethods(ctx, &chain, cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	if mode == "" || mode == "password" {
@@ -216,27 +221,61 @@ func passwordCallbackFromSecret(s credential.Secret) gossh.AuthMethod {
 	})
 }
 
-func (rc *RealClient) addPasswordMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) {
-	if cfg.Secrets != nil && cfg.SecretID != "" {
-		if stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored password"); err == nil && !stored.IsEmpty() {
-			*chain = append(*chain, authChainEntry{
-				kind:   kindSavedPassword,
-				method: passwordCallbackFromSecret(stored),
-				secret: stored,
-			})
-		} else if err != nil {
-			rc.log.Debug("secret lookup failed", "secretID", cfg.SecretID, "error", err)
-		}
-	}
+// A LOCKED VAULT IS NOT "no password is stored" (nocx-…). The connection
+// names a secret; the vault simply cannot be read yet. Swallowing that
+// distinction is what put the product in a loop nobody could get out of:
+// the rung was skipped, the ladder fell through to the prompt rung, and the
+// prompt told the user "no password is stored for this connection" — about a
+// connection whose password had been saved several times. Answering it with
+// Remember then needs the vault to WRITE, so the sealed error surfaced there
+// instead, the renderer raised the unlock, the open was re-sent — and the
+// re-sent open asked for the password again, because nothing had been bound.
+//
+// So the lookup's sealed error is PROPAGATED, before the dial. The transport
+// maps it to the canonical vault-sealed error, the renderer raises the unlock
+// it already owns, and the dispatcher re-sends the open once the vault
+// answers (ADR-0032). That open finds the stored password and asks nothing.
+// Every other lookup failure is still a skipped rung: a secret that is gone
+// or a provider that is broken leaves the prompt as the honest last resort.
+func vaultUnreadable(err error) bool {
+	return errors.Is(err, vault.ErrVaultSealed) || errors.Is(err, vault.ErrVaultUninitialized)
 }
 
-func (rc *RealClient) addKeyboardInteractiveMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) {
+func (rc *RealClient) addPasswordMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
+	if cfg.Secrets == nil || cfg.SecretID == "" {
+		return nil
+	}
+	stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored password")
+	if err != nil {
+		if vaultUnreadable(err) {
+			return err
+		}
+		rc.log.Debug("secret lookup failed", "secretID", cfg.SecretID, "error", err)
+		return nil
+	}
+	if stored.IsEmpty() {
+		return nil
+	}
+	*chain = append(*chain, authChainEntry{
+		kind:   kindSavedPassword,
+		method: passwordCallbackFromSecret(stored),
+		secret: stored,
+	})
+	return nil
+}
+
+func (rc *RealClient) addKeyboardInteractiveMethods(ctx context.Context, chain *[]authChainEntry, cfg *ConnectConfig) error {
 	if cfg.Secrets != nil && cfg.SecretID != "" {
-		if stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored secret"); err == nil && !stored.IsEmpty() {
+		stored, err := rc.getSecretWithUnlock(ctx, cfg, cfg.SecretID, "read the stored secret")
+		switch {
+		case err != nil && vaultUnreadable(err):
+			return err
+		case err == nil && !stored.IsEmpty():
 			*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive, secret: stored})
 		}
 	}
 	*chain = append(*chain, authChainEntry{kind: kindKeyboardInteractive})
+	return nil
 }
 
 // lookupKeyPassphrase resolves a private-key passphrase by SecretID from the

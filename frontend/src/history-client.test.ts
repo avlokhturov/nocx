@@ -4,7 +4,7 @@
 // full fact set of a completed command, nothing the session owns and no
 // output bytes — and the rung params history.query asks for.
 import { describe, it, expect, vi } from 'vitest'
-import { recordCommand, queryHistory } from './history-client'
+import { historyOutbox, recordCommand, queryHistory } from './history-client'
 import type { CommandRecord } from './command-ledger'
 import type { HistoryQuery } from './generated/history.query'
 import type { ExecutionAttempt, LifecycleFact } from './lifecycle/state'
@@ -74,7 +74,7 @@ describe('recordCommand', () => {
       // store persists int64.
       startedAt: 1000,
       endedAt: 1201,
-      tabId: 'tab-1',
+      paneId: 'tab-1',
     })
   })
 
@@ -110,10 +110,34 @@ describe('recordCommand', () => {
       'endedAt',
       'exitCode',
       'host',
+      'paneId',
       'startedAt',
       'status',
-      'tabId',
     ])
+  })
+
+  it('KEEPS a record the socket refused, and sends it when the socket is back', async () => {
+    // The wiring check, not the outbox's own unit test (history-outbox.test.
+    // ts has those): a record that failed must be IN the shared outbox, or
+    // the queue is a module nothing reaches — the shape this repo has already
+    // shipped once and paid for.
+    const before = historyOutbox.stats().pending
+    const down = { call: vi.fn().mockRejectedValue(new Error('socket closed')) }
+    await recordCommand(down as unknown as WSClient, 'tab-1', completedRecord(), completedAttempt())
+    expect(historyOutbox.stats().pending).toBe(before + 1)
+
+    // And a drain delivers exactly what was kept, through the same call the
+    // record was built with.
+    const sent: unknown[] = []
+    down.call.mockImplementation((method: string, params: unknown) => {
+      sent.push([method, params])
+      return Promise.resolve({ maskedCount: 0, maskedKinds: [], captures: [] })
+    })
+    await historyOutbox.drain()
+
+    expect(historyOutbox.stats().pending).toBe(0)
+    expect(sent).toHaveLength(before + 1)
+    expect((sent[0] as unknown[])[0]).toBe('history.record')
   })
 
   it('swallows a rejected call: a dropped record never throws', async () => {

@@ -1,4 +1,5 @@
-import { ClipboardGetText, ClipboardSetText } from '../wailsjs/runtime/runtime'
+import { Clipboard } from '@wailsio/runtime'
+import { hasWailsWebview } from './wails-runtime'
 
 // ── Clipboard access seam (AD-8: interface, AD-6: renderer never touches) ──
 
@@ -12,18 +13,18 @@ export interface ClipboardAccess {
 }
 
 /**
- * Wails-backed clipboard — works in the packaged app where Wails injects
- * window.runtime. ClipboardSetText returns a boolean; false means the
- * platform rejected the write and must be surfaced, not swallowed.
+ * Wails-backed clipboard — works in the packaged webview where the v3
+ * runtime's transport reaches the backend. SetText rejects when the
+ * platform refused the write; the rejection must be surfaced, not
+ * swallowed.
  */
 class WailsClipboard implements ClipboardAccess {
   async readText(): Promise<string> {
-    return ClipboardGetText()
+    return Clipboard.Text()
   }
 
   async writeText(text: string): Promise<void> {
-    const ok = await ClipboardSetText(text)
-    if (!ok) throw new Error('ClipboardSetText returned false')
+    await Clipboard.SetText(text)
   }
 }
 
@@ -75,8 +76,11 @@ class NoopClipboard implements ClipboardAccess {
  * injected down; no consumer calls the factory itself.
  */
 export function createClipboardAccess(): ClipboardAccess {
-  // Wails runtime — packaged app.
-  if (typeof window !== 'undefined' && (window as unknown as { runtime?: unknown }).runtime) {
+  // Wails webview — packaged app, the only environment where a runtime
+  // clipboard call reaches the backend. wails-runtime.ts owns the probe;
+  // the browser shim deliberately answers no, because it routes bindings
+  // only and a Clipboard call over it would fail.
+  if (hasWailsWebview()) {
     return new WailsClipboard()
   }
 

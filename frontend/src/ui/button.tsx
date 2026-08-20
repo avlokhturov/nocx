@@ -4,9 +4,9 @@
  * The button carries `class="ui-button"` on the `<button>` element and
  * `data-variant` / `data-size` for variance (§3.1 of the design spec).
  *
- * Variant vocabulary: `default` (neutral, today's secondary appearance),
- * `primary` (accent-filled), `danger` (danger outline),
- * `ghost` (a control that reads as a row rather than a button).
+ * Variant vocabulary: `default` (neutral), `primary` (accent-filled),
+ * `danger` (danger outline), `ghost` (a list row), `dashed` (an empty
+ * creation slot), and `workspace` (the full-height coloured tab-strip badge).
  *
  * ## When to use each variant
  *
@@ -20,6 +20,11 @@
  * - **danger** — destructive and irreversible.
  * - **ghost** — a control that reads as a row rather than a button
  *   (e.g. the settings rail's nav items).
+ * - **dashed** — the empty slot where one more of something is made: the last
+ *   column of a board, the tile after the last card. It is not an outline
+ *   button and not a quieter `default`; it is a shape that reads as a PLACE
+ *   rather than as a thing, which is what stops the reader counting it among
+ *   the things beside it. Use it only where activating it CREATES.
  *
  * `class` is intentionally absent as a prop — appearance is locked to
  * the kit (§3.6). Layout and placement belong to a parent wrapper or
@@ -28,7 +33,7 @@
 import { splitProps } from 'solid-js'
 import type { JSX } from 'solid-js'
 
-export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost'
+export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost' | 'dashed' | 'workspace'
 export type ButtonSize = 'sm' | 'md'
 
 export interface ButtonProps {

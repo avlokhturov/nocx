@@ -1,0 +1,370 @@
+/* The workspace overview (nocx-edhcu) — a transient, full-window read of
+   every workspace and every pane.
+
+   PLACEMENT ONLY. Every control in it is a kit component: a card is
+   RecordRow, a heading is Section, the count is Badge and the attention
+   marker is StatusDot. This file arranges them — a scrim, a strip, a grid —
+   and never repaints one. There is no rule here for a terminal, a canvas or
+   an image, because the surface deliberately draws none: a scaled-down
+   terminal is grey noise, and the card being text is the whole feature.
+
+   IT IS A BOARD OF COLUMNS: one workspace per column, its panes stacked
+   under it. The first arrangement was a strip of workspace chips across the
+   top and full-width sections below — Mission Control's geometry — and it was
+   wrong for this content. Mission Control needs the strip because the body
+   shows ONE desktop at a time; ours shows every workspace at once, so the
+   strip and the section headings said the same thing twice, and the one that
+   looked like navigation was the dead one. Columns say it once: the heads are
+   a row you scan for the workspace that wants you, and what is inside each is
+   directly beneath it. It is also the arrangement a drag between workspaces
+   will want (nocx-ophw6) — a board, not a stack of bands.
+
+   IT HAS TO READ AS A MODE, NOT AS MORE CONTENT. The first version was a
+   half-transparent scrim at z-index 60, and on screen the file tree and the
+   tab strip showed straight through the gaps between cards — so the overview
+   looked like a broken layer of the application rather than a picture OF it.
+   Mission Control works because everything behind it visibly stops being
+   available: it goes dark, it goes soft, and only then do the things you can
+   pick float on top. That is what the ground below is for, and it is why the
+   blur is not decoration. */
+
+/* ── The ground ────────────────────────────────────────────────────────── */
+
+/* Covers the window, and the padding is not decoration: it is the only
+   region a click can land on to dismiss the overview, so it has to be
+   reachable at every window size.
+
+   ABOVE EVERYTHING THE APPLICATION DRAWS, and below the toasts alone. The
+   scale in this codebase runs banner 10, prompt 20, menus 30, an overflow
+   menu 200 and toasts 300; at 60 this sat under two of them, which is how a
+   context menu belonging to the surface underneath could paint over a modal
+   picture of the whole application. A toast still wins on purpose — it
+   reports something that just happened, and the overview is a place you are
+   standing rather than a thing being said. */
+.overview {
+  position: fixed;
+  inset: 0;
+  z-index: 250;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  /* The ground never scrolls. The carousel owns horizontal overflow and each
+     workspace owns the vertical overflow of its cards. */
+  overflow: hidden;
+  padding: var(--space-8) var(--space-6) var(--space-12);
+  /* Two layers doing two jobs. The wash darkens what is behind so the cards
+     are the brightest thing on screen; the blur takes the STRUCTURE out of
+     it, which is what stops a file tree behind the surface from reading as a
+     column of the surface. Either alone leaves the other's failure. */
+  background: color-mix(in srgb, var(--color-canvas), transparent 15%);
+  backdrop-filter: blur(16px) saturate(80%);
+  -webkit-backdrop-filter: blur(16px) saturate(80%);
+  color: var(--color-text);
+  font-family: var(--font-family-ui);
+  --wails-draggable: no-drag;
+}
+
+.overview:focus {
+  outline: none;
+}
+
+.overview__close {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 1;
+}
+
+.overview__panel {
+  width: 100%;
+  max-width: 1600px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+/* ── The board ─────────────────────────────────────────────────────────── */
+
+/* The board is one scene: workspace columns above, board-wide creation below.
+   Horizontal overflow never escapes; every column shares the available width. */
+.overview__board {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: 100%;
+  height: min(70vh, 680px);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.overview__columns {
+  --overview-edge-fade: 64px;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: var(--space-3) var(--space-2);
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    black var(--overview-edge-fade),
+    black calc(100% - var(--overview-edge-fade)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    black var(--overview-edge-fade),
+    black calc(100% - var(--overview-edge-fade)),
+    transparent 100%
+  );
+}
+
+.overview__columns::-webkit-scrollbar {
+  display: none;
+}
+
+/* The selected column is 360px wide. Real flex spacers give the first and
+   last columns enough scrollable runway to put their centres at 50% without
+   painting permanent empty space into the viewport. Account for the gap and
+   inline padding between each spacer and its edge column. */
+.overview__columns::before,
+.overview__columns::after {
+  content: '';
+  flex: 0 0 max(var(--overview-edge-fade), calc(50% - 180px - var(--space-3) - var(--space-2)));
+}
+
+.overview__column {
+  --overview-workspace-colour: var(--color-border);
+  flex: 0 0 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--overview-workspace-colour), var(--color-border) 60%);
+  border-radius: var(--control-radius-lg);
+  background: color-mix(in srgb, var(--overview-workspace-colour), var(--color-surface) 92%);
+  box-shadow: 0 12px 32px color-mix(in srgb, black, transparent 82%);
+  opacity: 0.86;
+  transform: scale(1);
+  transform-origin: center;
+  transition:
+    flex-basis 0.2s ease,
+    transform 0.18s ease,
+    opacity 0.2s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.overview__column[data-colour='grey'] {
+  --overview-workspace-colour: var(--ws-grey);
+}
+
+.overview__column[data-colour='blue'] {
+  --overview-workspace-colour: var(--ws-blue);
+}
+
+.overview__column[data-colour='cyan'] {
+  --overview-workspace-colour: var(--ws-cyan);
+}
+
+.overview__column[data-colour='green'] {
+  --overview-workspace-colour: var(--ws-green);
+}
+
+.overview__column[data-colour='yellow'] {
+  --overview-workspace-colour: var(--ws-yellow);
+}
+
+.overview__column[data-colour='orange'] {
+  --overview-workspace-colour: var(--ws-orange);
+}
+
+.overview__column[data-colour='red'] {
+  --overview-workspace-colour: var(--ws-red);
+}
+
+.overview__column[data-colour='pink'] {
+  --overview-workspace-colour: var(--ws-pink);
+}
+
+.overview__column[data-colour='purple'] {
+  --overview-workspace-colour: var(--ws-purple);
+}
+
+/* Width changes are deliberately modest: context remains readable, while the
+   selected workspace gets enough room to scan without becoming half a screen. */
+.overview__column[data-distance='2'] {
+  flex-basis: 260px;
+  opacity: 0.9;
+}
+
+.overview__column[data-distance='1'] {
+  flex-basis: 300px;
+  opacity: 0.96;
+}
+
+.overview__column[data-distance='0'] {
+  flex-basis: 360px;
+  opacity: 1;
+}
+
+/* Hover preview is paint-only: after the dwell timer it grows over the fixed
+   layout slot, so neither neighbours nor scroll position can move the pointer
+   across an enter/leave boundary. */
+.overview__column[data-hovered='true']:not([data-spotlight='true']) {
+  transform: scale(1.035);
+  opacity: 1;
+  z-index: 1;
+}
+
+.overview__column[data-spotlight='true'],
+.overview__column[data-hovered='true'],
+.overview__column:focus-within {
+  border-color: color-mix(in srgb, var(--overview-workspace-colour), transparent 28%);
+  background: color-mix(in srgb, var(--overview-workspace-colour), var(--color-surface) 84%);
+  box-shadow: 0 18px 44px color-mix(in srgb, black, transparent 70%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overview__column {
+    transition: none;
+  }
+
+  .overview__columns {
+    scroll-behavior: auto;
+  }
+}
+
+/* Every column has the same heading geometry. "Ungrouped" names the loose
+   pane collection without becoming the default workspace's stored name. */
+.overview__column-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-1);
+  min-height: 32px;
+  min-width: 0;
+}
+
+.overview__column-head > .ui-button {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.overview__column-head > .ui-icon-button {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.overview__column-actions {
+  flex: 0 0 auto;
+  display: flex;
+}
+
+.overview__column-actions > .ui-button {
+  width: 100%;
+  min-height: 44px;
+  gap: var(--space-2);
+}
+
+/* Workspace creation addresses the board as a whole, so it sits below the
+   columns instead of consuming the width of a workspace that does not exist. */
+.overview__new-workspace {
+  flex: 0 0 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.overview__new-workspace > .ui-button {
+  width: min(280px, 100%);
+  min-height: 44px;
+  gap: var(--space-2);
+}
+
+/* ── The cards ─────────────────────────────────────────────────────────── */
+
+/* Cards start under the heading and keep one stable reading edge. The stack
+   owns overflow, so a long workspace scrolls without moving its neighbours. */
+.overview__cards {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: var(--space-3);
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 2px;
+}
+
+/* A card is the one thing on this surface that is fully opaque, and that is
+   the whole hierarchy: the ground is washed, the pills are half-there, and
+   the things you can actually pick are solid. The shadow is what lifts them
+   off a blurred backdrop — without one they read as holes cut in it. */
+.overview__card {
+  flex: 0 0 clamp(96px, 13vh, 144px);
+  min-width: 0;
+  display: flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-lg);
+  background: var(--color-surface);
+  box-shadow: 0 8px 24px color-mix(in srgb, black, transparent 70%);
+  overflow: hidden;
+  transition:
+    transform 0.12s ease,
+    box-shadow 0.12s ease;
+}
+
+.overview__card > .ui-collection-row {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.overview__card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px color-mix(in srgb, black, transparent 60%);
+}
+
+/* Movement is a nicety here and nothing depends on it, so it is the first
+   thing to go for anyone who has asked the OS for less of it. */
+@media (prefers-reduced-motion: reduce) {
+  .overview__card {
+    transition: none;
+  }
+
+  .overview__card:hover {
+    transform: none;
+  }
+}
+
+/* The pane the person is in right now, so "where was I" is answered before
+   they start reading. */
+.overview__card[data-active='true'] {
+  border-color: var(--color-accent);
+}
+
+.overview__card[data-state='waiting'] {
+  border-color: var(--color-warning);
+}
+
+.overview__card[data-state='failed'] {
+  border-color: var(--color-danger);
+}

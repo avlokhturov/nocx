@@ -65,7 +65,7 @@
       "type": "string"
     },
     "scope": {
-      "description": "Owner label the renderer attached at open (tab id or profile id). The backend tears the forward down when the tab that opened it disconnects, not by this label.",
+      "description": "Owner label the renderer attached at open (pane id or profile id). The backend tears the forward down when the pane that opened it disconnects, not by this label.",
       "type": "string"
     },
     "caveat": {

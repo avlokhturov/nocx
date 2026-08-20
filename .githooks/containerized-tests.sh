@@ -81,8 +81,28 @@ HOST_GID="$(id -g)"
 # previous root-based runner are simply left orphaned.
 GOMOD_VOL="nocx-hook-gomod-${HOST_UID}-${HOST_GID}"
 GOBUILD_VOL="nocx-hook-gobuild-${HOST_UID}-${HOST_GID}"
-FE_VOL="nocx-hook-fe-${HOST_UID}-${HOST_GID}"
 NPM_VOL="nocx-hook-npm-${HOST_UID}-${HOST_GID}"
+
+# FE_VOL is ALSO keyed by worktree, and the other three deliberately are not
+# (nocx-x6z3). The distinction is what the volume holds. GOMOD, GOBUILD and NPM
+# are content-addressed caches: two worktrees sharing them is not a hazard, it
+# is the entire reason they are named volumes, and keying them per worktree
+# would make every new worktree's first commit cold.
+#
+# /work is not a cache. vitest_containerized ASSEMBLES a workspace in it —
+# it wipes everything but node_modules, copies the source in, and runs
+# `npm ci`, which itself removes node_modules and reinstalls. Two worktrees
+# doing that at once destroy each other's dependency tree mid-install, and the
+# symptom is a module that vanished from under a running vitest:
+# ERR_MODULE_NOT_FOUND on tinypool or on vitest/dist/worker.js itself. Observed
+# 2026-08-17 with feat-workspaces and feat-ai-assistant committing at the same
+# moment, which is the second time it cost a session an hour; AGENTS.md already
+# named it as a cost invisible to whoever pays it.
+#
+# cksum over the absolute path: POSIX, stable across runs, and short enough to
+# keep the volume name readable in `docker volume ls`.
+WORKTREE_KEY="$(printf '%s' "$PWD" | cksum | cut -d' ' -f1)"
+FE_VOL="nocx-hook-fe-${HOST_UID}-${HOST_GID}-${WORKTREE_KEY}"
 
 require_docker() {
     if ! command -v docker >/dev/null 2>&1 || ! docker version >/dev/null 2>&1; then
@@ -133,7 +153,7 @@ go_test_containerized() {
             groupadd --gid "$RUN_GID" nocx-sshtest 2>/dev/null || true
             useradd -M -u "$RUN_UID" -g "$RUN_GID" -s /bin/bash -d /tmp/nocx-sshd-home nocx-sshtest 2>/dev/null || true
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups \
-                go test -race ./...
+                go test -race -tags gtk3 ./...
         '
 }
 

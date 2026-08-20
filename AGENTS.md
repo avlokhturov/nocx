@@ -1,6 +1,6 @@
 # AGENTS.md — Working rules for AI agents on `nocx`
 
-`nocx` is a local-first, Warp-style terminal (Go backend + xterm.js frontend + Wails v2
+`nocx` is a local-first, Warp-style terminal (Go backend + xterm.js frontend + Wails v3
 desktop). This file is the operating contract for **any** AI agent contributing to the
 repo. Read it before writing code.
 
@@ -138,6 +138,41 @@ missing — only that written code is used.**
 > Same epic, second way: `contentkey` had tests for every failure path and none asserting
 > the key is obtainable on an ordinary machine — where it never was. **For every "returns
 > an error when…" there is a paired "and on a normal machine it succeeds".**
+
+**Ask `deadcode -whylive <symbol>`, not `deadcode -filter <package>`.** The filter form is
+worse than a weak check on the packages we most want to check: `deadcode`'s RTA marks every
+method reached through an interface as reflection-reachable, so for `internal/content` the
+filter has **always** printed nothing and cannot be made to print anything. An acceptance
+criterion written on it is not merely satisfiable while the write path is dead — it is
+unfalsifiable. `-whylive` answers the question actually being asked, and the contrast is
+what makes it evidence:
+
+```
+deadcode -tags gtk3 -whylive '…/internal/content.sqliteContent.Submit' ./...
+  → main → App.Run → … → sqliteContent.Submit        # wired
+deadcode -tags gtk3 -whylive '…/internal/content.sqliteContent.AddEdge' ./...
+  → "reachable only through reflection"              # not wired
+```
+
+> 2026-08-17, `nocx-rtg0.3`: the brief demanded the `-filter` run and the worker ran it,
+> got the empty output the brief predicted, and then said so plainly — that the same empty
+> output appeared before its commit and on a clean tree, so it was evidence of nothing. It
+> used `-whylive` on a wired method and an unwired one in the same package to show the
+> difference. That is the check; note the `-tags gtk3` too, without which cgo fails on Linux
+> before `deadcode` reaches our code at all.
+
+**And the blind spot is not `-filter`'s — it is RTA's, so the ratchet has it too.** Later
+the same day `nocx-re6gk` measured it directly, with three probes in one run: a plain
+unwired function **is** reported; the same shape **wired** from one call site is not; and a
+dead **method on a type reached only through an interface** is **not reported either**.
+That third case is exactly the shape `ContentDB.Add` had. So the gate catches a dead
+function, and cannot catch a dead method behind a live interface — which is most of this
+codebase, since AD-8 puts every module behind one.
+
+**Therefore: `deadcode` can tell you a symbol is dead. It can never tell you a feature is
+wired.** For that, name the seam and ask `-whylive` for it, or write the test that watches
+a user do the thing. Rule 2's "every epic proves its happy path" is not a supplement to the
+ratchet; on an interface-first codebase it is the only check that works.
 
 **3. Test the failure paths, and state invariants as intervals.** For every external call
 your code makes, there is a test where that call fails — mechanical, cheap, and the single
@@ -575,7 +610,7 @@ changed.
   `settings`. One core, multiple build targets.
 - **Frontend:** xterm.js (WebGL) + TypeScript, CodeMirror 6 for the editor. Terminal render
   state lives here (AD-6) — [ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md).
-- **Desktop shell:** Wails v2 (macOS first).
+- **Desktop shell:** Wails v3 (macOS first).
 - **Transport:** one WebSocket — raw **binary** data plane + **JSON-RPC 2.0** control
   plane (AD-1).
 

@@ -3,8 +3,8 @@ package content
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,9 +99,9 @@ func TestPlaintextCanary(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("Open: %v", openErr)
 	}
-	hist := db.CommandHistory()
-	if _, addErr := hist.Add(ctx, CommandRecord{Command: canaryMarker, Cwd: "/srv", Host: "", Status: StatusSuccess}); addErr != nil {
-		t.Fatalf("Add: %v", addErr)
+	hist := db.Ledger()
+	if _, addErr := hist.RecordCompleted(ctx, aRecordedCommand(canaryMarker)); addErr != nil {
+		t.Fatalf("RecordCompleted: %v", addErr)
 	}
 
 	// 1. The store's own files: db, -wal, -shm. No header, no plaintext.
@@ -199,7 +199,7 @@ func TestPlaintextCanary(t *testing.T) {
 // assertReadsMarker reopens an encrypted destination with the key and checks
 // the canary row is there — usability, not only confidentiality. The query is
 // the caller's: the backup and VACUUM destinations carry the store schema
-// (command_history), the ATTACH destination carries the test's own table.
+// (entries), the ATTACH destination carries the test's own table.
 func assertReadsMarker(t *testing.T, path, label, query string) {
 	t.Helper()
 	conn := openKeyedConn(t, path)
@@ -226,13 +226,11 @@ func TestBackupProducesConsistentEncryptedSnapshot(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("Open: %v", openErr)
 	}
-	hist := db.CommandHistory()
+	hist := db.Ledger()
 	const rows = 50
 	for i := range rows {
-		if _, err := hist.Add(ctx, CommandRecord{
-			Command: fmt.Sprintf("cmd-%d", i), Cwd: "/repo", Host: "", Status: StatusSuccess,
-		}); err != nil {
-			t.Fatalf("Add: %v", err)
+		if _, err := hist.RecordCompleted(ctx, aRecordedCommand(fmt.Sprintf("cmd-%d", i))); err != nil {
+			t.Fatalf("RecordCompleted: %v", err)
 		}
 	}
 	// Deliberately do NOT checkpoint: the newest rows are WAL-only.
@@ -280,9 +278,42 @@ func TestContentDBChild(t *testing.T) {
 		childWriter(t)
 	case "checkpointer":
 		childCheckpointer(t)
+	case "evictor":
+		childEvictor(t)
 	default:
 		t.Skip("not a child invocation")
 	}
+}
+
+// newChild re-execs this test binary in the given role against the given
+// database. Shared by every cross-process test here so the re-exec pattern
+// has one implementation: the role and the path are the whole interface.
+func newChild(t *testing.T, role, path string) *exec.Cmd {
+	t.Helper()
+	cmd, _ := newChildReporting(t, role, path)
+	return cmd
+}
+
+// newChildReporting is newChild plus the child's stdout, for a caller that
+// must wait until the child has actually DONE something rather than until
+// some number of milliseconds has passed. AGENTS.md: a test may not depend on
+// timing — wait on an observable state change, never on a duration.
+func newChildReporting(t *testing.T, role, path string) (*exec.Cmd, io.Reader) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestContentDBChild") //nolint:gosec // standard Go test re-exec pattern
+	cmd.Env = append(
+		os.Environ(),
+		"NOCX_CONTENT_CHILD="+role,
+		"NOCX_CONTENT_PATH="+path,
+	)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout pipe for %s child: %v", role, err)
+	}
+	if startErr := cmd.Start(); startErr != nil {
+		t.Fatalf("start %s child: %v", role, startErr)
+	}
+	return cmd, out
 }
 
 func childWriter(t *testing.T) {
@@ -292,11 +323,9 @@ func childWriter(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 	ctx := context.Background()
-	hist := db.CommandHistory()
+	hist := db.Ledger()
 	for i := 0; ; i++ {
-		if _, err := hist.Add(ctx, CommandRecord{
-			Command: fmt.Sprintf("child-row-%d", i), Cwd: "/proc", Host: "", Status: StatusSuccess,
-		}); err != nil {
+		if _, err := hist.RecordCompleted(ctx, aRecordedCommand(fmt.Sprintf("child-row-%d", i))); err != nil {
 			os.Exit(4)
 		}
 		time.Sleep(2 * time.Millisecond)
@@ -320,21 +349,8 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "content.db")
 
-	startChild := func(role string) *exec.Cmd {
-		cmd := exec.Command(os.Args[0], "-test.run=TestContentDBChild") //nolint:gosec // standard Go test re-exec pattern
-		cmd.Env = append(
-			os.Environ(),
-			"NOCX_CONTENT_CHILD="+role,
-			"NOCX_CONTENT_PATH="+path,
-		)
-		if err := cmd.Start(); err != nil {
-			t.Fatalf("start %s child: %v", role, err)
-		}
-		return cmd
-	}
-
-	writer := startChild("writer")
-	checkpointer := startChild("checkpointer")
+	writer := newChild(t, "writer", path)
+	checkpointer := newChild(t, "checkpointer", path)
 
 	// Let both processes work on the shared database, then kill the
 	// checkpointer mid-checkpoint and the writer mid-write.
@@ -373,45 +389,92 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	if n == 0 {
 		t.Fatal("no rows survived two processes writing to one database")
 	}
-	if _, err := db.CommandHistory().Query(ctx, ScopeEverywhere, "", "", 10, nil, ""); err != nil {
+	if _, err := db.Ledger().QueryEntries(ctx, LedgerQuery{Scope: ScopeEverywhere, Limit: 10}); err != nil {
 		t.Fatalf("query after kills: %v", err)
 	}
 
 	// The same database keeps working across processes: a fresh store writes.
-	if _, err := db.CommandHistory().Add(ctx, CommandRecord{Command: "after-kills", Cwd: "/", Host: "", Status: StatusSuccess}); err != nil {
+	if _, err := db.Ledger().RecordCompleted(ctx, aRecordedCommand("after-kills")); err != nil {
 		t.Fatalf("Add after kills: %v", err)
 	}
 }
 
-// The retention sweep is best-effort by design: the INSERT is already
-// durable when the sweep runs, so a sweep failure must log and leave Add
-// successful — otherwise a caller retrying Add would duplicate the command.
-func TestRetentionSweepFailureIsBestEffort(t *testing.T) {
+// aRecordedCommand is THE factory for a completed command in this package's
+// tests, and it is one because a struct literal in a test is a promise that
+// ages badly: CompletedCommand will gain fields, every literal keeps compiling
+// with a zero value for them, and the test goes on passing over a shape the
+// product no longer writes. AGENTS.md records that exact failure — a struct
+// literal in a test that predated a new required dependency, found as a nil
+// dereference on a merge nobody could have caught from either branch.
+//
+// So the callers below name only what their assertion is ABOUT — the intent —
+// and everything a valid row needs lives here, in one place that a new
+// required field breaks loudly and once.
+func aRecordedCommand(intent string) CompletedCommand {
+	return CompletedCommand{
+		Client: "canary",
+		Env:    Environment{ID: "local", Kind: EnvLocal},
+		Cwd:    "/srv",
+		Intent: intent,
+		Status: EntrySuccess,
+	}
+}
+
+// The startup sweep uses the PARTIAL INDEX and does not scan the table
+// (nocx-rtg0.6). It is the one statement that runs on every start before the
+// store is handed out, and the table it runs over grows with a person's whole
+// history — so a plan that degrades to a scan turns "nocx starts" into "nocx
+// starts, eventually", years in, on the machine of the user with the most to
+// lose.
+//
+// Asserted from the QUERY PLAN rather than from a duration: a timing
+// assertion would pass on an empty test database whatever the plan said, and
+// is the shape AGENTS.md forbids anyway.
+func TestStartupSweepUsesThePartialIndex(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "content.db")
 	db, err := openTestStore(t, path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer func() { _ = db.Close() }()
-	sc, ok := db.(*sqliteContent)
-	if !ok {
-		t.Fatalf("store is %T, want *sqliteContent", db)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
 	}
-	sc.policy.SetRetentionDays(1)
-	sc.sweep = func(context.Context, int64) error { return errors.New("sweep failed") }
 
-	now := time.Now().UnixMilli()
-	if _, addErr := db.CommandHistory().Add(context.Background(), CommandRecord{
-		Command: "sweep-failure-row", Cwd: "/", Host: "", Status: StatusSuccess, EndedAt: &now,
-	}); addErr != nil {
-		t.Fatalf("Add with a failing sweep returned an error: %v", addErr)
-	}
-	recs, err := db.CommandHistory().List(context.Background(), 10)
+	conn := openKeyedConn(t, path)
+	rows, err := conn.Query(`EXPLAIN QUERY PLAN
+		UPDATE entries SET phase = 'closed', status =
+		  CASE WHEN kind = 'agent' THEN 'interrupted' ELSE 'unknown' END
+		WHERE phase != 'closed'`)
 	if err != nil {
-		t.Fatalf("List: %v", err)
+		t.Fatalf("EXPLAIN QUERY PLAN: %v", err)
 	}
-	if len(recs) != 1 {
-		t.Fatalf("rows = %d, want the inserted row to survive a failed sweep", len(recs))
+	defer func() { _ = rows.Close() }()
+
+	plan := ""
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if scanErr := rows.Scan(&id, &parent, &notused, &detail); scanErr != nil {
+			t.Fatalf("scan plan: %v", scanErr)
+		}
+		plan += detail + "\n"
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		t.Fatalf("plan rows: %v", rowsErr)
+	}
+
+	t.Logf("startup sweep plan:\n%s", plan)
+	if !strings.Contains(plan, "entries_open") {
+		t.Fatalf("the startup sweep does not use entries_open:\n%s", plan)
+	}
+	// The plan reads "SCAN entries USING INDEX entries_open", and the word
+	// SCAN there is not the failure: entries_open is PARTIAL (phase !=
+	// 'closed'), so walking it walks only the rows the sweep is for — which
+	// on a healthy store is none. What must never appear is a bare "SCAN
+	// entries", the plan with the index gone, which walks a person's whole
+	// history on every start.
+	if strings.Contains(plan, "SCAN entries\n") {
+		t.Fatalf("the startup sweep scans the whole table:\n%s", plan)
 	}
 }

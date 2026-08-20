@@ -1,6 +1,6 @@
 // The notes chord: ⌥⌘N (Alt+Meta+N), design §6.3 — checked against the
 // global chords rather than assumed: ⌘, (settings), ⌘⇧P (palette), ⌥⌘P
-// (snippets), ⌘⇧O (ports), ⌘T/⌘W/⌘1-9 (TabManager). ⌥⌘N is free and sits
+// (snippets), ⌘⇧O (ports), ⌘T/⌘W/⌘1-9 (PaneManager). ⌥⌘N is free and sits
 // beside the snippets chord it is a sibling of.
 //
 // The predicate is ONE thing, owned here, read by every keyboard boundary

@@ -37,11 +37,11 @@ import (
 // completes. It mirrors the ledger's CommandRecord minus the fields that
 // never cross (the session-local id, the live marker-line accessor, the
 // disposed flag) and minus the output, which is never retained (ADR-0008).
-// TabID is the ONE deliberate exception to "the renderer's session-local ids
-// never cross the wire" (nocx-tsajw): the renderer-minted per-tab identity
+// PaneID is the ONE deliberate exception to "the renderer's session-local ids
+// never cross the wire" (nocx-tsajw): the renderer-minted per-pane identity
 // that scopes the pending-capture registry. It is opaque to the backend —
 // minted as a UUID, never reused, and destruction is bound to the connection
-// it arrives on, so a tab id from one connection cannot reach another's
+// it arrives on, so a pane id from one connection cannot reach another's
 // captures. The scope's generation stays a backend fact (the connection's
 // own submission counter).
 type historyRecordParams struct {
@@ -60,7 +60,7 @@ type historyRecordParams struct {
 	StartedAt *int64 `json:"startedAt"`
 	EndedAt   *int64 `json:"endedAt"`
 	Trusted   bool   `json:"trusted"`
-	TabID     string `json:"tabId"`
+	PaneID    string `json:"paneId"`
 }
 
 // redactionWire is one redaction segment on the wire: kind and span in
@@ -128,12 +128,24 @@ const epochFloor int64 = 1_577_836_800_000 // 2020-01-01T00:00:00Z
 // (nil → content store not wired), the transport-owned capture registry and
 // discovery seams, and the Responder; never the *WSServer (migration map,
 // "history.* — the content domain": the capture registry stays in the
-// handler, connection-scoped in-memory). The tab id comes per call, from the
+// handler, connection-scoped in-memory). The pane id comes per call, from the
 // connection identity.
 type historyRecordHandlers struct {
 	op       capability.ContentOperation // nil → content store not wired
 	captures *credential.CaptureRegistry
 	machine  historyMachine // discovery prompt hint (transport-owned)
+	// status is the product's one place for "durable history is not doing
+	// what the settings promise" (nocx-rtg0.15). The write path raises on it
+	// and clears on it, which is nocx-rtg0.10's policy in one line: the user
+	// is told ONCE PER EPISODE rather than once per lost command, because
+	// Raise is idempotent within a reason and the episode ends at the first
+	// write that lands. Nil when nothing wired one.
+	status *HistoryStatus
+	// clientID binds a recorded row to the connection that wrote it, exactly
+	// as the ledger's lifecycle writer binds its own (nocx-rtg0.19). Every
+	// entry carries one; a row that cannot say who wrote it is a shape the
+	// ledger does not have.
+	clientID string
 	r        Responder
 }
 
@@ -153,7 +165,7 @@ type historyMachine interface {
 // outputEnabled policy governs a capture path that does not exist yet.
 //
 // Detection fails closed here: a masking failure refuses the write (never
-// the raw command), destroys the tab's pending captures, and errors the
+// the raw command), destroys the pane's pending captures, and errors the
 // ack. The command itself already ran — refusing the record fails nothing
 // the user did.
 func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *wsConn, state *connState, req jsonrpcRequest) {
@@ -183,12 +195,12 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	masked, findings, segs, err := masking.MaskWithSegments(p.Command)
 	if err != nil {
 		// Fail closed: the raw command must not reach the row, and the
-		// tab's pending captures die with the failed record.
+		// pane's pending captures die with the failed record.
 		if h.captures != nil {
-			// The failing TAB's captures die — the tab id on this record,
-			// bound to this connection. A masking failure in one tab never
-			// touches another tab's offers on the same socket.
-			h.captures.DestroyTab(connectionID(wconn), p.TabID)
+			// The failing PANE's captures die — the pane id on this record,
+			// bound to this connection. A masking failure in one pane never
+			// touches another pane's offers on the same socket.
+			h.captures.DestroyPane(connectionID(wconn), p.PaneID)
 		}
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: detection failed; command not recorded"})
 		return
@@ -197,16 +209,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	// The row's segments: one per finding, byte offsets into the masked
 	// command. Offsets are stored in bytes (the store slices bytes); the
 	// UTF-16 conversion happens at the wire, below, once.
-	redactions := make([]content.Redaction, 0, len(segs))
-	for i, seg := range segs {
-		redactions = append(redactions, content.Redaction{
-			Kind:   string(findings[i].Kind),
-			Start:  seg.Start,
-			End:    seg.End,
-			Prefix: seg.Prefix,
-			Suffix: seg.Suffix,
-		})
-	}
+	redactions := redactionsOf(findings, segs)
 
 	// Already saved this session: the row stores the existing reference
 	// automatically and nothing is offered. The fingerprint is equality
@@ -280,19 +283,44 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		return
 	}
 
-	rec := content.CommandRecord{
-		Command:     rowCommand,
-		Cwd:         p.Cwd,
-		Host:        p.Host,
-		Author:      p.Author,
-		Status:      content.CommandStatus(p.Status),
-		ExitCode:    p.ExitCode,
-		StartedAt:   p.StartedAt,
-		EndedAt:     p.EndedAt,
-		Trusted:     p.Trusted,
+	// THE RECEIPT RIDES entries.payload, which is where the ledger keeps it
+	// (internal/content/redaction.go): how many secrets were taken out, of
+	// which kinds, and where the masks sit. history.query's contract declares
+	// all three on every row, and the "3 secrets masked" line, the recall
+	// overlay's unresolved chips and the vault save that turns one span into
+	// a reference are unanswerable without them.
+	payload, payloadErr := content.WithEntryMasking("{}", content.EntryMasking{
 		MaskedCount: ack.MaskedCount,
 		MaskedKinds: ack.MaskedKinds,
 		Redactions:  rowRedactions,
+	})
+	if payloadErr == nil && p.ExitCode != nil {
+		payload, payloadErr = mergeShellExitCode(payload, p.ExitCode)
+	}
+	if payloadErr != nil {
+		// Fails CLOSED, as the ledger's other writer does: a row that cannot
+		// say what was masked out of it is the soft degrade this whole path
+		// exists to prevent.
+		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: the redaction receipt could not be recorded; command not recorded"})
+		return
+	}
+
+	rec := content.CompletedCommand{
+		Client:  h.clientID,
+		Env:     environmentForHost(p.Host),
+		PaneID:  panePtr(p.PaneID),
+		Cwd:     p.Cwd,
+		Intent:  rowCommand,
+		Payload: payload,
+		Status:  content.EntryStatus(p.Status),
+		// The author the renderer minted, carried verbatim onto the entry's
+		// kind (design §3.1, nocx-iadtt): the store side never derives it
+		// from a lane or a run state, or a human command typed while an
+		// agent works would be attributed to the agent.
+		Author:            content.EntryKind(p.Author),
+		StartedAt:         p.StartedAt,
+		EndedAt:           p.EndedAt,
+		TerminationReason: terminationForStatus(content.EntryStatus(p.Status)),
 	}
 	entryID := ""
 	runErr := h.op.Run(ctx, func(ctx context.Context, svc capability.ContentService) error {
@@ -300,20 +328,36 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		if err != nil {
 			return err
 		}
-		if id > 0 {
-			entryID = strconv.FormatInt(id, 10)
+		// An empty id is keep-history-off: the command ran, no row appeared,
+		// and there is nothing for a capture to rewrite.
+		if id != "" {
+			entryID = id
 			ack.EntryID = entryID
 		}
 		return nil
 	})
 	if runErr != nil {
-		// History-record failure destroys the tab's pending captures: the
+		// THE EPISODE OPENS HERE (nocx-rtg0.10). A store that is refusing
+		// writes is durable history not running, and the person is entitled
+		// to know — once. Raise is idempotent within a reason, so a hundred
+		// failing commands raise it once and the notice goes away when a
+		// write lands, not when it fades.
+		//
+		// A SATURATION REFUSAL IS NOT A DEGRADE and is deliberately excluded
+		// below: the gate refusing one call under load says nothing about
+		// whether the store is keeping commands, and treating backpressure
+		// as a broken feature would put a permanent notice on a healthy app.
+		var saturated *capability.RefusedError
+		if h.status != nil && !errors.As(runErr, &saturated) {
+			h.status.Raise(HistoryDegradeWriteFailed, runErr.Error())
+		}
+		// History-record failure destroys the pane's pending captures: the
 		// record that was to carry the offer's row never landed (capture
 		// contract). A gate refusal is the saturation error; anything else
 		// keeps the store-failure answer unchanged from the pre-capability
 		// handler.
 		if h.captures != nil {
-			h.captures.DestroyTab(connectionID(wconn), p.TabID)
+			h.captures.DestroyPane(connectionID(wconn), p.PaneID)
 		}
 		var rej *capability.RefusedError
 		if errors.As(runErr, &rej) {
@@ -324,6 +368,14 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		return
 	}
 
+	// AND THE EPISODE CLOSES HERE: a write landed, so the store is keeping
+	// commands again. Only a writeFailed episode is closed — a runtime
+	// success does not disprove "the content key could not be read", and
+	// clearing that would erase a sentence that is still true.
+	if h.status != nil {
+		h.status.ClearReason(HistoryDegradeWriteFailed)
+	}
+
 	// The offers, decided after the row exists (the capture's first link is
 	// the row it will rewrite). Linking and suppression are one atomic
 	// registry step.
@@ -332,14 +384,14 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	// Gating the whole call on len(creds) > 0 is fine for offers — a
 	// keyless command has nothing to offer — and Submit's suppression
 	// rules (already saved, already dismissed) apply on every record
-	// regardless. A new submission deliberately does NOT destroy the tab's
+	// regardless. A new submission deliberately does NOT destroy the pane's
 	// older pending captures (the supersede rule was removed, capture.go
 	// header); with no credentials Submit returns nothing, which is
 	// exactly what is wanted here.
 	if h.captures != nil {
 		scope := credential.CaptureScope{
 			Connection: connectionID(wconn),
-			Tab:        p.TabID,
+			Pane:       p.PaneID,
 			SessionIDs: sessionIDsOf(state),
 			EntryID:    entryID,
 			Generation: state.nextGeneration(),
@@ -369,7 +421,7 @@ func connectionID(wconn *wsConn) string {
 }
 
 // sessionIDsOf is the snapshot of the connection's sessions at record time
-// — informational scope (a tab can hold several sessions; ambiguous
+// — informational scope (a pane can hold several sessions; ambiguous
 // ownership falls back rather than guessing).
 func sessionIDsOf(state *connState) []string {
 	state.mu.Lock()
@@ -380,6 +432,29 @@ func sessionIDsOf(state *connState) []string {
 	state.mu.Unlock()
 	sort.Strings(ids)
 	return ids
+}
+
+// redactionsOf pairs the detector's findings with its segments into the
+// store's redaction segments: kind from the finding, byte span and the
+// head/tail mask from the segment. Byte offsets into the MASKED text, which
+// is what the store slices; the UTF-16 conversion the renderer decorates with
+// happens at the wire and nowhere else.
+//
+// One owner (AD-8), because both durable writers of a masked command need
+// exactly this list: history.record's entry receipt and ledger.open's. Two copies of the pairing would
+// agree until the day one of them learned about a new segment field.
+func redactionsOf(findings []secrets.Finding, segs []secrets.Segment) []content.Redaction {
+	out := make([]content.Redaction, 0, len(segs))
+	for i, seg := range segs {
+		out = append(out, content.Redaction{
+			Kind:   string(findings[i].Kind),
+			Start:  seg.Start,
+			End:    seg.End,
+			Prefix: seg.Prefix,
+			Suffix: seg.Suffix,
+		})
+	}
+	return out
 }
 
 // maskedKindsOf deduplicates the findings' kinds in first-occurrence order —
@@ -405,12 +480,17 @@ func validateHistoryRecord(p historyRecordParams) string {
 	if p.Command == "" || strings.TrimSpace(p.Command) == "" {
 		return "command is required and must not be empty"
 	}
-	if strings.TrimSpace(p.TabID) == "" {
-		return "tabId is required"
+	if strings.TrimSpace(p.PaneID) == "" {
+		return "paneId is required"
 	}
-	switch content.CommandStatus(p.Status) {
-	case content.StatusRunning, content.StatusSuccess, content.StatusFailure,
-		content.StatusInterrupted, content.StatusUnknown:
+	// The closed set is the WIRE's, and it is deliberately not the ledger's:
+	// entries.status also has `pending`, which this method can never carry —
+	// a command being reported has already ended. `running` stays in the set
+	// because the renderer sends it for a command it is still watching, and
+	// the ledger's own enum accepts it (nocx-rtg0.19).
+	switch content.EntryStatus(p.Status) {
+	case content.EntryRunning, content.EntrySuccess, content.EntryFailure,
+		content.EntryInterrupted, content.EntryUnknown:
 	default:
 		return "status must be one of running, success, failure, interrupted, unknown"
 	}

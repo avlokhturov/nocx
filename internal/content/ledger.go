@@ -2,23 +2,49 @@ package content
 
 // Schema v1 of the one authoritative ledger (nocx-rtg0.2), per ADR-0019,
 // ADR-0020 and design §5.2. The types here are the public repository seam:
-// the history adapter persists command-bearing rows in entries.kind; the
-// legacy command_history table remains only for old files and fixtures; and
-// the ledger.* wire methods (nocx-rtg0.3) are still tests-only until the
-// cutover. Nothing may write both (ADR-0019 §4).
+// ContentDB.Ledger() returns a LedgerRepository, the only writer of the v1
+// tables. The interim command_history table and CommandHistoryRepository are
+// untouched by this surface — they remain the live history path until
+// nocx-rtg0.19 removes them, and nothing may write both (ADR-0019 §4).
 //
-// Until that cutover the LedgerRepository write path has NO PRODUCTION
-// CALLER — only tests. Stated loudly because the same shape shipped once
-// before (nocx-rtg0: ContentDB.Add reachable only from its own tests while
-// a reachable read path hid the unreachable write): the v1 tables are
-// schema-complete and test-proven, and deliberately not wired into the
-// transport until nocx-rtg0.3.
+// The entry lifecycle IS wired as of nocx-rtg0.3: internal/transport's
+// ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
+// StartExecution and FinishExecution through capability.LedgerService, and
+// the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
+// SubmitAgentAsk, TransitionRun and FinishAgentRun. The READ path is wired
+// as of nocx-rtg0.20: ledger.query drives QueryEntries and ledger.get drives
+// Entry plus Edges (ws_ledger_query.go), and the query's `host` field is
+// what finally asks a resolved environment row for its host — so
+// Environment.Host has a renderer. What is still test-reachable only:
+// CreateSession, DeleteSession, ListEntries, DeleteEntry, AppendArtifact and
+// AddEdge — plus the whole of LayoutRepository (layout.go), which keeps the
+// same statement in its own header.
+//
+// RewriteRedaction is the awkward third case and is written down rather than
+// rounded to one of the other two: it is WIRED — secrets.captureSave reaches
+// it through capability.CaptureSaveService, which routes a link by the id it
+// carries — but no production caller mints a link keyed by an entry id yet.
+// history.record is what mints links, and it writes command_history rows. So
+// the path is live and correct, and in production the router always takes the
+// other arm until nocx-rtg0.19 replaces history.record's writer
+// (nocx-rtg0.24).
+//
+// Read that list rather than a deadcode run. `deadcode -filter
+// 'nocx/internal/content'` prints nothing for this package and always has —
+// RTA reports every method here "reachable only through reflection", so the
+// tool cannot tell a wired write path from an unwired one. This is exactly
+// the shape that shipped once before (nocx-rtg0: ContentDB.Add reachable
+// only from its own tests while a reachable read path hid the unreachable
+// write, under a green "deadcode is empty"), so the honest statement lives
+// here, next to the seam, and is kept current by hand.
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 // ── closed enums; each mirrors a CHECK constraint in schemaV1 ─────────────
@@ -215,13 +241,12 @@ const (
 
 // ── records ───────────────────────────────────────────────────────────────
 
-// Workspace is narrative and presentation scope (ADR-0020 §5): which
-// sessions read as one story. It mints default grants from its policy; it is
-// never the enforcement object.
-type Workspace struct {
-	ID   string
-	Name string
-}
+// Workspace — narrative and presentation scope (ADR-0020 §5): which sessions
+// read as one story — is declared in layout.go, together with the tab and the
+// pane. It moved there with nocx-isoph.1: the backend now owns the whole
+// chain workspace → tab → pane, and a table with two repository owners is
+// the defect the design spends most of its length avoiding. The ledger still
+// reads it through sessions.workspace_id; it no longer writes it.
 
 // Session is a restore key, never a recall filter (ADR-0019 §5): it names
 // "that tab". An entry outlives its session (ON DELETE SET NULL).
@@ -240,6 +265,24 @@ type Environment struct {
 	Endpoint  *string // canonical user@host:port; nil for local
 	ProfileID *string
 	Payload   string // identity facets JSON (sparse extension only)
+}
+
+// Host is the environment's host as the ledger stored it: the endpoint for
+// a remote environment, "" for the local machine — the same string
+// command_history's host column held and the same one history.query's
+// contract calls host.
+//
+// It is a READ of the facet environmentForSession wrote, never a second
+// derivation of it: nothing here asks a session where it is and nothing
+// re-hashes an id, so the one owner of "where is this session" (AD-8) is
+// still the only thing that decides. When the endpoint facet is refined to
+// the canonical user@host:port, THIS is where the host is taken out of it —
+// a caller that splits an endpoint itself would be the second owner.
+func (e Environment) Host() string {
+	if e.Endpoint == nil {
+		return ""
+	}
+	return *e.Endpoint
 }
 
 // EnvironmentIDFor derives the environment id from its facets (design §3.1:
@@ -276,9 +319,15 @@ type Observation struct {
 // the submitted content, so a replay of the same id aliases the same intent
 // and a replay with different content is refused (ErrIDConflict).
 type SubmitEntry struct {
-	ID             string // client-minted UUIDv7
-	Client         string // client identity binding the idempotency key
-	EnvironmentID  string
+	ID            string // client-minted UUIDv7
+	Client        string // client identity binding the idempotency key
+	EnvironmentID string
+	// PaneID is the block's DURABLE anchor (design §6.1): the pane it ran
+	// in, frontend-minted and therefore UNTRUSTED — an id naming no pane is
+	// refused with ErrUnknownPane rather than stored dangling. Nil means the
+	// entry is attached to no recorded pane, which is what an agent run
+	// outside a terminal and every submit before nocx-rtg0.28 look like.
+	PaneID         *string
 	SessionID      *string
 	Cwd            string
 	Kind           EntryKind
@@ -321,11 +370,94 @@ type StartExecution struct {
 }
 
 // FinishExecution closes one run and the entry with it: the termination
-// reason is the execution's fact, the status is the entry's final one.
+// reason is the execution's fact, the status is the entry's final one, and
+// the remaining three are the ENTRY's terminal facts — what a close learns
+// that only the close can know.
+//
+// Those three are here rather than on SubmitEntry because Submit is
+// write-once by construction: the client-minted id is an idempotency key
+// bound to a digest of the submitted content, so routing a later fact
+// through Submit would change the digest and turn every outbox replay of the
+// original open into ErrIDConflict (nocx-rtg0.23). A close is the second
+// event on one row, never a second submission of one intent.
 type FinishExecution struct {
 	EndedAt           int64
 	TerminationReason TerminationReason
 	Status            EntryStatus
+	// StartedAt fills entries.started_at when the close is what learns it: a
+	// close whose open was lost carries the start the renderer measured. A
+	// row that already knows its start keeps it — the close never overwrites
+	// a fact the ledger already held.
+	StartedAt *int64
+	// DurationMs is the renderer's measured duration. Nil leaves whatever the
+	// row already carries: a close with no measurement erases nothing.
+	DurationMs *int64
+	// Payload is the entry's kind payload (design §3.3) — for a shell entry
+	// the exit code. Nil leaves the column untouched, which is what a close
+	// on a kind with no terminal payload wants.
+	Payload *string
+}
+
+// ShellPayload is the `shell` arm of the kind payload (design §3.3), the
+// durable form of the facts that are shell-specific and therefore NOT
+// top-level entry columns — hoisting them would make every other kind carry
+// nulls.
+//
+// The arm carries exactly one field today. `trusted` and `markers` are in
+// the design's version of this type and are deliberately absent: ADR-0024
+// deleted the `trusted` boolean, its laundering rule and the anonymous
+// marker cycle it was derived from, so neither has a source in the renderer
+// any more. A field the wire could only fill with a guess is worse than one
+// that is not there.
+type ShellPayload struct {
+	Kind     EntryKind `json:"kind"`
+	V        int       `json:"v"`
+	ExitCode *int      `json:"exitCode"`
+}
+
+// ShellPayloadJSON renders the shell arm for storage. The error json.Marshal
+// declares cannot happen for three primitive fields, and a branch no test
+// could reach is worse than none.
+func ShellPayloadJSON(exitCode *int) string {
+	b, _ := json.Marshal(ShellPayload{Kind: EntryShell, V: 1, ExitCode: exitCode})
+	return string(b)
+}
+
+// ShellExitCodeOf reads the exit code back out of an entry payload — the
+// counterpart of ShellPayloadJSON, and the ONE reader of that key, so a
+// recall read never re-derives an exit code from anything else.
+//
+// nil means the row has no exit code, which is a real state and not a zero:
+// a command that is still running has none, an interrupted one has none, and
+// a non-shell entry never had one. The arm is only read when the payload
+// says it is a shell arm, because the key belongs to that arm — the payload
+// is a shared object whose other keys have their own owners (the redaction
+// receipt in redaction.go).
+func ShellExitCodeOf(payload string) (*int, error) {
+	obj, err := decodePayloadObject(payload)
+	if err != nil {
+		return nil, err
+	}
+	raw, ok := obj["kind"]
+	if !ok {
+		return nil, nil
+	}
+	var kind EntryKind
+	if err := json.Unmarshal(raw, &kind); err != nil {
+		return nil, fmt.Errorf("content: entry payload kind is not a string: %w", err)
+	}
+	if kind != EntryShell {
+		return nil, nil
+	}
+	code, ok := obj["exitCode"]
+	if !ok {
+		return nil, nil
+	}
+	var out *int
+	if err := json.Unmarshal(code, &out); err != nil {
+		return nil, fmt.Errorf("content: entry payload exitCode is not a number: %w", err)
+	}
+	return out, nil
 }
 
 // Grant is the authority recorded on a run (ADR-0020 §5): versioned,
@@ -616,7 +748,56 @@ var (
 	ErrFrameSessionMismatch = errors.New("content: frame belongs to another session")
 	ErrRegionOutOfBounds    = errors.New("content: region is out of bounds")
 	ErrNoSuchRun            = errors.New("content: no such run")
+	ErrNoSuchEntry          = errors.New("content: no such entry")
+	// ErrArtifactTooLarge is the ceiling on ONE artifact, and it is input
+	// validation rather than the user's retention preference: the per-command
+	// cap decides how much of an output is worth keeping, this decides what a
+	// caller may make the store hold whatever any setting says.
+	ErrArtifactTooLarge = errors.New("content: artifact exceeds the per-artifact ceiling")
 )
+
+// MaxArtifactBytes is that ceiling. Four times the per-command cap's default,
+// so raising the setting to its own maximum does not walk into it by
+// accident.
+const MaxArtifactBytes = 1 << 20
+
+// CaptureOutput is one body of a frozen block arriving from the renderer
+// (nocx-2f0f, design §4). It is the only write path for what a shell command
+// printed, and it is deliberately not AppendArtifact followed by AppendChunk
+// at the caller: the two have to land in one transaction, and the execution
+// the artifact hangs on is resolved HERE — the renderer knows the entry it
+// recorded and has never seen an execution id, which is a backend integer.
+//
+// EVERY ID IS UNTRUSTED. The artifact id is client-minted, so a capture whose
+// ack was lost is retried: the same id and seq is a replay that writes
+// nothing, and the same id asking for a different artifact is ErrIDConflict.
+type CaptureOutput struct {
+	// EntryID is the row the body belongs to — what history.record answered
+	// with.
+	EntryID string
+	// ArtifactID is client-minted UUIDv7 and the idempotency key.
+	ArtifactID string
+	// MediaType is application/vt for the SGR body a restore draws, or
+	// text/plain for the derived body search and copy read.
+	MediaType MediaType
+	// DerivedFrom names the artifact this one was produced from: the plain
+	// body names the SGR body, and nothing else in this path sets it.
+	DerivedFrom *string
+	// Truncated says the body is not the whole of what was printed — 'cap'
+	// when the middle was dropped at the per-command limit.
+	Truncated *Truncation
+
+	CaptureMethod  CaptureMethod
+	CaptureVersion int
+	TerminalCols   *int
+	TerminalRows   *int
+
+	// Seq is the chunk's position, minted by the CALLER so a retry is a
+	// no-op. It starts at 1, which is where AppendChunk's own numbering
+	// starts.
+	Seq  int
+	Body []byte
+}
 
 // AppendArtifact creates one artifact of an execution, with its capture
 // provenance (ADR-0019 §6). Content arrives via AppendChunk; an artifact is
@@ -665,22 +846,157 @@ type LedgerEntrySummary struct {
 	ID            string
 	IngestSeq     int64
 	EnvironmentID string
+	// Environment is the row EnvironmentID names, resolved by the SAME
+	// statement that read the entry — never a lookup per row. It is what
+	// lets a row say which host it ran on (Environment.Host()); nil when no
+	// environment row carries the id, which is "unknown", never "local".
+	Environment *Environment
+	Cwd         string
+	Kind        EntryKind
+	Intent      string
+	Phase       Phase
+	Status      EntryStatus
+	SubmittedAt int64
+	// The terminal facts, and the column the two sparse readers live in.
+	// They are on the SUMMARY rather than only on LedgerEntry because a page
+	// of recall renders all four — the relative time, the duration, the exit
+	// code and the redaction receipt — and a page that had to fetch them per
+	// row would be the N+1 the environment join exists to prevent.
+	StartedAt  *int64
+	EndedAt    *int64
+	DurationMs *int64
+	// Payload is the entry's kind payload column, raw. Two readers own its
+	// keys and neither is the store: ShellExitCodeOf for the shell arm and
+	// EntryMaskingOf for the redaction receipt (nocx-rtg0.24). The store
+	// hands the column over rather than decoding it, so there is exactly one
+	// decoder per key and it is the one that already exists.
+	Payload string
+}
+
+// Summary is the timeline row of a recall-shaped entry — a projection, never
+// a second read. It exists so the entry a detail read returns and the rows a
+// page returns reach the wire through ONE mapping: two mappers of one shape
+// disagree the first time either grows a field.
+func (e LedgerEntry) Summary() LedgerEntrySummary {
+	return LedgerEntrySummary{
+		ID: e.ID, IngestSeq: e.IngestSeq, EnvironmentID: e.EnvironmentID,
+		Environment: e.Environment, Cwd: e.Cwd, Kind: e.Kind, Intent: e.Intent,
+		Phase: e.Phase, Status: e.Status, SubmittedAt: e.SubmittedAt,
+		StartedAt: e.StartedAt, EndedAt: e.EndedAt, DurationMs: e.DurationMs,
+		Payload: e.Payload,
+	}
+}
+
+// MaxLedgerPageLimit is the ceiling on one page of recall. An unbounded
+// limit is a denial of service the renderer can trigger by accident — one
+// mistyped page size and the store reads years of history into memory.
+const MaxLedgerPageLimit = 200
+
+// LedgerQuery is one recall query over the ledger (design §6.2). Scope is
+// the ladder's rung (§10.6) and EnvironmentID/Cwd are its coordinates: the
+// server answers from the rung it was asked for and never silently widens,
+// because a ladder whose rung you cannot see is a filter. Kind and Status
+// are the closed enums the CHECK constraints name — a value they do not name
+// is a refused request, never an empty result set.
+//
+// The two bounds read DIFFERENT columns, deliberately:
+//
+//   - Before is the paging cursor and reads ingest_seq, the design's total
+//     order (§6.3). The page holds entries strictly earlier in that order.
+//     The interim command_history path pages on its rowid; the two are never
+//     mixed, because a rowid is not this design's order.
+//   - Since is a wall-clock floor and reads submitted_at, the store's own
+//     stamp. It is a question about time, and seq cannot answer one. It is
+//     deliberately not ended_at, which is NULL while a command runs and
+//     would silently drop every running entry from a time window.
+//
+// Text is the recall overlay's search box, and it is deliberately the SAME
+// predicate the interim history path has answered since nocx-ms7v: a
+// case-insensitive substring over the recorded intent, applied WITHIN the
+// rung. Not a pattern and not full-text — a needle containing % or _ matches
+// those characters literally, because the box is a search box and never a
+// grammar the user has to learn. Empty is no filter, which is also what an
+// absent one means on the wire. Full-text search is a different question with
+// a different owner (ledger.search, nocx-rtg0.21); this field exists so the
+// cutover off command_history is like for like rather than a feature.
+type LedgerQuery struct {
+	Scope         Scope
+	EnvironmentID string
 	Cwd           string
 	Kind          EntryKind
-	Intent        string
-	Phase         Phase
 	Status        EntryStatus
-	SubmittedAt   int64
+	// PaneID narrows the page to one pane's blocks — the read design §8's
+	// restore is made of. It is a FILTER and not a rung: the rungs are the
+	// recall ladder the user climbs (everywhere / host / directory) and a
+	// pane is not a step on it, so this composes with whichever rung was
+	// asked for instead of becoming a fourth one. Empty is no filter.
+	PaneID string
+	// BeforeID is the cursor expressed as the previous page's last entry id,
+	// which is the only handle history.query has ever put on the wire
+	// (nocx-rtg0.19). The store resolves it to that row's ingest_seq inside
+	// the same read transaction and pages before it.
+	//
+	// NOTHING IS ORDERED BY IT. The order is ingest_seq and only ingest_seq —
+	// a UUIDv7 sorts by the moment a CLIENT minted it, which is not the
+	// moment the backend accepted it, so ordering by one would silently
+	// reshuffle a user's history. This is a position resolved through a row,
+	// never a comparison.
+	//
+	// An id naming no row is REFUSED rather than answered with the newest
+	// page: a caller paging with a handle the store has evicted must learn
+	// that instead of quietly starting again from the top.
+	BeforeID string
+	Text     string
+	Since    *int64
+	Before   *int64
+	Limit    int
+}
+
+// LedgerPage is one page of recall, newest first, plus the three facts that
+// keep it honest.
+type LedgerPage struct {
+	// Entries is the page. Never nil: no matches is an empty slice.
+	Entries []LedgerEntrySummary
+	// Exhausted is true when no further entries exist beyond this page.
+	Exhausted bool
+	// HasRows reports whether the ledger holds any entry at all, read in the
+	// same transaction as the page. It is what separates "the store answered
+	// and had nothing" from "the store has nothing to answer from": an empty
+	// answer and an unanswerable question must not look alike, and a reader
+	// that cannot tell them apart renders "no history" for "history is off".
+	HasRows bool
+	// Coverage is the store-wide horizon in Unix milliseconds: how far back
+	// this store can still speak for, independent of the rung and of every
+	// filter, because retention is store-wide so the horizon is too. Nil
+	// when there is no horizon to state.
+	//
+	// It has two sources and the honest one depends on eviction. Once this
+	// store has evicted anything the number comes from the retention
+	// watermark — the horizon CANNOT be computed from the rows that remain,
+	// because the rows that carried it are the ones that were deleted
+	// (§5.4). Until then it is the oldest retained entry's ended_at, which
+	// is exact: the survivors are the whole store. Nil while nothing has
+	// completed and nothing has been evicted.
+	Coverage *int64
 }
 
 // LedgerEntry is the recall-shaped read: the entry with every execution and
 // each execution's pinned observation, grant and artifacts.
 type LedgerEntry struct {
-	ID             string
-	IngestSeq      int64
-	Client         string
-	Digest         string
-	EnvironmentID  string
+	ID            string
+	IngestSeq     int64
+	Client        string
+	Digest        string
+	EnvironmentID string
+	// Environment is the resolved environment row (see
+	// LedgerEntrySummary.Environment): the entry's host, kind and profile,
+	// read back in the same statement as the entry. Nil when the
+	// environment row is gone.
+	Environment *Environment
+	// PaneID is the anchor the restore path reads; SessionID beside it is
+	// provenance, and it is nil from the first Open after the backend that
+	// wrote it exited (design §6.1).
+	PaneID         *string
 	SessionID      *string
 	Cwd            string
 	Kind           EntryKind
@@ -757,14 +1073,13 @@ type Artifact struct {
 }
 
 // LedgerRepository is the typed repository for schema v1 (ADR-0019,
-// ADR-0020, design §5.2). The history adapter already writes the
-// command-bearing projection in entries.kind; the legacy command_history
-// table stays only for old files and fixtures; and the write path has no
-// production caller until nocx-rtg0.3.
+// ADR-0020, design §5.2). It is the ONLY writer of the v1 tables; the
+// interim CommandHistoryRepository writes command_history, and nothing may
+// write both. The header above keeps the by-hand list of which methods have
+// a production caller and which do not.
 type LedgerRepository interface {
-	// CreateWorkspace records a narrative scope.
-	CreateWorkspace(ctx context.Context, ws Workspace) error
-	// CreateSession records a restore key under a workspace.
+	// CreateSession records a restore key under a workspace. The workspace
+	// itself belongs to LayoutRepository (layout.go).
 	CreateSession(ctx context.Context, sess Session) error
 	// DeleteSession removes a restore key; entries keep their rows and
 	// lose the reference (ON DELETE SET NULL — an entry outlives its
@@ -778,23 +1093,75 @@ type LedgerRepository interface {
 	// row identity — what an execution pins. Append-only: a later
 	// observation never rewrites an earlier one.
 	RecordObservation(ctx context.Context, obs Observation) (int64, error)
+	// RecordCompleted writes one command that has already finished — the
+	// intent, its single execution and its outcome in ONE transaction, with
+	// the entry id minted by the backend. It is what history.record lands
+	// through since nocx-rtg0.19 replaced command_history, and it exists
+	// beside Submit rather than instead of it because the two answer
+	// different questions: Submit opens a lifecycle the renderer will drive
+	// to a close, this records one that is already over.
+	RecordCompleted(ctx context.Context, in CompletedCommand) (string, error)
 	// Submit accepts an intent as an open entry and returns the
 	// backend-assigned ingest_seq. Two entries in the same millisecond
 	// still get distinct, ordered sequences — wall time is not a key.
 	// Idempotent for (id, client, digest): a replay returns the original
 	// row; the same id with different content is ErrIDConflict.
 	Submit(ctx context.Context, in SubmitEntry) (SubmitResult, error)
-	// Entry is the recall read: the entry, its executions, each
+	// Entry is the recall read: the entry, its resolved environment (which
+	// is how the row says what host it ran on), its executions, each
 	// execution's pinned observation and grant, and its artifacts
 	// (metadata only — no chunk bodies). Nil when no row carries id.
 	Entry(ctx context.Context, id string) (*LedgerEntry, error)
 	// ListEntries returns the limit newest entries, newest first, ordered
-	// by ingest_seq — commit order, never by wall clock.
+	// by ingest_seq — commit order, never by wall clock. Each row carries
+	// its resolved environment, joined in the one statement: the page costs
+	// a single query however many rows and however many hosts it spans.
 	ListEntries(ctx context.Context, limit int) ([]LedgerEntrySummary, error)
+	// QueryEntries is the recall read and the ONE ordering implementation
+	// (design §6.2): one page of the rung the caller asked for, newest first
+	// by ingest_seq, with the page's exhaustion, whether the ledger holds
+	// any row at all, and the store-wide retention horizon — all read in one
+	// transaction, so the page and the facts about it cannot disagree about
+	// the store's state. Every row carries its resolved environment from the
+	// same statement. A request the closed enums cannot express, or a limit
+	// outside [1, MaxLedgerPageLimit], is refused rather than answered with
+	// an empty page that reads as "nothing ever matched".
+	QueryEntries(ctx context.Context, q LedgerQuery) (LedgerPage, error)
+	// RewriteRedaction replaces the redaction segment at span in the
+	// entry's stored intent with reference (a vault reference), removing the
+	// segment from the entry's receipt (EntryMasking, in entries.payload).
+	// The row is addressed by its client-minted UUIDv7 — the ledger's own
+	// key, which is what makes this method exist rather than widening
+	// CommandHistoryRepository's rowid-keyed one.
+	//
+	// Idempotent: a span that is not among the row's CURRENT redactions is a
+	// no-op, so a retried save after a lost response cannot replace text at
+	// stale offsets. Returns ErrNotFound when no entry carries id, and an
+	// error when the span no longer fits the stored intent — the row changed
+	// shape underneath the caller, and refusing is the only answer that is
+	// not corruption.
+	RewriteRedaction(ctx context.Context, entryID string, span Redaction, reference string) error
 	// DeleteEntry removes an entry; edges referencing it and its
 	// executions (and their artifacts, chunks and grant) cascade. A pin
 	// protects against background eviction, not against this.
 	DeleteEntry(ctx context.Context, id string) error
+	// EvictEntries removes the oldest completed entries retention no longer
+	// covers — oldest-first by ingest_seq, the ledger's only total order —
+	// and records what it removed in the retention watermark, in ONE
+	// transaction. An entry holding a pinned artifact is exempt; an entry
+	// that has not ended is unfinished rather than old and is never a
+	// candidate. Max bounds the pass, because eviction shares the writer
+	// goroutine with every other mutation.
+	//
+	// The deletion and the watermark commit together or not at all: a
+	// deletion without its watermark would silently narrow what the store
+	// can answer while it went on claiming full coverage.
+	EvictEntries(ctx context.Context, req EvictionRequest) (EvictionResult, error)
+	// Watermark reports what this store has ever lost to eviction: the
+	// running count and the horizon its knowledge is complete after. Both
+	// are read from the watermark alone — that they are underivable from
+	// the surviving rows is the reason it exists.
+	Watermark(ctx context.Context) (RetentionWatermark, error)
 	// StartExecution begins one run, pinning the environment observation
 	// current at this moment, and returns the execution's row identity.
 	// Fails when the entry's environment has no observation yet — there
@@ -807,9 +1174,21 @@ type LedgerRepository interface {
 	// AppendArtifact creates one artifact of an execution (never a BLOB:
 	// content arrives chunked).
 	AppendArtifact(ctx context.Context, in AppendArtifact) (string, error)
+	// CaptureOutput records one body of a frozen block: the artifact if it
+	// is not there yet and the chunk at its seq, in one transaction against
+	// the entry's own execution. Idempotent on (artifact id, seq).
+	//
+	// REFUSING TO STORE IS NOT AN ERROR, and the answer says which happened.
+	// Output retention off, or an entry marked sensitive, returns
+	// (false, nil): the block keeps its row and keeps no body, the same shape
+	// RecordCompleted uses for history.enabled. An error there would surface
+	// in front of somebody who turned the setting off deliberately, and a
+	// bare nil would leave the caller sending the rest of a body nobody is
+	// storing.
+	CaptureOutput(ctx context.Context, in CaptureOutput) (bool, error)
 	// AppendChunk appends one chunk to an artifact and maintains its
 	// byte_len (logical content bytes — the retention budget's unit).
-	AppendChunk(ctx context.Context, artifactID string, body []byte) error
+	AppendChunk(ctx context.Context, artifactID string, seq int, body []byte) error
 	// Artifact returns one artifact with its chunk bodies, or nil when no
 	// artifact carries id.
 	Artifact(ctx context.Context, id string) (*Artifact, error)

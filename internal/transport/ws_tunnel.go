@@ -1,7 +1,7 @@
 package transport
 
 // tunnel.* — local port forwarding (spec §7, nocx-8gix). The transport owns
-// the RPC surface and the tab-scoped lifetime; the forwarding itself lives in
+// the RPC surface and the pane-scoped lifetime; the forwarding itself lives in
 // internal/tunnel, and the SSH connection lease in internal/ssh.
 
 import (
@@ -39,7 +39,7 @@ type tunnelOpenParams struct {
 	// Destination is the remote target, host:port, dialed over the SSH
 	// connection.
 	Destination string `json:"destination"`
-	// Scope is the owner label the renderer attaches (tab or session id).
+	// Scope is the owner label the renderer attaches (pane or session id).
 	Scope string `json:"scope,omitempty"`
 }
 
@@ -111,8 +111,8 @@ type tunnelHandlers struct {
 
 // handleTunnelOpen establishes one local forward and reports the record.
 //
-//	--> {"jsonrpc":"2.0","id":1,"method":"tunnel.open","params":{"profileId":"ssh:p1:1","port":0,"destination":"db.internal:5432","scope":"tab:1"}}
-//	<-- {"jsonrpc":"2.0","id":1,"result":{"id":"ab12…","direction":"local","requestedBind":{"host":"127.0.0.1","port":0},"actualBind":{"host":"127.0.0.1","port":43210},"destination":"db.internal:5432","scope":"tab:1","state":"running","stopReason":null,"error":null}}
+//	--> {"jsonrpc":"2.0","id":1,"method":"tunnel.open","params":{"profileId":"ssh:p1:1","port":0,"destination":"db.internal:5432","scope":"pane:1"}}
+//	<-- {"jsonrpc":"2.0","id":1,"result":{"id":"ab12…","direction":"local","requestedBind":{"host":"127.0.0.1","port":0},"actualBind":{"host":"127.0.0.1","port":43210},"destination":"db.internal:5432","scope":"pane:1","state":"running","stopReason":null,"error":null}}
 //
 // The bind happens before this returns (spec §7.1): EADDRINUSE, an invalid
 // address and a permission error are synchronous, user-visible failures.

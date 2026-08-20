@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 // sidebar-width — the shell's width policy for the sidebar panel (nocx-qmcu):
-// one clamped number, applied to the panel as a CSS variable, persisted
-// through the settings seam by whoever owns that seam. The controller is the
-// single owner of the value; the DOM and the subscribers are projections.
+// one clamped WHOLE number of pixels, applied to the panel as a CSS variable
+// and persisted into the UI-state document by whoever owns that seam. The
+// controller is the single owner of the value; the DOM and the subscribers
+// are projections.
 import { describe, expect, it, vi } from 'vitest'
 import {
-  SIDEBAR_WIDTH_KEY,
   SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_MIN,
   SIDEBAR_WIDTH_MAX,
@@ -18,11 +18,21 @@ import {
 describe('bounds', () => {
   it('the minimum leaves room for a name; the maximum keeps the panes', () => {
     // The numbers are the contract — see sidebar-width.ts for the measured
-    // reasoning. If they move, the comment and the Go NumberSpec move too.
+    // reasoning. If they move, the comment and internal/uistate move too.
     expect(SIDEBAR_WIDTH_MIN).toBe(200)
     expect(SIDEBAR_WIDTH_MAX).toBe(640)
     expect(SIDEBAR_WIDTH_DEFAULT).toBe(240)
-    expect(SIDEBAR_WIDTH_KEY).toBe('sidebar.width')
+  })
+
+  it('yields a WHOLE number of pixels, whatever the pointer said', () => {
+    // A drag reports a fractional position, and storing it verbatim is what
+    // put "206.3828125 px" on a Settings page (nocx-mqie.3). The rounding
+    // belongs at the clamp because that is where the width is decided: the
+    // CSS variable, the handle's aria-valuenow and the stored value must
+    // all be the same number.
+    expect(clampSidebarWidth(206.3828125)).toBe(206)
+    expect(clampSidebarWidth(206.75)).toBe(207)
+    expect(Number.isInteger(clampSidebarWidth(319.5))).toBe(true)
   })
 
   it('clamps below the minimum and above the maximum', () => {
@@ -102,14 +112,14 @@ describe('createSidebarWidthController', () => {
   it('a throwing persist cannot break the drag or lose the applied width', () => {
     const panel = document.createElement('div')
     const ctrl = createSidebarWidthController(panel, 240, () => {
-      throw new Error('settings store is on fire')
+      throw new Error('the ui-state store is on fire')
     })
     expect(() => ctrl.apply(400, { persist: true })).not.toThrow()
     expect(ctrl.width).toBe(400)
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('400px')
   })
 
-  it('reports dragging state so the settings observer stands down', () => {
+  it('reports dragging state so nothing clobbers a live drag', () => {
     const panel = document.createElement('div')
     const ctrl = createSidebarWidthController(panel, 240)
     expect(ctrl.isDragging()).toBe(false)
@@ -121,11 +131,11 @@ describe('createSidebarWidthController', () => {
 })
 
 describe('persistSidebarWidth', () => {
-  it('writes the key and stays silent when the write succeeds', async () => {
+  it('writes the width and stays silent when the write succeeds', async () => {
     const onFailure = vi.fn()
-    const setSetting = vi.fn().mockResolvedValue({ ok: true })
-    persistSidebarWidth(setSetting, onFailure, 320)
-    expect(setSetting).toHaveBeenCalledWith('sidebar.width', 320)
+    const save = vi.fn().mockResolvedValue({ ok: true })
+    persistSidebarWidth(save, onFailure, 320)
+    expect(save).toHaveBeenCalledWith(320)
     await vi.waitFor(() => expect(onFailure).not.toHaveBeenCalled())
   })
 
@@ -135,13 +145,13 @@ describe('persistSidebarWidth', () => {
     const pending = new Promise<never>((_, reject) => {
       rejectWrite = reject
     })
-    const setSetting = vi.fn(() => pending)
+    const save = vi.fn(() => pending)
 
     // Fire-and-forget: the caller (the controller's commit) must never see
     // the rejection — the width is already applied and stays on screen.
-    expect(() => persistSidebarWidth(setSetting, onFailure, 400)).not.toThrow()
+    expect(() => persistSidebarWidth(save, onFailure, 400)).not.toThrow()
 
-    rejectWrite(new Error('settings store is down'))
+    rejectWrite(new Error('the ui-state store is down'))
     await vi.waitFor(() => expect(onFailure).toHaveBeenCalledTimes(1))
     expect(onFailure).toHaveBeenCalledWith(
       'Could not save the sidebar width — it will not survive a restart',
@@ -149,10 +159,10 @@ describe('persistSidebarWidth', () => {
   })
   it('a synchronous throw from the writer is caught and surfaced too', () => {
     const onFailure = vi.fn()
-    const setSetting = vi.fn(() => {
+    const save = vi.fn(() => {
       throw new Error('transport died synchronously')
     })
-    expect(() => persistSidebarWidth(setSetting, onFailure, 480)).not.toThrow()
+    expect(() => persistSidebarWidth(save, onFailure, 480)).not.toThrow()
     expect(onFailure).toHaveBeenCalledTimes(1)
     expect(onFailure).toHaveBeenCalledWith(
       'Could not save the sidebar width — it will not survive a restart',

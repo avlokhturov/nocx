@@ -63,7 +63,7 @@ func (f *fakeAgentService) FinishAgentRun(_ context.Context, _ int64, in content
 	return nil
 }
 
-func (f *fakeAgentService) AppendRunDelta(_ context.Context, _ string, body []byte) error {
+func (f *fakeAgentService) AppendRunDelta(_ context.Context, _ string, _ int, body []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.appended = append(f.appended, string(body))

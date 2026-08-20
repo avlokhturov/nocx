@@ -12,20 +12,6 @@
 export { createBannerState, type BannerState } from './banner-model'
 export { createProfileLists, setProfileLists, type ProfileLists } from './profiles-model'
 export { createSidebarState, type SidebarState } from './sidebar-model'
-export {
-  addTab,
-  activateTab,
-  closeTab,
-  createTabModel,
-  reorderTab,
-  updateTabTitle,
-  updateTabActivity,
-  updateTabAgentStatus,
-  type TabData,
-  type TabDescriptor,
-  type TabModel,
-} from './tab-model'
-
 // ── Settings (re‑exported from settings-domain, q.v.) ─────────────────────
 
 export {

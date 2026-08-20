@@ -14,14 +14,23 @@ type Policy struct {
 	enabled       bool
 	retentionDays int
 	outputEnabled bool
+	outputCap     int
 }
 
 // NewPolicy returns the default policy: history kept, no age limit, output
-// retained. Output capture is a later epic (nocx-de7); the flag is the seam
-// that capture path will gate on.
+// retained, and the per-command cap at its setting's default. The cap is
+// stated here as well as in settings because a store opened without a
+// registry — a test, a migration tool — must still bound what one command
+// can spend.
 func NewPolicy() *Policy {
-	return &Policy{enabled: true, outputEnabled: true}
+	return &Policy{enabled: true, outputEnabled: true, outputCap: DefaultOutputCapBytes}
 }
+
+// DefaultOutputCapBytes is what one command's body may be worth until the
+// user says otherwise: 256 KiB of head and tail together, which is the
+// default of settings.HistoryOutputCapKB expressed in the unit the code
+// works in.
+const DefaultOutputCapBytes = 256 << 10
 
 // SetEnabled flips "keep history at all". When off, Add records nothing.
 func (p *Policy) SetEnabled(v bool) {
@@ -51,9 +60,9 @@ func (p *Policy) RetentionDays() int {
 	return p.retentionDays
 }
 
-// SetOutputEnabled flips whether command output is retained. Capture is not
-// built yet; this is the gate the artifact path (nocx-de7, schema rtg0.2)
-// will consult.
+// SetOutputEnabled flips whether command output is retained. It is the gate
+// CaptureOutput consults: off means the command keeps its row and keeps no
+// body, and the ack says so rather than failing.
 func (p *Policy) SetOutputEnabled(v bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -65,4 +74,30 @@ func (p *Policy) OutputEnabled() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.outputEnabled
+}
+
+// SetOutputCapBytes sets how much of ONE command's output is kept. Zero or
+// less means the default: a cap of nothing would be output retention off
+// wearing another switch's clothes, and there is already a switch for that.
+func (p *Policy) SetOutputCapBytes(v int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if v <= 0 {
+		v = DefaultOutputCapBytes
+	}
+	p.outputCap = v
+}
+
+// OutputCapBytes reports the per-command cap. It is the RENDERER that applies
+// it — it holds the rows and can cut on a character boundary — and this is
+// what the renderer is told, through settings; the store's own ceiling
+// (MaxArtifactBytes) is a different number for a different question and is
+// not this.
+func (p *Policy) OutputCapBytes() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.outputCap <= 0 {
+		return DefaultOutputCapBytes
+	}
+	return p.outputCap
 }

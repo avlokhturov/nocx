@@ -12,17 +12,23 @@ import (
 // Read policy: reads participate in the content gate — the store is one
 // database and history.record writes rows the query reads.
 type ContentService interface {
-	// QueryHistory serves history.query: one page of the recall ladder.
-	QueryHistory(ctx context.Context, scope content.Scope, cwd, host string, limit int, before *int64, text string) (content.HistoryPage, error)
-	// RecordCommand stores one completed command's facts (history.record)
-	// and returns the backend-assigned row id. When the live History
-	// policy is off, Add succeeds and returns (0, nil) — a command runs
-	// and no row appears, never an error.
-	RecordCommand(ctx context.Context, rec content.CommandRecord) (int64, error)
-	// RewriteRedaction replaces one row's redaction segment with a vault
-	// reference — the capture-save link rewrite. The row is addressed by
-	// its stable id; a row the retention sweep removed is ErrNotFound.
-	RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error
+	// QueryHistory serves history.query: one page of the recall ladder,
+	// answered FROM THE LEDGER since nocx-rtg0.19 retired command_history.
+	// The rung, its coordinates and the cursor arrive already expressed as
+	// the ledger's own query — the transport owns the translation, because
+	// it owns the wire's vocabulary and this layer owns none of it.
+	QueryHistory(ctx context.Context, q content.LedgerQuery) (content.LedgerPage, error)
+	// RecordCommand stores one completed command (history.record) and
+	// returns the entry id the backend minted for it. When the live History
+	// policy is off it succeeds and returns ("", nil) — a command runs and
+	// no row appears, never an error, and the empty id says there is
+	// nothing to reference.
+	RecordCommand(ctx context.Context, in content.CompletedCommand) (string, error)
+	// The capture-save link rewrite is NOT here. It is one behaviour with
+	// one seam — CaptureSaveService.RewriteRedaction, which is the only
+	// thing secrets.captureSave ever reached — and the copy that used to sit
+	// on this interface had no caller at all (AD-8: a second surface for one
+	// behaviour goes out of step with the first the moment either changes).
 }
 
 // ContentOperation is the typed operation for the content domain. Its gate
@@ -48,23 +54,16 @@ type contentService struct {
 	db    content.ContentDB
 }
 
-func (s *contentService) QueryHistory(ctx context.Context, scope content.Scope, cwd, host string, limit int, before *int64, text string) (content.HistoryPage, error) {
+func (s *contentService) QueryHistory(ctx context.Context, q content.LedgerQuery) (content.LedgerPage, error) {
 	if err := s.guard.check(); err != nil {
-		return content.HistoryPage{}, err
+		return content.LedgerPage{}, err
 	}
-	return s.db.CommandHistory().Query(ctx, scope, cwd, host, limit, before, text)
+	return s.db.Ledger().QueryEntries(ctx, q)
 }
 
-func (s *contentService) RecordCommand(ctx context.Context, rec content.CommandRecord) (int64, error) {
+func (s *contentService) RecordCommand(ctx context.Context, in content.CompletedCommand) (string, error) {
 	if err := s.guard.check(); err != nil {
-		return 0, err
+		return "", err
 	}
-	return s.db.CommandHistory().Add(ctx, rec)
-}
-
-func (s *contentService) RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error {
-	if err := s.guard.check(); err != nil {
-		return err
-	}
-	return s.db.CommandHistory().RewriteRedaction(ctx, id, span, reference)
+	return s.db.Ledger().RecordCompleted(ctx, in)
 }

@@ -134,6 +134,27 @@
   color: var(--color-text);
 }
 
+/* ── Workspace — a full-height coloured badge in the tab strip ─────────
+   The feature supplies `--ws-colour`; the kit owns the control's paint and
+   keeps its hit area at the full 38px strip height. Mixing with chrome keeps
+   the foreground readable across both dark and light themes. */
+.ui-button[data-variant='workspace'] {
+  align-self: stretch;
+  height: 100%;
+  justify-content: flex-start;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--ws-colour) 48%, var(--color-chrome));
+  border: none;
+  border-radius: 7px;
+  color: var(--color-text);
+  font: inherit;
+}
+
+.ui-button[data-variant='workspace']:hover {
+  background: color-mix(in srgb, var(--ws-colour) 64%, var(--color-chrome));
+  color: var(--color-text);
+}
+
 /* ── Selected ────────────────────────────────────────────────────────────
    Two registers, one per variant family:
 
@@ -172,6 +193,21 @@
   color: var(--color-canvas);
 }
 
+/* Workspace keeps its own colour when it is the current navigation choice;
+   the general selected rule above must not turn it into an accent button. */
+.ui-button[data-variant='workspace'][aria-selected='true'] {
+  background: color-mix(in srgb, var(--ws-colour) 58%, var(--color-chrome));
+  color: var(--color-text);
+  font-weight: 600;
+  box-shadow: inset 0 -2px var(--ws-colour);
+  border-radius: 7px 0 0 7px;
+}
+
+.ui-button[data-variant='workspace'][aria-selected='true']:hover {
+  background: color-mix(in srgb, var(--ws-colour) 64%, var(--color-chrome));
+  color: var(--color-text);
+}
+
 .ui-button[data-variant='ghost'][aria-selected='true'] {
   position: relative;
   background: var(--color-tab-active);
@@ -194,4 +230,22 @@
   bottom: 0;
   width: 2px;
   background: var(--color-accent);
+}
+
+/* ── dashed — the empty slot where one more is made ──────────────────────
+
+   An outline that is not yet filled. It sits beside real things — cards, the
+   columns of a board — and must not be counted among them, which a solid
+   border or a filled ground would make it. Dashed is the one convention that
+   reads as "the next one goes here" without pretending to be a one. */
+
+.ui-button[data-variant='dashed'] {
+  border: 1px dashed var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.ui-button[data-variant='dashed']:hover:not(:disabled) {
+  border-color: var(--color-text-dim);
+  color: var(--color-text);
 }

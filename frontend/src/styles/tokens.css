@@ -67,11 +67,19 @@ html {
 
   /* ── Shell layout (§2.5) ────────────────────────────────────────────
      There is deliberately no --sidebar-width here: the sidebar's width is
-     the `sidebar.width` setting, applied inline as --sidebar-width by
-     frontend/src/sidebar-width.ts (nocx-qmcu). A second static declaration
+     UI state in the uistate document (ADR-0033), applied inline as
+     --sidebar-width by frontend/src/sidebar-width.ts. A second declaration
      of the same number would be the dead twin this token used to be. */
   --activity-bar-width: 48px;
   --tab-height: 38px;
+
+  /* A command block's BODY padding. Named here because two surfaces wear it:
+     the frozen `.cmd-output` and the live region that becomes it. They must
+     agree — the pane's height changes at the moment one replaces the other,
+     and the scrollback hangs from its bottom edge, so a disagreement is a
+     jump every time a command ends. */
+  --cmd-output-pad-top: 2px;
+  --cmd-output-pad-bottom: 6px;
 
   /* Space the tab bar must leave clear on its leading edge for window controls
      the host draws over it. Zero everywhere by default — only macOS puts its
@@ -81,6 +89,18 @@ html {
   --titlebar-inset-start: 0px;
 }
 
+/* 78px was calibrated for `mac.TitleBarHiddenInset()`, which pushes the traffic
+   lights inwards. 4c430dcf dropped it for `mac.TitleBarHidden()` — the inset
+   variant's NSToolbar left a minimised window unrestorable (nocx-dqg) — and
+   touched only main.go; its own message says "only the extra inset of the
+   traffic lights is lost". The lights moved left and the room reserved for them
+   did not, so the strip kept paying for a title bar the app had stopped asking
+   for (nocx-gm4fj).
+
+   66px is the geometry the app actually draws: the close button starts at 7px,
+   the three sit on a 20px pitch and are 12px across, so the green one ends at
+   59px. The remaining 7px, plus the 4px `.tabstrip-lead` adds of its own, is
+   the gutter between the last light and the first control. */
 :root[data-platform='darwin'] {
-  --titlebar-inset-start: 78px;
+  --titlebar-inset-start: 66px;
 }

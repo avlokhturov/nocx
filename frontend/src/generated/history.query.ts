@@ -26,9 +26,9 @@ export interface HistoryQuery {
    */
   exhausted: boolean
   /**
-   * Where the rows came from. 'session' means the in-memory ledger only — the persistent store is unavailable or empty, and the overlay must say so rather than presenting one session as all history. 'store' means the persistent store answered. Distinguishing them is the same rule as unavailable-never-collapses-into-unresolved: an empty answer and an unanswerable question must not look alike.
+   * Where the rows came from — three states, because two of them used to be one and the overlay could not tell a terminal that has forgotten nothing from a terminal that is not keeping anything. 'store' means the persistent store answered, with or without matches on this rung. 'session' means the store answered and holds no rows at all, so what the overlay shows is the in-memory ledger and it must say 'this session only' rather than presenting one session as all history. 'unavailable' means there is no store to answer from: durable history is not running, and the reason is on history.status — the ONE place the product says so (contracts/history.status.schema.json). This field carries the same fact on the read path so the recall panel needs no second call; it does not own it. Distinguishing all three is the rule the store's own HasRows was written for: an empty answer and an unanswerable question must not look alike.
    */
-  source: 'store' | 'session'
+  source: 'store' | 'session' | 'unavailable'
   /**
    * How far back the answer's source can see: the oldest retained entry's ended_at in Unix milliseconds, store-wide — independent of the rung and of the text filter, because retention is store-wide. With retention set, a search can only see part of history; the overlay renders this line so a partial answer is not presented as the whole one. Null when the source holds no completed rows (nothing to state a horizon for).
    */
@@ -80,9 +80,12 @@ export interface HistoryEntry {
    */
   redactions?: Redaction[]
 }
+/**
+ * One structured redaction segment. Declared once, by the ledger's own contract — this table and that one hold the same product object masked by the same owner, and two declarations of it would drift the moment either changed. When nocx-rtg0.19 removes command_history, the declaration is already where it survives.
+ */
 export interface Redaction {
   /**
-   * The closed vocabulary of internal/secrets: openai, github-pat, slack, aws-access-key, gitlab, jwt, private-key, url-userinfo, db-connstring, auth-header, env-assignment, high-entropy.
+   * The closed vocabulary of internal/secrets.
    */
   kind:
     | 'openai'
@@ -98,19 +101,19 @@ export interface Redaction {
     | 'env-assignment'
     | 'high-entropy'
   /**
-   * Inclusive UTF-16 code-unit offset into command.
+   * Inclusive UTF-16 code-unit offset into the recorded text.
    */
   start: number
   /**
-   * Exclusive UTF-16 code-unit offset into command.
+   * Exclusive UTF-16 code-unit offset into the recorded text.
    */
   end: number
   /**
-   * The head of the value the mask shows (the first 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   * The head of the value the mask shows (the first 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked text.
    */
   prefix: string
   /**
-   * The tail of the value the mask shows (the last 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked command.
+   * The tail of the value the mask shows (the last 4 characters), or "" when the mask shows no material. Exactly the text already visible in the masked text.
    */
   suffix: string
 }
