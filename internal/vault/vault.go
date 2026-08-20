@@ -87,6 +87,14 @@ type Vault struct {
 	// of the coalescing seam: every caller that finds it non-nil joins the
 	// ask instead of raising a second (unlock.go).
 	unlockPending *unlockPrompt
+	// beforeResolve runs immediately before an unlock prompt's answer is
+	// handed to its waiters. It is the one instant at which "no waiter is
+	// ever released while this prompt is still the pending one" can be
+	// falsified, so it is where the test asserts it — the alternative is
+	// racing the scheduler with two real requests and calling a green run
+	// proof. Nothing outside this package's tests sets it; it is nil in
+	// every shipped build.
+	beforeResolve func()
 	// promptCtx is the vault-owned lifetime of every unlock ask: cancelled by
 	// Close, so a renderer that vanished mid-prompt cannot keep an ask (and
 	// its waiters) alive past the vault's own end.

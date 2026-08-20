@@ -112,22 +112,41 @@ func (v *Vault) EnsureUnsealed(ctx context.Context, reason string) error {
 
 	// One prompt per pending state. The snapshot of the waiter set happens
 	// under the vault lock, so every caller that joined before this point is
-	// named in the dialog; the ask itself runs outside any lock. The
-	// resolution is fanned out BEFORE the pending state is cleared: a caller
-	// arriving mid-resolution joins the prompt and immediately receives the
-	// answer, instead of racing it and raising a second prompt. Only a
-	// caller that arrives after the prompt is fully over starts a new one.
+	// named in the dialog; the ask itself runs outside any lock.
+	//
+	// THE PENDING STATE IS RETIRED BEFORE THE ANSWER IS FANNED OUT, and the
+	// order used to be the other way round. `resolve` releases every waiter,
+	// so the caller that asked is back in its own code — and able to make a
+	// second request — while `unlockPending` still pointed at a prompt that
+	// was already over. That second request joined the dead prompt and was
+	// handed the FIRST one's answer without anything being raised: a person
+	// who dismissed the unlock and immediately did something else that needs
+	// the vault got silence, which is the defect
+	// TestEnsureUnsealed_SecondUserActionRaisesFreshPrompt exists to catch.
+	// It reproduces under load at count=400 and reported on CI as a 5.00 s
+	// "the second prompt was never raised".
+	//
+	// Retiring first keeps what the old order was protecting. A caller that
+	// arrives while the ask is still up still finds the pending prompt and
+	// joins it, which is the case that must not raise a second dialog. A
+	// caller that arrives after `RequestUnlock` has returned is a new user
+	// action against a vault that is still sealed, and it SHOULD raise a
+	// fresh prompt — telling those two apart is what the pointer is for, and
+	// leaving it set past the resolution is what stopped it doing that.
 	go func() {
 		v.mu.Lock()
 		reason := p.reason()
 		v.mu.Unlock()
 		err := req.RequestUnlock(pctx, reason)
-		p.resolve(err)
 		v.mu.Lock()
 		if v.unlockPending == p {
 			v.unlockPending = nil
 		}
 		v.mu.Unlock()
+		if h := v.beforeResolve; h != nil {
+			h()
+		}
+		p.resolve(err)
 	}()
 
 	return p.wait(ctx)
