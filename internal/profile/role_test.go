@@ -123,7 +123,7 @@ func TestResolveRole_ReturnsTheAssignedPair(t *testing.T) {
 	assignments := []RoleAssignment{
 		{Role: RoleAnswering, EndpointID: "endpoint:custom:local:222", Model: "qwen3"},
 	}
-	ep, model, err := ResolveRole(RoleAnswering, assignments, eps)
+	ep, model, err := ResolveRole(RoleAnswering, assignments, DefaultModel{}, eps)
 	if err != nil {
 		t.Fatalf("ResolveRole: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestResolveRole_ReturnsTheAssignedPair(t *testing.T) {
 // visible refusal, never a silent fallback to another model — even when an
 // unassigned endpoint with models exists right there.
 func TestResolveRole_UnassignedIsARefusalNeverAFallback(t *testing.T) {
-	_, _, err := ResolveRole(RoleAnswering, nil, validRoleEndpoints())
+	_, _, err := ResolveRole(RoleAnswering, nil, DefaultModel{}, validRoleEndpoints())
 	if !errors.Is(err, ErrRoleUnassigned) {
 		t.Fatalf("ResolveRole without an assignment = %v, want ErrRoleUnassigned", err)
 	}
@@ -155,7 +155,7 @@ func TestResolveRole_DeletedEndpointIsARefusalThatNamesIt(t *testing.T) {
 		{Role: RoleAnswering, EndpointID: "endpoint:custom:openai:111", Model: "gpt-4o"},
 	}
 	// The assigned endpoint is gone from the store; another endpoint remains.
-	_, _, err := ResolveRole(RoleAnswering, assignments, validRoleEndpoints()[1:])
+	_, _, err := ResolveRole(RoleAnswering, assignments, DefaultModel{}, validRoleEndpoints()[1:])
 	if !errors.Is(err, ErrRoleEndpointGone) {
 		t.Fatalf("ResolveRole with a deleted endpoint = %v, want ErrRoleEndpointGone", err)
 	}
@@ -177,7 +177,7 @@ func TestResolveRole_RemovedModelIsARefusalThatNamesIt(t *testing.T) {
 		// be silently substituted.
 		Models: []EndpointModel{{Name: "gpt-4o-mini"}},
 	}}
-	_, _, err := ResolveRole(RoleAnswering, assignments, eps)
+	_, _, err := ResolveRole(RoleAnswering, assignments, DefaultModel{}, eps)
 	if !errors.Is(err, ErrRoleModelGone) {
 		t.Fatalf("ResolveRole with a removed model = %v, want ErrRoleModelGone", err)
 	}
@@ -187,7 +187,7 @@ func TestResolveRole_RemovedModelIsARefusalThatNamesIt(t *testing.T) {
 }
 
 func TestResolveRole_UnknownRoleIsARefusal(t *testing.T) {
-	_, _, err := ResolveRole("invented", nil, nil)
+	_, _, err := ResolveRole("invented", nil, DefaultModel{}, nil)
 	if !errors.Is(err, ErrRoleUnknown) {
 		t.Fatalf("ResolveRole(invented) = %v, want ErrRoleUnknown", err)
 	}
@@ -218,5 +218,148 @@ func TestRoleRepository_SurvivesReload(t *testing.T) {
 	got, err := again.LoadRoleAssignments()
 	if err != nil || len(got) != 1 || got[0].Role != RoleClassifier {
 		t.Fatalf("reloaded assignments = %+v (err %v), want the stored row", got, err)
+	}
+}
+
+// The default (bead nocx-rikz5): ONE (endpoint, model) pair a person names
+// once, which every role WITHOUT its own assignment resolves through. It is
+// an input to the one resolver, not a second resolution path, and it is
+// legal only because the person authored it — "the first model of the first
+// endpoint" is the fallback nocx-e6kn2 forbids.
+func TestResolveRole_FallsBackToTheDefault(t *testing.T) {
+	eps := []Endpoint{{ID: "e1", Name: "openrouter", Models: []EndpointModel{{Name: "m-a"}, {Name: "m-b"}}}}
+	def := DefaultModel{EndpointID: "e1", Model: "m-a"}
+
+	// No assignment at all: the default answers.
+	ep, model, err := ResolveRole(RoleAnswering, nil, def, eps)
+	if err != nil {
+		t.Fatalf("resolve with only a default: %v", err)
+	}
+	if ep.ID != "e1" || model != "m-a" {
+		t.Fatalf("resolved to %q/%q, want e1/m-a", ep.ID, model)
+	}
+
+	// An explicit assignment OUTRANKS the default — the override is the point.
+	as := []RoleAssignment{{Role: RoleAnswering, EndpointID: "e1", Model: "m-b"}}
+	_, model, err = ResolveRole(RoleAnswering, as, def, eps)
+	if err != nil {
+		t.Fatalf("resolve with an assignment: %v", err)
+	}
+	if model != "m-b" {
+		t.Fatalf("resolved to %q, want the role's own m-b", model)
+	}
+}
+
+func TestResolveRole_NoDefaultAndNoAssignmentStaysUnassigned(t *testing.T) {
+	eps := []Endpoint{{ID: "e1", Name: "openrouter", Models: []EndpointModel{{Name: "m-a"}}}}
+	_, _, err := ResolveRole(RoleAnswering, nil, DefaultModel{}, eps)
+	if !errors.Is(err, ErrRoleUnassigned) {
+		t.Fatalf("err = %v, want ErrRoleUnassigned", err)
+	}
+}
+
+func TestResolveRole_ADefaultPointingAtNothingRefusesRatherThanRepairs(t *testing.T) {
+	eps := []Endpoint{{ID: "e1", Name: "openrouter", Models: []EndpointModel{{Name: "m-a"}}}}
+
+	// A default naming an endpoint that is not there refuses. This is the
+	// RACE path, not the ordinary one: DeleteEndpoint clears the default in
+	// the same write, so in the ordinary case there is no default left to
+	// dangle. Kept because clearing is the tidy path, never the safety
+	// net — another process may delete between load and resolve.
+	gone := DefaultModel{EndpointID: "deleted", Model: "m-a"}
+	if _, _, err := ResolveRole(RoleAnswering, nil, gone, eps); !errors.Is(err, ErrRoleEndpointGone) {
+		t.Fatalf("deleted endpoint: err = %v, want ErrRoleEndpointGone", err)
+	}
+
+	stale := DefaultModel{EndpointID: "e1", Model: "m-removed"}
+	if _, _, err := ResolveRole(RoleAnswering, nil, stale, eps); !errors.Is(err, ErrRoleModelGone) {
+		t.Fatalf("removed model: err = %v, want ErrRoleModelGone", err)
+	}
+}
+
+// A half-set default names nothing, so it is refused at the write; the
+// EMPTY pair is the clear, returning every unassigned role to the visible
+// failure state. "Unset" is a value, never an error, on the way back out.
+func TestSetDefaultModel_TheEmptyPairClearsAndAHalfSetPairIsRefused(t *testing.T) {
+	s := newTestStore(t)
+
+	if def, err := s.LoadDefaultModel(); err != nil || def.IsSet() {
+		t.Fatalf("fresh store: default = %+v, err = %v, want the zero value and no error", def, err)
+	}
+	if err := s.SetDefaultModel(DefaultModel{EndpointID: "e1", Model: "m-a"}); err != nil {
+		t.Fatalf("SetDefaultModel: %v", err)
+	}
+	if def, _ := s.LoadDefaultModel(); def != (DefaultModel{EndpointID: "e1", Model: "m-a"}) {
+		t.Fatalf("default = %+v, want e1/m-a", def)
+	}
+	for _, half := range []DefaultModel{{EndpointID: "e2"}, {Model: "m-b"}} {
+		if err := s.SetDefaultModel(half); err == nil {
+			t.Errorf("SetDefaultModel(%+v) succeeded, want a refusal", half)
+		}
+	}
+	if def, _ := s.LoadDefaultModel(); def.EndpointID != "e1" || def.Model != "m-a" {
+		t.Fatalf("a refused write changed the stored default to %+v", def)
+	}
+	if err := s.SetDefaultModel(DefaultModel{}); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if def, _ := s.LoadDefaultModel(); def.IsSet() {
+		t.Fatalf("default after the clear = %+v, want unset", def)
+	}
+}
+
+func TestDefaultModel_SurvivesReload(t *testing.T) {
+	path := t.TempDir() + "/p.json"
+	s := NewJSONStore(path)
+	if err := s.SetDefaultModel(DefaultModel{EndpointID: "e1", Model: "m-a"}); err != nil {
+		t.Fatalf("SetDefaultModel: %v", err)
+	}
+	got, err := NewJSONStore(path).LoadDefaultModel()
+	if err != nil || got != (DefaultModel{EndpointID: "e1", Model: "m-a"}) {
+		t.Fatalf("reloaded default = %+v (err %v), want the stored pair", got, err)
+	}
+}
+
+func TestDeleteEndpoint_ClearsADefaultNamingItButLeavesAssignmentsDangling(t *testing.T) {
+	s := newTestStore(t)
+	ep := validTestEndpoint()
+	if err := s.CreateEndpoint(ep); err != nil {
+		t.Fatalf("CreateEndpoint: %v", err)
+	}
+	if err := s.SetDefaultModel(DefaultModel{EndpointID: ep.ID, Model: ep.Models[0].Name}); err != nil {
+		t.Fatalf("SetDefaultModel: %v", err)
+	}
+	if err := s.AssignRole(RoleAssignment{Role: RoleClassifier, EndpointID: ep.ID, Model: ep.Models[0].Name}); err != nil {
+		t.Fatalf("AssignRole: %v", err)
+	}
+	if _, err := s.DeleteEndpoint(ep.ID); err != nil {
+		t.Fatalf("DeleteEndpoint: %v", err)
+	}
+
+	def, err := s.LoadDefaultModel()
+	if err != nil {
+		t.Fatalf("LoadDefaultModel: %v", err)
+	}
+	if def.IsSet() {
+		t.Fatalf("the default survived its endpoint as %+v — it now points at nothing", def)
+	}
+
+	as, err := s.LoadRoleAssignments()
+	if err != nil {
+		t.Fatalf("LoadRoleAssignments: %v", err)
+	}
+	if len(as) != 1 || as[0].EndpointID != ep.ID {
+		t.Fatalf("assignments = %+v, want the classifier's kept so the person is told it broke", as)
+	}
+
+	// And the product consequence, which is the criterion that matters: an
+	// unassigned role is back at "choose a model", not "endpoint gone".
+	if _, _, err := ResolveRole(RoleAnswering, as, def, nil); !errors.Is(err, ErrRoleUnassigned) {
+		t.Fatalf("after the delete: err = %v, want ErrRoleUnassigned", err)
+	}
+	// ...while the role that DID name it is still told, by the resolver, that
+	// what it named is gone.
+	if _, _, err := ResolveRole(RoleClassifier, as, def, nil); !errors.Is(err, ErrRoleEndpointGone) {
+		t.Fatalf("the dangling assignment: err = %v, want ErrRoleEndpointGone", err)
 	}
 }

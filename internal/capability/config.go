@@ -632,7 +632,8 @@ func (s *configService) AssignRole(a profile.RoleAssignment) error {
 }
 
 // ResolveRole is the config domain's one role→(endpoint, model) resolution
-// (bead nocx-e6kn2): it loads the assignments and the endpoints and calls
+// (bead nocx-e6kn2): it loads the assignments, the default and the endpoints
+// and calls
 // profile.ResolveRole — the pure, storage-free resolver — so the refusal
 // rules (unassigned, endpoint gone, model gone) live in exactly one place
 // and every consumer (agent.ask, the classifier bead, the roles surface
@@ -650,11 +651,21 @@ func (s *configService) ResolveRole(role profile.ModelRole) (profile.Endpoint, s
 	if err != nil {
 		return profile.Endpoint{}, "", err
 	}
+	// The default is READ here and handed to the resolver as an input, so
+	// the resolution itself stays in one place (bead nocx-rikz5). Its error
+	// is RETURNED, never swallowed into "no default": a store that cannot
+	// answer must not look like a person who chose nothing, or an unreadable
+	// file renders as an honest "choose a model" and sends someone to
+	// re-choose what they already chose.
+	def, err := s.roles.LoadDefaultModel()
+	if err != nil {
+		return profile.Endpoint{}, "", err
+	}
 	eps, err := s.endpoints.LoadEndpoints()
 	if err != nil {
 		return profile.Endpoint{}, "", err
 	}
-	return profile.ResolveRole(role, assignments, eps)
+	return profile.ResolveRole(role, assignments, def, eps)
 }
 
 // loadEndpoint returns the stored endpoint with the given id, or nil when
