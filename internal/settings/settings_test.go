@@ -1154,7 +1154,7 @@ func findPathList(t *testing.T, reg *settings.Registry, key string) *settings.Pa
 	return nil
 }
 
-// ── Path-list settings (ADR-0036 §3, ADR-0038 §3.1) ─────────────────────
+// ── Path-list settings (ADR-0037 §3, ADR-0039 §3.1) ─────────────────────
 
 // tmpDirs returns n fresh existing directories under one t.TempDir() base.
 func tmpDirs(t *testing.T, n int) []string {
@@ -1172,7 +1172,7 @@ func tmpDirs(t *testing.T, n int) []string {
 }
 
 // pathListKeys lists every declared path-list setting. The shared behavior is
-// proven for each declaration, never just the first (ADR-0038 adds the
+// proven for each declaration, never just the first (ADR-0039 adds the
 // read-only class beside the writable one).
 func pathListKeys() []string {
 	return []string{"sandbox.allowedWritablePaths", "sandbox.allowedReadOnlyPaths"}

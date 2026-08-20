@@ -16,7 +16,7 @@ import (
 
 func main() {
 	// Sandboxed shells are launched by re-exec'ing this binary as the
-	// __sandbox-landlock-exec helper (ADR-0035 §8.2); the helper never
+	// __sandbox-landlock-exec helper (ADR-0036 §8.2); the helper never
 	// returns.
 	if sandbox.MaybeHelper() {
 		return

@@ -1,7 +1,7 @@
 # Sandboxed shell contract restoration design
 
 **Date:** 2026-08-18 · **Status:** accepted for implementation · **Bead:** `nocx-y46q.18`  
-**Related:** ADR-0035, ADR-0036, ADR-0038, ADR-0039, AD-11  
+**Related:** ADR-0036, ADR-0037, ADR-0039, ADR-0040, AD-11  
 **Supersedes:** `2026-08-16-sandboxed-opencode-launch-design.md`; its private runtime-tree artifact placement is retained
 
 ## 1. Problem

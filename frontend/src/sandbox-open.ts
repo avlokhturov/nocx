@@ -1,5 +1,5 @@
 /**
- * sandbox-open — the Quick Connect "Sandboxed shell…" flow (ADR-0039).
+ * sandbox-open — the Quick Connect "Sandboxed shell…" flow (ADR-0040).
  *
  * Extracted from the composition root so the one flow that turns a picker and
  * a permission dialog into a new tab is testable without booting `main()`. The
@@ -32,7 +32,7 @@ export interface SandboxOpenFlowDeps {
  *  consumes (the same rule that names PLACEMENT_KEY/THEME_KEY in main.tsx). */
 export const SANDBOX_WRITABLE_PATHS_KEY = 'sandbox.allowedWritablePaths'
 
-/** The settings key carrying the persisted read-only baseline (ADR-0038 §3.1). */
+/** The settings key carrying the persisted read-only baseline (ADR-0039 §3.1). */
 export const SANDBOX_READ_ONLY_PATHS_KEY = 'sandbox.allowedReadOnlyPaths'
 
 /**

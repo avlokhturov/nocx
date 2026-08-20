@@ -1,13 +1,13 @@
-# ADR-0038: Sandbox directories have explicit read-only or read-write grants
+# ADR-0039: Sandbox directories have explicit read-only or read-write grants
 
 - **Status:** Accepted
 - **Date:** 2026-08-17
-- **Related:** ADR-0035, ADR-0036, ADR-0037, ADR-0011, AD-11, `nocx-83oba`
+- **Related:** ADR-0036, ADR-0037, ADR-0038, ADR-0011, AD-11, `nocx-83oba`
 - **Design:** `docs/superpowers/specs/2026-08-17-sandbox-two-class-permissions-design.md`
 
 ## Context
 
-ADR-0036 added multiple optional sandbox directories, but made every one writable. Common agent workflows need to inspect shared notes, archives, datasets, or sibling repositories without modifying them. The existing choice — no access or read-write access — violates least privilege.
+ADR-0037 added multiple optional sandbox directories, but made every one writable. Common agent workflows need to inspect shared notes, archives, datasets, or sibling repositories without modifying them. The existing choice — no access or read-write access — violates least privilege.
 
 The current implementation already appends multiple picker results. The missing capability is an explicit access class per directory, enforced the same way on Linux Landlock and macOS Seatbelt.
 
@@ -45,9 +45,9 @@ The current implementation already appends multiple picker results. The missing 
 11. Bounds remain explicit: 32 entries per persisted list and per delta array, 256 realized policy roots, and 64 KiB serialized policy. Backend runtime discovery is also bounded to 16,384 PATH entries/candidates, 1 MiB per ELF metadata section, 4 KiB per dynamic string, 256 strings per tag, 64 MiB aggregate ELF metadata, 65,536 dependency nodes/resolution probes, and dependency depth 64; relative PATH entries are ignored. “Any number of folders” means multiple user-selected entries within these safety bounds, never unbounded control-plane or executable-metadata input.
 12. Running grants remain immutable. Any validation, policy, native launch, probe, or readiness failure registers no session and never retries unsandboxed.
 
-## Superseded ADR-0036 clauses
+## Superseded ADR-0037 clauses
 
-This decision replaces ADR-0036's writable-only clauses:
+This decision replaces ADR-0037's writable-only clauses:
 
 - one global writable baseline becomes separate read-only and writable baselines;
 - writable-only `add`/`remove` becomes four class-scoped deltas;
@@ -55,7 +55,7 @@ This decision replaces ADR-0036's writable-only clauses:
 - the open result reports both root classes;
 - policy conflict rules now include cross-class containment.
 
-All other ADR-0036 decisions remain: native picker only, canonical existing directories, exact baseline removals, settings revision gating, backend policy authority, immutable running grants, strict decode, canonical workspace ownership, and post-enforcement readiness.
+All other ADR-0037 decisions remain: native picker only, canonical existing directories, exact baseline removals, settings revision gating, backend policy authority, immutable running grants, strict decode, canonical workspace ownership, and post-enforcement readiness.
 
 ## Consequences
 

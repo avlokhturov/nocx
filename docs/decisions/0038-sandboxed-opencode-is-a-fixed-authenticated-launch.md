@@ -1,13 +1,13 @@
-# ADR-0037 — Sandboxed opencode is a fixed authenticated launch
+# ADR-0038 — Sandboxed opencode is a fixed authenticated launch
 
 - **Status:** Accepted
 - **Date:** 2026-08-16
-- **Related:** ADR-0035, ADR-0036, ADR-0024, AD-7, AD-8, AD-11, `nocx-y46q.17`
+- **Related:** ADR-0036, ADR-0037, ADR-0024, AD-7, AD-8, AD-11, `nocx-y46q.17`
 - **Design:** `docs/superpowers/specs/2026-08-16-sandboxed-opencode-launch-design.md`
 
 ## Context
 
-ADR-0035 named the experimental action `Sandboxed shell…`. Its implementation builds a local enhanced-shell rcfile under the host `os.TempDir()` and only afterwards asks Landlock or Seatbelt to enforce policy. The policy intentionally grants no host temp root. The caged shell therefore cannot read the capability-bearing rcfile, starts conventionally, and may leave the unread artifact behind.
+ADR-0036 named the experimental action `Sandboxed shell…`. Its implementation builds a local enhanced-shell rcfile under the host `os.TempDir()` and only afterwards asks Landlock or Seatbelt to enforce policy. The policy intentionally grants no host temp root. The caged shell therefore cannot read the capability-bearing rcfile, starts conventionally, and may leave the unread artifact behind.
 
 The action also stops after opening that shell. No backend layer starts the `opencode` agent the workflow exists to contain.
 

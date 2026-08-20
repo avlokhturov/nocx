@@ -3,7 +3,7 @@ title: Sandbox two-class directory permissions implementation plan
 status: approved
 created: 2026-08-17
 bead: nocx-83oba
-adr: docs/decisions/0038-sandbox-two-class-directory-grants.md
+adr: docs/decisions/0039-sandbox-two-class-directory-grants.md
 spec: docs/superpowers/specs/2026-08-17-sandbox-two-class-permissions-design.md
 ---
 
@@ -129,7 +129,7 @@ Extract one local class-section component only if it removes real duplicated sta
 
 ## Documentation cleanup
 
-ADR-0038 and the new design spec are the authoritative delta; ADR-0036 remains append-only history. Update AD-11 to cite ADR-0038 and name both baselines/classes. Keep ADR-0035/0037 and vision scope unchanged.
+ADR-0039 and the new design spec are the authoritative delta; ADR-0037 remains append-only history. Update AD-11 to cite ADR-0039 and name both baselines/classes. Keep ADR-0036/0037 and vision scope unchanged.
 
 ## Complete callsite migration
 

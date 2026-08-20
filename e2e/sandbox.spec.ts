@@ -1,5 +1,5 @@
 /**
- * e2e: sandboxed-shell action (ADR-0035, ADR-0039).
+ * e2e: sandboxed-shell action (ADR-0036, ADR-0040).
  *
  * Walks the Quick Connect picker and the Settings toggle: the action is a
  * capability/visibility gate, so flipping the flag must only change what the

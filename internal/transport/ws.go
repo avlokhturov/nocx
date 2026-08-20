@@ -162,7 +162,7 @@ type WSServer struct {
 	backupService   *backup.Service
 	backupFileSaver func(string, string) (*backup.SaveResult, error)
 
-	// sandboxSvc is the per-pane filesystem sandbox backend (ADR-0035),
+	// sandboxSvc is the per-pane filesystem sandbox backend (ADR-0036),
 	// answering sandbox.status and preparing sandboxed open requests. The
 	// transport never renders policy — it validates the request and maps the
 	// backend's typed errors to reserved codes.
@@ -1474,7 +1474,7 @@ type openParams struct {
 	// overrides the resolved user.
 	Host string `json:"host,omitempty"`
 	User string `json:"user,omitempty"`
-	// Sandbox is the strict opt-in filesystem sandbox request (ADR-0038 §5).
+	// Sandbox is the strict opt-in filesystem sandbox request (ADR-0039 §5).
 	// A present, valid object opts in; omitted means ordinary local; null is
 	// rejected at decode. The renderer supplies workspace, settingsRevision
 	// and bounded class-scoped add/remove deltas — never policy roots.
@@ -1528,7 +1528,7 @@ type openParentParams struct {
 }
 
 // openSandboxParams is the strictly-decoded sandbox block of open
-// (ADR-0038 §5). workspace and settingsRevision are required; addWritable,
+// (ADR-0039 §5). workspace and settingsRevision are required; addWritable,
 // removeWritable, addReadOnly and removeReadOnly are optional bounded deltas.
 // Populated by decodeOpenSandbox, never by a permissive Unmarshal.
 type openSandboxParams struct {

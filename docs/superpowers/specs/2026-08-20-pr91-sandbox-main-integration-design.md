@@ -462,13 +462,13 @@ their error/reason surfaces are already path-free and do not change.
 
 | PR (old)                                                     | New                                                          | Note                                   |
 | ------------------------------------------------------------ | ------------------------------------------------------------ | -------------------------------------- |
-| `0033-native-per-tab-filesystem-sandbox.md`                  | `0035-native-per-tab-filesystem-sandbox.md`                  | —                                      |
-| `0034-sandbox-writable-allowlist-and-launch-overrides.md`    | `0036-sandbox-writable-allowlist-and-launch-overrides.md`    | kept, superseded in part by 0038       |
-| `0035-sandboxed-opencode-is-a-fixed-authenticated-launch.md` | `0037-sandboxed-opencode-is-a-fixed-authenticated-launch.md` | superseded by 0039's interactive shell |
-| `0036-sandbox-two-class-directory-grants.md`                 | `0038-sandbox-two-class-directory-grants.md`                 | —                                      |
-| `0037-sandbox-launches-an-interactive-shell.md`              | `0039-sandbox-launches-an-interactive-shell.md`              | —                                      |
-| `0038-sandbox-denied-access-inbox.md`                        | `0040-sandbox-denied-access-inbox.md`                        | —                                      |
-| `0039-explicit-home-grants-project-into-isolated-home.md`    | `0041-explicit-home-grants-project-into-isolated-home.md`    | —                                      |
+| `0033-native-per-tab-filesystem-sandbox.md`                  | `0036-native-per-tab-filesystem-sandbox.md`                  | —                                      |
+| `0034-sandbox-writable-allowlist-and-launch-overrides.md`    | `0037-sandbox-writable-allowlist-and-launch-overrides.md`    | kept, superseded in part by 0038       |
+| `0035-sandboxed-opencode-is-a-fixed-authenticated-launch.md` | `0038-sandboxed-opencode-is-a-fixed-authenticated-launch.md` | superseded by 0039's interactive shell |
+| `0036-sandbox-two-class-directory-grants.md`                 | `0039-sandbox-two-class-directory-grants.md`                 | —                                      |
+| `0037-sandbox-launches-an-interactive-shell.md`              | `0040-sandbox-launches-an-interactive-shell.md`              | —                                      |
+| `0038-sandbox-denied-access-inbox.md`                        | `0041-sandbox-denied-access-inbox.md`                        | —                                      |
+| `0039-explicit-home-grants-project-into-isolated-home.md`    | `0042-explicit-home-grants-project-into-isolated-home.md`    | —                                      |
 
 Main `0033-ui-state-is-a-document-not-a-setting.md` and
 `0034-consent-belongs-to-the-machine-not-the-connection.md` are unchanged.
@@ -476,8 +476,8 @@ Every cross-reference inside the seven renumbered ADRs is re-pointed to the new
 numbers (the +2 shift is mechanical and complete — no `0033`/`0034` reference
 survives pointing at a sandbox ADR). `docs/architecture.md` adds the PR's
 **AD-11** (after main's AD-10) with its link list re-pointed to
-`0035, 0036, 0038, 0039, 0040, 0041`, and the sentence "ADR-0039 supersedes
-ADR-0037's fixed-OpenCode launch target" (the old "0037 supersedes 0035").
+`0035, 0036, 0038, 0039, 0040, 0041`, and the sentence "ADR-0040 supersedes
+ADR-0038's fixed-OpenCode launch target" (the old "0037 supersedes 0035").
 
 ---
 

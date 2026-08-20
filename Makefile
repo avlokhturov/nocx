@@ -85,7 +85,7 @@ conformance:
 	NOCX_TEST_SSH_G=1 $(GO) test -v -count=1 -run Conformance ./internal/ssh/...
 
 
-# Real Landlock enforcement smoke (ADR-0035 §8, ADR-0039). Proves the cage behaves, not
+# Real Landlock enforcement smoke (ADR-0036 §8, ADR-0040). Proves the cage behaves, not
 # just that the source compiles. Requires a kernel with Landlock ABI >= 3 and
 # FAILS LOUDLY below it — it is a release gate, not an env-gated convenience.
 # The ABI probe is go-landlock's own cmd, resolved from the module cache.
@@ -104,7 +104,7 @@ sandbox-smoke-linux-artifact:
 	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name an executable nocx binary"; exit 1; fi
 	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
 
-# Real Seatbelt enforcement smoke (ADR-0035 §9.4, ADR-0039). Runs the shared probe
+# Real Seatbelt enforcement smoke (ADR-0036 §9.4, ADR-0040). Runs the shared probe
 # inside a real sandbox-exec cage on macOS. Absence is a failed release gate:
 # a successful release must prove enforcement rather than skip the check.
 sandbox-smoke-macos:

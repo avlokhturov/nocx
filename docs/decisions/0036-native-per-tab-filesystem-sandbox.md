@@ -1,4 +1,4 @@
-# ADR-0035 — Native per-tab filesystem sandbox (opt-in, experimental)
+# ADR-0036 — Native per-tab filesystem sandbox (opt-in, experimental)
 
 - **Status:** Accepted
 - **Date:** 2026-08-02
@@ -108,8 +108,8 @@ Ship an **opt-in, experimental, filesystem-only, native per-tab sandbox**:
   allow-list model, availability reporting, security-visible state) are borrowed, and
   fail-closed launch is recorded as an intentional divergence from termic.
 
-ADR-0036 amends the one-workspace policy with bounded writable grants and launch-time
-overrides. ADR-0037 amends the launch target to fixed backend-resolved `opencode`, moves
+ADR-0037 amends the one-workspace policy with bounded writable grants and launch-time
+overrides. ADR-0038 amends the launch target to fixed backend-resolved `opencode`, moves
 private bootstrap artifacts into the sandbox runtime tree, and requires lifecycle
 authentication before the bootstrap shell replaces itself with the agent.
 

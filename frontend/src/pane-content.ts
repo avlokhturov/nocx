@@ -80,7 +80,7 @@ export interface ActiveOrigin {
  */
 export interface PaneHost {
   setTitle(title: string): void
-  /** Update the pane's tooltip (ADR-0035 §3.3 — sandbox tooltip). */
+  /** Update the pane's tooltip (ADR-0036 §3.3 — sandbox tooltip). */
   updateTooltip(tooltip: string): void
   requestAttention(): void
   requestClose(): void

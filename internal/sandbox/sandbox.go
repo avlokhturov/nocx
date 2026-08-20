@@ -1,5 +1,5 @@
 // Package sandbox implements the opt-in, experimental, filesystem-only
-// per-pane sandbox (ADR-0035, design spec 2026-08-02-native-filesystem-sandbox).
+// per-pane sandbox (ADR-0036, design spec 2026-08-02-native-filesystem-sandbox).
 //
 // The renderer requests a workspace plus bounded add/remove deltas; the
 // backend canonicalizes them and owns policy construction and enforcement.

@@ -1,6 +1,6 @@
 # Sandboxed opencode launch design
 
-**Date:** 2026-08-16 · **Status:** superseded by ADR-0039 on 2026-08-18 · **Bead:** `nocx-y46q.17`
+**Date:** 2026-08-16 · **Status:** superseded by ADR-0040 on 2026-08-18 · **Bead:** `nocx-y46q.17`
 **Replacement:** `2026-08-18-sandbox-shell-contract-restoration-design.md`
 
 ## 1. Problem

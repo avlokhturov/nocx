@@ -22,7 +22,7 @@ export class DialogClient {
   }
 
   /** Open the native folder picker for the sandboxed-shell workspace
-   *  (ADR-0036 §3.2, ADR-0039). Resolves to the chosen ABSOLUTE directory,
+   *  (ADR-0037 §3.2, ADR-0040). Resolves to the chosen ABSOLUTE directory,
    *  or an empty path when the user cancelled (a no-op for the action). */
   openDirectoryDialog(): Promise<DialogOpenDirectory> {
     return this.dispatcher.call('dialog.openDirectory', {})

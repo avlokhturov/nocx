@@ -1,7 +1,7 @@
 # Sandbox denied-access inbox — design
 
 **Bead:** `nocx-091ij`
-**Decision:** [ADR-0040](../../decisions/0040-sandbox-denied-access-inbox.md)
+**Decision:** [ADR-0041](../../decisions/0041-sandbox-denied-access-inbox.md)
 **Scope:** experimental local filesystem sandbox on Linux and macOS
 
 ## Product contract
@@ -93,7 +93,7 @@ The inbox derives a directory without widening:
 2. Otherwise inspect only its immediate parent. If that parent is an existing directory, canonicalize it.
 3. Otherwise, or if the result is the filesystem root, record the event with `canGrant=false`, an empty directory, and a user-facing reason.
 
-It never climbs to a nearest existing ancestor. On resolve, `settings.Registry.AppendSandboxPath` canonicalizes again, validates the 32-entry limit and ADR-0038 cross-class rules, appends under the registry lock, persists, then publishes `settings.changed`. A failed append leaves the event pending. The transport returns a path-free typed refusal.
+It never climbs to a nearest existing ancestor. On resolve, `settings.Registry.AppendSandboxPath` canonicalizes again, validates the 32-entry limit and ADR-0039 cross-class rules, appends under the registry lock, persists, then publishes `settings.changed`. A failed append leaves the event pending. The transport returns a path-free typed refusal.
 
 ## Wire contract
 

@@ -3,10 +3,10 @@ title: Sandbox writable allowlist and per-tab permission overrides
 status: approved
 created: 2026-08-16
 bead: nocx-y46q.14
-supersedes: ADR-0035 clauses named by ADR-0036
+supersedes: ADR-0036 clauses named by ADR-0037
 ---
 
-> **Amended 2026-08-18:** ADR-0039 and
+> **Amended 2026-08-18:** ADR-0040 and
 > `2026-08-18-sandbox-shell-contract-restoration-design.md` supersede this document's
 > fixed-OpenCode action copy, status-intent check, and confirmation label. The two-class
 > permission model, strict DTO, revision gate, dialog, and native policy rules remain current.

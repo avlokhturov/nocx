@@ -3,7 +3,7 @@
 > **For agentic workers:** execute this plan slice by slice; each slice is independently
 > verifiable and lands against a green tree. Steps within slices use `- [ ]` checkboxes.
 
-> **Amended 2026-08-16:** ADR-0036/0037 and their accepted design specs supersede this
+> **Amended 2026-08-16:** ADR-0037/0037 and their accepted design specs supersede this
 > plan's workspace-only DTO and generic `Sandboxed shell…` target. The implemented action
 > confirms writable grants, authenticates the private in-runtime bootstrap, and then launches
 > fixed backend-resolved `opencode`. The original slice ledger below remains historical.
@@ -32,7 +32,7 @@ frontend, Playwright + `cmd/devharness` for E2E.
 **Source of truth:** `.internal/specs/2026-08-02-native-filesystem-sandbox-design.md`.
 Where this plan and the spec disagree, the spec wins and this plan is wrong. Evidence ledger:
 `.internal/reports/2026-08-02-native-filesystem-sandbox-research.md`; decision:
-`docs/decisions/0035-native-per-tab-filesystem-sandbox.md`.
+`docs/decisions/0036-native-per-tab-filesystem-sandbox.md`.
 
 > **Amended 2026-08-16:** this is the completed base implementation plan. The executable
 > change for global writable paths, per-launch deltas, strict revision-gated requests, and
@@ -374,7 +374,7 @@ named test in slices 1-6 before the release gate is considered green.
 
 ## Cross-cutting evidence requirements
 
-- Landlock ABI floor (3) and cap (8) appear verbatim in: spec §8.1, ADR-0035, this plan's
+- Landlock ABI floor (3) and cap (8) appear verbatim in: spec §8.1, ADR-0036, this plan's
   Global Constraints, and the smoke-suite names (`sandbox-smoke-linux`).
 - Backend names `landlock`/`seatbelt`/`unsupported` and reasons
   `landlock-unavailable`/`landlock-abi-too-old`/`sandbox-exec-unavailable`/`probe-failed`/

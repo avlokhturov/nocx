@@ -265,7 +265,7 @@ describe('sandboxed session launch failure', () => {
   })
 })
 
-describe('sandboxed session tooltip (ADR-0036 §8, ADR-0039)', () => {
+describe('sandboxed session tooltip (ADR-0037 §8, ADR-0040)', () => {
   const sandboxRequest = {
     workspace: '/w',
     settingsRevision: 0,

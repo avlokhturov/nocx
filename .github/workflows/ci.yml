@@ -6,7 +6,7 @@
 #     should build and test what ships to users;
 #   - internal/pty exercises creack/pty, and PTY semantics differ between macOS
 #     and Linux — those tests are only meaningful on the target OS;
-#   - ADR-0035's deprecated Seatbelt backend must be exercised before merge,
+#   - ADR-0036's deprecated Seatbelt backend must be exercised before merge,
 #     while newer hosted images have made sandbox-exec abort before its child
 #     starts. The release workflow uses the same pinned image.
 # (Note: wails/v2 also requires GTK3/WebKit2GTK on Linux; the decision stands
@@ -287,7 +287,7 @@ jobs:
 
       - name: The OS split has not drifted
         run: make ci-os-split
-      # Real Landlock enforcement smoke (ADR-0035 §8). The release gate that
+      # Real Landlock enforcement smoke (ADR-0036 §8). The release gate that
       # proves the cage behaves on Linux; it fails loudly when the runner's
       # kernel is below Landlock ABI 3 — a runner that cannot run it must be
       # replaced, never silently skipped.

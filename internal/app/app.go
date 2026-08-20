@@ -83,7 +83,7 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
-	// Sandbox is the per-pane filesystem sandbox backend (ADR-0035). Injected
+	// Sandbox is the per-pane filesystem sandbox backend (ADR-0036). Injected
 	// here — the single composition root — and nowhere else.
 	Sandbox sandbox.Service
 	// UnlockRequester lets backend code request a vault unlock from the

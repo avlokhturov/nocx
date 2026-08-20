@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the dialog.openDirectory JSON-RPC method: the native folder picker behind the sandboxed-shell workspace action (ADR-0036 §3.2, §4.3; ADR-0039). The chosen ABSOLUTE directory, or an empty string when the user cancelled. The method reports itself unavailable (-32601) when no native runtime exists; the caller reports the typed failure without creating a pane.
+ * Result of the dialog.openDirectory JSON-RPC method: the native folder picker behind the sandboxed-shell workspace action (ADR-0037 §3.2, §4.3; ADR-0040). The chosen ABSOLUTE directory, or an empty string when the user cancelled. The method reports itself unavailable (-32601) when no native runtime exists; the caller reports the typed failure without creating a pane.
  */
 export interface DialogOpenDirectory {
   /**

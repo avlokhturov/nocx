@@ -173,7 +173,7 @@ func jsonrpcCallWithID(t *testing.T, conn *websocket.Conn, method string, params
 	}
 }
 
-// TestOpenParamsRejectsEnhanced pins the strict open decode (ADR-0036 §5,
+// TestOpenParamsRejectsEnhanced pins the strict open decode (ADR-0037 §5,
 // superseding nocx-tr2n's "neither obeyed nor rejected"): integration is
 // still requested by the backend for every session, but a renderer that
 // still sends the obsolete `enhanced` member is now refused as an unknown

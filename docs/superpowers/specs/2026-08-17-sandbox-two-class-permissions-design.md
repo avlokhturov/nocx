@@ -3,11 +3,11 @@ title: Sandbox two-class directory permissions
 status: approved
 created: 2026-08-17
 bead: nocx-83oba
-decision: ADR-0038
-supersedes: 2026-08-16-sandbox-per-tab-permissions-design.md where ADR-0038 states
+decision: ADR-0039
+supersedes: 2026-08-16-sandbox-per-tab-permissions-design.md where ADR-0039 states
 ---
 
-> **Amended 2026-08-18:** ADR-0039 and
+> **Amended 2026-08-18:** ADR-0040 and
 > `2026-08-18-sandbox-shell-contract-restoration-design.md` supersede the
 > fixed-OpenCode action/status wording only. The two-class directory contract
 > and all policy, DTO, dialog, metadata, and validation decisions remain current.

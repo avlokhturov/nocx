@@ -1,7 +1,7 @@
 # Native per-tab filesystem sandbox — design
 
 - **Date:** 2026-08-02
-- **Touches:** ADR-0035 (this decision), AD-7/AD-8 (session model and composition-root wiring),
+- **Touches:** ADR-0036 (this decision), AD-7/AD-8 (session model and composition-root wiring),
   `internal/settings`, `internal/transport`, `internal/session`, `internal/pty`,
   `internal/app`, `frontend/src/quick-connect.tsx`, `frontend/src/tabs.ts`,
   `frontend/src/terminal-content.ts`
@@ -12,12 +12,12 @@
 This spec owns the complete V1 architecture. Where this spec and the implementation plan
 disagree, this spec wins and the plan is wrong.
 
-> **Amended 2026-08-18:** ADR-0036, ADR-0038, and
+> **Amended 2026-08-18:** ADR-0037, ADR-0039, and
 > `docs/superpowers/specs/2026-08-16-sandbox-per-tab-permissions-design.md` supersede this
 > document's workspace-only request, one-setting/no-extra-roots, and macOS start-as-readiness
-> clauses. ADR-0039 and
+> clauses. ADR-0040 and
 > `docs/superpowers/specs/2026-08-18-sandbox-shell-contract-restoration-design.md` restore
-> the original `Sandboxed shell…` product intent and supersede ADR-0037's fixed-OpenCode
+> the original `Sandboxed shell…` product intent and supersede ADR-0038's fixed-OpenCode
 > launch, while retaining its placement of private bootstrap artifacts inside the runtime
 > tree. This document remains authoritative for the unchanged platform policy and lifecycle.
 

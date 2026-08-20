@@ -1,8 +1,8 @@
-# ADR-0040: Sandbox denied-access inbox is diagnostic, bounded, and event-ID resolved
+# ADR-0041: Sandbox denied-access inbox is diagnostic, bounded, and event-ID resolved
 
 **Status:** Accepted
 **Date:** 2026-08-18
-**Related:** ADR-0035, ADR-0036, ADR-0038, ADR-0039, AD-1, AD-7, AD-8, AD-11, `nocx-091ij`
+**Related:** ADR-0036, ADR-0037, ADR-0039, ADR-0040, AD-1, AD-7, AD-8, AD-11, `nocx-091ij`
 
 ## Context
 

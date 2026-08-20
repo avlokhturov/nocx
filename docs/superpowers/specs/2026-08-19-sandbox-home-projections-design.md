@@ -1,7 +1,7 @@
 # Sandbox HOME projections for explicit grants — design
 
 **Bead:** `nocx-r7dle`  
-**Decision:** [ADR-0041](../../decisions/0041-explicit-home-grants-project-into-isolated-home.md)  
+**Decision:** [ADR-0042](../../decisions/0042-explicit-home-grants-project-into-isolated-home.md)  
 **Scope:** experimental local filesystem sandbox on Linux and macOS
 
 ## Product contract
@@ -65,7 +65,7 @@ Example: projections for `.config/opencode` and `.config/other` create private m
 
 The Linux/macOS materializer uses directory-relative Unix operations through `golang.org/x/sys/unix`: no-follow directory opens, `mkdirat`, and `symlinkat`. It verifies runtime root, runtime HOME, and every synthetic parent as directories owned by the effective backend user with exact mode `0700`. Existing entries are collisions; nothing is repaired, merged, or overwritten. It never calls `MkdirAll`, follows a parent symlink, or creates below an already-created projection.
 
-Immediately before each final link, the backend re-runs the canonical existing-directory pipeline on the source and requires the exact canonical result to remain unchanged. The link target is exactly `HostPath`. This narrows ordinary disappearance or symlink drift but does not claim inode-stable protection against a separate already-unrestricted same-user process; ADR-0036 keeps that actor outside the threat model.
+Immediately before each final link, the backend re-runs the canonical existing-directory pipeline on the source and requires the exact canonical result to remain unchanged. The link target is exactly `HostPath`. This narrows ordinary disappearance or symlink drift but does not claim inode-stable protection against a separate already-unrestricted same-user process; ADR-0037 keeps that actor outside the threat model.
 
 Any collision, ownership/mode fault, non-directory or symlink parent, changed/vanished source, partial syscall failure, or malformed plan returns the path-free `NewSetupErrorf("runtime home projection failed")`. Both platform `Prepare` fail closures remove only the fresh runtime tree and register no session. `RemoveRuntimeRoot` removes links without following them, so host targets survive cleanup.
 

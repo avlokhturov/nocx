@@ -408,7 +408,7 @@ func TestOpen_SandboxHappyPath(t *testing.T) {
 	if len(result.Result.Sandbox.HomeProjections) != 1 || result.Result.Sandbox.HomeProjections[0].HostPath != canon {
 		t.Errorf("homeProjections = %v, want canonical workspace projection", result.Result.Sandbox.HomeProjections)
 	}
-	// The canonical workspace drives session CWD (ADR-0036 item 9): the same
+	// The canonical workspace drives session CWD (ADR-0037 item 9): the same
 	// value reaches session.Config.Cwd and comes back as the open result's
 	// cwd, matching the policy's workspace — never the raw input.
 	if result.Result.Cwd != canon {
