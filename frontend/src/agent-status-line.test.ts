@@ -11,6 +11,10 @@ const ready: AgentStatusResult = {
   endpointConfigured: true,
   credential: 'resolvable',
   lastProbe: null,
+  // The role's resolution (nocx-rikz5) is required on the wire, so the
+  // fixture carries it. agentStatusLine does not read it yet — the ladder
+  // that does is its own task; this keeps the fixture a legal status.
+  answering: { ready: true, reason: null, endpoint: 'Local', model: 'qwen3' },
 }
 
 describe('agentStatusLine', () => {
