@@ -385,6 +385,12 @@ async function main() {
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
   tm.onCreateEndpoint = () => openSettingsPane().startNewEndpoint()
+  // The composer's model chip names the model that will answer and IS the
+  // way to change it (nocx-rikz5): the Roles page is where that choice is
+  // made. Beside onCreateEndpoint because it is the same idea — a state
+  // names the one page that repairs it — and it reuses that seam for the
+  // endpoints destination rather than growing a second one.
+  tm.onOpenRoles = () => openSettingsPane().openPage('roles')
   tm.onActivity = reportActivity
 
   // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────
