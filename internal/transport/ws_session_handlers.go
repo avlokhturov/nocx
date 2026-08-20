@@ -250,10 +250,18 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 	}
 	var setupErr *sandbox.SetupError
 	if errors.As(err, &setupErr) {
-		h.log.Error("sandbox setup failed", "reason", "setup-failed")
+		// The reason is a fixed token the sandbox package chose, never the
+		// error text: the detail behind it names paths, and neither the wire
+		// nor the log may carry those. A setup failure with no typed reason
+		// stays generic.
+		reason := setupErr.Reason
+		if reason == "" {
+			reason = "setup-failed"
+		}
+		h.log.Error("sandbox setup failed", "reason", reason)
 		_ = r.TryError(req.ID, RPCError{
 			Code: -32007, Message: "sandbox setup failed",
-			Data: map[string]any{"reason": "setup-failed"},
+			Data: map[string]any{"reason": reason},
 		})
 		return
 	}
