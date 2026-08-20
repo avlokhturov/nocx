@@ -29,6 +29,8 @@ import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import { SandboxAccessSettings, type SandboxAccessClient } from './sandbox-access-settings'
+import { classConflict } from './sandbox-path-classes'
+import { SANDBOX_READ_ONLY_PATHS_KEY, SANDBOX_WRITABLE_PATHS_KEY } from './sandbox-open'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
@@ -643,9 +645,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
     try {
       const picked = await props.dialogClient.openDirectoryDialog()
       if (!picked.path) return
-      const peerKey = sandboxPeerKey(decl.key)
-      if (peerKey !== null && pathsValue(peerKey).includes(picked.path)) {
-        setErrors(decl.key, 'This path is already active in the peer sandbox list')
+      // The two-class rule is stated once, in sandbox-path-classes, and the
+      // backend is still the authority. This surface used to compare exact
+      // strings in both directions, which refused a writable folder inside a
+      // read-only one — the exception ADR-0039 exists for — and accepted a
+      // read-only folder inside a writable one, which the backend then
+      // refused in different words (nocx-61alt).
+      const conflict = sandboxClassConflictFor(decl.key, picked.path)
+      if (conflict !== null) {
+        setErrors(decl.key, conflict)
         return
       }
       setErrors(decl.key, undefined as never)
@@ -852,10 +860,25 @@ export function SettingsComponent(props: SettingsComponentProps) {
       : []
   }
 
-  function sandboxPeerKey(key: string): string | null {
-    if (key === 'sandbox.allowedWritablePaths') return 'sandbox.allowedReadOnlyPaths'
-    if (key === 'sandbox.allowedReadOnlyPaths') return 'sandbox.allowedWritablePaths'
+  /** The class a sandbox path list grants, or null for any other setting.
+   *  Keyed by declaration id because that is what the wire carries; moving it
+   *  onto the declaration itself is nocx-lt8su. */
+  function sandboxPathClass(key: string): 'readOnly' | 'readWrite' | null {
+    if (key === SANDBOX_WRITABLE_PATHS_KEY) return 'readWrite'
+    if (key === SANDBOX_READ_ONLY_PATHS_KEY) return 'readOnly'
     return null
+  }
+
+  /** What this surface may say about a pick, before the backend decides. */
+  function sandboxClassConflictFor(key: string, path: string): string | null {
+    const target = sandboxPathClass(key)
+    if (target === null) return null
+    return classConflict(
+      target,
+      path,
+      pathsValue(SANDBOX_READ_ONLY_PATHS_KEY),
+      pathsValue(SANDBOX_WRITABLE_PATHS_KEY),
+    )
   }
 
   /**
