@@ -27,6 +27,7 @@ import { resolve } from 'node:path'
 const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 
+import type { PaneIdentity } from './terminal-content'
 import { EditorView } from '@codemirror/view'
 import {
   createRendererMock,
@@ -34,6 +35,7 @@ import {
   makeClipboard,
   makeBanner,
   makeSession,
+  anchoredPane,
   integrationHandler,
   lifecycleHandler,
   type ClipboardFake,
@@ -42,14 +44,15 @@ import {
   type RendererMock,
   type SessionFake,
   FIXTURE_CWD,
-} from './test-support/tabs-fixtures'
+  FIXTURE_DIRECTORY_LABEL,
+} from './test-support/panes-fixtures'
 import { ClipboardGate } from './clipboard'
 import { CommandEditor } from './editor'
 import { CommandLedger } from './command-ledger'
 import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
-import { Tab } from './tabs'
-import { SURFACE_TERMINAL } from './tab-content'
+import { Pane } from './panes'
+import { SURFACE_TERMINAL } from './pane-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
@@ -124,6 +127,15 @@ interface MountOpts {
   /** What `content.ready` must settle to. Default true — an open that is
    *  expected to fail (the host-key refusal) sets it false. */
   expectedReady?: boolean
+  /** The pane this content is the surface of, and when its row exists
+   *  (nocx-rtg0.29). The default is a pane the chain already holds, which is
+   *  what every test that is not about the race wants. */
+  pane?: PaneIdentity
+  /** Show the pane BEFORE it mounts — the order the real activation seam
+   *  uses, and the one no test used to model: PaneManager.activate() runs
+   *  between Pane.start() and the renderer being built, so the show lands
+   *  on a pane with no scrollback and no second show ever comes. */
+  visibleBeforeMount?: boolean
 }
 /** Mount a real TerminalContent inside a Tab and return the live editor view. */
 async function mountTerminal(
@@ -136,7 +148,7 @@ async function mountTerminal(
   ed: CommandEditor
   clipboard: ClipboardFake
   content: TerminalContent
-  tab: Tab
+  tab: Pane
   teardown: () => void
 }> {
   const clientFake = client ?? makeClient()
@@ -144,7 +156,7 @@ async function mountTerminal(
   const wsClient = clientFake as unknown as WSClient
   const content = new TerminalContent(
     wsClient,
-    'tab-wire-1',
+    opts.pane ?? anchoredPane(),
     clipboard,
     new ClipboardGate(),
     makeBanner(),
@@ -153,7 +165,7 @@ async function mountTerminal(
     opts.ssh,
     opts.hooks,
   )
-  const tab = new Tab(
+  const tab = new Pane(
     content,
     {
       surfaceType: SURFACE_TERMINAL,
@@ -168,6 +180,7 @@ async function mountTerminal(
   const paneParent = document.createElement('div')
   paneParent.append(tab.pane)
   if (opts.attachToDocument) document.body.append(paneParent)
+  if (opts.visibleBeforeMount) content.setVisible(true)
   await tab.start()
   await expect(content.ready).resolves.toBe(opts.expectedReady ?? true)
 
@@ -520,10 +533,9 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
   // takes — with nothing bypassed. The command text reaches the PTY via the
   // renderer's paste handoff and the trailing '\r' via the session, so both
   // are asserted: a second, parallel route would look different.
-  it('Enter in the recall overlay executes the previewed command through the normal submit path', async () => {
+  it('Enter in the recall overlay takes the command into the line and sends nothing', async () => {
     const { view, ed, content, teardown } = await mountTerminal(makeClipboard())
     const session = (content as unknown as { session: SessionFake }).session
-    const renderer = rendererOf(content)
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
@@ -554,18 +566,15 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       // preview lands when the answer does.
       await vi.waitFor(() => expect(ed.getDoc()).toBe('make deploy')) // previewing the only row
 
-      key(view, { key: 'Enter' }) // accept — executes the previewed command
-      // The same two frames again, in the same order and the same shapes as
-      // the typed submit: the recalled command takes the ordinary submit
-      // path, not a second route.
-      expect(session.send.mock.calls.slice(sentBefore).map((c: unknown[]) => c[0])).toEqual([
-        'make deploy',
-        sentShape,
-      ])
-      // `paste` is a method declaration on TerminalRenderer, so referencing it
-      // detached trips unbound-method; the mock property type does not.
-      const pasteMock = renderer as unknown as { paste: ReturnType<typeof vi.fn> }
-      expect(pasteMock.paste).toHaveBeenLastCalledWith('make deploy')
+      key(view, { key: 'Enter' }) // takes the row — it does not run it
+      // NOTHING went to the pty: the overlay closes with the command in the
+      // line, and the next Enter — on a command the person can now read and
+      // edit — is the one that runs it (the owner's reversal, 2026-08-19).
+      expect(session.send.mock.calls.length).toBe(sentBefore)
+      expect(ed.getDoc()).toBe('make deploy')
+      // The shape the typed submit sent is still the reference for what a
+      // real send looks like; nothing here produced one.
+      expect(sentShape).toBe('\r')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
@@ -1320,7 +1329,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
   async function mountSshTerminal(): Promise<{
     ed: CommandEditor
     content: TerminalContent
-    tab: Tab
+    tab: Pane
     teardown: () => void
   }> {
     const clientFake = makeClient({
@@ -1329,7 +1338,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
     const wsClient = clientFake as unknown as WSClient
     const content = new TerminalContent(
       wsClient,
-      'tab-wire-1',
+      anchoredPane(),
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -1337,7 +1346,7 @@ describe('the live prompt says where Enter will land (nocx-3779)', () => {
       () => {},
       { profileId: '', host: '192.168.0.57', user: 'root' },
     )
-    const tab = new Tab(
+    const tab = new Pane(
       content,
       {
         surfaceType: SURFACE_TERMINAL,
@@ -2032,7 +2041,7 @@ describe('activeOrigin (B.9) — the machine the tab speaks for', () => {
     const wsClient = makeClient() as unknown as WSClient
     const unmounted = new TerminalContent(
       wsClient,
-      'tab-wire-1',
+      anchoredPane(),
       makeClipboard(),
       new ClipboardGate(),
       makeBanner(),
@@ -2756,15 +2765,17 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
       readOnlyMock.mockClear()
 
-      // The atomic handoff: the editor hides ITSELF at commit, and the
-      // submit callback makes the grid writable in the SAME synchronous
-      // step the bytes go out — keys typed before the running fact lands
-      // must reach the pty, never be dropped (the u7uh.23 vanish).
+      // The atomic handoff: the editor leaves the layout at commit, box and
+      // all (nocx-g6hnk), and the submit callback makes the grid writable in
+      // the same synchronous step the bytes go out — keys typed before the
+      // running fact lands reach the pty. The ORDER is what this asserts;
+      // where the composer's 77px went is asserted in editor.test.ts.
       ed.insertText('read x')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
       expect(ed.isVisible).toBe(false)
+      expect(ed.root.style.display).toBe('none')
       expect(readOnlyMock).toHaveBeenLastCalledWith(false)
 
       // The published attempt opens the running interval; the sync keeps
@@ -2777,7 +2788,11 @@ describe('the projections consume the kernel through the composition root (ADR-0
         epoch: 1,
         attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'read x' },
       })
+      // Still gone, still writable: the lifecycle only RECONCILES here — the
+      // commit already removed the composer — and reconciling must not
+      // resurrect it or take the keyboard back off the program.
       expect(ed.isVisible).toBe(false)
+      expect(ed.root.style.display).toBe('none')
       expect(readOnlyMock).toHaveBeenLastCalledWith(false)
       // The completion closes the interval, and back at the prompt the
       // editor returns and the grid locks again.
@@ -2796,6 +2811,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       expect(ed.isVisible).toBe(true)
+      expect(ed.root.style.visibility).toBe('')
+      expect(ed.root.dataset.suspended).toBeUndefined()
+      expect(ed.root.hasAttribute('inert')).toBe(false)
       expect(readOnlyMock).toHaveBeenLastCalledWith(true)
     } finally {
       Element.prototype.scrollTo = protoScrollTo
@@ -3062,6 +3080,58 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it('sizes the live region when the grid has PARSED the bytes, not when they were handed over', async () => {
+    // xterm parses asynchronously. The measure used to be scheduled from
+    // session.onData, one line after renderer.write(), so it ran on the
+    // animation frame BEFORE the chunk was in the buffer and sized the region
+    // to the grid as it was WITHOUT the output. A command that prints
+    // everything in one chunk has no next chunk to correct it, so it ran at
+    // the wrong size until it finished and then arrived all at once: `seq 1
+    // 10` measured three rows live and froze eleven, and the block leapt
+    // 153px up the pane at the end of a command that had already finished
+    // (2026-08-19 frame capture, e2e container).
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      Object.defineProperty(withScrollback.scrollback.scrollbackArea, 'clientHeight', {
+        value: 300,
+        configurable: true,
+      })
+      withScrollback.scrollback.scrollbackArea.scrollTo = vi.fn()
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'seq' },
+      })
+      expect(withScrollback.scrollback.mode).toBe('running')
+      const before = withScrollback.scrollback.xtermLiveContainer.style.height
+
+      // The bytes arrive and the grid ALREADY reports the taller content —
+      // but they have not been parsed, so nothing may be measured yet.
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(200)
+      client._sessions[0].fireData('one\ntwo\nthree\n')
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe(before)
+
+      // The parse pass settles: NOW the rows exist and the region is sized.
+      renderer._fireWriteParsed()
+      expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('200px')
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      teardown()
+    }
+  })
+
   it('the running grid is fitted to the live region cap, so a tall inline TUI keeps its last row reachable (nocx-zn4d)', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
@@ -3128,6 +3198,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // unscrollable inside the box.
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(1000)
       client._sessions[0].fireData('repaint')
+      renderer._fireWriteParsed()
       expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
       expect(fitViewport).toHaveBeenLastCalledWith(
         expect.objectContaining({ width: 800, height: 276 }),
@@ -3205,6 +3276,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // The first sizing sets the height; the box grows to the cap.
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
       client._sessions[0].fireData('top frame')
+      renderer._fireWriteParsed()
       expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
       expect(scrollTo).toHaveBeenCalled()
       scrollTo.mockClear()
@@ -3214,6 +3286,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       // reads (nocx-6w4z).
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(276)
       client._sessions[0].fireData('top frame')
+      renderer._fireWriteParsed()
       expect(withScrollback.scrollback.xtermLiveContainer.style.height).toBe('276px')
       expect(scrollTo).not.toHaveBeenCalled()
     } finally {
@@ -4547,8 +4620,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 // Panes are hidden with a CSS class, not unmounted, so the WebGL texture
 // atlas of a hidden pane goes stale and its glyphs come back drawn from
 // wrong coordinates. nocx-e27 fixed that with a viewport-wide repaint on
-// activation; 21fd7f6a (the TabContent seam) carried refreshAtlas() down
-// into TerminalContent and left the call behind in TabManager, so the fix
+// activation; 21fd7f6a (the PaneContent seam) carried refreshAtlas() down
+// into TerminalContent and left the call behind in PaneManager, so the fix
 // became dead code and the corruption came back.
 //
 // The repaint therefore hangs off setVisible, which is where visibility is
@@ -4585,6 +4658,834 @@ describe('TerminalContent visibility repaints the grid', () => {
       expect(tab.pane.classList.contains('active')).toBe(true)
       content.setVisible(false)
       expect(tab.pane.classList.contains('active')).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ── The tab is named by what runs in it (nocx-n8n82) ─────────────────────
+//
+// A tab's title has exactly three sources, in absolute order: the
+// program's own OSC 0/2 title, the command currently running in it — the
+// ledger's running record, the app-owned submit (ADR-0024 §5) — and the
+// cwd. This suite watches the middle source through the real submit and
+// the real authenticated completion, so a regression in either direction
+// fails here.
+describe('the running command names the tab (nocx-n8n82)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the wire seam tests deliver authenticated facts through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    const subscribe = client.dispatcher.subscribe
+    expect(subscribe).toHaveBeenCalledWith('lifecycle.changed', expect.any(Function))
+    return lifecycleHandler(client)
+  }
+
+  /** jsdom does not implement scrollTo/scrollIntoView; the block model
+   *  calls them on submit. Stub them for the duration — the same trade
+   *  the projections tests make. Returns the restore. */
+  function stubScrolling(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+    }
+  }
+
+  /** Dispatch a submit key exactly where a user's keystroke lands. */
+  function submitEnter(view: EditorView): void {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+  }
+
+  it('shows the running command while it runs and the cwd when it finishes', async () => {
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // A fresh tab is named after where it is.
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+
+      // 1. The authenticated prompt gives the editor the keyboard.
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(ed.isVisible).toBe(true)
+
+      // 2. The user submits; the command is now the ledger's running
+      //    record, and the tab is named by it.
+      ed.insertText('herdr')
+      submitEnter(view)
+      expect(tab.title).toBe('herdr')
+
+      // 3. The authenticated completion ends the command: the record is
+      //    no longer running, and the tab falls back to the cwd.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'b'.repeat(64),
+          completedAt: '2026-08-16T00:00:00Z',
+        },
+      })
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('a program that declares an OSC 0/2 title still wins over the command name', async () => {
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('herdr')
+      submitEnter(view)
+      expect(tab.title).toBe('herdr')
+
+      // Absolute order: the program's own title outranks the command name.
+      renderer._fireTitle('herdr 2.0')
+      expect(tab.title).toBe('herdr 2.0')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('does not resurrect a name the program cleared on the way out', async () => {
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('herdr')
+      submitEnter(view)
+      expect(tab.title).toBe('herdr')
+
+      // The program sets its own title and clears it on the way out —
+      // an OSC 0/2 with an EMPTY string (tabs.ts documents the gesture).
+      renderer._fireTitle('herdr')
+      renderer._fireTitle('')
+      // The command is still the running record: without the clear guard
+      // the running-command source would resurrect 'herdr' right here.
+      const ledger = (content as unknown as { ledger: CommandLedger }).ledger
+      expect(ledger.records()[0].status).toBe('running')
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+
+      // And when the command finally completes, the name stays gone.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'b'.repeat(64),
+          completedAt: '2026-08-16T00:00:00Z',
+        },
+      })
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+
+  it('shows the location line when the title is a name of its own, and none when the title IS the location', async () => {
+    const onSubtitleChange = vi.fn()
+    const onProgramTitleChange = vi.fn()
+    const client = makeClient()
+    const { view, ed, content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true, hooks: { onSubtitleChange, onProgramTitleChange } },
+      client,
+    )
+    const handler = factHandler(client)
+    const renderer = rendererOf(content)
+    const restoreScroll = stubScrolling()
+    try {
+      content.setVisible(true)
+      // The title IS the cwd: a second line would print the same string.
+      expect(tab.title).toBe(FIXTURE_DIRECTORY_LABEL)
+      expect(onSubtitleChange).toHaveBeenLastCalledWith('')
+
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('herdr')
+      submitEnter(view)
+      // A command title is a name of its own: the location is the second
+      // line, never a duplicate.
+      expect(tab.title).toBe('herdr')
+      expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
+      // The agent-state classifier is fed the real program title, which
+      // is empty here — never the composed string.
+      expect(onProgramTitleChange).toHaveBeenLastCalledWith('')
+
+      // A program title is also a name of its own — same second line.
+      renderer._fireTitle('herdr')
+      expect(onSubtitleChange).toHaveBeenLastCalledWith(FIXTURE_CWD)
+      expect(onProgramTitleChange).toHaveBeenLastCalledWith('herdr')
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
+})
+
+// A session the backend cannot currently reach (nocx-iarf9). Nothing has
+// ended, so the tab stays exactly as it is — and the user is told, because a
+// terminal that has silently stopped being connected to anything looks
+// identical to one that is simply quiet.
+describe('the reachability axis', () => {
+  it('says so when the connection stops responding, and again when it returns', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const session = client._sessions[0]
+      expect(session.onLiveness).toHaveBeenCalled()
+
+      session.fireLiveness('unknown')
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'warning',
+        message:
+          'This connection has stopped responding — the session may still be running on the host.',
+      })
+
+      session.fireLiveness('alive', 3)
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'info',
+        message: 'This connection is responding again.',
+      })
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ── liveWork: what is RUNNING in this pane (nocx-isoph.6, design D6) ───────
+//
+// The close prompts name what dies before it dies, and this is where the
+// naming gets its facts. It is deliberately a third answer beside
+// activeOrigin and lineage — see the capability's own comment in
+// pane-content.ts for why merging any two of them loses a case.
+describe('liveWork — what a close would destroy in this pane (nocx-isoph.6)', () => {
+  /** The lifecycle fact handler TerminalContent registered on the fake
+   *  dispatcher — the seam a live prompt arrives through. */
+  function factHandler(client: ClientFake): (p: unknown) => void {
+    return lifecycleHandler(client)
+  }
+
+  it('a local shell at a prompt holds a session and is running nothing', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      // Not null — the pane holds a live session — and not live either:
+      // closing an idle local shell loses nothing (live-work.ts).
+      expect(content.liveWork()).toEqual({ command: null, host: null })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the command while it is running', async () => {
+    const client = makeClient()
+    const { content, ed, view, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      factHandler(client)({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('ansible-playbook deploy.yml')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      expect(content.liveWork()?.command).toBe('ansible-playbook deploy.yml')
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('names the machine a hand-typed ssh walked onto, with nothing running on it', async () => {
+    // The case the capability exists for: a session on another machine is
+    // live AT ITS PROMPT — the connection, and whatever state it is holding
+    // open, is what the close destroys — and nobody opened it through a
+    // profile, so the only record of it is the authenticated domain the pane
+    // walked into (nocx-u7uh.11).
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const handler = factHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      expect(content.liveWork()).toEqual({ command: null, host: null })
+
+      // The parent suspends as the child establishes (protocol §9), then the
+      // hand-typed `ssh deploy@prod-01`.
+      handler({ lane: 'lane-1', lifecycle: 'native' })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        destination: { host: 'prod-01', user: 'deploy' },
+      })
+
+      expect(content.liveWork()).toEqual({ command: null, host: 'deploy@prod-01' })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('answers null once the shell has exited, where lineage still speaks for the tab', async () => {
+    const session = makeSession()
+    const client = makeClient()
+    client.openSession.mockResolvedValue(session)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const exitCb = session.onExit.mock.calls[0]?.[0] as (exit: {
+        sessionId: string
+        cause: 'exited' | 'interrupted'
+      }) => void
+      exitCb({ sessionId: session.sessionId, cause: 'exited' })
+
+      // Nothing is running: the loss already happened, and a prompt naming
+      // it would be describing a tab it cannot save.
+      expect(content.liveWork()).toBeNull()
+      // The tab is still on screen, so its provenance is still true. The two
+      // answers differ on purpose.
+      expect(content.lineage()?.sessionId).toBe(session.sessionId)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The session waits for its pane's row (nocx-rtg0.29)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the session waits for its pane row (nocx-rtg0.29)', () => {
+  const PANE = '0199c5e2-8f3a-7c41-b9d6-2e7a04f18b53'
+
+  it('does not open while the row is still in flight, then names the pane', async () => {
+    let admit!: (registered: boolean) => void
+    const registered = new Promise<boolean>((resolve) => {
+      admit = resolve
+    })
+    const client = makeClient()
+    const mounting = mountTerminal(makeClipboard(), { pane: { paneId: PANE, registered } }, client)
+
+    // The lifecycle subscription is wired in mount() IMMEDIATELY before the
+    // open, so waiting for it is waiting for the exact point the session
+    // used to be opened from. Reaching it with no open having been sent is
+    // what proves the order — no duration is involved, which is the only
+    // kind of ordering assertion that survives a fast machine.
+    await vi.waitFor(() => expect(client.dispatcher.subscribe).toHaveBeenCalled())
+    expect(client.openSession).not.toHaveBeenCalled()
+
+    admit(true)
+    const { teardown } = await mounting
+    try {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+      expect(client.openSession.mock.calls[0][2]).toEqual({ paneId: PANE })
+    } finally {
+      teardown()
+    }
+  })
+
+  // Criterion 4: no layout store is not a refusal. The id is still one
+  // identity for history.record and secrets.paneClosed; it simply names no
+  // row, so the open must not claim it does.
+  it('opens without a paneId when the pane has no row, rather than refusing', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      { pane: { paneId: PANE, registered: Promise.resolve(false) } },
+      client,
+    )
+    try {
+      expect(client.openSession).toHaveBeenCalledTimes(1)
+      expect(client.openSession.mock.calls[0][2]).toEqual({})
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the pane on a profile ssh open too — an ssh tab is a pane', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'ssh:test:1', host: 'example.test' },
+        pane: { paneId: PANE, registered: Promise.resolve(true) },
+      },
+      client,
+    )
+    try {
+      expect(client.openSSHSession.mock.calls[0][3]).toEqual({ paneId: PANE })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the pane on a direct-host ssh open too', async () => {
+    const client = makeClient()
+    const { teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: '', host: 'example.test' },
+        pane: { paneId: PANE, registered: Promise.resolve(true) },
+      },
+      client,
+    )
+    try {
+      expect(client.openSSHSessionByHost.mock.calls[0][4]).toEqual({ paneId: PANE })
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A frozen block sends what it printed (nocx-2f0f)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a frozen block sends what it printed (nocx-2f0f)', () => {
+  // The whole feature, through the seam a person reaches: they type a command,
+  // it finishes, and the text it printed leaves for the store. Everything
+  // below the assertion is the ordinary path — the app-owned submit, the
+  // authenticated completion, the render fence, the history.record ack — and
+  // none of it is stubbed past the socket.
+  it('takes the entry from the record ack and sends the body against it', async () => {
+    const FENCE = 'd'.repeat(64)
+    const client = makeClient()
+    client.call.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: 'e-capture',
+          redactions: [],
+          maskedCommand: 'echo hello',
+          captures: [],
+        })
+      }
+      if (method === 'ledger.capture') {
+        return Promise.resolve({ artifactId: 'a-1', stored: true })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    // The lifecycle fact handler the content registered on the fake
+    // dispatcher — the seam authenticated facts arrive through.
+    const handler = lifecycleHandler(client)
+    const renderer = rendererOf(content)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('echo hello')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-c', state: 'open', origin: 'app', command: 'echo hello' },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-c',
+          state: 'completed',
+          exitCode: 0,
+          fence: FENCE,
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      await vi.waitFor(() =>
+        expect(client.call.mock.calls.some((c) => c[0] === 'history.record')).toBe(true),
+      )
+      // The visual freeze is what produces the bodies, and it waits for the
+      // fence. Until it runs there is nothing to send — which is why the ack
+      // parks rather than being dropped.
+      renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
+
+      await vi.waitFor(() =>
+        expect(client.call.mock.calls.some((c) => c[0] === 'ledger.capture')).toBe(true),
+      )
+      const sent = client.call.mock.calls
+        .filter((c) => c[0] === 'ledger.capture')
+        .map((c) => c[1] as { entryId: string; mediaType: string; seq: number })
+      expect(sent[0].entryId).toBe('e-capture')
+      expect(sent[0].mediaType).toBe('application/vt')
+      expect(sent[0].seq).toBe(1)
+      // Both bodies: the durable one and the derived text the second names it
+      // from. One without the other is half the artifact pair.
+      await vi.waitFor(() =>
+        expect(
+          client.call.mock.calls
+            .filter((c) => c[0] === 'ledger.capture')
+            .some((c) => (c[1] as { mediaType: string }).mediaType === 'text/plain'),
+        ).toBe(true),
+      )
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// The pane reports where it IS, so a restore reopens it there (nocx-zkiv4)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the pane reports its directory (nocx-zkiv4)', () => {
+  it('reports a verified local cwd once, and not again for the same directory', async () => {
+    const reported: string[] = []
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onPaneCwdChange: (cwd) => reported.push(cwd) } },
+      client,
+    )
+    const renderer = rendererOf(content)
+    try {
+      // The session-open cwd is a provider's fallback, not a report: nothing
+      // has been verified yet, so nothing may be stored (AD-5).
+      expect(reported).toEqual([])
+
+      renderer._fireCwd('', '/repo/frontend')
+      expect(reported).toEqual(['/repo/frontend'])
+
+      // A shell prints its prompt many times in one directory. The row is
+      // written on CHANGE, or sitting still would cost a write per prompt.
+      renderer._fireCwd('', '/repo/frontend')
+      expect(reported).toEqual(['/repo/frontend'])
+
+      renderer._fireCwd('', '/repo/internal')
+      expect(reported).toEqual(['/repo/frontend', '/repo/internal'])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('never reports a directory from an ssh pane, because a local shell cannot reopen there', async () => {
+    const reported: string[] = []
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        ssh: { profileId: 'p-1', host: 'pi.local' },
+        hooks: { onPaneCwdChange: (cwd) => reported.push(cwd) },
+      },
+      client,
+    )
+    const renderer = rendererOf(content)
+    try {
+      // /home/pi on a Raspberry Pi is not /home/pi here. Storing it would
+      // send the restored pane to a directory that does not exist on this
+      // machine — or, worse, to a different one that does.
+      renderer._fireCwd('pi.local', '/home/pi')
+      expect(reported).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A pane draws its past the first time it is shown (nocx-m3fqk)
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a pane draws its past (nocx-m3fqk)', () => {
+  function storeWith(entries: unknown[], body: string | null) {
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') {
+        const p = params as { paneId?: string }
+        return Promise.resolve({
+          entries: p.paneId ? entries : [],
+          scope: 'everywhere',
+          exhausted: true,
+          hasRows: entries.length > 0,
+          coverage: null,
+        })
+      }
+      if (method === 'ledger.get') {
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          artifacts: body === null ? [] : [{ id: 'art-1', mediaType: 'application/vt' }],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: 'art-1',
+          mediaType: 'application/vt',
+          body: body ?? '',
+          truncated: null,
+          byteLen: (body ?? '').length,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    return client
+  }
+
+  const entry = (over: Record<string, unknown> = {}) => ({
+    id: 'e-1',
+    seq: 1,
+    environmentId: 'env',
+    host: null,
+    cwd: '/repo',
+    kind: 'shell',
+    intent: 'make test',
+    phase: 'closed',
+    status: 'success',
+    submittedAt: 1,
+    startedAt: 1,
+    endedAt: 2,
+    durationMs: 1200,
+    exitCode: 0,
+    maskedCount: 0,
+    maskedKinds: [],
+    redactions: [],
+    ...over,
+  })
+
+  it('draws the blocks it ran before, above a boundary, marked as not live', async () => {
+    const client = storeWith([entry({ id: 'e-2', intent: 'make lint' }), entry()], '\u001b[32mPASS')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(2)
+      })
+
+      // Oldest first: the page comes back newest-first and a person reads
+      // their past downwards.
+      const restored = [...inner.querySelectorAll('[data-restored="true"]')]
+      expect(restored[0].textContent).toContain('make test')
+      expect(restored[1].textContent).toContain('make lint')
+
+      // The boundary, and everything restored ABOVE it: what makes "this
+      // shell is a new one" visible rather than implied (ADR-0019 §3).
+      const boundary = inner.querySelector('[data-restore-boundary="true"]')
+      expect(boundary).not.toBeNull()
+      expect(
+        boundary!.compareDocumentPosition(restored[1]) & Node.DOCUMENT_POSITION_PRECEDING,
+      ).toBeTruthy()
+
+      // Drawn ONCE: a pane is shown on every tab switch.
+      content.setVisible(false)
+      content.setVisible(true)
+      await Promise.resolve()
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('survives being shown before it is mounted, which is what really happens', async () => {
+    // The activation seam calls setVisible(true) while the pane is still
+    // being built, so the first show finds no scrollback. Spending the
+    // one-shot there costs the pane its whole past — and no unit test would
+    // have seen it, because a test shows a pane that is already mounted.
+    const client = storeWith([entry()], 'output')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const withScrollback = content as unknown as { scrollback: ScrollbackController | null }
+      const real = withScrollback.scrollback
+      withScrollback.scrollback = null
+      content.setVisible(true)
+      await Promise.resolve()
+      withScrollback.scrollback = real
+
+      content.setVisible(false)
+      content.setVisible(true)
+      await vi.waitFor(() => {
+        expect(real!.scrollbackInner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('draws its past when the show arrived before the mount, with no second show', async () => {
+    // THE ORDER THE PRODUCT ACTUALLY RUNS IN, and the one every test above
+    // gets backwards. On a restored pane the log reads: Pane.start(),
+    // PaneManager.activate() -> setVisible(true), and only THEN "creating
+    // renderer". So the one show a restored pane ever gets lands while there
+    // is no scrollback to draw into, and nothing runs the read again — the
+    // tab is active and stays active, so no second setVisible(true) arrives,
+    // and a page load is not a reconnect either.
+    //
+    // The e2e proved neither end was empty: the store held both blocks,
+    // anchored to the right panes, and ledger.query with the restored pane id
+    // answered with them in the second session. The read was simply never
+    // issued. Nothing appeared in the log because "not yet" is silent, which
+    // is correct — the defect was that "not yet" had no "later".
+    const client = storeWith([entry()], 'output')
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { visibleBeforeMount: true },
+      client,
+    )
+    try {
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+      expect(inner.querySelector('[data-restore-boundary="true"]')).not.toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not read the past of a pane nobody has looked at yet', async () => {
+    // The other half of the interval, and the reason the mount cannot simply
+    // read unconditionally: eight panes at fifty blocks is four hundred
+    // blocks of DOM before the first frame. A pane that mounts without being
+    // shown asks nothing, and asks the moment it IS shown.
+    const client = storeWith([entry()], 'output')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await Promise.resolve()
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
+      content.setVisible(true)
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('tries again when the socket comes back, instead of showing an empty past forever', async () => {
+    // The defect the e2e found, and the one no unit test would have: the
+    // restart drops the socket, the pane is shown while it is still coming
+    // back, ledger.query is refused — and a one-shot spent on that failure
+    // leaves the pane with no past for the rest of the session. A reconnect
+    // is ordinary (AD-9), so "could not ask" must not be recorded as
+    // "there was nothing".
+    const client = storeWith([entry()], 'output')
+    const live = client.call.getMockImplementation()! as (
+      method: string,
+      params?: unknown,
+    ) => Promise<unknown>
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') return Promise.reject(new Error('socket is reconnecting'))
+      return live(method, params)
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      await Promise.resolve()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
+
+      // The socket returns and the report fires. The past appears without
+      // the person doing anything.
+      expect(client.onReconnectResult).toHaveBeenCalled()
+      client.call.mockImplementation(live)
+      client._fireReconnect()
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(1)
+      })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('says the output is gone when the artifact is, instead of drawing an empty block', async () => {
+    const client = storeWith([entry()], null)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-output-evicted="true"]')).not.toBeNull()
+      })
+      expect(inner.textContent).toContain('Output is no longer kept')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('costs the past and never the pane when the store cannot be read', async () => {
+    const client = makeClient()
+    client.call.mockRejectedValue(new Error('store down'))
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      await Promise.resolve()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(0)
+      // The pane is alive and usable, which is the property that matters.
+      expect(content.shellState).toBeDefined()
     } finally {
       teardown()
     }

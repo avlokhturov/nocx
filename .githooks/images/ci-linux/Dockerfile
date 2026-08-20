@@ -52,7 +52,9 @@ RUN apt-get update \
       build-essential ca-certificates curl git \
       dash zsh openssh-server openssh-client \
       gnome-keyring dbus-x11 \
+      libgtk-3-dev libwebkit2gtk-4.1-dev \
  && rm -rf /var/lib/apt/lists/*
+
 
 # setup-go with `go-version: '1.26'` resolves to the newest 1.26.x, which is
 # what the job actually runs; GO_VERSION pins it here so a red run can be

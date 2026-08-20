@@ -6,7 +6,12 @@
 // fetched, published, applied; 0/unmeasurable publishes nothing); only a
 // real browser can confirm the pixel geometry (see the task report).
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { measureNaturalAdvance, publishCellMetric, type CellMetric } from './cell-metric'
+import {
+  measureNaturalAdvance,
+  publishCellMetric,
+  publishRowPitch,
+  type CellMetric,
+} from './cell-metric'
 
 const WIDTH_ONLY = { width: 640, height: 16 } as DOMRect
 
@@ -104,5 +109,26 @@ describe('publishCellMetric', () => {
     expect(publishCellMetric(container, 8.5, () => 0)).toBeNull()
     expect(container.style.getPropertyValue('--term-cell-width')).toBe('')
     expect(container.style.getPropertyValue('--term-cell-delta')).toBe('')
+  })
+})
+
+describe('publishRowPitch', () => {
+  it('publishes the grid row pitch the frozen block lays its lines out on', () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    expect(publishRowPitch(container, 20)).toBe(20)
+    expect(container.style.getPropertyValue('--term-cell-height')).toBe('20px')
+  })
+
+  it('publishes nothing while the renderer cannot measure, so the stylesheet fallback stands', () => {
+    // A pitch of 0 would collapse every frozen line to nothing — worse than
+    // the guess it replaces, so an unmeasurable renderer publishes nothing at
+    // all and `.term-line` keeps its `1.2em` fallback.
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    expect(publishRowPitch(container, 0)).toBeNull()
+    expect(publishRowPitch(container, Number.NaN)).toBeNull()
+    expect(publishRowPitch(container, Number.POSITIVE_INFINITY)).toBeNull()
+    expect(container.style.getPropertyValue('--term-cell-height')).toBe('')
   })
 })

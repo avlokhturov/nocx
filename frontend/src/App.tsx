@@ -9,14 +9,14 @@ import { ToastHost } from './ui/toast'
  *   #vertical-tabstrip  — TabStripBase mounts here (vertical)
  *   #activitybar        — mountSidebar renders SidebarSolid here
  *   #sidebar            — sidebar panel, managed by SidebarSolid
- *   #panes              — TabManager appends tab panes here (Solid MUST never
+ *   #panes              — PaneManager appends tab panes here (Solid MUST never
  *                         render children beneath, key, or remount this element)
  *
  * #tabbar stays present in both placements as the Wails drag region.
  * #workspace is a flex row containing #vertical-tabstrip and #body.
  *
  * Per-tab surfaces (settings, connections, export) keep their own Solid roots
- * mounted into panes by the TabContent seam — converting those is not this
+ * mounted into panes by the PaneContent seam — converting those is not this
  * bead's scope.
  *
  * No reactive state: the shell skeleton is static. All lifecycle and wiring

@@ -336,6 +336,18 @@ already injects `performance.now()` and forbids `Date.now()`), because a wall cl
 jumps produces negative durations; ordering from `seq`, because two windows can submit in
 the same millisecond and wall time is not a key.
 
+> **Amended 2026-08-17 by `nocx-rtg0.23`, which stores these three.** The two-clock decision
+> stands; the assignment of the clocks does not, and `command-ledger.ts` now injects
+> `Date.now()` and forbids `performance.now()` — the reverse of the sentence above. It was
+> reversed by `nocx-rtg0.16`: a presentation clock in a field the store judges by put every
+> row in January 1970, where the retention sweep deleted it microseconds after it was
+> written. So `startedAt` is the renderer's **wall** clock at submit, because a start that
+> renders as "3 days ago" after a restart can only be one; `endedAt` is the **backend's**
+> wall clock at the close, on ADR-0019's rule that what the store judges by the store must
+> own; and `durationMs` is the renderer's own measurement, never the difference of the two.
+> The negative-duration hazard the paragraph names is real and is answered by measuring the
+> duration rather than by subtracting wall times.
+
 ### 3.3 Kind payloads
 
 ```ts
@@ -361,6 +373,14 @@ type EntryPayload =
 
 Only the `shell` arm is implemented. The others are shown because a union with one arm is
 indistinguishable from a struct, and the point is that adding an arm is a local change.
+
+> **Amended 2026-08-17 by `nocx-rtg0.23`, which writes this arm.** The stored shell arm is
+> `{ kind: 'shell', v: 1, exitCode }`. `trusted` and `markers` are gone, not deferred:
+> ADR-0024 deleted the `trusted` boolean, its laundering rule and `trusted` as a field
+> crossing to `history.record`, and with it the anonymous OSC 133 marker cycle a
+> `MarkerTrace` was read from. Neither has a source in the renderer any more, so a wire that
+> accepted them would be asking for a guess. `ledger.close` refuses `exitCode` on any other
+> kind for the same reason this section gives for not hoisting it.
 
 Each payload carries a schema version `v`. The discriminator stays a closed set on purpose —
 see §15 for why this design declines the "open type-id" alternative.
@@ -792,6 +812,37 @@ envelope = { id, environment, cwd, kind, intent, sensitivity, clientSeq }
 - `ledger.open   { envelope }` → `{ seq, submittedAt }`
 - `ledger.bind   { envelope, facts }`
 - `ledger.close  { envelope, status, facts, durationMs }`
+
+> **Amended 2026-08-17 by `nocx-rtg0.3`, which shipped this.** The envelope carries
+> `sessionId`, not `environment`. The backend derives the environment from the session
+> through `environmentForSession`, which is already this repo's one derivation of where a
+> session is and whose own comment says the backend never trusts the renderer's idea of
+> where it is. Putting the environment facets on the wire would be a second derivation of
+> one fact, which is the AD-8 defect this design invokes elsewhere. **The envelope's stated
+> purpose survives whole**: the session yields `environment_id` and the other three NOT NULL
+> columns still ride the envelope, so a `close` for an unknown id still creates its row.
+> What it does not serve is an outbox replay arriving after the session is gone — §6.4's
+> problem, named in `ws_ledger.go`'s header and carried by `nocx-rtg0.4`. Reversing this is
+> a deliberate reversal of `environmentForSession`'s rule and must be decided as one.
+>
+> The same bead found a gap this section cannot see from here: **`FinishExecution` has
+> nowhere to put an exit code or a duration for a row that already exists**, so a `close`
+> that creates its own row records more than a `close` on an open one.
+>
+> **Closed 2026-08-17 by `nocx-rtg0.23`.** `close` is
+> `{ envelope, status, facts: { terminationReason, exitCode }, startedAt, durationMs }`, and
+> `FinishExecution` writes the entry's terminal facts — `started_at`, `ended_at`,
+> `duration_ms` and the kind payload — in the same transaction as the run's, so the two
+> paths record the same row. It went there rather than through `Submit` because `Submit`'s
+> id is an idempotency key bound to a digest of the submitted content: a later fact routed
+> through it would change the digest and turn every outbox replay of the original `open`
+> into `ErrIDConflict`. **Three columns of `command_history` still have no ledger answer** —
+> `masked_count`, `masked_kinds` and `redactions`, and with them `RewriteRedaction`'s
+> vault-capture flow, which addresses a row by its `command_history` id. The ledger masks
+> the intent through the same owner and then discards the findings and the segments. A
+> fourth, `host`, is present as `environment_id` and derivable both ways, but
+> `LedgerRepository` exposes no environment read, so a row cannot be rendered with its host
+> yet. Those four are `nocx-rtg0.19`'s to answer before it deletes the table.
 
 v2 sent `{id, status, facts, durationMs}` on close and claimed it could upsert a missing row
 — impossible, since the row needs `environment_id`, `cwd`, `kind` and `intent`, all NOT NULL,

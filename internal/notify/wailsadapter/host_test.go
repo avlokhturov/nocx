@@ -11,20 +11,21 @@ import (
 
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 )
 
 // harness records every runtime interaction and lets a test control the
 // authorization answers, so the adapter's behavior is asserted through the
 // seams the real Wails runtime would occupy.
 type harness struct {
-	sent           []runtime.NotificationOptions
-	sendErr        error
-	cb             func(runtime.NotificationResult)
-	lookups        []string
+	sent    []notifications.NotificationOptions
+	sendErr error
+	cb      func(notifications.NotificationResult)
+	// focuses records the session ids handed to the Focus seam — session
+	// ids, not tab ids: the backend has no tab id and the renderer is what
+	// resolves one (AD-7).
 	focuses        []string
 	focusErr       error
-	lookup         func(sessionID string) (tab string, ok bool)
 	available      bool
 	requestGranted bool
 	requestErr     error
@@ -45,33 +46,25 @@ func newHarness(t *testing.T, mutate ...func(*harness)) (*harness, *wailsadapter
 	for _, m := range mutate {
 		m(h)
 	}
-	lookup := func(sid string) (string, bool) {
-		h.lookups = append(h.lookups, sid)
-		return "tab-" + sid, true
-	}
-	if h.lookup != nil {
-		lookup = h.lookup
-	}
-	host := wailsadapter.New(context.Background(), wailsadapter.Deps{
-		Send: func(_ context.Context, opts runtime.NotificationOptions) error {
+	host := wailsadapter.New(wailsadapter.Deps{
+		Send: func(opts notifications.NotificationOptions) error {
 			h.sent = append(h.sent, opts)
 			return h.sendErr
 		},
-		IsAvailable: func(context.Context) bool { return h.available },
-		RequestAuthorization: func(context.Context) (bool, error) {
+		IsAvailable: func() bool { return h.available },
+		RequestAuthorization: func() (bool, error) {
 			h.requestCalls++
 			return h.requestGranted, h.requestErr
 		},
-		CheckAuthorization: func(context.Context) (bool, error) {
+		CheckAuthorization: func() (bool, error) {
 			h.checkCalls++
 			return h.checkGranted, h.checkErr
 		},
-		RegisterResponse: func(_ context.Context, cb func(runtime.NotificationResult)) {
+		RegisterResponse: func(cb func(notifications.NotificationResult)) {
 			h.cb = cb
 		},
-		Lookup: lookup,
-		Focus: func(tab string) error {
-			h.focuses = append(h.focuses, tab)
+		Focus: func(sessionID string) error {
+			h.focuses = append(h.focuses, sessionID)
 			return h.focusErr
 		},
 		Log: slog.New(slog.NewTextHandler(&h.logBuf, nil)),
@@ -143,7 +136,7 @@ func TestBannerBodyArrivesVerbatim(t *testing.T) {
 			if err != nil {
 				t.Fatalf("json.Marshal(options): %v", err)
 			}
-			var back runtime.NotificationOptions
+			var back notifications.NotificationOptions
 			if err := json.Unmarshal(raw, &back); err != nil {
 				t.Fatalf("json.Unmarshal: %v", err)
 			}
@@ -157,26 +150,25 @@ func TestBannerBodyArrivesVerbatim(t *testing.T) {
 	}
 }
 
-// TestClickFocusesOriginatingTab: the callback decode, the tab lookup and the
-// focus call are each asserted. Both the empty and the Wails-normalized
-// default action identifiers mean "the banner body was clicked".
-func TestClickFocusesOriginatingTab(t *testing.T) {
+// TestClickFocusesOriginatingSession: the callback decode and the focus call
+// are each asserted, and the value handed on is the session id the banner
+// carried — verbatim, with no tab id derived from it. Both the empty and the
+// Wails-normalized default action identifiers mean "the banner body was
+// clicked".
+func TestClickFocusesOriginatingSession(t *testing.T) {
 	for _, action := range []string{"", "DEFAULT_ACTION"} {
 		t.Run("action="+action, func(t *testing.T) {
 			h, _ := newHarness(t)
 			if h.cb == nil {
 				t.Fatal("click callback was not registered")
 			}
-			h.cb(runtime.NotificationResult{Response: runtime.NotificationResponse{
+			h.cb(notifications.NotificationResult{Response: notifications.NotificationResponse{
 				ActionIdentifier: action,
 				UserInfo:         map[string]interface{}{"sessionId": "s42"},
 			}})
 
-			if len(h.lookups) != 1 || h.lookups[0] != "s42" {
-				t.Errorf("tab lookup: got %v want [s42]", h.lookups)
-			}
-			if len(h.focuses) != 1 || h.focuses[0] != "tab-s42" {
-				t.Errorf("focus call: got %v want [tab-s42]", h.focuses)
+			if len(h.focuses) != 1 || h.focuses[0] != "s42" {
+				t.Errorf("focus call: got %v want [s42]", h.focuses)
 			}
 		})
 	}
@@ -187,22 +179,22 @@ func TestClickFocusesOriginatingTab(t *testing.T) {
 func TestClickMalformedPayloadNoFocus(t *testing.T) {
 	cases := []struct {
 		name    string
-		result  runtime.NotificationResult
+		result  notifications.NotificationResult
 		wantLog string
 	}{
-		{"response error", runtime.NotificationResult{Error: errors.New("callback exploded")}, "notification response error"},
-		{"unknown action", runtime.NotificationResult{Response: runtime.NotificationResponse{
+		{"response error", notifications.NotificationResult{Error: errors.New("callback exploded")}, "notification response error"},
+		{"unknown action", notifications.NotificationResult{Response: notifications.NotificationResponse{
 			ActionIdentifier: "com.apple.UNNotificationDismissActionIdentifier",
 			UserInfo:         map[string]interface{}{"sessionId": "s1"},
 		}}, "notification response has an unknown action"},
-		{"nil user info", runtime.NotificationResult{Response: runtime.NotificationResponse{}}, "notification response carries no usable session id"},
-		{"empty user info", runtime.NotificationResult{Response: runtime.NotificationResponse{
+		{"nil user info", notifications.NotificationResult{Response: notifications.NotificationResponse{}}, "notification response carries no usable session id"},
+		{"empty user info", notifications.NotificationResult{Response: notifications.NotificationResponse{
 			UserInfo: map[string]interface{}{},
 		}}, "notification response carries no usable session id"},
-		{"session id wrong type", runtime.NotificationResult{Response: runtime.NotificationResponse{
+		{"session id wrong type", notifications.NotificationResult{Response: notifications.NotificationResponse{
 			UserInfo: map[string]interface{}{"sessionId": float64(42)},
 		}}, "notification response carries no usable session id"},
-		{"session id empty string", runtime.NotificationResult{Response: runtime.NotificationResponse{
+		{"session id empty string", notifications.NotificationResult{Response: notifications.NotificationResponse{
 			UserInfo: map[string]interface{}{"sessionId": ""},
 		}}, "notification response carries no usable session id"},
 	}
@@ -220,47 +212,49 @@ func TestClickMalformedPayloadNoFocus(t *testing.T) {
 	}
 }
 
-// TestClickUnknownSession: a click naming a session no live tab owns focuses
-// nothing.
+// TestClickUnknownSession: a click naming a session nothing owns any more is
+// still handed to Focus — resolving a session id to a tab is the renderer's
+// job, so the adapter cannot know it is stale — and Focus saying so is a
+// logged failure, not a panic and not a focus of something else.
 func TestClickUnknownSession(t *testing.T) {
-	h, host := newHarness(t, func(h *harness) {
-		h.lookup = func(string) (string, bool) { return "", false }
-	})
+	h, _ := newHarness(t, func(h *harness) { h.focusErr = errors.New("no tab holds session gone") })
 	if h.cb == nil {
 		t.Fatal("click callback was not registered")
 	}
-	h.cb(runtime.NotificationResult{Response: runtime.NotificationResponse{
+	h.cb(notifications.NotificationResult{Response: notifications.NotificationResponse{
 		UserInfo: map[string]interface{}{"sessionId": "gone"},
 	}})
-	if len(h.focuses) != 0 {
-		t.Errorf("focused %v for an unknown session, want none", h.focuses)
+	if len(h.focuses) != 1 || h.focuses[0] != "gone" {
+		t.Errorf("focus call: got %v want [gone]", h.focuses)
 	}
-	if !strings.Contains(h.logBuf.String(), "notification response names an unknown session") {
-		t.Errorf("expected a logged unknown-session warning, log: %q", h.logBuf.String())
+	if !strings.Contains(h.logBuf.String(), "focus failed after notification click") {
+		t.Errorf("expected a logged focus failure, log: %q", h.logBuf.String())
 	}
-	_ = host
+	if !strings.Contains(h.logBuf.String(), "gone") {
+		t.Errorf("expected the failure to name the session, log: %q", h.logBuf.String())
+	}
 }
 
-// TestClickWithoutResolver: a host constructed with no tab resolver logs the
+// TestClickWithoutResolver: a host constructed with no focus path logs the
 // inability loudly and never panics.
 func TestClickWithoutResolver(t *testing.T) {
 	var buf bytes.Buffer
-	var cb func(runtime.NotificationResult)
-	host := wailsadapter.New(context.Background(), wailsadapter.Deps{
-		IsAvailable:          func(context.Context) bool { return true },
-		RequestAuthorization: func(context.Context) (bool, error) { return true, nil },
-		CheckAuthorization:   func(context.Context) (bool, error) { return true, nil },
-		RegisterResponse: func(_ context.Context, c func(runtime.NotificationResult)) {
+	var cb func(notifications.NotificationResult)
+	host := wailsadapter.New(wailsadapter.Deps{
+		IsAvailable:          func() bool { return true },
+		RequestAuthorization: func() (bool, error) { return true, nil },
+		CheckAuthorization:   func() (bool, error) { return true, nil },
+		RegisterResponse: func(c func(notifications.NotificationResult)) {
 			cb = c
 		},
 		Log: slog.New(slog.NewTextHandler(&buf, nil)),
 	})
-	cb(runtime.NotificationResult{Response: runtime.NotificationResponse{
+	cb(notifications.NotificationResult{Response: notifications.NotificationResponse{
 		UserInfo: map[string]interface{}{"sessionId": "s1"},
 	}})
 	// No panic above is part of the assertion: the host has no focus path to
 	// call, and the inability is logged, never acted on blindly.
-	if !strings.Contains(buf.String(), "notification click cannot be honored: no tab resolver is wired") {
+	if !strings.Contains(buf.String(), "notification click cannot be honored: no focus path is wired") {
 		t.Errorf("expected a logged resolver warning, log: %q", buf.String())
 	}
 	_ = host
@@ -270,11 +264,11 @@ func TestClickWithoutResolver(t *testing.T) {
 // honored as far as it can be, and the failure is visible, not swallowed.
 func TestClickFocusFailure(t *testing.T) {
 	h, _ := newHarness(t, func(h *harness) { h.focusErr = errors.New("tab manager busy") })
-	h.cb(runtime.NotificationResult{Response: runtime.NotificationResponse{
+	h.cb(notifications.NotificationResult{Response: notifications.NotificationResponse{
 		UserInfo: map[string]interface{}{"sessionId": "s42"},
 	}})
-	if len(h.focuses) != 1 || h.focuses[0] != "tab-s42" {
-		t.Errorf("focus call: got %v want [tab-s42]", h.focuses)
+	if len(h.focuses) != 1 || h.focuses[0] != "s42" {
+		t.Errorf("focus call: got %v want [s42]", h.focuses)
 	}
 	if !strings.Contains(h.logBuf.String(), "focus failed after notification click") {
 		t.Errorf("expected a logged focus failure, log: %q", h.logBuf.String())
@@ -298,6 +292,21 @@ func TestPermissionStates(t *testing.T) {
 		}
 		if _, err := host.RequestAuthorization(context.Background()); !errors.Is(err, notify.ErrUnavailable) {
 			t.Errorf("RequestAuthorization: got %v want ErrUnavailable", err)
+		}
+		// AND THE OS IS NEVER TOUCHED. Every assertion above is about the
+		// answer; this one is about the call not being made, and it is the
+		// one that matters most on macOS, where reading authorization from a
+		// process that has no bundle throws an Objective-C exception and
+		// aborts the application rather than returning an error Go can see.
+		// The startup resolve calls Refresh, so this is the exact path that
+		// killed every unbundled run before the composition root began
+		// passing ServiceStartup's verdict in through IsAvailable.
+		if _, err := host.Refresh(context.Background()); !errors.Is(err, notify.ErrUnavailable) {
+			t.Errorf("Refresh: got %v want ErrUnavailable", err)
+		}
+		if h.checkCalls != 0 || h.requestCalls != 0 {
+			t.Errorf("reached the OS on an unavailable host: %d check(s), %d request(s), want 0 and 0",
+				h.checkCalls, h.requestCalls)
 		}
 	})
 

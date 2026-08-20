@@ -26,6 +26,10 @@ export interface Open {
    */
   sessionEpoch: number
   /**
+   * The workspace this session belongs to (nocx-fraus). NEVER empty and never absent: a tab is always in exactly one workspace, and there is no null (.internal/specs/2026-08-15-workspaces-ux-design.md §4.2). The open REQUEST may omit a workspace — the renderer has no name for the default because the default never renders — and the backend registry then supplies it, which is why this result field is required while the request field is not. It CARRIES NO BEHAVIOUR: nothing reads authority, addressability or reachability from it, the fence that later consults membership is a separate epic (§5), and §5.5 forbids any surface before that epic from describing a workspace as safe, isolated or contained.
+   */
+  workspaceId: string
+  /**
    * Starting working directory of the session's shell, with the home directory abbreviated to ~.
    */
   cwd: string
@@ -33,4 +37,21 @@ export interface Open {
    * The resolved destination mode for this session (nocx-mlm7): the connection-scope default the tab's capability control starts from. script (the default — N3) wraps and installs automatically, raw adds nothing, relay is consent-gated (inert until the relay lands). The mode is never proof that integration succeeded — that is what session.integrationChanged reports, and it is the only thing that reports it.
    */
   desiredMode: 'raw' | 'script' | 'relay'
+  /**
+   * The session that opened this one (nocx-9hu9d), or null for a root session. Always present: null is the answer for a root, and a missing key would make "this session has no parent" indistinguishable from "this backend does not say". It is the edge the backend RECORDED — the renderer's claim in the open params is checked against the live registry and refused (-32602) if it cannot be true, so what comes back here is an admitted fact, not an echo. The full identity is carried, never a bare sessionId: an id alone re-resolves to whatever holds it now, which is the ambiguity instanceId + sessionEpoch exist to remove (nocx-3oupk), and this edge is written once and never revisited. PROVENANCE ONLY — it says "A created B" and confers nothing: the parent gains no right to observe or control the child by appearing here, and continuing authority is a separate, revocable object (ADR-0020 §5). The edge outlives its subject: a parent that exits leaves this value exactly as it was, because a parent's death never closes or rewrites its children (design D6).
+   */
+  parent: {
+    /**
+     * The opener's session id.
+     */
+    sessionId: string
+    /**
+     * The backend instance that minted the opener. Equal to this session's own instanceId for every edge the backend will admit — a claim naming another instance is refused, because a record out of a previous backend can never resolve to a session here.
+     */
+    instanceId: string
+    /**
+     * The opener's epoch within that instance: which incarnation of that session id created this one. A later session reusing the id is a different incarnation and is not this parent.
+     */
+    sessionEpoch: number
+  } | null
 }

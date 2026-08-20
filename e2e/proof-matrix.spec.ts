@@ -12,14 +12,14 @@
  * §5 of .internal/specs/2026-07-27-kit-owns-its-appearance-design.md
  */
 import type { Page } from '@playwright/test'
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, settingsReady } from './harness'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Open settings via keyboard shortcut and wait for the page to render. */
 async function openSettings(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
-  await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 10_000 })
+  await settingsReady(page)
 }
 
 /** Wait for a setting row identified by its data-key to appear. */
@@ -443,6 +443,11 @@ test.describe('4. Scroll ownership — measured', () => {
     await openSettings(page)
     // Navigate to Interface section to see more settings rows
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
+    // The scroller AFTER the navigation, and that order is the assertion.
+    // Interface is a generated section, so it is `scrollMode: 'page'` and owns
+    // a `.ui-page__scroll` for as long as it is the open page. Waiting for it
+    // before the click would be waiting on Settings' loading frame instead
+    // (see settingsReady) — which openSettings has already done properly.
     await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5_000 })
     await expect(page.locator('.ui-page__body')).toBeAttached()
 
@@ -496,9 +501,12 @@ test.describe('4. Scroll ownership — measured', () => {
     // Navigate to Interface section to see more settings rows
     await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
-    // Scroll the last setting row into view using the scroll container
+    // Scroll the last setting row into view using the scroll container. The
+    // scroller arrives WITH Interface — Settings opens on Connections, which
+    // is contained and has none — so it is waited for, never assumed.
     const lastRow = page.locator('.ui-settings-row').last()
     const scroller = page.locator('.ui-page__scroll')
+    await expect(scroller).toBeVisible({ timeout: 5_000 })
     await page.evaluate(() => {
       const s = document.querySelector('.ui-page__scroll')
       if (s) {
@@ -506,7 +514,9 @@ test.describe('4. Scroll ownership — measured', () => {
         s.scrollTop = s.scrollHeight
       }
     })
-    await page.waitForTimeout(200)
+    await expect
+      .poll(() => scroller.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+      .toBeGreaterThan(0)
 
     // The row should be visible within the scroll container
     const scrollerBox = await scroller.boundingBox()
@@ -554,13 +564,13 @@ test.describe('5. Roving tabindex', () => {
       // bug. promptReady is the app saying it is done moving focus.
       await promptReady(page)
 
-      // Read the first tab's data-tab-id from the locator, not activeElement
-      const initialId = await tabs.first().getAttribute('data-tab-id')
+      // Read the first tab's data-pane-id from the locator, not activeElement
+      const initialId = await tabs.first().getAttribute('data-pane-id')
       expect(initialId).not.toBeNull()
 
       // Put keyboard focus on the first tab. Playwright's .focus() on a
       // tabindex="-1" element may be redirected by the roving handler, so
-      // we check the active element's data-tab-id after focusing.
+      // we check the active element's data-pane-id after focusing.
       await page.evaluate(() => {
         ;(document.querySelector('[role="tab"]') as HTMLElement)?.focus()
       })
@@ -572,7 +582,7 @@ test.describe('5. Roving tabindex', () => {
 
       // The next tab should now be focused
       const focusedId = await page.evaluate(() =>
-        document.activeElement?.getAttribute('data-tab-id'),
+        document.activeElement?.getAttribute('data-pane-id'),
       )
       expect(focusedId).not.toBeNull()
       // The focused element should differ from the initial first tab
@@ -595,16 +605,16 @@ test.describe('5. Roving tabindex', () => {
 
       // Focus the active tab (tabindex="0" — the second tab). Playwright's
       // .focus() works here because tabindex >= 0.
-      const activeTab = page.locator('[role="tab"][tabindex="0"]')
-      await activeTab.focus()
-      await expect(activeTab).toBeFocused()
+      const activePane = page.locator('[role="tab"][tabindex="0"]')
+      await activePane.focus()
+      await expect(activePane).toBeFocused()
       // ArrowLeft from the second tab should move to the first
       await page.keyboard.press('ArrowLeft')
       await page.waitForTimeout(100)
 
       // Check that focus moved to the first tab
-      const firstTab = tabs.first()
-      const isFirstFocused = await firstTab.evaluate((el) => el === document.activeElement)
+      const firstPane = tabs.first()
+      const isFirstFocused = await firstPane.evaluate((el) => el === document.activeElement)
       expect(isFirstFocused).toBe(true)
     })
 
@@ -887,16 +897,25 @@ test.describe('6. Page duties', () => {
       // Navigate to Interface section to see more settings rows
       await page.locator('.ui-grouped-nav__item[data-item="Interface"] button').click()
 
-      // The last row should be scrollable into view
+      // WAIT FOR THE SCROLLER THE NAVIGATION BRINGS. Settings opens on
+      // Connections, which is `scrollMode: 'contained'` and has no
+      // `.ui-page__scroll` at all; the element below belongs to Interface and
+      // exists only once that page is the open one. Without this the evaluate
+      // found null, scrolled nothing, and the boundingBox below timed out.
       const lastRow = page.locator('.ui-settings-row').last()
       const scroller = page.locator('.ui-page__scroll')
+      await expect(scroller).toBeVisible({ timeout: 5_000 })
       await page.evaluate(() => {
         const s = document.querySelector('.ui-page__scroll')
         if (s) {
           s.scrollTop = s.scrollHeight
         }
       })
-      await page.waitForTimeout(200)
+      // The settled scroll position, not a duration: `scrollTop` is the
+      // observable the assignment above is trying to produce.
+      await expect
+        .poll(() => scroller.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+        .toBeGreaterThan(0)
 
       const scrollerBox = await scroller.boundingBox()
       const rowBox = await lastRow.boundingBox()

@@ -36,6 +36,7 @@ import (
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
+	"github.com/shady2k/nocx/internal/workspace"
 )
 
 // contractDir holds the wire schemas. Deliberately not under internal/: the
@@ -1210,11 +1211,12 @@ func TestHistoryQuery_OverTheWireConformsToContract(t *testing.T) {
 		started := ended - 4_100
 		horizon := int64(1_700_000_000_000)
 		exit := 0
-		fake := &fakeHistoryDB{page: content.HistoryPage{
-			Entries: []content.CommandRecord{
-				{ID: 7, Command: "git status", Cwd: "/repo", Host: "", Status: content.StatusSuccess, ExitCode: &exit, StartedAt: &started, EndedAt: &ended},
-				{ID: 6, Command: "make", Cwd: "/repo", Host: "", Status: content.StatusFailure},
-			},
+		done := ledgerRow("0192f0aa-0000-7000-8000-000000000007", "git status", "/repo", "", content.EntrySuccess)
+		done.StartedAt, done.EndedAt = &started, &ended
+		done.Payload = content.ShellPayloadJSON(&exit)
+		failed := ledgerRow("0192f0aa-0000-7000-8000-000000000006", "make", "/repo", "", content.EntryFailure)
+		fake := &fakeHistoryDB{page: content.LedgerPage{
+			Entries:   []content.LedgerEntrySummary{done, failed},
 			HasRows:   true,
 			Exhausted: true,
 			Coverage:  &horizon,
@@ -1599,6 +1601,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 			SessionID:    "0123456789abcdef0123456789abcdef",
 			InstanceID:   "fedcba9876543210fedcba9876543210",
 			SessionEpoch: 1,
+			WorkspaceID:  string(workspace.Default),
 			Cwd:          "~/work",
 			DesiredMode:  mode,
 		})
@@ -4750,6 +4753,276 @@ func TestExit_DTOStatusRulesAreExact(t *testing.T) {
 			}
 			if err := validateJSONErr(schema, raw); err == nil {
 				t.Fatalf("schema accepted %s: %s", c.name, raw)
+			}
+		})
+	}
+}
+
+// ── ledger.open / ledger.bind / ledger.close ─────────────────────────────
+
+// The DTO's own conformance: one case per interesting shape of the ack the
+// three lifecycle methods share — the applied event, the replay and the
+// drop. Enum spelling and the integer types are what this catches.
+func TestLedgerEvents_DTOsConformToContract(t *testing.T) {
+	cases := map[string]struct {
+		schema string
+		dto    ledgerEventResponse
+	}{
+		"open applied": {"ledger.open.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000001", ClientSeq: 0, Seq: 1,
+			SubmittedAt: 1_750_000_000_000, Phase: "open", Outcome: ledgerApplied,
+		}},
+		"open replay": {"ledger.open.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000001", ClientSeq: 4, Seq: 12,
+			SubmittedAt: 1_750_000_000_000, Phase: "open", Outcome: ledgerReplay,
+		}},
+		"bind applied": {"ledger.bind.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000002", ClientSeq: 5, Seq: 13,
+			SubmittedAt: 1_750_000_000_000, Phase: "bound", Outcome: ledgerApplied,
+		}},
+		"bind dropped after close": {"ledger.bind.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000002", ClientSeq: 5, Seq: 13,
+			SubmittedAt: 1_750_000_000_000, Phase: "closed", Outcome: ledgerDropped,
+		}},
+		"close applied": {"ledger.close.schema.json", ledgerEventResponse{
+			ID: "01924f9c-0000-7000-8000-000000000003", ClientSeq: 6, Seq: 14,
+			SubmittedAt: 1_750_000_000_000, Phase: "closed", Outcome: ledgerApplied,
+		}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			schema := loadSchema(t, c.schema)
+			raw, err := json.Marshal(c.dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, name+" DTO")
+		})
+	}
+}
+
+// The real methods through the real socket, into the real store. Nothing here
+// names a field, so nothing here can omit one; additionalProperties:false plus
+// required makes the key set exact in both directions. Every state the ack has
+// is driven off the socket: applied on a created row, applied on an advance,
+// replay on a re-delivery, and dropped on a bind that arrives after the close.
+func TestLedgerEvents_OverTheWireConformToContract(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	openSchema := loadSchema(t, "ledger.open.schema.json")
+	bindSchema := loadSchema(t, "ledger.bind.schema.json")
+	closeSchema := loadSchema(t, "ledger.close.schema.json")
+
+	// The close carries every fact it may (nocx-rtg0.23), so the ack that is
+	// validated is the one the widened method actually answers with.
+	closeParams := func(id string, seq int) map[string]any {
+		return map[string]any{
+			"envelope":   ledgerEnv(sid, id, "make", seq),
+			"status":     "success",
+			"facts":      map[string]any{"terminationReason": "completed", "exitCode": 0},
+			"durationMs": 42,
+			"startedAt":  1_750_000_000_000,
+		}
+	}
+
+	steps := []struct {
+		name   string
+		method string
+		schema *jsonschema.Schema
+		params map[string]any
+	}{
+		{"open creates", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
+		{"open replayed", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
+		{"bind advances", "ledger.bind", bindSchema, map[string]any{
+			"envelope": ledgerEnv(sid, "wire-1", "make", 2),
+			"facts":    map[string]any{"interactivity": "tty", "executor": "zsh"},
+		}},
+		{"close advances", "ledger.close", closeSchema, closeParams("wire-1", 3)},
+		{"bind dropped after close", "ledger.bind", bindSchema, map[string]any{
+			"envelope": ledgerEnv(sid, "wire-1", "make", 4),
+		}},
+		{"close creates a row nobody opened", "ledger.close", closeSchema, closeParams("wire-2", 1)},
+	}
+
+	id := 2
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			resp := vaultCall(t, conn, step.method, step.params, id)
+			id++
+			if resp.Error != nil {
+				t.Fatalf("%s: unexpected error: %+v", step.method, resp.Error)
+			}
+			validateJSON(t, step.schema, resp.Result, step.method+" result ("+step.name+")")
+		})
+	}
+}
+
+// ── ledger.query / ledger.get ────────────────────────────────────────────
+
+// The DTOs' own conformance: the shapes with everything populated and the
+// shapes with nothing. The empty cases are the ones that matter here — a nil
+// slice marshals as null, and `entries` arriving as null rather than [] is
+// the exact defect vault.status shipped with `providers`.
+func TestLedgerReads_DTOsConformToContract(t *testing.T) {
+	host := "deploy@prod.example.com"
+	started := int64(1_750_000_000_000)
+	ended := int64(1_750_000_001_000)
+	duration := int64(1000)
+	exit := 2
+	entry := ledgerEntryWire{
+		ID: "01924f9c-0000-7000-8000-000000000001", Seq: 7,
+		EnvID: "3f1a", Host: &host, Cwd: "/repo", Kind: "shell",
+		Intent: "make deploy", Phase: "closed", Status: "failure",
+		SubmittedAt: started, StartedAt: &started, EndedAt: &ended,
+		DurationMs: &duration, ExitCode: &exit, MaskedCount: 1,
+		MaskedKinds: []string{"openai"},
+		Redactions: []redactionWire{
+			{Kind: "openai", Start: 4, End: 20, Prefix: "sk-p", Suffix: "7890"},
+		},
+	}
+	// The row a live command produces: no end, no exit code, no host row.
+	running := ledgerEntryWire{
+		ID: "01924f9c-0000-7000-8000-000000000002", Seq: 8,
+		EnvID: "3f1a", Host: nil, Cwd: "/repo", Kind: "shell",
+		Intent: "make watch", Phase: "bound", Status: "running",
+		SubmittedAt: started, MaskedKinds: []string{}, Redactions: []redactionWire{},
+	}
+
+	queryCases := map[string]ledgerQueryResponse{
+		"populated": {
+			Entries: []ledgerEntryWire{entry, running}, Scope: "host",
+			Exhausted: false, HasRows: true, Coverage: &ended,
+		},
+		"empty ledger": {
+			Entries: []ledgerEntryWire{}, Scope: "everywhere",
+			Exhausted: true, HasRows: false, Coverage: nil,
+		},
+	}
+	querySchema := loadSchema(t, "ledger.query.schema.json")
+	for name, dto := range queryCases {
+		t.Run("query/"+name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, querySchema, raw, "ledger.query "+name+" DTO")
+		})
+	}
+
+	cols, rows := 120, 40
+	stream := "combined"
+	truncated := "cap"
+	offset, end := int64(0), int64(4096)
+	getCases := map[string]ledgerGetResponse{
+		"populated": {
+			Entry: entry,
+			Edges: []ledgerEdgeWire{{
+				From: entry.ID, To: running.ID, Rel: "rerun-of",
+				Payload: json.RawMessage(`{"note":"anything"}`),
+			}},
+			Artifacts: []ledgerArtifactWire{{
+				ID: "artifact-1", ExecutionID: 3, MediaType: "text/plain",
+				DerivedFrom: nil, State: "sealed", ByteLen: 4096, ChunkCount: 2,
+				Pinned: true, Truncated: &truncated, CaptureMethod: "raw-output",
+				CaptureVersion: 1, TerminalCols: &cols, TerminalRows: &rows,
+				Stream: &stream, ByteOffset: &offset, ByteEnd: &end, Encoding: "utf-8",
+				Gaps:    []ledgerGapWire{{Start: 10, End: 20, Reason: "dropped"}},
+				Payload: json.RawMessage(`{}`),
+			}},
+		},
+		"an entry with no relations and no captures": {
+			Entry: running, Edges: []ledgerEdgeWire{}, Artifacts: []ledgerArtifactWire{},
+		},
+	}
+	getSchema := loadSchema(t, "ledger.get.schema.json")
+	for name, dto := range getCases {
+		t.Run("get/"+name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, getSchema, raw, "ledger.get "+name+" DTO")
+		})
+	}
+}
+
+// The real methods through the real socket, into the real store. Nothing
+// here names a field, so nothing here can omit one; additionalProperties
+// false plus required makes the key set exact in both directions. The empty
+// answer is driven first, because that is the payload a fixture-built test
+// would never produce.
+func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	sid := openLocalSession(t, conn)
+
+	querySchema := loadSchema(t, "ledger.query.schema.json")
+	getSchema := loadSchema(t, "ledger.get.schema.json")
+
+	empty := vaultCall(t, conn, "ledger.query", map[string]any{"scope": "everywhere"}, 2)
+	if empty.Error != nil {
+		t.Fatalf("ledger.query on an empty ledger: %+v", empty.Error)
+	}
+	validateJSON(t, querySchema, empty.Result, "ledger.query result (empty ledger)")
+
+	// A row with a secret in it, closed with an exit code: the receipt and
+	// the shell arm are both on the wire, off the real payload.
+	openEntry(t, conn, sid, "wire-1", "deploy --token=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCD", 3)
+	closeEntryOverWire(t, conn, sid, "wire-1", "failure", 3, 4)
+	openEntry(t, conn, sid, "wire-2", "make test", 5)
+
+	for _, c := range []struct {
+		name   string
+		params map[string]any
+	}{
+		{"everywhere", map[string]any{"scope": "everywhere"}},
+		{"a rung with no matches", map[string]any{
+			"scope": "directory", "environmentId": localEnvironmentID(), "cwd": "/nowhere",
+		}},
+		{"a page that is not exhausted", map[string]any{"scope": "everywhere", "limit": 1}},
+	} {
+		t.Run("query/"+c.name, func(t *testing.T) {
+			resp := vaultCall(t, conn, "ledger.query", c.params, 10)
+			if resp.Error != nil {
+				t.Fatalf("ledger.query: %+v", resp.Error)
+			}
+			validateJSON(t, querySchema, resp.Result, "ledger.query result ("+c.name+")")
+		})
+	}
+
+	got := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-1"}, 11)
+	if got.Error != nil {
+		t.Fatalf("ledger.get: %+v", got.Error)
+	}
+	validateJSON(t, getSchema, got.Result, "ledger.get result (a closed entry)")
+}
+
+// And the negative: the schema REFUSES a page that is missing a required
+// field or carrying a key nobody declared. additionalProperties:false plus
+// an explicit required is what makes the check exact in both directions —
+// without them the schema accepts anything and the gate is theatre.
+func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
+	schema := loadSchema(t, "ledger.query.schema.json")
+	bad := map[string]string{
+		"entries as null":     `{"entries":null,"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
+		"hasRows missing":     `{"entries":[],"scope":"host","exhausted":true,"coverage":null}`,
+		"an undeclared field": `{"entries":[],"scope":"host","exhausted":true,"hasRows":true,"coverage":null,"source":"store"}`,
+		"a rung nobody named": `{"entries":[],"scope":"repository","exhausted":true,"hasRows":true,"coverage":null}`,
+		"an entry with no host key": `{"entries":[{"id":"a","seq":1,"environmentId":"e","cwd":"/","kind":"shell",` +
+			`"intent":"x","phase":"open","status":"pending","submittedAt":1,"startedAt":null,"endedAt":null,` +
+			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[]}],` +
+			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, []byte(raw)); err == nil {
+				t.Fatalf("the contract accepted %s: %s", name, raw)
 			}
 		})
 	}

@@ -8,13 +8,16 @@
  * NOT implemented here yet; this seam is shaped so it can be added.
  */
 
-import { Log } from '../wailsjs/go/main/WailsApp'
+import { Log } from '../bindings/github.com/shady2k/nocx/wailsapp'
+import { bindingReachable } from './wails-runtime'
 
-/** The Wails runtime augments `window` with a `go` bridge object. */
+/** The generated bindings are named, so this is the key both the browser
+ *  shim and the reachability probe split. */
+const LOG_BINDING = 'main.WailsApp.Log'
+
+/** Devtools flip for decision tracing: `window.nocxDebug = true`. Read
+ *  live so it takes effect without a reload. */
 interface WailsWindow extends Window {
-  go?: { main?: { WailsApp?: { Log?: (message: string) => Promise<void> } } }
-  /** Devtools flip for decision tracing: `window.nocxDebug = true`. Read
-   *  live so it takes effect without a reload. */
   nocxDebug?: unknown
 }
 
@@ -34,24 +37,36 @@ function write(level: LogLevel, msg: string, fields?: LogFields): void {
   }
   const full = parts.join(' ')
 
-  if (
-    typeof window !== 'undefined' &&
-    typeof (window as WailsWindow).go?.main?.WailsApp?.Log === 'function'
-  ) {
-    // Swallow the FFI rejection — callers never see a floating promise.
-    Log(full).catch(() => {
-      /* swallowed */
-    })
-  } else {
-    const fn =
-      level === 'error'
-        ? console.error
-        : level === 'warn'
-          ? console.warn
-          : level === 'debug'
-            ? console.debug
-            : console.log
-    fn(full)
+  // Which side takes the line is decided synchronously, before any call.
+  // v2 probed window.go for the Log method; v3 asks the same question of
+  // the runtime it actually has (shim bridge, or the webview's invoke
+  // bridge). Deciding it by catching the call's rejection instead would
+  // put every browser log line a microtask after the event that caused it
+  // — invisible to a synchronous reader, and to a test.
+  if (!bindingReachable(LOG_BINDING)) {
+    consoleFor(level)(full)
+    return
+  }
+
+  // Backend path. A rejection here is the soft degrade — the line still
+  // reaches the console rather than vanishing — and callers never see a
+  // floating promise.
+  Log(full).catch(() => {
+    consoleFor(level)(full)
+  })
+}
+
+/** The console sink for a level. */
+function consoleFor(level: LogLevel): (msg: string) => void {
+  switch (level) {
+    case 'error':
+      return console.error
+    case 'warn':
+      return console.warn
+    case 'debug':
+      return console.debug
+    default:
+      return console.log
   }
 }
 

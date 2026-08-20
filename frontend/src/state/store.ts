@@ -6,17 +6,24 @@
  * functions themselves (ADR-0012 §2).
  *
  * Slice ownership:
- *   tabModel   → tab-model.ts  (ordered tabs, active tab, MRU)
+ *   (the pane slice is GONE — see below)
  *   sidebar    → sidebar-model.ts  (collapsed, active view)
  *   settings   → settings-domain.ts  (mirror, revision, transitions)
  *   profiles   → profiles-model.ts  (connection profiles list)
  *   banner     → banner-model.ts  (clipboard banner shown)
  *
  * Terminal render state does NOT appear here (AD-6).
+ *
+ * NEITHER DOES THE PANE MODEL, and its removal is nocx-isoph.4. There was a
+ * `paneModel` slice here — ordered panes, the active pane, the MRU — derived
+ * from PaneManager and kept beside it as a framework-neutral copy. The
+ * backend owns that model now (design §4.1): the order, the membership and
+ * the decoration come from layout.read, and a second in-renderer copy of the
+ * same rules would be exactly the two owners the whole epic exists to
+ * remove. It had no production reader, which is how it survived this long.
  */
 
 import { createStore } from 'solid-js/store'
-import type { AgentStatus } from '../agent-status'
 import type { SettingsMirror, SettingsSnapshot } from '../settings-domain'
 import { createMirror } from '../settings-domain'
 import { createBannerState, type BannerState } from './banner-model'
@@ -27,23 +34,10 @@ import {
   type ProfileLists,
 } from './profiles-model'
 import { createSidebarState, type SidebarState } from './sidebar-model'
-import {
-  addTab,
-  activateTab as activateTabModel,
-  closeTab as closeTabModel,
-  createTabModel,
-  reorderTab as reorderTabModel,
-  updateTabActivity as updateTabActivityModel,
-  updateTabAgentStatus as updateTabAgentStatusModel,
-  updateTabTitle as updateTabTitleModel,
-  type TabDescriptor,
-  type TabModel,
-} from './tab-model'
 
 // ── Application state tree ─────────────────────────────────────────────────
 
 export interface AppState {
-  tabModel: TabModel
   sidebar: SidebarState
   settings: SettingsMirror
   profiles: ProfileLists
@@ -52,7 +46,6 @@ export interface AppState {
 
 function createInitialState(): AppState {
   return {
-    tabModel: createTabModel(),
     sidebar: createSidebarState(),
     settings: createMirror(),
     profiles: createProfileLists(),
@@ -67,41 +60,12 @@ function createInitialState(): AppState {
  *
  * Returns a tuple [state, actions] where `actions` are named transitions
  * that wrap the framework‑neutral transition functions.  Consumers call
- * `actions.addTab(...)`, not `setState(...)` directly.
+ * `actions.setActiveView(...)`, not `setState(...)` directly.
  */
 export function createAppStore(): [AppState, AppActions] {
   const [state, setState] = createStore<AppState>(createInitialState())
 
   const actions: AppActions = {
-    // ── Tab transitions ──────────────────────────────────────────────────
-    addTab: (descriptor: TabDescriptor) => {
-      setState('tabModel', (prev) => addTab(prev, descriptor))
-    },
-
-    activateTab: (tabId: number) => {
-      setState('tabModel', (prev) => activateTabModel(prev, tabId))
-    },
-
-    closeTab: (tabId: number) => {
-      setState('tabModel', (prev) => closeTabModel(prev, tabId))
-    },
-
-    reorderTab: (draggedId: number, targetId: number) => {
-      setState('tabModel', (prev) => reorderTabModel(prev, draggedId, targetId))
-    },
-
-    updateTabTitle: (tabId: number, title: string) => {
-      setState('tabModel', (prev) => updateTabTitleModel(prev, tabId, title))
-    },
-
-    updateTabActivity: (tabId: number, hasActivity: boolean) => {
-      setState('tabModel', (prev) => updateTabActivityModel(prev, tabId, hasActivity))
-    },
-
-    updateTabAgentStatus: (tabId: number, status: AgentStatus | null) => {
-      setState('tabModel', (prev) => updateTabAgentStatusModel(prev, tabId, status))
-    },
-
     // ── Sidebar transitions ──────────────────────────────────────────────
     toggleSidebar: () => {
       setState('sidebar', (prev) => ({
@@ -177,21 +141,6 @@ export function createAppStore(): [AppState, AppActions] {
 // ── Named transitions interface ────────────────────────────────────────────
 
 export interface AppActions {
-  /** Add a tab to the model and activate it. */
-  addTab: (descriptor: TabDescriptor) => void
-  /** Activate a tab by id (updates MRU). */
-  activateTab: (tabId: number) => void
-  /** Close a tab.  If last tab, opens a fresh terminal. */
-  closeTab: (tabId: number) => void
-  /** Reorder a tab by dragging. */
-  reorderTab: (draggedId: number, targetId: number) => void
-  /** Set a tab's display title. */
-  updateTabTitle: (tabId: number, title: string) => void
-  /** Set a tab's activity indicator. */
-  updateTabActivity: (tabId: number, hasActivity: boolean) => void
-  /** Set a tab's agent status. */
-  updateTabAgentStatus: (tabId: number, status: AgentStatus | null) => void
-
   /** Toggle sidebar collapsed state. */
   toggleSidebar: () => void
   /** Set the active sidebar view (may toggle collapsed). */

@@ -37,6 +37,19 @@ export interface TextFieldProps {
   disabled?: boolean
   required?: boolean
   autoFocus?: boolean
+  /**
+   * Select the field's current text when it takes focus, so the first
+   * keystroke replaces it.
+   *
+   * For a field that opens PRE-FILLED with a suggestion — a suggested
+   * workspace name, a suggested filename — where the value is an offer rather
+   * than a starting point to edit. Without it the caret lands at one end and
+   * the person has to clear the suggestion before typing, which makes a
+   * helpful default into a chore. Meaningless without `autoFocus`, and
+   * deliberately not implied by it: most autofocused fields are empty or hold
+   * a value the user is amending.
+   */
+  selectOnFocus?: boolean
   trailing?: JSX.Element
   /**
    * A numeric field's unit ('days', 'MiB'), rendered as a suffix inside the
@@ -92,7 +105,18 @@ export function TextField(props: TextFieldProps) {
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}
       ref={(element) => {
-        if (props.autoFocus === true) queueMicrotask(() => element.focus())
+        // Read BEFORE the microtask, not inside it. A prop read inside a
+        // deferred callback is a reactive read outside any tracked scope —
+        // `solid/reactivity` refuses it, and it is right to: the value it
+        // would see is whatever the prop happens to hold a tick later. Both
+        // of these are answered at mount and never change afterwards.
+        const focusOnMount = props.autoFocus === true
+        const selectOnMount = props.selectOnFocus === true
+        if (focusOnMount)
+          queueMicrotask(() => {
+            element.focus()
+            if (selectOnMount) element.select()
+          })
         // mirrorControlledValue reads the accessor inside its own createEffect
         // (a tracked scope); the gate cannot see across that helper boundary.
         // eslint-disable-next-line solid/reactivity -- helper-boundary contract
@@ -115,7 +139,14 @@ export function TextField(props: TextFieldProps) {
       autofocus={props.autoFocus === true}
       rows={4}
       ref={(element) => {
-        if (props.autoFocus === true) queueMicrotask(() => element.focus())
+        // Read before the microtask — see the input above for why.
+        const focusOnMount = props.autoFocus === true
+        const selectOnMount = props.selectOnFocus === true
+        if (focusOnMount)
+          queueMicrotask(() => {
+            element.focus()
+            if (selectOnMount) element.select()
+          })
         // eslint-disable-next-line solid/reactivity -- same helper-boundary contract.
         mirrorControlledValue(element, () => props.value)
       }}

@@ -1,0 +1,166 @@
+/* WorkspaceChip — a workspace drawn as a segment of the tab row (workspaces
+   UX rework; amends design §4.3).
+
+   WHAT THE FIRST DRAFT GOT WRONG, since the fix is most of this file. It drew
+   the pill as a small muted Caption floating beside 200px tabs, and marked
+   the run with a 2px rule along the tab tops. On screen that produced a stray
+   footnote followed by four indistinguishable slabs: the object that NAMES a
+   container was the quietest thing in the row, and the only mark joining the
+   container to its members was a hairline nobody could see. A group is read
+   as a REGION — a header physically attached to its members, a shared ground,
+   and space before and after — never as a shared border.
+
+   PLACEMENT AND ATTENTION. The control is the kit's full-height workspace
+   Button, which owns the coloured badge, type, focus ring and selected state.
+   This file positions that control, supplies its workspace colour token and
+   draws the attention mark only while a folded pane is busy or alert. */
+
+.nocx-workspace-chip {
+  /* The neutral ground for a workspace nobody coloured. It is a real state —
+     a row the backend minted for a session nobody recorded has no owner and
+     therefore no colour — and it must still be visible. */
+  --ws-colour: var(--color-text-dim);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  margin-left: var(--space-2);
+  margin-right: 0;
+}
+
+/* A folded workspace gets a little more separation because no visible tabs
+   continue its run. */
+.nocx-workspace-chip:not([data-expanded]) {
+  margin-right: var(--space-2);
+}
+
+.nocx-workspace-chip > .ui-button {
+  max-width: 200px;
+  gap: var(--space-1);
+}
+
+/* No permanent colour dot: the badge already carries identity. This mark
+   exists only while the workspace has background activity or an alert. */
+.nocx-workspace-chip__attention {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ws-colour);
+}
+
+.nocx-workspace-chip[data-colour='grey'] {
+  --ws-colour: var(--ws-grey);
+}
+
+.nocx-workspace-chip[data-colour='blue'] {
+  --ws-colour: var(--ws-blue);
+}
+
+.nocx-workspace-chip[data-colour='cyan'] {
+  --ws-colour: var(--ws-cyan);
+}
+
+.nocx-workspace-chip[data-colour='green'] {
+  --ws-colour: var(--ws-green);
+}
+
+.nocx-workspace-chip[data-colour='yellow'] {
+  --ws-colour: var(--ws-yellow);
+}
+
+.nocx-workspace-chip[data-colour='orange'] {
+  --ws-colour: var(--ws-orange);
+}
+
+.nocx-workspace-chip[data-colour='red'] {
+  --ws-colour: var(--ws-red);
+}
+
+.nocx-workspace-chip[data-colour='pink'] {
+  --ws-colour: var(--ws-pink);
+}
+
+.nocx-workspace-chip[data-colour='purple'] {
+  --ws-colour: var(--ws-purple);
+}
+
+/* The name, and the only thing here that can be long. It ellipses rather than
+   wrapping: the strip is one row tall.
+
+   It takes the Button's type — body size, sentence case — and NOT the
+   caption register it started in. Weight is the one thing added, and only
+   for the workspace whose tabs are out: a container that is currently in
+   front may say so, and the rest read as available rather than as noise. */
+.nocx-workspace-chip__name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nocx-workspace-chip[data-expanded] .nocx-workspace-chip__name {
+  font-weight: 600;
+}
+
+/* How many tabs are folded away. Drawn only while the group IS folded, so it
+   never competes with the tabs themselves for the reader's attention.
+
+   IT COUNTS AND IT DOES NOT REPORT. The first draft turned this badge red to
+   mean "something inside needs you", which asks the reader to remember
+   whether a red 4 means four failures, or four tabs one of which failed, or a
+   four-tab workspace in a danger state. A count answers "how many"; the
+   attention mark below answers "what needs me". Two questions, two marks. */
+.nocx-workspace-chip__count {
+  flex: none;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-text-dim), transparent 88%);
+  color: var(--color-text-dim);
+  font-size: var(--font-size-2xs);
+  line-height: 16px;
+  text-align: center;
+}
+
+/* ── Attention: what the folded panes are doing ───────────────────────────
+
+   THIS IS WHY FOLDING IS ALLOWED AT ALL. A folded browser tab group is inert.
+   A folded workspace here can hold an agent that has stopped and is waiting on
+   a human, and if the pill said nothing, hiding it would be hiding the only
+   notice anyone was going to get.
+
+   RUNNING IS NOT NEWS. In a terminal most tabs are running or idle for long
+   stretches, so `busy` gets the quietest mark there is — one small static
+   point — and nothing else. Saturated colour and movement are spent only on
+   `alert`, which is a human actually being asked for; spending them on
+   ordinary work is how a strip becomes something people stop reading. */
+
+.nocx-workspace-chip[data-attention='busy'] .nocx-workspace-chip__attention {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ws-colour), transparent 75%);
+}
+
+.nocx-workspace-chip[data-attention='alert'] .nocx-workspace-chip__attention {
+  background: var(--color-danger);
+  animation: nocx-workspace-chip-pulse 1.6s ease-in-out infinite;
+}
+
+/* Movement is a request for attention, so it is spent only on the state that
+   is one — and withdrawn entirely for anyone who has asked the OS for less of
+   it. The colour still says everything the animation did. */
+@media (prefers-reduced-motion: reduce) {
+  .nocx-workspace-chip[data-attention='alert'] .nocx-workspace-chip__attention {
+    animation: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-danger), transparent 60%);
+  }
+}
+
+@keyframes nocx-workspace-chip-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

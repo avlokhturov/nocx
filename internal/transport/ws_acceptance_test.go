@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -546,19 +547,25 @@ func hasProfile(t *testing.T, ps *profile.JSONStore, id string) bool {
 func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	dialStarted := make(chan struct{})
-	releaseDial := make(chan struct{})
+	// THE GATE IS HELD BY THE RESOLVE, not by the dial. It used to be the
+	// dial, and that is the defect nocx-l21ib.1 removed: an open now holds
+	// [config, session] for its RESOLVE — store and vault reads — and dials
+	// under neither, so a handshake can no longer refuse every other pane's
+	// open and every config request for as long as it lasts. The property
+	// this test is about is unchanged (a conflicting config mutation waits
+	// on the gate, from one socket and from two); only the thing holding
+	// the gate is now something that genuinely holds it.
+	resolveStarted := make(chan struct{})
+	releaseResolve := make(chan struct{})
 	t.Cleanup(func() {
 		select {
-		case <-releaseDial:
+		case <-releaseResolve:
 		default:
-			close(releaseDial)
+			close(releaseResolve)
 		}
 	})
 	reg.WithSSHFactory(&stubSSHFactory{
 		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			close(dialStarted)
-			<-releaseDial
 			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("blocked then refused")}
 		},
 	})
@@ -570,12 +577,14 @@ func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 		WithContentDB(&fakeHistoryDB{}),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				close(resolveStarted)
+				<-releaseResolve
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
 			},
 		}),
 		// A LONG wait bound: the conflicting mutations must WAIT for the
-		// dial rather than exhaust the bound — a conflict is a queue of
-		// length two, and the test drives the dial's release directly.
+		// resolve rather than exhaust the bound — a conflict is a queue of
+		// length two, and the test drives the resolve's release directly.
 		WithDomainConflictWaitTimeout(30*time.Second),
 	)
 	ctx := context.Background()
@@ -587,20 +596,19 @@ func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 	connA := connectWS(t, srv)
 	defer connA.Close() //nolint:errcheck
 
-	// An SSH open whose DIAL blocks holds the [config, session] gates for
-	// the whole dial (the conservative grain).
+	// An SSH open whose RESOLVE blocks holds the [config, session] gates.
 	sendControl(t, connA, "open", map[string]any{
 		"kind": "ssh", "profileId": "ssh:p:1",
 		"cols": 80, "rows": 24,
 	}, 1)
 	select {
-	case <-dialStarted:
+	case <-resolveStarted:
 	case <-time.After(5 * time.Second):
-		t.Fatal("dial never started")
+		t.Fatal("resolve never started")
 	}
 
 	// A conflicting config mutation from the SAME socket WAITS: with the
-	// dial holding the gates, it cannot run until the dial releases, and
+	// resolve holding the gates, it cannot run until the dial releases, and
 	// with the waiting gates it is not refused. Give the task a moment to
 	// reach the gate, then prove it has not landed.
 	sendControl(t, connA, "profiles.create", map[string]any{
@@ -626,7 +634,7 @@ func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 	}
 
 	// A NON-conflicting operation (content domain) genuinely overlaps the
-	// blocked dial: it completes while the config gates are held. This is
+	// blocked resolve: it completes while the config gates are held. This is
 	// the FIRST read on connB — the socket is still clean.
 	hist := jsonrpcCall(t, connB, "history.query", map[string]any{
 		"scope": "everywhere", "limit": 5,
@@ -638,16 +646,16 @@ func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 		t.Fatalf("unmarshal history: %v", err)
 	}
 	if histEnv.Error != nil {
-		t.Fatalf("non-conflicting history.query refused during the blocked dial: %+v", histEnv.Error)
+		t.Fatalf("non-conflicting history.query refused during the blocked resolve: %+v", histEnv.Error)
 	}
 
-	// Release the dial: the open completes (with its dial error), the
+	// Release the resolve: the open completes (with its dial error), the
 	// gates free, and BOTH waiting mutations are serialized through and
 	// succeed — a conflict waits, it is never refused.
 	select {
-	case <-releaseDial:
+	case <-releaseResolve:
 	default:
-		close(releaseDial)
+		close(releaseResolve)
 	}
 
 	for _, tc := range []struct {
@@ -732,19 +740,18 @@ func TestSequentialBackToBackConflictingRequestsNeverSaturated(t *testing.T) {
 func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	reg := newRegWithStub(logger)
-	dialStarted := make(chan struct{})
-	releaseDial := make(chan struct{})
+	// Held by the RESOLVE, for the reason the test above states.
+	resolveStarted := make(chan struct{})
+	releaseResolve := make(chan struct{})
 	t.Cleanup(func() {
 		select {
-		case <-releaseDial:
+		case <-releaseResolve:
 		default:
-			close(releaseDial)
+			close(releaseResolve)
 		}
 	})
 	reg.WithSSHFactory(&stubSSHFactory{
 		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
-			close(dialStarted)
-			<-releaseDial
 			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("blocked")}
 		},
 	})
@@ -755,6 +762,8 @@ func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 		WithGroupRepository(ps),
 		WithProfileResolver(&fakeResolver{
 			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				close(resolveStarted)
+				<-releaseResolve
 				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
 			},
 		}),
@@ -772,15 +781,15 @@ func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 	conn := connectWS(t, srv)
 	defer conn.Close() //nolint:errcheck
 
-	// The blocked dial holds the [config, session] gates.
+	// The blocked resolve holds the [config, session] gates.
 	sendControl(t, conn, "open", map[string]any{
 		"kind": "ssh", "profileId": "ssh:p:1",
 		"cols": 80, "rows": 24,
 	}, 1)
 	select {
-	case <-dialStarted:
+	case <-resolveStarted:
 	case <-time.After(5 * time.Second):
-		t.Fatal("dial never started")
+		t.Fatal("resolve never started")
 	}
 
 	// The conflicting mutation waits the bound out, then is refused.
@@ -803,9 +812,123 @@ func TestBoundedConflictWaitExhaustsToRefusal(t *testing.T) {
 	}
 
 	select {
-	case <-releaseDial:
+	case <-releaseResolve:
 	default:
-		close(releaseDial)
+		close(releaseResolve)
+	}
+}
+
+// ── A DIAL HOLDS NO DOMAIN GATE (nocx-l21ib.1) ────────────────────────────
+//
+// The inverse of the two tests above, and the reason they had to change: an
+// ssh handshake waits on the network and sometimes on a person — the password
+// prompt is answered by a human — and while it did so it held [config,
+// session]. Every other pane's open, and every config, vault, git and files
+// request, waited one second on those gates and was then refused, which the
+// product showed as "The terminal is busy — that action was refused" and, for
+// a pane, as a tab that died with "Terminal failed to start: Control plane
+// busy". A restored workspace came back with one live pane and the rest dead.
+//
+// So this is written as the user's sentence: while one connection is dialing,
+// the rest of the application still answers.
+
+func TestDialInFlightRefusesNothing(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+
+	// The FIRST dial blocks; any later one answers at once. A second open
+	// must be able to reach its own dial — that is the half of the claim the
+	// session gate used to make impossible.
+	var dials atomic.Int32
+	dialStarted := make(chan struct{})
+	releaseDial := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseDial:
+		default:
+			close(releaseDial)
+		}
+	})
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(ctx context.Context, host string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			if dials.Add(1) == 1 {
+				close(dialStarted)
+				<-releaseDial
+			}
+			return nil, &ssh.ErrAuthFailed{User: "test", Host: host, Err: errors.New("no auth in this test")}
+		},
+	})
+
+	ps := profile.NewJSONStore(t.TempDir() + "/p.json")
+	srv := NewWSServer(logger, reg,
+		WithProfileRepository(ps),
+		WithGroupRepository(ps),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(profileID string) (string, *ssh.ConnectConfig, error) {
+				return "host.example.com", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+		// The PRODUCTION wait bound. A test that widened it could not fail:
+		// the refusal this is about is the bound expiring, so the bound is
+		// part of what is being asserted.
+		WithDomainConflictWaitTimeout(DefaultDomainConflictWaitTimeout),
+	)
+	ctx := context.Background()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(ctx) })
+
+	conn := connectWS(t, srv)
+	defer conn.Close() //nolint:errcheck
+
+	sendControl(t, conn, "open", map[string]any{
+		"kind": "ssh", "profileId": "ssh:p:1",
+		"cols": 80, "rows": 24,
+	}, 1)
+	select {
+	case <-dialStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("dial never started")
+	}
+
+	// A config mutation lands while the dial is in flight. Before the split
+	// this waited out the bound and came back -32004.
+	created := jsonrpcCallWithID(t, conn, "profiles.create", map[string]any{
+		"id": "ssh:p:2", "name": "b", "type": "ssh",
+		"options": map[string]any{"host": "b.example.com"},
+	}, 2)
+	assertNotRefused(t, created, "profiles.create during an in-flight dial")
+
+	// And so does a SECOND open — the session half of the same claim. It
+	// fails on its own auth, which is this stub's business and not the
+	// point; what matters is that it was admitted and reached its dial.
+	second := jsonrpcCallWithID(t, conn, "open", map[string]any{
+		"kind": "ssh", "profileId": "ssh:p:2",
+		"cols": 80, "rows": 24,
+	}, 3)
+	assertNotRefused(t, second, "a second open during an in-flight dial")
+	if n := dials.Load(); n < 2 {
+		t.Fatalf("the second open never reached a dial (%d dials); it was refused or queued behind the first", n)
+	}
+
+	close(releaseDial)
+	readResponseFor(t, conn, 1, 10*time.Second)
+}
+
+// assertNotRefused fails when the response is the saturation refusal. Any
+// OTHER error passes: these calls are made against stubs that fail for their
+// own reasons, and the claim is about admission, not about the answer.
+func assertNotRefused(t *testing.T, resp []byte, what string) {
+	t.Helper()
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal %s: %v", what, err)
+	}
+	if env.Error != nil && env.Error.Code == SaturationErrorCode {
+		t.Fatalf("%s was refused with the saturation error: %s", what, resp)
 	}
 }
 

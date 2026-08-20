@@ -134,10 +134,18 @@ AGENTS.md's testing rule 3 requires an invariant to name **both** ends, and the 
 is the one a durable session record needs. It is stated here so epic E inherits it rather than
 re-deriving it, and it is **deliberately not** in epic A's cut.
 
-The reason is a fact about the tree: `internal/session/` has **no restore path at all**, and
-tabs survive a restart through `internal/settings/` — the frontend re-opens sessions from
-persisted tab descriptors and the backend restores nothing. So this interval would introduce
-session persistence for the first time. And under D5 there is nothing yet for it to preserve:
+The reason is a fact about the tree, and **the first draft of this paragraph got that fact
+wrong** (`nocx-qfwrc`). It said tabs survive a restart through `internal/settings/`, with the
+frontend re-opening them from persisted descriptors. They do not. **Nothing restores a tab.**
+`restoreDescriptor` is written in four places, typed `unknown`, and read nowhere —
+`frontend/src/file-viewer/index.ts:85` says so in as many words: "nothing serialises the tab
+list and nothing reconstructs a tab from a descriptor". The only tab-related setting in
+`internal/settings/` is `TabPlacement`. `internal/session/` has no restore path either. On
+start you get one fresh local tab, whatever you had open before.
+
+**The conclusion below survives and is stronger for the correction** — there is even less to
+preserve than this paragraph assumed. This interval would introduce session persistence for
+the first time. And under D5 there is nothing yet for it to preserve:
 if workers die with the backend, every node after a restart is a fresh session, and a durable
 parent edge has no surviving child to point at. `nocx-if6` phase A's argument is about **shape**
 — what the record and the wire carry — not about durability, and only the shape is expensive to

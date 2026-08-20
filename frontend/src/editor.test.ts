@@ -489,6 +489,29 @@ describe('CommandEditor', () => {
     expect(viewOf(ed).state.doc.toString()).toBe('')
   })
 
+  it('leaves the layout whole when it hides, and takes its slot back when shown', () => {
+    const { ed } = setup()
+    ed.show()
+
+    // The composer has ONE way out, and it takes its box with it: the flex
+    // slot is what an inline TUI on the normal buffer needs, and the settle
+    // glide — not a reserved box — is what keeps the scrollback from jumping
+    // (nocx-g6hnk, reversing part of nocx-i4h04).
+    ed.hide()
+
+    expect(ed.isVisible).toBe(false)
+    expect(ed.root.style.display).toBe('none')
+    expect(ed.root.hasAttribute('inert')).toBe(false)
+
+    ed.show()
+
+    expect(ed.isVisible).toBe(true)
+    expect(ed.root.style.display).toBe('')
+    expect(ed.root.style.visibility).toBe('')
+    expect(ed.root.dataset.suspended).toBeUndefined()
+    expect(ed.root.hasAttribute('inert')).toBe(false)
+  })
+
   it('dispose removes the root and leaves the editor inert, not broken', () => {
     const { ed, container } = setup()
     ed.show()

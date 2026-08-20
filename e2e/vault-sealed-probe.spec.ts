@@ -25,7 +25,7 @@ import { test as base, expect, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint } from './harness'
+import { VaultBackend, bindEndpoint, settingsReady } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 
@@ -70,7 +70,7 @@ async function openApp(page: Page): Promise<void> {
 
 async function openAIEndpoints(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
-  await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 10_000 })
+  await settingsReady(page)
   await page.locator(SETTINGS_AI_NAV).click()
   await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
 }

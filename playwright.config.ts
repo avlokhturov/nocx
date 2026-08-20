@@ -50,26 +50,36 @@ if (wanted?.length && projects.length === 0) {
 export default defineConfig({
   testDir: './e2e',
 
-  timeout: 60_000,
+  // A HUNG TEST IS CUT OFF IN HALF A MINUTE, not a whole one. Nothing in this
+  // suite legitimately takes 30 seconds: the slowest honest spec is about seven,
+  // and a run of 338 cases pays this ceiling only for tests that are already
+  // broken.
+  timeout: 30_000,
 
-  // Playwright's expect timeout is 5 seconds, which is a library default and
-  // was never a statement about this app on this hardware.
+  // 20 seconds was raised from Playwright's 5 for a real, measured failure —
+  // 86 assertions of 200 in CI run 31087876366 reporting "resolved to 0
+  // elements" while the snapshot taken moments later showed the tab present.
+  // The cause was named precisely: "Under `wails dev` each page.goto is a full
+  // reload: vite transforms modules on demand, the renderer re-establishes the
+  // WebSocket, and the backend spawns a PTY."
   //
-  // Every spec opens by asserting the first tab exists, and on the CI runner
-  // that assertion was failing across the suite — 86 of 200 in run 31087876366
-  // — with "resolved to 0 elements" while the error-context snapshot captured
-  // moments later showed the tab present. So the tab arrives; it arrives after
-  // five seconds. Under `wails dev` each page.goto is a full reload: vite
-  // transforms modules on demand, the renderer re-establishes the WebSocket,
-  // and the backend spawns a PTY for the new session. That is seconds of real
-  // work on a shared macOS runner, and none of it is what the specs are about.
+  // THAT ARRANGEMENT NO LONGER EXISTS. This file's own header says so — there
+  // is ONE stand now, cmd/devharness plus vite, and `wails is not started
+  // here`. The number outlived the machine it was measured against, which is
+  // how a workaround becomes a constant.
   //
-  // The cost is bounded and paid only when something is genuinely wrong: an
-  // assertion that would fail still fails, 15 seconds later than it used to,
-  // and the per-test timeout above is unchanged so a hung test is still cut off
-  // at 60s. What this buys back is a suite whose failures mean something
-  // (nocx-qth1).
-  expect: { timeout: 20_000 },
+  // What it costs is paid entirely on red. A passing assertion returns the
+  // moment its state arrives; a failing one waits out the whole budget. At 20
+  // seconds a run with 21 failures burns seven minutes doing nothing but
+  // waiting for something that will not happen — measured here on 2026-08-17,
+  // and paid again on every debugging round.
+  //
+  // So it goes back to the library default. If the first-tab assertion turns
+  // out to need more than five seconds on the devharness stand, THAT is the
+  // defect: AGENTS.md's rule is that a test waits on an observable state change
+  // and never on a duration, and an assertion that needs a long budget is one
+  // that is not waiting on the right thing. Raise the waiting, not the number.
+  expect: { timeout: 5_000 },
 
   // Refuse to start when the disk is nearly full.
   //

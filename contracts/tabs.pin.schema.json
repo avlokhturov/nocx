@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.pin.schema.json",
+  "title": "TabsPinResult",
+  "description": "Result of the tabs.pin JSON-RPC method: the tab as stored after the change, read back rather than echoed. It sets whether the tab is kept at the head of the strip. Three narrow methods rather than one sparse update: a patch where a missing field and a null field mean different things is how 'what changed' stops being answerable.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tab"],
+  "properties": {
+    "tab": {
+      "$ref": "tabs.create.schema.json#/$defs/tab"
+    }
+  }
+}

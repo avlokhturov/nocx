@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.reorder.schema.json",
+  "title": "TabsReorderResult",
+  "description": "Result of the tabs.reorder JSON-RPC method: one workspace's tabs, in the new strip order, with the positions the backend wrote. Scoped to ONE workspace and taking its whole order: a tab belonging to another workspace is not a member here, so naming one is refused rather than treated as a move — reordering a strip never changes membership.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tabs"],
+  "properties": {
+    "tabs": {
+      "description": "The workspace's tabs, in position order. Never null; an empty array is a real answer.",
+      "type": "array",
+      "items": {
+        "$ref": "tabs.create.schema.json#/$defs/tab"
+      }
+    }
+  }
+}

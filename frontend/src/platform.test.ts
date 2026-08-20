@@ -7,12 +7,18 @@ import {
   currentPlatform,
 } from './platform'
 
-vi.mock('../wailsjs/runtime/runtime', () => ({
-  Environment: vi.fn(),
+// Partial mock: System.Environment is the only fact this file owns. The rest
+// of the runtime stays real, because platform.ts reaches log.ts, which
+// reaches the generated bindings, which pull further exports out of this
+// module at import time. Listing those here is a list that goes stale the
+// next time the binding generator runs.
+vi.mock('@wailsio/runtime', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@wailsio/runtime')>()),
+  System: { Environment: vi.fn() },
 }))
 
-const { Environment } = await import('../wailsjs/runtime/runtime')
-const environmentMock = Environment as unknown as ReturnType<typeof vi.fn>
+const { System } = await import('@wailsio/runtime')
+const environmentMock = System.Environment as unknown as ReturnType<typeof vi.fn>
 
 describe('normalizePlatform', () => {
   it.each(['darwin', 'linux', 'windows'] as const)('passes %s through', (p) => {
@@ -51,7 +57,7 @@ describe('currentPlatform — the capability-facing fact', () => {
   })
 
   it('is the GOOS the Wails runtime reports', async () => {
-    environmentMock.mockResolvedValue({ platform: 'darwin' })
+    environmentMock.mockResolvedValue({ OS: 'darwin' })
     await bootstrapPlatform(document.createElement('div'))
     expect(currentPlatform()).toBe('darwin')
   })
@@ -85,13 +91,13 @@ describe('bootstrapPlatform', () => {
   })
 
   it('stamps the platform the Wails runtime reports', async () => {
-    environmentMock.mockResolvedValue({ platform: 'linux' })
+    environmentMock.mockResolvedValue({ OS: 'linux' })
     await expect(bootstrapPlatform(root)).resolves.toBe('linux')
     expect(root.getAttribute('data-platform')).toBe('linux')
   })
 
   it('reserves the traffic-light inset only on darwin', async () => {
-    environmentMock.mockResolvedValue({ platform: 'darwin' })
+    environmentMock.mockResolvedValue({ OS: 'darwin' })
     await bootstrapPlatform(root)
     expect(root.getAttribute('data-platform')).toBe('darwin')
   })

@@ -569,8 +569,15 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	}, func(text string) error {
 		// Persist BEFORE emitting: a delta the renderer lost is still in
 		// the ledger, and a persist failure aborts the stream.
+		//
+		// The chunk is numbered from 1 while the notification's seq starts at
+		// 0, and the offset is deliberate rather than tidy: chunk numbering
+		// is the store's (artifact_id, seq) key, which is what makes a
+		// retried delta a no-op, and the notification's seq is what the
+		// renderer routes on. Renumbering either to match the other would
+		// change a contract to save an addition.
 		if persistErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-			return svc.AppendRunDelta(ctx, rc.artifactID, []byte(text))
+			return svc.AppendRunDelta(ctx, rc.artifactID, seq+1, []byte(text))
 		}); persistErr != nil {
 			return persistErr
 		}

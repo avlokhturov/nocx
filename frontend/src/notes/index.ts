@@ -8,10 +8,10 @@
  * focuses the tab that is already open — two editors over one document is
  * two drafts of it, and the second one to save wins silently.
  */
-import type { ContentDescriptor, SingletonKey, SurfaceType } from '../tab-content'
+import type { ContentDescriptor, SingletonKey, SurfaceType } from '../pane-content'
 import { NoteContent } from './note-content'
 import type { NotesStore } from './notes-store'
-import type { TabManager } from '../tabs'
+import type { PaneManager } from '../panes'
 import { log } from '../log'
 import { showToast } from '../ui/toast'
 
@@ -19,14 +19,14 @@ import { showToast } from '../ui/toast'
 const SURFACE_NOTE: SurfaceType = 'nocx.note' as SurfaceType
 
 interface Wiring {
-  readonly tm: TabManager
+  readonly tm: PaneManager
   readonly store: NotesStore
 }
 
 let wiring: Wiring | null = null
 
-/** The one wiring point; call once, after the TabManager exists. */
-export function registerNotesSurface(tm: TabManager, store: NotesStore): void {
+/** The one wiring point; call once, after the PaneManager exists. */
+export function registerNotesSurface(tm: PaneManager, store: NotesStore): void {
   wiring = { tm, store }
 }
 
@@ -47,7 +47,7 @@ export function openNote(id: string, title: string): void {
     supportsAttention: false,
     defaultTitle: title,
   }
-  wiring.tm.openTab(new NoteContent(id, { store: wiring.store }), descriptor)
+  wiring.tm.openPane(new NoteContent(id, { store: wiring.store }), descriptor)
 }
 
 /**

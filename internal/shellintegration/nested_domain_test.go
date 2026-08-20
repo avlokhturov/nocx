@@ -759,6 +759,12 @@ func TestZshNestedChildStillborn(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
+	// The sentinel is written to the PTY; the activation above was observed
+	// on the CHANNEL. One transport cannot speak for the other, so wait for
+	// the sentinel itself (channelShell.run carries the long note) — and do
+	// it before taking the kernel mutex, so nothing waits while holding it.
+	waitForOutput(t, s, "STILLBORN-SUDO-RAN", 15*time.Second)
+
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if !k.parentSuspended {
@@ -769,9 +775,6 @@ func TestZshNestedChildStillborn(t *testing.T) {
 	}
 	if !k.parentActivated {
 		t.Fatalf("parent never re-activated after the stillborn child; order=%v output=%q", k.order, s.output())
-	}
-	if !strings.Contains(s.output(), "STILLBORN-SUDO-RAN") {
-		t.Fatalf("the refused command did not run conventionally; output=%q", s.output())
 	}
 }
 
@@ -906,9 +909,10 @@ func TestZshNestedChildStillbornSu(t *testing.T) {
 	rejectedBefore := k.rejected
 	k.mu.Unlock()
 
-	if !strings.Contains(s.output(), "su: Authentication failure") {
-		t.Fatalf("the refused launch did not run conventionally; output=%q", s.output())
-	}
+	// The sentinel is written to the PTY; k.parentActivated was observed on
+	// the CHANNEL. One transport cannot speak for the other — wait for the
+	// sentinel itself (channelShell.run carries the long note).
+	waitForOutput(t, s, "su: Authentication failure", 15*time.Second)
 
 	// A late frame from the never-established child: inject a hello with
 	// the child's full tuple after the parent restored, and assert the
@@ -996,9 +1000,8 @@ func TestBashNestedChildDomainSuFallback(t *testing.T) {
 	rejectedBefore := k.rejected
 	k.mu.Unlock()
 
-	if !strings.Contains(s.output(), "FALLBACK-CHILD-RAN") {
-		t.Fatalf("the conventional child did not run the command; output=%q", s.output())
-	}
+	// PTY sentinel after a CHANNEL wait: wait for the sentinel itself.
+	waitForOutput(t, s, "FALLBACK-CHILD-RAN", 15*time.Second)
 
 	// A late frame from the never-established child is rejected and
 	// counted.

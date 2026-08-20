@@ -7,7 +7,7 @@
  * registration). Without it the Connect button dispatches a no-op and the
  * tab assertion fails.
  */
-import { test, expect, type Page } from './harness'
+import { test, expect, settingsReady, type Page } from './harness'
 
 const PROFILE_NAME = 'Test SSH'
 
@@ -49,6 +49,13 @@ test.describe('Connections inside Settings', () => {
 
   test.afterEach(async ({ page }) => {
     await page.goto('/')
+    // Wait for the app to be up before sending it a keystroke, exactly as the
+    // walk below does. Pressing the chord into a page that is still starting
+    // is waiting on nothing: on webkit the keydown landed before the shortcut
+    // was wired, Settings never opened, and the two 10s waits that follow
+    // spent the test's whole budget describing a page that was never going to
+    // change. The body already waits; the hook did not.
+    await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
     await page.keyboard.press('Meta+,')
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     // Wait for the list before reading it: count() is a one-shot read with no
@@ -68,7 +75,7 @@ test.describe('Connections inside Settings', () => {
 
     // Open Settings via keyboard shortcut (Meta+,).
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
 
     // Record tab count AFTER Settings is open (Settings is itself a tab).
     const tabsBeforeConnect = await page.locator('.nocx-tab-title').count()
@@ -142,9 +149,9 @@ test.describe('Connections inside Settings', () => {
 
     // Opening a connection needs somewhere to keep secrets, so the product asks
     // for it before it opens anything: vaultController.ensureBeforeSave defers
-    // newSSHTab behind setup while the vault is uninitialized (vault.tsx:255).
+    // newSSHPane behind setup while the vault is uninitialized (vault.tsx:255).
     // This spec used to click Connect and wait for a tab that was never coming —
-    // the console said "connect from Settings" and never "newSSHTab called",
+    // the console said "connect from Settings" and never "newSSHPane called",
     // because the deferred callback was sitting behind this dialog (nocx-z9s9.4).
     // Asked for only while the vault is uninitialized, so this is conditional
     // rather than asserted: the two browser projects share one backend and one
@@ -171,7 +178,7 @@ test.describe('Connections inside Settings', () => {
     })
 
     // Verify the new tab is not called "Settings".
-    const newTab = page.locator('.nocx-tab-title').last()
-    await expect(newTab).not.toHaveText('Settings')
+    const newPane = page.locator('.nocx-tab-title').last()
+    await expect(newPane).not.toHaveText('Settings')
   })
 })

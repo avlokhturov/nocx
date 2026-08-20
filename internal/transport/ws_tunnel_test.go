@@ -274,13 +274,13 @@ func TestTunnelStop_UnknownID(t *testing.T) {
 	}
 }
 
-// TestTunnelTabTeardown_DoesNotStopOtherTabsForward is the lifetime
+// TestTunnelPaneTeardown_DoesNotStopOtherPanesForward is the lifetime
 // invariant of spec §7.3 at the transport seam: two tabs open forwards on
 // the SAME shared connection; one tab disconnects; its forward stops, the
 // other tab's forward keeps forwarding. Technically the tunnels each hold
 // their own pooled reference; this test proves the RPC layer never couples
 // them.
-func TestTunnelTabTeardown_DoesNotStopOtherTabsForward(t *testing.T) {
+func TestTunnelPaneTeardown_DoesNotStopOtherPanesForward(t *testing.T) {
 	h := newTunnelHarness(t, nil)
 	defer h.stop()
 	target := startEchoTarget(t)

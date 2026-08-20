@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/workspaces.reorder.schema.json",
+  "title": "WorkspacesReorderResult",
+  "description": "Result of the workspaces.reorder JSON-RPC method: every workspace, in the new switcher order, with the positions the backend wrote. The call takes the WHOLE order and never a move — a partial list needs a second rule for where everything else goes, and two rules for one order disagree eventually — so a list that is not a permutation of the workspaces is refused and nothing moves.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspaces"],
+  "properties": {
+    "workspaces": {
+      "description": "Every workspace, in position order. Never null: an empty array is the answer when there is nothing to order, and the renderer's first .map assumes it.",
+      "type": "array",
+      "items": {
+        "$ref": "workspaces.create.schema.json#/$defs/workspace"
+      }
+    }
+  }
+}

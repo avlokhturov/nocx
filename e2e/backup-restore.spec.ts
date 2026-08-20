@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, settingsReady } from './harness'
 
 /**
  * The backup surface must move non-empty user state through the real renderer
@@ -14,7 +14,7 @@ test.describe('Backup & Restore', () => {
 
     // Open settings.
     await page.keyboard.press('Meta+,')
-    await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+    await settingsReady(page)
 
     // Change a reachable persisted setting so restore has an observable effect.
     const placementNav = '.ui-grouped-nav__item[data-item="Interface"] button'

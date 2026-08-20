@@ -4,14 +4,18 @@
     "",
     "Every entry is a Go function `deadcode ./...` reports unreachable from main().",
     "It may only shrink. A function deadcode reports that is not listed here is a",
-    "new violation and fails the pre-commit hook.",
+    "new violation and fails the CI job that analysed that platform.",
     "",
-    "NOT machine-specific: the list is the UNION over darwin/arm64 and linux/amd64,",
-    "analysed with CGO_ENABLED=0, so every machine computes the same set. Both",
-    "halves of a build-tag-gated pair (secretservice_linux.go and its _other",
-    "sibling) are therefore listed, and an entry never appears or vanishes because",
-    "of who ran the gate — which is what made this unpassable on macOS while CI,",
-    "which runs no deadcode at all, stayed silent (nocx-0odm)."
+    "The list is the UNION over darwin and linux. Wails v3 requires cgo, so no host",
+    "can analyse both: ci.yml runs the ratchet per platform (ci-mac for darwin,",
+    "ci-linux for linux) and each job sees a SUBSET of this file. That is why the",
+    "updater prunes only entries whose file `go list` says the analysing platform",
+    "compiled — dropping the other platform's half here is what made the gate",
+    "unpassable on macOS while CI stayed silent (nocx-0odm, nocx-re6gk).",
+    "",
+    "Not a proof of no dead code: deadcode's RTA counts a method reached through",
+    "an interface as reachable, so a dead method behind a live interface never",
+    "appears here. Ask `deadcode -whylive <symbol>` for that."
   ],
   "violations": [
     {

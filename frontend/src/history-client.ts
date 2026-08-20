@@ -20,12 +20,13 @@ import type { CommandRecord, CommandStatus } from './command-ledger'
 import type { ExecutionAttempt } from './lifecycle/state'
 import type { HistoryQuery } from './generated/history.query'
 import type { HistoryRecord } from './generated/history.record'
+import { HistoryOutbox, payloadBytes } from './history-outbox'
 import type { WSClient } from './ipc'
 import type { RecallScope } from './recall'
 
 /** The history.record request — the ledger's facts minus what never crosses
  *  (the session-local id, the live marker-line accessor, the disposed flag)
- *  and minus the output, which is never retained (ADR-0008). tabId is the
+ *  and minus the output, which is never retained (ADR-0008). paneId is the
  *  ONE deliberate exception to "session-local ids never cross the wire"
  *  (nocx-tsajw): the renderer-minted per-tab identity that scopes the
  *  pending-capture registry. It is opaque to the backend — minted once per
@@ -38,7 +39,7 @@ export interface HistoryRecordParams {
   exitCode: number | null
   startedAt: number | null
   endedAt: number | null
-  tabId: string
+  paneId: string
 }
 
 /** Send one completed command's facts to the store, authorized by the
@@ -61,7 +62,7 @@ export interface HistoryRecordParams {
  *  error, so the caller treats null exactly like "nothing to show". */
 export function recordCommand(
   client: WSClient,
-  tabId: string,
+  paneId: string,
   rec: CommandRecord,
   attempt: ExecutionAttempt,
 ): Promise<HistoryRecord | null> {
@@ -78,13 +79,35 @@ export function recordCommand(
     // in tests — the schema says integer, so the wire copy rounds.
     startedAt: rec.startedAt === null ? null : Math.round(rec.startedAt),
     endedAt: rec.endedAt === null ? null : Math.round(rec.endedAt),
-    tabId,
+    paneId,
   }
-  return client
-    .call<HistoryRecord>('history.record', params)
-    .then((ack) => ack)
-    .catch(() => null)
+  // THROUGH THE OUTBOX, not straight at the socket (nocx-rtg0.4). A drop
+  // between a command finishing and this call landing used to lose the
+  // command silently — AD-9 replays PTY bytes and says nothing about the
+  // control plane. The outbox keeps it and sends it when the socket returns,
+  // within the bound nocx-rtg0.10 set.
+  //
+  // The answer is unchanged: the ack when it lands, null when it did not, so
+  // every caller that treats null as "nothing to show" keeps working. A
+  // record delivered later reports nothing back, deliberately — by then the
+  // block that asked has its answer, and moving a receipt under a person who
+  // has stopped looking is worse than not moving it.
+  return historyOutbox.submit<HistoryRecord>({
+    bytes: payloadBytes(params),
+    send: () => client.call<HistoryRecord>('history.record', params),
+  })
 }
+
+/**
+ * The one outbox, module-scoped for the reason the store's repositories are
+ * singletons: a second one would be a second answer to "what have we not
+ * managed to record", and the two would disagree about the bound the moment
+ * either filled.
+ *
+ * Its drain is wired to the connection in ipc.ts, which is the only place
+ * that knows a socket came back.
+ */
+export const historyOutbox = new HistoryOutbox()
 export async function queryHistory(
   client: WSClient,
   scope: RecallScope,

@@ -22,47 +22,75 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// captureFakeDB is a real-behaving in-memory ContentDB for the capture
-// round: Add assigns ids, Query serves, RewriteRedaction actually replaces
-// the span and drops the segment — the fake the record/save/query round
-// trip needs.
+// captureFakeDB is a real-behaving in-memory ContentDB for the capture round
+// over the LEDGER seam (nocx-rtg0.19): RecordCompleted mints ids,
+// QueryEntries serves, RewriteRedaction actually replaces the span in the
+// stored intent and drops the segment from the receipt in entries.payload —
+// the fake the record/save/query round trip needs. A fake that stopped
+// behaving would turn this round trip into a green test of nothing.
+//
+// Those three plus ListEntries are the only methods exercised — the embedded
+// nil content.LedgerRepository turns any other call into a loud panic rather
+// than a quiet zero value.
 type captureFakeDB struct {
+	content.LedgerRepository
 	mu      sync.Mutex
 	nextID  int64
-	records []content.CommandRecord
+	records []content.LedgerEntrySummary
 }
 
-func newCaptureFakeDB() *captureFakeDB { return &captureFakeDB{nextID: 1} }
+func newCaptureFakeDB() *captureFakeDB { return &captureFakeDB{} }
 
-func (f *captureFakeDB) CommandHistory() content.CommandHistoryRepository { return f }
-func (f *captureFakeDB) Conversations() content.ConversationRepository    { return nil }
-func (f *captureFakeDB) Backup(_ context.Context, _ string) error         { return content.ErrNotImplemented }
-func (f *captureFakeDB) Close() error                                     { return nil }
-func (f *captureFakeDB) RestorePrivate(_ context.Context, _ []content.Conversation, _ []content.CommandRecord) error {
-	return content.ErrNotImplemented
-}
-func (f *captureFakeDB) Ledger() content.LedgerRepository { return nil }
+func (f *captureFakeDB) Conversations() content.ConversationRepository { return nil }
+func (f *captureFakeDB) Backup(_ context.Context, _ string) error      { return content.ErrNotImplemented }
+func (f *captureFakeDB) Close() error                                  { return nil }
+func (f *captureFakeDB) Ledger() content.LedgerRepository              { return f }
+func (f *captureFakeDB) Layout() content.LayoutRepository              { return nil }
 
-func (f *captureFakeDB) Add(_ context.Context, record content.CommandRecord) (int64, error) {
+func (f *captureFakeDB) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	record.ID = f.nextID
 	f.nextID++
-	f.records = append(f.records, record)
-	return record.ID, nil
+	id := fakeEntryID(f.nextID)
+	env := in.Env
+	f.records = append(f.records, content.LedgerEntrySummary{
+		ID:            id,
+		IngestSeq:     f.nextID,
+		EnvironmentID: env.ID,
+		Environment:   &env,
+		Cwd:           in.Cwd,
+		Kind:          content.EntryShell,
+		Intent:        in.Intent,
+		Phase:         content.PhaseClosed,
+		Status:        in.Status,
+		StartedAt:     in.StartedAt,
+		EndedAt:       in.EndedAt,
+		Payload:       in.Payload,
+	})
+	return id, nil
 }
 
-func (f *captureFakeDB) RewriteRedaction(_ context.Context, id int64, span content.Redaction, reference string) error {
+// RewriteRedaction is the settlement the save round trip turns on, and it is
+// kept honest: the receipt is read and written back with the store's OWN
+// codecs (content.EntryMaskingOf / content.WithEntryMasking), so a fake that
+// drifted from the payload contract fails here instead of agreeing with
+// itself. Not matching any current segment is the idempotent no-op a retried
+// save relies on.
+func (f *captureFakeDB) RewriteRedaction(_ context.Context, entryID string, span content.Redaction, reference string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i := range f.records {
-		if f.records[i].ID != id {
+		r := &f.records[i]
+		if r.ID != entryID {
 			continue
 		}
-		r := &f.records[i]
+		masking, err := content.EntryMaskingOf(r.Payload)
+		if err != nil {
+			return err
+		}
 		matched := false
-		kept := make([]content.Redaction, 0, len(r.Redactions))
-		for _, red := range r.Redactions {
+		kept := make([]content.Redaction, 0, len(masking.Redactions))
+		for _, red := range masking.Redactions {
 			if red.Start == span.Start && red.End == span.End && red.Kind == span.Kind {
 				matched = true
 				continue
@@ -72,72 +100,81 @@ func (f *captureFakeDB) RewriteRedaction(_ context.Context, id int64, span conte
 		if !matched {
 			return nil // idempotent no-op
 		}
-		r.Command = r.Command[:span.Start] + reference + r.Command[span.End:]
-		r.Redactions = kept
+		masking.Redactions = kept
+		payload, err := content.WithEntryMasking(r.Payload, masking)
+		if err != nil {
+			return err
+		}
+		r.Intent = r.Intent[:span.Start] + reference + r.Intent[span.End:]
+		r.Payload = payload
 		return nil
 	}
 	return content.ErrNotFound
 }
 
-func (f *captureFakeDB) List(_ context.Context, limit int) ([]content.CommandRecord, error) {
+func (f *captureFakeDB) ListEntries(_ context.Context, limit int) ([]content.LedgerEntrySummary, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make([]content.CommandRecord, 0, limit)
+	out := make([]content.LedgerEntrySummary, 0, limit)
 	for i := len(f.records) - 1; i >= 0 && len(out) < limit; i-- {
 		out = append(out, f.records[i])
 	}
 	return out, nil
 }
 
-func (f *captureFakeDB) GetByID(_ context.Context, id int64) (*content.CommandRecord, error) {
+func (f *captureFakeDB) QueryEntries(_ context.Context, q content.LedgerQuery) (content.LedgerPage, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for i := range f.records {
-		if f.records[i].ID == id {
-			r := f.records[i]
-			return &r, nil
-		}
-	}
-	return nil, nil
-}
-
-func (f *captureFakeDB) FindByPrefix(_ context.Context, prefix string, limit int) ([]content.CommandRecord, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]content.CommandRecord, 0, limit)
-	for i := len(f.records) - 1; i >= 0 && len(out) < limit; i-- {
-		if strings.HasPrefix(f.records[i].Command, prefix) {
-			out = append(out, f.records[i])
-		}
-	}
-	return out, nil
-}
-
-func (f *captureFakeDB) Query(_ context.Context, scope content.Scope, cwd, host string, limit int, before *int64, _ string) (content.HistoryPage, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var entries []content.CommandRecord
+	var entries []content.LedgerEntrySummary
 	for i := len(f.records) - 1; i >= 0; i-- {
 		r := f.records[i]
-		switch scope {
+		switch q.Scope {
 		case content.ScopeDirectory:
-			if r.Cwd != cwd || r.Host != host {
+			if r.Cwd != q.Cwd || r.EnvironmentID != q.EnvironmentID {
 				continue
 			}
 		case content.ScopeHost:
-			if r.Host != host {
+			if r.EnvironmentID != q.EnvironmentID {
 				continue
 			}
 		}
-		if before != nil && r.ID >= *before {
+		if q.BeforeID != "" && r.ID >= q.BeforeID {
 			continue
 		}
 		entries = append(entries, r)
-		if len(entries) >= limit {
+		if len(entries) >= q.Limit {
 			break
 		}
 	}
-	return content.HistoryPage{Entries: entries, HasRows: len(f.records) > 0, Exhausted: true}, nil
+	return content.LedgerPage{Entries: entries, HasRows: len(f.records) > 0, Exhausted: true}, nil
+}
+
+// storedRow is one row of the capture fake as these tests read it: the
+// durable intent and the live redaction list, decoded with the SAME reader
+// the wire uses. The receipt is not a column any more — it rides
+// entries.payload — so a test that peeked at a field would be reading a
+// shape the store does not have.
+type storedRow struct {
+	ID         string
+	Command    string
+	Redactions []content.Redaction
+}
+
+func (f *captureFakeDB) rows(t *testing.T, limit int) []storedRow {
+	t.Helper()
+	entries, err := f.ListEntries(context.Background(), limit)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	out := make([]storedRow, 0, len(entries))
+	for _, e := range entries {
+		masking, maskErr := content.EntryMaskingOf(e.Payload)
+		if maskErr != nil {
+			t.Fatalf("entry %s payload: %v", e.ID, maskErr)
+		}
+		out = append(out, storedRow{ID: e.ID, Command: e.Intent, Redactions: masking.Redactions})
+	}
+	return out
 }
 
 // newCaptureWSServer wires a WSServer over the capture fake with an
@@ -318,10 +355,7 @@ func TestHistoryRecord_CaptureSaveFlow(t *testing.T) {
 	}
 
 	// The row is a reference now.
-	recs, err := db.List(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
+	recs := db.rows(t, 10)
 	if len(recs) != 1 || !strings.Contains(recs[0].Command, "{{secret:openrouter.ai}}") {
 		t.Fatalf("stored command = %q, want the reference", recs[0].Command)
 	}
@@ -392,10 +426,7 @@ func TestHistoryRecord_DestroyedCaptureSavesNothing(t *testing.T) {
 		t.Errorf("error code = %d, want -32010 (capture unknown)", resp.Error.Code)
 	}
 	// The masked row is untouched: the redaction segment is still there.
-	recs, err := db.List(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
+	recs := db.rows(t, 10)
 	if len(recs) != 1 || len(recs[0].Redactions) != 1 {
 		t.Fatalf("row after refused save = %+v, want the structured redaction intact", recs)
 	}
@@ -428,10 +459,7 @@ func TestHistoryRecord_AlreadySavedStoresTheReference(t *testing.T) {
 	if len(ack2.Captures) != 0 {
 		t.Fatalf("re-submit of a saved value must not offer, got %+v", ack2.Captures)
 	}
-	recs, err := db.List(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
+	recs := db.rows(t, 10)
 	if len(recs) != 2 {
 		t.Fatalf("rows = %d, want 2", len(recs))
 	}
@@ -466,10 +494,7 @@ func TestHistoryRecord_AlreadyPendingLinks(t *testing.T) {
 	if resp := vaultCall(t, conn, "secrets.captureSave", map[string]any{"captureId": ack1.Captures[0].ID}, 3); resp.Error != nil {
 		t.Fatalf("save: %+v", resp.Error)
 	}
-	recs, err := db.List(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
+	recs := db.rows(t, 10)
 	if len(recs) != 2 {
 		t.Fatalf("rows = %d, want 2", len(recs))
 	}
@@ -524,7 +549,7 @@ func TestHistoryRecord_CaptureDismissOverTheWire(t *testing.T) {
 	if resp.Error == nil || resp.Error.Code != -32011 {
 		t.Fatalf("save after dismiss = %+v, want -32011 (consumed)", resp.Error)
 	}
-	recs, _ := db.List(context.Background(), 10)
+	recs := db.rows(t, 10)
 	if len(recs) != 1 || len(recs[0].Redactions) != 1 {
 		t.Fatalf("row after dismiss = %+v, want the structured redaction intact", recs)
 	}
@@ -555,7 +580,7 @@ func TestHistoryRecord_RedactionOffsetsAreUTF16(t *testing.T) {
 		t.Errorf("prefix/suffix = %q/%q, want the mask's head/tail", ack.Redactions[0].Prefix, ack.Redactions[0].Suffix)
 	}
 	// The row itself stores byte offsets — the store slices bytes.
-	recs, _ := db.List(context.Background(), 10)
+	recs := db.rows(t, 10)
 	if len(recs) != 1 || recs[0].Redactions[0].Start != 25 {
 		t.Errorf("stored redaction start = %+v, want byte offset 25", recs[0].Redactions)
 	}

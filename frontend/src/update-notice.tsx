@@ -1,6 +1,6 @@
 import { type Component, type Accessor, Switch, Match, createSignal } from 'solid-js'
 import { render } from 'solid-js/web'
-import { ApplyUpdate } from '../wailsjs/go/main/WailsApp'
+import { ApplyUpdate } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { Button } from './ui/button'
 
 export type UpdateState =

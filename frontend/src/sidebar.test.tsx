@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { fireEvent } from '@solidjs/testing-library'
 import { createEffect, createSignal } from 'solid-js'
 import {
@@ -70,10 +70,6 @@ function panelTitle(panel: HTMLElement): string | null {
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 describe('sidebar', () => {
-  beforeEach(() => {
-    localStorage.clear()
-  })
-
   afterEach(() => {
     document.body.replaceChildren()
   })
@@ -158,16 +154,65 @@ describe('sidebar', () => {
   })
 
   it('persists the collapsed state and restores it on the next mount', () => {
+    // The persistence seam is the UI-state document (ADR-0033), not
+    // localStorage. The fake stands in for the round trip: whatever the
+    // first mount saved is what the second one boots from.
+    const saved = { collapsed: false, activeViewId: '' }
+    const persistence = {
+      get collapsed() {
+        return saved.collapsed
+      },
+      get activeViewId() {
+        return saved.activeViewId
+      },
+      save: (next: { collapsed: boolean; activeViewId: string }) => {
+        saved.collapsed = next.collapsed
+        saved.activeViewId = next.activeViewId
+      },
+    }
+
     const first = mount()
-    mountSidebar(first.bar, first.panel, TWO_VIEWS, [SETTINGS_ACTION])
+    mountSidebar(first.bar, first.panel, TWO_VIEWS, [SETTINGS_ACTION], persistence)
     viewBtn(first.bar, 'alpha').click() // collapse
+    expect(saved.collapsed).toBe(true)
 
     document.body.replaceChildren()
     const second = mount()
-    mountSidebar(second.bar, second.panel, TWO_VIEWS, [SETTINGS_ACTION])
+    mountSidebar(second.bar, second.panel, TWO_VIEWS, [SETTINGS_ACTION], persistence)
 
     expect(second.panel.classList.contains('collapsed')).toBe(true)
-    expect(viewBtn(second.bar, 'alpha').classList.contains('active')).toBe(false)
+    expect(viewBtn(second.bar, 'alpha').getAttribute('aria-selected')).toBeNull()
+  })
+
+  it('restores the view that was on screen, and falls back when it is gone', () => {
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], {
+      collapsed: false,
+      activeViewId: 'beta',
+      save: () => {},
+    })
+    expect(panelTitle(panel)).toBe('Beta')
+    expect(panel.classList.contains('collapsed')).toBe(false)
+
+    // A view id this build no longer registers is repaired, not obeyed: the
+    // panel opens on the first view rather than on nothing.
+    document.body.replaceChildren()
+    const next = mount()
+    mountSidebar(next.bar, next.panel, TWO_VIEWS, [SETTINGS_ACTION], {
+      collapsed: false,
+      activeViewId: 'a-view-that-was-renamed',
+      save: () => {},
+    })
+    expect(panelTitle(next.panel)).toBe('Alpha')
+  })
+
+  it('remembers nothing, and starts open, when there is no persistence', () => {
+    // The shell without a backend (dev-web, a test). Absence is an ordinary
+    // state: the panel opens on the first view and no write is attempted.
+    const { bar, panel } = mount()
+    mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], null)
+    expect(panel.classList.contains('collapsed')).toBe(false)
+    expect(panelTitle(panel)).toBe('Alpha')
   })
 
   it('triggers onActivate when an action button is clicked, without touching the panel', () => {
@@ -283,10 +328,6 @@ describe('sidebar', () => {
 })
 
 describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
-  beforeEach(() => {
-    localStorage.clear()
-  })
-
   afterEach(() => {
     document.body.replaceChildren()
   })
@@ -368,10 +409,6 @@ describe('sidebar — revealView and view props (nocx-wzc4.7)', () => {
 // persisted by the visit.
 
 describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
-  beforeEach(() => {
-    localStorage.clear()
-  })
-
   afterEach(() => {
     document.body.replaceChildren()
   })
@@ -485,12 +522,20 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
   it('a Settings visit does not persist the transient collapse as a preference', async () => {
     const [isSettings, setIsSettings] = createSignal(false)
     const { bar, panel } = mount()
+    const writes: boolean[] = []
+    const persistence = {
+      collapsed: false,
+      activeViewId: '',
+      save: (next: { collapsed: boolean; activeViewId: string }) => {
+        writes.push(next.collapsed)
+      },
+    }
     mountSidebar(
       bar,
       panel,
       TWO_VIEWS,
       [SETTINGS_ACTION],
-      undefined,
+      persistence,
       undefined,
       undefined,
       undefined,
@@ -500,17 +545,17 @@ describe('sidebar — Settings tab transient collapse (nocx-3e3b)', () => {
        main.tsx disable. */
       () => isSettings(),
     )
-    // The open state is the persisted preference.
-    await vi.waitFor(() => expect(localStorage.getItem('nocx.sidebar.collapsed')).toBe('0'))
+    // The open state is what was written.
+    await vi.waitFor(() => expect(writes[writes.length - 1]).toBe(false))
 
     setIsSettings(true)
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
-    // The transient collapse must not have rewritten the preference.
-    expect(localStorage.getItem('nocx.sidebar.collapsed')).toBe('0')
+    // The transient collapse must not have rewritten the remembered state.
+    expect(writes.every((collapsed) => collapsed === false)).toBe(true)
 
     setIsSettings(false)
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
-    expect(localStorage.getItem('nocx.sidebar.collapsed')).toBe('0')
+    expect(writes.every((collapsed) => collapsed === false)).toBe(true)
   })
 
   it('revealView (the Ctrl/Cmd+Shift+O path) still expands the panel from a Settings tab', async () => {

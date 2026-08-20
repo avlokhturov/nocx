@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import { SurfaceRegistry } from './surface-registry'
-import { BaseTabContent, type SurfaceType, type SingletonKey } from './tab-content'
+import { BasePaneContent, type SurfaceType, type SingletonKey } from './pane-content'
 
 // ── Surface that carries no baggage — confirms the registry works on its own ──
 
-class StubContent extends BaseTabContent {
+class StubContent extends BasePaneContent {
   async mount(): Promise<void> {
     /* no-op */
   }

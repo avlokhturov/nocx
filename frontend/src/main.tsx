@@ -1,11 +1,19 @@
 import './style.css'
-import { GetWSPort, GetWSToken, CheckForUpdate, ReportHealthy } from '../wailsjs/go/main/WailsApp'
+import {
+  GetWSPort,
+  GetWSToken,
+  CheckForUpdate,
+  ReportHealthy,
+} from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { render } from 'solid-js/web'
 import { Show, createSignal } from 'solid-js'
 import App from './App'
 import { log } from './log'
+import { installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
-import { TabManager } from './tabs'
+import { LayoutStore } from './layout/layout-store'
+import { LayoutClient } from './layout/layout-client'
+import { PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
@@ -18,6 +26,7 @@ import type { ConnectionsPasswordRequest } from './generated/connections.passwor
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
+import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { AgentClient } from './agent'
@@ -50,15 +59,16 @@ import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
 import { registerGitDiffSurface } from './git/git-diff/open-git-diff'
-import type { ActiveOrigin, SurfaceType } from './tab-content'
+import type { ActiveOrigin, SurfaceType } from './pane-content'
 import {
-  SIDEBAR_WIDTH_KEY,
-  SIDEBAR_WIDTH_DEFAULT,
   clampSidebarWidth,
   createSidebarWidthController,
   persistSidebarWidth,
 } from './sidebar-width'
+import { UIStateClient } from './uistate-client'
 import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
+import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
+import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -73,9 +83,15 @@ import { NotesStore } from './notes/notes-store'
 import { NotesPanel } from './notes/notes-panel'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
+import { createOverviewController } from './overview/overview-controller'
 import { askFields } from './snippets/resolve'
 
 async function main() {
+  // The browser transport must be installed before any binding call: in the
+  // dev-web and headless-e2e browsers the window.go shim is the only thing
+  // that can answer GetWSPort/GetWSToken. A no-op in the packaged webview.
+  installBrowserTransport()
+
   log.info('nocx: main() called')
 
   // Single Solid root owns the shell. App renders the skeleton with empty
@@ -135,6 +151,11 @@ async function main() {
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
+  // The UI-state document (ADR-0033): what the app remembers without being
+  // asked — the sidebar's collapse, its view, its width. Not the settings
+  // registry, which holds what a user deliberately chose, and not
+  // localStorage, which may not carry facts.
+  const uiStateClient = new UIStateClient(dispatcher)
   // The snippet library: ONE store, read by the palette, the settings page
   // and every later surface (design §6 — no change notification on the
   // wire, a writer re-reads). Constructed with the other clients because
@@ -238,10 +259,13 @@ async function main() {
   applyOutputWrap(OUTPUT_WRAP_DEFAULT)
 
   let placement: unknown = 'horizontal'
-  // The sidebar width from the same snapshot: the value that survives a
-  // restart. A fetch failure falls back to the declared default, which is
-  // also what the CSS paints before this bootstrap runs (style.css #sidebar).
-  let sidebarWidth = SIDEBAR_WIDTH_DEFAULT
+  // The sidebar's remembered state, from the UI-state document rather than
+  // the settings snapshot below — a drag is not a decision (ADR-0033). A
+  // failure falls back to the declared defaults, which is also what the CSS
+  // paints before this bootstrap runs (style.css #sidebar); load() never
+  // throws for exactly that reason.
+  const uiState = await uiStateClient.load()
+  const sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
@@ -252,16 +276,28 @@ async function main() {
     // The default wrap for a command block's output — one attribute on the
     // root, read by the CSS; the per-block ⋮ override is not touched by it.
     applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
-    const raw = snap.values[SIDEBAR_WIDTH_KEY]
-    if (typeof raw === 'number' && Number.isFinite(raw)) {
-      sidebarWidth = clampSidebarWidth(raw)
-    }
+    // How much of one command's output is kept. Applied here beside the wrap
+    // for the same reason: the renderer is where it is enforced, so it has to
+    // know before the first block freezes.
+    applyOutputCap(snap.values[OUTPUT_CAP_KEY])
+    // Whether boot reopens what was left. Read HERE, before the pane manager
+    // exists, because it decides what the first frame contains — and read
+    // once: flipping it mid-session must not make tabs appear or vanish
+    // under the person.
+    applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
   } catch {
     // Backend may not be ready yet — safe fallback.
   }
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
 
-  const tm = new TabManager(
+  // The layout chain, which the backend owns and the renderer renders
+  // (nocx-isoph.4). Constructed here, beside every other wire client, and
+  // read by PaneManager on boot — before it opens anything, so a reload finds
+  // the tabs it left rather than deciding what the window looks like and
+  // asking afterwards.
+  const layout = new LayoutStore(new LayoutClient(dispatcher))
+
+  const tm = new PaneManager(
     bar,
     verticalStripHost,
     panes,
@@ -271,18 +307,36 @@ async function main() {
     banner,
     profileClient,
     tabStrip,
+    layout,
+    // Which tab was in front: the UI-state document holds it, and the mirror
+    // is already warm — `load()` above ran before this line (ADR-0033).
+    uiStateClient,
   )
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
-  tm.onCreateSecret = (name) => openSettingsTab().startNewSecret(name)
+  tm.onCreateSecret = (name) => openSettingsPane().startNewSecret(name)
   // A question refused for want of an endpoint: the toast names the
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
-  tm.onCreateEndpoint = () => openSettingsTab().startNewEndpoint()
+  tm.onCreateEndpoint = () => openSettingsPane().startNewEndpoint()
   tm.onActivity = reportActivity
 
+  // ── The workspace overview (nocx-edhcu) ──────────────────────────────
+  // Every workspace and every pane at once, as text cards. The controller
+  // installs its own ⌥⌘O listener on the document — like the other two ⌥⌘
+  // surfaces, because which pane you are in is not the question it answers —
+  // and the strip's head button opens the same one rather than a second.
+  const overview = createOverviewController(tm.overviewPort())
+  tm.onOpenOverview = () => overview.open()
+
   const observer = new SettingsObserver(dispatcher)
+  // Durable-history availability (nocx-rtg0.15). Started here rather than
+  // inside Settings so the status is already known when the tab opens, and
+  // so a degrade raised while the app runs (nocx-rtg0.10 will raise through
+  // the same surface) reaches a screen that is already on the section.
+  const historyStatusStore = new HistoryStatusStore(client)
+  historyStatusStore.start()
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -301,13 +355,14 @@ async function main() {
         endpointsClient,
         agentClient,
         snippetsStore,
+        historyStatusStore,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
         // Vault preflight: if sealed, ensureBeforeSave shows UnlockDialog
-        // and defers newSSHTab until after unseal.
+        // and defers newSSHPane until after unseal.
         vaultController.ensureBeforeSave(() => {
-          void tm.newSSHTab(
+          void tm.newSSHPane(
             profile.id,
             profile.options.host,
             profile.options.user,
@@ -330,8 +385,8 @@ async function main() {
   // (Orca's PORTS panel) sits beside the terminal so a port can be watched
   // while the command that opens it is being typed; a tab replaces the
   // terminal and cannot do that. The view follows the ACTIVE tab: the
-  // target accessor below is a Solid signal fed by TabManager's
-  // onActiveTabChange, so switching SSH tabs re-scopes the panel, a local
+  // target accessor below is a Solid signal fed by PaneManager's
+  // onActivePaneChange, so switching SSH tabs re-scopes the panel, a local
   // tab scopes to the reserved "local" target and shows THIS machine's
   // listeners, and a tab with no ports scope (alias, Settings) shows the
   // no-connection state instead of a stale host's ports (nocx-wzc4.8).
@@ -344,13 +399,13 @@ async function main() {
   const [portsUnavailable, setPortsUnavailable] = createSignal<string>(tm.portsUnavailableReason())
   // The ACTIVE tab's origin for origin-following surfaces (the Files panel,
   // design §5.4): a signal fed on tab change exactly like portsTargetId —
-  // TabManager.activeOrigin() reads a plain field, so the accessor must be
+  // PaneManager.activeOrigin() reads a plain field, so the accessor must be
   // this signal, never a direct call.
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
-  tm.onActiveTabChange = () => {
+  tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
@@ -532,7 +587,7 @@ async function main() {
     // about is still there, and a toast would take the explanation away
     // from it (design §11).
     onRefused: (message) => qc.showSnippets(message),
-    onManage: () => openSettingsTab().openPage('snippets'),
+    onManage: () => openSettingsPane().openPage('snippets'),
     // A body with {{ask:…}} fields: the palette closes and the form asks
     // for all of them at once (owner review — a step that filters a list
     // cannot also be where a value is typed).
@@ -549,14 +604,14 @@ async function main() {
    * Open (or focus) the Settings tab and hand back the instance that is
    * actually on screen.
    *
-   * `openTab` deduplicates on the singleton key, so when Settings is already
+   * `openPane` deduplicates on the singleton key, so when Settings is already
    * open the content just built is discarded and the live instance is the
    * existing tab's. Talking to the one we built would have addressed a surface
    * nobody can see — silently, and only on the second invocation.
    */
-  function openSettingsTab(): SettingsContent {
+  function openSettingsPane(): SettingsContent {
     const { content, descriptor } = registry.build(SURFACE_ID_SETTINGS)
-    const live = tm.openTab(content, descriptor).content
+    const live = tm.openPane(content, descriptor).content
     if (!(live instanceof SettingsContent)) {
       throw new Error('nocx: the Settings singleton is not a SettingsContent')
     }
@@ -572,9 +627,9 @@ async function main() {
     // The persistence seam (persistSidebarWidth): fire-and-forget, and a
     // failed write surfaces a warning instead of reverting the width or
     // wedging the handle — the value stays applied, and the next commit
-    // retries. `setSetting` is a method, hence the closure.
+    // retries. `save` is a method, hence the closure.
     persistSidebarWidth(
-      (key, value) => profileClient.setSetting(key, value),
+      (px) => uiStateClient.save({ sidebar: { width: px } }),
       (message) => showToast({ level: 'warning', message }),
       width,
     )
@@ -601,15 +656,13 @@ async function main() {
         // has overridden, in place, with no restart and no reflow of the
         // blocks that carry their own answer.
         applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
-        // Sidebar width changed — apply it unless the user is mid-drag: the
-        // live pointer position is the truth until the release commits it
-        // (nocx-qmcu).
-        if (!sidebarWidthCtrl.isDragging()) {
-          const raw = snap.values[SIDEBAR_WIDTH_KEY]
-          if (typeof raw === 'number' && Number.isFinite(raw)) {
-            sidebarWidthCtrl.apply(clampSidebarWidth(raw))
-          }
-        }
+        // The cap is live too: a block frozen after the change is captured
+        // under the new number, and blocks already stored keep what they got.
+        applyOutputCap(snap.values[OUTPUT_CAP_KEY])
+        // The sidebar width is deliberately absent from this loop now. It
+        // is not a setting, so no settings revision can carry it, and one
+        // window is the only thing that changes it — re-reading it here
+        // would be the app telling itself what it just did (ADR-0033 §7).
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }
@@ -705,11 +758,22 @@ async function main() {
         icon: SettingsIcon,
         onActivate: () => {
           log.info('nocx: opening Settings tab')
-          openSettingsTab()
+          openSettingsPane()
         },
       },
     ],
-    undefined,
+    {
+      collapsed: uiState.sidebar.collapsed,
+      activeViewId: uiState.sidebar.activeViewId,
+      save: (next) => {
+        // Fire-and-forget, and silent: a collapse that fails to persist
+        // costs the next launch's starting state and nothing a user could
+        // act on now. The width's seam warns because a drag is a
+        // deliberate act with an expectation attached; toggling a panel
+        // twenty times a session is not.
+        void uiStateClient.save({ sidebar: next }).catch(() => {})
+      },
+    },
     /* eslint-disable solid/reactivity -- mountSidebar consumes these
        accessors reactively (SidebarViewProps.activeProfileId and
        .activeOrigin, fed with the ports target and the Files origin, plus
@@ -726,7 +790,7 @@ async function main() {
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
       e.preventDefault()
-      openSettingsTab()
+      openSettingsPane()
     }
   })
 
@@ -738,7 +802,7 @@ async function main() {
   document.body.append(qcContainer)
 
   const sshProvider = new SSHQuickConnectProvider(profileClient, (id, host, user) =>
-    tm.newSSHTab(id, host, user),
+    tm.newSSHPane(id, host, user),
   )
   // "Forward a port" (nocx-4t37): a command that needs a target drills in
   // INSIDE the palette — server, then port — instead of dead-ending or
@@ -857,8 +921,8 @@ async function main() {
 
   const qcProviders: QuickConnectProvider[] = [
     new ActionsQuickConnectProvider(
-      () => tm.newTab(),
-      () => openSettingsTab().startNewConnection(),
+      () => tm.newPane(),
+      () => openSettingsPane().startNewConnection(),
       forwardPortCommand,
     ),
     sshProvider,
@@ -867,12 +931,12 @@ async function main() {
     // sit in the server list or the command palette.
     snippetsProvider,
     new SSHAliasQuickConnectProvider(profileClient, (host, user, port) =>
-      tm.newSSHTab('', host, user, port),
+      tm.newSSHPane('', host, user, port),
     ),
     // Free-form fallback: "Connect to <host>" when the typed query matches
     // neither a saved profile nor an alias. Same host path as aliases — the
     // dialog only reaches it after every real match missed.
-    new AdHocQuickConnectProvider((host, user, port) => tm.newSSHTab('', host, user, port)),
+    new AdHocQuickConnectProvider((host, user, port) => tm.newSSHPane('', host, user, port)),
     // The vault half (nocx-fk32). It contributes only to the 'secrets'
     // variant — the dialog admits one kind set per variant — so these rows
     // never appear in the server list or the palette.
@@ -883,7 +947,7 @@ async function main() {
       // The create dialog is the vault's own, and it is the SAME one the
       // prompt's '@' picker opens (nocx-fk32.1): a secret needs a name and a
       // value, and neither picker is where a value gets typed.
-      create: (name) => openSettingsTab().startNewSecret(name),
+      create: (name) => openSettingsPane().startNewSecret(name),
       // The vault layer owns both prompts (nocx-fk32.3); the picker only
       // says which one this state calls for.
       requestUnseal: () => vaultController.openUnlock('use its secrets'),
@@ -948,7 +1012,7 @@ async function main() {
   }
 
   // The completion dropdown's snippet rows (design §10.2): the library the
-  // provider reads and the acceptance it delegates. Set on the TabManager,
+  // provider reads and the acceptance it delegates. Set on the PaneManager,
   // so every pane built afterwards carries them.
   tm.snippets = {
     snippets: () => {
@@ -996,7 +1060,7 @@ async function main() {
   // mixed, each row typed on the right; target-needing commands drill in.
   // Chosen to match the command-palette convention. The tab-strip caret
   // (wireQuickConnect above) stays the plain server list. Does not collide
-  // with TabManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
+  // with PaneManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
   // CodeMirror (which does not register this binding in its keymap).
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
@@ -1017,12 +1081,12 @@ async function main() {
     }
   })
 
-  void tm.openInitialTab()
+  void tm.openInitialPane()
 
   // --- Auto-update: check on start, then every 24 h ---
 
   // Report healthy once the initial tab's renderer mounted and PTY opened.
-  tm.initialTabReady.then(
+  tm.initialPaneReady.then(
     () => {
       ReportHealthy().catch((err) => console.warn('nocx: ReportHealthy failed', err))
     },

@@ -39,7 +39,6 @@ import (
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
-	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -50,6 +49,7 @@ import (
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/transport"
+	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
@@ -118,6 +118,12 @@ type App struct {
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
 
+	// UIState owns what the app must remember without being asked
+	// (ADR-0033) — window geometry and the shell's layout. Exported because
+	// main.go is the only place a Wails context exists, and the window half
+	// of this document can only be sampled and applied there.
+	UIState *uistate.Store
+
 	// slogger is the same logger Logger wraps, kept so an adapter built
 	// outside this package (main.go's attention host) writes to the log file
 	// rather than to slog.Default(), which nothing here installs.
@@ -178,7 +184,49 @@ func policyFromSettings(reg *settings.Registry) *content.Policy {
 	if v, err := reg.GetBool(settings.HistoryOutputEnabled); err == nil {
 		p.SetOutputEnabled(v)
 	}
+	if v, err := reg.GetNumber(settings.HistoryOutputCapKB); err == nil {
+		p.SetOutputCapBytes(int(v) << 10)
+	}
 	return p
+}
+
+// clearWindowOnCleanStart is the whole of "reopen tabs and panes on startup"
+// being OFF (settings.RestoreOnStartup, nocx-l21ib.4): everything the last
+// session left in the window is marked closed, once, before the transport can
+// serve a single layout.read.
+//
+// IT IS THE BACKEND'S ACT AND NOT THE RENDERER'S, though the renderer is what
+// decides not to draw the rows, and the choice is deliberate. A renderer
+// sweeping through the existing write path would issue one close per leftover
+// tab: N transactions where the act is one, so a backend that died halfway
+// would leave half a session open and reopen exactly it on the next launch
+// with restore back on — the defect this exists to end, one launch later. It
+// would also mint a replacement tab on the last close (that is what a close
+// does when the application is left with none) and then have to reconcile a
+// row nobody asked for. Here the same act is one transaction, and it lands
+// where the store's other startup reconciliations already live: closeOpenEntries
+// and dropDeadSessions run on the same argument — a backend start IS an
+// application start (D5), and this Open is the new one.
+//
+// The POLICY stays in the composition root and the MECHANISM in the store,
+// which is why the setting is read here rather than in content.Config: the
+// store has no business knowing what a person ticked in Settings.
+//
+// A failure is a WARN and nothing more. The window still opens, on the
+// leftovers the sweep did not reach — worse than a clean start and much
+// better than a backend that refuses to start over a preference.
+func clearWindowOnCleanStart(ctx context.Context, reg *settings.Registry, db content.ContentDB, logger *slog.Logger) {
+	restore, err := reg.GetBool(settings.RestoreOnStartup)
+	if err != nil {
+		logger.Warn("restore-on-startup setting unreadable; opening on what was left", "error", err)
+		return
+	}
+	if restore {
+		return
+	}
+	if err := db.Layout().ClearWindow(ctx); err != nil {
+		logger.Warn("clean start could not close the last session's tabs; they may reopen later", "error", err)
+	}
 }
 
 // SetDialogService attaches the native dialog capability (dialog.* RPCs). It
@@ -509,6 +557,13 @@ func New(opts ...Option) (*App, error) {
 		return hex.EncodeToString(raw[:])
 	})
 
+	// The UI-state document (ADR-0033): the same document family again, and
+	// deliberately NOT the settings registry — a drag is not a decision. It
+	// never fails to open, because an absent document is an ordinary state
+	// and an unreadable one costs the user their window size, not their
+	// launch.
+	uiStateStore := uistate.New(docStore, slogger)
+
 	// The installed fact (nocx-mlm7 P7, design §5.4): backend-owned,
 	// persisted across restarts, keyed by the resolved destination
 	// identity, written only from a passport the renderer accepted and
@@ -574,6 +629,11 @@ func New(opts ...Option) (*App, error) {
 	// theirs and never discard, because text somebody wrote cannot
 	// (.internal/specs/2026-08-16-notes-design.md §4.2).
 	var contentKey []byte
+	// The key's own failure text, kept rather than only logged: it is the
+	// second line of the notice the History settings raise when durable
+	// history is not running (nocx-rtg0.15). A reason without a detail is a
+	// dead end for whoever has to act on it.
+	var contentKeyErr string
 	if key, keyErr := contentkey.LoadOrCreate(ctx, contentkey.Config{
 		Registry:    reg,
 		KeyID:       vault.ContentKeyID,
@@ -586,6 +646,7 @@ func New(opts ...Option) (*App, error) {
 		Logger:   logger,
 	}); keyErr != nil {
 		slogger.Warn("encrypted local stores unavailable; starting without them", "reason", keyErr)
+		contentKeyErr = keyErr.Error()
 	} else {
 		contentKey = key
 	}
@@ -638,23 +699,52 @@ func New(opts ...Option) (*App, error) {
 	// the app starts WITHOUT durable history (the stub) and says so: a
 	// terminal that refuses to start because its history database could not
 	// open a key is worse than one that starts and admits the gap.
+	//
+	// "Says so" is a product statement, not a log line, and until
+	// nocx-rtg0.15 it was only ever the latter: every path below warned and
+	// the Settings screen went on offering a keep-history toggle, a
+	// retention age and a two-number budget that governed nothing.
+	// historyStatus is what makes the sentence true. It is deliberately the
+	// SAME surface a runtime write failure will raise through
+	// (nocx-rtg0.10) — raise/clear, not one-shot, and not named after
+	// startup — so the product has one way to say "durable history is not
+	// running, here is why" and never grows a second (ws_history_status.go
+	// carries the argument in full).
+	historyStatus := transport.NewHistoryStatus()
 	historyPolicy := policyFromSettings(settingsRegistry)
 	budget, budgetErr := budgetFromSettings(settingsRegistry)
 	if budgetErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", budgetErr)
+		historyStatus.Raise(transport.HistoryDegradeInvalidBudget, budgetErr.Error())
 	} else if contentKey == nil {
 		// The key already said why, once, above.
 		slogger.Warn("durable command history unavailable; starting without it", "reason", "no content key")
+		historyStatus.Raise(transport.HistoryDegradeNoKey, contentKeyErr)
 	} else if db, openErr := content.Open(ctx, content.Config{
 		Path:   filepath.Join(paths.DataDir(), "content.db"),
 		Key:    contentKey,
 		Budget: budget,
 		Policy: historyPolicy,
 		Logger: logger,
+		// The rebuild's own announcement (nocx-rtg0.19). A schema change
+		// discards the file, and the store says so in a slog.Warn nobody
+		// reads — while the symptom a person actually sees, an empty
+		// history, is indistinguishable from a fresh install. This is the
+		// composition root handing that fact to the surface that already
+		// exists to say when history is not what the settings promise.
+		OnDiscard: func(rows int) { historyStatus.Discarded(rows) },
 	}); openErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
+		historyStatus.Raise(transport.HistoryDegradeOpenFailed, openErr.Error())
 	} else {
 		contentDB = db
+		// The closing event, named. Nothing has raised on this path today —
+		// Clear is a no-op on a status that starts available — but the
+		// interval is stated at both ends here rather than left to be
+		// inferred, and this is the line a retry (or nocx-rtg0.10's queue
+		// draining) closes its episode on.
+		historyStatus.Clear()
+		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
@@ -664,7 +754,7 @@ func New(opts ...Option) (*App, error) {
 		for _, k := range keys {
 			switch k {
 			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
-				settings.HistoryOutputEnabled.Key():
+				settings.HistoryOutputEnabled.Key(), settings.HistoryOutputCapKB.Key():
 				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
 					historyPolicy.SetEnabled(v)
 				}
@@ -673,6 +763,9 @@ func New(opts ...Option) (*App, error) {
 				}
 				if v, err := settingsRegistry.GetBool(settings.HistoryOutputEnabled); err == nil {
 					historyPolicy.SetOutputEnabled(v)
+				}
+				if v, err := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); err == nil {
+					historyPolicy.SetOutputCapBytes(int(v) << 10)
 				}
 			}
 		}
@@ -723,10 +816,12 @@ func New(opts ...Option) (*App, error) {
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		transport.WithHistoryStatus(historyStatus),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
+		transport.WithUIState(uiStateStore),
 		transport.WithHostKeyTruster(&proberAdapter{client: sshClient}),
 		// The remote shell launcher (nocx-xs1d), adapted across the two
 		// identically-named declarations and wired into every ConnectConfig
@@ -887,7 +982,7 @@ func New(opts ...Option) (*App, error) {
 	attentionHost := &notify.HostHolder{}
 	notifyRouter, routerErr := notify.NewRouter(notify.Table{
 		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: wailsadapter.HostSink{Host: attentionHost}},
+			{Sink: notify.HostSink{Host: attentionHost}},
 		},
 	}, notify.Limits{
 		MaxInFlight:     4,
@@ -948,6 +1043,27 @@ func New(opts ...Option) (*App, error) {
 	// server is built above; the window before this line is empty (no
 	// session can have spawned a shell yet).
 	lifecyclePub.SetEmitter(tp)
+
+	// The liveness projection's watcher (nocx-iarf9), bound here for the same
+	// reason as the emitter above. The registry decides WHEN a session's
+	// belief changed — the keepalive prober's findings arrive there — and the
+	// transport decides who is told; without this line the ssh prober's
+	// knowledge that a host stopped answering would stop at the record, and
+	// the tab would go on looking alive until the connection finally died.
+	sess.SetLivenessObserver(tp.PublishLiveness)
+
+	// The vault's prompt carrier, bound post-construction for the same
+	// reason as the emitter above: the server is built here. The vault
+	// owns "I am sealed and one unlock is already pending" (nocx-o9jdu) and
+	// the transport owns "deliver one prompt to whichever renderer is
+	// there" — this line is the only place the two meet.
+	//
+	// NOT YET LIVE FOR USERS: EnsureUnsealed has no production consumer
+	// until nocx-k41yv routes the sealed secret-access paths through it.
+	// Callers still reach RequestUnlock directly and still get one prompt
+	// each. Recorded here rather than left to a green deadcode run, which
+	// is how nocx-rtg0 shipped a write path nobody called.
+	v.SetUnlockRequester(tp)
 
 	// One resolver, one consumer family: connections.test probes and
 	// ordinary connects resolve identically. Created after tp so the
@@ -1030,6 +1146,7 @@ func New(opts ...Option) (*App, error) {
 		logFile:          logFile,
 		procs:            procs,
 		attentionHost:    attentionHost,
+		UIState:          uiStateStore,
 		slogger:          slogger,
 	}
 
@@ -1580,6 +1697,15 @@ func (a *App) Shutdown(ctx context.Context) {
 	// for a new watch once the transport and the sessions are gone.
 	if a.procs != nil {
 		_ = a.procs.Close()
+	}
+	// The UI-state document last of the writers: its debounce means the very
+	// last drag of the session may still be pending, and Close is what turns
+	// a clean quit into a write rather than a lost layout. After the
+	// transport, so no renderer can still be setting a layout underneath it.
+	if a.UIState != nil {
+		if err := a.UIState.Close(); err != nil {
+			a.Logger.Error("ui state shutdown error", "error", err)
+		}
 	}
 	a.Logger.Info("application stopped")
 	// Close the log file last, after the final line: the stable copy of

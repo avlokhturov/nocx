@@ -2,10 +2,10 @@
 //
 // openFileViewer tests: deduplication on the canonical path (D12), the
 // asymmetric title rule (remote carries the host, local never does), and the
-// per-endpoint key composition. A real TabManager is used — the dedup lives
-// in TabManager.openTab, and asserting it through a fake would test the fake.
+// per-endpoint key composition. A real PaneManager is used — the dedup lives
+// in PaneManager.openPane, and asserting it through a fake would test the fake.
 import { describe, expect, it, vi } from 'vitest'
-import { createRendererMock, mountTabManager } from '../test-support/tabs-fixtures'
+import { createRendererMock, mountPaneManager } from '../test-support/panes-fixtures'
 import type { FilesReadResult } from '../generated/files.read'
 import { SurfaceRegistry } from '../surface-registry'
 import {
@@ -81,7 +81,7 @@ function target(overrides: Partial<FileViewerTarget>): FileViewerTarget {
 }
 
 async function setup(): Promise<{ binding: FakeBinding; titles: () => string[] }> {
-  const { manager, bar } = await mountTabManager()
+  const { manager, bar } = await mountPaneManager()
   const binding = new FakeBinding()
   registerFileViewerSurface(new SurfaceRegistry(), manager, binding.deps)
   const titles = (): string[] =>

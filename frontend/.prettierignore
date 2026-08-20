@@ -1,6 +1,6 @@
 dist/
 node_modules/
-wailsjs/
+bindings/
 package-lock.json
 
 # Playwright run artefacts. The pre-commit hook runs prettier from THIS directory,

@@ -205,6 +205,9 @@ func TestLoopbackPolicyAcceptsTheWailsWebview(t *testing.T) {
 		// Linux WebKitGTK sends a bare "wails" hostname without ".localhost".
 		// Captured from a packaged build: origin=wails://wails host=127.0.0.1:42723.
 		{"linux packaged webview", "wails://wails", true},
+		// Wails v3's WebKitGTK webview sends the bare "localhost" hostname.
+		// Captured from a v3 packaged build: origin=wails://localhost host=127.0.0.1:42665.
+		{"linux packaged webview (wails v3)", "wails://localhost", true},
 		{"browser dev path", "http://localhost:5173", true},
 		{"port-forwarded verification loop", "http://127.0.0.1:9876", true},
 		{"non-browser caller sends no Origin", "", true},
@@ -232,5 +235,8 @@ func TestWailsOriginStillRequiresLoopbackHost(t *testing.T) {
 	}
 	if p.Allow("wails://wails", "attacker.example:8080") {
 		t.Fatal("a Linux wails Origin must not excuse a foreign Host")
+	}
+	if p.Allow("wails://localhost", "attacker.example:8080") {
+		t.Fatal("a v3 wails Origin must not excuse a foreign Host")
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
@@ -47,10 +46,18 @@ func validateHistoryQueryRaw(raw json.RawMessage) string {
 	if p.Scope == "host" && p.Host == nil {
 		return "host is required for scope=host"
 	}
-	if p.Before != nil {
-		if _, err := strconv.ParseInt(*p.Before, 10, 64); err != nil {
-			return "before must be the opaque row id of the previous page"
-		}
+	// THE CURSOR IS OPAQUE, and this bound may not know more about it than
+	// the handler does. It used to ParseInt the handle, which was true of the
+	// interim command_history's rowid and is false of the ledger's
+	// client-minted UUIDv7 — so after nocx-rtg0.19 every real `before` a
+	// renderer could send was refused here, in front of a handler that had
+	// already stopped reading the shape (parseHistoryQueryParams). Two owners
+	// of one predicate, and the one that lost the plot won by running first.
+	// The only cursor that is refusable without reading it is the empty one,
+	// which names no row at all — the same rule, in the same words, as the
+	// handler's.
+	if p.Before != nil && *p.Before == "" {
+		return "before must be the opaque row id of the previous page"
 	}
 	if p.Text != nil && utf8.RuneCountInString(*p.Text) > maxSearchTextRunes {
 		return fmt.Sprintf("text exceeds %d characters", maxSearchTextRunes)
@@ -72,8 +79,8 @@ func validateHistoryRecordRaw(raw json.RawMessage) string {
 	if utf8.RuneCountInString(p.Command) > maxRecordCommandRunes {
 		return fmt.Sprintf("command exceeds %d characters", maxRecordCommandRunes)
 	}
-	if utf8.RuneCountInString(p.TabID) > maxTabIDRunes {
-		return fmt.Sprintf("tabId exceeds %d characters", maxTabIDRunes)
+	if utf8.RuneCountInString(p.PaneID) > maxPaneIDRunes {
+		return fmt.Sprintf("paneId exceeds %d characters", maxPaneIDRunes)
 	}
 	if utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
 		return "cwd exceeds the length bound"
@@ -91,11 +98,11 @@ func (s *WSServer) contentSpecs(lane control.Admission, contentGate control.Admi
 	}
 	specs := []methodSpec{
 		regResponder(contentSub, "history.query", params(validateHistoryQueryRaw), func(r Responder) handlerFunc {
-			h := historyQueryHandlers{op: contentOp, r: r}
+			h := historyQueryHandlers{op: contentOp, durable: s.historyDurableAvailable, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleHistoryQuery(ctx, req) }
 		}),
 		reg(contentSub, "history.record", params(validateHistoryRecordRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := historyRecordHandlers{op: contentOp, captures: s.captures, machine: s, r: r}
+			h := historyRecordHandlers{op: contentOp, captures: s.captures, machine: s, status: s.historyStatus, clientID: connectionID(w), r: r}
 			return func(ctx context.Context, req jsonrpcRequest) {
 				h.handleHistoryRecord(ctx, w, state, req)
 			}

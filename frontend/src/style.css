@@ -38,6 +38,7 @@
 @import './styles/components/grouped-rail.css';
 @import './styles/components/icon-button.css';
 @import './styles/components/section.css';
+@import './styles/components/swatch-picker.css';
 @import './styles/components/badge.css';
 @import './styles/components/secret-chip.css';
 @import './styles/components/block-receipt.css';
@@ -63,6 +64,7 @@
 @import './styles/components/record-row.css';
 @import './styles/components/resize-handle.css';
 @import './styles/components/tab-strip.css';
+@import './styles/components/workspace-chip.css';
 @import './styles/components/row-list.css';
 @import './styles/components/key-material-input.css';
 @import './styles/components/tree-row.css';
@@ -71,6 +73,7 @@
 @import './styles/components/endpoints.css';
 @import './styles/components/snippets.css';
 @import './styles/components/notes.css';
+@import './styles/components/overview.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';
@@ -107,8 +110,8 @@
 /* ── Sidebar panel ─────────────────────────────────────────────────────
    The width is the `--sidebar-width` custom property, set inline by the
    sidebar's width controller (frontend/src/sidebar-width.ts) from the
-   `sidebar.width` setting; 240px here is only the first-paint fallback
-   before the bootstrap snapshot arrives. The panel is a flex ROW: the
+   UI-state document (ADR-0033); 240px here is only the first-paint
+   fallback before that document arrives. The panel is a flex ROW: the
    active view fills it and the kit ResizeHandle owns the last 6px, so the
    drag surface is a real flex slot that never overlaps the view's
    scrollbar (nocx-qmcu). */
@@ -147,14 +150,25 @@
   padding: 10px 14px 12px;
 }
 
-/* The rule that collapsed this for a pane-filling program is gone with the
-   reservation it was working around: `hide()` now takes the box away every
-   time, so there is nothing left to collapse (nocx-6w4z). */
+/* Every presentation that is not a prompt REMOVES this card and its box: the
+   composer's `hide()` sets `display:none`, and the height goes back to the
+   scroller. It kept its box for a while, so a submit could not move a
+   scrollback that hangs from the scroller's bottom edge — traded away once
+   the settle glide could play that displacement back instead, because the
+   reservation was costing an inline TUI on the normal buffer four rows of
+   pane. The history is in editor.ts on `hide()` (nocx-g6hnk, nocx-i4h04). */
 
 .nocx-editor-chrome {
   display: flex;
   align-items: center;
   margin-bottom: 8px;
+  /* One chip row, always. The chips in this strip come and go with the
+     lifecycle — the recovery chip appears when a command starts, the location
+     chip only on ssh — and a strip that collapsed when the last one left
+     would take its height out of the scrollback at exactly the moment a
+     command is submitted. The chips themselves are all one height; this is
+     the row's floor when none of them is showing (nocx-i4h04). */
+  min-height: 23px;
   font-family: var(--font-family-ui);
   font-size: var(--font-size-2xs);
   -webkit-user-select: none;
@@ -210,6 +224,17 @@
   -webkit-user-select: none;
   user-select: none;
   flex: none;
+  /* A CHIP IS ONE BOX WHATEVER ELEMENT CARRIES IT. The recovery chip is a
+     <button> — it is pressable — and a button's UA border and metrics made it
+     25px tall against every other chip's 21. That chip appears exactly when a
+     command starts, so the composer's chrome grew 2px at every Enter and the
+     scrollback, which hangs from its bottom edge, moved with it (nocx-i4h04).
+     Reset here rather than on the one chip: the next pressable chip would
+     arrive with the same 4px. */
+  border: 0;
+  font: inherit;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-xs);
 }
 
 .nocx-chip-muted {
@@ -509,6 +534,16 @@
   flex-direction: column;
 }
 
+/* While the pane is settling into a new shape, the stack is displaced
+   downward by the amount the glide is hiding (scrollback/controller.ts
+   `_glide`), and the stack hangs from this box's bottom edge — so those
+   pixels are past it and the scroller reports itself scrollable. The bar
+   flashed on every command. `hidden` keeps the scroll offset and keeps this a
+   scroll container, and the stable gutter above means no width moves. */
+.scrollback-area.is-settling {
+  overflow-y: hidden;
+}
+
 .scrollback-inner {
   display: flex;
   flex-direction: column;
@@ -523,15 +558,23 @@
   border-radius: 0;
 }
 
-/* ── Live region (two-layer: clip container + stable inner) ─────────── */
+/* The follow observer's target: where the output ENDS, in layout terms. A
+   sibling of the stack, so the settle's transform never moves it — watching
+   the live region instead made a displaced stack read as "the person scrolled
+   away" (nocx-i4h04.3). The negative margin cancels its own box, so it costs
+   the layout nothing. */
+.scrollback-follow-sentinel {
+  flex: none;
+  height: 1px;
+  margin-top: -1px;
+  pointer-events: none;
+}
+
+/* ── Live region (three layers: flow box + content clip + xterm) ─────── */
 
 .xterm-live-container {
   flex: none;
   overflow: hidden;
-  /* No height transition. The height changes on every frame of output, so the
-     animation never finished — and anything measuring this element to position
-     the scroller was reading a value mid-flight, aiming at a target that had
-     moved by the time the scroll landed. */
 }
 
 .xterm-live-container.live-idle {
@@ -539,7 +582,29 @@
 }
 
 .xterm-live-container.live-running {
+  /* Fallback until the renderer can measure its first row. The controller
+     replaces this with the written content height in measurable sessions. */
   height: 140px;
+  /* THE RUNNING REGION IS THE BLOCK'S BODY, so it carries the body's padding
+     (.cmd-output above, one source for both). Without it the region was 8px
+     shorter than the body that replaces it, and the scrollback — which hangs
+     from its bottom edge — moved by that much at every freeze. The controller
+     never hard-codes the 8: it reads the padding off this element and sizes
+     the box to content + padding, so this rule stays the only place the
+     number lives. */
+  padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
+}
+
+/* The flow box and this clip receive the same measured height. The separate
+   clip still keeps xterm's full grid from leaking below a short command. */
+.xterm-live-viewport {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.live-running > .xterm-live-viewport {
+  height: 0;
 }
 
 /* Fills the pane, not the viewport. It was `position: fixed` with all four
@@ -559,11 +624,10 @@
   flex: none;
 }
 
-/* Inner wrapper: always has a stable min-height so xterm.fit() produces
-   a sane grid even when the clip container is 36px tall. xterm mounts
-   into this element, not the clip container. overflow:hidden is
-   defence-in-depth against xterm artifacts leaking below the clip
-   (P1-5: stray bar below tabs). */
+/* Xterm wrapper: always has a stable min-height so xterm.fit() produces a
+   sane grid even when the content clip is one row tall. xterm mounts here,
+   inside the clip; overflow:hidden is defence-in-depth against artifacts
+   leaking below it (P1-5: stray bar below tabs). */
 .xterm-inner {
   min-height: 140px;
   height: 100%;
@@ -774,7 +838,11 @@
 }
 
 .cmd-output {
-  padding: 2px 0 6px 0;
+  /* The block body's own padding, named because the LIVE region wears the
+     same box while the command runs (see .xterm-live-container.live-running):
+     the running region and the frozen body it becomes must occupy the same
+     height, or the pane moves at the moment one replaces the other. */
+  padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
   line-height: 1.2;
@@ -806,7 +874,17 @@
 .term-line {
   display: block;
   font-size: var(--font-size-terminal);
-  min-height: 1.2em;
+  /* ONE FROZEN ROW IS ONE GRID ROW. The pitch is the renderer's measured cell
+     height, published as --term-cell-height beside --term-cell-delta by
+     scrollback/cell-metric.ts; `1.2em` was here before it and was a guess at
+     a number only the renderer can measure. The vertical miss is felt rather
+     than seen: the frozen block replaces the live region at the end of every
+     command, so a pitch that disagrees with the grid's changes the pane's
+     height at that moment and the scrollback — which hangs from its bottom
+     edge — moves. The fallback keeps the old guess for a session whose
+     renderer has not measured yet. */
+  min-height: var(--term-cell-height, 1.2em);
+  line-height: var(--term-cell-height, 1.2em);
   /* N frozen columns must occupy exactly N × the terminal's cell width
      (nocx-yy9g). xterm rasterises at a cell advance snapped to whole
      device pixels; the DOM would otherwise lay the same font out at its
@@ -830,6 +908,37 @@
    overflow-x: auto — is the FROZEN contract (nocx-juau) and stays for
    command blocks; this modifier is the same frame with the prose grammar,
    and it must come after the base rule for the cascade. */
+.scrollback-restore-boundary {
+  /* Where the previous session ended. ADR-0019 §3 asks for the difference
+     between a restored block and a live one to be VISIBLE, and a rule with a
+     word on it is what a person reads — "is this shell still running" is not
+     answered by blocks that look slightly different. */
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.scrollback-restore-boundary::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--color-border);
+}
+
+.cmd-output-evicted {
+  /* Where a body used to be. Retention removes an artifact while its entry
+     stays (ADR-0019 §7), and a reconstruction has to state its own horizon:
+     a block whose output was evicted must not read like a command that
+     printed nothing. Dimmed and italic, because it is our sentence and not
+     the program's — the one line in a block's body that nocx wrote. */
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
 .cmd-output-ask {
   white-space: pre-wrap;
   overflow-wrap: break-word;

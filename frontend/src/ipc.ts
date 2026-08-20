@@ -1,8 +1,10 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
+import { historyOutbox } from './history-client'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
-import type { TabClose } from './generated/tab.close'
+import type { SessionLiveness } from './generated/session.liveness'
+import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -21,6 +23,51 @@ type OpenResult = {
   sessionEpoch?: number
   cwd?: string
   desiredMode?: Open['desiredMode']
+  /** The workspace the backend RESOLVED for this session (nocx-fraus). It is
+   *  derived, never sent: the renderer names a pane and the backend walks
+   *  pane -> tab -> workspace itself, so this ack is the only place the
+   *  renderer can learn where the session landed — the default workspace
+   *  never renders, so the renderer has no name of its own for it. */
+  workspaceId?: string
+  /** The opener the backend ADMITTED, or null for a root session
+   *  (nocx-9hu9d). Read rather than dropped because it is the only place the
+   *  renderer ever learns it: the edge is written once, at open, and the ack
+   *  is the one message that carries it. PROVENANCE ONLY — see
+   *  SessionHandle.parent. */
+  parent?: Open['parent']
+}
+
+/**
+ * What an open carries beyond its geometry and its destination.
+ *
+ * NAMED rather than positional, for the reason TerminalContentHooks is named
+ * (see terminal-content.ts): `user` and `paneId` are both optional strings in
+ * adjacent slots on openSSHSessionByHost, so two bare positionals would let
+ * every misalignment type-check — which is exactly the defect that put
+ * onSetupVault into the onAdoptabilityChange slot.
+ */
+export interface OpenAnchor {
+  /**
+   * The pane this session is the pipe of: the renderer-minted UUIDv7 the
+   * layout chain stores (design §7). The renderer is the only end that knows
+   * it — the backend walks pane -> tab -> workspace from here, and told
+   * nothing it can only answer "the default", which leaves every block this
+   * session records anchored on nothing (nocx-rtg0.29).
+   *
+   * ABSENT AND EMPTY ARE DIFFERENT ANSWERS on the wire. validateOpenRaw
+   * treats an absent paneId as legitimate — a session attached to no
+   * recorded pane — and refuses a malformed one with -32602. An empty string
+   * is the second, so the openers below drop the key rather than send it
+   * blank.
+   */
+  paneId?: string
+}
+
+/** The paneId as the wire wants it: the key, or no key at all. One helper for
+ *  all three openers, because "how an absent pane is expressed" is one fact
+ *  and three copies of `...(x ? {paneId: x} : {})` would be three. */
+function paneParam(anchor: OpenAnchor): { paneId?: string } {
+  return anchor.paneId ? { paneId: anchor.paneId } : {}
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -186,6 +233,19 @@ interface SessionState {
   // a frame — the channel has stopped accepting bytes and the keystrokes
   // are being dropped. Once per stall, not once per key.
   inputStalledCallback: (() => void) | null
+
+  // Fires when the backend revises what it believes about REACHING this
+  // session: alive, or unknown when the host has stopped answering and
+  // nothing has ended (contracts/session.liveness.schema.json). The
+  // terminal half of that vocabulary never arrives here — a session that
+  // ended is the exit notification's news.
+  livenessCallback: ((liveness: SessionLiveness) => void) | null
+
+  // The livenessEpoch of the last observation applied to this session. An
+  // observation whose epoch is not GREATER describes an older moment,
+  // whatever order it arrived in, and is dropped — the receiving half of
+  // the rule the backend's record keeps (nocx-iarf9).
+  livenessEpoch: number
 }
 
 // Per-session ack throttle state, tracked outside SessionState so the timer
@@ -207,6 +267,28 @@ export class SessionHandle {
      *  control starts from. Never proof integration succeeded — the reason
      *  field and the arrival of markers confirm or downgrade it. */
     readonly desiredMode: Open['desiredMode'] = 'script',
+    /** The session that opened this one, as the backend ADMITTED it, or null
+     *  for a root session (nocx-9hu9d). The full identity, never a bare id:
+     *  an id alone re-resolves to whatever holds it now.
+     *
+     *  PROVENANCE ONLY (nocx-wtv3p, ADR-0020 §5). It says "A created B" and
+     *  confers nothing: no surface may read it to decide that one tab may
+     *  observe, drive or close another, and the backend refuses such an
+     *  attempt whatever the renderer believes
+     *  (internal/transport/ws_lineage_prohibitions_test.go). The one thing it
+     *  is read for is the ASK in PaneManager.closePane — naming what a close
+     *  would leave running, which is the opposite of acting on them. */
+    readonly parent: Open['parent'] = null,
+    /** The workspace the backend resolved this session into (nocx-fraus).
+     *
+     *  IT CARRIES NO BEHAVIOUR, and the contract says so: nothing reads
+     *  authority, addressability or reachability from it, and §5.5 forbids
+     *  any surface before the fence epic from describing a workspace as
+     *  safe, isolated or contained. It is read as PROVENANCE — what the
+     *  backend resolved from the pane the renderer named — which is why it
+     *  is decoded here rather than dropped: this ack is the only message
+     *  that carries it. */
+    readonly workspaceId: string = '',
   ) {}
 
   send(data: string): void {
@@ -241,6 +323,14 @@ export class SessionHandle {
   onInputStalled(cb: () => void): void {
     this.client.onSessionInputStalled(this.sessionId, cb)
   }
+
+  /** Registers a callback for the backend's revised belief about reaching
+   *  this session (nocx-iarf9). Fires on a CHANGE — the backend publishes
+   *  when the value changes, not once per probe — so a handler may treat
+   *  every call as news. */
+  onLiveness(cb: (liveness: SessionLiveness) => void): void {
+    this.client.onSessionLiveness(this.sessionId, cb)
+  }
 }
 
 export class WSClient {
@@ -254,6 +344,11 @@ export class WSClient {
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
     this.dispatcher.onConnect(() => {
+      // A socket came back, so anything the outbox kept can go now
+      // (nocx-rtg0.4). Fire-and-forget: a drain that fails leaves the queue
+      // exactly as it was and the next connect tries again, which is the
+      // whole point of keeping it.
+      void historyOutbox.drain()
       const ws = this.dispatcher.socket!
       ws.onmessage = (event: MessageEvent) => {
         if (event.data instanceof ArrayBuffer) {
@@ -379,6 +474,41 @@ export class WSClient {
       this.sessions.delete(sid)
     })
 
+    // The backend revised what it believes about reaching a session
+    // (nocx-iarf9). Two refusals before anything is delivered, and both are
+    // the point rather than defensiveness:
+    //
+    //   - the incarnation must be the one this tab opened. A report naming
+    //     another backend instance, or another epoch of this session id, is
+    //     about a different session that merely shares the id (nocx-3oupk).
+    //   - the observation must be NEWER than the last one applied. A report
+    //     delayed behind a faster path would otherwise revive a belief the
+    //     backend has already moved on from, purely by arriving last.
+    this.dispatcher.subscribe('session.liveness', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      if (!state) return
+      if (raw.instanceId !== state.instanceId || raw.sessionEpoch !== state.sessionEpoch) return
+      const epoch = raw.livenessEpoch
+      if (typeof epoch !== 'number' || epoch <= state.livenessEpoch) return
+      const value = raw.liveness
+      if (value !== 'alive' && value !== 'unknown') return
+      const observedAt = raw.observedAt
+      if (typeof observedAt !== 'string') return
+      state.livenessEpoch = epoch
+      state.livenessCallback?.({
+        sessionId: sid,
+        instanceId: state.instanceId,
+        sessionEpoch: state.sessionEpoch,
+        liveness: value,
+        livenessEpoch: epoch,
+        observedAt,
+      })
+    })
+
     // The backend dropped input for a session: its write queue is full,
     // so the channel underneath has stopped accepting bytes.
     this.dispatcher.subscribe('inputStalled', (params: unknown) => {
@@ -416,15 +546,21 @@ export class WSClient {
     return this.dispatcher.call<T>(method, params)
   }
 
-  /** Tell the backend a tab closed, so its pending captures die with it
-   *  (nocx-tsajw). The tabId is the renderer-minted per-tab identity — the
-   *  one wire exception to "session-local ids never cross" — declared once
-   *  in contracts/tab.close.schema.json (TabClose is generated from it).
-   *  Fire-and-forget: a lost notification is covered by the transport
-   *  disconnect, which is the same destruction the tab's death implies. */
-  notifyTabClosed(tabId: string): void {
-    const params: TabClose = { tabId }
-    this.dispatcher.notify('tab.close', params)
+  /** Tell the backend a pane closed, so its PENDING CAPTURES die with it
+   *  (nocx-tsajw). The paneId is the pane's one identity — the same UUIDv7
+   *  the layout chain stores and history.record carries — declared once in
+   *  contracts/secrets.paneClosed.schema.json (SecretsPaneClosed is generated
+   *  from it). Fire-and-forget: a lost notification is covered by the
+   *  transport disconnect, which is the same destruction the pane's death
+   *  implies.
+   *
+   *  NOT the same act as panes.close, and the method was renamed to say so
+   *  (nocx-isoph.4): this closes a capture scope and touches no store, while
+   *  panes.close removes the pane from the durable chain and can mint a
+   *  replacement tab. A pane the user closes sends both. */
+  notifyPaneClosed(paneId: string): void {
+    const params: SecretsPaneClosed = { paneId }
+    this.dispatcher.notify('secrets.paneClosed', params)
   }
 
   // --- ack plumbing -------------------------------------------------------
@@ -476,13 +612,14 @@ export class WSClient {
   // never established a lifecycle channel and could never show a block. The
   // renderer still wires the editor BEFORE this call, so no invisible
   // prompt gap can occur (nocx-4ff.10).
-  openSession(cols: number, rows: number): Promise<SessionHandle> {
+  openSession(cols: number, rows: number, anchor: OpenAnchor = {}): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,
         rows,
         xpixel: 0,
         ypixel: 0,
+        ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result))
   }
@@ -490,7 +627,12 @@ export class WSClient {
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
-  openSSHSession(cols: number, rows: number, profileId: string): Promise<SessionHandle> {
+  openSSHSession(
+    cols: number,
+    rows: number,
+    profileId: string,
+    anchor: OpenAnchor = {},
+  ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
         cols,
@@ -499,6 +641,7 @@ export class WSClient {
         ypixel: 0,
         kind: 'ssh',
         profileId,
+        ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result))
   }
@@ -510,6 +653,7 @@ export class WSClient {
     rows: number,
     host: string,
     user?: string,
+    anchor: OpenAnchor = {},
   ): Promise<SessionHandle> {
     return this.dispatcher
       .call<OpenResult>('open', {
@@ -520,6 +664,7 @@ export class WSClient {
         kind: 'ssh',
         host,
         user,
+        ...paneParam(anchor),
       })
       .then((result) => this._registerHandle(result))
   }
@@ -547,10 +692,19 @@ export class WSClient {
       exitCallback: null,
       resetCallback: null,
       inputStalledCallback: null,
+      livenessCallback: null,
+      livenessEpoch: 0,
       instanceId,
       sessionEpoch,
     })
-    return new SessionHandle(this, sid, result?.cwd ?? '', result?.desiredMode ?? 'script')
+    return new SessionHandle(
+      this,
+      sid,
+      result?.cwd ?? '',
+      result?.desiredMode ?? 'script',
+      result?.parent ?? null,
+      result?.workspaceId ?? '',
+    )
   }
 
   // --- reattach -----------------------------------------------------------
@@ -627,6 +781,13 @@ export class WSClient {
     const state = this.sessions.get(sessionId)
     if (state) {
       state.inputStalledCallback = cb
+    }
+  }
+
+  onSessionLiveness(sessionId: string, cb: (liveness: SessionLiveness) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.livenessCallback = cb
     }
   }
 

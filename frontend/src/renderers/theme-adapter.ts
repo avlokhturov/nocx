@@ -2,7 +2,7 @@
  * Theme adapter — resolves `--terminal-*` CSS custom properties into xterm's
  * `ITheme`, with atomic fallback to the built-in default when a required token
  * is missing. Also provides a module-level theme-change pub/sub so terminal
- * controllers can be notified without touching the TabManager or the Solid tree.
+ * controllers can be notified without touching the PaneManager or the Solid tree.
  *
  * ADR-0013 §2.6, §8.1; design spec §5.4.
  *

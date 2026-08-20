@@ -28,7 +28,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, documentDir } from './harness'
+import { VaultBackend, bindEndpoint, documentDir, settingsReady } from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -157,7 +157,7 @@ function startSshd(password?: string): Promise<{
 
 async function setupVault(page: Page): Promise<void> {
   await page.keyboard.press('Meta+,')
-  await expect(page.locator('.ui-page__scroll')).toBeVisible({ timeout: 5000 })
+  await settingsReady(page)
   await page.locator('.ui-grouped-nav__item[data-item="secrets"]').click()
   await page.getByRole('button', { name: 'Set up protection' }).click()
   const setupDialog = page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })

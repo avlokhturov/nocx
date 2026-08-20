@@ -149,6 +149,22 @@ type Config struct {
 	// Used by revocation to find sessions running that credential.
 	// Empty for sessions with no linked credential (inline auth).
 	CredentialID string
+	// Parent claims the session that opened this one (nocx-9hu9d). The zero
+	// Ref means "no parent" — a root session, which is every session the
+	// product opens today. A non-zero Ref is a CLAIM, checked by
+	// validateParent before anything is spawned and recorded immutably on
+	// the session afterwards; see lineage.go for what is refused and why.
+	// It carries provenance and nothing else: no part of Open reads it to
+	// decide what the session may do.
+	Parent Ref
+	// PaneID names the pane this session is the pipe of (design §6.1 and
+	// §7). Frontend-minted UUIDv7, validated and resolved by the transport
+	// BEFORE anything is spawned, and empty when this session is attached to
+	// no recorded pane.
+	//
+	// It is recorded rather than derived, unlike the workspace beside it —
+	// see the note on Session.PaneID.
+	PaneID string
 }
 
 type PTYFactory interface {
@@ -168,6 +184,52 @@ type Session interface {
 	// instance, or an earlier epoch of this one, is a different
 	// incarnation and must not resolve to this session.
 	Identity() Identity
+	// Parent returns the session that opened this one, and whether there is
+	// one at all (nocx-9hu9d). The edge is immutable: it is written once, at
+	// creation, and exists from then until the registry drops this session's
+	// record — the parent's own death is not an end of that interval, because
+	// provenance does not stop being true when its subject dies (D6). The Ref
+	// is returned BY VALUE for the same reason: a caller cannot write back
+	// through what it is handed, and there is no other door — nothing on this
+	// interface takes a Ref.
+	//
+	// It answers "who created this", never "who may act on this". A caller
+	// deciding an authority question from this value is the defect ADR-0020 §5
+	// names; the revocable delegation that does answer it is a later epic.
+	Parent() (Ref, bool)
+	// Liveness returns what the backend currently believes about this
+	// session: {liveness, livenessEpoch, observedAt} over alive | dead |
+	// unknown | interrupted (nocx-iarf9). See liveness.go — in particular
+	// that a terminal value is derived from this session's own end and can
+	// be asserted by nobody, and that `unknown` is what a session on an
+	// unreachable host reads as, because both other renderings would lie.
+	Liveness() LivenessState
+	// PaneID returns the pane this session is the pipe of, or empty when it
+	// is attached to none (nocx-rtg0.28). Immutable: a session is the pipe
+	// of one pane for its whole life, and the pane outlives it (D5) rather
+	// than the other way round.
+	//
+	// This is NOT the second owner the workspace below would have been, and
+	// the difference is where the fact comes from. The workspace is DERIVED
+	// — the chain pane → tab → workspace answers it, and a copy here would
+	// start lying the first time a pane was dragged. The pane is not derived
+	// from anything the session holds; it is what the opener named, and the
+	// transport already refused it if it named nothing. It is here because
+	// the ledger's write path needs the anchor for every block this session
+	// records (design §6.1), and reading it off the session is what keeps
+	// the renderer from restating it per event on the envelope — which would
+	// be two surfaces owning one input.
+	PaneID() string
+	// There is deliberately NO WorkspaceID here (nocx-isoph.2). The field
+	// nocx-fraus put on the session was the intermediate step, not the
+	// destination: since tabs-panes-and-blocks §4.5 the workspace is a
+	// column on the TAB, and the backend owns the whole chain, so it
+	// RESOLVES pane → tab → workspace itself (content.LayoutRepository's
+	// WorkspaceForPane). A copy on the session would be the second owner of
+	// one fact, and the two would part company the first time a pane was
+	// dragged into another tab — with the session's copy still answering
+	// confidently. The invariant is unchanged: never null, one owner of the
+	// default (internal/workspace.Default).
 	// Host returns the session's remote hostname. Empty for a local session.
 	Host() string
 	// Cwd is where the session's shell was started. It is the tab's name
@@ -289,6 +351,11 @@ type Reg struct {
 	// every session it opens. A record from a previous backend instance
 	// carries a different one, which is what the refusal compares.
 	instanceID InstanceID
+	// livenessObserver is told (by Ref) when a session's liveness value
+	// changes, so the transport can publish it (nocx-iarf9). Set at the
+	// composition root after the transport exists; nil until then, and nil
+	// forever in any build that does not publish it. Guarded by mu.
+	livenessObserver func(Ref)
 	// epochCounter mints the per-session epoch: atomic because Open is
 	// called concurrently (one per tab) and the counter has no other lock
 	// of its own — the sessions-map insert takes r.mu, but the mint must be
@@ -356,6 +423,15 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	// names is (instance, epoch), and the identity is immutable from the
 	// moment the session exists.
 	epoch := r.epochCounter.Add(1)
+	// The parent edge is checked BEFORE anything is spawned or dialed
+	// (nocx-9hu9d): a claim that cannot be true must not cost the user a shell
+	// or an ssh handshake, and a refused open must leave nothing behind for a
+	// later session to inherit. A zero Ref is a root session and skips it.
+	if !cfg.Parent.Zero() {
+		if err := r.validateParent(id, cfg.Parent); err != nil {
+			return nil, err
+		}
+	}
 
 	var ch Channel
 	var err error
@@ -370,6 +446,13 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		}
 		opts = sshOptionsFromConfig(cfg.Remote)
 		opts = append(opts, ssh.WithSessionID(string(id)))
+		// The keepalive prober's findings come back here (nocx-iarf9): it is
+		// the one mechanism that already notices a host has stopped answering
+		// while the session is still open, and without this the knowledge was
+		// spent entirely on the decision to close the connection. Bound to
+		// the host name THIS open used, because the connection underneath is
+		// pooled and belongs to no single session.
+		opts = append(opts, ssh.WithLivenessObserver(r.hostLivenessObserver(cfg.Host)))
 		if cfg.Enhanced {
 			opts = append(opts, ssh.WithEnhanced())
 		}
@@ -396,9 +479,11 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	s := &realSession{
 		id:           id,
 		identity:     Identity{InstanceID: r.instanceID, Epoch: epoch},
+		parent:       cfg.Parent,
 		kind:         cfg.Kind,
 		host:         cfg.Host,
 		cwd:          resolveSessionCwd(cfg.Cwd),
+		paneID:       cfg.PaneID,
 		profileID:    cfg.ProfileID,
 		credentialID: cfg.CredentialID,
 		sshOpts:      opts,
@@ -599,9 +684,11 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 type realSession struct {
 	id           ID
 	identity     Identity // the incarnation identity: instance + epoch, immutable
+	parent       Ref      // who opened this session; zero for a root. Written once, at construction, and never again — there is no setter, and Parent hands out a copy
 	kind         Kind
 	host         string // empty for local sessions; the remote hostname for SSH
 	cwd          string
+	paneID       string // the pane this session is the pipe of; empty for none. Written once, at construction
 	profileID    string
 	credentialID string
 	sshOpts      []ssh.ConnectOption // the options the SSH connection was opened with; nil for local
@@ -611,6 +698,16 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
+
+	// The liveness projection (nocx-iarf9). livenessMu guards the record;
+	// livenessEpochs is this session's own monotonic source of observation
+	// epochs, so any two observations of THIS session are ordered without a
+	// shared clock (an observation of another incarnation is refused by
+	// identity, never by number). The zero record means "not observed yet",
+	// which livenessLocked resolves on the first read.
+	livenessMu     sync.Mutex
+	liveness       LivenessState
+	livenessEpochs atomic.Uint64
 
 	// writeCh feeds a single write goroutine that serialises every write in
 	// arrival order. The readLoop hands frames over without waiting, so
@@ -643,7 +740,9 @@ type writeResult struct {
 
 func (s *realSession) ID() ID                          { return s.id }
 func (s *realSession) Identity() Identity              { return s.identity }
+func (s *realSession) Parent() (Ref, bool)             { return s.parent, !s.parent.Zero() }
 func (s *realSession) Kind() Kind                      { return s.kind }
+func (s *realSession) PaneID() string                  { return s.paneID }
 func (s *realSession) Host() string                    { return s.host }
 func (s *realSession) Cwd() string                     { return s.cwd }
 func (s *realSession) ProfileID() string               { return s.profileID }

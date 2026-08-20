@@ -630,6 +630,31 @@ var HistoryOutputEnabled = MustRegisterBool(BoolSpec{
 	Default:     true,
 })
 
+// HistoryOutputCapKB bounds how much of ONE command's output is kept.
+//
+// The head and the tail are kept and the middle is dropped (design §4.3):
+// errors live in the tail, the invocation and its first diagnostics in the
+// head, and a million lines of progress bar between them are of no value to
+// anyone. A cap on BYTES rather than on lines is what bounds the budget
+// almost independently of what the user runs — a line cap is generous to a
+// program printing long lines and mean to one printing short ones, for no
+// reason either of them can see.
+//
+// It is not the size budget and it is not the age: those are store-wide and
+// belong to nocx-rtg0.30's knobs. This one is per command, and it is what
+// keeps one `cat` of a large file from spending the whole budget.
+var HistoryOutputCapKB = MustRegisterNumber(NumberSpec{
+	Key:         "history.outputCapKB",
+	Section:     "History",
+	Label:       "Keep per command, at most",
+	Description: "How much of one command's output is kept. Past this the beginning and the end are kept, the middle is dropped, and the block says so.",
+	DataClass:   PublicConfig,
+	Default:     256,
+	Min:         fp(16),
+	Max:         fp(4096),
+	Unit:        "KB",
+})
+
 // ClipboardOSC52Suppressed persists the "Don't show again" decision on the
 // OSC 52 clipboard permission banner. Currently in-memory only
 // (ClipboardGate._suppressed in frontend/src/clipboard.ts); making it
@@ -657,6 +682,37 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 		{Value: "horizontal", Label: "Horizontal"},
 		{Value: "vertical", Label: "Vertical"},
 	},
+})
+
+// RestoreOnStartup decides whether the application reopens on what was left
+// (nocx-l21ib): the workspaces, their tabs, the panes with their directories
+// and the blocks those panes printed.
+//
+// It restores a TAB, never a process. The shell died with the backend (D5)
+// and a local pane comes back with a fresh one in the same directory; nothing
+// here resurrects anything, and nothing in the product may suggest otherwise
+// (ADR-0019 §3).
+//
+// OFF MARKS THE LAST SESSION'S TABS CLOSED, and deletes nothing (the
+// composition root's clearWindowOnCleanStart, nocx-l21ib.4). It is still not
+// an instruction to forget — every row stays, with every block still anchored
+// to the pane that printed it, and a person who wants the history gone has
+// the History settings for that. What turning it back on reopens is the LAST
+// session, which is the whole reason the sweep exists: while a clean start
+// merely left the rows open and unshown, the next launch with the setting
+// back on reopened the session BEFORE the clean one, and every clean start
+// added another layer to the pile.
+//
+// In Interface rather than a section of its own: it is a decision about what
+// the window looks like when it opens, beside where the tabs are, and a
+// section holding one setting is a heading rather than a grouping.
+var RestoreOnStartup = MustRegisterBool(BoolSpec{
+	Key:         "restore.onStartup",
+	Section:     "Interface",
+	Label:       "Reopen tabs and panes on startup",
+	Description: "Reopen the workspaces, tabs and panes you left, each with the commands it ran. The shells themselves are new: a local pane starts a fresh shell in the same directory, and nothing that was running comes back. Off opens on an empty window: the tabs you had are closed, not deleted, and the commands they ran stay in your history — but they are not waiting for you if you turn this back on.",
+	DataClass:   PublicConfig,
+	Default:     true,
 })
 
 // OutputWrap is the DEFAULT wrap for a command block's output. The per-block
@@ -703,25 +759,16 @@ var UITheme = MustRegisterSelect(SelectSpec{
 	},
 })
 
-// SidebarWidth is the sidebar panel's width in CSS pixels. The frontend
-// applies it to #sidebar through the --sidebar-width variable and persists
-// it here — the one owner of the number (nocx-qmcu). The bounds mirror
-// frontend/src/sidebar-width.ts: the minimum is the Git dense row's floor
-// (status letter + type glyph + counts + stage control leave ≈35px of file
-// name at 200px), the maximum is the width at which the panel plus the
-// activity bar would own more than half of a 1280px window. Move the
-// numbers in both places.
-var SidebarWidth = MustRegisterNumber(NumberSpec{
-	Key:         "sidebar.width",
-	Section:     "Interface",
-	Label:       "Sidebar width",
-	Description: "Width of the sidebar panel in pixels. Drag the panel's edge, or focus the separator and use the arrow keys.",
-	DataClass:   PublicConfig,
-	Default:     240,
-	Min:         fp(200),
-	Max:         fp(640),
-	Unit:        "px",
-})
+// The sidebar's width used to be registered here as `sidebar.width`. It is
+// not a setting and never was: a setting is something a user DELIBERATELY
+// CHOOSES, and a width produced by dragging a panel edge is what the app must
+// remember without being asked. Registering it put a "Sidebar width" row on
+// Settings → Interface reading 206.3828125 px and badged the section
+// "Modified" the moment anybody dragged the edge — two symptoms of the one
+// wrong owner (nocx-mqie.3). It now lives in internal/uistate, beside the
+// window geometry, as a whole number of CSS pixels. See ADR-0033 for the line
+// between the two stores, and check a new key against it before adding one
+// here.
 
 // ── Declared groups ────────────────────────────────────────────────────
 // The settings rail's group catalogue (nocx-dgsp): declared here, shipped

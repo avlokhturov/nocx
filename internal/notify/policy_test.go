@@ -102,11 +102,11 @@ func (pt *policyTest) mk(session string, kind notify.Kind, body string) notify.E
 // ---------------------------------------------------------------------------
 // Suppression (design §6.1)
 
-// TestPolicy_Suppression_FocusedTabSuppressed: nothing is delivered about
+// TestPolicy_Suppression_FocusedPaneSuppressed: nothing is delivered about
 // the tab the user is looking at in a focused window; the same event with
 // the window unfocused is delivered; and an event about a DIFFERENT tab in
 // a focused window is delivered.
-func TestPolicy_Suppression_FocusedTabSuppressed(t *testing.T) {
+func TestPolicy_Suppression_FocusedPaneSuppressed(t *testing.T) {
 	t.Run("focused tab suppressed", func(t *testing.T) {
 		pt := newPolicyTest(t)
 		pt.focus.focused = true

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/credential"
@@ -145,7 +146,7 @@ func TestEndpointsProbe_RefusesControlCharacterHeaderBeforeAnyRequest(t *testing
 		if strings.Contains(name, "name") {
 			headers = []map[string]any{{"name": value, "value": "v", "secret": nil}}
 		}
-		raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		raw := probeAnswer(t, h, map[string]any{
 			"name":    "Local",
 			"baseUrl": "https://api.example.com/v1",
 			"model":   "gpt-4o",
@@ -153,6 +154,39 @@ func TestEndpointsProbe_RefusesControlCharacterHeaderBeforeAnyRequest(t *testing
 		})
 		if !strings.Contains(string(raw), "-32602") {
 			t.Errorf("%s: probe = %s, want -32602 before any request", name, raw)
+		}
+	}
+}
+
+// probeAnswer sends one endpoints.probe and returns the first answer that is
+// about the REQUEST. "Control plane busy" is not: the probe lane is
+// deliberately non-blocking — a probe is a network call nobody queues, so a
+// second one arriving while the first is in flight is refused rather than
+// held — and the refusal says so, retryable with retryAfterMs 0.
+//
+// The catch is that the slot is freed by the TAIL of the previous probe's
+// task, after that probe's response was already enqueued. So a caller that
+// reads one answer and immediately sends the next can land in the window
+// between the two, and on a loaded machine it does: this test sent three
+// probes in a row and the second was told the plane was busy with a probe it
+// had already been answered about (nocx-2h08 — the same response-precedes-
+// release shape as profiles.tabbyExecute, here in a lane that refuses by
+// design rather than waits).
+//
+// Retrying is what the renderer does with a retryable refusal, and it is the
+// only correct wait here: the state being waited on is the lane answering
+// about this request. wantWithin bounds a lane that never frees at all; it is
+// not the mechanism, and a slower machine simply retries once more.
+func probeAnswer(t *testing.T, h *assistantHarness, params map[string]any) json.RawMessage {
+	t.Helper()
+	deadline := time.Now().Add(wantWithin)
+	for {
+		raw := jsonrpcCall(t, h.conn, "endpoints.probe", params)
+		if !strings.Contains(string(raw), `"reason":"control-saturated"`) {
+			return raw
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the probe lane never freed: %s", raw)
 		}
 	}
 }

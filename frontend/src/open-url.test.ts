@@ -10,12 +10,18 @@ import { describe, expect, it, vi, beforeEach, afterEach, type Mock } from 'vite
 import { bootstrapPlatform } from './platform'
 import { createUrlOpener, type OpenUrlTransport } from './open-url'
 
-vi.mock('../wailsjs/runtime/runtime', () => ({
-  Environment: vi.fn(),
+// Partial mock: System.Environment is the only fact this file owns. The rest
+// of the runtime stays real, because platform.ts reaches log.ts, which
+// reaches the generated bindings, which pull further exports out of this
+// module at import time. Listing those here is a list that goes stale the
+// next time the binding generator runs.
+vi.mock('@wailsio/runtime', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@wailsio/runtime')>()),
+  System: { Environment: vi.fn() },
 }))
 
-const { Environment } = await import('../wailsjs/runtime/runtime')
-const environmentMock = Environment as unknown as ReturnType<typeof vi.fn>
+const { System } = await import('@wailsio/runtime')
+const environmentMock = System.Environment as unknown as ReturnType<typeof vi.fn>
 
 const HOSTING_URL = 'https://github.com/shady2k/nocx/tree/main'
 
@@ -40,7 +46,7 @@ async function asWeb(): Promise<void> {
 /** Reset the runtime fact the way the packaged app has it: GOOS from the
  *  runtime, which is exactly what makes the native path reachable. */
 async function asNative(platform: 'darwin' | 'linux' | 'windows' = 'linux'): Promise<void> {
-  environmentMock.mockResolvedValue({ platform })
+  environmentMock.mockResolvedValue({ OS: platform })
   await bootstrapPlatform(document.createElement('div'))
 }
 

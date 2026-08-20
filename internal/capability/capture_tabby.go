@@ -25,9 +25,16 @@ type CaptureSaveService interface {
 	// and atomic name-collision resolution; the name ACTUALLY used comes
 	// back (the renderer must never predict that a suffixed name is free).
 	CreateSecret(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error)
-	// RewriteRedaction replaces one history row's redaction segment with a
+	// RewriteRedaction replaces one recorded row's redaction segment with a
 	// vault reference. A row the retention sweep removed is ErrNotFound.
-	RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error
+	//
+	// The row is named by the capture link's entry id, which is a STRING
+	// because two tables hold masked command text for exactly one more bead:
+	// the interim command_history keys rows by an autoincrement rowid, and
+	// the ledger's entries by the client-minted UUIDv7 the renderer sent.
+	// The string is what both fit in; which store answers is decided in one
+	// place, below.
+	RewriteRedaction(ctx context.Context, entryID string, span content.Redaction, reference string) error
 }
 
 // CaptureSaveOperation is the typed operation for secrets.captureSave. Its
@@ -71,11 +78,27 @@ func (s *captureSaveService) CreateSecret(ctx context.Context, value credential.
 	return s.vault.CreateNamedResolved(ctx, value, meta)
 }
 
-func (s *captureSaveService) RewriteRedaction(ctx context.Context, id int64, span content.Redaction, reference string) error {
+// RewriteRedaction replaces one masked span in a recorded command with the
+// vault reference the user saved it as.
+//
+// IT USED TO BE A ROUTER, and the router is what nocx-rtg0.19 came to
+// demolish. Two tables held masked command text — the interim command_history
+// keyed by an AUTOINCREMENT rowid, the ledger keyed by a client-minted
+// UUIDv7 — and this method chose between them by trying to parse the id as a
+// decimal integer. The key spaces were disjoint by construction, so it was
+// correct rather than a heuristic; it was still a dispatcher deciding which
+// database to use from the SHAPE of a string, which is exactly the kind of
+// scaffolding that outlives its reason when nobody writes down that it was
+// scaffolding.
+//
+// command_history is gone, so there is one store and nothing to choose. An id
+// naming no entry comes back ErrNotFound, which is the answer a swept row
+// already gave and which the caller already treats as "nothing to rewrite".
+func (s *captureSaveService) RewriteRedaction(ctx context.Context, entryID string, span content.Redaction, reference string) error {
 	if err := s.guard.check(); err != nil {
 		return err
 	}
-	return s.contentDB.CommandHistory().RewriteRedaction(ctx, id, span, reference)
+	return s.contentDB.Ledger().RewriteRedaction(ctx, entryID, span, reference)
 }
 
 // ---------------------------------------------------------------------------

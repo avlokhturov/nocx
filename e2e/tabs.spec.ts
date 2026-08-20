@@ -112,7 +112,7 @@ test.describe('vertical tab placement', () => {
    * nocx-zudj: with two tabs open, switching to vertical left the strip listing no tabs
    * at all — the swap mounted the new strip without repopulating its display records.
    * The test above cannot catch it: it switches with ONE tab and adds the second while
-   * already vertical, so the populate path it exercises is addTab and not replaceStrip.
+   * already vertical, so the populate path it exercises is addPane and not replaceStrip.
    *
    * Asserted by measured geometry rather than by presence: a strip with rows that exist
    * at zero height would satisfy any assertion about the DOM while showing nothing (the
@@ -226,27 +226,54 @@ test.describe('vertical tab placement', () => {
 
     const tab = page.locator(TAB).first()
     const title = tab.locator('.nocx-tab-title')
-    const tabBox = await tab.boundingBox()
+    const paneBox = await tab.boundingBox()
     const titleBox = await title.boundingBox()
 
     // Title's left edge should be near the tab's left content edge:
     // 10px tab padding + 10px pill left + 22px pill width + 10px gap = 52px.
     // This is well left of centre (which would be ~80+ px for a 240px strip).
-    expect(titleBox!.x - tabBox!.x).toBeLessThan(60)
+    expect(titleBox!.x - paneBox!.x).toBeLessThan(60)
   })
 
-  test('horizontal label text is centred (not near the left edge)', async ({ page }) => {
+  test('horizontal labels all start in the same column, left of centre', async ({ page }) => {
     // beforeEach already reset to horizontal, but make sure.
     await expect(page.locator('#tabbar')).toHaveClass(/tabbar/)
 
-    const tab = page.locator(TAB).first()
-    const title = tab.locator('.nocx-tab-title')
-    const tabBox = await tab.boundingBox()
-    const titleBox = await title.boundingBox()
+    // THE HORIZONTAL LABEL IS LEFT-ALIGNED TOO, and this test used to assert
+    // the opposite — "well past 40px from the tab's left edge (centered text
+    // in a 200px tab)". Centring was withdrawn deliberately, with the reason
+    // written where the rule is (styles/components/tab.css): "A centred label
+    // starts at a different x in every tab, so reading the strip means
+    // saccading to a new position per tab instead of running the eye down one
+    // column — and with width now following content, the starting positions
+    // were about to become arbitrary as well."
+    //
+    // So the assertion is the promise that replaced it: ONE COLUMN. It is the
+    // stronger check of the two — a fixed offset can be satisfied by a single
+    // tab, while "every tab agrees" is a claim about the strip — and it is
+    // what a reader actually gets.
+    await page.locator('[aria-label="New tab"]').click()
+    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 15_000 })
 
-    // In horizontal with centering, the title's left edge should be well
-    // past 40px from the tab's left edge (centered text in a 200px tab).
-    expect(titleBox!.x - tabBox!.x).toBeGreaterThan(40)
+    const offsets: number[] = []
+    for (const tab of await page.locator(TAB).all()) {
+      const tabBox = await tab.boundingBox()
+      const titleBox = await tab.locator('.nocx-tab-title').boundingBox()
+      expect(tabBox).not.toBeNull()
+      expect(titleBox).not.toBeNull()
+      offsets.push(titleBox!.x - tabBox!.x)
+    }
+
+    expect(offsets.length).toBeGreaterThanOrEqual(2)
+    // The label clears the index digit and nothing else: tab padding plus the
+    // label's 20px left margin. Left of centre in any tab the strip draws.
+    for (const offset of offsets) {
+      expect(offset).toBeLessThan(60)
+    }
+    // …and every tab agrees, to the pixel.
+    for (const offset of offsets) {
+      expect(Math.abs(offset - offsets[0])).toBeLessThanOrEqual(1)
+    }
   })
 
   // Reset placement to horizontal after each vertical test so the

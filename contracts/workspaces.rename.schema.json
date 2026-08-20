@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/workspaces.rename.schema.json",
+  "title": "WorkspacesRenameResult",
+  "description": "Result of the workspaces.rename JSON-RPC method: the workspace as stored AFTER the rename, read back rather than echoed, so what the renderer draws is what the backend holds. A rename never creates: an id naming no workspace is refused with -32602, because a create is the only thing that may fix an id.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["workspace"],
+  "properties": {
+    "workspace": {
+      "$ref": "workspaces.create.schema.json#/$defs/workspace"
+    }
+  }
+}

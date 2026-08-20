@@ -2,7 +2,7 @@
 /**
  * Characterization tests for the settings surface.
  *
- * Tests observable behaviour of SettingsContent through its TabContent seam:
+ * Tests observable behaviour of SettingsContent through its PaneContent seam:
  * mount, search, modified-only filter, section navigation, viewport, deep
  * link, and dispose.  These pass against both the old imperative
  * implementation and the new Solid rewrite.
@@ -18,7 +18,7 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
 import type { Declaration, SettingsGroup } from './settings-domain'
-import type { TabHost } from './tab-content'
+import type { PaneHost } from './pane-content'
 import { VaultSection } from './vault'
 import type { VaultClient } from './vault-client'
 import { render, cleanup, fireEvent } from '@solidjs/testing-library'
@@ -147,12 +147,23 @@ function mockReady(
     }
   }
 }
-function mockTabHost(): TabHost {
+function mockPaneHost(): PaneHost {
   return {
     setTitle: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
+    contentSettled: vi.fn(),
   }
+}
+/** Click a generated section's rail item. Settings opens on the first rail
+ *  page — Connections, a component page — so generated-section assertions
+ *  must navigate first, exactly as a user would. */
+function openSection(container: HTMLElement, label: string): void {
+  const link = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('.ui-grouped-nav__item > .ui-button'),
+  ).find((l) => l.textContent.includes(label))
+  expect(link).toBeTruthy()
+  link!.click()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
@@ -161,7 +172,7 @@ describe('SettingsContent', () => {
   let target: HTMLDivElement
   let client: ProfileClient
   let content: SettingsContent
-  let host: TabHost
+  let host: PaneHost
   let signal: AbortSignal
 
   function visibleRows(): HTMLElement[] {
@@ -176,7 +187,7 @@ describe('SettingsContent', () => {
     document.body.append(target)
     client = new ProfileClient(new Dispatcher())
     content = new SettingsContent(client)
-    host = mockTabHost()
+    host = mockPaneHost()
     signal = new AbortController().signal
   })
 
@@ -193,12 +204,19 @@ describe('SettingsContent', () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
+    // The screen opens on Connections, a contained-scroll component page
+    // with no .ui-page__scroll — open a generated section for the layout
+    // containers this test pins.
+    openSection(target, 'Terminal')
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-page__scroll')).toBeTruthy()
+    })
+
     // Page renders .ui-page as root; .ui-page__rail and .ui-page__scroll
     // are the rail and scroll containers.
     const page = target.querySelector('.ui-page')
     expect(page).toBeTruthy()
     expect(page!.querySelector('.ui-page__rail')).toBeTruthy()
-    expect(page!.querySelector('.ui-page__scroll')).toBeTruthy()
   })
 
   it('rail has exactly one search input', async () => {
@@ -209,6 +227,30 @@ describe('SettingsContent', () => {
     const searchInputs = rail.querySelectorAll<HTMLInputElement>('input[type="search"]')
     expect(searchInputs.length).toBe(1)
     expect(searchInputs[0].placeholder).toBe('Search settings…')
+  })
+
+  it('opens on the first rail page — Connections selected, not the first generated section', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    // The rail's first row (Connections, top level) is the current page…
+    const nav = target.querySelector('[aria-label="Settings sections"]')!
+    const connItem = nav.querySelector<HTMLElement>(
+      '.ui-grouped-nav__item[data-item="connections"]',
+    )!
+    expect(connItem.getAttribute('data-selected')).toBe('true')
+
+    // …and nothing else is: the old default was the first GENERATED section
+    // (Terminal in this fixture, History in the shipped catalogue), which
+    // sits inside a group while Connections sits at the top of the rail.
+    const selected = nav.querySelectorAll<HTMLElement>(
+      '.ui-grouped-nav__item[data-selected="true"]',
+    )
+    expect(selected.length).toBe(1)
+
+    // The body is the Connections page, not the generated sections list.
+    expect(target.querySelector('.cm-root')).toBeTruthy()
+    expect(target.querySelector('.ui-settings-row')).toBeNull()
   })
 
   it('rail has one modified-only toggle with count', async () => {
@@ -304,10 +346,15 @@ describe('SettingsContent', () => {
     })
     await content.mount(target, host, signal)
 
-    // Before toggle: the three rows of the section the screen opens on.
-    // Settings selects the first section rather than listing all five settings
-    // end to end, so "everything visible" means Terminal, not the whole file.
-    expect(visibleRows().length).toBe(3)
+    // The screen opens on the first rail page (Connections, a component
+    // page), so open a generated section before counting rows.
+    openSection(target, 'Terminal')
+
+    // Before toggle: the three rows of the opened section, not all five
+    // settings end to end.
+    await vi.waitFor(() => {
+      expect(visibleRows().length).toBe(3)
+    })
 
     const checkbox = target.querySelector<HTMLInputElement>(
       '.ui-settings-filter input[type="checkbox"]',
@@ -532,8 +579,12 @@ describe('SettingsContent', () => {
     mockReady(client)
     await content.mount(target, host, signal)
 
-    const allSearchInputs = target.querySelectorAll<HTMLInputElement>('input[type="search"]')
-    expect(allSearchInputs.length).toBe(1)
+    // The screen opens on Connections, whose page carries its own search
+    // box — open a generated section so the surface holds only the rail's.
+    openSection(target, 'Terminal')
+    await vi.waitFor(() => {
+      expect(target.querySelectorAll<HTMLInputElement>('input[type="search"]').length).toBe(1)
+    })
 
     // Also: no search input of type text with search-related placeholder
     const textInputsSearching = target.querySelectorAll<HTMLInputElement>(
@@ -563,6 +614,12 @@ describe('SettingsContent', () => {
     vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
     await content.mount(target, host, signal)
 
+    // Open a generated section — the screen opens on Connections, a
+    // component page with no settings rows to filter.
+    openSection(target, 'Terminal')
+    await vi.waitFor(() => {
+      expect(visibleRows().length).toBe(3)
+    })
     // Activate modified-only filter — only fontSize visible.
     const railCheckbox = target.querySelector<HTMLInputElement>(
       '.ui-settings-filter input[type="checkbox"]',
@@ -697,6 +754,12 @@ describe('SettingsContent', () => {
       },
     })
     await content.mount(target, host, signal)
+    // The screen opens on Connections — open the History section, the only
+    // one this fixture declares, before reading its rows.
+    openSection(target, 'History')
+    await vi.waitFor(() => {
+      expect(target.querySelectorAll('.ui-text-field__unit').length).toBe(3)
+    })
 
     // The units the owner will read: days, MiB, MiB — beside each value.
     const units = Array.from(target.querySelectorAll('.ui-text-field__unit')).map(
@@ -759,6 +822,10 @@ describe('SettingsContent', () => {
       values: { 'history.enabled': true, 'history.outputEnabled': false },
     })
     await content.mount(target, host, signal)
+    openSection(target, 'History')
+    await vi.waitFor(() => {
+      expect(target.querySelectorAll('.ui-settings-row .ui-checkbox').length).toBe(2)
+    })
 
     // Two rows, each with its switch (the rail's own modified filter is a
     // checkbox too, so scope the count to the rows).
@@ -785,6 +852,10 @@ describe('SettingsContent', () => {
     }
     mockReady(client, { declarations: [decl], values: { 'history.retentionDays': 0 } })
     await content.mount(target, host, signal)
+    openSection(target, 'History')
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-text-field__caption')).toBeTruthy()
+    })
 
     const slot = () => target.querySelector('.ui-text-field__caption')
     expect(slot()?.textContent).toBe('Kept until the size limit is reached')
@@ -825,6 +896,10 @@ describe('SettingsContent', () => {
       'settings: "history.diskCeilingMiB" validation failed: value 1 below minimum 128'
     vi.spyOn(client, 'setSetting').mockRejectedValue(new Error(backendMessage))
     await content.mount(target, host, signal)
+    openSection(target, 'History')
+    await vi.waitFor(() => {
+      expect(target.querySelector('input[type="number"]')).toBeTruthy()
+    })
 
     const input = target.querySelector<HTMLInputElement>('input[type="number"]')!
     fireEvent.input(input, { target: { value: '1' } })
@@ -856,6 +931,10 @@ describe('SettingsContent', () => {
     mockReady(client, { declarations: [decl], values: { 'history.diskCeilingMiB': 8192 } })
     vi.spyOn(client, 'setSetting').mockRejectedValue(new Error('settings: store is read-only'))
     await content.mount(target, host, signal)
+    openSection(target, 'History')
+    await vi.waitFor(() => {
+      expect(target.querySelector('input[type="number"]')).toBeTruthy()
+    })
 
     // In range — the caption slot has nothing to say, so the surface must.
     const input = target.querySelector<HTMLInputElement>('input[type="number"]')!
@@ -874,7 +953,7 @@ describe('horizontal Field gate — every settings row must use primary label', 
   let target: HTMLDivElement
   let client: ProfileClient
   let content: SettingsContent
-  let host: TabHost
+  let host: PaneHost
   let signal: AbortSignal
 
   beforeEach(() => {
@@ -883,13 +962,17 @@ describe('horizontal Field gate — every settings row must use primary label', 
     document.body.append(target)
     client = new ProfileClient(new Dispatcher())
     content = new SettingsContent(client)
-    host = mockTabHost()
+    host = mockPaneHost()
     signal = new AbortController().signal
   })
 
   it('mounts generated settings pages with every horizontal Field defaulting to data-label=primary', async () => {
     mockReady(client)
     await content.mount(target, host, signal)
+    openSection(target, 'Terminal')
+    await vi.waitFor(() => {
+      expect(target.querySelectorAll<HTMLElement>('.ui-field-horizontal').length).toBeGreaterThan(0)
+    })
 
     const horizontals = target.querySelectorAll<HTMLElement>('.ui-field-horizontal')
     expect(horizontals.length).toBeGreaterThan(0)
