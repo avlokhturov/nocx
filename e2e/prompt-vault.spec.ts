@@ -197,7 +197,28 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     await expect(panel).not.toContainText(KEY)
     await expect(panel).not.toContainText('...')
 
-    // Enter on the row submits through the same seam: resolveLine hits the
+    // ENTER TAKES, IT NEVER RUNS — so the run is the SECOND Enter, and the
+    // two steps want different things from the vault. This spec pressed it
+    // once and expected the unlock, which was right until 2026-08-19: with an
+    // empty filter Enter used to submit the previewed command straight
+    // through the editor. The owner reversed it (recall.ts) for the reason
+    // design §8.10 gave in the first place — choosing from a list and running
+    // are two decisions, and one keystroke must not make both.
+    //
+    // The first Enter only moves the row into the line, so NOTHING about the
+    // vault is asked yet: no value is needed to display a reference, and the
+    // line holds the chip. Asserted, because "no unlock is raised here" is the
+    // half that a spec pressing Enter twice in a row would stop checking — a
+    // surface that asked for a passphrase to paste a masked command would be
+    // asking for a secret it has no use for.
+    await page.keyboard.press('Enter')
+    await expect(page.locator(`${INPUT} .ui-secret-chip`)).toHaveCount(1, { timeout: 10_000 })
+    await expect(page.getByRole('dialog').filter({ hasText: 'Unlock the vault' })).toHaveCount(0)
+
+    // The second Enter is the run, and running is what needs the VALUE: the
+    // line goes to the pty with the reference substituted, so resolveLine
+    // reaches a sealed vault. THE VAULT RAISES ITS OWN UNLOCK (ADR-0032) —
+    // the person never has to know a Vault page exists.
     await page.keyboard.press('Enter')
     await expect(page.getByRole('dialog').filter({ hasText: 'Unlock the vault' })).toBeVisible({
       timeout: 15_000,
