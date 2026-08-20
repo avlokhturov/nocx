@@ -1,4 +1,4 @@
-<img src="site/assets/icon-256.png" alt="" width="96" align="left" hspace="16" vspace="4">
+<img src="site/assets/icon-256.png" alt="" width="80">
 
 # nocx
 
@@ -7,8 +7,6 @@ manager. No account, no cloud service of its own, no product telemetry — the
 network it touches is the network you point it at.
 
 **[shady2k.github.io/nocx](https://shady2k.github.io/nocx/)** — what it does, and how to install it.
-
-<br clear="left">
 
 **Stack:** Go backend (PTY, SSH, session, transport) + xterm.js (WebGL) frontend +
 Wails v3 desktop shell, connected over one WebSocket carrying a raw binary data
