@@ -228,3 +228,53 @@ func TestDeadSession_TellsThePaneItsInputIsBeingDropped(t *testing.T) {
 		t.Fatal("input was dropped and the tab was never told: the degrade is invisible in the product")
 	}
 }
+
+// TestInputStalled_LatchDoesNotOutliveAnUnsentNotification pins the half the
+// latch was quietly getting wrong.
+//
+// notifyInputStalled fires ONCE per stall, and the flag clears only when the
+// session's write queue ACCEPTS a frame — which a stuck channel never does.
+// The notification itself goes out on TryNotify, the droppable path, whose
+// contract explains why dropping is safe: "a notification is refreshable
+// state the renderer re-syncs from the next one" (outbound.TryEnqueue). This
+// one is not refreshable, so a drop used to mean the tab was never told for
+// the whole life of the stall — the degrade invisible in the product, which
+// is the thing nocx-o2le exists to prevent.
+//
+// Driven through the seam the drop actually happens at: with nobody attached
+// there is no subscriber to notify, which is the same outcome as a dropped
+// frame and is reachable without starving a queue. The assertion is on what
+// the NEXT refused frame does, because that is what a person experiences —
+// they keep typing, and the tab has to tell them.
+func TestInputStalled_LatchDoesNotOutliveAnUnsentNotification(t *testing.T) {
+	dead := newDeadChannel()
+	t.Cleanup(func() { _ = dead.Close() })
+
+	ws := stallServer(t, dead)
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	sid := openSSHOverSocket(t, conn, 1)
+
+	rx := ws.getRx(session.ID(sid))
+	if rx == nil {
+		t.Fatal("the session has no rx state")
+	}
+
+	// The stall happens while nobody is attached: nothing can be told, so the
+	// latch must not be left claiming somebody was.
+	sub, state := rx.getSubscriber()
+	rx.setSubscriber(nil, nil)
+	ws.notifyInputStalled(session.ID(sid))
+	if rx.inputStalled.Load() {
+		t.Fatal("the latch is set although no notification was sent: the next refused frame will stay silent and the tab is never told")
+	}
+
+	// The tab comes back to a session that is still stuck, and the next
+	// refused frame tells it.
+	rx.setSubscriber(sub, state)
+	ws.notifyInputStalled(session.ID(sid))
+	if !rx.inputStalled.Load() {
+		t.Fatal("the notification was sent but the latch did not close: a held key would raise one per keystroke")
+	}
+}

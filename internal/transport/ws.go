@@ -2315,11 +2315,37 @@ func (s *WSServer) notifyInputStalled(sid session.ID) {
 	}
 	wconn, _ := rx.getSubscriber()
 	if wconn == nil {
+		// Nobody is attached to be told. Drop the latch so the tab that
+		// attaches next is told by the next refused frame — a stall that
+		// began while the renderer was away is still in force when it
+		// returns, and the flag only clears when the queue ACCEPTS a frame,
+		// which a stuck channel never does.
+		rx.inputStalled.Store(false)
 		return
 	}
 	if err := wconn.TryNotify("inputStalled", mustMarshal(map[string]string{
 		"sessionId": string(sid),
 	})); err != nil {
+		// THE LATCH MUST NOT OUTLIVE A NOTIFICATION THAT WAS NOT SENT.
+		// TryNotify is the droppable path, and its own contract says why
+		// that is safe: "the frame is dropped, which is safe because a
+		// notification is refreshable state the renderer re-syncs from the
+		// next one" (outbound.TryEnqueue). This one is not refreshable.
+		// It fires once per stall and the flag clears only when the write
+		// queue ACCEPTS a frame, which is exactly what a stalled session
+		// never does — so a dropped frame here meant the tab was never
+		// told, for the whole life of the stall.
+		//
+		// And the moment it is most likely to be dropped is the moment it
+		// matters: the outbound queue is full when the connection is
+		// drowning, which is the same trouble that stalls the session.
+		//
+		// Clearing the latch costs at most a duplicate notification — the
+		// renderer already treats this as a state, not an event — and buys
+		// the promise the message exists to keep. Without it the warning
+		// stays a slog.Warn nobody reads while the product presents a
+		// terminal that looks alive and ignores every key (nocx-o2le).
+		rx.inputStalled.Store(false)
 		s.log.Debug("write inputStalled notification", "error", err)
 	}
 }
