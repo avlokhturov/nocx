@@ -2,32 +2,41 @@ package content
 
 // Schema v1 of the one authoritative ledger (nocx-rtg0.2), per ADR-0019,
 // ADR-0020 and design §5.2. The types here are the public repository seam:
-// ContentDB.Ledger() returns a LedgerRepository, the only writer of the v1
-// tables. The interim command_history table and CommandHistoryRepository are
-// untouched by this surface — they remain the live history path until
-// nocx-rtg0.19 removes them, and nothing may write both (ADR-0019 §4).
+// ContentDB.Ledger() returns a LedgerRepository, and since nocx-rtg0.19 it is
+// the only writer of a command anywhere in nocx — command_history and
+// CommandHistoryRepository are gone, so ADR-0019 §4's "nothing may write
+// both" is now satisfied by there being nothing else to write.
 //
 // The entry lifecycle IS wired as of nocx-rtg0.3: internal/transport's
 // ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
 // StartExecution and FinishExecution through capability.LedgerService, and
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
-// SubmitAgentAsk, TransitionRun and FinishAgentRun. The READ path is wired
-// as of nocx-rtg0.20: ledger.query drives QueryEntries and ledger.get drives
-// Entry plus Edges (ws_ledger_query.go), and the query's `host` field is
-// what finally asks a resolved environment row for its host — so
-// Environment.Host has a renderer. What is still test-reachable only:
-// CreateSession, DeleteSession, ListEntries, DeleteEntry, AppendArtifact and
-// AddEdge — plus the whole of LayoutRepository (layout.go), which keeps the
-// same statement in its own header.
+// SubmitAgentAsk, TransitionRun, AppendChunk and FinishAgentRun. The READ
+// path is wired as of nocx-rtg0.20: ledger.query drives QueryEntries and
+// ledger.get drives Entry plus Edges (ws_ledger_query.go), and the query's
+// `host` field is what finally asks a resolved environment row for its host —
+// so Environment.Host has a renderer. history.record drives RecordCompleted
+// (nocx-rtg0.19), which is where a finished command lands now, under the
+// author the renderer minted (nocx-iadtt); ledger.capture drives
+// CaptureOutput.
 //
-// RewriteRedaction is the awkward third case and is written down rather than
-// rounded to one of the other two: it is WIRED — secrets.captureSave reaches
-// it through capability.CaptureSaveService, which routes a link by the id it
-// carries — but no production caller mints a link keyed by an entry id yet.
-// history.record is what mints links, and it writes command_history rows. So
-// the path is live and correct, and in production the router always takes the
-// other arm until nocx-rtg0.19 replaces history.record's writer
-// (nocx-rtg0.24).
+// WHAT IS STILL TEST-REACHABLE ONLY: CreateSession, DeleteSession,
+// ListEntries, DeleteEntry, AppendArtifact, AddEdge and RunState.
+//
+// EvictEntries and Watermark are the third category, and it is written down
+// rather than rounded to either of the other two: no production caller
+// reaches the INTERFACE METHOD, and the behaviour behind it is nonetheless
+// live on every submit — evictOnWrite calls the unexported evictEntries
+// directly (retention.go), and the query path reads the unexported watermark
+// inside its own transaction. So "no caller" here means the seam is untested
+// in production, not that retention is asleep.
+//
+// RewriteRedaction stopped being the awkward case when command_history went
+// (nocx-rtg0.19). It is wired and TAKEN: secrets.captureSave reaches it
+// through capability.CaptureSaveService, the id router that used to choose a
+// store by parsing an integer is gone with the second store, and
+// history.record now mints the entry-keyed links that made the ledger arm
+// unreachable in production before.
 //
 // Read that list rather than a deadcode run. `deadcode -filter
 // 'nocx/internal/content'` prints nothing for this package and always has —
