@@ -163,9 +163,29 @@ jobs:
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Commit=${GITHUB_SHA}"
           LDFLAGS="${LDFLAGS} -X github.com/shady2k/nocx/internal/version.Date=${BUILD_DATE}"
           # v3 has no -platform flag: build each slice and join with lipo (§4).
-          GOOS=darwin GOARCH=amd64 go build -tags "release production" -ldflags "$LDFLAGS" \
+          #
+          # CGO_ENABLED=1 AND THE -arch FLAGS ARE BOTH REQUIRED, and leaving
+          # them out is not a slow build, it is a broken one. Naming GOARCH
+          # explicitly makes this a CROSS build even on a Mac building for a
+          # Mac, and Go turns cgo OFF for a cross build unless told otherwise
+          # — so wails v3's darwin implementation, which is Objective-C
+          # behind cgo, was excluded from the compile and the package it
+          # belongs to failed on every symbol it defines: `undefined:
+          # macosApp`, `undefined: newPlatformApp`, `undefined:
+          # smAppServiceRegister`.
+          #
+          # With cgo back on, the C half still has to be told which slice it
+          # is building; clang defaults to the host's architecture and would
+          # otherwise hand arm64 objects to the amd64 link. Apple's clang
+          # cross-compiles both from either host, so `-arch` on the CFLAGS
+          # and the LDFLAGS is the whole of what it needs.
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            CGO_CFLAGS="-arch x86_64" CGO_LDFLAGS="-arch x86_64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
             -o build/bin/darwin-amd64/nocx .
-          GOOS=darwin GOARCH=arm64 go build -tags "release production" -ldflags "$LDFLAGS" \
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" \
+            go build -tags "release production" -ldflags "$LDFLAGS" \
             -o build/bin/darwin-arm64/nocx .
           mkdir -p build/bin/nocx.app/Contents/MacOS build/bin/nocx.app/Contents/Resources
           lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx \
