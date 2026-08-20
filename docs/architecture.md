@@ -9,14 +9,14 @@ updated: 2026-08-19
 
 ## Overview
 
-nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from an **xterm.js** (WebGL) frontend ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)), hosted by a **Wails v2** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote…
+nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from an **xterm.js** (WebGL) frontend ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)), hosted by a **Wails v3** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote…
 
 ## Component Diagram
 
 ```mermaid
 graph TB
     subgraph host["Host (swappable)"]
-        wails["Wails v2 desktop shell<br/>(WKWebView, embeds backend) — MVP"]
+        wails["Wails v3 desktop shell<br/>(WKWebView, embeds backend) — MVP"]
         webhost["Web host<br/>(same core serves FE + WS) — Phase 2/3"]
     end
 
@@ -121,11 +121,12 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Prevents: language fork between desktop and web; logic duplicated per host.
 - Rule: one Go codebase produces multiple build targets (desktop backend, web server, remote helper); hosts embed or serve it, never reimplement it.
 
-**AD-3 — Wails v2 as the MVP desktop shell.**
+**AD-3 — Wails as the desktop shell, thin and swappable.**
 
 - Binds: desktop packaging and the embedded WebView (WKWebView on macOS).
-- Prevents: premature adoption of Wails v3 alpha; multi-window complexity MVP does not need.
-- Rule: shell stays a thin, swappable host; tabs and Phase-2 splits are in-window. Migrate to v3 only if multi-window is required.
+- Prevents: business logic migrating into the shell, where it cannot be reached by the web or remote targets.
+- Rule: shell stays a thin, swappable host; tabs and splits are in-window.
+- **Version: v3** since `8004fd72` (`nocx-mgbjx`). This AD previously named v2 and permitted a migration on one condition — "migrate to v3 only if multi-window is required" — and that condition fired: v2's runtime has no window-creation call at all, every function being `Window*` acting on the single window. The AD was followed, not overridden. The move cost two Go source files and their tests, because AD-1 had already made the backend a WebSocket server and left the shell showing a window and supplying three OS conveniences; the work was in the build pipeline, which v3 restructures entirely (`wails.json` gives way to generated build assets, and the release workflow assembles the macOS bundle itself where v2's CLI did it).
 
 **AD-4 — SSH built on `golang.org/x/crypto/ssh` (foundation-first).**
 
@@ -208,7 +209,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - **Build & CI.** GitHub Actions lints, formats, and tests every change. `release.yml` triggers on a version tag, calls `ci.yml` as its gate, then builds both platforms in parallel — `build-macos` (universal bundle) and `build-linux` (AppImage) — and publishes a GitHub Release carrying a `.dmg` (human install on macOS), a `.zip` (the macOS updater payload), an `.AppImage` (Linux install _and_ updater payload), and an ed25519-signed `manifest.json`. No app store and no publisher signature; the reasoning is in ADR-0003. The single Go codebase cross-compiles to multiple targets: desktop backend, web server, and (Phase 2) the remote helper.
 - **A release is a tag, never a branch.** The version is the tag and nothing else: `validate` derives it as `${tag#v}`, and it reaches the binary through `-ldflags` (`internal/version`) and the macOS plist through a build-time `wails.json` patch. There is no `VERSION` file and no bump script — the number is chosen by a person at `git tag` time. The tag must be stable `vMAJOR.MINOR.PATCH` and must point at a commit reachable from `main`; `validate` refuses anything else. The `version` fields in `package.json` and `frontend/package.json` are npm metadata, are read by nothing, and are not the product version.
 - **Signing is verified before it is trusted.** `sign` generates the manifest, signs it with `RELEASE_SIGNING_KEY`, and then checks that signature against the keyring compiled into the very build being released (`internal/update/keyring.go`) — because a signature only ever verified by the key that made it proves nothing. That job runs on a dry run too, so the key and the shipped keyring are proven to be a pair before a tag exists. Only `publish` is gated on the tag, and it is the only job holding `contents: write`.
-- **macOS packaging.** Wails v2 packages the desktop app (`.app` bundle) with the Go backend embedded and the frontend bundle served into WKWebView. macOS and Linux ship now — Linux as an AppImage (linuxdeploy + GTK plugin) bundling the GTK/WebKitGTK stack into one self-replaceable file (ADR-0007); Windows is Phase 3.
+- **macOS packaging.** Wails v3 packages the desktop app (`.app` bundle) with the Go backend embedded and the frontend bundle served into WKWebView. macOS and Linux ship now — Linux as an AppImage (linuxdeploy + GTK plugin) bundling the GTK/WebKitGTK stack into one self-replaceable file (ADR-0007); Windows is Phase 3.
 - **Config / data locations.** Plain files in the OS config dir — `~/Library/Application Support/nocx` on macOS. Settings/themes/keybindings as JSON or TOML [ASSUMPTION: exact format TBD]; tab-restore as a small session file. The Phase-2 vault is a separate encrypted, single-machine store with no sync.
 
 - **Per-pane filesystem sandbox (experimental, [ADR-0035](decisions/0035-native-per-tab-filesystem-sandbox.md), [ADR-0036](decisions/0036-sandbox-writable-allowlist-and-launch-overrides.md), [ADR-0038](decisions/0038-sandbox-two-class-directory-grants.md), [ADR-0039](decisions/0039-sandbox-launches-an-interactive-shell.md)).** Support envelope: Linux requires a kernel with **Landlock ABI >= 3** (fail closed below); macOS uses the **deprecated, runtime-probed `sandbox-exec`/Seatbelt** plus an in-profile readiness shim; **Windows is unsupported in V1**. Pull requests run real Landlock/Seatbelt enforcement smokes on their native runners. A release additionally invokes the built Linux binary and the executable inside the packaged macOS `.app`, proving the early helper dispatch and real artifact enforcement path. The sandbox is filesystem-only; network, process and credential isolation remain out of scope.
@@ -229,7 +230,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 - The VT-frontend OSC / API risk was resolved in
   [ADR-0001](docs/decisions/0001-xterm-js-as-vt-frontend.md).
-- **Wails v2 vs v3.** v2 is stable and MVP-sufficient; v3 remains alpha. Open question: whether any Phase-2 feature (e.g. multi-window) forces an earlier v3 migration.
+- ~~**Wails v2 vs v3.**~~ **Closed.** The open question was whether a Phase-2 feature would force an earlier v3 migration; multi-window did, and the shell moved in `8004fd72` (`nocx-mgbjx`). See AD-3.
 - **Config format** — JSON vs TOML for settings/themes/keybindings is unresolved. [ASSUMPTION: either; leaning JSON/TOML per module.]
 
 ### Assumptions to confirm
