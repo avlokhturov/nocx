@@ -112,7 +112,7 @@ const commandSnapshotReady = async (page: Page) => {
 }
 
 test.describe('tab completion', () => {
-  test('a real command completes: Pane opens the dropdown, arrows pick, Enter inserts', async ({
+  test('a real command completes: Tab opens the dropdown, arrows pick, Enter inserts', async ({
     page,
   }) => {
     await page.goto('/')
@@ -245,7 +245,7 @@ test.describe('tab completion', () => {
     }
   })
 
-  test('no candidates: Pane opens a row that says nothing matched — never silence', async ({
+  test('no candidates: Tab opens a row that says nothing matched — never silence', async ({
     page,
   }) => {
     await page.goto('/')
@@ -436,14 +436,26 @@ test.describe('tab completion', () => {
       // Screenshot — the acceptance evidence the owner asked for.
       await page.screenshot({ path: '/tmp/nocx-c3-acceptance.png' })
 
-      // Enter accepts the cycled-to candidate; nothing was submitted.
+      // ENTER TAKES THE ROW AND STOPS, and this test used to assert the
+      // opposite: that accepting a directory re-queried into it and left the
+      // panel up. Both keys reached one call, so Enter descended instead of
+      // inserting — "one behaviour advertised as two", and the only way out of
+      // the walk was Escape, which dismisses the surface that is helping you.
+      // nocx-lu80a split them: Enter and a click are a DECISION (take the row,
+      // close, and the next Enter runs the command now sitting where it can be
+      // read); Tab, Right and End WALK, because "show me what there is" is not
+      // answered by finishing a directory name and stopping. The footer names
+      // them apart — "↵ to insert" against "→ to accept and continue".
       await page.keyboard.press('Enter')
       await expect(page.locator(INPUT)).toHaveText('cd beta/', { timeout: 5000 })
-      // Accepting a DIRECTORY re-queries into it — the owner's "Tab jumps to
-      // the next folder" — so the panel stays up describing where the caret
-      // now is. beta/ is empty, and the panel says so rather than "No
-      // matches": nothing was typed for anything to fail to match, and the
-      // completion the user just made succeeded (nocx-azxe.5).
+      await expect(dropdown).toHaveAttribute('data-open', 'false', { timeout: 5000 })
+
+      // The walk is still there, on its own key. Right descends into the
+      // directory, so the panel stays up describing where the caret now is:
+      // beta/ is empty, and it says so rather than "No matches" — nothing was
+      // typed for anything to fail to match, and the completion the user just
+      // made succeeded (nocx-azxe.5).
+      await page.keyboard.press('Tab')
       await expect(dropdown).toContainText('empty', { timeout: 5000 })
     } finally {
       fs.rmSync(fixture, { recursive: true, force: true })

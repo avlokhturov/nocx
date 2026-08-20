@@ -77,9 +77,14 @@ test.describe('vertical tab placement', () => {
     // Both actions belong to one group at the top of the column. They used to be
     // loose siblings of the list, which is `flex: 1 1 auto` — so it pushed them
     // apart and stranded the caret alone in the bottom corner.
+    //
+    // The caret is now the strip's MENU (`aria-label="More"`): the rework cut
+    // the row's five same-weight marks to three and made Quick connect a named
+    // row underneath it (tab-strip.tsx). Which mark it is does not change what
+    // this test is about — that the actions stay together, above the list.
     const strip = page.locator('#vertical-tabstrip')
     const plus = await strip.locator('[aria-label="New tab"]').boundingBox()
-    const caret = await strip.locator('[aria-label="Quick connect"]').boundingBox()
+    const caret = await strip.locator('[aria-label="More"]').boundingBox()
     const firstPane = await strip.locator('.nocx-tab').first().boundingBox()
 
     expect(plus!.y + plus!.height).toBeLessThanOrEqual(firstPane!.y + 1)

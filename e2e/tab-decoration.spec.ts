@@ -33,14 +33,35 @@ async function pickMenuItem(page: Page, label: string): Promise<void> {
   await expect(page.locator(MENU_ITEM)).toHaveCount(0, { timeout: 10_000 })
 }
 
-/** Rename through the kit's prompt: one field, and Save. */
-async function renameTab(page: Page, index: number, name: string): Promise<void> {
+/**
+ * Decorate a tab: its NAME AND ITS COLOUR, in the one form that asks for both.
+ *
+ * There is no "Green" row on the tab's menu, and there was never meant to be
+ * two places to answer this. The menu offers Rename…, Pin and Close; Rename
+ * opens the name-and-colour dialog (name-colour-dialog.tsx), which is a
+ * TextField and a SwatchPicker over one Save. This spec used to pick a colour
+ * as a second menu row after renaming, and it hung on a row that does not
+ * exist — "two surfaces for one decision" is the thing that dialog replaced.
+ *
+ * `colour` is null for a tab that is to stay undecorated: a tab's ordinary
+ * state, and the reason the picker carries a "No colour" swatch at all.
+ */
+async function decorateTab(
+  page: Page,
+  index: number,
+  name: string,
+  colour: string | null,
+): Promise<void> {
   await openTabMenu(page, index)
   await pickMenuItem(page, 'Rename')
-  const field = page.locator('.nocx-dialog__panel .ui-text-field__input')
+  const panel = page.locator('dialog[open] .nocx-dialog__panel')
+  const field = panel.locator('.ui-text-field__input')
   await expect(field).toBeVisible({ timeout: 10_000 })
   await field.fill(name)
-  await page.locator('.nocx-dialog__panel button', { hasText: 'Save' }).click()
+  if (colour !== null) {
+    await panel.locator(`.ui-swatch-picker__swatch[aria-label="${colour}"]`).click()
+  }
+  await panel.locator('button', { hasText: 'Save' }).click()
 }
 
 /**
@@ -81,13 +102,10 @@ test.describe('a decorated strip survives the renderer', () => {
     await promptReady(page)
 
     // Decorate the SECOND one: a name the user typed, a colour, and a pin.
-    await renameTab(page, 1, 'release')
+    await decorateTab(page, 1, 'release', 'Green')
     await expect(page.locator(TAB).nth(1).locator('.nocx-tab-title')).toHaveText('release', {
       timeout: 10_000,
     })
-
-    await openTabMenu(page, 1)
-    await pickMenuItem(page, 'Green')
     await expect(page.locator(TAB).nth(1)).toHaveAttribute('data-colour', 'green', {
       timeout: 10_000,
     })
@@ -152,17 +170,18 @@ test.describe('a decorated strip survives the renderer', () => {
     const derived = await title.textContent()
 
     // A name the user types wins over it…
-    await renameTab(page, 0, 'inbox')
+    await decorateTab(page, 0, 'inbox', null)
     await expect(title).toHaveText('inbox', { timeout: 10_000 })
 
     // …and clearing that name is a real operation, not a no-op: the tab goes
     // back to being labelled by its panes.
     await openTabMenu(page, 0)
     await pickMenuItem(page, 'Rename')
-    const field = page.locator('.nocx-dialog__panel .ui-text-field__input')
+    const panel = page.locator('dialog[open] .nocx-dialog__panel')
+    const field = panel.locator('.ui-text-field__input')
     await expect(field).toBeVisible({ timeout: 10_000 })
     await field.fill('')
-    await page.locator('.nocx-dialog__panel button', { hasText: 'Save' }).click()
+    await panel.locator('button', { hasText: 'Save' }).click()
     await expect(title).toHaveText(derived ?? '', { timeout: 10_000 })
   })
 })
