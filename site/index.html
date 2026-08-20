@@ -245,6 +245,129 @@
       </section>
 
       <hr class="rule" />
+      <section class="block" id="boundaries">
+        <p class="block__label">07 / boundaries</p>
+        <h2>What nocx deliberately doesn't do</h2>
+        <p class="lede">
+          These are not gaps waiting to be filled. They are the shape of the product.
+        </p>
+        <ul class="plain plain--negative">
+          <li>No account. There is nothing to sign up for and nothing to sign in to.</li>
+          <li>
+            No cloud service of its own. nocx runs on your machine; the network it touches is the
+            network you point it at — the hosts you connect to, the assistant endpoint you
+            configure, and a check for its own updates.
+          </li>
+          <li>
+            No product telemetry. The application reports no usage, and there is no analytics on
+            this page either. GitHub keeps its own ordinary server logs for downloads and for this
+            site; that is theirs, and we do not pretend otherwise.
+          </li>
+          <li>No cloud sync. Your settings, history and vault stay where they are.</li>
+        </ul>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="install">
+        <p class="block__label">08 / install</p>
+        <h2>Installing, and what to expect</h2>
+
+        <h3>macOS</h3>
+        <p>
+          Download the <code>.dmg</code>, open it, drag nocx into Applications. There is no Apple
+          Developer ID, so the build is ad-hoc signed rather than signed by an identity Apple can
+          attest, and it is not notarized — macOS quarantines it on download. Clear that once, on
+          first install:
+        </p>
+        <pre><code>xattr -dr com.apple.quarantine /Applications/nocx.app</code></pre>
+        <p>
+          Then open nocx normally. Later in-app updates fetch the build directly and do not
+          re-quarantine it. The reasoning behind shipping this way is written down in
+          <a
+            href="https://github.com/shady2k/nocx/blob/main/docs/decisions/0003-distribution-without-a-developer-id.md"
+            >ADR-0003</a
+          >.
+        </p>
+
+        <h3>Linux</h3>
+        <p>Download the <code>.AppImage</code>, make it executable, run it:</p>
+        <pre><code>chmod +x nocx-*-linux-amd64.AppImage
+./nocx-*-linux-amd64.AppImage</code></pre>
+        <p>
+          It bundles its own GTK 3 and WebKitGTK, so it does not need the host's, and it links
+          against glibc 2.35 — the floor set by building on Ubuntu 22.04. That covers Ubuntu 22.04+,
+          Debian 12+, Fedora 39+, RHEL 9+ and Arch. It is not "runs everywhere": if it refuses to
+          start and
+          <code>ldd --version</code> reports a glibc before 2.35, your distribution is below the
+          floor.
+        </p>
+
+        <h3>Updates</h3>
+        <p>
+          nocx verifies its update manifest with an embedded Ed25519 public key. That protects the
+          integrity of its own update channel; it is not a signature Apple attests, and the app is
+          neither Developer ID signed nor notarized. If an update goes wrong, the previous version
+          is kept beside the active one and the recovery commands are in the
+          <a href="https://github.com/shady2k/nocx#rollback-procedures">README</a>.
+        </p>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="built">
+        <p class="block__label">09 / built</p>
+        <h2>How it is put together</h2>
+        <dl class="strip">
+          <dt>Backend</dt>
+          <dd>Go — PTY, SSH, session, transport, settings. One core, several build targets.</dd>
+          <dt>Frontend</dt>
+          <dd>
+            xterm.js on WebGL for the terminal, CodeMirror 6 for the prompt, SolidJS for the
+            surrounding UI.
+          </dd>
+          <dt>Desktop shell</dt>
+          <dd>Wails v3, embedding the backend locally.</dd>
+          <dt>Transport</dt>
+          <dd>
+            One WebSocket: a raw binary data plane for terminal bytes, JSON-RPC 2.0 for control.
+            Terminal bytes are never wrapped in JSON.
+          </dd>
+          <dt>Platforms</dt>
+          <dd>macOS (universal) and Linux x86_64.</dd>
+        </dl>
+      </section>
+
+      <hr class="rule" />
+
+      <section class="block" id="get">
+        <p class="block__label">10 / get</p>
+        <h2>Try it</h2>
+        <div class="cta-row">
+          <a class="cta cta--primary" href="https://github.com/shady2k/nocx/releases/latest">
+            <span class="cta__label">Download for macOS</span>
+            <span class="cta__detail">universal .dmg · ad-hoc signed, not notarized</span>
+          </a>
+          <a class="cta" href="https://github.com/shady2k/nocx/releases/latest">
+            <span class="cta__label">Download for Linux</span>
+            <span class="cta__detail">x86_64 AppImage · glibc 2.35+</span>
+          </a>
+        </div>
+        <p class="state">
+          <strong>v0.2.0</strong> · released 2026-08-20 · early release, no formal support
+        </p>
+      </section>
+
+      <footer>
+        <p>
+          nocx is MIT licensed ·
+          <a href="https://github.com/shady2k/nocx">Source</a> ·
+          <a href="https://github.com/shady2k/nocx/releases">Releases</a> ·
+          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.2.0.md"
+            >What changed in v0.2.0</a
+          >
+        </p>
+      </footer>
     </main>
   </body>
 </html>
