@@ -4,9 +4,64 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>nocx — a local terminal that keeps your working context</title>
+    <meta
+      name="description"
+      content="A local terminal that keeps your working context: tabs, their output, notes and secret references survive a restart. macOS and Linux, no account, no cloud service of its own, no product telemetry."
+    />
+    <link rel="icon" href="./assets/icon-96.png" />
+    <link rel="apple-touch-icon" href="./assets/icon-256.png" />
     <link rel="stylesheet" href="./style.css" />
   </head>
+
   <body>
-    <main><h1>nocx</h1></main>
+    <main>
+      <header class="block">
+        <p class="logo">
+          <img src="./assets/icon-96.png" alt="" />
+          <span class="logo__word">nocx</span>
+        </p>
+
+        <h2>A local terminal that keeps your working context</h2>
+        <p class="lede">
+          Tabs, their output, notes and secret references survive a restart. Go backend, xterm.js on
+          WebGL, one WebSocket. macOS and Linux.
+        </p>
+
+        <div class="cta-row">
+          <a class="cta cta--primary" href="https://github.com/shady2k/nocx/releases/latest">
+            <span class="cta__label">Download for macOS</span>
+            <span class="cta__detail">universal .dmg · ad-hoc signed, not notarized</span>
+          </a>
+          <a class="cta" href="https://github.com/shady2k/nocx/releases/latest">
+            <span class="cta__label">Download for Linux</span>
+            <span class="cta__detail">x86_64 AppImage · glibc 2.35+</span>
+          </a>
+          <a class="cta" href="https://github.com/shady2k/nocx">
+            <span class="cta__label">Source on GitHub</span>
+            <span class="cta__detail">MIT</span>
+          </a>
+        </div>
+
+        <p class="state">
+          <strong>v0.2.0</strong> · released 2026-08-20 · early release, no formal support
+        </p>
+
+        <p class="constraint">
+          macOS quarantines the download, because there is no Apple Developer ID and no
+          notarization. Clearing it is one command, once — it is in
+          <a href="#install">Install</a>, in full, before you download anything.
+        </p>
+
+        <figure class="figure figure--placeholder">
+          <div class="figure__frame">
+            Product screenshot — the whole window: tab strip with a workspace pill, several command
+            blocks, the sidebar, the prompt
+          </div>
+          <figcaption>nocx running an agent TUI, theme Tokyo Night.</figcaption>
+        </figure>
+      </header>
+
+      <hr class="rule" />
+    </main>
   </body>
 </html>

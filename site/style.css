@@ -61,7 +61,7 @@ body {
 }
 
 main {
-  max-width: 72rem;
+  max-width: 64rem;
   margin: 0 auto;
   padding: 0 var(--gutter);
 }
@@ -95,9 +95,20 @@ main {
 /* --- the block: one hairline axis, metadata, then content ---------------- */
 
 .block {
+  /* One variable, because the prompt marker is positioned against this same
+   * value. Hard-coding --rhythm in both leaves the marker floating when a
+   * block wants different spacing, which is exactly what the first one does. */
+  --block-top: var(--rhythm);
+
   position: relative;
-  padding: var(--rhythm) 0 0 clamp(1rem, 3vw, 2.25rem);
+  padding: var(--block-top) 0 0 clamp(1rem, 3vw, 2.25rem);
   border-left: 1px solid var(--divider);
+}
+
+/* The first block opens the page; the full rhythm above it is a gap with
+ * nothing before it to separate from. */
+header.block {
+  --block-top: clamp(2rem, 5vw, 3.5rem);
 }
 
 .block::before {
@@ -106,7 +117,7 @@ main {
   content: '';
   position: absolute;
   left: -3px;
-  top: calc(var(--rhythm) + 0.62em);
+  top: calc(var(--block-top) + 0.62em);
   width: 5px;
   height: 5px;
   background: var(--accent);
@@ -125,7 +136,7 @@ main {
   line-height: 1.15;
   letter-spacing: -0.02em;
   margin: 0 0 1rem;
-  max-width: 20ch;
+  max-width: 24ch;
   font-weight: 620;
 }
 
@@ -288,8 +299,14 @@ a:hover {
 }
 
 /* A placeholder is honestly a placeholder. It never imitates the product —
- * a drawn fake UI is the one thing worse than an empty frame. */
+ * a drawn fake UI is the one thing worse than an empty frame.
+ *
+ * Its height is set here rather than by the real image's aspect ratio: an
+ * empty dashed box at a screenshot's proportions is a thousand pixels of
+ * nothing, which reads as a broken page rather than as a frame awaiting a
+ * picture. The real <img> replacing it carries its own dimensions. */
 .figure--placeholder .figure__frame {
+  min-height: 18rem;
   display: grid;
   place-items: center;
   border: 1px dashed var(--border);
