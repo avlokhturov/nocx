@@ -220,8 +220,8 @@ export const test = base.extend<object, { appReady: void }>({
 })
 
 /**
- * Leave the backend holding exactly one undecorated tab, and the UI state at
- * its declared defaults.
+ * Leave the backend holding exactly one undecorated tab, the UI state at its
+ * declared defaults, and no notes.
  *
  * THE PRODUCT NOW REMEMBERS TABS (nocx-isoph.4): the backend owns the
  * workspace → tab → pane chain, and a renderer that goes away leaves the rows
@@ -287,6 +287,21 @@ async function resetStand(): Promise<void> {
       sidebar: { collapsed: false, activeViewId: '', width: 240 },
       activeTab: '',
     })
+    // AND THE NOTES LIBRARY, which is the third durable document a spec can
+    // leave behind (nocx-9jcx7). A note outlives the renderer that wrote it —
+    // that IS the feature — and the suite keeps ONE stand for the whole run,
+    // so chromium's notes spec left its "Standup notes" where webkit's would
+    // find it and match two rows: "strict mode violation … resolved to 2
+    // elements", failing in the full suite and passing when the file is run
+    // alone. That signature is a shared store, not a defect in what notes do.
+    //
+    // Deleting is right here and would be wrong anywhere else: this is a
+    // disposable home (`$HOME` is moved for the whole run, e2e/preflight.ts),
+    // and the state a spec's first assertion describes is an empty library.
+    const notes = (await wire.call('notes.list', {})) as { notes: { id: string }[] }
+    for (const row of notes.notes) {
+      await wire.call('notes.delete', { id: row.id })
+    }
   } finally {
     wire.close()
   }
