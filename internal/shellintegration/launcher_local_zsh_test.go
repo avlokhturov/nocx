@@ -385,9 +385,23 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	// a real interactive shell is the only way to observe what a user gets.
 	cmd := exec.Command(launch.Command, launch.Args...)
 	cmd.ExtraFiles = []*os.File{shellFile} // fd 3, exactly as pty.WithExtraFiles
+	// NOCX_SNAPSHOT_WAIT_MS, for the reason the script states where it reads
+	// it (nocx.zsh): 250 ms is the budget a HUMAN's first prompt may spend
+	// waiting for the source-time snapshot job, and on timeout the payload is
+	// deliberately left for a LATER prompt rather than delaying this one. So
+	// the default makes "the snapshot has been emitted" a claim about how
+	// fast the machine is — this test runs exactly one command and then
+	// asserts on 636;S, which on a loaded runner had not been emitted yet.
+	// It failed three times in one CI day while passing here in 0.10 s.
+	//
+	// Raising the budget does not paper over a race, it removes one: the
+	// first prompt now waits for the FILE TO EXIST — an observable state
+	// change — and 15 s is a hang detector rather than an expectation. Ten
+	// tests in scripts_exec_test.go already do exactly this; the launcher
+	// tier simply never inherited it.
 	cmd.Env = append(
 		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
-		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
+		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000", "NOCX_SNAPSHOT_WAIT_MS=15000")...,
 	)
 
 	k := newFakeKernel(t, testCap)
