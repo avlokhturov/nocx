@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the agent.approve request (nocx-z9hj4, design §7.2): the person's decision on one exact proposal. Carries the FULL binding — run, attempt, tool, call id and the canonical-argument hash — so a yes names the exact proposal the notification showed and nothing else, plus the decision. A stale or unknown binding is answered honestly and resumes nothing.
+ * Params of the agent.approve request (nocx-z9hj4, design §7.2): the person's decision on one exact proposal. Carries the FULL binding — run, attempt, tool, call id and the canonical-argument hash — so a yes names the exact proposal the notification showed and nothing else, plus the decision and how far it reaches. The scope travels with the answer because the BACKEND applies it: a renderer that read the matrix, edited a row and wrote it back would be a second owner of the policy document, racing the settings page.
  */
 export interface AgentApprove {
   /**
@@ -37,4 +37,8 @@ export interface AgentApprove {
    * The person's decision: yes resumes the run as a new attempt of the same entry; no terminalizes it with agent-declined.
    */
   approved: boolean
+  /**
+   * How far the answer reaches: this proposal only, every call of the same effect in this terminal session, or the standing policy. 'session' and 'always' are refused for an egress question — 'always send secrets to the provider' is not a standing decision.
+   */
+  scope: 'once' | 'session' | 'always'
 }

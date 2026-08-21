@@ -234,10 +234,22 @@ type agentApprovalRequested struct {
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
 }
 
+// The three widths an answer can have (nocx-ki305, design "The prompt grows
+// six answers"). They are how FAR the answer reaches, never what it is over:
+// the effect the standing part is written against comes from the proposal
+// the backend itself classified, so no wire value can name a tool
+// (ADR-0028 decision 4).
+const (
+	approveScopeOnce    = "once"
+	approveScopeSession = "session"
+	approveScopeAlways  = "always"
+)
+
 // approveParams is the agent.approve request (design §7.2): the full binding
 // — run, attempt, tool, call id and the canonical-argument hash — plus the
-// person's decision. The schema (contracts/agent.approve.schema.json) pins
-// it: additionalProperties false, every field required.
+// person's decision and how far it reaches. The schema
+// (contracts/agent.approve.schema.json) pins it: additionalProperties false,
+// every field required.
 type approveParams struct {
 	RunID    string `json:"runId"`
 	Attempt  int    `json:"attempt"`
@@ -245,6 +257,11 @@ type approveParams struct {
 	CallID   string `json:"callId"`
 	ArgHash  string `json:"argHash"`
 	Approved bool   `json:"approved"`
+	// Scope is how far the answer reaches: this proposal only, every call
+	// of the same effect in this session, or the standing policy. It has no
+	// default — an absent scope is refused, because a default here would be
+	// a standing decision nobody expressed.
+	Scope string `json:"scope"`
 }
 
 // agentApproveResponse is the agent.approve result: the state the run moved
@@ -253,6 +270,13 @@ type approveParams struct {
 // the agent.runState notification either way.
 type agentApproveResponse struct {
 	State string `json:"state"`
+	// Warning is the sentence to show when the part of the answer that was
+	// meant to OUTLIVE this proposal could not be recorded. Empty when
+	// there was nothing to record or it was recorded. The decision itself
+	// always stood: a store problem is not the person's to pay for, so the
+	// call is not refused — the surface says the standing part did not
+	// stick, and that is the whole difference.
+	Warning string `json:"warning,omitempty"`
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────
@@ -308,9 +332,18 @@ type agentHandlers struct {
 	// rendered the question, and the answer must resume the EXACT run.
 	pendingRuns   map[int64]askRunContext
 	pendingRunsMu *sync.Mutex
-	state         *connState
-	clientID      string
-	r             Responder
+	// sessionPolicy is where "allow in this session" lands and where it
+	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
+	sessionPolicy *sessionPolicyStore
+	// globalPolicy is where "always" lands — the SAME store the settings
+	// page writes through, so a standing answer given at the prompt and one
+	// given on the page are one document with one owner. Nil when no policy
+	// was named, which is the state in which no run carries a grant and
+	// therefore nothing can escalate.
+	globalPolicy assistant.GlobalPolicy
+	state        *connState
+	clientID     string
+	r            Responder
 }
 
 // environmentForSession derives the ledger environment from the session's
@@ -530,7 +563,8 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// middleware's re-built proposal matches the one the person
 		// approved; the approved call's own execution is the entry's
 		// SUBSEQUENT attempt (attempt 2), recorded by the middleware.
-		attempt: 1,
+		attempt:   1,
+		sessionID: sid,
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -639,6 +673,21 @@ type askRunContext struct {
 	// call's own execution is the proposal entry's SUBSEQUENT attempt
 	// (attempt 2), which the middleware records.
 	attempt int
+	// sessionID is the session the run lives in — the session an "allow in
+	// this session" answer is about. Carried EXPLICITLY, from the ask that
+	// named it, rather than read back out of the grant: the grant's scope
+	// union is what the run may reach, which is not a fact about any one
+	// row and would stop being the session the moment a row is scoped
+	// wider.
+	sessionID session.ID
+	// pendingReason is which gate the run is currently suspended on —
+	// "policy" or "egress", empty when it is not suspended. Written by
+	// suspendForApproval into the pendingRuns copy, and read by
+	// agent.approve, which refuses a standing answer to an egress question.
+	// It is a fact about the OPEN QUESTION, not about the proposal, which
+	// is why it lives beside droppedBefore rather than in the approval
+	// store: only the transport knows which of the two gates asked.
+	pendingReason string
 }
 
 // runAskStream drives the prepared run to completion: persist streaming,
@@ -804,15 +853,6 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		// by another path). The question is moot; nothing to render.
 		return
 	}
-	// Carry the drops across the suspension: the resume re-drives this
-	// same context (runAskStream starts from rc.droppedBefore), and the
-	// decline terminalizes with it too.
-	h.pendingRunsMu.Lock()
-	if stored, ok := h.pendingRuns[rc.runID]; ok {
-		stored.droppedBefore = dropped
-		h.pendingRuns[rc.runID] = stored
-	}
-	h.pendingRunsMu.Unlock()
 	n := agentApprovalRequested{Reason: "policy"}
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
@@ -825,19 +865,44 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		// two shapes and the schema requires the effect on both.
 		n.Effect, n.Resource = string(eg.Effect), eg.Resource
 	}
+	// Carry the drops across the suspension: the resume re-drives this
+	// same context (runAskStream starts from rc.droppedBefore), and the
+	// decline terminalizes with it too. The gate that asked is carried the
+	// same way and for the same reason — agent.approve refuses a standing
+	// answer to an egress question, and by then only this record remembers
+	// which of the two gates produced it.
+	h.pendingRunsMu.Lock()
+	if stored, ok := h.pendingRuns[rc.runID]; ok {
+		stored.droppedBefore = dropped
+		stored.pendingReason = n.Reason
+		h.pendingRuns[rc.runID] = stored
+	}
+	h.pendingRunsMu.Unlock()
 	// The pending record is the wire's source of truth for criterion 7. The
 	// middleware records it at escalation in the real flow; the transport
 	// records it here when the wire received the question without it (a
 	// suspension that surfaced by any path) — and NEVER overwrites the
 	// middleware's record, which carries the proposal's ledger entry id the
 	// approved resume must run as a subsequent attempt of.
-	proposal := assistant.Approval{RunID: n.RunID, Attempt: n.Attempt, Tool: n.Tool, CallID: n.CallID, ArgHash: n.ArgHash}
+	proposal := assistant.Approval{
+		RunID: n.RunID, Attempt: n.Attempt, Tool: n.Tool, CallID: n.CallID, ArgHash: n.ArgHash,
+		Effect: content.Effect(n.Effect),
+	}
 	if !h.approvals.IsPending(proposal) {
 		if ap != nil {
 			proposal.EntryID = ap.EntryID
 		}
 		h.approvals.Request(proposal)
 	}
+	// And the effect, unconditionally — including onto the record the
+	// middleware already made, which is the ORDINARY path. The middleware
+	// records the proposal at escalation, where the store call carries the
+	// binding and the ledger entry; the effect only reaches here, off the
+	// same declaration the notification is built from. Noting it inside the
+	// branch above would leave the effect recorded in exactly the flows a
+	// scripted-suspension test exercises and missing in the real one, which
+	// is a green suite over an "always" that writes no row.
+	h.approvals.NoteEffect(proposal)
 	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
 }
 
@@ -887,15 +952,33 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
-
+	// Egress keeps TWO answers, once only (design, "The egress prompt keeps
+	// two answers"). An egress ask means a tool result carried
+	// secret-shaped material and nothing has been sent to the provider yet;
+	// "always" there would mean always send secrets to the provider, which
+	// is not a standing decision anyone should make by clicking a button
+	// next to five others. Refused here rather than in the validator
+	// because only the pending question knows which gate asked.
+	if rc.pendingReason == "egress" && p.Scope != approveScopeOnce {
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: an egress decision covers this result only — sending secret-shaped material to the model provider is never a standing answer",
+		})
+		return
+	}
 	if !p.Approved {
 		// The person declined: the run terminalizes with the reason that
 		// says a person declined (criterion 2, no-half), and the withheld
 		// egress bytes — if any — are dropped: the person said don't send.
+		// The standing part is recorded FIRST, so that a "deny always"
+		// writes its row even though the run terminalizes on the next
+		// line — the refusal of this call and the standing refusal of the
+		// effect are two facts, and only one of them dies with the run.
+		warning := h.applyStandingAnswer(p, ap, rc.sessionID)
 		h.approvals.ClearRetained(ap)
 		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermAgentDeclined,
 			"the run was declined", h.r)
-		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
+		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
 		return
 	}
 	if !h.approvals.Approve(ap) {
@@ -907,6 +990,10 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
+	// The yes is recorded, and only now is the part of it that outlives
+	// this proposal: an answer the server went on to refuse — the race
+	// above — must not leave a standing rule behind it.
+	warning := h.applyStandingAnswer(p, ap, rc.sessionID)
 	// The resume: the same run, the same stream context, the same binding —
 	// the middleware sees the approval and runs the call as the proposal's
 	// SUBSEQUENT attempt. The approval store is passed again, so the yes
@@ -916,10 +1003,60 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	}}); rej != nil {
 		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
-		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
+		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
 		return
 	}
-	_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming)}))
+	_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
+}
+
+// applyStandingAnswer records the part of a decision that outlives the
+// proposal it was given on: "in this session" writes the run's session's
+// overlay, "always" writes ONE row of the global matrix. "once" writes
+// nothing anywhere, which is the behaviour every answer had before this
+// existed. The row is the one the BACKEND classified the proposal under —
+// never anything the wire named, so no answer can express a rule over a tool
+// name (ADR-0028 decision 4).
+//
+// It returns the sentence to report when the standing part could not be
+// recorded, and empty when there was nothing to record or it was recorded.
+// A failure here never refuses the call: the person said yes, and punishing
+// them for a store problem is the wrong end to fail toward. The run resumes,
+// or the decline stands, and the result says the standing part did not
+// stick.
+func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) string {
+	if p.Scope == approveScopeOnce {
+		return ""
+	}
+	effect, ok := h.approvals.EffectFor(ap)
+	if !ok {
+		// No row was recorded for this proposal, so there is no row to
+		// write. Fail toward asking: the answer covers this call, and the
+		// next call of the same kind asks again.
+		h.log.Warn("agent.approve: the proposal names no effect class; the standing part of the answer was not recorded",
+			"run", p.RunID, "tool", p.Tool, "scope", p.Scope)
+		return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"
+	}
+	d := content.DecisionRefuse
+	if p.Approved {
+		d = content.DecisionPermit
+	}
+	if p.Scope == approveScopeSession {
+		h.sessionPolicy.Set(sid, effect, d)
+		return ""
+	}
+	if h.globalPolicy == nil {
+		return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+	}
+	// SetRowDecision replaces the row's DECISION and keeps its scopes: a
+	// standing answer changes what happens, never what the row is bound to.
+	// The write goes through the store the settings page writes through, so
+	// the two surfaces are one owner of one document rather than a
+	// read-modify-write race between them.
+	next := h.globalPolicy.Policy().SetRowDecision(effect, d)
+	if err := h.globalPolicy.SetPolicy(next); err != nil {
+		return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+	}
+	return ""
 }
 
 // resumeRun re-drives a suspended run after the person's yes: the run
@@ -960,6 +1097,14 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 	}
 	if strings.TrimSpace(p.ArgHash) == "" || utf8.RuneCountInString(p.ArgHash) > 128 {
 		return "argHash is required and bounded"
+	}
+	switch p.Scope {
+	case approveScopeOnce, approveScopeSession, approveScopeAlways:
+	default:
+		// No default: an answer with no scope is not "once". A default
+		// here would be a standing decision nobody expressed, and the
+		// schema requires the field for the same reason.
+		return "scope is required and must be one of once, session, always"
 	}
 	return ""
 }
@@ -1346,7 +1491,8 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			requester: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu: &s.pendingRunsMu,
-			log:           s.log, state: state, clientID: connectionID(w), r: r,
+			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,
+			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}
 	}
 	return []methodSpec{

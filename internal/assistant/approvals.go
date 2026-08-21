@@ -17,7 +17,11 @@ package assistant
 // the effect, so the gate retains the exact result the person was shown and
 // the approved resume sends THAT, never a newly produced one.
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/shady2k/nocx/internal/content"
+)
 
 // Approval is one human decision about one exact proposal.
 type Approval struct {
@@ -32,6 +36,13 @@ type Approval struct {
 	// changed argument hashes differently and never resumes under the old
 	// approval (nocx-5dldy).
 	EntryID string
+	// Effect is the effect class the gate decided this proposal under — the
+	// matrix row an answer that outlives the proposal ("in this session",
+	// "always") is about (nocx-ki305). A carrier like EntryID and for the
+	// same reason: keyOf ignores it, because two proposals differing only
+	// by effect cannot exist, and putting it in the key would silently stop
+	// matching approvals recorded before the effect was known.
+	Effect content.Effect
 }
 
 type approvalKey struct {
@@ -44,6 +55,7 @@ type approvalKey struct {
 
 type approvalEntry struct {
 	entryID string
+	effect  content.Effect
 }
 
 // retainedValue is the withheld result of an egress finding (design §7.1):
@@ -80,7 +92,7 @@ func NewApprovalStore() *ApprovalStore {
 func (s *ApprovalStore) Request(ap Approval) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pending[keyOf(ap)] = approvalEntry{entryID: ap.EntryID}
+	s.pending[keyOf(ap)] = approvalEntry{entryID: ap.EntryID, effect: ap.Effect}
 }
 
 // Approve records a yes to this exact proposal: the pending ask is answered
@@ -100,11 +112,15 @@ func (s *ApprovalStore) Approve(ap Approval) bool {
 	}
 	delete(s.pending, keyOf(ap))
 	// The wire's approve carries only the five binding fields; the entry
-	// the proposal was recorded under is the pending record's own.
+	// the proposal was recorded under, and the effect it was decided under,
+	// are the pending record's own.
 	if ap.EntryID == "" {
 		ap.EntryID = cur.entryID
 	}
-	s.approved[keyOf(ap)] = approvalEntry{entryID: ap.EntryID}
+	if ap.Effect == "" {
+		ap.Effect = cur.effect
+	}
+	s.approved[keyOf(ap)] = approvalEntry{entryID: ap.EntryID, effect: ap.Effect}
 	return true
 }
 
@@ -143,6 +159,49 @@ func (s *ApprovalStore) EntryIDFor(ap Approval) (string, bool) {
 	return "", false
 }
 
+// NoteEffect records the effect class the PENDING proposal was decided
+// under — the matrix row a "this session" or "always" answer is about
+// (nocx-ki305). It is recorded separately from Request because the two facts
+// have two writers: the middleware calls Request at escalation, carrying the
+// binding and the ledger entry, and the effect only reaches the transport,
+// which builds the question the person is shown. Noting it therefore never
+// touches the entry id the middleware's record carries — overwriting that is
+// what would cost the approved call its ledger thread.
+//
+// A proposal that is not pending is not invented, and an empty effect notes
+// nothing: an answer whose row is unknown must fall through to asking rather
+// than write a row nobody named.
+func (s *ApprovalStore) NoteEffect(ap Approval) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ap.Effect == "" {
+		return
+	}
+	k := keyOf(ap)
+	e, ok := s.pending[k]
+	if !ok {
+		return
+	}
+	e.effect = ap.Effect
+	s.pending[k] = e
+}
+
+// EffectFor returns the effect class the proposal was decided under. ok is
+// false when the proposal is neither pending nor approved, or was recorded
+// without one — and a false there is the fail-toward-asking end: the answer
+// applies to this call and nothing is written to any policy.
+func (s *ApprovalStore) EffectFor(ap Approval) (content.Effect, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e, ok := s.pending[keyOf(ap)]; ok && e.effect != "" {
+		return e.effect, true
+	}
+	if e, ok := s.approved[keyOf(ap)]; ok && e.effect != "" {
+		return e.effect, true
+	}
+	return "", false
+}
+
 // Retain holds the withheld result of an egress finding (design §7.1) so the
 // approved resume can send the EXACT bytes the person was shown — a resume
 // that re-ran the tool would repeat the effect and could produce a different
@@ -173,6 +232,8 @@ func (s *ApprovalStore) ClearRetained(ap Approval) {
 	delete(s.retained, keyOf(ap))
 }
 
+// keyOf is the binding and ONLY the binding: EntryID and Effect are carriers
+// the record holds, never part of what a yes matches.
 func keyOf(ap Approval) approvalKey {
 	return approvalKey{
 		runID:   ap.RunID,

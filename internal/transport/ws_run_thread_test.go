@@ -232,7 +232,7 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	}
 	got, errObj := approveOverWire(t, h.conn, map[string]any{
 		"runId": ap.RunID, "attempt": ap.Attempt, "tool": ap.Tool,
-		"callId": ap.CallID, "argHash": ap.ArgHash, "approved": true,
+		"callId": ap.CallID, "argHash": ap.ArgHash, "approved": true, "scope": "once",
 	}, 3)
 	if errObj != nil {
 		t.Fatalf("agent.approve: %+v", errObj)

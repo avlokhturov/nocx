@@ -87,9 +87,12 @@ func policySuspension(tool, callID, args, argHash string) func(runID string) err
 	}
 }
 
-// approvalWireResult is the decoded agent.approve result.
+// approvalWireResult is the decoded agent.approve result: the state the run
+// moved to, plus the sentence the standing part of the answer failed with —
+// empty when there was nothing to record or it was recorded.
 type approvalWireResult struct {
-	State string `json:"state"`
+	State   string `json:"state"`
+	Warning string `json:"warning"`
 }
 
 func approveOverWire(t *testing.T, conn *websocket.Conn, params map[string]any, id int) (approvalWireResult, *jsonrpcErrorObj) {
@@ -261,7 +264,7 @@ func TestAgentApprove_YesResumesTheRun(t *testing.T) {
 	// The renderer's literal payload: the full binding plus the decision.
 	got, errObj := approveOverWire(t, h.conn, map[string]any{
 		"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "files.read",
-		"callId": "call_1", "argHash": "hash-a", "approved": true,
+		"callId": "call_1", "argHash": "hash-a", "approved": true, "scope": "once",
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("agent.approve: %+v", errObj)
@@ -328,7 +331,7 @@ func TestAgentApprove_NoTerminalizesDeclined(t *testing.T) {
 	// precedes the response on the wire, and the reader captures both.
 	st, got, errObj := approveDeclineOverWire(t, h.conn, map[string]any{
 		"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "files.read",
-		"callId": "call_1", "argHash": "hash-a", "approved": false,
+		"callId": "call_1", "argHash": "hash-a", "approved": false, "scope": "once",
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("agent.approve(no): %+v", errObj)
@@ -379,7 +382,7 @@ func TestAgentApprove_UnknownIdResumesNothing(t *testing.T) {
 	// about it, so the yes is answered honestly and resumes nothing.
 	_, errObj = approveOverWire(t, h.conn, map[string]any{
 		"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "files.read",
-		"callId": "call_1", "argHash": "hash-CHANGED", "approved": true,
+		"callId": "call_1", "argHash": "hash-CHANGED", "approved": true, "scope": "once",
 	}, 2)
 	if errObj == nil {
 		t.Fatal("agent.approve with an unknown binding succeeded — criterion 7: it must be answered honestly")
@@ -421,7 +424,7 @@ func TestAgentApprove_ChangedArgumentsResuspend(t *testing.T) {
 	// The person approves the ORIGINAL proposal.
 	got, errObj := approveOverWire(t, h.conn, map[string]any{
 		"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "files.read",
-		"callId": "call_1", "argHash": "hash-a", "approved": true,
+		"callId": "call_1", "argHash": "hash-a", "approved": true, "scope": "once",
 	}, 2)
 	if errObj != nil || got.State != "streaming" {
 		t.Fatalf("agent.approve: %+v (err %v)", got, errObj)

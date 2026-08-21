@@ -94,7 +94,7 @@ func TestAgentApprove_ParamsOverTheSocketConformsToContract(t *testing.T) {
 	// The renderer's literal payload — runId as the string the notification
 	// carried, never a number a helper would complete the shape with.
 	params := `{"runId":` + strconv.Quote(strconv.FormatInt(res.RunID, 10)) +
-		`,"attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","approved":true}`
+		`,"attempt":1,"tool":"files.read","callId":"call_1","argHash":"hash-a","approved":true,"scope":"once"}`
 	validateJSON(t, schema, []byte(params), "agent.approve params (renderer's literal payload)")
 
 	got, errObj := approveOverWireRaw(t, h.conn, []byte(params), 2)
