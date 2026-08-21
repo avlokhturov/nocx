@@ -1,6 +1,7 @@
-/* Agent policy surface (ADR-0020 §7 as amended — amendment proposed,
-   2026-08-16): the matrix editor. One row per effect class: label, decision
-   select, the row's scopes, and an add-scope control. Layout only — the kit
+/* Agent policy surface (ADR-0020 §7 as amended, accepted 2026-08-16): the
+   matrix editor. One row per effect class: label, decision select, the row's
+   scopes and an add-scope control, and — only when the row is off the default
+   — the line that says what the standing answer means. Layout only; the kit
    owns every component's paint. */
 .st-policy__row {
   display: grid;
@@ -37,4 +38,32 @@
   gap: 0.5rem;
   align-items: center;
   margin-block-end: 0.4rem;
+}
+
+/* The standing-answer line spans the whole row. It restates the row's answer
+   in the person's own words, so it belongs under all three columns rather
+   than inside the scope cell — and it renders only for a row that is OFF the
+   default, because a line under every row is the noise the kit's README
+   already names ("Vault is locked", three times, under one page). */
+.st-policy__state {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* The rows no declared tool carries yet, behind ONE disclosure. The surface
+   PLACES the kit's collapsible Section here and paints none of it; this rule
+   is the gap above the group and nothing else. */
+.st-policy__dormant {
+  margin-block-start: 0.5rem;
+}
+
+.st-policy__dormant-note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
 }
