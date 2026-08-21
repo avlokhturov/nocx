@@ -203,27 +203,18 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       },
     ),
   )
-  /** The vault's password rows for the pickers (ADR-0017). Empty when the
-   *  vault is sealed or absent (dev harness). */
+  /** The vault's password rows for the pickers (ADR-0017), from the last
+   *  read that answered. */
   const [secretRows, setSecretRows] = createSignal<InventoryEntry[]>([])
-  /** The pickers only ever offer live vault data: while the vault is sealed
-   *  or uninitialized, stale rows from an earlier load must not be offered. */
-  const vaultOffersSecrets = createMemo(() => {
-    const state = props.vaultController?.status()?.state
-    return state === undefined || state === 'unsealed'
-  })
   /** The pickers' rows, filtered to the kind a secret-valued header may
    *  reference — an API key is a password-kind secret (ADR-0030's mint is
    *  KindPassword). */
-  const passwordRows = createMemo(() =>
-    vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : [],
-  )
-  /** Whether the unsealed vault's inventory has answered, for the row
-   *  credential state (nocx-9bx0m). Loaded at list time ONLY while the
-   *  vault is unsealed: a sealed vault is never asked, so the list cannot
-   *  raise the unlock prompt it would otherwise (ADR-0032). 'failed' means
-   *  the store did not answer — the honest 'unavailable' sentence, never a
-   *  fabricated 'deleted'. */
+  const passwordRows = createMemo(() => secretRows().filter((e) => e.kind === 'password'))
+  /** Whether the vault's inventory has answered, for the row credential
+   *  state (nocx-9bx0m). The LIST asks only while the vault is unsealed, so
+   *  showing a page never asks for a passphrase; the EDITOR asks whatever
+   *  the state is (ADR-0032). 'failed' means the store did not answer — the
+   *  honest 'unavailable' sentence, never a fabricated 'deleted'. */
   const [inventoryState, setInventoryState] = createSignal<
     'idle' | 'loading' | 'loaded' | 'failed'
   >('idle')
@@ -239,7 +230,41 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   // next editor open already retries through the shared loader.
   createEffect(() => {
     const state = props.vaultController?.status()?.state
-    if (state === 'unsealed' && inventoryState() === 'idle') void loadInventory()
+    if (state === 'unsealed' && inventoryState() === 'idle') void loadInventory('list')
+  })
+  // A vault that can no longer answer must not go on offering what it said
+  // before it was shut: sealing (or a reset) drops the rows and forgets the
+  // read, so the next unseal loads them again instead of serving a list from
+  // before the lock.
+  createEffect(() => {
+    const state = props.vaultController?.status()?.state
+    if (state === 'sealed' || state === 'uninitialized') {
+      setSecretRows([])
+      setInventoryState('idle')
+    }
+  })
+  /** Whether this opened form has already asked the vault. One ask per open:
+   *  a dismissed unlock is a decision, not something to re-ask on the next
+   *  keystroke that re-runs the effect. */
+  const [pickerAsked, setPickerAsked] = createSignal(false)
+  // THE PICKER is what wants the vault. A form showing one is asking for
+  // secret NAMES, and that request goes to the vault whatever state the
+  // vault is in — the vault raises its own unlock (ADR-0032) and the
+  // dispatcher re-sends the call. So an endpoint whose key IS a bound row
+  // opens on "Use existing secret" and asks at once, which is the whole of
+  // nocx-5ratm; while "+ New endpoint" over a locked vault shows no picker,
+  // wants nothing, and asks for no passphrase until the source is switched.
+  //
+  // This is the line the ADR draws, applied to a surface rather than a call
+  // site: not "an editor door may never ask" (which left the pickers empty
+  // and the bound row wearing its own handle), and not "any open asks"
+  // (which demands a passphrase for a form that will never touch a secret).
+  createEffect(() => {
+    if (!dialogOpen() || pickerAsked()) return
+    const d = draft()
+    if (d.keyMode !== 'secret' && !d.headers.some((h) => h.mode === 'secret')) return
+    setPickerAsked(true)
+    void loadInventory('picker')
   })
   const [discovered, setDiscovered] = createSignal<string[]>([])
   /** The endpoint being edited, or null for a new one. */
@@ -339,39 +364,60 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   // ── Draft editing ────────────────────────────────────────────────────
   /** Load the vault inventory — the ONE owner of the inventory fetch and
-   *  the secretRows state (AD-8). Two consumers share it: the pickers
-   *  (called when an editor opens) and the row credential state (called
-   *  at list time once the vault is unsealed — the rows render a
-   *  per-endpoint credential fact, so the list now needs the same read
-   *  the pickers already make). The failure state ('failed') is what keeps
-   *  a failed read from being misread as an empty vault — the rows say
-   *  'unavailable', never a fabricated 'deleted'.
+   *  the secretRows state (AD-8). Two consumers share it, and they differ in
+   *  exactly one thing: whether a LOCKED vault may be asked.
    *
-   *  A sealed or uninitialized vault is SKIPPED, not probed (nocx-q27y's
-   *  headers fix): the pickers offer nothing while the vault cannot answer,
-   *  and neither the editor door nor the list may raise the unlock prompt —
-   *  the vault-backed OPERATION (the Test button resolving a credential)
-   *  is what raises it (ADR-0032). The skip resets the state to 'idle', so
-   *  the list's unseal-triggered effect still loads once the vault can
-   *  answer — a stale 'loaded' from before a seal would otherwise be
-   *  misread after it. */
-  async function loadInventory() {
+   *  - 'picker' — a secret picker is on screen and must render secret NAMES.
+   *    That is a request for vault data, so it goes to the vault whatever
+   *    state the vault is in: a sealed vault answers -32001, and the
+   *    renderer's dispatcher raises the unlock and re-sends the call
+   *    (ADR-0032). Reading the status here to decide NOT to ask is the
+   *    per-call-site logic that ADR deletes — "needing the vault is a
+   *    property of the call, not of the call site" — and it is what left the
+   *    pickers empty and the bound row labelled with its own `secrow:`
+   *    handle, with nothing on screen to say why (nocx-5ratm).
+   *  - 'list' — the endpoints LIST needs the same rows for its per-endpoint
+   *    credential state, and merely showing a page must never ask for a
+   *    passphrase. It asks only while the vault is already unsealed.
+   *
+   *  An UNINITIALIZED vault is skipped either way: there is no vault to
+   *  unlock, so the call could only fail. The skip leaves the state 'idle',
+   *  so a later setup still loads — a stale 'loaded' would be misread.
+   *
+   *  A dismissed unlock is a choice, not a store failure: it leaves the
+   *  state 'idle', so no row says 'unavailable' about it and a later unseal
+   *  still loads. 'failed' is kept for a store that really did not answer. */
+  async function loadInventory(intent: 'picker' | 'list') {
     if (!props.vaultClient) return
     if (inventoryState() === 'loading') return // one fetch owner, one in flight
     const state = props.vaultController?.status()?.state
-    if (state === 'sealed' || state === 'uninitialized') {
+    if (state === 'uninitialized') {
       setSecretRows([])
       setInventoryState('idle')
       return
     }
+    // A list read on a vault that cannot answer is skipped, and the skip
+    // FORGETS the previous answer rather than keeping it: a stale 'loaded'
+    // that predates a just-minted key reports that key as deleted, which is
+    // what a person saw one second after saving it. 'idle' says what is
+    // true — nobody has asked — and the row stays quiet.
+    if (intent === 'list' && state !== 'unsealed') {
+      setSecretRows([])
+      setInventoryState('idle')
+      return
+    }
+    // Clear first: a re-opened editor must not offer rows from an earlier
+    // load while this request is in flight — it may be waiting behind an
+    // unlock dialog.
+    setSecretRows([])
     setInventoryState('loading')
     try {
       const inv = await props.vaultClient.inventory()
       setSecretRows(inv?.entries ?? [])
       setInventoryState('loaded')
-    } catch {
+    } catch (err) {
       setSecretRows([])
-      setInventoryState('failed')
+      setInventoryState(err instanceof VaultOperationCancelledError ? 'idle' : 'failed')
     }
   }
 
@@ -382,7 +428,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setDiscovered([])
     setDiscoveryKey('')
     validation.reset()
-    void loadInventory()
+    setPickerAsked(false)
     setDialogOpen(true)
   }
 
@@ -410,7 +456,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setProbeResult(null)
     setDiscovered([])
     setDiscoveryKey('')
-    void loadInventory()
+    setPickerAsked(false)
     setDialogOpen(true)
   }
 
@@ -568,7 +614,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       // loaded before the mint says the row's brand-new key is deleted —
       // which is what a person saw one second after saving it. Reload it
       // beside the endpoints, from the same success.
-      await loadInventory()
+      await loadInventory('list')
       showToast({ level: 'success', message: `Saved "${input.name}"` })
     } catch (err) {
       // A cancelled setup/unlock is not an error: the sheet is the surface
@@ -904,7 +950,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           secrets={passwordRows()}
           value={row().row}
           onValueChange={(v) => updateHeader(index, { row: v ?? '' })}
-          placeholder="\u2014 None \u2014"
         />
       </div>
     )
