@@ -231,7 +231,7 @@ async function main() {
     const first = pendingApprovals.values().next().value
     setActiveApproval(first ?? null)
   }
-  const decideApproval = async (approved: boolean) => {
+  const decideApproval = async (approved: boolean, scope: AgentApprove['scope']) => {
     const ask = activeApproval()
     if (!ask || approvalBusy()) return
     setApprovalBusy(true)
@@ -243,12 +243,12 @@ async function main() {
         callId: ask.callId,
         argHash: ask.argHash,
         approved,
-        // How far the answer reaches. 'once' is exactly today's behaviour —
-        // the decision covers this proposal and nothing else — and it is a
-        // stopgap: the prompt grows allow/deny at once, this session and
-        // always in its own task, and this call site is where the person's
-        // chosen scope will arrive from.
-        scope: 'once',
+        // How far the answer reaches, as the person chose it in the prompt.
+        // It travels with the decision because the BACKEND applies it: a
+        // renderer that read the matrix, edited a row and wrote it back would
+        // be a second owner of the policy document, racing the settings page
+        // (nocx-gycwo, design §"Three wire changes").
+        scope,
       } satisfies AgentApprove)
       // Only a RECORDED decision closes the question. A refusal (a stale
       // binding — the question was already answered) keeps the prompt up:
@@ -1276,8 +1276,7 @@ async function main() {
               open
               ask={ask}
               busy={approvalBusy()}
-              onAllow={() => void decideApproval(true)}
-              onDeny={() => void decideApproval(false)}
+              onDecide={(approved, scope) => void decideApproval(approved, scope)}
             />
           )}
         </Show>
