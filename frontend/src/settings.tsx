@@ -710,6 +710,38 @@ export function SettingsComponent(props: SettingsComponentProps) {
     () => new Set(filteredDeclarations().map((d: Declaration) => d.key)),
   )
 
+  /**
+   * The sections with something to show — the ones the body renders.
+   *
+   * A section with no visible row is not rendered at all rather than
+   * rendered and hidden. The surface already answers "is this page
+   * showing?" by unmounting: a component page's content is behind a keyed
+   * `Show`, and the whole generated block is behind another. A generated
+   * section is the same question, and answering it a second way left the
+   * open page trailed by every other section's rows at `display: none`.
+   *
+   * That is not merely waste. The rows of a page nobody is on are the tail
+   * of the scroller's content, so "the last setting row" — which is what
+   * the browser proofs of the scroll chain measure — meant whichever row
+   * happened to be declared last in the whole registry. It belonged to the
+   * open section only for as long as the last-registered section happened
+   * to be the one under test (nocx-avogl.4 registered one after it and the
+   * proofs began measuring a row nobody can see).
+   *
+   * Row-level hiding stays: within a section that IS showing, search hides
+   * individual rows, and Stack's `divided` variant is built for exactly
+   * that (`:not(.st-vis-hidden)`).
+   */
+  const visibleSections: () => string[] = createMemo(() => {
+    const shown = visibleKeys()
+    const withRows = new Set(
+      declarations()
+        .filter((d) => shown.has(d.key))
+        .map((d) => d.section),
+    )
+    return sections().filter((s) => withRows.has(s))
+  })
+
   // ── Actions ────────────────────────────────────────────────────────
 
   async function saveSetting(key: string, value: unknown): Promise<void> {
@@ -1247,52 +1279,51 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <div class="ui-settings-status ui-settings-nomatch">No settings match your search.</div>
           </Show>
 
-          {/* Render all sections; hide non-matching rows via inline style. */}
+          {/* The sections with something to show, and no others — see
+              visibleSections. Within one of them, search still hides
+              individual rows via `st-vis-hidden`. */}
           <Show when={loadState() === 'ready'}>
-            <For each={sections()}>
+            <For each={visibleSections()}>
               {(section) => {
                 const sectionDecls = () => declarations().filter((d) => d.section === section)
-                const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
                 return (
-                  <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
-                    <PageSection
-                      id={'st-section-' + encodeURIComponent(section)}
-                      title={section}
-                      divided
-                    >
-                      {/* The degrade notice, above the controls it
-                          contradicts. A kit StatusCard, placed and never
-                          repainted: a state plus what to do about it is
-                          exactly what it is for, and hand-rolling a
-                          coloured div here is the defect two epics spent
-                          themselves unwinding (ui/README.md). */}
-                      <Show when={section === HISTORY_SECTION && historyNotice() !== null}>
-                        <StatusCard
-                          tone="warning"
-                          title={historyNotice()!.title}
-                          description={historyNotice()!.description}
-                        />
-                      </Show>
-                      {/* The discard is `neutral`, not `warning`: nothing is
-                          wrong and there is nothing to fix — it is a thing
-                          that happened, which the person is entitled to know
-                          because an empty history after an update is
-                          otherwise indistinguishable from a fresh install.
-                          The kit has no `info` tone and does not need one;
-                          neutral is what "a fact, not a fault" already
-                          means here. */}
-                      <Show when={section === HISTORY_SECTION && discardNotice() !== null}>
-                        <StatusCard
-                          tone="neutral"
-                          title={discardNotice()!.title}
-                          description={discardNotice()!.description}
-                        />
-                      </Show>
-                      <For each={sectionDecls()}>
-                        {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
-                      </For>
-                    </PageSection>
-                  </div>
+                  <PageSection
+                    id={'st-section-' + encodeURIComponent(section)}
+                    title={section}
+                    divided
+                  >
+                    {/* The degrade notice, above the controls it
+                        contradicts. A kit StatusCard, placed and never
+                        repainted: a state plus what to do about it is
+                        exactly what it is for, and hand-rolling a
+                        coloured div here is the defect two epics spent
+                        themselves unwinding (ui/README.md). */}
+                    <Show when={section === HISTORY_SECTION && historyNotice() !== null}>
+                      <StatusCard
+                        tone="warning"
+                        title={historyNotice()!.title}
+                        description={historyNotice()!.description}
+                      />
+                    </Show>
+                    {/* The discard is `neutral`, not `warning`: nothing is
+                        wrong and there is nothing to fix — it is a thing
+                        that happened, which the person is entitled to know
+                        because an empty history after an update is
+                        otherwise indistinguishable from a fresh install.
+                        The kit has no `info` tone and does not need one;
+                        neutral is what "a fact, not a fault" already
+                        means here. */}
+                    <Show when={section === HISTORY_SECTION && discardNotice() !== null}>
+                      <StatusCard
+                        tone="neutral"
+                        title={discardNotice()!.title}
+                        description={discardNotice()!.description}
+                      />
+                    </Show>
+                    <For each={sectionDecls()}>
+                      {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
+                    </For>
+                  </PageSection>
                 )
               }}
             </For>
