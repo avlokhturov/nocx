@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -874,6 +875,14 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			return
 		}
 		reason, sentence := classifyAskFailure(err)
+		// This is the boundary that catches the framework's error, so this
+		// is where its text is kept — once, with the run id, and nowhere
+		// else (nocx-avogl.3). The wire carries the sentence; the log
+		// carries eino's "[NodeRunError] … node path: [node_1, ToolNode]"
+		// and whatever else the engine wrapped, which is the only place
+		// that trace survives at all.
+		h.log.Warn("agent ask: the run failed",
+			"run", rc.runID, "reason", string(reason), "sentence", sentence, "error", err)
 		h.terminalize(ctx, rc, dropped, content.RunFailed, reason, sentence, r)
 		return
 	}
@@ -1204,6 +1213,25 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 // and the sentence agent.runState carries — one owner of the engine-error →
 // wire-sentence mapping (design §7: "a sentence a person reads, not a Go
 // error string").
+//
+// Nothing here appends err.Error() (nocx-avogl.3). It used to, in the default
+// arm, and what a person saw was eino's own stringification:
+//
+//	the model failed to answer: [NodeRunError] failed to stream tool call
+//	call_7947...: agent policy: tool call refused
+//	node path: [node_1, ToolNode]
+//
+// `NodeRunError`, `node path`, `ToolNode` and the call id are the framework's
+// internals; they say nothing a person can act on and they are not ours. The
+// framework's text is not thrown away — runAskStream logs it once, with the
+// run id, at the boundary that catches it — but it never travels on the wire.
+//
+// A cause per sentence, deliberately: one message for three causes is how a
+// cause stops being findable. Every arm is reached by a TYPE, never by a
+// string match against the framework's text — the typed chain survives eino
+// intact (compose.internalError implements Unwrap; ToolsNode wraps with %w),
+// which is measured and guarded by TestAskFailure_TheTypedChainSurvivesEino
+// and written down on assistant.PolicyRefusedError.
 func classifyAskFailure(err error) (content.TerminationReason, string) {
 	var se *assistant.StreamError
 	if errors.As(err, &se) {
@@ -1221,13 +1249,69 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	if errors.As(err, &leaseErr) {
 		return leaseErr.Reason, runLeaseSentence(leaseErr.Reason)
 	}
+	// Cause 1: the policy refused a proposed call. The sentence names the
+	// tool and the reason and says what the person can do — a refusal is an
+	// answer, not a fault.
+	var refused *assistant.PolicyRefusedError
+	if errors.As(err, &refused) {
+		return content.TermFailed, policyRefusalSentence(refused)
+	}
+	// Cause 1b: the policy permitted the call, the tool RAN, and it failed.
+	// Its message is already the product's own — the renderer's "could not
+	// capture the screen", a command that could not start — so it is passed
+	// through, named by the tool it came from. Checked after the lease arm
+	// above: a lease that fires during a tool call arrives wrapped in this,
+	// and the lease's bound is the more specific fact.
+	var toolErr *assistant.ToolFailedError
+	if errors.As(err, &toolErr) {
+		return content.TermFailed, "the assistant's " + toolErr.Tool + " call did not finish: " + toolErr.Message()
+	}
+	// Cause 2: the model produced a tool call the engine cannot act on — a
+	// name that is not a tool, or arguments the schema it was shown does not
+	// allow. NOT a refusal: there was nothing to refuse.
+	//
+	// MEASURED, 2026-08-21: only the ARGUMENTS half reaches this arm. A tool
+	// name the model invents is rejected by eino's own index lookup ("tool %s
+	// not found in toolsNode indexes") BEFORE the policy middleware is
+	// entered, so ErrMalformedModelOutput's unknown-tool branch is
+	// unreachable through the engine and that failure lands on the default
+	// sentence below. It is framework-free there, so nothing leaks; naming it
+	// properly needs a handle eino does not give us, and is its own task.
+	if errors.Is(err, assistant.ErrMalformedModelOutput) {
+		return content.TermFailed, "the model asked for a tool call nocx could not act on: it did not match any tool the model was offered. Ask again — a different model may handle tools better."
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return content.TermTransportGone, "the connection was lost while the answer was streaming"
 	case errors.Is(err, context.DeadlineExceeded):
 		return content.TermTimeout, "the model did not answer in time"
+	}
+	// Cause 3: the request to the model endpoint never completed — a dial
+	// that failed, a TLS handshake that did not, a connection that dropped
+	// mid-request. Checked AFTER context.Canceled and context.DeadlineExceeded
+	// for the same reason the lease is checked before them: a cancelled or
+	// timed-out request in flight comes back as a *url.Error WRAPPING the
+	// context error, so matching *url.Error first would report every lost
+	// connection and every deadline as an unreachable endpoint.
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return content.TermFailed, "nocx could not reach the model endpoint. Check that the endpoint's address is right and that it is running, then ask again."
+	}
+	// Anything else. It still says nothing eino wrote: the trace is in the
+	// log, named there so a person can find it.
+	return content.TermFailed, "the model failed to answer. The details are in nocx's log."
+}
+
+// policyRefusalSentence states one refusal in the product's words: what was
+// proposed, why it did not run, and what the person can do about it. Written
+// per reason — a single sentence covering both would tell a person to change
+// a setting that is not the one standing in their way.
+func policyRefusalSentence(e *assistant.PolicyRefusedError) string {
+	switch e.Reason {
+	case assistant.RefusedOutOfScope:
+		return "nocx refused the assistant's " + e.Tool + " call: it named something outside what this question is allowed to reach. Widen what the assistant may touch in Settings, then ask again."
 	default:
-		return content.TermFailed, "the model failed to answer: " + err.Error()
+		return "nocx refused the assistant's " + e.Tool + " call: your agent policy does not allow this kind of action. Allow it in Settings, then ask again."
 	}
 }
 

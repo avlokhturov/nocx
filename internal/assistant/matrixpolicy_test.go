@@ -24,7 +24,8 @@ import (
 func decideOutcome(t *testing.T, grant content.Grant, tool agenttools.Tool, args map[string]any) policyOutcome {
 	t.Helper()
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil)
-	return mw.decide(tool, args)
+	outcome, _ := mw.decide(tool, args)
+	return outcome
 }
 
 func filesReadTool(t *testing.T) agenttools.Tool {

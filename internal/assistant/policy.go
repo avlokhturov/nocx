@@ -52,6 +52,86 @@ import (
 // made. The run adapter terminalizes the attempt as refused.
 var ErrPolicyRefused = errors.New("agent policy: tool call refused")
 
+// PolicyRefusalReason is WHY a call was refused — the two branches decide
+// takes, and no more: a closed set, because the product's sentence for a
+// refusal is written per reason and an unnamed third one would silently fall
+// back to the vaguest of them.
+type PolicyRefusalReason string
+
+const (
+	// RefusedByDecision: the grant's policy matrix decides refuse for this
+	// tool's effect class. Under an unbypassed declaration path the tool is
+	// never offered to the model at all (ForGrant filters), so this is the
+	// defense that holds if the declaration path is bypassed.
+	RefusedByDecision PolicyRefusalReason = "refused-by-decision"
+	// RefusedOutOfScope: the call named a resource outside the SELECTED
+	// effect's row scopes. This is the reachable one, and it is the owner's
+	// screenshot: a model that invents a session id fails the exact identity
+	// match (inScope, ResourceSession).
+	RefusedOutOfScope PolicyRefusalReason = "refused-out-of-scope"
+)
+
+// PolicyRefusedError is a refusal carrying the two facts the product's
+// sentence needs: WHICH tool was proposed and WHY it did not run
+// (nocx-avogl.3). ErrPolicyRefused alone could say neither, so the block
+// showed the framework's stringification of it instead.
+//
+// It unwraps to ErrPolicyRefused, so every existing errors.Is caller is
+// unchanged; the transport asks errors.As when it needs the two facts.
+//
+// MEASURED on 2026-08-21, because the answer decides whether a typed handle
+// is usable at all: eino's compose.internalError — the "[NodeRunError] … node
+// path: [node_1, ToolNode]" text in the owner's screenshot — implements
+// Unwrap, and ToolsNode wraps a failing call with %w
+// (compose/tool_node.go:1203). So the typed chain SURVIVES the framework
+// boundary intact: errors.Is and errors.As both recover this value at the
+// transport, and NO string match against the framework's text is needed
+// anywhere. internal/transport's TestAskFailure_TheTypedChainSurvivesEino is
+// the guard on that property.
+type PolicyRefusedError struct {
+	Tool   string
+	Reason PolicyRefusalReason
+}
+
+func (e *PolicyRefusedError) Error() string {
+	return fmt.Sprintf("%s: tool %q: %s", ErrPolicyRefused.Error(), e.Tool, e.Reason)
+}
+
+func (e *PolicyRefusedError) Unwrap() error { return ErrPolicyRefused }
+
+// ToolFailedError is the FOURTH cause a run can end on, and the one the
+// nocx-avogl.3 brief did not name: the policy permitted the call, the tool
+// ran, and it failed. Its message is already the product's — the renderer's
+// "could not capture the screen", a command that could not start — and until
+// this type existed it reached the block only because the transport's default
+// arm concatenated err.Error(), which is what dragged eino's
+// "[NodeRunError] … node path: […]" onto the screen with it. Deleting that
+// concatenation without this type would have silently swallowed a working
+// sentence, so the sentence gets a carrier of its own instead.
+//
+// Unwrap returns the tool's error, so terminationReasonOf's lease check and
+// every other errors.Is/As over the inner error are unchanged.
+type ToolFailedError struct {
+	Tool string
+	Err  error
+}
+
+func (e *ToolFailedError) Error() string {
+	return fmt.Sprintf("agent tool %q failed: %v", e.Tool, e.Err)
+}
+
+func (e *ToolFailedError) Unwrap() error { return e.Err }
+
+// Message is the tool's own text, without this wrapper's framing: what the
+// transport puts in front of a person. It is the EXECUTOR's string and never
+// the framework's — eino wraps outside this error, never inside it.
+func (e *ToolFailedError) Message() string {
+	if e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
 // ErrMalformedModelOutput marks a tool call that corresponds to no declared
 // tool or whose arguments do not match the schema the model was shown. Not a
 // refusal — there is nothing to call; the model produced output the engine
@@ -262,10 +342,16 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		}
 
 		// 3. Policy — permit / ask / refuse over the ADR-0020 lattice.
-		switch m.decide(decl, args) {
+		outcome, refusal := m.decide(decl, args)
+		switch outcome {
 		case policyRefuse:
-			tripLatch(ctx, ErrPolicyRefused)
-			return "", ErrPolicyRefused
+			// The refusal carries the tool and the reason: the transport
+			// writes the person's sentence from those two facts, and it can
+			// only do that if they cross the framework boundary WITH the
+			// error (see PolicyRefusedError).
+			refused := &PolicyRefusedError{Tool: decl.Name, Reason: refusal}
+			tripLatch(ctx, refused)
+			return "", refused
 		case policyAsk:
 			// Approval binds to the exact proposal: an approved call skips
 			// the ask; a changed argument hashes differently and does NOT
@@ -400,7 +486,9 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// with the outcome or the terminal reason, never before.
 		if runErr != nil {
 			_ = m.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)
-			return "", runErr
+			// Named, so the transport can say WHICH tool failed without
+			// stringifying the framework's wrapper around it.
+			return "", &ToolFailedError{Tool: decl.Name, Err: runErr}
 		}
 
 		if len(out) > maxToolResultBytes {
@@ -467,22 +555,28 @@ const (
 // (the tool should never have been declared under this grant — ForGrant
 // filters — and this is the defense that holds if the declaration path is
 // bypassed).
-func (m *policyMiddleware) decide(t agenttools.Tool, args map[string]any) policyOutcome {
+//
+// The second return value is meaningful ONLY for policyRefuse: it is the
+// reason, and it exists because the product must tell a person WHY a call did
+// not run. It is returned from here rather than re-derived at the transport —
+// the two branches below are the whole of "why", and a second derivation of
+// one question is the defect AGENTS.md spends a section on.
+func (m *policyMiddleware) decide(t agenttools.Tool, args map[string]any) (policyOutcome, PolicyRefusalReason) {
 	if m.grant.Policy.DecisionFor(t.Effect) == content.DecisionRefuse {
-		return policyRefuse
+		return policyRefuse, RefusedByDecision
 	}
 	if !m.inScope(t, args) {
-		return policyRefuse
+		return policyRefuse, RefusedOutOfScope
 	}
 	switch m.grant.Policy.DecisionFor(t.Effect) {
 	case content.DecisionPermit:
-		return policyPermit
+		return policyPermit, ""
 	default:
 		// Unstated rows, and a grant without a matrix, decide ASK: the
 		// fail-toward-asking default (an empty matrix is a policy that
 		// asks), and a silent permit is how a feature that was never
 		// configured survives a release.
-		return policyAsk
+		return policyAsk, ""
 	}
 }
 
