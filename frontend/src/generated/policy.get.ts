@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the policy.get JSON-RPC method (ADR-0020 §7 as amended 2026-08-16 — amendment proposed, awaiting owner approval): the ONE global agent policy, resolved (a workspace override will participate in the same content.ResolvePolicy the run mint uses). The policy is a MATRIX: one row per effect class of decision 6, each row one of permit | ask | refuse plus the resource scopes it applies within. The wire always carries all seven rows with their EFFECTIVE decisions (an unstated row decides ask) and a scopes array, never a null — a renderer can draw the whole matrix from the bytes.
+ * Result of the policy.get JSON-RPC method (ADR-0020 §7 as amended 2026-08-16, accepted): the ONE global agent policy, resolved (a workspace override will participate in the same content.ResolvePolicy the run mint uses). The policy is a MATRIX: one row per effect class of decision 6, each row one of permit | ask | refuse plus the resource scopes it applies within. The wire always carries all seven rows with their EFFECTIVE decisions (an unstated row decides ask) and a scopes array, never a null — a renderer can draw the whole matrix from the bytes.
  */
 export interface PolicyGet {
   /**

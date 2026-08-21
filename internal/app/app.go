@@ -808,10 +808,10 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-6pz0).
 	gitFactory := gitlocal.NewFactory()
 
-	// The ONE global agent policy (ADR-0020 §7 as amended — amendment
-	// proposed, awaiting owner approval): the matrix every run's grant is
-	// minted from. Persisted as a JSON document beside the settings; the
-	// run mint and the policy.get/set RPCs read the same store live, so a
+	// The ONE global agent policy (ADR-0020 §7 as amended 2026-08-16,
+	// accepted): the matrix every run's grant is minted from. Persisted as a
+	// JSON document beside the settings; the run mint and the
+	// policy.get/set RPCs read the same store live, so a
 	// Settings save applies without a restart. An unset or unreadable
 	// store IS a policy — the zero matrix, which asks — never an error.
 	policyStore := assistant.NewGlobalPolicyStore(docStore, "agent-policy.json")

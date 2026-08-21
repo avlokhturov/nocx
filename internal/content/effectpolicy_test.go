@@ -1,8 +1,7 @@
 package content_test
 
 // The policy matrix — acceptance criteria of the ADR-0020 §7 amendment
-// (proposed 2026-08-16, awaiting owner approval), asserted at the vocabulary
-// level:
+// (2026-08-16, accepted), asserted at the vocabulary level:
 //
 //   - criterion 2: per effect class and per resource scope, a policy is
 //     expressed and the decision follows it;

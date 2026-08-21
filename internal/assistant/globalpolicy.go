@@ -1,9 +1,8 @@
 package assistant
 
-// The ONE global agent policy (ADR-0020 §7 as amended — amendment proposed
-// 2026-08-16, awaiting owner approval): the matrix from which every run's
-// grant is minted, the default until the workspace grant source lands
-// (nocx-mp2vd). The resolution order — workspace overrides global, global is
+// The ONE global agent policy (ADR-0020 §7 as amended 2026-08-16,
+// accepted): the matrix from which every run's grant is minted, the default
+// until the workspace grant source lands (nocx-mp2vd). The resolution order — workspace overrides global, global is
 // the default — is stated ONCE, in content.ResolvePolicy; this package
 // supplies the global side of that order and nothing else.
 //

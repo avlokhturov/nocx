@@ -165,9 +165,9 @@ type WSServer struct {
 	// lease suspends its enforcement while a TUI owns the lane.
 	laneInteractivity *laneState
 	// agentPolicy is the ONE global agent policy the ask run grants are
-	// minted from (ADR-0020 §7 as amended 2026-08-16 — amendment proposed,
-	// awaiting owner approval): the global default of content.ResolvePolicy,
-	// overridden by the workspace grant source (nocx-mp2vd) when that lands.
+	// minted from (ADR-0020 §7 as amended 2026-08-16, accepted): the global
+	// default of content.ResolvePolicy, overridden by the workspace grant
+	// source (nocx-mp2vd) when that lands.
 	// Named by the composition root. Unset, ask runs carry no grant and the
 	// model is offered no tools — the state before readScreen (see
 	// runGrantFor).

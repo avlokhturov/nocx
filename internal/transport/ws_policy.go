@@ -1,9 +1,8 @@
 package transport
 
 // policy.get / policy.set — the ONE global agent policy (ADR-0020 §7 as
-// amended 2026-08-16, amendment proposed; awaiting owner approval), ON THE
-// WIRE because the settings surface edits it: the matrix the run grants are
-// minted from (runGrantFor). The result shape is declared once in
+// amended 2026-08-16, accepted), ON THE WIRE because the settings surface
+// edits it: the matrix the run grants are minted from (runGrantFor). The result shape is declared once in
 // contracts/policy.get.schema.json, generated into the renderer, and the Go
 // side is validated against it (DTO + over the socket, ws_contract_test.go).
 //

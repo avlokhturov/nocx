@@ -1,10 +1,10 @@
 package transport
 
 // policy.get / policy.set over the real socket: the ONE global agent policy
-// the run grants are minted from (ADR-0020 §7 as amended — amendment
-// proposed, awaiting owner approval). The tool-name rule is asserted by
-// trying here, at the wire: a policy that names a tool is an invalid-params
-// error, and there is no other vocabulary in which to express one.
+// the run grants are minted from (ADR-0020 §7 as amended 2026-08-16,
+// accepted). The tool-name rule is asserted by trying here, at the wire: a
+// policy that names a tool is an invalid-params error, and there is no other
+// vocabulary in which to express one.
 
 import (
 	"encoding/json"

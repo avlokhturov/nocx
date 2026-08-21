@@ -1,9 +1,9 @@
 package content
 
-// The agent policy matrix (ADR-0020 §7, as amended 2026-08-16 — amendment
-// PROPOSED, awaiting owner approval): one row per effect class of decision 6,
-// each row carrying exactly one decision — permit | ask | refuse — and the
-// resource scopes the decision applies within.
+// The agent policy matrix (ADR-0020 §7, as amended 2026-08-16, accepted):
+// one row per effect class of decision 6, each row carrying exactly one
+// decision — permit | ask | refuse — and the resource scopes the decision
+// applies within.
 //
 // The shape is a matrix, not a rule engine, on purpose: each effect appears
 // exactly once, so evaluation needs no conflict resolver and a person sees

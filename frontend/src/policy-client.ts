@@ -1,7 +1,7 @@
 /**
  * Agent policy client — the ONE global policy (ADR-0020 §7 as amended
- * 2026-08-16, amendment proposed/awaiting owner approval): the matrix the
- * backend mints every agent run's grant from.
+ * 2026-08-16, accepted): the matrix the backend mints every agent run's
+ * grant from.
  *
  * The wire shape is declared once, in contracts/policy.get.schema.json; the
  * renderer's types are generated and this module is their single consumer.
