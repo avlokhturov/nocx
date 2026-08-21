@@ -288,18 +288,82 @@ func appendScopeSet(a, b []GrantScope) []GrantScope {
 	return out
 }
 
+// SessionOverrides is the per-session overlay: what a person answered "in
+// this session" to, one decision per effect class. It is NOT a third matrix
+// — it is produced by clicks rather than authored, so it carries no scopes
+// and has no notion of an unstated row. An effect absent from the map is
+// not an answer, and therefore never a permit.
+type SessionOverrides map[Effect]Decision
+
 // ResolvePolicy is the ONE place the resolution order is stated (ADR-0020 §7
-// as amended): the workspace-level policy, when one exists, overrides the
-// global default; the global policy is the default. Today there is no
-// workspace grant source — nocx-mp2vd owns that seam and will supply the
-// override — so every call passes nil and the global policy resolves. The
-// later override is an extension of THIS function, never a second place the
-// same ordering is written.
-func ResolvePolicy(global EffectPolicy, workspace *EffectPolicy) EffectPolicy {
+// as amended): the session overlay over the workspace policy over the global
+// default. The workspace, when one exists, REPLACES the global wholesale; the
+// session overlay then applies per row on top of whichever won, changing that
+// row's decision and nothing else — never its scopes, which the overlay has
+// no way to express. Today there is no workspace grant source — nocx-mp2vd
+// owns that seam — so callers pass nil and the global resolves.
+//
+// An override whose decision is outside the enum is ignored rather than
+// applied: this function fails toward asking like every other layer, and an
+// invalid value must never be able to widen a row.
+func ResolvePolicy(global EffectPolicy, workspace *EffectPolicy, session SessionOverrides) EffectPolicy {
+	out := global
 	if workspace != nil {
-		return *workspace
+		out = *workspace
 	}
-	return global
+	for _, e := range []Effect{
+		EffectObserve, EffectMutateReversible, EffectMutateDestructive,
+		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
+	} {
+		d, ok := session[e]
+		if !ok || !d.valid() {
+			continue
+		}
+		row := out.rowFor(e)
+		row.Decision = d
+		out.setRow(e, row)
+	}
+	return out
+}
+
+// SetRowDecision returns a copy of the matrix with ONE row's decision
+// replaced, keeping that row's scopes. It is how a standing answer from the
+// approval prompt is applied (the transport calls it inside the policy
+// store's write), and the only exported mutator — a caller reaching into the
+// struct fields would be a second place that knows the lattice's shape.
+//
+// A decision outside the enum is ignored: every layer here fails toward
+// asking, and an invalid value must never widen a row.
+func (p EffectPolicy) SetRowDecision(e Effect, d Decision) EffectPolicy {
+	if !d.valid() {
+		return p
+	}
+	row := p.rowFor(e)
+	row.Decision = d
+	out := p
+	out.setRow(e, row)
+	return out
+}
+
+// setRow writes one row by effect — the inverse of rowFor, and the only
+// mutator on the matrix. Kept beside it so the two switches cannot drift.
+func (p *EffectPolicy) setRow(e Effect, row EffectRow) {
+	switch e {
+	case EffectObserve:
+		p.Observe = row
+	case EffectMutateReversible:
+		p.MutateReversible = row
+	case EffectMutateDestructive:
+		p.MutateDestructive = row
+	case EffectPrivilegeChange:
+		p.PrivilegeChange = row
+	case EffectDisclose:
+		p.Disclose = row
+	case EffectCrossBoundary:
+		p.CrossBoundary = row
+	case EffectDelegate:
+		p.Delegate = row
+	}
 }
 
 // ErrPolicySyntax marks a policy document that cannot be parsed — the

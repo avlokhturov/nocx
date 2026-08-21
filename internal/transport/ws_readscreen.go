@@ -234,7 +234,7 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 	if s.agentPolicy == nil {
 		return nil
 	}
-	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil)
+	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil, nil)
 	g := p.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}})
 	return &g
 }
