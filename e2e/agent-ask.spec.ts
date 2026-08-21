@@ -191,12 +191,19 @@ async function assignAnsweringRole(page: Page, endpointName: string, model: stri
   const modelSelect = answering.locator('select').nth(1)
   await expect(modelSelect).toBeEnabled()
   await modelSelect.selectOption({ label: model })
-  // The row's own word for the assignment: the state sentence names the
-  // assigned endpoint and model (roleStateLine), never a toast.
-  await expect(answering.locator('.roles-role__state')).toContainText(endpointName, {
-    timeout: 10_000,
-  })
-  await expect(answering.locator('.roles-role__state')).toContainText(model)
+  // The SELECTS are where an explicit assignment is legible, and since
+  // nocx-rikz5 they are the only place. The row's state sentence used to
+  // repeat them — "Answers with openrouter · m-a" directly under two controls
+  // already saying exactly that — and it now stays SILENT when a role
+  // resolves to what the selects show, speaking only when resolution goes
+  // somewhere they cannot show (through the default) or fails. So waiting for
+  // that sentence here waits for a line the product deliberately no longer
+  // draws.
+  await expect(answering.locator('select').first().locator('option:checked')).toHaveText(
+    endpointName,
+    { timeout: 10_000 },
+  )
+  await expect(answering.locator('select').nth(1).locator('option:checked')).toHaveText(model)
 }
 
 /** Run one command and wait for its finished (frozen) block. */
