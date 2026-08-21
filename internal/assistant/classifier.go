@@ -324,7 +324,7 @@ func (m *policyMiddleware) proposalApproved(toolName, callID, rawArgs string) bo
 //
 // The returned ask is the suspension's approval request; the returned fact
 // is what the ledger records. A nil ask means the verdict was clear.
-func (m *policyMiddleware) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string) (*ApprovalRequest, *classifierFact, error) {
+func (m *policyMiddleware) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any) (*ApprovalRequest, *classifierFact, error) {
 	findings, err := m.screenResult(ctx, rawArgs, nil)
 	if err != nil {
 		return nil, nil, err
@@ -334,14 +334,14 @@ func (m *policyMiddleware) classifyProposal(ctx context.Context, decl agenttools
 			Findings: findings,
 			Reason:   "the classifier could not be consulted: " + findingsSentence(findings),
 		}
-		return m.request(decl.Name, callID, rawArgs), fact, nil
+		return m.request(decl, callID, rawArgs, args), fact, nil
 	}
 	classification, err := m.classifier.Classify(ctx, ClassifyInput{Tool: decl.Name, CallID: callID, Arguments: rawArgs})
 	if err != nil {
 		fact := &classifierFact{
 			Reason: maskClassifierReason("the classifier could not be consulted: " + summarizeClassifierError(err)),
 		}
-		return m.request(decl.Name, callID, rawArgs), fact, nil
+		return m.request(decl, callID, rawArgs, args), fact, nil
 	}
 	if classification.Verdict != ClassifierClear {
 		fact := &classifierFact{
@@ -350,7 +350,7 @@ func (m *policyMiddleware) classifyProposal(ctx context.Context, decl agenttools
 			Model:     classification.Model,
 			Reason:    maskClassifierReason(classification.Reason),
 		}
-		return m.request(decl.Name, callID, rawArgs), fact, nil
+		return m.request(decl, callID, rawArgs, args), fact, nil
 	}
 	return nil, &classifierFact{
 		Consulted: true,

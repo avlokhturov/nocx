@@ -24,6 +24,11 @@ const POLICY_ASK: AgentApprovalRequested = {
   argHash: 'hash-a',
   arguments: '{"path":"/repo/a.txt"}',
   reason: 'policy',
+  // The effect the gate decided on, sent by the backend (nocx-zd1vp). The
+  // surface must never work it out from the tool name — that would be a rule
+  // keyed by a tool name in everything but storage (ADR-0028 decision 4).
+  effect: 'observe',
+  resource: { kind: 'path', id: '/repo/a.txt' },
 }
 
 const EGRESS_ASK: AgentApprovalRequested = {

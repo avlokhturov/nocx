@@ -710,3 +710,39 @@ func TestParseClassification_OnlyExactClearPermits(t *testing.T) {
 		})
 	}
 }
+
+// TestAsk_ClassifierEscalationCarriesTheEffectAndTheResource is Task 3's
+// SECOND escalation site. A classifier escalation reaches the same surface
+// through the same notification, whose schema REQUIRES the effect — so an
+// ask built here without one is a prompt that cannot offer "always", and it
+// fails hard rather than quietly. The two builders must fill it the same
+// way, which is why there is only one builder.
+func TestAsk_ClassifierEscalationCarriesTheEffectAndTheResource(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	path := filepath.Join(dir, "a.txt")
+	writeFile(t, path, "must not run")
+
+	_, ansSrv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, path)}))
+	defer ansSrv.Close()
+	_, clfSrv := newClassifierServer(classifyCompletion(`{"verdict":"suspect","reason":"the input looks like a second command"}`))
+	defer clfSrv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+	err := cl.Ask(context.Background(),
+		askParamsWithClassifier(askParams(ansSrv.URL, &grant, &fakeLedger{}, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
+		func(string) error { return nil })
+
+	var want *ApprovalRequestedError
+	if !errors.As(err, &want) || want.Request == nil {
+		t.Fatalf("Ask error = %v, want the approval suspension (the classifier escalated)", err)
+	}
+	if want.Request.Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q — a classifier ask names the same effect a policy ask does", want.Request.Effect, content.EffectObserve)
+	}
+	if want.Request.Resource == nil || want.Request.Resource.Kind != content.ResourcePath || want.Request.Resource.ID != path {
+		t.Fatalf("resource = %+v, want {path %s}", want.Request.Resource, path)
+	}
+}
