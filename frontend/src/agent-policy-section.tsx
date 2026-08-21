@@ -19,12 +19,23 @@
  *   say the same thing.
  *
  * `live` is the backend's answer to "which of these rows govern anything
- * today". Five of the seven have no declared tool behind them; drawing seven
- * equal rows is a soft degrade the surface used to hide (AGENTS.md: a soft
- * degrade must be visible in the product). The live rows come first and the
- * rest sit behind one disclosure that says what they are. Working this out
- * here is not an option — it would mean mapping a tool name to an effect,
- * which is the one thing no configuration path may do.
+ * today", and the page draws those rows and no others. Five of the seven
+ * classes have no declared tool behind them: nothing can produce them, so a
+ * row offering to answer a question that cannot be asked is the fiction to
+ * avoid — seven equal rows were the first version of it, and a disclosure
+ * headed "capabilities the assistant does not have yet" was the second, which
+ * left five controls on the page that did nothing. Not drawing them hides no
+ * degrade (AGENTS.md), because there is no capability behind them to degrade;
+ * and it needs no undoing later, since a row reappears the moment `live`
+ * carries its effect.
+ *
+ * The one exception is a class that already CARRIES an answer, which is the
+ * only case where drawing nothing would hide something real: an answer nobody
+ * can see is an answer nobody can take back. Those keep their row, under a
+ * heading that says they govern nothing yet.
+ *
+ * Working liveness out here is not an option — it would mean mapping a tool
+ * name to an effect, which is the one thing no configuration path may do.
  */
 import { createSignal, For, Index, onMount, Show } from 'solid-js'
 import {
@@ -124,7 +135,6 @@ export function AgentPolicySection(props: AgentPolicySectionProps) {
   const [loaded, setLoaded] = createSignal(false)
   const [loadError, setLoadError] = createSignal<string | null>(null)
   const [busyRow, setBusyRow] = createSignal<EffectKey | null>(null)
-  const [dormantOpen, setDormantOpen] = createSignal(false)
 
   /** Adopt a read whole: the matrix and the live list from the SAME answer.
    *  Two accessors filled separately would let the page render a row set and
@@ -153,7 +163,22 @@ export function AgentPolicySection(props: AgentPolicySectionProps) {
   })
 
   const liveKeys = () => EFFECT_KEYS.filter((k) => live().includes(k))
-  const dormantKeys = () => EFFECT_KEYS.filter((k) => !live().includes(k))
+  /** A class nothing can produce yet is NOT drawn. There is nothing to decide
+   *  about it, and a row saying "Ask every time" about an effect no tool can
+   *  have implies a question that will never be asked. `live` is the
+   *  backend's answer, so a row returns the day a tool carrying that effect
+   *  is declared — nothing here has to be remembered or undone for it.
+   *
+   *  The exception is a class that already CARRIES an answer, which is the
+   *  one case where drawing nothing would hide something: an answer nobody
+   *  can see is an answer nobody can take back. Those rows stay, grouped
+   *  under the sentence that says they govern nothing yet, until the person
+   *  sets them back to Ask. */
+  const answeredDormantKeys = () =>
+    EFFECT_KEYS.filter(
+      (k) =>
+        !live().includes(k) && !(wire()[k].decision === 'ask' && wire()[k].scopes.length === 0),
+    )
 
   /**
    * Write one gesture and adopt the result.
@@ -298,21 +323,15 @@ export function AgentPolicySection(props: AgentPolicySectionProps) {
       </Show>
       <Show when={loaded()}>
         <For each={liveKeys()}>{(key) => renderRow(key)}</For>
-        <Show when={dormantKeys().length > 0}>
+        <Show when={answeredDormantKeys().length > 0}>
           <div class="st-policy__dormant">
-            <Section
-              id="agent-policy-dormant"
-              title="Capabilities the assistant does not have yet"
-              collapsible
-              open={dormantOpen()}
-              onToggle={() => setDormantOpen((o) => !o)}
-            >
+            <Section id="agent-policy-dormant" title="Capabilities the assistant does not have yet">
               <p class="st-policy__dormant-note">
-                The assistant has no tool that does any of these, so an answer here governs nothing
-                today. It is saved all the same: the day it gains one, the answer you gave already
-                applies and it does not have to ask you then.
+                The assistant has no tool that does any of these, so these answers govern nothing
+                today. They are kept, and each one applies the day it gains a tool that does it —
+                set one back to Ask to take it back.
               </p>
-              <For each={dormantKeys()}>{(key) => renderRow(key)}</For>
+              <For each={answeredDormantKeys()}>{(key) => renderRow(key)}</For>
             </Section>
           </div>
         </Show>

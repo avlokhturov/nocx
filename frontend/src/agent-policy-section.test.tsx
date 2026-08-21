@@ -20,6 +20,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent, within } from '@solidjs/testing-library'
 import { Dispatcher } from './dispatcher'
 import {
+  EFFECT_KEYS,
   PolicyClient,
   blankPolicy,
   type EffectKey,
@@ -212,35 +213,52 @@ describe('agent policy surface', () => {
     expect(set).not.toHaveBeenCalled()
   })
 
-  it('lists the live effect classes first and puts the rest behind one disclosure', async () => {
+  it('draws only the effect classes a declared tool can produce today', async () => {
     const { client } = fakeClient([view(blankPolicy())])
     const container = mount(client)
     await waitForRows(container)
 
+    // Five of the seven classes have no tool behind them: nothing can produce
+    // them, so there is nothing to decide about them and a row would say
+    // otherwise. The backend's `live` list is the authority — when a tool
+    // carrying one is declared, its row appears without anybody editing this
+    // page.
     const visible = [...container.querySelectorAll('.st-policy__row')].map((r) =>
       r.getAttribute('data-effect'),
     )
     expect(visible).toEqual(['observe', 'mutate-destructive'])
-
-    const disclosure = container.querySelector('.st-policy__dormant') as HTMLElement
-    expect(disclosure).toBeTruthy()
-    expect(disclosure.textContent).toMatch(/does not have yet/i)
+    expect(container.querySelector('.st-policy__dormant')).toBeNull()
   })
 
-  it('the dormant rows open, and setting one is allowed', async () => {
-    const { client, set } = fakeClient([view(blankPolicy())])
+  it('a class nothing can produce still shows the answer somebody already gave it', async () => {
+    // An answer nobody can see is an answer nobody can take back. This one
+    // predates the tool it would govern — the row stays on the page, saying
+    // it governs nothing, until the person sets it back to Ask.
+    const answered: PolicyMatrix = {
+      ...blankPolicy(),
+      delegate: { decision: 'refuse', scopes: [] },
+    }
+    const { client, set } = fakeClient([view(answered), view(blankPolicy())])
     const container = mount(client)
     await waitForRows(container)
 
-    const disclosure = container.querySelector('.st-policy__dormant') as HTMLElement
-    fireEvent.click(within(disclosure).getByRole('button', { name: /does not have yet/i }))
+    const group = container.querySelector('.st-policy__dormant') as HTMLElement
+    expect(group).toBeTruthy()
+    expect(group.textContent).toMatch(/does not have yet/i)
+    // Visible without a disclosure to open: hiding a standing answer behind
+    // one is the same defect as not drawing it at all.
+    const delegate = within(group).getByText('Hand work to another agent')
+    expect(delegate).toBeTruthy()
+    expect(group.textContent).toContain('Never')
 
-    await vi.waitFor(() => {
-      expect(container.querySelectorAll('.st-policy__row')).toHaveLength(7)
-    })
-    fireEvent.change(decisionSelect(container, 'delegate'), { target: { value: 'refuse' } })
+    // And it can be taken back, which is the whole reason it is drawn.
+    fireEvent.change(decisionSelect(container, 'delegate'), { target: { value: 'ask' } })
     await vi.waitFor(() => expect(set).toHaveBeenCalledTimes(1))
-    expect(set.mock.calls[0][0].delegate.decision).toBe('refuse')
+    expect(set.mock.calls[0][0].delegate.decision).toBe('ask')
+    // The second read answers the blank policy: nothing is left to say.
+    await vi.waitFor(() => {
+      expect(container.querySelector('.st-policy__dormant')).toBeNull()
+    })
   })
 
   it('a row off the default says what it means, in the same words the prompt used', async () => {
@@ -269,14 +287,13 @@ describe('agent policy surface', () => {
   })
 
   it("says nothing in the ADR's words", async () => {
-    const { client } = fakeClient([view(LOADED)])
+    // Every class on the page at once, live or merely answered, so the
+    // vocabulary check covers the sentences both of them carry.
+    const answeredEverywhere: PolicyMatrix = blankPolicy()
+    for (const k of EFFECT_KEYS) answeredEverywhere[k] = { decision: 'refuse', scopes: [] }
+    const { client } = fakeClient([view(answeredEverywhere)])
     const container = mount(client)
     await waitForRows(container)
-    fireEvent.click(
-      within(container.querySelector('.st-policy__dormant') as HTMLElement).getByRole('button', {
-        name: /does not have yet/i,
-      }),
-    )
     await vi.waitFor(() => {
       expect(container.querySelectorAll('.st-policy__row')).toHaveLength(7)
     })
