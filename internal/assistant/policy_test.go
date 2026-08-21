@@ -790,3 +790,101 @@ func TestAsk_PermittedReadRecordsTheAttempt(t *testing.T) {
 		t.Fatalf("termination = %v, want completed — the outcome must be recorded on the attempt", ex.TerminationReason)
 	}
 }
+
+// ── the ask names its effect and its resource ─────────────────────────────
+
+// TestAsk_PolicyEscalationCarriesTheEffectAndTheResource is Task 3's first
+// criterion: the question a person is asked names the effect class the gate
+// decided on and the resource it matched the call against. The effect is
+// what a standing answer writes a row for, so it must come from the gate —
+// a renderer deriving it from the tool name would be a rule keyed by a tool
+// name, which ADR-0028 decision 4 forbids.
+func TestAsk_PolicyEscalationCarriesTheEffectAndTheResource(t *testing.T) {
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
+	path := filepath.Join(dir, "a.txt")
+	writeFile(t, path, "must not be read yet")
+
+	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, path)}))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(string) error { return nil })
+	var want *ApprovalRequestedError
+	if !errors.As(err, &want) || want.Request == nil {
+		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	}
+	if want.Request.Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q — files.read's declared class, decided by the gate", want.Request.Effect, content.EffectObserve)
+	}
+	if want.Request.Resource == nil {
+		t.Fatal("resource is nil, want the path the call named")
+	}
+	if want.Request.Resource.Kind != content.ResourcePath || want.Request.Resource.ID != path {
+		t.Fatalf("resource = %+v, want {path %s}", want.Request.Resource, path)
+	}
+	if n := f.requests.Load(); n != 1 {
+		t.Fatalf("the engine made %d model requests after the suspension, want exactly 1", n)
+	}
+}
+
+// TestAsk_EscalationWithoutAResourceArgCarriesNoResource is the null half:
+// a tool that names no resource in its parameters (git.status's repository
+// IS the grant's path scope) escalates with an effect and NO resource. Null
+// is a fact, not a gap — and the wire says so.
+func TestAsk_EscalationWithoutAResourceArgCarriesNoResource(t *testing.T) {
+	grant, _ := testDirGrant(t, askEveryTimeMatrix())
+
+	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "git.status", args: `{}`}))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(string) error { return nil })
+	var want *ApprovalRequestedError
+	if !errors.As(err, &want) || want.Request == nil {
+		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	}
+	if want.Request.Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q", want.Request.Effect, content.EffectObserve)
+	}
+	if want.Request.Resource != nil {
+		t.Fatalf("resource = %+v, want nil — git.status names no resource in its parameters", want.Request.Resource)
+	}
+}
+
+// TestAsk_EgressSuspensionCarriesTheEffectAndTheResource keeps the wire ONE
+// shape: the egress ask fills the same two fields from the same declaration,
+// even though the surface offers only allow/deny once there. Two shapes on
+// one notification is how a required field becomes absent on one path.
+func TestAsk_EgressSuspensionCarriesTheEffectAndTheResource(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	const secret = "known-secret-value-123"
+	path := filepath.Join(dir, "a.txt")
+	writeFile(t, path, "deploy key: "+secret)
+
+	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, path)}))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+	err := cl.Ask(context.Background(),
+		askParamsWith(srv.URL, &grant, &fakeLedger{}, nil, &knownMatcher{value: secret, name: "github-token"}, nil),
+		func(string) error { return nil })
+	var want *EgressRequestedError
+	if !errors.As(err, &want) || want.Request == nil {
+		t.Fatalf("Ask error = %v, want the egress suspension", err)
+	}
+	if want.Request.Effect != content.EffectObserve {
+		t.Fatalf("effect = %q, want %q", want.Request.Effect, content.EffectObserve)
+	}
+	if want.Request.Resource == nil || want.Request.Resource.ID != path {
+		t.Fatalf("resource = %+v, want {path %s}", want.Request.Resource, path)
+	}
+}

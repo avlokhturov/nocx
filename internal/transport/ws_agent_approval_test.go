@@ -72,12 +72,17 @@ func (s *scriptedApprovalClient) askCount() int {
 	return s.count
 }
 
-// policySuspension builds the exported policy-gate suspension for a run.
+// policySuspension builds the exported policy-gate suspension for a run. It
+// carries an effect because the real gate always does: agent.approvalRequested
+// REQUIRES the field, so a stand-in that omitted it would model a middleware
+// that cannot exist — and the notification it produced would not validate.
 func policySuspension(tool, callID, args, argHash string) func(runID string) error {
 	return func(runID string) error {
 		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: tool, CallID: callID,
 			Arguments: args, ArgHash: argHash,
+			Effect:   content.EffectObserve,
+			Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
 		}}
 	}
 }
@@ -456,6 +461,8 @@ func TestAgentApproval_EgressFindingOverTheWire(t *testing.T) {
 			return &assistant.EgressRequestedError{Request: &assistant.EgressRequest{
 				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
 				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
+				Effect:   content.EffectObserve,
+				Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
 				Findings: []assistant.EgressFinding{{
 					Source: assistant.EgressFindingHeuristic, Kind: "openai-api-key",
 					Start: 11, End: 11 + len(secret),

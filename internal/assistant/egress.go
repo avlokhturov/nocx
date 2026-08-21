@@ -19,6 +19,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/secrets"
 )
 
@@ -80,6 +81,12 @@ type EgressRequest struct {
 	// the surface echoes it back on agent.approve so the decision names the
 	// exact proposal — the same hash the approval store keys.
 	ArgHash string `json:"argHash"`
+	// Effect and Resource are the policy gate's own words for the call the
+	// findings came out of. The egress surface ignores them — its answers
+	// are allow/deny, once — but the agent.approvalRequested notification is
+	// ONE shape whichever gate asked, and its schema requires the effect.
+	Effect   content.Effect      `json:"effect"`
+	Resource *content.GrantScope `json:"resource,omitempty"`
 	// Findings are what the surface shows: what was found and where.
 	Findings []EgressFinding `json:"findings"`
 	// WasError reports whether the findings are in an ERROR string the

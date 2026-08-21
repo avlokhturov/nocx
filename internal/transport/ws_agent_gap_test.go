@@ -249,6 +249,7 @@ func TestAgentAsk_DropCountSurvivesASuspension(t *testing.T) {
 		deltas: []string{"first"},
 		err: &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
 			RunID: "7", Attempt: 1, Tool: "readScreen", CallID: "c1", ArgHash: "h",
+			Effect: content.EffectObserve,
 		}},
 	}, approvals)
 	rc := gapRunContext()

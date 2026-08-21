@@ -215,15 +215,23 @@ type agentRunState struct {
 // gate asked, and the egress findings when the gate that asked was the
 // egress gate. Findings are facts, never the material.
 type agentApprovalRequested struct {
-	RunID     string                    `json:"runId"`
-	Attempt   int                       `json:"attempt"`
-	Tool      string                    `json:"tool"`
-	CallID    string                    `json:"callId"`
-	ArgHash   string                    `json:"argHash"`
-	Arguments string                    `json:"arguments"`
-	Reason    string                    `json:"reason"` // "policy" | "egress"
-	WasError  bool                      `json:"wasError,omitempty"`
-	Findings  []assistant.EgressFinding `json:"findings,omitempty"`
+	RunID     string `json:"runId"`
+	Attempt   int    `json:"attempt"`
+	Tool      string `json:"tool"`
+	CallID    string `json:"callId"`
+	ArgHash   string `json:"argHash"`
+	Arguments string `json:"arguments"`
+	Reason    string `json:"reason"` // "policy" | "egress"
+	// Effect is the effect class the gate decided on — the row a standing
+	// answer writes. It crosses the wire because the renderer must never
+	// derive an effect from a tool name (ADR-0028 decision 4); it is filled
+	// on BOTH arms, so the notification is one shape whichever gate asked.
+	Effect string `json:"effect"`
+	// Resource is what the gate matched the call against, omitted when the
+	// call named none — a fact for the person, never what an answer is over.
+	Resource *content.GrantScope       `json:"resource,omitempty"`
+	WasError bool                      `json:"wasError,omitempty"`
+	Findings []assistant.EgressFinding `json:"findings,omitempty"`
 }
 
 // approveParams is the agent.approve request (design §7.2): the full binding
@@ -808,9 +816,14 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	n := agentApprovalRequested{Reason: "policy"}
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
+		n.Effect, n.Resource = string(ap.Effect), ap.Resource
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
+		// The egress arm fills the same two fields off the same
+		// declaration: the surface ignores them here, but the wire is not
+		// two shapes and the schema requires the effect on both.
+		n.Effect, n.Resource = string(eg.Effect), eg.Resource
 	}
 	// The pending record is the wire's source of truth for criterion 7. The
 	// middleware records it at escalation in the real flow; the transport

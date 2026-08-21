@@ -42,6 +42,30 @@ export interface AgentApprovalRequested {
    */
   reason: 'policy' | 'egress'
   /**
+   * The effect class the policy gate decided on — the row a standing answer writes. Sent by the backend because the renderer must never derive an effect from a tool name (ADR-0028 decision 4).
+   */
+  effect:
+    | 'observe'
+    | 'mutate-reversible'
+    | 'mutate-destructive'
+    | 'privilege-change'
+    | 'disclose'
+    | 'cross-boundary'
+    | 'delegate'
+  /**
+   * The resource the gate matched the call against, or null when the call named none. A fact for the person reading the question; a standing answer is over the effect, never over this.
+   */
+  resource?: {
+    /**
+     * The resource kind, from the ledger's closed set.
+     */
+    kind: 'path' | 'session' | 'environment' | 'credential' | 'destination'
+    /**
+     * The resource's id.
+     */
+    id: string
+  } | null
+  /**
    * Egress only: the findings are in an ERROR string the tool returned rather than in its result — the surface reads the two differently.
    */
   wasError?: boolean

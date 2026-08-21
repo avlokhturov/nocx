@@ -91,6 +91,15 @@ type ApprovalRequest struct {
 	// the backend computes it once, and a changed argument must not resume
 	// under the old approval.
 	ArgHash string `json:"argHash"`
+	// Effect is the effect class the gate decided on — the row a standing
+	// answer writes. It is SENT rather than derived, because deriving it in
+	// the renderer would be a rule keyed by a tool name in everything but
+	// storage, which ADR-0028 decision 4 forbids.
+	Effect content.Effect `json:"effect"`
+	// Resource is what the gate matched the call against, or nil when the
+	// call named none. A fact for the person reading the question; a
+	// standing answer is over the effect, never over this.
+	Resource *content.GrantScope `json:"resource,omitempty"`
 	// EntryID is the ledger entry that recorded the proposal — what the
 	// approved call runs as a SUBSEQUENT attempt of (ADR-0020 decision 4).
 	// A carrier for the resume, never displayed.
@@ -265,8 +274,8 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			if m.approvals != nil && m.approvals.IsApproved(ap) {
 				break // the exact proposal was approved; execute it
 			}
-			tripLatch(ctx, &ApprovalRequestedError{Request: m.request(decl.Name, tCtx.CallID, rawArgs)})
-			return "", m.escalate(ctx, decl, tCtx.CallID, rawArgs)
+			tripLatch(ctx, &ApprovalRequestedError{Request: m.request(decl, tCtx.CallID, rawArgs, args)})
+			return "", m.escalate(ctx, decl, tCtx.CallID, rawArgs, args)
 		}
 
 		// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
@@ -282,7 +291,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// classifier is never silently skipped.
 		var classifierFact *classifierFact
 		if m.classifier != nil && !m.proposalApproved(decl.Name, tCtx.CallID, rawArgs) {
-			ask, fact, classifyErr := m.classifyProposal(ctx, decl, tCtx.CallID, rawArgs)
+			ask, fact, classifyErr := m.classifyProposal(ctx, decl, tCtx.CallID, rawArgs, args)
 			if classifyErr != nil {
 				// The classifier's INPUT gate could not see (the recognizer
 				// failed closed): nothing decides this call unseen and
@@ -369,7 +378,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 				// exact proposal through the existing approval machinery;
 				// the run is NOT failed — it is awaiting the decision the
 				// surface renders.
-				req := m.egressRequest(decl.Name, tCtx.CallID, rawArgs, egress, runErr != nil)
+				req := m.egressRequest(decl, tCtx.CallID, rawArgs, args, egress, runErr != nil)
 				if m.approvals != nil {
 					ap.EntryID = entryID
 					m.approvals.Request(ap)
@@ -491,13 +500,13 @@ func (m *policyMiddleware) decide(t agenttools.Tool, args map[string]any) policy
 // this check lets through can still be refused by the capability; a call it
 // refuses never reaches the capability.
 func (m *policyMiddleware) inScope(t agenttools.Tool, args map[string]any) bool {
-	if t.ResourceArg == "" {
+	named, declares := namedResource(t, args)
+	if !declares {
 		// The tool names no resource in its parameters; its scope is the
 		// grant's own scope for the kinds it declares.
 		return true
 	}
-	id, ok := args[t.ResourceArg].(string)
-	if !ok {
+	if named == nil {
 		return false // validation already required it; refuse to be sure
 	}
 	for _, s := range m.grant.Policy.RowScopes(t.Effect) {
@@ -508,16 +517,57 @@ func (m *policyMiddleware) inScope(t agenttools.Tool, args map[string]any) bool 
 		// by the capability; a call it refuses never reaches it.
 		switch s.Kind {
 		case content.ResourcePath:
-			if pathUnder(id, s.ID) {
+			if pathUnder(named.ID, s.ID) {
 				return true
 			}
 		case content.ResourceSession:
-			if id == s.ID {
+			if named.ID == s.ID {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// namedResource is the ONE derivation of "which argument names the resource
+// this call touches, and what did the call spell there". Two callers ask it:
+// the scope check, which compares the answer against the row's scopes, and
+// the approval ask, which shows the answer to the person. They were written
+// as one deliberately — a second derivation of a single question agrees
+// everywhere anyone looks and disagrees somewhere nobody did, which is the
+// defect AGENTS.md spends a section on.
+//
+// declares is false only when the tool names no resource in its parameters
+// at ALL: git.status's repository IS the grant's path scope, so there is
+// nothing to compare and nothing to show. It is true with a nil scope when
+// the declared argument is absent or not a string — validation already
+// required it, so the scope check refuses rather than guessing, and the ask
+// shows no resource. The kind is the DECLARATION's, never inferred from the
+// value: a path and a session id are both strings.
+func namedResource(t agenttools.Tool, args map[string]any) (named *content.GrantScope, declares bool) {
+	if t.ResourceArg == "" {
+		return nil, false
+	}
+	id, ok := args[t.ResourceArg].(string)
+	if !ok {
+		return nil, true
+	}
+	var kind content.ResourceKind
+	if len(t.Resources) > 0 {
+		kind = t.Resources[0]
+	}
+	return &content.GrantScope{Kind: kind, ID: id}, true
+}
+
+// matchedResource is what the ask carries: the resource the call named, or
+// nil when it named none. The wire declares kind and id both non-empty, so a
+// half-named resource is no resource — never a scope with an empty half.
+func matchedResource(t agenttools.Tool, args map[string]any) *content.GrantScope {
+	named, _ := namedResource(t, args)
+	if named == nil || named.Kind == "" || named.ID == "" {
+		return nil
+	}
+	return named
 }
 
 // pathUnder is the lexical containment test of the policy's scope check: the
@@ -546,7 +596,7 @@ func pathUnder(path, scope string) bool {
 // same intent, never a new intent). The persisted interrupt state is the
 // proposal itself: the resume re-runs the pipeline and the approval record
 // decides whether the exact proposal may execute.
-func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string) error {
+func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any) error {
 	ap := m.proposal(decl.Name, callID, rawArgs)
 	var entryID string
 	if m.ledger != nil {
@@ -559,7 +609,7 @@ func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, c
 		}
 		entryID = id
 	}
-	req := m.request(decl.Name, callID, rawArgs)
+	req := m.request(decl, callID, rawArgs, args)
 	req.ArgHash = ap.ArgHash
 	req.EntryID = entryID
 	if m.approvals != nil {
@@ -596,13 +646,20 @@ func (m *policyMiddleware) escalateClassifier(ctx context.Context, decl agenttoo
 	return compose.StatefulInterrupt(ctx, ask, ask)
 }
 
-func (m *policyMiddleware) request(toolName, callID, rawArgs string) *ApprovalRequest {
+// request builds the ask BOTH escalation sites send — the policy arm and the
+// classifier arm alike. It takes the DECLARATION, not the tool name, because
+// the effect and the resource come off the declaration the gate just decided
+// with: one builder is what keeps a classifier ask from reaching the surface
+// without an effect, which the notification's schema requires.
+func (m *policyMiddleware) request(decl agenttools.Tool, callID, rawArgs string, args map[string]any) *ApprovalRequest {
 	return &ApprovalRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
-		Tool:      toolName,
+		Tool:      decl.Name,
 		CallID:    callID,
 		Arguments: rawArgs,
+		Effect:    decl.Effect,
+		Resource:  matchedResource(decl, args),
 	}
 }
 
@@ -659,14 +716,21 @@ func (m *policyMiddleware) screenResult(ctx context.Context, out string, runErr 
 	return findings, nil
 }
 
-func (m *policyMiddleware) egressRequest(toolName, callID, rawArgs string, findings []EgressFinding, wasError bool) *EgressRequest {
+// egressRequest builds the egress ask. It carries the effect and the resource
+// too, off the same declaration and by the same derivation as a policy ask:
+// the surface offers only allow/deny once here, but the notification is ONE
+// shape on the wire, and a required field absent on one path is how a schema
+// stops being a contract.
+func (m *policyMiddleware) egressRequest(decl agenttools.Tool, callID, rawArgs string, args map[string]any, findings []EgressFinding, wasError bool) *EgressRequest {
 	return &EgressRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
-		Tool:      toolName,
+		Tool:      decl.Name,
 		CallID:    callID,
 		Arguments: rawArgs,
 		ArgHash:   canonicalArgHash(rawArgs),
+		Effect:    decl.Effect,
+		Resource:  matchedResource(decl, args),
 		Findings:  findings,
 		WasError:  wasError,
 	}
