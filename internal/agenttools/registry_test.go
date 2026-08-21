@@ -473,3 +473,57 @@ func TestLiveEffects_NoDeclarationsIsAnEmptyListNotANull(t *testing.T) {
 		t.Fatalf("marshalled %s, want []", raw)
 	}
 }
+
+// TestDeclarationsCarryADescription is the "a fifth tool cannot be added
+// without a sentence" assertion, walked over the real table: the description
+// is what the model reads to decide whether a tool is the one it wants, and
+// a row without one offers it a name and a schema and nothing else. It is
+// checked here AND in validateDeclaration, so a row missing it fails the
+// suite by name and also never assembles into a set anybody could be
+// offered.
+func TestDeclarationsCarryADescription(t *testing.T) {
+	for _, d := range declarations {
+		if strings.TrimSpace(d.Description) == "" {
+			t.Errorf("declaration %q carries no description: the model would be offered a name and a schema and no sentence", d.Name)
+		}
+	}
+}
+
+// TestDeclarationsDescribeInTheProductsWords is the other half: the sentence
+// is written for the model, so it must not be our authority vocabulary. The
+// effect lattice (ADR-0020) says what the policy decides on; it says nothing
+// about what a tool does, and it was all the model had to go on before this.
+func TestDeclarationsDescribeInTheProductsWords(t *testing.T) {
+	jargon := []string{"effect", "InGo", "InRenderer"}
+	for _, d := range declarations {
+		low := strings.ToLower(d.Description)
+		for _, word := range jargon {
+			if strings.Contains(low, strings.ToLower(word)) {
+				t.Errorf("declaration %q describes itself with %q: %s", d.Name, word, d.Description)
+			}
+		}
+	}
+}
+
+// TestAssemble_RejectsDeclarationWithoutDescription is the enforcement end
+// of the same rule: a row with no description is an unfinished declaration,
+// refused at assembly exactly as a row with no params path is, named in the
+// error and absent from the set.
+func TestAssemble_RejectsDeclarationWithoutDescription(t *testing.T) {
+	reg, err := assemble(schemaFS(t, map[string]string{"x.schema.json": filesReadSchema}), []Declaration{{
+		Name:      "x",
+		Effect:    content.EffectObserve,
+		Resources: []content.ResourceKind{content.ResourcePath},
+		Executes:  InGo,
+		Params:    "x.schema.json",
+	}})
+	if err == nil {
+		t.Fatal("assemble succeeded on a row with no description, want an error")
+	}
+	if !strings.Contains(err.Error(), "description") {
+		t.Fatalf("error %q does not name the missing description", err)
+	}
+	if len(reg.tools) != 0 {
+		t.Fatalf("assembled %v, want the undescribed tool absent from the set", toolNames(reg.tools))
+	}
+}
