@@ -11,11 +11,12 @@
  * and the state sentence carries the same meaning the ask transaction
  * refuses on (deleted endpoint, removed model).
  *
- * The line's rule changed in nocx-rikz5 and these tests are what hold it:
- * the sentence exists to say what the two selects CANNOT. A role that names
- * its own endpoint and model gets NO line, because the selects already show
- * both. A role resolving through the default gets one, because its select
- * reads "As default" and cannot name the pair.
+ * The line's rule is what these tests hold: it speaks ONLY to refuse. A role
+ * that resolves — through its own pair or through the default — gets no line
+ * at all, because the page already says both: the two selects show an own
+ * pair, and the Default model control above shows the pair "As default"
+ * reads through. Repeating either under every role was noise the owner
+ * struck (nocx-rikz5). What remains is the vocabulary the ask refuses on.
  */
 import { describe, it, expect, vi, afterEach, type MockInstance } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
@@ -181,7 +182,7 @@ describe('the closed role set is visible', () => {
 describe('roleStateLine — the sentence the row and the backend share', () => {
   const eps = [ep('e1', 'OpenAI', ['gpt-4o', 'gpt-4o-mini']), ep('e2', 'Local', ['qwen3'])]
 
-  it('says NOTHING for a role that names its own resolvable pair — the two selects already show it', () => {
+  it('says nothing for a role that names its own resolvable pair — the two selects already show it', () => {
     expect(roleStateLine(role('answering', 'e2', 'qwen3'), null, eps)).toBeNull()
     // And still nothing when a default exists: the role does not use it.
     expect(
@@ -194,14 +195,10 @@ describe('roleStateLine — the sentence the row and the backend share', () => {
     expect(line?.tone).toBe('warning')
   })
 
-  it('names the pair when the role resolves THROUGH the default, which the select cannot', () => {
-    const line = roleStateLine(
-      role('answering', null, null),
-      { endpointId: 'e2', model: 'qwen3' },
-      eps,
-    )
-    expect(line?.tone).toBe('ok')
-    expect(line?.text).toBe('As default: Local · qwen3')
+  it('says NOTHING for a role that resolves through the default — the Default model control names the pair once', () => {
+    expect(
+      roleStateLine(role('answering', null, null), { endpointId: 'e2', model: 'qwen3' }, eps),
+    ).toBeNull()
   })
 
   it('a deleted endpoint is an error that says so — never a hop to a neighbour', () => {
@@ -350,9 +347,10 @@ describe('the default model — chosen here, and read through by every role that
     await vi.waitFor(() => expect(defEndpoint.value).toBe('e1'))
     expect(defModel.value).toBe('m-a')
     // ...and every role with no pair of its own now resolves through it and
-    // names the pair, which its own two selects cannot.
+    // falls SILENT: the warning that it could not be used is gone, and the
+    // pair is named once, by the control above, not again under each row.
     for (const row of roleRows(container)) {
-      expect(text(row)).toContain('As default: openrouter · m-a')
+      expect(row.querySelector('.roles-role__state')).toBeNull()
     }
     expect(sent.filter((s) => s.method === 'roles.setDefault')).toEqual([
       { method: 'roles.setDefault', params: { endpointId: 'e1', model: 'm-a' } },
@@ -407,6 +405,7 @@ describe('the default model — chosen here, and read through by every role that
     // The page never shows a default the store did not take.
     await vi.waitFor(() => expect(defEndpoint.value).toBe('e1'))
     expect(defModel.value).toBe('m-a')
-    expect(text(roleRows(container)[0])).toContain('As default: openrouter · m-a')
+    // And the role still resolves through it, so it still says nothing.
+    expect(roleRows(container)[0].querySelector('.roles-role__state')).toBeNull()
   })
 })

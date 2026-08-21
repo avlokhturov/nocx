@@ -48,16 +48,12 @@
   color: var(--color-text-muted);
 }
 
-/* The state sentence: the kit's StatusDot + text, the text painted by the
+/* The refusal sentence: the kit's StatusDot + text, the text painted by the
    same tone the dot carries. A sentence without its meaning is decoration.
-   It is ABSENT, not empty, on a role whose own pair resolves — the two
-   selects above it already say the pair, so there is nothing to lay out. */
+   It is ABSENT, not empty, whenever the role resolves — by its own pair or
+   through the default — so there is no `ok` tone here to paint. */
 .roles-role__state {
   font-size: var(--font-size-sm);
-}
-
-.roles-role__state[data-tone='ok'] {
-  color: var(--color-success);
 }
 
 .roles-role__state[data-tone='warning'] {

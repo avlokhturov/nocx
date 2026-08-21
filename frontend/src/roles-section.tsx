@@ -73,20 +73,24 @@ const ROLE_DESCRIPTION: Record<string, string> = {
 const AS_DEFAULT = 'As default'
 
 /**
- * The tone + sentence of one role's resolution, or NULL for silence.
+ * The tone + sentence of one role's REFUSAL, or NULL for silence.
  *
- * The line exists to say what the two selects CANNOT (bead nocx-rikz5).
- * When a role names its own endpoint and model, the selects already show
- * both, and a sentence repeating them is noise — so there is no line at
- * all. The line speaks only when resolution goes somewhere the controls do
- * not show: through the default (the select reads "As default" and cannot
- * name a pair), or nowhere, in which case it names the rung that failed.
+ * The line speaks only when the role does not resolve (bead nocx-rikz5).
+ * Everything a working role could say, the page already says: an own pair
+ * is shown by the role's two selects, and the pair "As default" reads
+ * through is named once by the Default model control at the top. A line
+ * repeating either is noise — the owner struck a green "As default: <ep> ·
+ * <model>" that restated the control above it under every role.
+ *
+ * So there are exactly three sentences left and all three are failures:
+ * nothing assigned anywhere, an endpoint that is gone, a model that is no
+ * longer offered.
  *
  * This EXTENDS the one resolver rather than adding a second beside it: the
  * page and the ask may never grow two answers to "what does this role
  * mean", which is why this function was written pure and unit-tested in the
- * first place. The return type gains `| null` because the silence is a
- * value, not an empty string — an empty string still renders a dot.
+ * first place. The return type is `| null` because the silence is a value,
+ * not an empty string — an empty string still renders a dot.
  */
 export function roleStateLine(
   row: WireRole,
@@ -101,31 +105,10 @@ export function roleStateLine(
   if (!def) {
     return { tone: 'warning', text: 'No model assigned — the role cannot be used until it is' }
   }
-  const broken = brokenLine(def.endpointId, def.model, endpoints)
-  if (broken) return broken
-  const resolved = resolvePair(def.endpointId, def.model, endpoints)
-  if (!resolved) {
-    // Unreachable: brokenLine returns null only when both halves resolve.
-    // Stated rather than asserted, because a `!` here would be a claim the
-    // type system cannot check and the next reader cannot verify.
-    return { tone: 'warning', text: 'No model assigned — the role cannot be used until it is' }
-  }
-  return { tone: 'ok', text: `${AS_DEFAULT}: ${resolved.endpoint} · ${resolved.model}` }
-}
-
-/** The display names of a stored pair, or null when either half is gone.
- *  One owner of the join, so the line and any future caller cannot disagree
- *  about which endpoint and which alias a pair names. */
-function resolvePair(
-  endpointId: string,
-  modelName: string,
-  endpoints: Endpoint[],
-): { endpoint: string; model: string } | null {
-  const ep = endpoints.find((e) => e.id === endpointId)
-  if (!ep) return null
-  const model = ep.models.find((m) => m.name === modelName)
-  if (!model) return null
-  return { endpoint: ep.name, model: model.alias ?? model.name }
+  // Resolves through the default, or names the rung of it that failed. A
+  // healthy default is silent here: the control above it already named the
+  // pair, and saying it again under every role was what got struck.
+  return brokenLine(def.endpointId, def.model, endpoints)
 }
 
 /** The two refusals a stored pair can carry — the same two profile.ResolveRole
@@ -385,8 +368,9 @@ export function RolesSection(props: RolesSectionProps) {
               />
             </label>
           </div>
-          {/* Silence is a state: a role whose own pair resolves says nothing
-              here, because the two selects above already said it. */}
+          {/* Silence is a state, and it is the normal one: a role that
+              resolves — its own pair, or the default — says nothing here.
+              This line only ever refuses. */}
           <Show when={line()}>
             {(l) => (
               <div class="roles-role__state" data-tone={l().tone}>

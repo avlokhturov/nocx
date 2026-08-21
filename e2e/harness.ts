@@ -627,13 +627,15 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
     await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
   }
 
-  // The row's own word for "the key landed": the badge renders exactly when
-  // the record's credential reference is set (endpoints-section renderRow),
-  // so it is the surface's account of the save rather than the test's.
-  await baseExpect(page.locator('.ui-collection-row').filter({ hasText: spec.name })).toContainText(
-    'Key saved',
-    { timeout: 10_000 },
-  )
+  // The record exists — which is all this helper can honestly claim, and all
+  // its callers need before going on. It used to wait for a green "Key
+  // saved" on the row and read that as proof the key had landed; a caption
+  // is not evidence of a secret, and the owner struck the caption anyway.
+  // Whether the KEY landed is proved where it can be: a probe through the
+  // fake endpoint, which records the material it was sent.
+  await baseExpect(page.locator('.ui-collection-row').filter({ hasText: spec.name })).toBeVisible({
+    timeout: 10_000,
+  })
 }
 
 /**
@@ -645,10 +647,16 @@ export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promis
  * the thing under test. It waits for the control, not for a duration.
  *
  * Two selects, endpoint first, because a half pair is never written
- * (roles-section onDefaultEndpointChange). The confirmation is the ANSWERING
- * ROW's own sentence — "As default: <endpoint> · <model>" — which is the
- * product saying the default resolved, not the test reading back what it
- * typed.
+ * (roles-section onDefaultEndpointChange).
+ *
+ * The confirmation is the control's OWN selects, and that is not the test
+ * reading back what it typed: every write re-adopts the table the backend
+ * returned (roles-section `adopt`), so a select holding the pair is the
+ * store's answer, never the draft. The answering row used to carry a green
+ * "As default: …" sentence and this waited on that; the owner struck it as
+ * a restatement of the control above, and a spec that waits on a line the
+ * product no longer has is the defect AGENTS.md names, not a regression to
+ * revert.
  */
 export async function setDefaultModel(
   page: Page,
@@ -661,11 +669,12 @@ export async function setDefaultModel(
   const modelSelect = control.locator('select').nth(1)
   await baseExpect(modelSelect).toBeEnabled()
   await modelSelect.selectOption({ label: model })
+  await baseExpect(control.locator('select').first()).toHaveValue(/.+/, { timeout: 10_000 })
+  await baseExpect(modelSelect).toHaveValue(/.+/, { timeout: 10_000 })
+  // And the answering role, which has no pair of its own, stops refusing:
+  // its warning line is gone because the default now carries it.
   const answering = page.locator('.roles-role').filter({ hasText: 'Answering' })
-  await baseExpect(answering.locator('.roles-role__state')).toContainText(
-    `As default: ${endpointName} · ${model}`,
-    { timeout: 10_000 },
-  )
+  await baseExpect(answering.locator('.roles-role__state')).toHaveCount(0, { timeout: 10_000 })
 }
 
 export class VaultBackend {

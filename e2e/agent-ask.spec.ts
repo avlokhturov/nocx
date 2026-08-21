@@ -50,7 +50,8 @@
  * RPC errors, so the wrapper could not tell "the vault needs setup" from a
  * disk error and the save died in a toast. The first test drives the
  * save-first path — the owner's exact repro, a fresh home with no vault and
- * a key typed into the form — and the row must read "Key saved" afterwards.
+ * a key typed into the form — and the endpoint must then actually answer,
+ * which is the only proof the key landed.
  * The connections path asks at the moment a secret is created (nocx-v64o);
  * the endpoints path now does the same.
  * The fake model endpoint (e2e/fake-openai.ts) is scripted and held open by
@@ -366,10 +367,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
     await expect(setupSheet).not.toBeVisible({ timeout: 10_000 })
 
-    // The deferred save ran with the vault now existing: the endpoint dialog
-    // closes and the SAVED ROW carries the key — the row's own word for it
-    // (the "Key saved" badge renders exactly when the record's credential
-    // reference is set, endpoints-section.tsx renderRow).
+    // The deferred save ran with the vault now existing: the dialog closes
+    // and the record is in the list. That the KEY landed is not asserted
+    // from any caption — it is proved below, where this same endpoint
+    // answers a real question through the fake.
     await expect(dialog).not.toBeVisible({ timeout: 10_000 })
     // The record landed and the row says so. The page deliberately shows no
     // assistant-readiness badge: readiness belongs on the ask chip, where a
@@ -379,7 +380,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // root: this file creates a second endpoint later, and a page-wide
     // contains would then pass on the wrong row.
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
-    await expect(savedRow).toContainText('Key saved', { timeout: 10_000 })
+    await expect(savedRow).toBeVisible({ timeout: 10_000 })
 
     // ── The answering role (nocx-e6kn2): the ask resolves the role to
     // its assigned (endpoint, model) pair, so the fresh endpoint is not
@@ -744,12 +745,14 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(unlockSheet).not.toBeVisible({ timeout: 10_000 })
 
     // The re-sent request carried the key: the save waits for it, so the
-    // dialog closes only after the record exists — and the SAVED ROW says
-    // so. Before the closeDialog fix this closed and toasted "Saved" while
-    // the create was still in flight, leaving no row and no error.
+    // dialog closes only after the record exists. Before the closeDialog fix
+    // this closed and toasted "Saved" while the create was still in flight,
+    // leaving no row and no error — so the row's EXISTENCE is the assertion,
+    // and the key itself is proved two steps down, where the Test resolves
+    // the STORED credential and the fake reports the material it received.
     await expect(dialog).not.toBeVisible({ timeout: 10_000 })
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: name })
-    await expect(savedRow).toContainText('Key saved', { timeout: 10_000 })
+    await expect(savedRow).toBeVisible({ timeout: 10_000 })
     // The stored material is the key the form was filled with — the Test
     // button resolves the STORED credential and the fake records it.
     await page.getByRole('button', { name: `Edit ${name}` }).click()
