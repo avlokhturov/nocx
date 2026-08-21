@@ -60,7 +60,14 @@ export function AgentPolicySection(props: AgentPolicySectionProps) {
   onMount(() => {
     void props.client
       .get()
-      .then(setMatrix)
+      // `.then(setMatrix)` was here and TYPE-CHECKED while being wrong:
+      // policy.get now answers a PolicyView, and Solid's overloaded Setter
+      // accepts any non-function value, so tsc saw nothing while the page
+      // would have stored {matrix, live} where a matrix belongs. Name the
+      // field. `live` is read in the task that redraws this page (the rows
+      // no declared tool carries stop being offered as equals); until then
+      // it is deliberately unused rather than silently dropped.
+      .then((view) => setMatrix(view.matrix))
       .catch((e) => setLoadError(e instanceof Error ? e.message : String(e)))
   })
 

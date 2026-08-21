@@ -10,7 +10,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent, within } from '@solidjs/testing-library'
 import { Dispatcher } from './dispatcher'
-import { PolicyClient, type PolicyMatrix } from './policy-client'
+import { PolicyClient, type EffectKey, type PolicyMatrix } from './policy-client'
 import { AgentPolicySection } from './agent-policy-section'
 import { clearToasts, toasts } from './ui'
 
@@ -35,10 +35,15 @@ function mount(client: PolicyClient): HTMLElement {
   return container
 }
 
+/** The two effect classes a declared tool actually carries today
+ *  (agenttools.LiveEffects). These fixtures name a matrix, so the view they
+ *  stand in for is that matrix plus the live list the backend now sends. */
+const LIVE: EffectKey[] = ['observe', 'mutate-destructive']
+
 function mockedClient(overrides?: { get?: PolicyMatrix; setError?: Error }): PolicyClient {
   const client = new PolicyClient(new Dispatcher())
   if (overrides?.get) {
-    vi.spyOn(client, 'get').mockResolvedValue(overrides.get)
+    vi.spyOn(client, 'get').mockResolvedValue({ matrix: overrides.get, live: LIVE })
   }
   if (overrides?.setError) {
     vi.spyOn(client, 'set').mockRejectedValue(overrides.setError)
@@ -93,7 +98,7 @@ describe('agent policy surface', () => {
 
   it('changes a decision and saves the matrix', async () => {
     const client = new PolicyClient(new Dispatcher())
-    vi.spyOn(client, 'get').mockResolvedValue(LOADED)
+    vi.spyOn(client, 'get').mockResolvedValue({ matrix: LOADED, live: LIVE })
     const setSpy = vi.spyOn(client, 'set').mockResolvedValue({ ok: true })
     const container = mount(client)
 
@@ -115,7 +120,7 @@ describe('agent policy surface', () => {
 
   it('adds and removes a scope on a row', async () => {
     const client = new PolicyClient(new Dispatcher())
-    vi.spyOn(client, 'get').mockResolvedValue(LOADED)
+    vi.spyOn(client, 'get').mockResolvedValue({ matrix: LOADED, live: LIVE })
     const setSpy = vi.spyOn(client, 'set').mockResolvedValue({ ok: true })
     const container = mount(client)
 
@@ -139,7 +144,7 @@ describe('agent policy surface', () => {
 
   it('offers no tool scope kind — the grant never names tools', async () => {
     const client = new PolicyClient(new Dispatcher())
-    vi.spyOn(client, 'get').mockResolvedValue(LOADED)
+    vi.spyOn(client, 'get').mockResolvedValue({ matrix: LOADED, live: LIVE })
     const container = mount(client)
 
     const observe = container.querySelector('[data-effect="observe"]') as HTMLElement
@@ -156,7 +161,7 @@ describe('agent policy surface', () => {
 
   it('surfaces a refused save as a danger toast', async () => {
     const client = new PolicyClient(new Dispatcher())
-    vi.spyOn(client, 'get').mockResolvedValue(LOADED)
+    vi.spyOn(client, 'get').mockResolvedValue({ matrix: LOADED, live: LIVE })
     vi.spyOn(client, 'set').mockRejectedValue(new Error('policy: unparseable'))
     const container = mount(client)
 

@@ -172,6 +172,16 @@ type WSServer struct {
 	// model is offered no tools — the state before readScreen (see
 	// runGrantFor).
 	agentPolicy assistant.GlobalPolicy
+	// liveEffects is which of that policy's seven rows govern anything at
+	// all: the effect classes at least one DECLARED tool carries. It is
+	// static, derived at build time from the tool declaration table, and it
+	// arrives from the composition root for the same reason every other
+	// module does (AGENTS.md: interface-first + DI, wired at ONE root) —
+	// reaching into the tool registry from a handler would make this the
+	// single place the transport knows a concrete tools package. Unset, the
+	// settings surface is told no row is live, which is a visible degrade
+	// rather than a silent claim that all seven govern something.
+	liveEffects []content.Effect
 
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
@@ -747,6 +757,20 @@ func WithAgentKnownMaterial(km assistant.KnownMaterial) WSServerOption {
 // nil/unset, ask runs carry no grant and the model is offered no tools.
 func WithAgentPolicy(p assistant.GlobalPolicy) WSServerOption {
 	return func(ws *WSServer) { ws.agentPolicy = p }
+}
+
+// WithLiveEffects names which effect classes a declared tool actually
+// carries — policy.get's "live". The value is agenttools.LiveEffects(), read
+// at the composition root beside WithAgentPolicy: the policy says what a run
+// MAY do, this says which of those rows anything can do at all, and the
+// settings surface needs both to avoid drawing five controls that govern
+// nothing as equals to the two that do.
+//
+// Passed in rather than reached for. It is static data off a compile-time
+// table, so the root is where it becomes a dependency — the same reason
+// WithBuildInfo reads internal/version there instead of in a handler.
+func WithLiveEffects(live []content.Effect) WSServerOption {
+	return func(ws *WSServer) { ws.liveEffects = live }
 }
 
 // WithAssistantProbeStore attaches the process-lifetime store of the last

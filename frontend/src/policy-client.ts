@@ -68,6 +68,25 @@ export type EffectKey = (typeof EFFECT_KEYS)[number]
 /** The keyed matrix the wire carries. */
 export type PolicyMatrix = Record<EffectKey, PolicyRow>
 
+/**
+ * What a read of the policy answers: the matrix, and which of its rows
+ * govern anything at all.
+ *
+ * `live` is the backend's answer and can only be the backend's. Seven rows
+ * are drawn and today only two have a declared tool behind them; working
+ * that out here would mean mapping a tool name to an effect, which is the
+ * one thing no configuration path may do (ADR-0028 decision 4). So the
+ * registry's declaration table says it, once, on the wire — and a tool
+ * declared tomorrow changes this list with no renderer edit at all.
+ */
+export interface PolicyView {
+  matrix: PolicyMatrix
+  /** The effect classes a declared tool carries, in the lattice's order. A
+   *  row outside this list governs nothing yet, and the page says so rather
+   *  than offering it as an equal to the rows that do. */
+  live: EffectKey[]
+}
+
 /** A fresh all-ask matrix — what the backend serves when nothing is set. */
 export function blankPolicy(): PolicyMatrix {
   const m = {} as PolicyMatrix
@@ -93,8 +112,10 @@ function toMatrix(w: WirePolicy): PolicyMatrix {
 export class PolicyClient {
   constructor(private readonly dispatcher: Dispatcher) {}
 
-  get(): Promise<PolicyMatrix> {
-    return this.dispatcher.call<PolicyGet>('policy.get', {}).then((r) => toMatrix(r.policy))
+  get(): Promise<PolicyView> {
+    return this.dispatcher
+      .call<PolicyGet>('policy.get', {})
+      .then((r) => ({ matrix: toMatrix(r.policy), live: r.live }))
   }
 
   set(policy: PolicyMatrix): Promise<PolicySet> {

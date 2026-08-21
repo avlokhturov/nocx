@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
@@ -825,6 +826,14 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithAgentPolicy(policyStore),
+		// Which of that policy's seven rows govern anything at all: the
+		// effect classes at least one DECLARED tool carries. Read HERE, off
+		// the tool declaration table, for the same reason WithBuildInfo
+		// reads internal/version here — it is compile-time state, and the
+		// composition root is where state becomes a dependency. The
+		// settings surface needs it so five controls that govern nothing do
+		// not look like the two that do.
+		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
 		transport.WithHistoryStatus(historyStatus),

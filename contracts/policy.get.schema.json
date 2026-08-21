@@ -4,8 +4,25 @@
   "title": "PolicyGet",
   "description": "Result of the policy.get JSON-RPC method (ADR-0020 §7 as amended 2026-08-16 — amendment proposed, awaiting owner approval): the ONE global agent policy, resolved (a workspace override will participate in the same content.ResolvePolicy the run mint uses). The policy is a MATRIX: one row per effect class of decision 6, each row one of permit | ask | refuse plus the resource scopes it applies within. The wire always carries all seven rows with their EFFECTIVE decisions (an unstated row decides ask) and a scopes array, never a null — a renderer can draw the whole matrix from the bytes.",
   "type": "object",
-  "required": ["policy"],
+  "additionalProperties": false,
+  "required": ["policy", "live"],
   "properties": {
+    "live": {
+      "description": "The effect classes at least one DECLARED tool carries — the registry's declaration table is the only thing that knows. A row outside this list governs nothing yet, and the surface says so rather than offering it as an equal to the rows that do. Always an array, never a null; deduplicated, in the lattice's order.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "observe",
+          "mutate-reversible",
+          "mutate-destructive",
+          "privilege-change",
+          "disclose",
+          "cross-boundary",
+          "delegate"
+        ]
+      }
+    },
     "policy": {
       "type": "object",
       "additionalProperties": false,

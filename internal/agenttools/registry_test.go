@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -386,4 +387,89 @@ func toolNames(tools []Tool) []string {
 		names[i] = t.Name
 	}
 	return names
+}
+
+// ── LiveEffects: which effect classes a declared tool actually carries ────
+
+// The settings surface draws seven effect rows and only some of them govern
+// anything: a row no declared tool carries is a control over nothing. The
+// declaration table is the only place that knows which is which, so these
+// tests pin that it is DERIVED from the table and not a second list kept in
+// step by hand.
+
+// TestLiveEffects_IsWhatTheDeclarationsCarry pins today's answer. Three of
+// the four rows carry observe and one carries mutate-destructive, so the
+// live set is those two — deduplicated, and in the lattice's order.
+func TestLiveEffects_IsWhatTheDeclarationsCarry(t *testing.T) {
+	got := LiveEffects()
+	want := []content.Effect{content.EffectObserve, content.EffectMutateDestructive}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("LiveEffects() = %v, want %v", got, want)
+	}
+}
+
+// TestLiveEffects_ADeclarationIsTheOnlyEditNeeded is the test that stops the
+// list becoming a hand-maintained copy: adding a row that carries disclose
+// makes disclose live, with no other edit anywhere.
+func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
+	withDisclose := append(append([]Declaration{}, declarations...), Declaration{
+		Name:      "secrets.reveal",
+		Effect:    content.EffectDisclose,
+		Resources: []content.ResourceKind{content.ResourceCredential},
+		Executes:  InGo,
+		Params:    "secrets.reveal.schema.json",
+	})
+	got := liveEffects(withDisclose)
+	want := []content.Effect{
+		content.EffectObserve,
+		content.EffectMutateDestructive,
+		content.EffectDisclose,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("liveEffects(+disclose) = %v, want %v", got, want)
+	}
+}
+
+// TestLiveEffects_IsTheLatticesOrderNotTheTables distinguishes the two
+// orderings the previous test cannot: mutate-reversible is declared LAST and
+// must come out SECOND, because the wire's order is the lattice's (the order
+// the surface draws its rows in), never the order somebody happened to add
+// tools in.
+func TestLiveEffects_IsTheLatticesOrderNotTheTables(t *testing.T) {
+	withReversible := append(append([]Declaration{}, declarations...), Declaration{
+		Name:      "files.write",
+		Effect:    content.EffectMutateReversible,
+		Resources: []content.ResourceKind{content.ResourcePath},
+		Executes:  InGo,
+		Params:    "files.write.schema.json",
+	})
+	got := liveEffects(withReversible)
+	want := []content.Effect{
+		content.EffectObserve,
+		content.EffectMutateReversible,
+		content.EffectMutateDestructive,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("liveEffects(+mutate-reversible) = %v, want %v (table order, not the lattice's)", got, want)
+	}
+}
+
+// TestLiveEffects_NoDeclarationsIsAnEmptyListNotANull: the wire declares live
+// as an array, so the no-tools answer must marshal as [] — a null would fail
+// the contract at the one moment the surface most needs a well-formed answer.
+func TestLiveEffects_NoDeclarationsIsAnEmptyListNotANull(t *testing.T) {
+	got := liveEffects(nil)
+	if got == nil {
+		t.Fatal("liveEffects(nil) = nil, want an empty slice: a null would not be an array on the wire")
+	}
+	if len(got) != 0 {
+		t.Fatalf("liveEffects(nil) = %v, want empty", got)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(raw) != "[]" {
+		t.Fatalf("marshalled %s, want []", raw)
+	}
 }

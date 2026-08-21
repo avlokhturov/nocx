@@ -256,3 +256,42 @@ func (r Registry) Lookup(name string) (Tool, bool) {
 func (r Registry) All() []Tool {
 	return r.tools
 }
+
+// LiveEffects is the set of effect classes at least one DECLARED tool
+// carries, deduplicated, in the lattice's canonical order. Today: observe
+// and mutate-destructive — the other five rows of the policy matrix have no
+// tool behind them at all.
+//
+// The settings surface needs this and cannot derive it: five controls that
+// govern nothing must not look like the two that do, and only the
+// declaration table knows which is which. It goes on the wire (policy.get's
+// "live") for exactly that reason.
+//
+// It reads the TABLE, not an assembled Registry, and the difference is
+// deliberate. Assembly can drop a row whose params schema did not reach the
+// binary — a build defect the composition root already fails loudly on
+// (assistant.newClient refuses an empty set) — and "this row governs
+// nothing" is a fact about what has been declared, not about which files
+// shipped. A package-level answer is also the only one the transport can ask
+// for without a registry of its own beside the assistant's, which would be a
+// second composition root for one table.
+func LiveEffects() []content.Effect {
+	return liveEffects(declarations)
+}
+
+func liveEffects(decls []Declaration) []content.Effect {
+	carried := make(map[content.Effect]bool, len(decls))
+	for _, d := range decls {
+		carried[d.Effect] = true
+	}
+	// Iterating the lattice rather than the table gives the canonical order
+	// and the deduplication in one pass, and makes an effect no member of
+	// allEffects covers unrepresentable here.
+	out := make([]content.Effect, 0, len(allEffects))
+	for _, e := range allEffects {
+		if carried[e] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
