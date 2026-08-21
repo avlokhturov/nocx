@@ -280,14 +280,16 @@ func declaredTools(permitted []agenttools.Tool) ([]tool.BaseTool, error) {
 	return out, nil
 }
 
-// toolDescription derives the model-facing description from the declaration
-// itself — one vocabulary, never a second one that can drift from the row.
+// toolDescription is the declaration's own sentence, unchanged. It used to
+// render the ADR-0020 lattice — "run: effect mutate-destructive over
+// session, executes InRenderer" — which is our vocabulary for AUTHORITY: it
+// says who may do a thing and nothing whatever about what the thing does,
+// and it was all the model had to go on. The row now carries a sentence
+// written for the model, so there is nothing left to derive here; the
+// effect and resource facts stay on the row for the consumers that decide
+// on them (the policy, the middleware), which is the point of the split.
 func toolDescription(t agenttools.Tool) string {
-	kinds := make([]string, 0, len(t.Resources))
-	for _, k := range t.Resources {
-		kinds = append(kinds, string(k))
-	}
-	return fmt.Sprintf("%s: effect %s over %s, executes %s", t.Name, t.Effect, strings.Join(kinds, ","), t.Executes)
+	return t.Description
 }
 
 // declaredTool is a tool the engine declares to the model but does not

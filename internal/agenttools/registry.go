@@ -28,6 +28,14 @@ import (
 type Declaration struct {
 	// Name is the tool name the model calls, e.g. "files.read".
 	Name string
+	// Description is the one sentence the MODEL reads: what the tool does
+	// and when to reach for it, in the product's words. It is never what
+	// the policy decides on — the effect and resource facts below are — and
+	// it never restates the params schema, which the model is shown byte
+	// for byte alongside it. A row without one does not assemble
+	// (validateDeclaration), so a tool cannot be offered as a name and a
+	// schema with nothing to say what it is for.
+	Description string
 	// Effect is the tool's class on the ADR-0020 lattice (the ledger's
 	// vocabulary — content.Effect).
 	Effect content.Effect
@@ -98,6 +106,7 @@ type Registry struct {
 var declarations = []Declaration{
 	{
 		Name:        "files.read",
+		Description: "Read the text of a file on this machine and return a window of it; reach for this when the answer depends on what is actually in a file rather than on what the person has told you about it.",
 		Effect:      content.EffectObserve,
 		Resources:   []content.ResourceKind{content.ResourcePath},
 		ResourceArg: "path",
@@ -107,6 +116,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "readScreen",
+		Description: "Read what is on a terminal session's screen right now — the text, the cursor and the styling; reach for this when the question is about what the person is looking at, since you are never shown the screen unless you go and read it.",
 		Effect:      content.EffectObserve,
 		Resources:   []content.ResourceKind{content.ResourceSession},
 		ResourceArg: "sessionId",
@@ -116,6 +126,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "run",
+		Description: "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
 		Effect:      content.EffectMutateDestructive,
 		Resources:   []content.ResourceKind{content.ResourceSession},
 		ResourceArg: "sessionId",
@@ -124,11 +135,12 @@ var declarations = []Declaration{
 		Narrow:      narrowRun,
 	},
 	{
-		Name:      "git.status",
-		Effect:    content.EffectObserve,
-		Resources: []content.ResourceKind{content.ResourcePath},
-		Executes:  InGo,
-		Params:    "git.status.schema.json",
+		Name:        "git.status",
+		Description: "Report the state of the git working tree you are working in — the current branch and which files are staged, modified or untracked; reach for this before saying anything about uncommitted work.",
+		Effect:      content.EffectObserve,
+		Resources:   []content.ResourceKind{content.ResourcePath},
+		Executes:    InGo,
+		Params:      "git.status.schema.json",
 	},
 }
 
@@ -193,6 +205,9 @@ func validateDeclaration(d Declaration) string {
 	}
 	if strings.TrimSpace(d.Params) == "" {
 		bad = append(bad, "missing params schema path")
+	}
+	if strings.TrimSpace(d.Description) == "" {
+		bad = append(bad, "missing description")
 	}
 	return strings.Join(bad, "; ")
 }
