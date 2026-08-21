@@ -371,6 +371,43 @@ describe('SettingsContent', () => {
     })
   })
 
+  // ── What is in the page, not merely what is on it ──────────────────
+
+  it('a section the person is not looking at is not in the page at all', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    openSection(target, 'Terminal')
+    await vi.waitFor(() => {
+      expect(visibleRows().length).toBe(3)
+    })
+
+    // Every row the document holds belongs to the open section. The surface
+    // already answers "is this page showing?" by unmounting for a component
+    // page; a generated section is the same question and gets the same
+    // answer, so nothing off-page is left behind the open one.
+    const rows = Array.from(target.querySelectorAll<HTMLElement>('.ui-settings-row'))
+    expect(rows.map((r) => r.dataset.key)).toEqual([
+      'terminal.fontSize',
+      'terminal.fontFamily',
+      'terminal.cursorStyle',
+    ])
+
+    // Stated as the thing the browser proof measures: the LAST row in the
+    // document is a row the person can see. It was true by accident until a
+    // section registered after Interface put a display:none row behind the
+    // open page and the e2e scroll proofs measured that one instead
+    // (nocx-avogl.4).
+    const seen = visibleRows()
+    expect(rows[rows.length - 1]).toBe(seen[seen.length - 1])
+
+    // …and the same for the section headings.
+    const headings = Array.from(target.querySelectorAll<HTMLElement>('.ui-page-section h2')).map(
+      (h) => h.textContent,
+    )
+    expect(headings).toEqual(['Terminal'])
+  })
+
   // ── Section nav click (nocx-ucxl) ──────────────────────────────────
 
   it('clicking a section in the rail always changes the content pane', async () => {
