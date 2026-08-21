@@ -182,6 +182,11 @@ type WSServer struct {
 	// settings surface is told no row is live, which is a visible degrade
 	// rather than a silent claim that all seven govern something.
 	liveEffects []content.Effect
+	// sessionPolicy holds each session's "allow in this session" answers —
+	// the overlay content.ResolvePolicy applies on top of the global policy
+	// for a run in that session. Dropped at every session teardown; the
+	// store and the drops are ws_sessionpolicy.go's subject.
+	sessionPolicy *sessionPolicyStore
 
 	// settings registry backs the settings.* JSON-RPC methods.
 	settings *settings.Registry
@@ -1025,6 +1030,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		ownerTunnels:        make(map[*wsConn]map[string]struct{}),
 		origins:             LoopbackOriginPolicy{},
 		agentApprovals:      assistant.NewApprovalStore(),
+		sessionPolicy:       newSessionPolicyStore(),
 		laneInteractivity:   newLaneState(),
 		satNotify:           newSaturatedNotifyLimiter(time.Second),
 		pendingRuns:         make(map[int64]askRunContext),
@@ -1243,6 +1249,10 @@ func (s *WSServer) Stop(ctx context.Context) error {
 		// bindings too. No subscriber is attached at shutdown — nobody to
 		// notify, and gitSessionClosed's nil capture is exactly that case.
 		s.gitSessionClosed(sess.ID(), nil)
+		// The session's "allow in this session" answers die with it, on
+		// every path that ends one (ws_sessionpolicy.go). Nothing persists
+		// them, so shutdown is the last of the three.
+		s.sessionPolicy.Drop(sess.ID())
 	}
 
 	// Application shutdown destroys every pending capture (the contract's
@@ -2403,6 +2413,13 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 		s.filesSessionClosed(sess.ID())
 		s.gitSessionClosed(sess.ID(), wconn)
 	}
+	// The session's "allow in this session" answers die with it
+	// (ws_sessionpolicy.go). Outside the claim: the claim exists because
+	// deleting a git binding is also the one chance to announce it, and
+	// forgetting an overlay announces nothing. Dropping twice costs nothing;
+	// dropping never leaves a permission alive past the session it was
+	// scoped to.
+	s.sessionPolicy.Drop(sess.ID())
 
 	if wconn == nil {
 		return
@@ -2525,6 +2542,9 @@ func (s *WSServer) closeSession(sid session.ID, sess session.Session) {
 	s.filesSessionClosed(sid)
 	s.laneInteractivity.remove(sid)
 	s.gitSessionClosed(sid, wconn)
+	// The session's "allow in this session" answers die with it
+	// (ws_sessionpolicy.go).
+	s.sessionPolicy.Drop(sid)
 	s.unregisterLifecycleLanes(sid)
 	s.unregisterIntegration(sid)
 	s.discoverySessionClosed(sess)

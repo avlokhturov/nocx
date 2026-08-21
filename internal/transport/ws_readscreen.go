@@ -26,6 +26,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -234,7 +235,12 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 	if s.agentPolicy == nil {
 		return nil
 	}
-	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil, nil)
+	// The session's own answers overlay the global policy — an "allow in
+	// this session" is in force from the answer until the session ends, and
+	// the store (ws_sessionpolicy.go) is what ends it. The run grant's base
+	// scope is already this session, so the overlay carries no scope of its
+	// own: the run cannot reach outside its session anyway.
+	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil, s.sessionPolicy.For(session.ID(sessionID)))
 	g := p.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}})
 	return &g
 }
