@@ -1040,3 +1040,115 @@ describe('horizontal Field gate — every settings row must use primary label', 
     }
   })
 })
+
+// ── The person's own paragraph (nocx-avogl.4, design §1 item 6) ────────
+//
+// Asserted as the task a person performs, not as what the component
+// renders: they open Settings, find the field on the Assistant rail, type
+// their paragraph into it, and it is written — no Save button anywhere near
+// it. Plus the bound, which the criterion requires to be ON THE SCREEN
+// rather than enforced silently.
+describe("the person's own instructions to the assistant", () => {
+  let target: HTMLDivElement
+  let client: ProfileClient
+  let content: SettingsContent
+  let host: PaneHost
+  let signal: AbortSignal
+
+  const PERSONAL: Declaration = {
+    key: 'assistant.personalInstructions',
+    section: 'Instructions',
+    label: 'Your instructions to the assistant',
+    description: 'Standing instructions added to the end of every question you ask.',
+    control: 'text',
+    dataClass: 'privateContent',
+    default: '',
+    multiline: true,
+    max: 2000,
+    unit: 'characters',
+  }
+
+  beforeEach(() => {
+    document.body.replaceChildren()
+    target = document.createElement('div')
+    document.body.append(target)
+    client = new ProfileClient(new Dispatcher())
+    content = new SettingsContent(client)
+    host = mockPaneHost()
+    signal = new AbortController().signal
+  })
+
+  async function openInstructions(): Promise<HTMLTextAreaElement> {
+    mockReady(client, {
+      declarations: [PERSONAL],
+      sectionGroups: { Instructions: 'assistant' },
+    })
+    await content.mount(target, host, signal)
+    // From the state a user starts in: the screen opens on Connections, so
+    // the rail is what takes them to the field.
+    openSection(target, 'Instructions')
+    let area: HTMLTextAreaElement | null = null
+    await vi.waitFor(() => {
+      area = target.querySelector<HTMLTextAreaElement>('textarea.ui-text-field__input')
+      expect(area).toBeTruthy()
+    })
+    return area!
+  }
+
+  it('typing a paragraph into it writes it, with no save step', async () => {
+    const save = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    const area = await openInstructions()
+
+    fireEvent.input(area, { target: { value: 'Never suggest brew. This machine uses nix.' } })
+
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalledWith(
+        'assistant.personalInstructions',
+        'Never suggest brew. This machine uses nix.',
+      )
+    })
+    // No Save button beside it: the row's only controls are the field and
+    // the reset affordance every settings row carries.
+    const row = document.getElementById('st-setting-assistant.personalInstructions')!
+    expect(row.querySelectorAll('button').length).toBeLessThanOrEqual(1)
+  })
+
+  it('states its length bound on the screen, and says so before anything is lost to it', async () => {
+    vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    const area = await openInstructions()
+
+    const caption = () =>
+      document
+        .getElementById('st-setting-assistant.personalInstructions')!
+        .querySelector('.ui-text-field__caption')
+    expect(caption()).toBeTruthy()
+    expect(caption()!.textContent).toContain('2000')
+    expect(caption()!.textContent).toContain('characters')
+
+    fireEvent.input(area, { target: { value: 'x'.repeat(1990) } })
+    await vi.waitFor(() => {
+      expect(caption()!.textContent).toContain('1990')
+    })
+  })
+
+  it('too long is refused visibly, in the field, rather than truncated', async () => {
+    const save = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    const area = await openInstructions()
+
+    fireEvent.input(area, { target: { value: 'y'.repeat(2001) } })
+
+    await vi.waitFor(() => {
+      const slot = document
+        .getElementById('st-setting-assistant.personalInstructions')!
+        .querySelector('.ui-text-field__caption[data-tone="error"]')
+      expect(slot?.textContent).toBe('Must be at most 2000 characters')
+    })
+    // What the person typed is still on the screen, whole: the field never
+    // shortens their text behind them.
+    expect(area.value.length).toBe(2001)
+    // And the backend's own rejection is not printed under a field whose
+    // caption already says the same thing.
+    expect(target.querySelector('.ui-settings-error')).toBeNull()
+    expect(save).toHaveBeenCalled()
+  })
+})
