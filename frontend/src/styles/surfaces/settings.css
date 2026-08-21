@@ -169,6 +169,18 @@
   gap: var(--space-3);
 }
 
+/* A paragraph needs the room to be one. Every other control on this screen is
+   an answer to its label and sizes itself — a switch, a 120px select, a number
+   field at one declared width — so the control column is `flex: 0 0 auto` and
+   takes what the control asks for. A bare textarea asks for its 20-column
+   default, which is not a field anybody writes several sentences into.
+   Placement only (width): the field's appearance, including whether it wraps,
+   is the kit's and is declared there. */
+.ui-settings-control-line .ui-text-field[data-multiline='true'] {
+  width: 44ch;
+  max-width: 100%;
+}
+
 /* A slot of fixed width, always present. The icon inside it comes and goes with
    the row's modified state; if the slot came and went too, the control would
    shift sideways the moment a value changed — the same defect the modified dot

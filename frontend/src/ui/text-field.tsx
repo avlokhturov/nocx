@@ -19,6 +19,20 @@ export interface TextFieldProps {
   error?: string
   /** When true, renders a <textarea> instead of an <input>. */
   multiline?: boolean
+  /**
+   * Wrap long lines to the width of the box instead of scrolling them
+   * sideways. `multiline` only.
+   *
+   * The two kinds of content a textarea holds want opposite treatment, and
+   * neither can be inferred from the other. VERBATIM MATERIAL — a pasted
+   * private key — must stay on the lines it arrived on, because a wrapped
+   * key looks like a different key and a person checking it by eye cannot
+   * tell. PROSE — a person's own standing instructions to the assistant —
+   * has no lines of its own, and not wrapping it puts a paragraph behind a
+   * horizontal scrollbar. Default is verbatim: it is what the first caller
+   * pastes, and the safer of the two to be wrong about.
+   */
+  wrap?: boolean
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
@@ -228,7 +242,11 @@ export function TextField(props: TextFieldProps) {
     props.required === true
 
   return (
-    <div class="ui-text-field" data-multiline={props.multiline ? 'true' : undefined}>
+    <div
+      class="ui-text-field"
+      data-multiline={props.multiline ? 'true' : undefined}
+      data-wrap={props.multiline && props.wrap ? 'true' : undefined}
+    >
       <Show when={hasFieldContent()} fallback={input()}>
         {/* When a caption slot exists it OWNS the error (the error replaces the
             caption in that slot); Field must not render a second one. */}

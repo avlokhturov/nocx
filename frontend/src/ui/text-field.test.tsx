@@ -138,6 +138,22 @@ describe('TextField', () => {
   })
 
   // ── Multiline (textarea) variance ──────────────────────────────────
+  // A multiline field holds one of two kinds of content and they want
+  // opposite treatment: VERBATIM MATERIAL (a pasted private key) must stay
+  // on the lines it came on, and PROSE (a person's standing instructions to
+  // the assistant) must wrap to the box. The default is verbatim, because
+  // that is what the first caller pastes and a wrapped key reads as a
+  // different key.
+  it('keeps multiline content on its own lines by default', () => {
+    const { container } = subject({ multiline: true, value: 'a very long line' })
+    expect(container.querySelector('.ui-text-field')!.getAttribute('data-wrap')).toBeNull()
+  })
+
+  it('marks a prose field as wrapping', () => {
+    const { container } = subject({ multiline: true, wrap: true, value: 'a very long line' })
+    expect(container.querySelector('.ui-text-field')!.getAttribute('data-wrap')).toBe('true')
+  })
+
   it('renders a textarea when multiline is set', () => {
     subject({ multiline: true, value: 'key content' })
     const input = screen.getByRole('textbox')

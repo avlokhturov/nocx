@@ -37,6 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
@@ -333,6 +334,16 @@ type agentHandlers struct {
 	// rendered the question, and the answer must resume the EXACT run.
 	pendingRuns   map[int64]askRunContext
 	pendingRunsMu *sync.Mutex
+	// personalInstructions reads the person's own paragraph from the
+	// settings document, on the request path, per ask. A function rather
+	// than a value because it must be READ when the question is asked: a
+	// value captured at registration would be whatever the field held when
+	// the connection opened, and the field is written while the app runs.
+	// The registration builder supplies one that answers "" when no
+	// settings registry is wired; personalParagraph tolerates a handler
+	// built without it, which is what a unit test constructing the struct
+	// directly has.
+	personalInstructions func() string
 	// sessionPolicy is where "allow in this session" lands and where it
 	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
 	sessionPolicy *sessionPolicyStore
@@ -385,12 +396,44 @@ func environmentForSession(sess session.Session) content.Environment {
 //     axis holds it only for the sessions that asked for shell integration,
 //     so it is not a fact about every pane. Telling the model the wrong
 //     shell buys wrong syntax stated confidently.
-func systemPromptFactsFor(sessionID, cwd string, env content.Environment) assistant.SystemPromptFacts {
-	f := assistant.SystemPromptFacts{SessionID: sessionID, Cwd: cwd, Env: env}
+//   - The person's own paragraph is NOT absent: it has an owner, and the
+//     owner is the settings document (nocx-avogl.4). It is read here, on
+//     the request path, and handed in — the prompt function never looks a
+//     setting up. Read fresh per ask, so a change on the settings screen
+//     governs the next question with no restart and nothing to invalidate.
+func systemPromptFactsFor(sessionID, cwd string, env content.Environment, personal string) assistant.SystemPromptFacts {
+	f := assistant.SystemPromptFacts{SessionID: sessionID, Cwd: cwd, Env: env, PersonalInstructions: personal}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
 	}
 	return f
+}
+
+// personalParagraph is the seam read, or "" when this handler was built
+// without it — a unit test constructing agentHandlers directly, never the
+// registration builder.
+func (h agentHandlers) personalParagraph() string {
+	if h.personalInstructions == nil {
+		return ""
+	}
+	return h.personalInstructions()
+}
+
+// personalInstructionsText reads the person's own paragraph out of the
+// settings registry — the document that owns it. Nil registry (a server
+// built without settings) and a rejected read are both "the person has
+// added nothing", which is the same state as an empty field: the prompt
+// then says nothing about it at all, rather than claiming they wrote
+// something they did not.
+func (s *WSServer) personalInstructionsText() string {
+	if s.settings == nil {
+		return ""
+	}
+	v, err := s.settings.GetString(settings.AssistantPersonalInstructions)
+	if err != nil {
+		return ""
+	}
+	return v
 }
 
 func (h agentHandlers) handleCaptureFrame(ctx context.Context, req jsonrpcRequest) {
@@ -594,9 +637,10 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// The facts the model is told, from their existing owners: the
 		// session id exactly as the ask spelled it (the string the tools'
 		// sessionId parameter is matched against), the cwd this question
-		// carried and the ledger recorded with it, and the pane's
-		// environment as environmentForSession already derived it.
-		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env),
+		// carried and the ledger recorded with it, the pane's environment
+		// as environmentForSession already derived it, and the person's
+		// own paragraph as the settings document holds it right now.
+		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, h.personalParagraph()),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -1537,8 +1581,9 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
-			pendingRunsMu: &s.pendingRunsMu,
-			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,
+			pendingRunsMu:        &s.pendingRunsMu,
+			personalInstructions: s.personalInstructionsText,
+			sessionPolicy:        s.sessionPolicy, globalPolicy: s.agentPolicy,
 			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}
 	}

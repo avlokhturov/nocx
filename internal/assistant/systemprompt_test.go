@@ -187,3 +187,80 @@ func TestSystemPrompt_AttachedContentSentenceIsConditional(t *testing.T) {
 		t.Errorf("the attached-content sentence added nothing")
 	}
 }
+
+// TestSystemPrompt_ThePersonsOwnTextIsLastAndUnderItsOwnHeading is design §1
+// item 6 at the pure end (bead nocx-avogl.4).
+//
+// Two assertions, and neither is "the text is present somewhere". LAST,
+// because a rule of the person's that contradicts a line of ours has to win,
+// and in a prompt that is decided by position. UNDER A HEADING, because the
+// model must be able to tell our standing rules from theirs — a prompt that
+// silently merges the two cannot be debugged by either of us.
+func TestSystemPrompt_ThePersonsOwnTextIsLastAndUnderItsOwnHeading(t *testing.T) {
+	const theirs = "Never suggest brew. This machine installs everything with nix."
+	base := SystemPromptFacts{
+		SessionID: "s-6", Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal}, OS: "linux",
+	}
+	ours := SystemPrompt(base)
+	base.PersonalInstructions = theirs
+	got := SystemPrompt(base)
+
+	idx := strings.Index(got, PersonalInstructionsHeading)
+	if idx < 0 {
+		t.Fatalf("the prompt carries the person's text under no heading of its own:\n%s", got)
+	}
+	// Every heading WE wrote is above it. The check is the standing set,
+	// read out of the prompt built without the person's text, so a heading
+	// added later is covered without editing this test.
+	var checked int
+	for _, line := range strings.Split(ours, "\n") {
+		if !isPromptHeading(line) {
+			continue
+		}
+		checked++
+		if at := strings.Index(got, line); at > idx {
+			t.Errorf("our heading %q sits BELOW the person's, at %d > %d — a later rule of ours would win",
+				line, at, idx)
+		}
+	}
+	if checked < 4 {
+		t.Fatalf("only %d of our headings were recognised — the position check is looking at nothing", checked)
+	}
+	if !strings.HasSuffix(strings.TrimRight(got, "\n"), theirs) {
+		t.Errorf("the prompt does not END with the person's own words:\n%s", got)
+	}
+	if strings.Index(got, theirs) < idx {
+		t.Errorf("the person's text appears above its own heading:\n%s", got)
+	}
+}
+
+// TestSystemPrompt_NoPersonalTextMeansNoHeadingAtAll keeps the rule the
+// attached-content sentence already follows: never claim to the model that
+// the person said something when they did not. An empty field is ABSENT —
+// not a heading with nothing under it.
+func TestSystemPrompt_NoPersonalTextMeansNoHeadingAtAll(t *testing.T) {
+	base := SystemPromptFacts{
+		SessionID: "s-7", Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal}, OS: "linux",
+	}
+	for _, empty := range []string{"", "   ", "\n\t\n"} {
+		base.PersonalInstructions = empty
+		got := SystemPrompt(base)
+		if strings.Contains(got, PersonalInstructionsHeading) {
+			t.Errorf("PersonalInstructions %q produced the heading with nothing under it:\n%s", empty, got)
+		}
+	}
+}
+
+// isPromptHeading recognises the prompt's own section headings: a short bare
+// line that is neither empty nor a sentence. The prompt writes each as
+// "\n<Heading>\n", so a heading is the line after a blank one and it does
+// not end in a full stop.
+func isPromptHeading(line string) bool {
+	l := strings.TrimSpace(line)
+	if l == "" || len(l) > 48 {
+		return false
+	}
+	return !strings.HasSuffix(l, ".") && !strings.HasSuffix(l, ":") && !strings.Contains(l, ": ")
+}

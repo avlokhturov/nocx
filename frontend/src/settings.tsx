@@ -47,6 +47,8 @@ import {
   monotonicRevisionPolicy,
   numberRangeCaption,
   numberRangeError,
+  textLengthCaption,
+  textLengthError,
   reconnectRevisionPolicy,
   recordSaveOutcome,
   type Declaration,
@@ -1025,6 +1027,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // boolean". NaN for a row that is not a number; every caller of a range
     // check treats NaN as "no opinion".
     const numeric = () => (decl.control === 'number' ? Number(displayValue(eff(), decl)) : NaN)
+    // The text this row shows, for the length caption and its error. Empty
+    // for a row that is not text, for the same reason numeric() is NaN
+    // there: displayValue warns when it can find neither a usable value nor
+    // a usable default, which is what a boolean looks like to it.
+    const textValue = () => (decl.control === 'text' ? displayValue(eff(), decl) : '')
     const showBreadcrumb = () => isSearching() && sectionFilter() === null
 
     return (
@@ -1079,8 +1086,24 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </Show>
 
             <Show when={decl.control === 'text'}>
+              {/* multiline is a VARIANT of the same kit component, declared
+                  by the setting (Declaration.multiline) — the kit answers
+                  "a paragraph rather than a value" with a prop and has no
+                  second component, so neither does this. The caption is the
+                  declared bound, permanently on screen: the criterion is
+                  that a length limit is stated, never discovered by losing
+                  text to it. */}
               <TextField
-                value={displayValue(eff(), decl)}
+                multiline={decl.multiline === true}
+                // A setting's paragraph is always prose. The kit's default
+                // is verbatim because its first caller pastes a private
+                // key; nothing on this screen ever does — a secret-class
+                // setting is a `secret` control, not a text one.
+                wrap
+                value={textValue()}
+                caption={textLengthCaption(decl, textValue())}
+                captionAlign="end"
+                error={textLengthError(decl, textValue())}
                 onInput={(v) => void saveSetting(decl.key, v)}
               />
             </Show>
@@ -1134,7 +1157,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <ProvenanceBadge decl={decl} />
           </div>
 
-          <Show when={fieldSaveError(decl, numeric(), err())}>
+          <Show when={fieldSaveError(decl, numeric(), err(), textValue())}>
             <div class="ui-settings-error">{err()}</div>
           </Show>
         </Field>
