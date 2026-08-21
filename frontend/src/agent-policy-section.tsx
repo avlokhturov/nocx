@@ -308,8 +308,9 @@ export function AgentPolicySection(props: AgentPolicySectionProps) {
               onToggle={() => setDormantOpen((o) => !o)}
             >
               <p class="st-policy__dormant-note">
-                Nothing the assistant can do today falls under these. Answering one now is allowed
-                and does exactly what it says — nothing, until it gains something that does it.
+                The assistant has no tool that does any of these, so an answer here governs nothing
+                today. It is saved all the same: the day it gains one, the answer you gave already
+                applies and it does not have to ask you then.
               </p>
               <For each={dormantKeys()}>{(key) => renderRow(key)}</For>
             </Section>

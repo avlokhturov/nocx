@@ -124,6 +124,17 @@
   gap: var(--space-2);
 }
 
+/* ...and the section's description has to make that gap back. The kit pulls
+   the description UP to its heading with a negative margin sized against the
+   kit's own gap (16px), so under this surface's halved one the pull cancels
+   the gap exactly: the sentence rendered flush against the heading's rule,
+   with no air at all, while the same sentence under a collapsible Section a
+   few rows down had 24px. Placement, not paint — and the surface that halved
+   the gap is the one that owes the correction. */
+.ui-settings .ui-page-section__desc {
+  margin-block-start: var(--space-4);
+}
+
 .ui-settings section {
   margin-bottom: var(--space-8);
 }
