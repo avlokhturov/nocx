@@ -190,10 +190,20 @@ second implementation of iteration that is already written and tested.
   interrupt bookkeeping and the checkpoint format. A change to any of them is a break, and the
   tests that prove never-declared, refusal-terminalizes and narrowing are what turn it into a
   red build.
-- **Checkpoints are process-lifetime state, not records.** They are encrypted, deleted on
-  terminalization, swept at startup — and approval therefore does not survive a restart, which
-  is already what the recovery rule says. Durable approval would make a checkpoint an artifact
-  with its own version, retention and migration, and that is deliberately not v1.
+- **Checkpoints are process-lifetime state, not records.** They live in one in-memory store
+  keyed by run id, are deleted on terminalization, and are swept at startup by the store being
+  born empty — so approval does not survive a restart, which is already what the recovery rule
+  says. Durable approval would make a checkpoint an artifact with its own version, retention
+  and migration, and that is deliberately not v1.
+
+  This bullet said "encrypted" until 2026-08-22 (nocx-04g2d), and the store built for it
+  (`internal/assistant/checkpoints.go`) does not encrypt. The word was struck rather than
+  implemented: the blob sits in the same address space that already holds the run's messages,
+  the question and the model's answer in the clear, so a key held beside it protects nothing
+  from anyone who can read the rest. Encryption is a property of the ledger AT REST
+  (ADR-0018), where the threat is a file somebody else can open; a checkpoint is never at
+  rest. If a checkpoint ever becomes durable, this decision is reopened with it.
+
 - **v1 permits ordinary invokable tools only.** `adk` wraps four tool shapes through four
   methods; a streaming or enhanced tool added later would route around a single installed
   wrapper. Registration refuses the other shapes until each is wrapped and tested.
