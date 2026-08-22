@@ -1758,6 +1758,38 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(chip?.textContent).toBe('failed')
   })
 
+  // nocx-kez4m: one header grammar for every kind. The overflow button is
+  // appended when the block is BUILT, so anything a later lifecycle adds to
+  // the header — the ask kind's terminal word is the only one today — lands
+  // to the RIGHT of the ⋮ unless it is placed deliberately. The owner saw
+  // "⋮ failed" above "50ms ok ⋮" and asked why one row read backwards.
+  it('the overflow button stays last in the header, for a finished answer as for a command', () => {
+    const { manager } = newManager()
+    const cmd = createCommandBlock(
+      'command',
+      91,
+      'echo hi',
+      '~',
+      '',
+      'out',
+      50,
+      0,
+      'success',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+    )
+    const cmdRight = cmd.querySelector('.cmd-header-right')!
+    expect(cmdRight.lastElementChild?.classList.contains('cmd-overflow-btn')).toBe(true)
+
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('the answer')
+    h.close('failure', 'the model returned no text')
+    const askRight = h.el.querySelector('.cmd-header-right')!
+    expect(askRight.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
+    expect(askRight.lastElementChild?.classList.contains('cmd-overflow-btn')).toBe(true)
+  })
+
   // nocx-e6kn2 acceptance: the person must be able to tell which model
   // answered. The pinned model rides the ask result and close names it on
   // the block; a close without a model (failure, or an older caller) keeps

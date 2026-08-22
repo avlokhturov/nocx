@@ -525,6 +525,22 @@ export function blockCommandText(blockEl: HTMLElement): string {
   return blockEl.querySelector('.cmd-header-text')?.textContent ?? ''
 }
 
+/** Place a chip in a header's right group, and keep the "⋮" last (nocx-kez4m).
+ *
+ *  The overflow button is appended when the block is BUILT, so a chip added
+ *  by a later lifecycle step — the ask kind's terminal word is the only one
+ *  today — lands to its RIGHT unless somebody says otherwise. The owner saw
+ *  an answer block reading "⋮ failed" above a command block reading
+ *  "50ms ok ⋮" and asked why one row runs backwards.
+ *
+ *  So the rule lives HERE rather than in each caller: chips go left of the
+ *  button, whether or not the button exists yet. A kind added later inherits
+ *  the order by using this, instead of learning the button's position by
+ *  luck. */
+function placeHeaderChip(right: Element, chip: Element): void {
+  right.insertBefore(chip, right.querySelector('.cmd-overflow-btn'))
+}
+
 /**
  * Build the "⋮" overflow menu button + dropdown (P2-9, P1-6 fix).
  * The menu is rendered as a child of document.body with position:fixed
@@ -1736,7 +1752,7 @@ export class BlockManager {
               ? 'nocx-chip nocx-chip-ok cmd-header-exit'
               : 'nocx-chip nocx-chip-fail cmd-header-exit'
           chip.textContent = status === 'success' ? chips.done : chips.failed
-          right.appendChild(chip)
+          placeHeaderChip(right, chip)
         }
         // The model that answered, on the answer itself (nocx-e6kn2): the
         // person must be able to tell which model answered without going
