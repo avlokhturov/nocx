@@ -318,8 +318,6 @@ export interface TerminalContentHooks {
   sandbox?: SandboxRequest
   /** Verified cwd for a replacement local shell; empty uses backend default. */
   initialCwd?: string
-  /** Reports the immutable sandbox state from the open result. */
-  onSandboxedChange?: (sandboxed: boolean) => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -2415,7 +2413,6 @@ export class TerminalContent extends BasePaneContent {
         this._applyIntegration(fact)
       })
       const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
-      this.hooks.onSandboxedChange?.(sandboxInfo != null)
       if (sandboxInfo) {
         const writable = sandboxInfo.writableRoots.join(', ')
         const readOnly = sandboxInfo.readOnlyRoots.join(', ')
