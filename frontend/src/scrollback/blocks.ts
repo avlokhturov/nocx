@@ -11,6 +11,8 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
+import { createToolCallLine, type ToolCallEffect } from '../ui/tool-call-line'
+import { createReasoningNote, type ReasoningNote } from '../ui/reasoning-note'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
@@ -146,11 +148,37 @@ export interface AnswerBlockHandle {
    *  `this: void` — the target holds the handle and calls the method
    *  detached from any receiver (unbound-method contract). */
   append(this: void, text: string): void
+  /** Draw one tool call (agent.runToolCall) in the answer's flow, AT THE
+   *  POSITION IT ARRIVED (nocx-shxv0). Not a top-level block: the call
+   *  belongs to the answer that was streaming when it happened, and that
+   *  is what fixes the ordering the owner saw inverted — a run tool's
+   *  block sitting below the answer written from its output.
+   *
+   *  Idempotent per `callId`: the backend announces a call once per
+   *  EXECUTION, and an approved egress resume puts the same call through
+   *  the pipeline a second time. One call, one line. */
+  toolCall(this: void, call: AnswerToolCall): void
+  /** Append one chunk of the model's thinking (agent.runReasoning) — into
+   *  its own collapsed note, never into the answer text (nocx-s92so). The
+   *  note is created at the FIRST chunk, so a model that returns no
+   *  reasoning renders nothing at all. */
+  reasoning(this: void, text: string): void
   /** Close the block: success, or failure with the renderable reason.
    *  `model` names the model that answered (the ask result's pinned
    *  run fact, nocx-e6kn2): painted as the block's provenance on
    *  success, so a person can tell which model answered. */
   close(this: void, status: 'success' | 'failure', error?: string, model?: string): void
+}
+
+/** One tool call as the answer flow draws it — the wire's facts
+ *  (contracts/agent.runToolCall.schema.json), narrowed to what this surface
+ *  needs. Deliberately no result and no raw arguments: see ui/tool-call-line
+ *  for why. */
+export interface AnswerToolCall {
+  callId: string
+  tool: string
+  effect: ToolCallEffect
+  resource?: { kind: string; id: string }
 }
 
 /** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
@@ -1628,6 +1656,16 @@ export class BlockManager {
     // moment the first delta lands, and a run that fails before any text
     // must stop waiting too (the timeout sentence and the waiting state
     // are two ends of one fact, nocx-ex636).
+    // The dots stand in for TEXT THAT IS NOT THERE YET, so anything that
+    // puts content in the body retires them — a tool call and the thinking
+    // note both do, and the header's "thinking" chip deliberately does NOT
+    // go with them: the model has done something, and it has not answered.
+    // Retiring the chip there would leave the corner silent while the run
+    // is still working.
+    const stopTyping = (): void => {
+      el.querySelector('.cmd-answer-typing')?.remove()
+    }
+
     const stopWaiting = (): void => {
       el.querySelector('.cmd-answer-waiting')?.remove()
       el.querySelector('.cmd-answer-waiting-pulse')?.remove()
@@ -1635,7 +1673,7 @@ export class BlockManager {
       // stops standing in for text. A run that fails before any delta
       // clears both, or the dots would go on typing an answer that will
       // never arrive.
-      el.querySelector('.cmd-answer-typing')?.remove()
+      stopTyping()
     }
 
     // The streamed chunks split MID-LINE, so the body keeps one persistent
@@ -1700,9 +1738,43 @@ export class BlockManager {
       }
     }
 
+    // The flow's non-text elements (nocx-shxv0, nocx-s92so). Both are
+    // placed in the SAME body as the prose, in arrival order, because that
+    // order is the product fact: a call rendered anywhere else stops saying
+    // when it happened.
+    const seenCalls = new Set<string>()
+    let reasoningNote: ReasoningNote | null = null
+
+    // Closing the partial row is what keeps arrival order honest. A chunk
+    // that did not end in '\n' leaves a row open; the next chunk continues
+    // it, and text that arrives AFTER an inserted element would otherwise be
+    // written into a row that sits BEFORE it. Appended to outputEl and never
+    // into a fence container: a call arrives between model responses, so it
+    // cannot land inside one response's fenced block.
+    const insertInFlow = (node: HTMLElement): void => {
+      stopTyping()
+      partial = null
+      outputEl.appendChild(node)
+    }
+
     return {
       id,
       el,
+      toolCall(call: AnswerToolCall): void {
+        if (seenCalls.has(call.callId)) return
+        seenCalls.add(call.callId)
+        insertInFlow(
+          createToolCallLine({ tool: call.tool, effect: call.effect, resource: call.resource }),
+        )
+      },
+      reasoning(text: string): void {
+        if (text === '') return
+        if (!reasoningNote) {
+          reasoningNote = createReasoningNote()
+          insertInFlow(reasoningNote.el)
+        }
+        reasoningNote.append(text)
+      },
       append(text: string): void {
         if (text === '') return
         stopWaiting()

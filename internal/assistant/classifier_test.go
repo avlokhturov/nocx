@@ -167,7 +167,7 @@ func middlewareForWithClassifier(t *testing.T, grant content.Grant, ledger Attem
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", 1, nil, classifier)
+	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", 1, nil, classifier, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestAsk_ClassifierSuspectEscalatesPermittedCall(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
@@ -343,7 +343,7 @@ func TestAsk_ClassifierInputKnownMaterialNeverReachesClassifier(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), p, func(string) error { return nil })
+	err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
 
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
@@ -405,7 +405,7 @@ func TestClassifierUnreachableEscalates(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil), fixedResolver{classifierTargetAt("http://127.0.0.1:1")}),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
@@ -461,7 +461,7 @@ func TestAsk_ClassifierUnparseableEscalates(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the escalation (unparseable classifier output)", err)
@@ -490,7 +490,7 @@ func TestClassifierRoleUnassignedEscalates(t *testing.T) {
 	err := cl.Ask(context.Background(),
 		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil),
 			failingResolver{err: errors.New("classifier role: no model assigned")}),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the escalation (role-unassigned must escalate)", err)
@@ -571,7 +571,12 @@ func TestAsk_ClassifierQuietPermittedCallRuns(t *testing.T) {
 	var got string
 	err := cl.Ask(context.Background(),
 		askParamsWithClassifier(askParams(ansSrv.URL, &grant, ledger, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
-		func(d string) error { got += d; return nil })
+		func(e AskEvent) error {
+			if e.Kind == AskAnswer {
+				got += e.Text
+			}
+			return nil
+		})
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -624,7 +629,7 @@ func TestAsk_NoClassifierBehavesAsToday(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(ansSrv.URL, &grant, ledger, nil), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(ansSrv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
@@ -733,7 +738,7 @@ func TestAsk_ClassifierEscalationCarriesTheEffectAndTheResource(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWithClassifier(askParams(ansSrv.URL, &grant, &fakeLedger{}, nil), fixedResolver{classifierTargetAt(clfSrv.URL)}),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) || want.Request == nil {

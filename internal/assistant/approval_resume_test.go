@@ -58,7 +58,7 @@ func TestAsk_ApprovedProposalResumesWhenTheModelReRolls(t *testing.T) {
 	}
 
 	// 1. The ask suspends: the person is asked about the first roll's call.
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
 	var asked *ApprovalRequestedError
 	if !errors.As(err, &asked) || asked.Request == nil {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -79,8 +79,10 @@ func TestAsk_ApprovedProposalResumesWhenTheModelReRolls(t *testing.T) {
 	// 3. The resume: the same run, re-driven. The person answered; the call
 	//    must run, and the person must NOT be asked the same question again.
 	var got strings.Builder
-	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(s string) error {
-		got.WriteString(s)
+	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(e AskEvent) error {
+		if e.Kind == AskAnswer {
+			got.WriteString(e.Text)
+		}
 		return nil
 	})
 	var again *ApprovalRequestedError
@@ -143,7 +145,7 @@ func TestAsk_ASessionAnswerStopsTheNextProposalAsking(t *testing.T) {
 	}
 
 	// The question: the first proposal escalates.
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
 	var asked *ApprovalRequestedError
 	if !errors.As(err, &asked) || asked.Request == nil {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -169,7 +171,7 @@ func TestAsk_ASessionAnswerStopsTheNextProposalAsking(t *testing.T) {
 	// The resume, under the re-minted grant: the restored call runs, the
 	// model proposes a SECOND read, and nobody is asked about it.
 	resumed := askParams(srv.URL, &answered, ledger, approvals)
-	if askErr := cl.Ask(context.Background(), resumed, func(string) error { return nil }); askErr != nil {
+	if askErr := cl.Ask(context.Background(), resumed, func(AskEvent) error { return nil }); askErr != nil {
 		var again *ApprovalRequestedError
 		if errors.As(askErr, &again) && again.Request != nil {
 			t.Fatalf("the run asked again about %s %s after \"allow in this session\" — the answer never reaches the run it was given in (nocx-v94ne)",
@@ -216,7 +218,7 @@ func TestAsk_TerminalRunsLeaveNoCheckpoint(t *testing.T) {
 
 	// Suspended: the checkpoint is the only thing that can carry this run
 	// past the person's answer, so it stays.
-	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(string) error { return nil }); err == nil {
+	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil }); err == nil {
 		t.Fatal("the ask did not suspend")
 	}
 	if !held() {
@@ -228,7 +230,7 @@ func TestAsk_TerminalRunsLeaveNoCheckpoint(t *testing.T) {
 	if !approvals.Approve(asked) {
 		t.Fatal("the proposal was not pending")
 	}
-	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(string) error { return nil }); err != nil {
+	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("the approved resume failed: %v", err)
 	}
 	if held() {
@@ -238,7 +240,7 @@ func TestAsk_TerminalRunsLeaveNoCheckpoint(t *testing.T) {
 	// Failed: the endpoint is gone, and a run that cannot even reach the
 	// model leaves nothing behind either.
 	srv.Close()
-	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(string) error { return nil }); err == nil {
+	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil }); err == nil {
 		t.Fatal("the ask against a closed endpoint did not fail")
 	}
 	if held() {
@@ -274,7 +276,7 @@ func TestAsk_TwoQuestionsInOneRunBothGetPast(t *testing.T) {
 
 	answerOne := func(t *testing.T, which string) *ApprovalRequest {
 		t.Helper()
-		err := cl.Ask(context.Background(), p, func(string) error { return nil })
+		err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
 		var asked *ApprovalRequestedError
 		if !errors.As(err, &asked) || asked.Request == nil {
 			t.Fatalf("%s: Ask error = %v, want the approval-requested suspension", which, err)
@@ -298,7 +300,7 @@ func TestAsk_TwoQuestionsInOneRunBothGetPast(t *testing.T) {
 	}
 
 	// Both answered: the run finishes, and nobody is asked a third time.
-	if err := cl.Ask(context.Background(), p, func(string) error { return nil }); err != nil {
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("after both answers the run still did not finish: %v", err)
 	}
 }

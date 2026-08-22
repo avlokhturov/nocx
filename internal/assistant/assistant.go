@@ -47,16 +47,22 @@ type Client interface {
 	// error means the probe could not run at all (a parameter the engine
 	// refuses), and no result is produced.
 	Probe(ctx context.Context, p ProbeParams) (ProbeResult, error)
-	// Ask streams the model's answer to the given messages (the ask
-	// transaction's explain-mode run, design §4.2). onDelta is called for
-	// every content chunk, in order; returning an error from onDelta ABORTS
-	// the stream — the caller's write was refused, and the run must
-	// terminalize rather than wedge (the probe's write-only callback cannot
-	// say that, which is why this one can). Ask returns nil when the answer
-	// was received in full, a *StreamError when the model or the transport
-	// failed mid-stream (or the stream produced no text), and any other Go
-	// error when the ask could not run at all.
-	Ask(ctx context.Context, p AskParams, onDelta func(string) error) error
+	// Ask streams the run to onEvent — ONE ordered stream carrying the
+	// three things a run produces: the answer's text, the model's
+	// reasoning, and the tool calls it makes (nocx-shxv0, nocx-bshm2,
+	// nocx-s92so). One callback rather than three because the ORDER between
+	// them is the product fact: a tool call belongs where it happened, in
+	// the answer that was streaming when it happened, and three callbacks
+	// could not state that.
+	//
+	// Returning an error from onEvent ABORTS the stream — the caller's write
+	// was refused, and the run must terminalize rather than wedge (the
+	// probe's write-only callback cannot say that, which is why this one
+	// can). Ask returns nil when the answer was received in full, a
+	// *StreamError when the model or the transport failed mid-stream (or the
+	// stream produced no ANSWER text — reasoning alone is not an answer),
+	// and any other Go error when the ask could not run at all.
+	Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error
 	// Discard drops the engine's suspended state for one run — the eino
 	// checkpoint an escalation wrote, and the interrupt it named. A run
 	// that has terminalized has no branch left to continue, and ADR-0028
@@ -69,6 +75,74 @@ type Client interface {
 	// transport can call it from its one terminal funnel without asking
 	// whether the run ever suspended.
 	Discard(runID string)
+}
+
+// AskEventKind names which of the three things one Ask event is. A closed
+// set: the renderer draws each differently, and a fourth kind arriving
+// unnamed would be drawn as whichever of these it was mistaken for — which
+// is exactly the defect nocx-bshm2 was (a tool result drawn as the answer,
+// because the loop asked only "does this message have content").
+type AskEventKind string
+
+const (
+	// AskAnswer is a chunk of the answer — the model's own prose, and the
+	// ONLY thing that is the answer. Not a tool's return value, not the
+	// model's thinking.
+	AskAnswer AskEventKind = "answer"
+	// AskReasoning is a chunk of the model's thinking (eino's
+	// schema.Message.ReasoningContent, which the OpenAI-compatible adapter
+	// fills from the wire's `reasoning_content`). Its own kind because an
+	// answer block that concatenates thinking with the answer is nocx-bshm2
+	// in another shape; a model that sends none produces none of these.
+	AskReasoning AskEventKind = "reasoning"
+	// AskToolCall is one tool call the run is about to make. It is a thing
+	// on the wire and an element of the answer's own flow, so the ordering
+	// fixes itself: the call is rendered where it happened.
+	AskToolCall AskEventKind = "toolCall"
+)
+
+// AskEvent is one event of a run's ordered stream.
+type AskEvent struct {
+	Kind AskEventKind
+	// Text is the chunk, for AskAnswer and AskReasoning. Empty for a tool
+	// call — a call is not text, and the raw arguments blob is deliberately
+	// not what a person reads.
+	Text string
+	// Call is the call, for AskToolCall only.
+	Call *ToolCall
+}
+
+// ToolCall is the fact a person is shown when the assistant does something:
+// WHICH tool, and WHAT it touched. Deliberately NOT the arguments blob and
+// deliberately NOT the result.
+//
+// The result is left off because it already has an owner. The attempt's
+// outcome is in the ledger (design §6.4), the run tool's output is in the
+// block the command really opened, and the egress gate (design §7.1) screens
+// a result for the PROVIDER — sending the same bytes to the renderer would
+// be a second egress path this bead did not decide. EntryID is the handle a
+// later "show me what it returned" reaches through; it is not a second copy
+// of the bytes.
+type ToolCall struct {
+	// Tool is the declared tool name, e.g. "files.read".
+	Tool string
+	// CallID is the model's own id for this call. The renderer keys on it,
+	// so a call that is announced twice — an approved egress resume passes
+	// the same call through the pipeline again — renders once.
+	CallID string
+	// EntryID is the ledger action entry the attempt was recorded under
+	// (openAttempt): the thread joining question, run, attempt and answer.
+	EntryID string
+	// Effect is the class the gate decided on — the ledger's vocabulary,
+	// never derived from the tool name by the renderer (ADR-0028 decision
+	// 4).
+	Effect content.Effect
+	// Resource is what the call named, from namedResource — the ONE
+	// derivation of "which argument names the resource this call touches",
+	// shared with the scope check and the approval ask. Nil when the tool
+	// names no resource in its parameters (git.status's repository IS the
+	// grant's path scope).
+	Resource *content.GrantScope
 }
 
 // Message is one turn of the conversation, in this package's own

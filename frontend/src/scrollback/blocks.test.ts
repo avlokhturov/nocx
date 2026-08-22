@@ -1711,6 +1711,84 @@ describe('BlockManager.addAnswerBlock', () => {
     return { inner, manager }
   }
 
+  // ── the answer's own flow (nocx-shxv0, nocx-s92so) ──────────────────
+
+  /** The body's children in DOM order, each as "kind:text" — the ORDER is
+   *  the property these tests are about, so nothing is queried by class in
+   *  isolation. */
+  function flowOf(h: { el: HTMLElement }): string[] {
+    const body = h.el.querySelector('[data-answer-body]')
+    return Array.from(body?.children ?? []).map((c) => {
+      if (c.classList.contains('ui-tool-call'))
+        return `call:${c.querySelector('.ui-tool-call__tool')?.textContent ?? ''}`
+      if (c.classList.contains('ui-reasoning'))
+        return `thinking:${c.querySelector('.ui-reasoning__body')?.textContent ?? ''}`
+      if (c.classList.contains('term-line')) return `text:${c.textContent ?? ''}`
+      return c.className
+    })
+  }
+
+  it('draws a tool call WHERE IT ARRIVED, before the text written from it', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('what went wrong?', '/')
+    h.append('let me look')
+    h.toolCall({
+      callId: 'call_1',
+      tool: 'files.read',
+      effect: 'observe',
+      resource: { kind: 'path', id: '/repo/a.txt' },
+    })
+    h.append('line 3 is wrong')
+    // Not "a call appears somewhere in the block": the call sits BETWEEN
+    // the prose that preceded it and the prose written from its result.
+    // That is the defect this fixes — the run tool's block used to land
+    // below a finished answer written from its output.
+    expect(flowOf(h)).toEqual(['text:let me look', 'call:files.read', 'text:line 3 is wrong'])
+  })
+
+  it('renders one line per call id, however many times the backend announces it', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    const call = { callId: 'call_1', tool: 'run', effect: 'mutate-destructive' as const }
+    h.toolCall(call)
+    // An approved egress resume puts the SAME call through the pipeline a
+    // second time, so the same announcement arrives twice.
+    h.toolCall(call)
+    expect(flowOf(h)).toEqual(['call:run'])
+  })
+
+  it('puts the thinking in its own note and never in the answer text', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.reasoning('the user asks about ')
+    h.reasoning('the screen')
+    h.append('it says hello')
+    expect(flowOf(h)).toEqual(['thinking:the user asks about the screen', 'text:it says hello'])
+    const rows = Array.from(h.el.querySelectorAll('.term-line')).map((r) => r.textContent)
+    expect(rows).toEqual(['it says hello'])
+  })
+
+  it('a model with no reasoning and no calls renders exactly what it always did', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('hello world')
+    h.close('success')
+    expect(h.el.querySelector('.ui-reasoning')).toBeNull()
+    expect(h.el.querySelector('.ui-tool-call')).toBeNull()
+    expect(flowOf(h)).toEqual(['text:hello world'])
+  })
+
+  it('a call retires the typing dots but leaves the header reporting work', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.toolCall({ callId: 'call_1', tool: 'readScreen', effect: 'observe' })
+    // The body has content now, so the stand-in for text goes...
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    // ...and the corner keeps saying the run is working, because it is: the
+    // model has done something and it has not answered.
+    expect(h.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
+  })
+
   it('renders a selectable block with the question as its header', () => {
     const { inner, manager } = newManager()
     manager.addAnswerBlock('what does this mean?', '/repo')

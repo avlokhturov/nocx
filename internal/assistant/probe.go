@@ -57,7 +57,16 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	// is written, nothing is looked up.
 	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers,
 		[]*schema.Message{schema.UserMessage(probePrompt)}, nil, nil, c.checkpoints, "",
-		func(delta string) error { sb.WriteString(delta); return nil })
+		// The probe asks "does this model answer", so only the ANSWER
+		// counts: a reasoning model that thought and said nothing has not
+		// answered, and a probe that accepted its thinking would report a
+		// working endpoint on a stream with no reply in it.
+		func(e AskEvent) error {
+			if e.Kind == AskAnswer {
+				sb.WriteString(e.Text)
+			}
+			return nil
+		})
 
 	res := ProbeResult{
 		EndpointName: p.Name,

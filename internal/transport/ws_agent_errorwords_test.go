@@ -80,8 +80,8 @@ func (c *recordingClient) Probe(ctx context.Context, p assistant.ProbeParams) (a
 // state, so there is nothing to drop.
 func (*recordingClient) Discard(string) {}
 
-func (c *recordingClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
-	err := c.inner.Ask(ctx, p, onDelta)
+func (c *recordingClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
+	err := c.inner.Ask(ctx, p, onEvent)
 	c.mu.Lock()
 	c.err = err
 	c.mu.Unlock()

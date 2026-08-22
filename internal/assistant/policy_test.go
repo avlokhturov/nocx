@@ -232,7 +232,7 @@ func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLed
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, known, "run-1", 1, requester, nil)
+	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, known, "run-1", 1, requester, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestAsk_RefusalTerminalizes(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
 	if err == nil {
 		t.Fatal("Ask succeeded — the out-of-grant call was not refused")
 	}
@@ -308,7 +308,7 @@ func TestAsk_RefusalOnSecondCallPreventsThird(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
 	if err == nil {
 		t.Fatal("Ask succeeded — the refusal did not terminalize the run")
 	}
@@ -347,7 +347,7 @@ func TestAsk_EscalationOnSecondCallPreventsThird(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -377,7 +377,7 @@ func TestAsk_FailedAttemptWritePreventsExecution(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
 	if err == nil {
 		t.Fatal("Ask succeeded — a failed attempt write was ignored")
 	}
@@ -419,7 +419,7 @@ func TestAsk_EscalationSuspendsBeforeDomain(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -513,8 +513,10 @@ func TestAsk_PermittedReadReturnsFileContents(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 	var answer string
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(d string) error {
-		answer += d
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(e AskEvent) error {
+		if e.Kind == AskAnswer {
+			answer += e.Text
+		}
 		return nil
 	})
 	if err != nil {
@@ -740,7 +742,7 @@ func TestAsk_PermittedReadRecordsTheAttempt(t *testing.T) {
 	p := askParams(srv.URL, &grant, ledger, nil)
 	p.RunID = "run-1"
 	p.Attempt = 1
-	if err := cl.Ask(context.Background(), p, func(string) error { return nil }); err != nil {
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 
@@ -811,7 +813,7 @@ func TestAsk_PolicyEscalationCarriesTheEffectAndTheResource(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) || want.Request == nil {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -844,7 +846,7 @@ func TestAsk_EscalationWithoutAResourceArgCarriesNoResource(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(string) error { return nil })
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) || want.Request == nil {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -876,7 +878,7 @@ func TestAsk_EgressSuspensionCarriesTheEffectAndTheResource(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWith(srv.URL, &grant, &fakeLedger{}, nil, &knownMatcher{value: secret, name: "github-token"}, nil),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 	var want *EgressRequestedError
 	if !errors.As(err, &want) || want.Request == nil {
 		t.Fatalf("Ask error = %v, want the egress suspension", err)

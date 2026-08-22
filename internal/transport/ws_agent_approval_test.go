@@ -59,7 +59,7 @@ func (s *scriptedApprovalClient) Discard(runID string) {
 	s.discarded = append(s.discarded, runID)
 }
 
-func (s *scriptedApprovalClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
+func (s *scriptedApprovalClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.received = append(s.received, p)
@@ -70,7 +70,7 @@ func (s *scriptedApprovalClient) Ask(ctx context.Context, p assistant.AskParams,
 	// could only do one of the two could not model the numbering the
 	// resume has to continue from.
 	for _, d := range step.deltas {
-		if err := onDelta(d); err != nil {
+		if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: d}); err != nil {
 			return err
 		}
 	}

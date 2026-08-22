@@ -72,7 +72,7 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{value: secret, name: "github-token"}, nil),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 	var want *EgressRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the egress suspension (not a failure, not a tool result)", err)
@@ -132,7 +132,7 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{}, nil), // the vault knows nothing
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 	var want *EgressRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the egress suspension", err)
@@ -174,7 +174,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{}, requester),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 	var want *EgressRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the egress suspension (the error string was screened)", err)
@@ -316,7 +316,7 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 	}
 	err := cl.Ask(context.Background(),
 		askParamsWith(srv.URL, &grant, ledger, nil, &knownMatcher{}, nil),
-		func(string) error { return nil })
+		func(AskEvent) error { return nil })
 	var want *EgressRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the egress suspension", err)
@@ -342,7 +342,7 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if _, err := newPolicyMiddleware(grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", 1, nil, nil); err == nil {
+	if _, err := newPolicyMiddleware(grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", 1, nil, nil, nil); err == nil {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
 	}
 }

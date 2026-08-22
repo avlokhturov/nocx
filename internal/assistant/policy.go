@@ -235,6 +235,18 @@ type policyMiddleware struct {
 	// exactly as they do without one. Consulted ONLY where the policy says
 	// permit; every failure and every suspect verdict escalates.
 	classifier CallClassifier
+	// onCall announces a call that is ABOUT TO RUN (nocx-shxv0). It lives
+	// here rather than in the engine's event loop because this is the only
+	// place that holds all four facts at once: the declaration the gate
+	// decided with, the resource namedResource derived from the validated
+	// arguments, the ledger entry the attempt was recorded under, and the
+	// knowledge that the call will actually execute. The engine's loop sees
+	// only the messages, and would have to derive the resource a second
+	// time from a raw arguments blob — the defect AGENTS.md spends a
+	// section on.
+	//
+	// Nil is "nobody is listening", which is every non-transport caller.
+	onCall func(ToolCall) error
 
 	validators map[string]*jsonschema.Schema
 }
@@ -255,7 +267,10 @@ type policyMiddleware struct {
 // classifier is the second model that judges permitted proposals (bead
 // nocx-kpy23); nil means not wired for this run — permitted calls run
 // exactly as they do without one.
-func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, requester RendererRequester, classifier CallClassifier) (*policyMiddleware, error) {
+//
+// onCall is the seam the visible tool call leaves through (nocx-shxv0);
+// nil means nobody is listening and nothing is announced.
+func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
@@ -269,6 +284,7 @@ func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledg
 		attempt:    attempt,
 		requester:  requester,
 		classifier: classifier,
+		onCall:     onCall,
 		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
 	}
 	for _, t := range registry.All() {
@@ -416,6 +432,39 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
 			return "", fmt.Errorf("agent tool %q: construct capability: %w", decl.Name, err)
 		}
+		// 5b. The call becomes VISIBLE (nocx-shxv0), here and not earlier
+		// or later. Not earlier, because a call that is refused, malformed
+		// or escalated has not happened — and an escalated one already has
+		// a surface of its own, the approval prompt, which two surfaces
+		// owning one input is exactly what AGENTS.md forbids. Not later,
+		// because a person must see what the assistant is doing WHILE it
+		// does it: a run tool's command can take a minute, and an account
+		// written after the fact is what the owner saw on 2026-08-22 —
+		// the block sitting below the answer written from it.
+		//
+		// It carries the resource namedResource derived, never the raw
+		// arguments blob, and never the result (see ToolCall's doc for why
+		// the result is left off). Announced once per EXECUTION, so an
+		// approved egress resume — which passes the same call through this
+		// pipeline a second time — announces the same CallID again; the
+		// renderer keys on it and renders one call.
+		if m.onCall != nil {
+			if err := m.onCall(ToolCall{
+				Tool:     decl.Name,
+				CallID:   tCtx.CallID,
+				EntryID:  entryID,
+				Effect:   decl.Effect,
+				Resource: matchedResource(decl, args),
+			}); err != nil {
+				// The caller refused the write, which is the one thing that
+				// stops a run: the same contract onEvent has for a delta.
+				// The attempt is closed rather than left open — the
+				// interval closes with a terminal reason, never silently.
+				_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+				return "", err
+			}
+		}
+
 		// 6. Execution — in Go, against the narrowed capability. An
 		// APPROVED egress resume does not re-run the tool: the result that
 		// was withheld and shown to the person is retained (design §7.1's

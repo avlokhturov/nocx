@@ -498,8 +498,19 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	if art.ByteLen != int64(len(body)) {
 		t.Errorf("artifact byte_len = %d, want %d", art.ByteLen, len(body))
 	}
-	if !strings.Contains(body, "file1") || !strings.Contains(body, "ok") {
-		t.Errorf("answer body = %q, want the tool output and the final answer", body)
+	// The DURABLE end of nocx-bshm2: the stored answer is the model's prose
+	// and NOT the tool's return value. This assertion used to read the other
+	// way round — it required "file1", the run tool's output, to be IN the
+	// answer — because that is what the code did: the engine's loop emitted
+	// every message with content and a tool result is a message, so the raw
+	// return travelled the delta path and was persisted with the answer.
+	// A test written from the implementation cannot report that; this one
+	// now states the contract instead.
+	if !strings.Contains(body, "ok") {
+		t.Errorf("answer body = %q, want the model's final answer", body)
+	}
+	if strings.Contains(body, "file1") {
+		t.Errorf("answer body = %q — the tool's output was persisted as though the model had said it", body)
 	}
 
 	// ── the order they happened in ──────────────────────────────────────

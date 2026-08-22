@@ -42,7 +42,7 @@ func askWithGrant(t *testing.T, grant *content.Grant) *fakeOpenAIServer {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	if err := cl.Ask(context.Background(), p, func(string) error { return nil }); err != nil {
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 	return f
@@ -140,7 +140,7 @@ func TestAsk_NoGrantTakesTheNoToolsPath(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 	p := testAskParams(srv.URL) // Grant is nil
-	if err := cl.Ask(context.Background(), p, func(string) error { return nil }); err != nil {
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 	body := f.body()
