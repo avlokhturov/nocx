@@ -84,8 +84,21 @@ export interface ScriptedToolCall {
 }
 
 export interface StreamScript {
-  /** One string per content delta. The concatenation is the answer. */
-  chunks: string[]
+  /** One string per content delta. The concatenation is the answer.
+   *
+   *  A FUNCTION is given the request body this response is answering, and
+   *  returns the chunks — so a script can write its answer FROM what the
+   *  model was actually sent, tool results included, instead of from what
+   *  the spec hoped would be sent.
+   *
+   *  That distinction is the whole point where a tool's RESULT is the thing
+   *  under test. A fixed script says the marker because the spec typed the
+   *  marker into the fixture; a derived one says it only if the marker
+   *  reached the model, so the sentence a person reads in the answer block
+   *  is evidence about the product rather than about the fake. Used by
+   *  agent-reads-the-screen.spec.ts; every other script here is fixed, and
+   *  should stay fixed unless it is asserting the same kind of thing. */
+  chunks: string[] | ((body: string) => string[])
   /** Hold the response open after this many content chunks have been
    *  flushed (default: write all chunks without holding). A held response
    *  stays `streaming` until release(id) lets it finish. The hold is among
@@ -313,7 +326,7 @@ export class FakeOpenAI {
     })
     res.flushHeaders()
 
-    const chunks = script.chunks
+    const chunks = typeof script.chunks === 'function' ? script.chunks(record.body) : script.chunks
     const calls = script.toolCalls ?? []
     const model = script.model ?? 'e2e-model'
     const holdAfter = script.holdAfter ?? chunks.length
