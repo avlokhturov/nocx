@@ -453,6 +453,7 @@ type fakeSession struct {
 	parent   session.Ref
 	kind     session.Kind
 	host     string
+	openedAt time.Time
 	sshOpts  []ssh.ConnectOption
 }
 
@@ -472,6 +473,7 @@ func (f *fakeSession) Liveness() session.LivenessState {
 func (f *fakeSession) WorkspaceID() workspace.ID { return workspace.Default }
 func (f *fakeSession) Kind() session.Kind        { return f.kind }
 func (f *fakeSession) PaneID() string            { return "" }
+func (f *fakeSession) OpenedAt() time.Time       { return f.openedAt }
 func (f *fakeSession) Host() string              { return f.host }
 func (f *fakeSession) Cwd() string               { return "/home/test" }
 func (f *fakeSession) ProfileID() string         { return "" }

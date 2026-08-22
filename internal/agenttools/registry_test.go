@@ -63,6 +63,28 @@ const readScreenSchema = `{
   "properties": {"sessionId": {"type": "string"}}
 }`
 
+const blocksListSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": {"type": "string"},
+    "limit": {"type": "integer"}
+  }
+}`
+
+const blocksReadSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "blockId"],
+  "properties": {
+    "sessionId": {"type": "string"},
+    "blockId": {"type": "string"},
+    "start": {"type": "integer"},
+    "count": {"type": "integer"}
+  }
+}`
+
 const runSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -243,10 +265,12 @@ func grant(effects []content.Effect, kinds ...content.ResourceKind) content.Gran
 
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"files.read.schema.json": filesReadSchema,
-		"git.status.schema.json": gitStatusSchema,
-		"readScreen.schema.json": readScreenSchema,
-		"run.schema.json":        runSchema,
+		"files.read.schema.json":  filesReadSchema,
+		"git.status.schema.json":  gitStatusSchema,
+		"readScreen.schema.json":  readScreenSchema,
+		"run.schema.json":         runSchema,
+		"blocks.list.schema.json": blocksListSchema,
+		"blocks.read.schema.json": blocksReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -273,11 +297,14 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if got := reg.ForGrant(observePath); containsName(got, "readScreen") {
 		t.Fatalf("ForGrant(observe+path) = %v, want readScreen absent (session tool, path grant)", toolNames(got))
 	}
-	// A session grant offers exactly the session tool — the positive end of
-	// the same rule: readScreen's resource kind is what a session grant
-	// covers, and the path tools stay absent.
-	if got := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)); !containsName(got, "readScreen") || len(got) != 1 {
-		t.Fatalf("ForGrant(observe+session) = %v, want exactly [readScreen]", toolNames(got))
+	// A session grant offers exactly the session tools — the positive end of
+	// the same rule: their resource kind is what a session grant covers, and
+	// the path tools stay absent. Three of them observe a session: the live
+	// screen, and the two halves of the finished blocks (nocx-5u3oz.6).
+	sessionObserve := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)))
+	wantSession := []string{"readScreen", "blocks.list", "blocks.read"}
+	if !reflect.DeepEqual(sessionObserve, wantSession) {
+		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
 	// The run row's classification: mutate-destructive + session. A grant
 	// carrying exactly that effect and kind offers exactly run; an observe
@@ -308,10 +335,12 @@ func containsName(tools []Tool, name string) bool {
 // exactly the state the code is in today — so this asserts the content.
 func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"files.read.schema.json": filesReadSchema,
-		"git.status.schema.json": gitStatusSchema,
-		"readScreen.schema.json": readScreenSchema,
-		"run.schema.json":        runSchema,
+		"files.read.schema.json":  filesReadSchema,
+		"git.status.schema.json":  gitStatusSchema,
+		"readScreen.schema.json":  readScreenSchema,
+		"run.schema.json":         runSchema,
+		"blocks.list.schema.json": blocksListSchema,
+		"blocks.read.schema.json": blocksReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

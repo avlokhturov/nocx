@@ -94,8 +94,11 @@ type Registry struct {
 }
 
 // declarations is the table — the only place a tool comes into existence.
-// Four rows, three execution states (design §4.1–§4.2): files.read executes
-// in Go (its Narrow is wired and its executor lives in internal/assistant),
+// Six rows, three execution states (design §4.1–§4.2): files.read and the
+// two block tools execute in Go (their Narrow is wired and their executors
+// live in internal/assistant — blocks.list and blocks.read answer from the
+// pane's durable ledger record, which is where a frozen block's text lives
+// once its rows have left the grid),
 // readScreen and run execute in the renderer (InRenderer tools — the
 // executor asks the renderer through the transport's broker; readScreen
 // reads a session's screen, run submits a command through the same submit
@@ -116,7 +119,7 @@ var declarations = []Declaration{
 	},
 	{
 		Name:        "readScreen",
-		Description: "Read what is on a terminal session's screen right now — the text, the cursor and the styling; reach for this when the question is about what the person is looking at, since you are never shown the screen unless you go and read it.",
+		Description: "Read what is on a terminal session's screen right now — the text, the cursor and the styling; reach for this for a command that is still RUNNING, or for a full-screen program the person is in, since you are never shown the screen unless you go and read it. It shows only the live screen: a command that has already finished has left it, and blocks.list is where its output went.",
 		Effect:      content.EffectObserve,
 		Resources:   []content.ResourceKind{content.ResourceSession},
 		ResourceArg: "sessionId",
@@ -133,6 +136,26 @@ var declarations = []Declaration{
 		Executes:    InRenderer,
 		Params:      "run.schema.json",
 		Narrow:      narrowRun,
+	},
+	{
+		Name:        "blocks.list",
+		Description: "List the commands that have already finished in a terminal session — newest first, each with the id blocks.read takes, what was run, how it ended and how many lines it printed; reach for this whenever the question is about what the person has run or what something printed, because a finished command's output has left the screen and readScreen can no longer see it.",
+		Effect:      content.EffectObserve,
+		Resources:   []content.ResourceKind{content.ResourceSession},
+		ResourceArg: "sessionId",
+		Executes:    InGo,
+		Params:      "blocks.list.schema.json",
+		Narrow:      narrowBlocks,
+	},
+	{
+		Name:        "blocks.read",
+		Description: "Read a window of one finished command's output, by the id blocks.list gave you; reach for this once you know which command you care about, and aim the window with the line count blocks.list reported — the answer says which window you actually got, so asking past the end of the output is safe.",
+		Effect:      content.EffectObserve,
+		Resources:   []content.ResourceKind{content.ResourceSession},
+		ResourceArg: "sessionId",
+		Executes:    InGo,
+		Params:      "blocks.read.schema.json",
+		Narrow:      narrowBlocks,
 	},
 	{
 		Name:        "git.status",

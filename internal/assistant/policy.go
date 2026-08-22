@@ -1108,7 +1108,19 @@ func (m *policyMiddleware) run(decl agenttools.Tool, ctx context.Context, capabi
 	if !ok {
 		return "", fmt.Errorf("tool %q has a capability constructor but no executor — a registration that cannot run", decl.Name)
 	}
-	return fn(ctx, capability, rawArgs)
+	return fn(ctx, capability, rawArgs, m.seams())
+}
+
+// seams is the run's wiring handed to an InGo executor: what a tool needs
+// that is neither its arguments nor its authority. The block record rides on
+// the same value the renderer requests do, because the transport adapts one
+// object for both (requester.go); a run with no requester wired hands over a
+// nil source, and the block tools say so rather than answering empty.
+func (m *policyMiddleware) seams() toolSeams {
+	if m.requester == nil {
+		return toolSeams{}
+	}
+	return toolSeams{blocks: m.requester}
 }
 
 // executeInRenderer runs one InRenderer tool: the capability is the

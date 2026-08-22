@@ -31,6 +31,8 @@ import (
 // the "asserted by trying, not by inspecting" seam. RequestScreen exists
 // only to satisfy the RendererRequester interface; run tests never call it.
 type recordingRunner struct {
+	unscriptedBlocks
+
 	mu      sync.Mutex
 	asked   []askedRun
 	body    json.RawMessage

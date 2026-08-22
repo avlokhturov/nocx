@@ -52,3 +52,14 @@ func narrowReadScreen(grant content.Grant) (Capability, error) {
 func narrowRun(grant content.Grant) (Capability, error) {
 	return NewRunner(grant.Scopes), nil
 }
+
+// narrowBlocks is the blocks.list / blocks.read rows' capability
+// constructor: the grant's ResourceSession scopes, nothing else — the same
+// narrowing readScreen and run get, as its own type. Both rows share it
+// because they share one authority question ("may this run read this
+// session's blocks"); what each does with the answer is the executor's, and
+// the ledger seam they read through is wired at the run (the assistant's
+// BlockSource), not here, so the capability stays pure authority.
+func narrowBlocks(grant content.Grant) (Capability, error) {
+	return NewBlockReader(grant.Scopes), nil
+}

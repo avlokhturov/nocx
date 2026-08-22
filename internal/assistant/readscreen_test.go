@@ -23,6 +23,7 @@ import (
 // scripted answer: the readScreen tests assert what the tool ASKED the
 // renderer — the "asserted by trying, not by inspecting" seam.
 type recordingRequester struct {
+	unscriptedBlocks
 	mu    sync.Mutex
 	asked []askedScreen
 	body  json.RawMessage

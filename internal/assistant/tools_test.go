@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -46,6 +47,15 @@ func askWithGrant(t *testing.T, grant *content.Grant) *fakeOpenAIServer {
 		t.Fatalf("Ask: %v", err)
 	}
 	return f
+}
+
+func containsToolName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
 }
 
 // requestTools extracts the tools array the request actually carried.
@@ -115,16 +125,29 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 		t.Fatalf("credential grant declared tools %v, want none", toolNames(t, got))
 	}
 
-	// A session grant declares exactly the session tool — readScreen is the
-	// first tool whose resource kind is a session, so a session scope is
-	// now meaningful (the positive end of the same rule).
+	// A session grant declares exactly the session tools — the positive end
+	// of the same rule. Three of them observe a session: the live screen,
+	// and the two halves of the finished blocks (nocx-5u3oz.6). The path
+	// tools stay absent from the same request, which is what makes this an
+	// assertion about the SET and not about presence.
 	f = askWithGrant(t, &content.Grant{
 		Effects: []content.Effect{content.EffectObserve},
 		Scopes:  []content.GrantScope{{Kind: content.ResourceSession, ID: "lane-1"}},
 	})
 	got = toolNames(t, requestTools(t, f.body()))
-	if len(got) != 1 || got[0] != "readScreen" {
-		t.Fatalf("session grant declared tools %v, want exactly [readScreen]", got)
+	wantSession := []string{"readScreen", "blocks.list", "blocks.read"}
+	if !reflect.DeepEqual(got, wantSession) {
+		t.Fatalf("session grant declared tools %v, want exactly %v", got, wantSession)
+	}
+
+	// And the block tools are ABSENT — never declared-and-filtered — from a
+	// grant that names no session at all: the request the engine built for
+	// the path grant above carried neither of them.
+	f = askWithGrant(t, observePath)
+	for _, name := range wantSession {
+		if containsToolName(toolNames(t, requestTools(t, f.body())), name) {
+			t.Fatalf("path grant declared %q; a session tool under a grant with no session scope must never be declared", name)
+		}
 	}
 }
 

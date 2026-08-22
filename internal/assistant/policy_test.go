@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -574,7 +575,7 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
-	out, err := executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, short)))
+	out, err := executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, short)), toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesRead: %v", err)
 	}
@@ -596,7 +597,7 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	// a zero-length window, no error.
 	empty := filepath.Join(dir, "empty.txt")
 	writeFile(t, empty, "")
-	out, err = executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)))
+	out, err = executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)), toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesRead on an empty file: %v — a window past the end is answered honestly, not as an error", err)
 	}
@@ -687,15 +688,13 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	if !ok {
 		t.Fatalf("NewClient returned %T, want *client", cl)
 	}
-	if got := len(internal.tools.All()); got != 4 {
-		t.Fatalf("registry has %d tools, want the real set of 4", got)
-	}
 	names := make([]string, 0, len(internal.tools.All()))
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	if names[0] != "files.read" || names[1] != "readScreen" || names[2] != "run" || names[3] != "git.status" {
-		t.Fatalf("assembled tools = %v, want [files.read readScreen run git.status]", names)
+	want := []string{"files.read", "readScreen", "run", "blocks.list", "blocks.read", "git.status"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}
 }
 
