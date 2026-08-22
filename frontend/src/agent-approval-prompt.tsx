@@ -25,6 +25,17 @@
  * provider", which is not a decision anyone should make by clicking a button
  * sitting next to five others. Egress keeps Allow / Deny, once only.
  *
+ * WHAT THE SESSION IS CALLED (nocx-vnzek). The wire carries the derived
+ * resource, and for `kind: 'session'` that derivation IS the session id — an
+ * internal handle that says nothing to the person being asked to decide. So
+ * the surface names the pane instead, through the SAME derivation the tab
+ * strip and the answer's tool-call line use (PaneManager.sessionDisplayName,
+ * injected as `sessionName`), and says nothing at all when no pane can be
+ * named. The proposed ARGUMENTS are untouched by this: that block is the
+ * model's own proposal, quoted verbatim, and paraphrasing an id inside it
+ * would misreport what was asked for. The sentence is added beside it, never
+ * substituted into it.
+ *
  * What the surface must not overstate (design §7.2): approving covers the
  * call that is asking — it has NOT run, and no call after it in that response
  * will. It does NOT promise the domain is untouched: a permitted sibling
@@ -52,6 +63,11 @@ export interface AgentApprovalPromptProps {
    * a surface that split them would invite a call site that forgot one.
    */
   onDecide: (approved: boolean, scope: ApprovalScope) => void
+  /** What a session is called TO A PERSON — the pane's own display title.
+   *  Null when no pane in this window holds it, and then the prompt says
+   *  nothing about it rather than printing the id back. Absent in a
+   *  bare-bones embedding, which is the same case. */
+  sessionName?: (sessionId: string) => string | null
 }
 
 const TITLE: Record<AgentApprovalRequested['reason'], string> = {
@@ -78,6 +94,15 @@ const SCOPES: ReadonlyArray<{ scope: ApprovalScope; suffix: string }> = [
 export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const ask = () => props.ask
   const effectLabel = () => EFFECT_LABEL[ask().effect]
+
+  /** The pane this call reaches, when the resource is a session and a pane
+   *  can name it. '' otherwise — for a path, whose id is already the
+   *  person's own word, and for a session nothing on screen holds. */
+  const paneName = () => {
+    const res = ask().resource
+    if (!res || res.kind !== 'session') return ''
+    return props.sessionName?.(res.id) ?? ''
+  }
 
   const egressIntro = () => {
     if (ask().reason !== 'egress') return ''
@@ -159,6 +184,11 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           The assistant is asking to call <strong>{ask().tool}</strong> with these arguments:
         </p>
         <CodeBlock ariaLabel={`Arguments of ${ask().tool}`}>{ask().arguments}</CodeBlock>
+        <Show when={paneName() !== ''}>
+          <p>
+            This call reaches <strong>{paneName()}</strong>.
+          </p>
+        </Show>
         <Show when={(ask().findings?.length ?? 0) > 0}>
           <Stack gap="loose">
             <p>What was found, and where — never the material itself:</p>

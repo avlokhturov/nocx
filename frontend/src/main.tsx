@@ -74,6 +74,7 @@ import {
 } from './sidebar-width'
 import { UIStateClient } from './uistate-client'
 import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
+import { REASONING_EXPANDED_KEY, applyReasoningExpanded } from './reasoning-expanded'
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
@@ -347,6 +348,10 @@ async function main() {
     // The default wrap for a command block's output — one attribute on the
     // root, read by the CSS; the per-block ⋮ override is not touched by it.
     applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+    // Whether an answer's thinking note opens by itself (nocx-y9e88), beside
+    // the wrap for the same reason: it decides what the surface does before
+    // anything is drawn on it.
+    applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
     // How much of one command's output is kept. Applied here beside the wrap
     // for the same reason: the renderer is where it is enforced, so it has to
     // know before the first block freezes.
@@ -751,6 +756,10 @@ async function main() {
         // has overridden, in place, with no restart and no reflow of the
         // blocks that carry their own answer.
         applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+        // Live in the same sense: flipping it opens or shuts the thinking
+        // notes ALREADY on screen, so the setting is never contradicted by
+        // the answers a person is looking at.
+        applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
         // The cap is live too: a block frozen after the change is captured
         // under the new number, and blocks already stored keep what they got.
         applyOutputCap(snap.values[OUTPUT_CAP_KEY])
@@ -1277,6 +1286,10 @@ async function main() {
               ask={ask}
               busy={approvalBusy()}
               onDecide={(approved, scope) => void decideApproval(approved, scope)}
+              // A session in the question is named by the pane that holds
+              // it, through the tab strip's own derivation (nocx-vnzek) —
+              // the same one the answer's tool-call lines read.
+              sessionName={(id) => tm.sessionDisplayName(id)}
             />
           )}
         </Show>

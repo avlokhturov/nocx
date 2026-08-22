@@ -26,6 +26,17 @@
 // destructive call must not look like a read, and the renderer must never
 // derive an effect from a tool name (ADR-0028 decision 4) — the backend
 // sends it.
+//
+// AND A SESSION IS NAMED, NEVER NUMBERED (nocx-vnzek). The derived resource
+// is the right thing to show for a path — a path is the person's own word —
+// and the wrong thing for a session, where the derivation IS the session id
+// and the line read `readScreen 9bb9a7602c27e8ba0741972c7049b54b`. The id is
+// an internal handle; a person's word for that session is the pane's name,
+// which the tab strip already derives (panes.ts sessionDisplayName →
+// Pane.displayTitle → layout/tab-label). That derivation is INJECTED here
+// rather than repeated: this module owns the paint rule ("a session shows
+// its name"), the pane layer owns the name. The id stays on the wire, where
+// the renderer routes and dedupes on it — this is paint only.
 
 /** The effect classes the ledger names (content.Effect) — the closed set the
  *  wire's enum declares. */
@@ -54,7 +65,41 @@ export interface ToolCallLineSpec {
   resource?: { kind: string; id: string }
 }
 
-export function createToolCallLine(call: ToolCallLineSpec): HTMLElement {
+/** What the line needs from outside itself to paint a resource. */
+export interface ToolCallLineDeps {
+  /** What a SESSION is called to a person — the pane's own display title,
+   *  the same words the tab strip and the tab's tooltip show. Null when no
+   *  pane in this window holds that session (it was closed, or it belongs
+   *  to another window), and null is a real answer: see resourceText. */
+  sessionName?: (sessionId: string) => string | null
+}
+
+/**
+ * What the resource is CALLED on this line, or null when it cannot be named.
+ *
+ * A path, an environment variable, a destination: shown verbatim, because
+ * the derived id IS the person's own word for them.
+ *
+ * A session: the pane's name, and NEVER the id. When nothing can name the
+ * session the line falls back to naming the tool alone — the shape it
+ * already has for a call that named no resource at all — rather than to the
+ * id, because printing the id back is the whole defect. What is lost is
+ * which of several sessions was touched, in the one case where that session
+ * is no longer on screen to be looked at; what is gained is that the line
+ * never shows a person a number that means nothing to them.
+ */
+function resourceText(
+  resource: { kind: string; id: string },
+  deps: ToolCallLineDeps,
+): string | null {
+  if (resource.kind === 'session') return deps.sessionName?.(resource.id) || null
+  return resource.id
+}
+
+export function createToolCallLine(
+  call: ToolCallLineSpec,
+  deps: ToolCallLineDeps = {},
+): HTMLElement {
   const root = document.createElement('div')
   root.className = 'ui-tool-call'
   root.dataset.effect = call.effect
@@ -74,16 +119,18 @@ export function createToolCallLine(call: ToolCallLineSpec): HTMLElement {
   tool.textContent = call.tool
   root.appendChild(tool)
 
-  if (call.resource) {
+  const named = call.resource ? resourceText(call.resource, deps) : null
+  if (call.resource && named) {
     const res = document.createElement('span')
     res.className = 'ui-tool-call__resource'
-    res.textContent = call.resource.id
-    // A path or a session id is long and the line must stay one line (the
-    // scrollback hangs from the block and a wrapping line moves it). The
-    // whole value lives in the title, so nothing is only in the ellipsis.
-    res.title = `${call.resource.kind}: ${call.resource.id}`
+    res.textContent = named
+    // A path is long and the line must stay one line (the scrollback hangs
+    // from the block and a wrapping line moves it). The whole value lives
+    // in the title, so nothing is only in the ellipsis — and the title
+    // carries the SAME name the line does, never the id behind it.
+    res.title = `${call.resource.kind}: ${named}`
     root.appendChild(res)
-    root.setAttribute('aria-label', `used ${call.tool} on ${call.resource.id}`)
+    root.setAttribute('aria-label', `used ${call.tool} on ${named}`)
   } else {
     root.setAttribute('aria-label', `used ${call.tool}`)
   }

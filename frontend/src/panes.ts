@@ -1015,6 +1015,10 @@ export class PaneManager {
       undefined,
       {
         onSubtitleChange: (subtitle) => paneRef.current?.updateSubtitle(subtitle),
+        // A tool call in an answer names the session it touched by the
+        // pane's own name (nocx-vnzek). Only this manager can answer it —
+        // the session may be another pane's.
+        sessionName: (id) => this.sessionDisplayName(id),
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
@@ -1094,6 +1098,10 @@ export class PaneManager {
       sshOpts,
       {
         onSubtitleChange: (subtitle) => paneRef.current?.updateSubtitle(subtitle),
+        // A tool call in an answer names the session it touched by the
+        // pane's own name (nocx-vnzek). Only this manager can answer it —
+        // the session may be another pane's.
+        sessionName: (id) => this.sessionDisplayName(id),
         onAdoptabilityChange: (adoptable: boolean) => {
           const pane = paneRef.current
           if (!pane) return
@@ -1951,17 +1959,40 @@ export class PaneManager {
     return content instanceof TerminalContent ? content : null
   }
 
+  /** The pane whose session matches, when any pane in this window holds it.
+   *  ONE walk, because "which pane is this session" is one question and the
+   *  two callers below want different halves of the answer. */
+  private paneForSession(sessionId: string): Pane | null {
+    for (const pane of this.panes) {
+      const content = pane.content
+      if (content instanceof TerminalContent && content.sessionId() === sessionId) {
+        return pane
+      }
+    }
+    return null
+  }
+
   /** The terminal content whose session matches, when any pane holds it —
    *  the readScreen pull's lookup (nocx-ljfwz): the renderer answers a
    *  screen request only for the pane that owns the session's grid. */
   terminalContentForSession(sessionId: string): TerminalContent | null {
-    for (const pane of this.panes) {
-      const content = pane.content
-      if (content instanceof TerminalContent && content.sessionId() === sessionId) {
-        return content
-      }
-    }
-    return null
+    const content = this.paneForSession(sessionId)?.content
+    return content instanceof TerminalContent ? content : null
+  }
+
+  /** What a session is called TO A PERSON (nocx-vnzek): the pane's own
+   *  display title — the words already on the tab and in its tooltip.
+   *  Null when no pane in this window holds that session, or when the pane
+   *  has no title yet (a pane one round trip old); a caller must treat that
+   *  as "cannot be named", never fall back to the id, which is the internal
+   *  handle this exists to keep off the screen.
+   *
+   *  There is no second derivation here: `displayTitle` composes the typed
+   *  tab name, the pane's own title and the descriptor's default exactly
+   *  once (layout/tab-label.ts), and this is that answer asked by session
+   *  rather than by pane. */
+  sessionDisplayName(sessionId: string): string | null {
+    return this.paneForSession(sessionId)?.displayTitle || null
   }
 
   /** The active pane's PANE element — the always-visible mount the snippet

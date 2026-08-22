@@ -695,6 +695,38 @@ func TestHistorySectionDeclaresUserDecisions(t *testing.T) {
 	}
 }
 
+// The Answers section carries the one decision a person makes about how an
+// answer is DRAWN (nocx-y9e88): whether the model's thinking opens by itself.
+// It is a toggle, it defaults to closed, and it sits under Assistant — a
+// setting rendered in the wrong group is a setting nobody finds.
+func TestAnswersSectionDeclaresTheThinkingDefault(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{data: map[credential.SecretID]string{}})
+	var decl settings.Declaration
+	found := false
+	for _, d := range reg.Declarations() {
+		if d.Key == "assistant.expandReasoning" {
+			decl, found = d, true
+		}
+	}
+	if !found {
+		t.Fatal("assistant.expandReasoning is not declared — the setting has no screen")
+	}
+	if decl.Section != "Answers" {
+		t.Errorf("section %q, want %q", decl.Section, "Answers")
+	}
+	if decl.Control != "toggle" {
+		t.Errorf("control %q, want %q — the kit renders a toggle as a switch", decl.Control, "toggle")
+	}
+	// The answer is what a person came for; the thinking is several times
+	// longer. Closed until they say otherwise.
+	if decl.Default != false {
+		t.Errorf("default %v, want false", decl.Default)
+	}
+	if got := reg.SectionGroups()["Answers"]; got != "assistant" {
+		t.Errorf("Answers → group %q, want %q", got, "assistant")
+	}
+}
+
 // A sentinel that is explained only in prose is a sentinel nobody reads. The
 // meaning of 0 travels on the wire beside the unit and the bounds, so the
 // screen has nothing to infer (nocx-w7h.12).

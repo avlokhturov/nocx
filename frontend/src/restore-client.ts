@@ -85,22 +85,29 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
 }
 
 /**
- * The body one block printed, or null when there is none to show.
+ * ONE entry's artifact of a given media type, or null when there is none.
  *
- * NULL IS TWO DIFFERENT FACTS and the caller renders both the same way, which
- * is correct: retention evicted the artifact, or the store could not be
- * reached. Either way the honest answer on screen is "the output is not
- * here", never an empty block that reads as a command which printed nothing.
+ * Two round trips, always the same two: `ledger.get` for the entry (which
+ * lists its artifacts) and `ledger.artifact` for the bytes. The media type is
+ * the ONLY thing that varies between the two callers below, which is exactly
+ * why they share this and do not each own a fetch: a second path would agree
+ * with this one until the day the artifact list changed shape.
+ *
+ * NULL IS TWO DIFFERENT FACTS: retention evicted the artifact, or the store
+ * could not be reached. They are collapsed here on purpose — every caller
+ * has to say the same thing for both ("this is not here"), and a caller that
+ * could tell them apart would still have nothing different to do.
  */
-export async function bodyForBlock(client: WSClient, entryId: string): Promise<string | null> {
+async function artifactBody(
+  client: WSClient,
+  entryId: string,
+  mediaType: string,
+): Promise<string | null> {
   try {
     const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
-    // The SGR body is what a block draws. The derived text/plain artifact
-    // beside it is for search and copy, and drawing that one would silently
-    // throw the colour away.
-    const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
-    if (!vt) return null
-    const body = await client.call<LedgerArtifact>('ledger.artifact', { id: vt.id })
+    const artifact = entry.artifacts.find((a) => a.mediaType === mediaType)
+    if (!artifact) return null
+    const body = await client.call<LedgerArtifact>('ledger.artifact', { id: artifact.id })
     return body.body
   } catch {
     // Quiet by design: a pane restoring fifty blocks would otherwise log
@@ -108,4 +115,37 @@ export async function bodyForBlock(client: WSClient, entryId: string): Promise<s
     // once, in the product, that history is unavailable.
     return null
   }
+}
+
+/**
+ * The body one block printed, or null when there is none to show.
+ *
+ * The SGR body is what a block DRAWS. The derived text/plain artifact beside
+ * it is for search and copy, and drawing that one would silently throw the
+ * colour away.
+ *
+ * Null is rendered as "the output is not here", never as an empty block that
+ * reads as a command which printed nothing.
+ */
+export async function bodyForBlock(client: WSClient, entryId: string): Promise<string | null> {
+  return artifactBody(client, entryId, 'application/vt')
+}
+
+/**
+ * The text one ANSWER entry recorded, or null when it is no longer stored.
+ *
+ * This is the artifact SubmitAgentAsk wrote for the answer, so it is what the
+ * model actually said — not a rendering of it. Copying an answer reads THIS
+ * (nocx-v13pd): the flow consumes the markdown markers it paints, so the DOM
+ * is no longer the answer, and a copy scraped from it would quietly differ
+ * from the record.
+ *
+ * Null is a refusal the caller must SAY. Falling back to the painted text
+ * would be the defect this exists to close, silently.
+ */
+export async function answerTextForEntry(
+  client: WSClient,
+  entryId: string,
+): Promise<string | null> {
+  return artifactBody(client, entryId, 'text/plain')
 }

@@ -21,17 +21,35 @@
 // A model that returns no reasoning gets NOTHING — no empty section, no
 // placeholder. That is the caller's contract too: this is constructed at the
 // first chunk, never up front.
+//
+// COLLAPSED IS THE DEFAULT, NOT A LAW (nocx-y9e88). A person who wants to
+// watch the model think says so once, in Settings, and `expanded` is that
+// answer arriving here — the caller reads the setting (reasoning-expanded.ts)
+// and this note obeys it. It stays a native <details> either way, so the
+// person can close an opened note by clicking its summary: the setting
+// decides what a note DOES until somebody says otherwise, which is the same
+// shape `terminal.wrapOutput` has for a command block.
+
+/** What the caller may decide about a note as it is built. */
+export interface ReasoningNoteSpec {
+  /** Render the note open. The setting's value at the moment the note was
+   *  built; false, and absent, both mean closed. */
+  expanded?: boolean
+}
 
 export interface ReasoningNote {
-  readonly el: HTMLElement
+  /** The disclosure itself. Typed as the element it is, so a caller that
+   *  opens or closes one — the settings applier — needs no cast. */
+  readonly el: HTMLDetailsElement
   /** Append one chunk. The body is `white-space: pre-wrap`, so the model's
    *  own line breaks survive and no chunk boundary shows. */
   append(text: string): void
 }
 
-export function createReasoningNote(): ReasoningNote {
+export function createReasoningNote(spec: ReasoningNoteSpec = {}): ReasoningNote {
   const root = document.createElement('details')
   root.className = 'ui-reasoning'
+  root.open = spec.expanded === true
 
   const summary = document.createElement('summary')
   summary.className = 'ui-reasoning__summary'

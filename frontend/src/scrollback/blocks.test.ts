@@ -18,6 +18,8 @@ import {
   type BlockKind,
 } from './blocks'
 import { shellHighlightReady } from '../shell-highlight'
+import { applyReasoningExpanded } from '../reasoning-expanded'
+import { clearToasts, toasts } from '../ui/toast'
 import { BufferLine } from './test-helpers'
 import { setCurrentTheme, _resetThemeState } from '../renderers/theme-adapter'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -1731,15 +1733,56 @@ describe('the serialized output range vs the block creation line (nocx-4yhi)', (
 
 // ── Answer blocks (nocx-x8s2.2) ───────────────────────────────────────────
 
+// ── Menu and clipboard helpers, shared by the copy tests in both
+// describes below (nocx-v13pd). One block, one menu, one recorder.
+/** Records what reached the clipboard, and answers with the list. */
+function captureClipboard(): string[] {
+  const copied: string[] = []
+  Object.defineProperty(navigator, 'clipboard', {
+    value: {
+      writeText: vi.fn((t: string) => {
+        copied.push(t)
+        return Promise.resolve()
+      }),
+    },
+    configurable: true,
+  })
+  return copied
+}
+
+/** Open one block's ⋮ menu and return it. */
+function openBlockMenu(blockEl: HTMLElement): HTMLElement {
+  blockEl
+    .querySelector<HTMLElement>('.cmd-overflow-btn')!
+    .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
+}
+
+/** Open the menu and click the item with this label. */
+function clickMenuItem(blockEl: HTMLElement, label: string): void {
+  Array.from(openBlockMenu(blockEl).querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+    .find((b) => b.textContent === label)!
+    .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+}
+
 describe('BlockManager.addAnswerBlock', () => {
-  function newManager() {
+  function newManager(
+    sessionName?: (id: string) => string | null,
+    answerText?: (entryId: string) => Promise<string | null>,
+  ) {
     const inner = document.createElement('div')
+    // Attached to the document, like the real scrollback: the settings
+    // applier that opens the thinking notes already on screen walks the
+    // document, and a detached tree is not on screen.
+    document.body.appendChild(inner)
     const xtermContainer = document.createElement('div')
     // The manager inserts blocks BEFORE the xterm container, so the
     // container must already be a child (the mount path attaches both).
     inner.appendChild(xtermContainer)
     const manager = new BlockManager(inner, xtermContainer, {
       snapshotStore: freshStore(),
+      sessionName,
+      answerText,
     })
     return { inner, manager }
   }
@@ -1779,6 +1822,22 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['text:let me look', 'call:files.read', 'text:line 3 is wrong'])
   })
 
+  it('names the session a call touched by the PANE\u2019s name, never the id (nocx-vnzek)', () => {
+    // The tab strip's derivation reaches the line through the manager. The
+    // id is on the wire and stays there: what a person reads is the pane.
+    const { manager } = newManager((id) => (id === 'sess-9bb9' ? 'home/dev' : null))
+    const h = manager.addAnswerBlock('what is on my screen?', '/')
+    h.toolCall({
+      callId: 'call_1',
+      tool: 'readScreen',
+      effect: 'observe',
+      resource: { kind: 'session', id: 'sess-9bb9' },
+    })
+    const res = h.el.querySelector('.ui-tool-call__resource')
+    expect(res?.textContent).toBe('home/dev')
+    expect(h.el.textContent).not.toContain('sess-9bb9')
+  })
+
   it('renders one line per call id, however many times the backend announces it', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
@@ -1799,6 +1858,34 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['thinking:the user asks about the screen', 'text:it says hello'])
     const rows = Array.from(h.el.querySelectorAll('.term-line')).map((r) => r.textContent)
     expect(rows).toEqual(['it says hello'])
+  })
+
+  it('opens the thinking note when the person asked for it, and only then (nocx-y9e88)', () => {
+    const { manager } = newManager()
+    applyReasoningExpanded(false)
+    const shut = manager.addAnswerBlock('q', '/')
+    shut.reasoning('weighing the two options')
+    expect(shut.el.querySelector<HTMLDetailsElement>('.ui-reasoning')?.open).toBe(false)
+
+    applyReasoningExpanded(true)
+    const open = manager.addAnswerBlock('q', '/')
+    open.reasoning('weighing the two options')
+    expect(open.el.querySelector<HTMLDetailsElement>('.ui-reasoning')?.open).toBe(true)
+
+    // The one already on screen follows the change too — a setting the
+    // surface contradicts is the defect.
+    expect(shut.el.querySelector<HTMLDetailsElement>('.ui-reasoning')?.open).toBe(true)
+    applyReasoningExpanded(false)
+  })
+
+  it('renders nothing at all for a model that thought nothing, with the setting ON', () => {
+    const { manager } = newManager()
+    applyReasoningExpanded(true)
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('hello world')
+    h.close('success')
+    expect(h.el.querySelector('.ui-reasoning')).toBeNull()
+    applyReasoningExpanded(false)
   })
 
   it('a model with no reasoning and no calls renders exactly what it always did', () => {
@@ -1939,11 +2026,21 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     await shellHighlightReady
   })
 
-  function newManager() {
+  function newManager(
+    sessionName?: (id: string) => string | null,
+    answerText?: (entryId: string) => Promise<string | null>,
+  ) {
     const inner = document.createElement('div')
     const xtermContainer = document.createElement('div')
     inner.appendChild(xtermContainer)
-    const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
+    // Attached to the document like the real scrollback: the ⋮ menu renders
+    // at body level and is found from there.
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, xtermContainer, {
+      snapshotStore: freshStore(),
+      sessionName,
+      answerText,
+    })
     return { inner, manager }
   }
 
@@ -2058,6 +2155,74 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(blockOutputText(h.el)).toBe('before\n```\nprintf "hi"\n```\nafter')
   })
 
+  it('highlights a shell fence with the SAME lexer the editor uses (nocx-swoje)', async () => {
+    await shellHighlightReady
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('```bash\necho hi\n```\n')
+    h.close('success')
+    const code = h.el.querySelector('.cmd-output-code')!
+    const rows = Array.from(code.querySelectorAll('.term-line'))
+    // The delimiters stay plain — they mark the region, they are not in it.
+    expect(rows[0].querySelector('span')).toBeNull()
+    // The command line is tokenised, and the classes are the editor's own.
+    expect(rows[1].querySelector('[class^="tok-"]')).not.toBeNull()
+    // The bytes are unchanged: copying a fence still returns what arrived.
+    expect(rows[1].textContent).toBe('echo hi')
+  })
+
+  it('renders a fence in another language plainly rather than colouring it wrongly', async () => {
+    await shellHighlightReady
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('```python\nprint("hi")\n```\n')
+    h.close('success')
+    const rows = Array.from(h.el.querySelectorAll('.cmd-output-code .term-line'))
+    expect(rows[1].querySelector('span')).toBeNull()
+    expect(rows[1].textContent).toBe('print("hi")')
+  })
+
+  it('a fence with no language is shell — this is a terminal (nocx-swoje)', async () => {
+    await shellHighlightReady
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('```\necho hi\n```\n')
+    h.close('success')
+    const rows = Array.from(h.el.querySelectorAll('.cmd-output-code .term-line'))
+    expect(rows[1].querySelector('[class^="tok-"]')).not.toBeNull()
+  })
+
+  it('paints the markdown a model emits, and escapes every byte of it', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('## Findings\n- run `ls` in **the repo**\n<script>alert(1)</script>\n')
+    h.close('success')
+    const rows = Array.from(h.el.querySelectorAll<HTMLElement>('.cmd-output > .term-line'))
+    expect(rows[0].dataset.md).toBe('h2')
+    expect(rows[1].dataset.md).toBe('li')
+    expect(rows[1].querySelector('code.ui-md-code')?.textContent).toBe('ls')
+    expect(rows[1].querySelector('strong.ui-md-strong')?.textContent).toBe('the repo')
+    // The model's tag is text, and the answer body grew no script element.
+    expect(h.el.querySelector('script')).toBeNull()
+    expect(rows[2].textContent).toBe('<script>alert(1)</script>')
+  })
+
+  it('an answer with no code and no structure renders exactly as it always did', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('the command exited with 1\nnothing else happened\n')
+    h.close('success')
+    const rows = Array.from(h.el.querySelectorAll<HTMLElement>('.cmd-output > .term-line'))
+    expect(rows.map((r) => r.textContent)).toEqual([
+      'the command exited with 1',
+      'nothing else happened',
+    ])
+    for (const r of rows) {
+      expect(r.dataset.md).toBeUndefined()
+      expect(r.children.length).toBe(0)
+    }
+  })
+
   it('fence → prose → fence keeps each fence in its own container, after the prose', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
@@ -2084,39 +2249,85 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(blockOutputText(h.el)).toBe('```\ncode')
   })
 
-  it('Copy output and Copy all read the answer through the block, fence included', () => {
-    const copied: string[] = []
-    Object.defineProperty(navigator, 'clipboard', {
-      value: {
-        writeText: vi.fn((t: string) => {
-          copied.push(t)
-          return Promise.resolve()
-        }),
-      },
-      configurable: true,
-    })
-    const { manager } = newManager()
+  it('Copy output on an ANSWER returns the STORED text, not the painted DOM (nocx-v13pd)', async () => {
+    const copied = captureClipboard()
+    // Deliberately different from what the flow paints: the answer's markers
+    // are consumed on screen, so a copy scraped from the DOM would quietly
+    // differ from the record. This is the record.
+    const stored = '## Findings\n- run `ls` in **the repo**\n```\ncode\n```\n'
+    const { manager } = newManager(undefined, () => Promise.resolve(stored))
     const h = manager.addAnswerBlock('question?', '/')
-    h.append('answer prose\n```\ncode\n```')
+    h.el.dataset.answerEntryId = 'entry-7'
+    h.append('## Findings\n- run `ls` in **the repo**\n```\ncode\n```\n')
+    h.close('success')
+    // What is on screen has already lost the markers — which is the point.
+    expect(blockOutputText(h.el)).not.toBe(stored)
+
+    clickMenuItem(h.el, 'Copy output')
+    await vi.waitFor(() => expect(copied.length).toBe(1))
+    expect(copied[0]).toBe(stored)
+
+    clickMenuItem(h.el, 'Copy all')
+    await vi.waitFor(() => expect(copied.length).toBe(2))
+    expect(copied[1]).toBe(`question?\n${stored}`)
+  })
+
+  it('says so when the stored answer is gone, rather than copying the painted text', async () => {
+    const copied = captureClipboard()
+    clearToasts()
+    // Null is retention AND an unreachable store — one refusal for both.
+    const { manager } = newManager(undefined, () => Promise.resolve(null))
+    const h = manager.addAnswerBlock('question?', '/')
+    h.el.dataset.answerEntryId = 'entry-7'
+    h.append('some answer')
     h.close('success')
 
-    const openMenu = () => {
-      h.el
-        .querySelector<HTMLElement>('.cmd-overflow-btn')!
-        .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-      return document.body.querySelector<HTMLElement>('.cmd-overflow-menu')!
-    }
-    const clickItem = (menu: HTMLElement, label: string) => {
-      Array.from(menu.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
-        .find((b) => b.textContent === label)!
-        .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-    }
+    clickMenuItem(h.el, 'Copy output')
+    await vi.waitFor(() => expect(toasts().length).toBe(1))
+    expect(toasts()[0].level).toBe('warning')
+    // Nothing was copied: a copy that quietly differs from the record is
+    // worse than a refusal.
+    expect(copied).toEqual([])
+    clearToasts()
+  })
 
-    clickItem(openMenu(), 'Copy output')
-    expect(copied[0]).toBe('answer prose\n```\ncode\n```')
+  it('says it is working while it fetches, so the menu never looks inert', async () => {
+    captureClipboard()
+    let release: (v: string | null) => void = () => {}
+    const pending = new Promise<string | null>((resolve) => {
+      release = resolve
+    })
+    const { manager } = newManager(undefined, () => pending)
+    const h = manager.addAnswerBlock('question?', '/')
+    h.el.dataset.answerEntryId = 'entry-7'
+    h.append('some answer')
+    h.close('success')
 
-    clickItem(openMenu(), 'Copy all')
-    expect(copied[1]).toBe('question?\nanswer prose\n```\ncode\n```')
+    const menu = openBlockMenu(h.el)
+    const item = Array.from(
+      menu.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+    ).find((b) => b.textContent === 'Copy output')!
+    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    // The item reports the work rather than sitting there looking clicked.
+    expect(item.dataset.busy).toBe('')
+    expect(item.disabled).toBe(true)
+    expect(item.textContent).not.toBe('Copy output')
+
+    release('stored')
+    await vi.waitFor(() => expect(document.body.querySelector('.cmd-overflow-menu')).toBeNull())
+  })
+
+  it('a COMMAND block still copies what the terminal drew — unchanged', () => {
+    const copied = captureClipboard()
+    const { manager } = newManager(undefined, () =>
+      Promise.reject(new Error('a command must never reach the ledger for its copy')),
+    )
+    manager.startBlock('echo hi', '/repo', 0)
+    const rec = manager.freezeBlock((y) => (y === 0 ? new BufferLine('hi') : undefined), 0, 0)!
+    clickMenuItem(rec.el, 'Copy output')
+    expect(copied[0]).toBe('hi')
+    clickMenuItem(rec.el, 'Copy all')
+    expect(copied[1]).toBe('echo hi\nhi')
   })
 
   // The wrap override lives in the ⋮ menu because it is the exception: the

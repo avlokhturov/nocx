@@ -13,6 +13,9 @@ import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
 import { createToolCallLine, type ToolCallEffect } from '../ui/tool-call-line'
 import { createReasoningNote, type ReasoningNote } from '../ui/reasoning-note'
+import { reasoningStartsExpanded } from '../reasoning-expanded'
+import { paintAnswerLine } from '../ui/answer-markdown'
+import { showToast } from '../ui/toast'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
@@ -306,6 +309,40 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
+// ── A fenced block's language ───────────────────────────────────────────────
+//
+// nocx has ONE lexer (shell-highlight.ts, the same tokenizer the command
+// editor and the frozen header use), so a fence is either shell or it is
+// plain. A second highlighter for a second language is exactly the "look for
+// the existing answer before you write a second one" prohibition, and
+// guessing at a grammar we do not have would colour Python as if it were sh.
+//
+// A fence with NO info string is treated as shell. This is a terminal: a bare
+// fence in an assistant's answer is a command far more often than it is
+// anything else, and the tokenizer is purely syntactic — a wrong guess costs
+// colour and never meaning, where leaving every bare fence grey costs the
+// feature the owner asked for.
+const SHELL_FENCE = new Set([
+  '',
+  'sh',
+  'bash',
+  'zsh',
+  'ksh',
+  'fish',
+  'shell',
+  'shellscript',
+  'shell-session',
+  'console',
+  'terminal',
+])
+
+/** The info string of a fence opener: everything after the backticks, lower
+ *  cased, first word only (```` ```bash title="x" ```` is bash). */
+function fenceLanguage(openerLine: string): string {
+  const rest = openerLine.trim().replace(/^`+/, '').trim()
+  return rest.split(/\s+/)[0].toLowerCase()
+}
+
 // ── CWD display ────────────────────────────────────────────────────────────
 
 function cwdLabel(cwd: string): string {
@@ -315,31 +352,36 @@ function cwdLabel(cwd: string): string {
   return parts.slice(-2).join('/')
 }
 
-// ── Frozen-header highlight readiness ────────────────────────────────────────
+// ── Shell highlight readiness ────────────────────────────────────────────────
 //
-// The Shiki grammar loads asynchronously at module init. A header frozen in
+// The Shiki grammar loads asynchronously at module init. Anything painted in
 // the few milliseconds before that resolves would stay plain forever, so
 // spans rendered pre-ready are registered here and repainted by
 // `highlightShellText` once the tokenizer exists. After that the registration
-// is a no-op: the grammar is loaded and every later header is coloured at
-// freeze time.
+// is a no-op: the grammar is loaded and every later span is coloured when it
+// is written.
+//
+// Two callers, one registry (nocx-swoje): a frozen block's header, and a row
+// inside a shell fence in an answer. Both write the same lexer's output into
+// innerHTML, so both must catch up the same way — a second list would be a
+// second answer to one question.
 
 let tokenizerLoaded = false
-/** Spans frozen before the grammar loaded, keyed by the tab's snapshot store
- *  so the repaint judges against the right tab's command set. */
-const pendingHeaderSpans = new Map<HTMLElement, CommandSnapshotStore>()
+/** Spans painted before the grammar loaded, keyed by the tab's snapshot
+ *  store so the repaint judges against the right tab's command set. */
+const pendingHighlightSpans = new Map<HTMLElement, CommandSnapshotStore>()
 
-function refreshPendingHeaderSpans(): void {
-  for (const [el, store] of pendingHeaderSpans) {
+function refreshPendingHighlightSpans(): void {
+  for (const [el, store] of pendingHighlightSpans) {
     const text = el.textContent ?? ''
     if (text && text !== '(empty)') el.innerHTML = highlightShellText(text, store)
   }
-  pendingHeaderSpans.clear()
+  pendingHighlightSpans.clear()
 }
 
 onShellHighlightReady(() => {
   tokenizerLoaded = true
-  refreshPendingHeaderSpans()
+  refreshPendingHighlightSpans()
 })
 /**
  * Create the header row for a block — flat, warp-style (P0-1).
@@ -495,7 +537,7 @@ function createHeader(
       cmdSpan.textContent = command || '(empty)'
     } else {
       cmdSpan.innerHTML = command ? highlightShellText(command, store) : '(empty)'
-      if (!tokenizerLoaded) pendingHeaderSpans.set(cmdSpan, store)
+      if (!tokenizerLoaded) pendingHighlightSpans.set(cmdSpan, store)
     }
   }
   header.appendChild(cmdSpan)
@@ -576,7 +618,16 @@ function placeHeaderChip(right: Element, chip: Element): void {
  * calculated from the button's bounding rect. Closes on outside click
  * and Escape key.
  */
-function buildOverflowMenu(blockEl: HTMLElement, command: string): HTMLElement {
+/** Fetch the DURABLE text of one answer entry, or null when it is not
+ *  stored any more. Injected, never constructed here: this module has no
+ *  socket, and the one that does is wired at the composition root. */
+export type AnswerTextSource = (entryId: string) => Promise<string | null>
+
+function buildOverflowMenu(
+  blockEl: HTMLElement,
+  command: string,
+  answerText?: AnswerTextSource,
+): HTMLElement {
   const btn = document.createElement('button')
   btn.className = 'cmd-overflow-btn'
   btn.textContent = '\u22EE' // ⋮ vertical ellipsis
@@ -629,28 +680,98 @@ function buildOverflowMenu(blockEl: HTMLElement, command: string): HTMLElement {
       closeMenu()
     })
 
+    // WHERE A BLOCK'S OUTPUT COMES FROM, AND WHY THE TWO KINDS DIFFER
+    // (nocx-v13pd).
+    //
+    // A COMMAND block copies what the terminal DREW. The rows in the DOM are
+    // the artefact — the serializer put them there from the grid — so
+    // scraping them is not a shortcut, it is reading the thing itself.
+    //
+    // An ANSWER block copies what was RECORDED. Since nocx-swoje the answer
+    // flow RENDERS the model's markdown: `# ` becomes a heading and the
+    // marker is consumed, `**bold**` becomes weight and the asterisks are
+    // gone. The DOM is therefore a rendering of the answer and no longer the
+    // answer, and a copy scraped from it would quietly differ from what the
+    // model said. The durable text is right there — SubmitAgentAsk writes a
+    // text/plain artifact for every answer — and the block already knows its
+    // entry id, because the deltas were routed by it.
+    //
+    // Which makes copying an answer ASYNC, and that has two consequences the
+    // menu has to honour: the item says it is working (a control that looks
+    // clicked and does nothing reads as broken), and a fetch that comes back
+    // empty REFUSES rather than falling back to the painted text. A copy
+    // that quietly differs from the record is worse than one that did not
+    // happen.
+    const isAnswer = () => blockEl.dataset.blockKind === 'ask'
+
+    /** The answer's stored text, or null — retention took it, the store is
+     *  unreachable, or this window has no source wired. All three are the
+     *  same fact to a person: it is not here. */
+    const storedAnswer = async (): Promise<string | null> => {
+      const entryId = blockEl.dataset.answerEntryId
+      if (!entryId || !answerText) return null
+      return answerText(entryId)
+    }
+
+    const refuseCopy = (): void => {
+      showToast({
+        level: 'warning',
+        message: 'The stored answer is not available, so nothing was copied.',
+      })
+    }
+
+    /** Run an async menu action with the item reporting the work, and close
+     *  the menu when it settles either way. */
+    const whileFetching = async (item: HTMLButtonElement, work: () => Promise<void>) => {
+      item.disabled = true
+      item.dataset.busy = ''
+      item.textContent = 'Copying…'
+      try {
+        await work()
+      } finally {
+        closeMenu()
+      }
+    }
+
     const copyOut = document.createElement('button')
     copyOut.className = 'cmd-overflow-menu-item'
     copyOut.textContent = 'Copy output'
     copyOut.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      // The copyable text is asked of the BLOCK at read time (nocx-ex636):
-      // an answer block's body is appended after the frame, so the
-      // builder-time output reference is null — the block knows where its
-      // output lives.
-      const text = blockOutputText(blockEl)
-      clipboardFallback(text)
-      closeMenu()
+      if (!isAnswer()) {
+        // The copyable text is asked of the BLOCK at read time (nocx-ex636):
+        // an answer block's body is appended after the frame, so the
+        // builder-time output reference is null — the block knows where its
+        // output lives.
+        clipboardFallback(blockOutputText(blockEl))
+        closeMenu()
+        return
+      }
+      void whileFetching(copyOut, async () => {
+        const stored = await storedAnswer()
+        if (stored === null) refuseCopy()
+        else clipboardFallback(stored)
+      })
     })
     const copyAll = document.createElement('button')
     copyAll.className = 'cmd-overflow-menu-item'
     copyAll.textContent = 'Copy all'
     copyAll.addEventListener('click', (ev) => {
       ev.stopPropagation()
-      const outText = blockOutputText(blockEl)
-      const recorded = btn.closest('.cmd-block')?.getAttribute('data-recorded-command')
-      clipboardFallback(`${recorded ?? command}\n${outText}`)
-      closeMenu()
+      const intent = () =>
+        btn.closest('.cmd-block')?.getAttribute('data-recorded-command') ?? command
+      if (!isAnswer()) {
+        clipboardFallback(`${intent()}\n${blockOutputText(blockEl)}`)
+        closeMenu()
+        return
+      }
+      // The same source as Copy output, deliberately: two items on one block
+      // reading one thing from two places is how they start to disagree.
+      void whileFetching(copyAll, async () => {
+        const stored = await storedAnswer()
+        if (stored === null) refuseCopy()
+        else clipboardFallback(`${intent()}\n${stored}`)
+      })
     })
 
     // Wrap is a per-block override of the kind's default, and it lives here
@@ -806,6 +927,7 @@ export function createCommandBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   author: CommandAuthor = 'shell',
+  answerText?: AnswerTextSource,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -849,7 +971,7 @@ export function createCommandBlock(
   // Overflow menu (P2-9) — always the LAST element of the header-right
   // group (owner directive: ⋮ never shifts position). It reads the block's
   // copyable text from the BLOCK, at click time (nocx-ex636).
-  const overflow = buildOverflowMenu(wrapper, command)
+  const overflow = buildOverflowMenu(wrapper, command, answerText)
   const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
   wrapper.appendChild(header)
@@ -1053,6 +1175,19 @@ export interface BlockManagerOpts {
    *  different rendering, and a reader that cannot tell has to guess. The
    *  manager holds no renderer, so the caller that does supplies it. */
   dimensions?: () => { cols: number; rows: number }
+  /** What a session is called TO A PERSON, for a tool-call line that named
+   *  one (nocx-vnzek). The manager holds no pane list, so the caller that
+   *  does supplies the tab strip's own derivation
+   *  (PaneManager.sessionDisplayName); the paint rule built on it lives in
+   *  ui/tool-call-line.ts. Absent in a bare-bones embedding, and then a
+   *  session simply cannot be named — never rendered as its id. */
+  sessionName?: (sessionId: string) => string | null
+  /** The durable text of one ANSWER entry, for the copy path (nocx-v13pd).
+   *  The manager holds no socket, so the caller that does supplies the
+   *  reader (restore-client.answerTextForEntry). Absent in a bare-bones
+   *  embedding, and then copying an answer refuses rather than falling back
+   *  to the painted text. */
+  answerText?: AnswerTextSource
 }
 
 export class BlockManager {
@@ -1089,6 +1224,12 @@ export class BlockManager {
   private _snapshotStore: CommandSnapshotStore
   private _onDeferredFreeze?: () => void
   private _dimensions?: () => { cols: number; rows: number }
+  /** The tab strip's answer to "what is this session called to a person",
+   *  handed to every tool-call line this manager draws (nocx-vnzek). */
+  private _sessionName?: (sessionId: string) => string | null
+  /** Reader for an answer's durable text — handed to the copy menu of every
+   *  answer block this manager frames (nocx-v13pd). */
+  private _answerText?: AnswerTextSource
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
@@ -1137,6 +1278,8 @@ export class BlockManager {
     this._onDeferredFreeze = opts.onDeferredFreeze
     this._onBlockFrozen = opts.onBlockFrozen
     this._dimensions = opts.dimensions
+    this._sessionName = opts.sessionName
+    this._answerText = opts.answerText
   }
 
   /** THE ONE DOOR into `.scrollback-inner`. Everything this manager shows
@@ -1694,6 +1837,10 @@ export class BlockManager {
         else this._onBlockDeselected(bid)
       },
       this._snapshotStore,
+      // The default author, named because the parameter after it is the one
+      // that matters here: an answer block's copy reads the ledger.
+      'shell',
+      this._answerText,
     )
     const outputEl = document.createElement('div')
     // The ask kind's body class comes from the kind's rules — the wrap
@@ -1755,6 +1902,9 @@ export class BlockManager {
     // a fresh container, so the order fence → prose → fence survives.
     let partial: HTMLSpanElement | null = null
     let inFence = false
+    /** The language the open fence declared — read once, at the opener, and
+     *  used for every row until the closer. */
+    let fenceLang = ''
     let codeEl: HTMLElement | null = null
     const fenceMarker = /^\s*```/
 
@@ -1806,6 +1956,14 @@ export class BlockManager {
     // when it happened.
     const seenCalls = new Set<string>()
     let reasoningNote: ReasoningNote | null = null
+    // Captured here rather than read off `this` inside the returned handle:
+    // the handle's methods are declared `this: void` and are called as bare
+    // functions.
+    const sessionName = this._sessionName
+    // This tab's command-existence store — the same instance the frozen
+    // headers judge against, so a shell fence in an answer is tokenised
+    // exactly as the same words would be in a block header.
+    const snapshotStore = this._snapshotStore
 
     // Closing the partial row is what keeps arrival order honest. A chunk
     // that did not end in '\n' leaves a row open; the next chunk continues
@@ -1826,13 +1984,20 @@ export class BlockManager {
         if (seenCalls.has(call.callId)) return
         seenCalls.add(call.callId)
         insertInFlow(
-          createToolCallLine({ tool: call.tool, effect: call.effect, resource: call.resource }),
+          createToolCallLine(
+            { tool: call.tool, effect: call.effect, resource: call.resource },
+            { sessionName },
+          ),
         )
       },
       reasoning(text: string): void {
         if (text === '') return
         if (!reasoningNote) {
-          reasoningNote = createReasoningNote()
+          // Open or shut as the setting says at the moment the model starts
+          // thinking (nocx-y9e88). A note built while the setting was off and
+          // then switched on is caught by the applier, which walks what is
+          // already on screen — this is the other half of the same rule.
+          reasoningNote = createReasoningNote({ expanded: reasoningStartsExpanded() })
           insertInFlow(reasoningNote.el)
         }
         reasoningNote.append(text)
@@ -1860,9 +2025,32 @@ export class BlockManager {
                 codeEl = null
                 row.remove()
                 codeContainer().appendChild(row)
+                fenceLang = fenceLanguage(line)
               }
               // The closer was created inside the code region and stays
               // there; the rows after it go back to the prose body.
+              //
+              // NEITHER DELIMITER IS PAINTED. They mark where the region
+              // starts and ends; they are not code, and they are not prose
+              // whose asterisks mean anything. Leaving them as plain text is
+              // also what keeps `Copy output` returning the answer with its
+              // fence markers intact, which is a contract this block already
+              // had (nocx-juau).
+            } else if (inFence) {
+              // A code row. The EXISTING lexer, on a shell fence only
+              // (SHELL_FENCE above says why), and the same pre-ready catch-up
+              // the frozen headers use — an answer that arrives in the first
+              // milliseconds of a launch must not stay grey forever.
+              if (SHELL_FENCE.has(fenceLang) && line !== '') {
+                row.innerHTML = highlightShellText(line, snapshotStore)
+                if (!tokenizerLoaded) pendingHighlightSpans.set(row, snapshotStore)
+              }
+            } else {
+              // Prose. The structure a model actually emits, painted per
+              // completed line, with every byte escaped (nocx-swoje;
+              // ui/answer-markdown.ts owns the whole grammar and says what
+              // it deliberately does not render).
+              paintAnswerLine(row, line)
             }
           } else {
             // The final segment stays partial — the next chunk continues it.

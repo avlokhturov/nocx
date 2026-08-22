@@ -272,6 +272,24 @@ describe('PaneManager', () => {
     expect(rows.panes).toHaveLength(1)
   })
 
+  // ── a session's name to a person (nocx-vnzek) ─────────────────────────
+
+  it('names a session with the same words the tab strip shows, and nothing for one it does not hold', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    })
+    const sessionId = client._sessions[0].sessionId
+    // ONE answer to "what is this session called": the strip renders it and
+    // this returns it. A second derivation is what the defect was.
+    const onStrip = bar.querySelector('.nocx-tab-title')?.textContent
+    expect(onStrip).toBe(FIXTURE_DIRECTORY_LABEL)
+    expect(manager.sessionDisplayName(sessionId)).toBe(onStrip)
+    // A session no pane holds cannot be named — and the id is not a
+    // fallback, because the id is what this exists to keep off the screen.
+    expect(manager.sessionDisplayName('mock-sid-does-not-exist')).toBeNull()
+  })
+
   // ── fallback title consistency (badge vs title after close) ───────────
 
   it('fallback title is the directory, not a number that would disagree with the badge', async () => {

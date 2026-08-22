@@ -70,6 +70,44 @@ function recordDecisions() {
   }
 }
 
+describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek)', () => {
+  afterEach(cleanup)
+
+  const SESSION_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'readScreen',
+    arguments: '{"sessionId":"9bb9a7602c27e8ba0741972c7049b54b"}',
+    resource: { kind: 'session', id: '9bb9a7602c27e8ba0741972c7049b54b' },
+  }
+
+  it("says which pane the call reaches, in the pane's own name", () => {
+    const r = renderPrompt({
+      ask: SESSION_ASK,
+      sessionName: (id: string) => (id === '9bb9a7602c27e8ba0741972c7049b54b' ? 'home/dev' : null),
+    })
+    expect(r.getByText(/home\/dev/)).toBeTruthy()
+  })
+
+  it('leaves the proposed arguments verbatim — the blob is what the model asked for', () => {
+    const { container } = renderPrompt({
+      ask: SESSION_ASK,
+      sessionName: () => 'home/dev',
+    })
+    const code = container.querySelector('.ui-code-block')
+    expect(code?.textContent).toBe('{"sessionId":"9bb9a7602c27e8ba0741972c7049b54b"}')
+  })
+
+  it('says nothing extra when no pane can name the session', () => {
+    const r = renderPrompt({ ask: SESSION_ASK, sessionName: () => null })
+    expect(r.queryByText(/This call reaches/)).toBeNull()
+  })
+
+  it('says nothing extra for a path — a path is the person’s own word', () => {
+    const r = renderPrompt({ ask: POLICY_ASK, sessionName: () => 'home/dev' })
+    expect(r.queryByText(/This call reaches/)).toBeNull()
+  })
+})
+
 describe('AgentApprovalPrompt', () => {
   afterEach(cleanup)
 

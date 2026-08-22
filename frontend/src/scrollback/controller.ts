@@ -41,6 +41,14 @@ export interface ScrollbackControllerOpts {
    *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
    *  output window from the frozen block). */
   onBlockFrozen?: (rec: BlockRecord) => void
+  /** What a session is called to a person — passed straight to the block
+   *  manager, which hands it to every tool-call line it draws (nocx-vnzek).
+   *  This controller neither derives nor caches it. */
+  sessionName?: (sessionId: string) => string | null
+  /** The durable text of one ANSWER entry — passed straight to the block
+   *  manager, which hands it to the copy menu of every answer block it
+   *  frames (nocx-v13pd). This controller neither fetches nor caches it. */
+  answerText?: (entryId: string) => Promise<string | null>
 }
 
 export class ScrollbackController {
@@ -171,6 +179,8 @@ export class ScrollbackController {
       // resized, and the provenance must say what the serializer actually
       // saw.
       dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
+      sessionName: opts.sessionName,
+      answerText: opts.answerText,
     })
 
     // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────

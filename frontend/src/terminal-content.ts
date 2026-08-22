@@ -72,7 +72,7 @@ import {
 } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
-import { blocksForPane, bodyForBlock } from './restore-client'
+import { answerTextForEntry, blocksForPane, bodyForBlock } from './restore-client'
 import { restoredBlock } from './scrollback/restored-block'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
@@ -319,6 +319,14 @@ export interface TerminalContentHooks {
    *  main.tsx to the Settings tab's Endpoints page. Reused, not duplicated,
    *  by the model chip's `endpoints` destination (nocx-rikz5). */
   onCreateEndpoint?: () => void
+  /** What a session is called TO A PERSON — the pane's own display title,
+   *  the words already on the tab (nocx-vnzek). A tool-call line in an
+   *  answer names the session it touched with this instead of the session
+   *  id, which is an internal handle. Only the pane manager can answer it:
+   *  the session may be ANOTHER pane's, and a pane knows only its own.
+   *  Absent in an embedding with no pane list, and then the line names the
+   *  tool alone. */
+  sessionName?: (sessionId: string) => string | null
   /** The model chip's other destination: the Roles page, where the model
    *  that answers is chosen (nocx-rikz5). Beside onCreateEndpoint because
    *  it is the same idea — a state names one page that repairs it — and
@@ -1207,6 +1215,18 @@ export class TerminalContent extends BasePaneContent {
         // pending agent-run completion waits (nocx-tjppv — the run tool
         // reads the output window from the frozen block).
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
+        // A tool call that names a session gets the session's NAME, not its
+        // id (nocx-vnzek). Passed as the hook itself, read at paint time:
+        // a pane's title changes as it works, and the line must say what the
+        // pane was called when the call happened.
+        sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
+        // Copying an ANSWER reads what was recorded, never what was painted
+        // (nocx-v13pd): the answer flow consumes the markdown markers it
+        // renders, so the DOM is a rendering and no longer the answer. The
+        // same two round trips a restored block's body takes, asking for the
+        // text/plain artifact instead of the SGR one — one fetch path, two
+        // media types.
+        answerText: (entryId) => answerTextForEntry(this.client, entryId),
       })
 
       log.info('nocx: mounting renderer')

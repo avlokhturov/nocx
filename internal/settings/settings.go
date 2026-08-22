@@ -850,6 +850,34 @@ var AssistantPersonalInstructions = MustRegisterString(StringSpec{
 	MaxLength:   2000,
 })
 
+// AssistantExpandReasoning decides whether an answer's reasoning note opens
+// by itself (nocx-y9e88).
+//
+// nocx-s92so put the model's thinking in its own COLLAPSED note, and that is
+// right for the person who came for the answer. It is wrong for the person
+// who came to watch the model think, and until this existed there was no way
+// for them to say so: every answer arrived closed and every note had to be
+// opened by hand, one at a time, forever.
+//
+// It is a setting and not UI state (ADR-0033): a person chooses it
+// deliberately, at a control, it means the same on any machine, and
+// differing from the default is worth a badge. Opening one note by clicking
+// its summary is the other class — a side effect of reading — and is
+// therefore NOT written anywhere. That is the whole shape of the feature:
+// this decides what a note does UNTIL somebody says otherwise, exactly as
+// terminal.wrapOutput decides what a block does.
+//
+// Default false. The answer is what a person asked for; the thinking is
+// several times longer and would push it off the screen.
+var AssistantExpandReasoning = MustRegisterBool(BoolSpec{
+	Key:         "assistant.expandReasoning",
+	Section:     "Answers",
+	Label:       "Always show the model's thinking",
+	Description: "Open the thinking note on every answer instead of leaving it collapsed. You can still close any single note by clicking it, and a model that returns no thinking still shows nothing at all.",
+	DataClass:   PublicConfig,
+	Default:     false,
+})
+
 // The sidebar's width used to be registered here as `sidebar.width`. It is
 // not a setting and never was: a setting is something a user DELIBERATELY
 // CHOOSES, and a width produced by dragging a panel edge is what the app must
@@ -874,6 +902,7 @@ func init() {
 	RegisterGroup(SettingsGroup{ID: "application", Title: "Application", Order: 2})
 	RegisterGroup(SettingsGroup{ID: "developer", Title: "Developer", Order: 3})
 	RegisterSectionGroup("Instructions", "assistant")
+	RegisterSectionGroup("Answers", "assistant")
 	RegisterSectionGroup("Interface", "application")
 	RegisterSectionGroup("Clipboard", "application")
 	RegisterSectionGroup("History", "application")

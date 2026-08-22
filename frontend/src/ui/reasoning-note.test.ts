@@ -13,8 +13,16 @@ describe('ReasoningNote', () => {
     const note = createReasoningNote()
     expect(note.el.classList.contains('ui-reasoning')).toBe(true)
     expect(note.el.tagName).toBe('DETAILS')
-    expect((note.el as HTMLDetailsElement).open).toBe(false)
+    expect(note.el.open).toBe(false)
     expect(note.el.querySelector('.ui-reasoning__summary')?.textContent).toBe('Thinking')
+  })
+
+  it('opens on request — the setting decides the default, the note obeys it (nocx-y9e88)', () => {
+    expect(createReasoningNote({ expanded: true }).el.open).toBe(true)
+    expect(createReasoningNote({ expanded: false }).el.open).toBe(false)
+    // Still a native disclosure: opened by default is not opened for good,
+    // and the summary is what closes it again.
+    expect(createReasoningNote({ expanded: true }).el.tagName).toBe('DETAILS')
   })
 
   it('concatenates chunks, so a split mid-word leaves no seam', () => {
