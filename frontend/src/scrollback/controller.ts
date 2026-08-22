@@ -139,6 +139,13 @@ export class ScrollbackController {
 
     // Separator between blocks and live region — inserted before the
     // xterm container so blocks stack above it. Hidden when no blocks.
+    //
+    // THE ONLY TWO CHILDREN THIS FILE PUTS IN. They are the container's own
+    // frame: built with it, never removed, and the anchor the manager
+    // inserts against. Everything that comes and goes — a live block, an
+    // answer, the restored past and its boundary — belongs to BlockManager
+    // and enters through its `_own` (nocx-0zb1m). A second inserter here is
+    // what let `clear` miss half the scrollback.
     this.separator = document.createElement('div')
     this.separator.className = 'scrollback-separator'
     this.separator.style.display = 'none'
@@ -425,28 +432,17 @@ export class ScrollbackController {
   }
 
   /**
-   * Put blocks the STORE holds above everything the live session draws
-   * (nocx-m3fqk), and mark where the past ends.
+   * Draw the pane's past, and land the view where a terminal always lands.
    *
-   * Inserted before the first live element rather than appended, so restored
-   * blocks keep the order they are given and a session that has already
-   * printed something does not find its past underneath its present.
-   *
-   * The boundary is an element of its own rather than a class on the last
-   * restored block: ADR-0019 §3 asks for the difference to be VISIBLE, and a
-   * line saying where the previous session ended is what a person reads — a
-   * block that merely looks a little different is not an answer to "is this
-   * shell still running".
+   * The blocks and the boundary go in through the MANAGER (nocx-0zb1m):
+   * putting them in here made a second owner of this container's children,
+   * and `clear` — which asks the manager — could not see half the
+   * scrollback. What is left here is the part that is genuinely the
+   * controller's, because it is about the VIEW rather than about the blocks.
    */
   restorePast(blocks: HTMLElement[]): void {
     if (blocks.length === 0) return
-    const anchor = this.scrollbackInner.firstChild
-    for (const el of blocks) this.scrollbackInner.insertBefore(el, anchor)
-    const boundary = document.createElement('div')
-    boundary.className = 'scrollback-restore-boundary'
-    boundary.dataset.restoreBoundary = 'true'
-    boundary.textContent = 'Previous session'
-    this.scrollbackInner.insertBefore(boundary, anchor)
+    this._blockManager.restorePast(blocks)
     // AND LAND AT THE NEWEST BLOCK, which is where a terminal always puts
     // you. The insert goes ABOVE everything, so the scroller keeps the
     // offset it had — 0, on a pane that has just been built — and the person

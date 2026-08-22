@@ -686,6 +686,39 @@ describe('BlockManager', () => {
     expect(manager.blocks[1].command).toBe('b')
   })
 
+  it('restorePast puts the past above everything, and clearAll takes it away again (nocx-0zb1m)', () => {
+    // The restored past used to be inserted past this manager, so the list
+    // clearAll walks could not name it. The manager owns it now: it goes in
+    // here, and it comes out with everything else.
+    manager.startBlock('live', '~', 0)
+    const past = ['oldest', 'newest'].map((label) => {
+      const el = document.createElement('div')
+      el.className = 'cmd-block'
+      el.dataset.restored = 'true'
+      el.textContent = label
+      return el
+    })
+    manager.restorePast(past)
+
+    expect(
+      Array.from(inner.children)
+        .slice(0, 3)
+        .map((k) => k.textContent),
+    ).toEqual(['oldest', 'newest', 'Previous session'])
+    expect(inner.querySelector('.scrollback-restore-boundary')).not.toBeNull()
+
+    manager.clearAll()
+
+    expect(inner.querySelectorAll('.cmd-block').length).toBe(0)
+    expect(inner.querySelector('.scrollback-restore-boundary')).toBeNull()
+    expect(inner.children.length).toBe(1) // only the xterm container remains
+  })
+
+  it('restorePast with nothing to draw adds no boundary — an empty past is not a past', () => {
+    manager.restorePast([])
+    expect(inner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+
   it('clearAll removes all blocks and resets state', () => {
     manager.startBlock('test', '~', 0)
     expect(inner.children.length).toBe(2)

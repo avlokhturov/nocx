@@ -1064,6 +1064,19 @@ export class BlockManager {
    *  selection API; the ask surface drives them through AnswerBlockHandle
    *  only. */
   private _answerBlocks: AnswerBlockRecord[] = []
+  /** EVERY element this manager has put into `.scrollback-inner`: live
+   *  command blocks, answer blocks, the restored past and the boundary that
+   *  labels it. The typed lists above exist for what each KIND of block
+   *  needs (a freeze range, a question); this exists for the one thing they
+   *  share — they are the scrollback, and `clear` empties the scrollback.
+   *
+   *  So `clearAll` walks this and nothing else. Before it, restored blocks
+   *  were inserted straight into the container by the controller, past the
+   *  manager, and `clear` left the whole previous session on screen under
+   *  its "Previous session" line because `clearAll` had no list that named
+   *  it (nocx-0zb1m). A second list to look in would have been the same
+   *  defect with a third thing to keep in step. */
+  private _owned = new Set<HTMLElement>()
   private _nextId = 1
   private _now: () => number
   private _onBlockFrozen?: (rec: BlockRecord) => void
@@ -1126,8 +1139,56 @@ export class BlockManager {
     this._dimensions = opts.dimensions
   }
 
+  /** THE ONE DOOR into `.scrollback-inner`. Everything this manager shows
+   *  goes through here and is remembered, so a new kind of child cannot be
+   *  added without `clearAll` already knowing how to take it away. */
+  private _own(el: HTMLElement, before: ChildNode | null): void {
+    this._scrollbackInner.insertBefore(el, before)
+    this._owned.add(el)
+  }
+
+  /** The visual freeze REPLACES a block's element (`freezeBlock` swaps it in
+   *  the DOM), so ownership moves with it. Without this the set would hold a
+   *  detached element and miss the attached one — the exact shape of the
+   *  defect this ownership was written to close. */
+  private _reown(oldEl: HTMLElement, newEl: HTMLElement): void {
+    this._owned.delete(oldEl)
+    this._owned.add(newEl)
+  }
+
+  /**
+   * Draw blocks the STORE holds ABOVE everything the live session has, and
+   * mark where the past ends (nocx-m3fqk).
+   *
+   * Inserted before the first child rather than appended, so restored blocks
+   * keep the order they are given and a session that has already printed
+   * something does not find its past underneath its present.
+   *
+   * The boundary is an element of its own rather than a class on the last
+   * restored block: ADR-0019 §3 asks for the difference to be VISIBLE, and a
+   * line saying where the previous session ended is what a person reads — a
+   * block that merely looks a little different is not an answer to "is this
+   * shell still running".
+   *
+   * It lives HERE, beside the live blocks, because one container may have
+   * only one owner: the caller builds the elements, the manager is what puts
+   * them on screen and what takes them off again (nocx-0zb1m). The caller
+   * keeps the scroll decision, which is about the view and not about the
+   * blocks.
+   */
+  restorePast(blocks: HTMLElement[]): void {
+    if (blocks.length === 0) return
+    const anchor = this._scrollbackInner.firstChild
+    for (const el of blocks) this._own(el, anchor)
+    const boundary = document.createElement('div')
+    boundary.className = 'scrollback-restore-boundary'
+    boundary.dataset.restoreBoundary = 'true'
+    boundary.textContent = 'Previous session'
+    this._own(boundary, anchor)
+  }
+
   /** An id for a block this manager did not create: a RESTORED one, built
-   *  from the store and inserted above the live session (nocx-m3fqk).
+   *  from the store and handed back to `restorePast` (nocx-m3fqk).
    *
    *  From the same counter as every other block, because the id space is what
    *  selection and the DOM address blocks by — two spaces would let a
@@ -1271,7 +1332,7 @@ export class BlockManager {
       this._snapshotStore,
       author,
     )
-    this._scrollbackInner.insertBefore(el, this._xtermContainer)
+    this._own(el, this._xtermContainer)
 
     const rec: BlockRecord = {
       id,
@@ -1412,6 +1473,7 @@ export class BlockManager {
       rec.author,
     )
 
+    this._reown(rec.el, newEl)
     rec.el = newEl
     // Anything that wanted to decorate this block had to wait for THIS
     // moment, because the line above threw the running element away. One
@@ -1649,7 +1711,7 @@ export class BlockManager {
     for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('i'))
     outputEl.appendChild(typing)
     el.appendChild(outputEl)
-    this._scrollbackInner.insertBefore(el, this._xtermContainer)
+    this._own(el, this._xtermContainer)
     this._answerBlocks.push({ id, question, el })
 
     // The waiting chip says the model has not answered yet; it stops the
@@ -1849,13 +1911,12 @@ export class BlockManager {
   clearAll(): void {
     this._stopTicker()
     this._cancelPendingFence()
-    for (const b of this._blocks) {
-      b.el.remove()
-    }
+    // ONE list, because there is one owner: whatever this manager put in
+    // the container comes out, whether it was a live block, an answer or a
+    // restored one under its boundary (nocx-0zb1m).
+    for (const el of this._owned) el.remove()
+    this._owned.clear()
     this._blocks = []
-    for (const b of this._answerBlocks) {
-      b.el.remove()
-    }
     this._answerBlocks = []
     this._runningBlock = null
     this._cmdStartTime = null
