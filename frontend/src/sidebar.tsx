@@ -40,7 +40,7 @@
 
 import { render, Dynamic } from 'solid-js/web'
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, untrack } from 'solid-js'
-import type { Component } from 'solid-js'
+import type { Component, JSX } from 'solid-js'
 import { SidebarView } from './ui/sidebar-view'
 import { ResizeHandle } from './ui/resize-handle'
 import { createAppStore, type AppActions, type AppState } from './state'
@@ -176,6 +176,7 @@ interface PanelRootProps {
   /** The width controller (nocx-qmcu) — when present the panel renders the
    *  kit ResizeHandle at its trailing edge and the drag resizes #sidebar. */
   resize?: SidebarWidthController
+  panelActions?: () => JSX.Element
 }
 
 function PanelRoot(props: PanelRootProps) {
@@ -201,6 +202,7 @@ function PanelRoot(props: PanelRootProps) {
         collapsed={() => props.state.sidebar.collapsed}
         getActiveProfileId={props.getActiveProfileId}
         getActiveOrigin={props.getActiveOrigin}
+        panelActions={props.panelActions}
       />
       {/* The handle is the flex row's trailing slot (see #sidebar in
           style.css): a real flex item, never an overlay, so it can neither
@@ -234,6 +236,7 @@ function ActiveView(props: {
   collapsed: () => boolean
   getActiveProfileId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
+  panelActions?: () => JSX.Element
 }) {
   // Only the active view renders, so "visible" is exactly the panel's
   // expanded state — a collapsed sidebar is a hidden view (nocx-wzc4.7).
@@ -581,10 +584,12 @@ export function mountSidebar(
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   getActivePaneIsSettings?: () => boolean,
+  panelActions?: () => JSX.Element,
 ): SidebarHandle {
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
   const activePaneIsSettings = getActivePaneIsSettings ?? (() => false)
+  const actionsForPanel = panelActions
 
   const [state, storeActions] = createAppStore()
 
@@ -636,6 +641,7 @@ export function mountSidebar(
         getActiveProfileId={activeProfileId}
         getActiveOrigin={activeOrigin}
         resize={resize}
+        panelActions={actionsForPanel}
       />
     ),
     panel,
