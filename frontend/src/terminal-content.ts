@@ -63,7 +63,7 @@ import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
-import type { BlockRecord } from './scrollback/blocks'
+import type { AnswerToolCall, BlockRecord } from './scrollback/blocks'
 import {
   CommandLedger,
   type CommandAuthor,
@@ -1390,8 +1390,27 @@ export class TerminalContent extends BasePaneContent {
               handle.append(text)
               this.scrollback?.scrollToBottom()
             },
-            close: (status: 'success' | 'failure', error?: string) => {
-              handle.close(status, error)
+            // A tool call and a chunk of thinking grow the block exactly as
+            // a delta does, so they follow for the same reason (nocx-shxv0,
+            // nocx-s92so). Forwarded EXPLICITLY rather than left to the
+            // spread above: the spread would carry the method and lose the
+            // follow, which is the kind of gap nobody notices until an
+            // answer stops scrolling for one of its three event kinds.
+            toolCall: (call: AnswerToolCall) => {
+              handle.toolCall(call)
+              this.scrollback?.scrollToBottom()
+            },
+            reasoning: (text: string) => {
+              handle.reasoning(text)
+              this.scrollback?.scrollToBottom()
+            },
+            // `model` is forwarded, and it was not: this wrapper took two
+            // parameters where the handle takes three, so the "answered by
+            // <model>" provenance nocx-e6kn2 added could never be painted —
+            // the value reached here and stopped. TypeScript cannot see it;
+            // a function of lower arity is assignable.
+            close: (status: 'success' | 'failure', error?: string, model?: string) => {
+              handle.close(status, error, model)
               this.scrollback?.scrollToBottom()
             },
           }
@@ -3875,7 +3894,27 @@ export class TerminalContent extends BasePaneContent {
    *  session.write from the backend. Resolves when the block this
    *  submission opened freezes, with the completed run body: the entry id
    *  (the app-owned ledger record id, minted at submit by the ordinary
-   *  path), the exit status and a window of the output. */
+   *  path), the exit status and a window of the output.
+   *
+   *  THE BLOCK STAYS, AND IT IS NOT A SECOND COPY OF THE ANSWER'S TOOL-CALL
+   *  LINE (nocx-shxv0). Two surfaces now show that this command happened,
+   *  so the ownership is stated rather than left to be discovered:
+   *
+   *    - This BLOCK owns the command: its text, its output, its exit
+   *      status, its ledger entry. The command really ran in the lane, the
+   *      ledger says so, and a command that ran with no block would be an
+   *      input surface with no visible record — the exact thing the module
+   *      header of run-command.ts refuses.
+   *    - The ANSWER's tool-call line owns WHEN: it says the assistant
+   *      reached for `run` at this point in its answer, and it carries no
+   *      command text and no output. It cannot drift from the block,
+   *      because it restates nothing the block holds.
+   *
+   *  What was wrong before was not that the block existed — it was that the
+   *  answer had no element for the call, so the block was the only trace
+   *  and it necessarily appended BELOW an answer that was already
+   *  streaming. Deleting the block would have hidden a real command to fix
+   *  a rendering-order defect. */
   submitAgentCommand(command: string): Promise<AgentRunCompletion> {
     if (command === '') {
       return Promise.reject(new Error('run: an empty command is a bare newline, not an execution'))

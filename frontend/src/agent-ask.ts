@@ -16,6 +16,8 @@ import { frozenFrameSourceFromBlock, mintFrozenFrame } from './frame/frozen'
 import type { AgentAsk } from './generated/agent.ask'
 import type { AgentCaptureFrame } from './generated/agent.captureFrame'
 import type { AgentRunDelta } from './generated/agent.runDelta'
+import type { AgentRunReasoning } from './generated/agent.runReasoning'
+import type { AgentRunToolCall } from './generated/agent.runToolCall'
 import type { AgentRunState } from './generated/agent.runState'
 import type { AgentStatusResult } from './generated/agent.status'
 import type { InputTarget } from './input-target'
@@ -258,6 +260,36 @@ export class AgentInputTarget implements InputTarget {
       // must not append to the wrong block.
       if (handle.el.dataset.answerEntryId !== d.entryId) return
       handle.append(d.text)
+    })
+    // A tool call is an element of THIS answer's flow (nocx-shxv0), so it is
+    // routed exactly as a delta is — same two ids, same mismatch rule — and
+    // handed to the same handle. That is the whole ordering fix: the call is
+    // appended when it arrives, which is before the deltas the model writes
+    // from its result, so it can no longer read as "answered first, ran the
+    // command afterwards".
+    this.seams.dispatcher.subscribe('agent.runToolCall', (params: unknown) => {
+      const c = params as AgentRunToolCall
+      const handle = this.runs.get(c.runId)
+      if (!handle) return
+      if (handle.el.dataset.answerEntryId !== c.entryId) return
+      handle.toolCall({
+        callId: c.callId,
+        tool: c.tool,
+        effect: c.effect,
+        // The wire says `null` for a tool that names no resource; the flow
+        // wants "absent", and the two must not be confused into a resource
+        // with an empty half.
+        resource: c.resource ?? undefined,
+      })
+    })
+    // The model's thinking, into its own note and never into the answer
+    // text (nocx-s92so).
+    this.seams.dispatcher.subscribe('agent.runReasoning', (params: unknown) => {
+      const r = params as AgentRunReasoning
+      const handle = this.runs.get(r.runId)
+      if (!handle) return
+      if (handle.el.dataset.answerEntryId !== r.entryId) return
+      handle.reasoning(r.text)
     })
     this.seams.dispatcher.subscribe('agent.runState', (params: unknown) => {
       const s = params as AgentRunState

@@ -45,7 +45,7 @@ func (s *stubAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams
 // state, so there is nothing to drop.
 func (*stubAssistantClient) Discard(string) {}
 
-func (s *stubAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
+func (s *stubAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
 	return nil
 }
 

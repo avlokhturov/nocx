@@ -113,7 +113,7 @@ func TestAsk_EscalationRecordsTheProposalThread(t *testing.T) {
 	p := askParams(srv.URL, &grant, ledger, approvals)
 	p.RunID = "run-1"
 	p.Attempt = 1
-	err := cl.Ask(context.Background(), p, func(string) error { return nil })
+	err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -207,7 +207,7 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	p.Attempt = 1
 
 	// Pass 1: the escalation.
-	err := cl.Ask(context.Background(), p, func(string) error { return nil })
+	err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -225,7 +225,7 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	}
 
 	// Pass 2: the resume. The same messages, the same binding — the call runs.
-	if askErr := cl.Ask(context.Background(), p, func(string) error { return nil }); askErr != nil {
+	if askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); askErr != nil {
 		t.Fatalf("the approved resume failed: %v", askErr)
 	}
 	if f.requests.Load() != 2 {
@@ -338,7 +338,7 @@ func TestAsk_ApprovedEgressResumeThread(t *testing.T) {
 	p.Attempt = 1
 
 	// Pass 1: the finding suspends; the attempt that ran closes interrupted.
-	err := cl.Ask(context.Background(), p, func(string) error { return nil })
+	err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil })
 	var egErr *EgressRequestedError
 	if !errors.As(err, &egErr) {
 		t.Fatalf("Ask error = %v, want the egress suspension", err)
@@ -361,7 +361,7 @@ func TestAsk_ApprovedEgressResumeThread(t *testing.T) {
 
 	// Pass 2: the resume. The tool does not re-run (the retained result is
 	// sent as approved), the finding does not re-suspend, the run completes.
-	if askErr := cl.Ask(context.Background(), p, func(string) error { return nil }); askErr != nil {
+	if askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); askErr != nil {
 		t.Fatalf("the approved egress resume failed: %v", askErr)
 	}
 	if _, _, retained := approvals.RetainedResult(ap); retained {

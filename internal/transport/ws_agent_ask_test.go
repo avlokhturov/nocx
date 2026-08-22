@@ -51,14 +51,14 @@ func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbePa
 // state, so there is nothing to drop.
 func (*scriptedAssistantClient) Discard(string) {}
 
-func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
+func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.askCalls++
 	s.received = append([]assistant.Message(nil), p.Messages...)
 	s.receivedParams = p
 	for _, d := range s.deltas {
-		if err := onDelta(d); err != nil {
+		if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: d}); err != nil {
 			s.aborted = true
 			return err
 		}
@@ -462,8 +462,8 @@ func (b *blockingAskClient) Probe(ctx context.Context, p assistant.ProbeParams) 
 // state, so there is nothing to drop.
 func (*blockingAskClient) Discard(string) {}
 
-func (b *blockingAskClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
-	if err := onDelta("first"); err != nil {
+func (b *blockingAskClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
+	if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: "first"}); err != nil {
 		return err
 	}
 	close(b.firstDone)

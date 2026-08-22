@@ -395,9 +395,9 @@ func (b *barrierAskClient) Probe(context.Context, assistant.ProbeParams) (assist
 // state, so there is nothing to drop.
 func (*barrierAskClient) Discard(string) {}
 
-func (b *barrierAskClient) Ask(_ context.Context, _ assistant.AskParams, onDelta func(string) error) error {
+func (b *barrierAskClient) Ask(_ context.Context, _ assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
 	for i := 0; i < b.n; i++ {
-		if err := onDelta(fmt.Sprintf("d%d", i)); err != nil {
+		if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: fmt.Sprintf("d%d", i)}); err != nil {
 			return err
 		}
 		b.deltaCnt++
@@ -700,7 +700,7 @@ func (c *interleavedAskClient) Probe(context.Context, assistant.ProbeParams) (as
 // state, so there is nothing to drop.
 func (*interleavedAskClient) Discard(string) {}
 
-func (c *interleavedAskClient) Ask(_ context.Context, _ assistant.AskParams, onDelta func(string) error) error {
+func (c *interleavedAskClient) Ask(_ context.Context, _ assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
 	c.mu.Lock()
 	script := c.scripts[c.nextScript]
 	c.nextScript++
@@ -712,7 +712,7 @@ func (c *interleavedAskClient) Ask(_ context.Context, _ assistant.AskParams, onD
 	<-c.bothStarted // both runs are streaming before either emits
 	for _, d := range script {
 		<-c.turn
-		if err := onDelta(d); err != nil {
+		if err := onEvent(assistant.AskEvent{Kind: assistant.AskAnswer, Text: d}); err != nil {
 			c.turn <- struct{}{}
 			return err
 		}

@@ -41,6 +41,8 @@
 @import './styles/components/swatch-picker.css';
 @import './styles/components/badge.css';
 @import './styles/components/secret-chip.css';
+@import './styles/components/tool-call-line.css';
+@import './styles/components/reasoning-note.css';
 @import './styles/components/mode-indicator.css';
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';

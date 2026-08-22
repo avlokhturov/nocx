@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -62,11 +63,12 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 	return cm, nil
 }
 
-// streamModelAnswer streams the model's answer to msgs through the adk
-// agent, calling onDelta for every content chunk. It is the explain-mode
-// run: zero tools, terminate after the first completed response.
+// streamModelAnswer drives one run through the adk agent and emits its
+// ordered event stream to onEvent: the answer's chunks, the model's
+// reasoning, and — through the policy middleware, which is the only place
+// that knows a call is about to run — its tool calls.
 //
-// onDelta returns an error to ABORT the stream — the caller's write was
+// onEvent returns an error to ABORT the stream — the caller's write was
 // refused, and the model must stop rather than keep producing chunks nobody
 // can deliver (the probe's write-only callback cannot express that; the ask
 // transaction needs it so a refused socket write terminalizes the run
@@ -75,7 +77,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onDelta func(string) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -205,6 +207,22 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 			continue
 		}
 		mo := ev.Output.MessageOutput
+		// THE ROLE DECIDES WHETHER THIS IS THE ANSWER AT ALL (nocx-bshm2).
+		// The loop used to emit any message that had content, and a tool
+		// RESULT is a message — adk builds it with EventFromMessage(…,
+		// schema.Tool, toolName) (adk/wrappers.go), and its content is the
+		// tool's raw JSON return. So a readScreen result was rendered as
+		// though the assistant had spoken it, in the middle of the answer.
+		//
+		// The check is an ALLOW-LIST rather than "not a tool result": the
+		// answer is the ASSISTANT's own words and nothing else, so a role
+		// this loop has never seen is skipped rather than spoken. Every
+		// model-output event adk produces for *schema.Message carries
+		// schema.Assistant (adk/interface.go typedModelOutputEvent), and
+		// copies preserve it, so nothing the model says is lost by it.
+		if mo.Role != schema.Assistant {
+			continue
+		}
 		if mo.IsStreaming && mo.MessageStream != nil {
 			stream := mo.MessageStream
 			// Read-once, must close exactly once (schema/stream.go) —
@@ -218,27 +236,51 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 				if err != nil {
 					return err
 				}
-				if msg != nil && msg.Content != "" {
-					if err := onDelta(msg.Content); err != nil {
+				if msg == nil {
+					continue
+				}
+				// Reasoning FIRST, and separately: a chunk can carry both,
+				// and concatenating them would put the thinking inside the
+				// answer, which is the same defect in another shape
+				// (nocx-s92so). eino's schema.Message.ReasoningContent is
+				// "the thinking process of the model" and the
+				// OpenAI-compatible adapter fills it from the wire's
+				// `reasoning_content`; we used to decode it and drop it.
+				if msg.ReasoningContent != "" {
+					if err := onEvent(AskEvent{Kind: AskReasoning, Text: msg.ReasoningContent}); err != nil {
+						return err
+					}
+				}
+				if msg.Content != "" {
+					if err := onEvent(AskEvent{Kind: AskAnswer, Text: msg.Content}); err != nil {
 						return err
 					}
 				}
 			}
 			continue
 		}
-		if mo.Message != nil && mo.Message.Content != "" {
-			if err := onDelta(mo.Message.Content); err != nil {
+		if mo.Message == nil {
+			continue
+		}
+		if mo.Message.ReasoningContent != "" {
+			if err := onEvent(AskEvent{Kind: AskReasoning, Text: mo.Message.ReasoningContent}); err != nil {
+				return err
+			}
+		}
+		if mo.Message.Content != "" {
+			if err := onEvent(AskEvent{Kind: AskAnswer, Text: mo.Message.Content}); err != nil {
 				return err
 			}
 		}
 	}
 }
 
-// Ask implements Client. It streams the model's answer through the same adk
-// agent as the probe (streamModelAnswer is the one explain-mode run), over
-// the same guarded HTTP client. Zero content after a completed stream is a
-// StreamError — the endpoint answered; it did not answer.
-func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) error) error {
+// Ask implements Client. It streams the run through the same adk agent as
+// the probe (streamModelAnswer is the one explain-mode run), over the same
+// guarded HTTP client. Zero ANSWER text after a completed stream is a
+// StreamError — the endpoint answered; it did not answer. Reasoning alone
+// does not count: a model that only thought did not reply.
+func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error {
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return fmt.Errorf("ask: base URL is required")
 	}
@@ -256,6 +298,22 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 			msgs = append(msgs, schema.SystemMessage(m.Content))
 		}
 	}
+	// ONE ordered stream, and the mutex is what makes it one. The events
+	// have two producers on two goroutines: this function's loop over the
+	// agent's iterator, and the policy middleware, which runs inside eino's
+	// tool node. Their relative order is already decided by the graph — a
+	// tool node cannot start before the model stream that proposed the call
+	// has been produced, and the answer written FROM a result cannot be
+	// produced before the tool returns — but two goroutines calling one
+	// callback would still interleave two writes. This serializes them so
+	// the caller sees a stream, not a race.
+	var emitMu sync.Mutex
+	emit := func(e AskEvent) error {
+		emitMu.Lock()
+		defer emitMu.Unlock()
+		return onEvent(e)
+	}
+
 	var declared []tool.BaseTool
 	var handlers []adk.ChatModelAgentMiddleware
 	if p.Grant != nil {
@@ -282,7 +340,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 			if p.Classifier != nil {
 				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
 			}
-			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.Requester, classifier)
+			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.Requester, classifier, func(call ToolCall) error {
+				return emit(AskEvent{Kind: AskToolCall, Call: &call})
+			})
 			if err != nil {
 				return err
 			}
@@ -296,9 +356,11 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 	// there is no second flag to keep in step with the store, and no way
 	// to ask for a resume of a run that is not suspended.
 	var text strings.Builder
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, func(delta string) error {
-		text.WriteString(delta)
-		return onDelta(delta)
+	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, func(e AskEvent) error {
+		if e.Kind == AskAnswer {
+			text.WriteString(e.Text)
+		}
+		return emit(e)
 	})
 	if err != nil {
 		// A suspension is the ONE outcome that keeps the checkpoint: the

@@ -87,6 +87,8 @@ function makeTarget(chips: ReferenceChip[] = []) {
     id: 1,
     el: document.createElement('div'),
     append: vi.fn(),
+    toolCall: vi.fn(),
+    reasoning: vi.fn(),
     close: vi.fn(),
   }
   const onRefusal = vi.fn()
@@ -229,6 +231,85 @@ describe('AgentInputTarget', () => {
     expect(handle.append).toHaveBeenNthCalledWith(2, ' world')
   })
 
+  it('routes a tool call to the run’s block, ahead of the deltas written from it', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('what went wrong?')
+
+    // The order the backend emits is the order the block is driven in — the
+    // whole point of putting the call on the wire (nocx-shxv0).
+    dispatcher.emit('agent.runToolCall', {
+      runId: 7,
+      entryId: 'answer-1',
+      callId: 'call_1',
+      tool: 'files.read',
+      effect: 'observe',
+      actionEntryId: 'entry-action-1',
+      resource: { kind: 'path', id: '/repo/a.txt' },
+    })
+    dispatcher.emit('agent.runDelta', { runId: 7, entryId: 'answer-1', seq: 0, text: 'line 3' })
+
+    expect(handle.toolCall).toHaveBeenCalledWith({
+      callId: 'call_1',
+      tool: 'files.read',
+      effect: 'observe',
+      resource: { kind: 'path', id: '/repo/a.txt' },
+    })
+    const callOrder = (handle.toolCall as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
+    const deltaOrder = (handle.append as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0]
+    expect(callOrder).toBeLessThan(deltaOrder)
+  })
+
+  it('a call that named no resource is handed on as absent, never as an empty one', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('is the tree clean?')
+
+    dispatcher.emit('agent.runToolCall', {
+      runId: 7,
+      entryId: 'answer-1',
+      callId: 'call_9',
+      tool: 'git.status',
+      effect: 'observe',
+      actionEntryId: 'entry-action-9',
+      resource: null,
+    })
+    expect(handle.toolCall).toHaveBeenCalledWith({
+      callId: 'call_9',
+      tool: 'git.status',
+      effect: 'observe',
+      resource: undefined,
+    })
+  })
+
+  it('routes reasoning to the run’s block, and never through append', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('why?')
+
+    dispatcher.emit('agent.runReasoning', { runId: 7, entryId: 'answer-1', text: 'thinking...' })
+    expect(handle.reasoning).toHaveBeenCalledWith('thinking...')
+    expect(handle.append).not.toHaveBeenCalled()
+  })
+
+  it('ignores a tool call and a reasoning chunk whose entryId does not match', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('q')
+
+    dispatcher.emit('agent.runToolCall', {
+      runId: 7,
+      entryId: 'some-other-answer',
+      callId: 'call_1',
+      tool: 'files.read',
+      effect: 'observe',
+      actionEntryId: 'entry-action-1',
+    })
+    dispatcher.emit('agent.runReasoning', {
+      runId: 7,
+      entryId: 'some-other-answer',
+      text: 'stale',
+    })
+    expect(handle.toolCall).not.toHaveBeenCalled()
+    expect(handle.reasoning).not.toHaveBeenCalled()
+  })
+
   it('ignores a delta whose entryId does not match the run’s answer entry', async () => {
     const { dispatcher, handle, target } = makeTarget()
     await target.submit('q')
@@ -278,6 +359,8 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       id: 1,
       el: document.createElement('div'),
       append: vi.fn(),
+      toolCall: vi.fn(),
+      reasoning: vi.fn(),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -314,6 +397,8 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
       id: 1,
       el,
       append: vi.fn(),
+      toolCall: vi.fn(),
+      reasoning: vi.fn(),
       close: vi.fn(),
     }
     const openAnswer = vi.fn(() => handle)
@@ -353,6 +438,8 @@ describe('AgentInputTarget refusal', () => {
       id: 1,
       el: document.createElement('div'),
       append: vi.fn(),
+      toolCall: vi.fn(),
+      reasoning: vi.fn(),
       close: vi.fn(),
     }
     const onRefusal = vi.fn()

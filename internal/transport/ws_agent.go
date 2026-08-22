@@ -196,6 +196,44 @@ type agentRunDelta struct {
 	Text    string `json:"text"`
 }
 
+// agentRunToolCall is the agent.runToolCall notification (nocx-shxv0): the
+// assistant is about to DO something, announced where it happens. runId and
+// entryId route it exactly as they route a delta — the renderer places it in
+// the answer's own flow, so the ordering the owner saw inverted on
+// 2026-08-22 (a run tool's block below the answer written from it) cannot
+// recur: the call is emitted before the model has been given its result.
+//
+// EntryID is the ANSWER entry (the routing key); ActionEntryID is the
+// LEDGER's action entry for the attempt. Two entries, two jobs, so neither
+// name is doing the other's work.
+//
+// What is deliberately NOT here: the tool's result and the raw arguments
+// blob. The result has an owner already (the ledger's attempt, the run
+// tool's own block) and sending it here would be a second egress path the
+// gate of design §7.1 never screened for this destination; the arguments'
+// readable half is the RESOURCE, derived once by namedResource, which the
+// scope check and the approval ask already share.
+type agentRunToolCall struct {
+	RunID         int64               `json:"runId"`
+	EntryID       string              `json:"entryId"`
+	CallID        string              `json:"callId"`
+	Tool          string              `json:"tool"`
+	Effect        string              `json:"effect"`
+	ActionEntryID string              `json:"actionEntryId"`
+	Resource      *content.GrantScope `json:"resource,omitempty"`
+}
+
+// agentRunReasoning is the agent.runReasoning notification (nocx-s92so): one
+// chunk of the model's thinking, on its own wire. Never a field of
+// agent.runDelta — an answer block that concatenates thinking with the
+// answer is the tool-result defect in another shape — and never persisted,
+// because the durable answer is the answer.
+type agentRunReasoning struct {
+	RunID   int64  `json:"runId"`
+	EntryID string `json:"entryId"`
+	Text    string `json:"text"`
+}
+
 // agentRunState is the agent.runState notification: the run's terminal
 // state. error is present only for failed, and it is a sentence a person
 // reads, never a Go error string (design §7). droppedDeltas is present only
@@ -885,7 +923,58 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Approvals:     h.approvals,
 		RunID:         strconv.FormatInt(rc.runID, 10),
 		Attempt:       rc.attempt,
-	}, func(text string) error {
+	}, func(ev assistant.AskEvent) error {
+		// ONE ordered stream, three notifications (nocx-shxv0, nocx-bshm2,
+		// nocx-s92so). The order between them is the product fact this
+		// bead is about: the call is rendered where it happened, inside the
+		// answer that was streaming when it happened, and the socket
+		// delivers what this callback emits in the order it emits it.
+		switch ev.Kind {
+		case assistant.AskToolCall:
+			// NOT PERSISTED, and that is not an omission: the durable
+			// account of a tool call is the LEDGER's action entry, which
+			// the middleware wrote before the call ran and whose id rides
+			// this notification. Appending it to the answer artifact would
+			// be a second record of one fact, disagreeing with the first
+			// the moment either changed.
+			if ev.Call == nil {
+				return nil
+			}
+			if err := r.TryNotify("agent.runToolCall", mustMarshal(agentRunToolCall{
+				RunID:         rc.runID,
+				EntryID:       rc.answerEntryID,
+				CallID:        ev.Call.CallID,
+				Tool:          ev.Call.Tool,
+				Effect:        string(ev.Call.Effect),
+				ActionEntryID: ev.Call.EntryID,
+				Resource:      ev.Call.Resource,
+			})); err != nil {
+				// Counted with the delta drops, and into the SAME counter,
+				// because it is the same fact about the live view: a call
+				// that happened is missing from the flow the person is
+				// reading, and the answer they see is not the whole of what
+				// the run did. The durable side is whole either way — the
+				// ledger has the attempt — so this never aborts the stream.
+				dropped++
+			}
+			return nil
+		case assistant.AskReasoning:
+			// Also not persisted, and for the stronger reason: the durable
+			// answer is the ANSWER, and appending the thinking to the
+			// answer artifact would put it back inside the answer by
+			// another route — the defect this bead removed from the live
+			// path (nocx-s92so). A reasoning chunk the wire refuses is a
+			// live-view gap like any other.
+			if err := r.TryNotify("agent.runReasoning", mustMarshal(agentRunReasoning{
+				RunID:   rc.runID,
+				EntryID: rc.answerEntryID,
+				Text:    ev.Text,
+			})); err != nil {
+				dropped++
+			}
+			return nil
+		}
+		text := ev.Text
 		// Persist BEFORE emitting: a delta the renderer lost is still in
 		// the ledger, and a persist failure aborts the stream.
 		//

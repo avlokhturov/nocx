@@ -478,8 +478,14 @@ func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {
 		t.Fatalf("newClient: %v", err)
 	}
 	var answer strings.Builder
-	if err := cl.Ask(context.Background(), p, func(delta string) error {
-		answer.WriteString(delta)
+	// Only the ANSWER, deliberately: since nocx-bshm2 a tool's return value
+	// no longer travels the delta path, so this asserts the model NAMED the
+	// marker in its prose — not that the tool's window happened to contain
+	// it. That is the criterion the epic actually wants.
+	if err := cl.Ask(context.Background(), p, func(ev AskEvent) error {
+		if ev.Kind == AskAnswer {
+			answer.WriteString(ev.Text)
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("Ask: %v", err)
