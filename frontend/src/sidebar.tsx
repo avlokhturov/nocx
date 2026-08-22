@@ -517,6 +517,7 @@ function SidebarSolid(props: SidebarSolidProps) {
               <IconButton
                 size="lg"
                 data-action={action.id}
+                railIndicator={true}
                 data-testid={action.id}
                 title={typeof action.title === 'function' ? action.title() : action.title}
                 ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
