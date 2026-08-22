@@ -47,6 +47,10 @@ func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbePa
 	return assistant.ProbeResult{OK: true, Model: p.Model}, nil
 }
 
+// Discard implements assistant.Client. This fake holds no suspended
+// state, so there is nothing to drop.
+func (*scriptedAssistantClient) Discard(string) {}
+
 func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -453,6 +457,10 @@ type blockingAskClient struct {
 func (b *blockingAskClient) Probe(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
 	return assistant.ProbeResult{OK: true}, nil
 }
+
+// Discard implements assistant.Client. This fake holds no suspended
+// state, so there is nothing to drop.
+func (*blockingAskClient) Discard(string) {}
 
 func (b *blockingAskClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
 	if err := onDelta("first"); err != nil {

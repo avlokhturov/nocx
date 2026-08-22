@@ -57,6 +57,18 @@ type Client interface {
 	// failed mid-stream (or the stream produced no text), and any other Go
 	// error when the ask could not run at all.
 	Ask(ctx context.Context, p AskParams, onDelta func(string) error) error
+	// Discard drops the engine's suspended state for one run — the eino
+	// checkpoint an escalation wrote, and the interrupt it named. A run
+	// that has terminalized has no branch left to continue, and ADR-0028
+	// says a checkpoint is deleted on terminalization.
+	//
+	// Ask already does this for every terminal outcome it returns from.
+	// This is the seam for the ones it does not: the person DECLINED, or
+	// the run was closed by another path while its question was still
+	// open. Discarding a run that holds nothing does nothing, so the
+	// transport can call it from its one terminal funnel without asking
+	// whether the run ever suspended.
+	Discard(runID string)
 }
 
 // Message is one turn of the conversation, in this package's own
@@ -267,10 +279,11 @@ func newClient(logger log.Logger, toolsFS fs.FS) (Client, error) {
 
 func newClientWithRegistry(logger log.Logger, reg agenttools.Registry) Client {
 	return &client{
-		log:       logger,
-		http:      newGuardedHTTPClient(logger),
-		tools:     reg,
-		approvals: NewApprovalStore(),
+		log:         logger,
+		http:        newGuardedHTTPClient(logger),
+		tools:       reg,
+		approvals:   NewApprovalStore(),
+		checkpoints: newRunCheckpoints(),
 	}
 }
 
@@ -279,4 +292,8 @@ type client struct {
 	http      *http.Client
 	tools     agenttools.Registry
 	approvals *ApprovalStore
+	// checkpoints is the process-lifetime suspended-run store (ADR-0028:
+	// "approval resumes FROM THE CHECKPOINT"). One per client, keyed by run
+	// id, shared by every run the server drives — see checkpoints.go.
+	checkpoints *runCheckpoints
 }

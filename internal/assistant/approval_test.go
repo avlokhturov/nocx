@@ -177,12 +177,19 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	ledger := realLedger(t)
 	approvals := NewApprovalStore()
 
-	// Request 1: the model proposes the call (escalates). Request 2 (the
-	// resume): the model proposes the SAME call (approved, runs). Request 3:
-	// the answer.
+	// Request 1: the model proposes the call (escalates). Request 2: the
+	// answer, after the RESTORED call has run.
+	//
+	// The resume spends NO model request — it restores the proposal from
+	// the checkpoint (nocx-igu4y). This fake used to serve the tool call on
+	// the first TWO completions, which is what a resume that re-called the
+	// model needed; it is why nothing here could see that a real provider
+	// mints a fresh call id on the second roll and the approval then
+	// matches nothing. Serving it once is what makes the count below an
+	// assertion about the resume rather than about the fake.
 	var n atomic.Int64
 	handler := func(w http.ResponseWriter, r *http.Request) {
-		if n.Add(1) <= 2 {
+		if n.Add(1) == 1 {
 			streamToolCalls(w, toolCallSpec{name: "files.read", args: args})
 			return
 		}
@@ -221,8 +228,8 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	if askErr := cl.Ask(context.Background(), p, func(string) error { return nil }); askErr != nil {
 		t.Fatalf("the approved resume failed: %v", askErr)
 	}
-	if f.requests.Load() != 3 {
-		t.Fatalf("the engine made %d model requests, want 3 — escalate, resume-call, answer", f.requests.Load())
+	if f.requests.Load() != 2 {
+		t.Fatalf("the engine made %d model requests, want 2 — escalate, then the answer after the RESTORED call ran. A third means the resume re-asked the model to propose, which re-rolls the call id the approval is bound to (nocx-igu4y)", f.requests.Load())
 	}
 
 	e, err := ledger.Entry(context.Background(), entryID)
@@ -308,9 +315,12 @@ func TestAsk_ApprovedEgressResumeThread(t *testing.T) {
 	ledger := realLedger(t)
 	approvals := NewApprovalStore()
 
+	// One proposal, then the answer: the resume restores the withheld call
+	// from the checkpoint rather than asking the model to propose it again
+	// (nocx-igu4y). Serving it twice modelled the old re-rolling resume.
 	var n atomic.Int64
 	handler := func(w http.ResponseWriter, r *http.Request) {
-		if n.Add(1) <= 2 {
+		if n.Add(1) == 1 {
 			streamToolCalls(w, toolCallSpec{name: "files.read", args: args})
 			return
 		}

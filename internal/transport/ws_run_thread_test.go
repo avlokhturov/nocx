@@ -66,14 +66,20 @@ func askPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
 }
 
 // authorisedRunServer is the fake provider for the authorised exchange:
-// requests 1 and 2 stream the SAME run tool call (the escalation, then the
-// checkpoint-resumed call), later requests stream the answer — the shape
-// TestAsk_ApprovedResumeRunsAsSubsequentAttempt proves at the engine level.
+// request 1 streams the run tool call the policy escalates on, and every
+// later request streams the answer.
+//
+// It used to stream the call on requests 1 AND 2, because the resume asked
+// the model to propose it again. Since nocx-igu4y it does not: the resume
+// restores the proposal from the checkpoint and spends no model request at
+// all, so a second scripted proposal would be a NEW call — with a new call
+// id, escalating again, and the run would never finish. The engine-level
+// shape is TestAsk_ApprovedResumeRunsAsSubsequentAttempt.
 func authorisedRunServer(args string) (*runToolCallingServer, *httptest.Server) {
 	s := &runToolCallingServer{args: args}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		if s.requests.Add(1) <= 2 {
+		if s.requests.Add(1) == 1 {
 			streamToolCallChunk(w, "run", s.args)
 			return
 		}
@@ -302,8 +308,8 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	if st.RunID != res.RunID || st.State != "completed" {
 		t.Fatalf("runState = runId %d state %q, want %d completed", st.RunID, st.State, res.RunID)
 	}
-	if fake.requests.Load() < 3 {
-		t.Fatalf("provider received %d requests, want >= 3 — escalate, resume-call, answer", fake.requests.Load())
+	if fake.requests.Load() < 2 {
+		t.Fatalf("provider received %d requests, want >= 2 — escalate, then the answer after the RESTORED call ran (the resume spends no model request; nocx-igu4y)", fake.requests.Load())
 	}
 	return h, res, answer, ap
 }

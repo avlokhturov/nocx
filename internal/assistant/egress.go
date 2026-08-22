@@ -143,15 +143,16 @@ type KnownMaterial interface {
 // egressRequestFrom finds the egress ask among an interrupt event's
 // contexts, mirroring approvalRequestFrom: the asking call carries our
 // *EgressRequest as its info; the latched, deferred calls carry a plain
-// string. The first egress ask is the one the human decides about.
-func egressRequestFrom(info *adk.InterruptInfo) *EgressRequest {
+// string. The first egress ask is the one the human decides about, and its
+// interrupt ID is the branch a resume continues.
+func egressRequestFrom(info *adk.InterruptInfo) (*EgressRequest, string) {
 	if info == nil {
-		return nil
+		return nil, ""
 	}
 	for _, ic := range info.InterruptContexts {
 		if req, ok := ic.Info.(*EgressRequest); ok {
-			return req
+			return req, ic.ID
 		}
 	}
-	return nil
+	return nil, ""
 }

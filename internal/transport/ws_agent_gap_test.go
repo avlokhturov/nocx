@@ -391,6 +391,10 @@ func (b *barrierAskClient) Probe(context.Context, assistant.ProbeParams) (assist
 	return assistant.ProbeResult{OK: true}, nil
 }
 
+// Discard implements assistant.Client. This fake holds no suspended
+// state, so there is nothing to drop.
+func (*barrierAskClient) Discard(string) {}
+
 func (b *barrierAskClient) Ask(_ context.Context, _ assistant.AskParams, onDelta func(string) error) error {
 	for i := 0; i < b.n; i++ {
 		if err := onDelta(fmt.Sprintf("d%d", i)); err != nil {
@@ -691,6 +695,10 @@ func newInterleavedAskClient(a, b []string) *interleavedAskClient {
 func (c *interleavedAskClient) Probe(context.Context, assistant.ProbeParams) (assistant.ProbeResult, error) {
 	return assistant.ProbeResult{OK: true}, nil
 }
+
+// Discard implements assistant.Client. This fake holds no suspended
+// state, so there is nothing to drop.
+func (*interleavedAskClient) Discard(string) {}
 
 func (c *interleavedAskClient) Ask(_ context.Context, _ assistant.AskParams, onDelta func(string) error) error {
 	c.mu.Lock()

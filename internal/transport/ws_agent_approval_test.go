@@ -26,6 +26,9 @@ import (
 
 // approvalScriptStep is one Ask outcome of the scripted engine.
 type approvalScriptStep struct {
+	// deltas are emitted before suspend is consulted, so one step can be
+	// "answer this much, then ask" — the shape the delta numbering across
+	// a suspension is about.
 	deltas  []string
 	suspend func(runID string) error // non-nil → Ask returns this suspension
 }
@@ -37,10 +40,23 @@ type scriptedApprovalClient struct {
 	script   []approvalScriptStep
 	received []assistant.AskParams
 	count    int
+	// discarded is every run id the transport dropped the engine's
+	// suspended state for (Client.Discard) — the decline path's own
+	// assertion: a run nobody may resume must not keep a continuation.
+	discarded []string
 }
 
 func (s *scriptedApprovalClient) Probe(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
 	return assistant.ProbeResult{OK: true, Model: p.Model}, nil
+}
+
+// Discard is the engine seam a terminal run drops its suspended state
+// through (assistant.Client). The fake records WHICH runs were discarded,
+// so a test can assert that a declined run leaves no continuation behind.
+func (s *scriptedApprovalClient) Discard(runID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.discarded = append(s.discarded, runID)
 }
 
 func (s *scriptedApprovalClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
@@ -49,13 +65,17 @@ func (s *scriptedApprovalClient) Ask(ctx context.Context, p assistant.AskParams,
 	s.received = append(s.received, p)
 	step := s.script[s.count]
 	s.count++
-	if step.suspend != nil {
-		return step.suspend(p.RunID)
-	}
+	// Deltas FIRST, then the suspension: a real run answers some of the
+	// question before it proposes the call that stops it, and a step that
+	// could only do one of the two could not model the numbering the
+	// resume has to continue from.
 	for _, d := range step.deltas {
 		if err := onDelta(d); err != nil {
 			return err
 		}
+	}
+	if step.suspend != nil {
+		return step.suspend(p.RunID)
 	}
 	return nil
 }
@@ -64,6 +84,12 @@ func (s *scriptedApprovalClient) params() []assistant.AskParams {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]assistant.AskParams(nil), s.received...)
+}
+
+func (s *scriptedApprovalClient) discards() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.discarded...)
 }
 
 func (s *scriptedApprovalClient) askCount() int {

@@ -185,7 +185,10 @@ type agentAskResponse struct {
 // of the streamed answer. runId AND entryId are both on every delta because
 // the renderer routes by entryId while the acceptance criterion drives two
 // overlapping asks — "the current answer" is not an identity. seq ascends
-// per run from 0 and is the renderer's ordering key.
+// per run from 0 and is the renderer's ordering key — ACROSS a suspension
+// too: since nocx-igu4y the resume continues the answer rather than
+// re-rolling it, so its deltas are numbered after the ones the question
+// interrupted, never over them.
 type agentRunDelta struct {
 	RunID   int64  `json:"runId"`
 	EntryID string `json:"entryId"`
@@ -766,6 +769,21 @@ type askRunContext struct {
 	// row and would stop being the session the moment a row is scoped
 	// wider.
 	sessionID session.ID
+	// nextSeq is the delta sequence the NEXT drive of this run starts
+	// from — written by suspendForApproval, read by runAskStream.
+	//
+	// It exists because the resume is now a REAL checkpoint resume
+	// (nocx-igu4y): the model is not asked to produce the answer again, so
+	// the deltas that follow the approval are the CONTINUATION of the ones
+	// before it, not a second copy of them. While the resume re-rolled the
+	// whole answer, restarting at 0 was harmless — a retried delta is a
+	// no-op on the store's (artifact_id, seq) key, and the renderer
+	// re-received what it already had. With a real resume it would be a
+	// collision: new text written over the persisted chunks of the text
+	// before the question, and a renderer routing new deltas onto old
+	// numbers. The count must ascend across the whole run, so it crosses
+	// the suspension exactly as droppedBefore does.
+	nextSeq int
 	// pendingReason is which gate the run is currently suspended on —
 	// "policy" or "egress", empty when it is not suspended. Written by
 	// suspendForApproval into the pendingRuns copy, and read by
@@ -851,7 +869,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		})
 	}
 
-	seq := 0
+	// The deltas continue where the last drive of this run stopped: a
+	// resumed run is one answer, numbered once (see askRunContext.nextSeq).
+	seq := rc.nextSeq
 	err := h.client.Ask(ctx, assistant.AskParams{
 		Key:           rc.secret,
 		BaseURL:       rc.endpoint.BaseURL,
@@ -911,11 +931,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		var apErr *assistant.ApprovalRequestedError
 		var egErr *assistant.EgressRequestedError
 		if errors.As(err, &apErr) && apErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, dropped, apErr.Request, nil)
+			h.suspendForApproval(ctx, rc, r, dropped, seq, apErr.Request, nil)
 			return
 		}
 		if errors.As(err, &egErr) && egErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, dropped, nil, egErr.Request)
+			h.suspendForApproval(ctx, rc, r, dropped, seq, nil, egErr.Request)
 			return
 		}
 		reason, sentence := classifyAskFailure(err)
@@ -944,8 +964,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // it is recorded into the stored stream context so the resume's or the
 // decline's terminal close carries the WHOLE run's count — a gap observed
 // before the question reached the person is still a gap in the live view
-// after the resume's terminal close.
-func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, dropped int, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
+// after the resume's terminal close. nextSeq crosses the same boundary for
+// the same reason and is the stronger case: since nocx-igu4y the resume
+// CONTINUES the answer instead of re-rolling it, so its deltas must be
+// numbered after these, not over them.
+func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, dropped, nextSeq int, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
 	}); err != nil {
@@ -974,6 +997,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	h.pendingRunsMu.Lock()
 	if stored, ok := h.pendingRuns[rc.runID]; ok {
 		stored.droppedBefore = dropped
+		stored.nextSeq = nextSeq
 		stored.pendingReason = n.Reason
 		h.pendingRuns[rc.runID] = stored
 	}
@@ -1160,9 +1184,28 @@ func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approva
 }
 
 // resumeRun re-drives a suspended run after the person's yes: the run
-// streams again (awaiting_approval → streaming), the Ask re-runs with the
-// approval stored, and the stream runs to its terminal state like any other.
+// streams again (awaiting_approval → streaming), the Ask resumes from the
+// engine's checkpoint with the approval stored, and the stream runs to its
+// terminal state like any other.
+//
+// The grant is MINTED AGAIN here (nocx-v94ne), and that is the whole of what
+// makes "allow in this session" mean anything inside the run it was given
+// in. The run's grant was minted once, when the question was asked; the
+// answer that follows writes the session overlay (applyStandingAnswer →
+// sessionPolicyStore), and a grant minted before that write cannot see it.
+// So every further call of the same effect class in the same run asked
+// again — which is exactly what the person's answer said to stop doing.
+//
+// ADR-0020 §5 forbids MUTATING a running grant, and this does not: rc is
+// this function's own copy, nothing running holds it, and the middleware
+// for the resumed attempt is built fresh from the new value. ADR-0028 says
+// it in as many words — approval resumes "as a new attempt with a new
+// grant". The approval BINDING is untouched: its Attempt still names the
+// interrupted proposal, which is what the person answered about.
 func (h agentHandlers) resumeRun(ctx context.Context, rc askRunContext, r Responder) {
+	if h.grantFor != nil {
+		rc.grant = h.grantFor(string(rc.sessionID))
+	}
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunStreaming)
 	}); err != nil {
@@ -1223,10 +1266,19 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 // whole, so the run still closes with the state it earned.
 func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, dropped int, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
 	// The run is closing: nothing may resume it. Drop the stored stream
-	// context so a late agent.approve finds no pending question.
+	// context so a late agent.approve finds no pending question — and the
+	// engine's continuation with it (nocx-igu4y). Ask drops its own
+	// checkpoint on every terminal outcome IT returns from; this is the
+	// one funnel for the outcomes it does not — the person declined, the
+	// stream could not be submitted, the run was closed while its question
+	// was still open. A checkpoint nobody may resume is a copy of the
+	// run's messages held for the life of the process.
 	h.pendingRunsMu.Lock()
 	delete(h.pendingRuns, rc.runID)
 	h.pendingRunsMu.Unlock()
+	if h.client != nil {
+		h.client.Discard(strconv.FormatInt(rc.runID, 10))
+	}
 	tctx := context.WithoutCancel(ctx)
 	err := h.op.Run(tctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.FinishAgentRun(ctx, rc.runID, content.FinishAgentRun{

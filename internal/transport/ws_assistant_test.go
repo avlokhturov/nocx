@@ -41,6 +41,10 @@ func (s *stubAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams
 	return s.probe(ctx, p)
 }
 
+// Discard implements assistant.Client. This fake holds no suspended
+// state, so there is nothing to drop.
+func (*stubAssistantClient) Discard(string) {}
+
 func (s *stubAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
 	return nil
 }

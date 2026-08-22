@@ -862,16 +862,22 @@ func (m *policyMiddleware) deferred(ctx context.Context, tCtx *adk.ToolContext, 
 // event's contexts: the asking call carries our *ApprovalRequest as its
 // info; the latched, deferred calls carry a plain string ("a prior call
 // ..."). The first ask is the one the human decides about.
-func approvalRequestFrom(info *adk.InterruptInfo) *ApprovalRequest {
+//
+// It returns the interrupt's ID with it — adk's fully-qualified address of
+// THIS suspended branch — because that is what a resume must name
+// (adk.ResumeParams.Targets). The two facts come off one context and are
+// found by one walk: a request whose branch we could not name is a
+// suspension nobody could ever answer.
+func approvalRequestFrom(info *adk.InterruptInfo) (*ApprovalRequest, string) {
 	if info == nil {
-		return nil
+		return nil, ""
 	}
 	for _, ic := range info.InterruptContexts {
 		if req, ok := ic.Info.(*ApprovalRequest); ok {
-			return req
+			return req, ic.ID
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 // ── the attempt ───────────────────────────────────────────────────────────

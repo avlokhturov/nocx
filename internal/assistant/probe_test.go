@@ -7,6 +7,7 @@ package assistant
 // eino path, not of a stub.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,6 +41,12 @@ func newFakeOpenAI(handler func(w http.ResponseWriter, r *http.Request)) (*fakeO
 		f.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		f.lastBody.Store(string(body))
+		// Put the body BACK. Recording it here consumed it, and a handler
+		// that wants to answer differently depending on what the engine
+		// SENT — a provider that stops proposing once it sees the tool
+		// result, which is every real one — would otherwise read an empty
+		// request and behave like a provider that proposes forever.
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		f.lastAuth.Store(r.Header.Get("Authorization"))
 		f.lastPath.Store(r.URL.Path)
 		hdrs := make(map[string]string)

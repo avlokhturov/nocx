@@ -76,6 +76,10 @@ func (c *recordingClient) Probe(ctx context.Context, p assistant.ProbeParams) (a
 	return c.inner.Probe(ctx, p)
 }
 
+// Discard implements assistant.Client. This fake holds no suspended
+// state, so there is nothing to drop.
+func (*recordingClient) Discard(string) {}
+
 func (c *recordingClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
 	err := c.inner.Ask(ctx, p, onDelta)
 	c.mu.Lock()

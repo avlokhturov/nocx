@@ -75,7 +75,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, handlers []adk.ChatModelAgentMiddleware, onDelta func(string) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onDelta func(string) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -123,10 +123,50 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		ctx = withCustomHeaderNames(ctx, names)
 	}
 
-	it := agent.Run(ctx, &adk.AgentInput{
-		Messages:        msgs,
+	// The run goes through adk.Runner rather than agent.Run, and that is
+	// what makes an approval resumable at all: ONLY the Runner carries a
+	// CheckPointStore. agent.Run builds a private temporary bridge store of
+	// its own (adk/chatmodel.go), so adding WithCheckPointID to it changes
+	// nothing — the checkpoint dies with the call that wrote it.
+	//
+	// Under the Runner, ToolsNode checkpoints its INPUT message with its
+	// tool calls and restores it before regenerating the tasks
+	// (compose/tool_node.go). That is the whole fix: the resumed attempt
+	// sees the SAME call id and the SAME arguments the person approved,
+	// already-executed siblings are retained by call id, and no model call
+	// is spent rebuilding a proposal the model would have re-rolled with a
+	// fresh id — which is what left a person answering the same question
+	// forever.
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           agent,
 		EnableStreaming: true,
-	}, runOpts...)
+		CheckPointStore: checkpoints,
+	})
+	var it *adk.AsyncIterator[*adk.AgentEvent]
+	if target, ok := checkpoints.resumable(checkpointID); ok {
+		// A resume, and it takes NO messages: the continuation is the
+		// checkpoint, and the target names WHICH suspended branch goes on.
+		// The decision itself is not passed here — it lives in the
+		// ApprovalStore, which the middleware consults when the restored
+		// call reaches the pipeline again; eino's resume data would be a
+		// second place for one answer to live.
+		var err error
+		it, err = runner.ResumeWithParams(ctx, checkpointID, &adk.ResumeParams{
+			Targets: map[string]any{target: nil},
+		}, runOpts...)
+		if err != nil {
+			return fmt.Errorf("resume the suspended run: %w", err)
+		}
+	} else {
+		// A first drive. Without a run id there is nothing to key a
+		// checkpoint by — and nothing an approval could bind to either
+		// (the binding starts with the run), so such a run cannot suspend
+		// resumably and does not pretend to.
+		if checkpointID != "" {
+			runOpts = append(runOpts, adk.WithCheckPointID(checkpointID))
+		}
+		it = runner.Run(ctx, msgs, runOpts...)
+	}
 	for {
 		ev, ok := it.Next()
 		if !ok {
@@ -142,14 +182,21 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// fall through the Output==nil guard and the suspension would be
 		// silently reported as a completed run.
 		if ev.Action != nil && ev.Action.Interrupted != nil {
-			if req := approvalRequestFrom(ev.Action.Interrupted); req != nil {
+			// The Runner has already written the checkpoint by the time
+			// this event reaches us (it saves, then sends). Recording the
+			// interrupt's id against it is what completes the pair the
+			// next drive reads: the bytes are the framework's, the branch
+			// is ours to name.
+			if req, interruptID := approvalRequestFrom(ev.Action.Interrupted); req != nil {
+				checkpoints.suspend(checkpointID, interruptID)
 				return &ApprovalRequestedError{Request: req}
 			}
 			// The egress gate's ask (design §7.1): a tool result contained
 			// secret-shaped material and the run suspended before the bytes
 			// left for the provider. Same shape as the inbound ask — NOT a
 			// failure, the state the approval surface renders.
-			if req := egressRequestFrom(ev.Action.Interrupted); req != nil {
+			if req, interruptID := egressRequestFrom(ev.Action.Interrupted); req != nil {
+				checkpoints.suspend(checkpointID, interruptID)
 				return &EgressRequestedError{Request: req}
 			}
 			return &ApprovalRequestedError{}
@@ -243,18 +290,50 @@ func (c *client) Ask(ctx context.Context, p AskParams, onDelta func(string) erro
 		}
 	}
 
+	// The checkpoint is keyed by the run id, because that is what a drive
+	// of this run already is: one run, one suspension, one continuation.
+	// So an Ask whose run has a live checkpoint IS the resume of it —
+	// there is no second flag to keep in step with the store, and no way
+	// to ask for a resume of a run that is not suspended.
 	var text strings.Builder
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, func(delta string) error {
+	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, func(delta string) error {
 		text.WriteString(delta)
 		return onDelta(delta)
 	})
 	if err != nil {
+		// A suspension is the ONE outcome that keeps the checkpoint: the
+		// run is not over, and the checkpoint is the only thing that can
+		// carry it past the person's answer. Every other error ends the
+		// run — a refusal, a malformed proposal, a failed stream, a
+		// cancelled context — and a run that has ended leaves nothing
+		// behind (ADR-0028: checkpoints are deleted on terminalization).
+		// v0.9.13 deletes nothing itself; the store's owner is
+		// responsible, which the framework says in as many words.
+		var apErr *ApprovalRequestedError
+		var egErr *EgressRequestedError
+		if !errors.As(err, &apErr) && !errors.As(err, &egErr) {
+			c.Discard(p.RunID)
+		}
 		return err
 	}
+	c.Discard(p.RunID)
 	if text.Len() == 0 {
 		return &StreamError{Message: "the model returned no text"}
 	}
 	return nil
+}
+
+// Discard implements Client: it drops whatever suspended state the engine
+// holds for one run. Ask calls it on every terminal outcome of its own; the
+// transport calls it for the terminal outcomes Ask never returns from — the
+// person declined, or the run was closed while its question was still open.
+// Discarding a run that holds nothing is the ordinary case and does
+// nothing.
+func (c *client) Discard(runID string) {
+	if runID == "" {
+		return
+	}
+	_ = c.checkpoints.Delete(context.Background(), runID)
 }
 
 // declaredTools converts the registry's assembled tools into the ADK tools
