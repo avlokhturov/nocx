@@ -4818,7 +4818,9 @@ func TestAgentRunResolved_FailedDTOConformsToContract(t *testing.T) {
 // The DTOs' conformance: field tags and enum spelling.
 func TestAgentRunNotifications_DTOsConformToContract(t *testing.T) {
 	deltaSchema := loadSchema(t, "agent.runDelta.schema.json")
-	raw, err := json.Marshal(agentRunDelta{RunID: 7, EntryID: "answer-1", Seq: 0, Text: "hello"})
+	raw, err := json.Marshal(agentRunDelta{
+		RunID: 7, EntryID: "answer-1", BlockID: "answer-1/text-1", Seq: 0, Text: "hello",
+	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -5324,7 +5326,6 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 		Caused []struct {
 			EntryID    string `json:"entryId"`
 			Position   int    `json:"position"`
-			At         int    `json:"at"`
 			Kind       string `json:"kind"`
 			OpensBlock bool   `json:"opensBlock"`
 			Effect     *string
@@ -5354,22 +5355,6 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 	}
 	if body.Caused[1].Effect != nil || body.Caused[1].Resource != nil {
 		t.Fatalf("a command came back with tool facts: %+v", body.Caused[1])
-	}
-	// THE ANCHOR IS DEAD AND THE FIELD HAS NOT LEFT YET (ADR-0037,
-	// nocx-dc2fr.1 → .2). `at` said where in the prose a cause sat, and it
-	// existed only because the unit that was DRAWN (a run of prose) and the
-	// unit that was STORED (the whole answer) were different things. They
-	// are the same thing now — a cause is a CHILD, at a seat — so nothing
-	// records an offset and nothing can.
-	//
-	// The field is still required by contracts/ledger.get.schema.json, so
-	// it still goes out, and what it carries is the only honest value left:
-	// zero, for every cause. This asserts exactly that, so the day the
-	// contract drops the field (nocx-dc2fr.2, which owns the wire) this test
-	// fails and is deleted rather than quietly passing on a placeholder.
-	if body.Caused[0].At != 0 || body.Caused[1].At != 0 {
-		t.Fatalf("the anchors off the socket = %d, %d; want 0, 0 — `at` is no longer recorded",
-			body.Caused[0].At, body.Caused[1].At)
 	}
 	if !body.Caused[0].OpensBlock {
 		t.Fatalf("the action's opensBlock off the socket = false, want the stored true")
@@ -5402,16 +5387,18 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"observe","resource":{"kind":"path"}}]`),
 		"an undeclared field on a cause": body(
 			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"parent":"a"}]`),
-		// The anchor and the block fact are required for the same reason
-		// the position is: a cause that carries neither is a cause a
-		// restored turn cannot place, and "absent" and "0" must not be the
-		// same thing on the wire (nocx-9sqii).
-		"a cause with no anchor": body(
-			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
-		"a negative anchor": body(
-			`[{"entryId":"b","position":0,"at":-1,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		// THE ANCHOR IS GONE FROM THE CONTRACT (ADR-0037), so it is refused
+		// like any other field nobody declared — additionalProperties does
+		// that, and this is the assertion that it really is off the schema
+		// rather than merely unset by the server.
+		"a cause still carrying the anchor": body(
+			`[{"entryId":"b","position":0,"at":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		// The block fact is required for the reason the position is: a cause
+		// that will not say whether it opened a block is one a restored turn
+		// cannot draw, and "absent" and "false" must not be the same thing on
+		// the wire.
 		"a cause that will not say whether it opened a block": body(
-			`[{"entryId":"b","position":0,"at":0,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
 	}
 	for name, raw := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -5422,10 +5409,19 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	}
 	// And the shape it must ACCEPT, so the refusals above are a contract
 	// and not an accident of a schema that refuses everything.
-	ok := body(`[{"entryId":"b","position":0,"at":12,"kind":"action","intent":"files.read",` +
+	ok := body(`[{"entryId":"b","position":0,"kind":"action","intent":"files.read",` +
 		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"},"opensBlock":false}]`)
 	if err := validateJSONErr(schema, []byte(ok)); err != nil {
 		t.Fatalf("the schema refused a well-formed cause: %v", err)
+	}
+	// And a run of prose, which is a child like any other since ADR-0037: it
+	// names no intent, has no effect and no resource, and opens no block. The
+	// server sends these now, so a schema that could not express one would be
+	// a contract the wire cannot keep.
+	prose := body(`[{"entryId":"t","position":1,"kind":"text","intent":"",` +
+		`"effect":null,"resource":null,"opensBlock":false}]`)
+	if err := validateJSONErr(schema, []byte(prose)); err != nil {
+		t.Fatalf("the schema refused a run of prose: %v", err)
 	}
 }
 

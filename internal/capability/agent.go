@@ -21,18 +21,27 @@ type AgentService interface {
 	// CaptureFrame ingests one renderer-minted frame and returns the
 	// backend-minted frame id.
 	CaptureFrame(ctx context.Context, in content.CaptureFrame) (content.CaptureFrameResult, error)
-	// SubmitAsk records one ask transaction atomically (question + answer
-	// entry + pending run + references/caused-by edges) and returns the
-	// backend-minted run id.
+	// SubmitAsk records one ask transaction atomically (the turn, its pending
+	// run and its reference edges) and returns the backend-minted run id. It
+	// opens no body: a turn's body is its `text` children now (ADR-0037), and
+	// the first one is opened by the stream, not by the ask.
 	SubmitAsk(ctx context.Context, in content.AgentAsk) (content.AgentAskResult, error)
 	// TransitionRun moves the run to a non-terminal state (prepared →
 	// streaming) — the gate deltas may not pass before.
 	TransitionRun(ctx context.Context, runID int64, to content.RunState) error
 	// FinishAgentRun closes the run and its entries in one transaction.
 	FinishAgentRun(ctx context.Context, runID int64, in content.FinishAgentRun) error
-	// AppendRunDelta appends one streamed chunk to the answer artifact,
-	// maintaining its byte_len. The delta is persisted BEFORE it is emitted
-	// over the wire — the ledger is the record.
+	// OpenProse opens one run of assistant prose under the turn: a `text`
+	// child at the next free seat with an artifact of its own (ADR-0037).
+	// The stream calls it on the first delta after a call — the backend owns
+	// where one run of prose begins, so the renderer never decides it.
+	OpenProse(ctx context.Context, turnID string) (content.ProseBlock, error)
+	// SealProse seals one prose block's body: the boundary arrived (the next
+	// tool call) and nothing more may be appended to it.
+	SealProse(ctx context.Context, entryID string) error
+	// AppendRunDelta appends one streamed chunk to the prose block's
+	// artifact, maintaining its byte_len. The delta is persisted BEFORE it is
+	// emitted over the wire — the ledger is the record.
 	//
 	// seq is the chunk's position and the caller already has it: it numbers
 	// every agent.runDelta notification. Passing it makes a retried delta a
@@ -92,6 +101,20 @@ func (s *agentService) FinishAgentRun(ctx context.Context, runID int64, in conte
 		return err
 	}
 	return s.ledger.FinishAgentRun(ctx, runID, in)
+}
+
+func (s *agentService) OpenProse(ctx context.Context, turnID string) (content.ProseBlock, error) {
+	if err := s.guard.check(); err != nil {
+		return content.ProseBlock{}, err
+	}
+	return s.ledger.OpenProse(ctx, turnID)
+}
+
+func (s *agentService) SealProse(ctx context.Context, entryID string) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	return s.ledger.SealProse(ctx, entryID)
 }
 
 func (s *agentService) AppendRunDelta(ctx context.Context, artifactID string, seq int, body []byte) error {

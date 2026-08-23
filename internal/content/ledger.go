@@ -11,7 +11,8 @@ package content
 // ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
 // StartExecution and FinishExecution through capability.LedgerService, and
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
-// SubmitAgentAsk, TransitionRun, AppendChunk and FinishAgentRun. The READ
+// SubmitAgentAsk, TransitionRun, OpenProse, SealProse, AppendChunk and
+// FinishAgentRun. The READ
 // path is wired as of nocx-rtg0.20: ledger.query drives QueryEntries and
 // ledger.get drives Entry plus Edges plus Caused (ws_ledger_query.go), and the query's
 // `host` field is what finally asks a resolved environment row for its host —
@@ -780,22 +781,39 @@ type AgentAsk struct {
 // never executed.
 //
 // ONE entry id and not two (nocx-4em1z). A turn is a block: the question is
-// the entry's intent and the answer is its body, the way a command line and
-// its output are. The answer used to be an entry of its own joined by a
-// caused-by edge (assistant design §5) and nothing needed it to be — its id
-// was a routing ADDRESS for deltas, reasoning, tool-call lines and copy, and
-// the turn's own id addresses all four.
+// the entry's intent, and its BODY IS ITS CHILDREN (ADR-0037, amending
+// ADR-0036). The answer used to be an entry of its own joined by a caused-by
+// edge (assistant design §5) and nothing needed it to be — its id was a
+// routing ADDRESS for deltas, reasoning, tool-call lines and copy, and the
+// turn's own id addresses all four.
+//
+// NO ANSWER ARTIFACT IS OPENED HERE, and the absence is the change. The ask
+// used to open one text/plain artifact on the run and every delta appended to
+// it, which is precisely the arrangement ADR-0037 retires: the unit that is
+// DRAWN (a run of prose) and the unit that was STORED (the whole answer) were
+// different things, and something had to translate between them. The run
+// opens a `text` child per run of prose instead (OpenProse), so the turn
+// itself now carries no body at all.
 type AgentAskResult struct {
 	RunID int64
-	// EntryID is the turn: what the deltas append to, what the flow renders
-	// as a block, and what a restore reads back.
+	// EntryID is the turn: what the deltas are routed by, what the flow
+	// renders as a block, and what a restore reads back. It is the PARENT the
+	// prose blocks are opened under, never the thing prose appends to.
+	EntryID   string
+	IngestSeq int64
+	Replayed  bool
+}
+
+// ProseBlock is one run of assistant prose as the store holds it (ADR-0037):
+// the `text` child of the turn, and the artifact that child's deltas append
+// to. Two ids because they are two rows doing two jobs — the block is what is
+// DRAWN and what the wire addresses, the artifact is the body it grows.
+type ProseBlock struct {
+	// EntryID is the `text` entry: a child of the turn, at its own seat,
+	// born closed and successful because prose was printed, not attempted.
 	EntryID string
-	// AnswerArtifactID is where the streamed text lands — an artifact with
-	// provenance rather than a string in a column (ADR-0019 §6), which is
-	// the part of §5 that this shape keeps.
-	AnswerArtifactID string
-	IngestSeq        int64
-	Replayed         bool
+	// ArtifactID is that block's body, open until the block is sealed.
+	ArtifactID string
 }
 
 // The ask's reference-validation failures — reachable from the renderer (an
@@ -1154,6 +1172,19 @@ type LedgerEntry struct {
 	Sensitivity Sensitivity
 	Payload     string
 	Executions  []Execution
+	// Artifacts are the entry's OWN bodies — the ones no execution produced
+	// (ADR-0037 decision 3: an artifact belongs to its block, and which
+	// attempt made it is a second, weaker fact that a `text` block does not
+	// have). A run of prose is exactly that case, and without this it could
+	// be written and never enumerated: the per-execution lists below reach a
+	// body through its attempt, and there is no attempt to reach through.
+	//
+	// It is deliberately NOT every artifact of the entry. A command's output
+	// hangs on the attempt that produced it and is listed there; repeating it
+	// here would be one body in two lists, which is two owners of one fact
+	// the moment either list is filtered. Metadata only, like the others —
+	// the recall read never hauls bytes.
+	Artifacts []Artifact
 }
 
 // Execution is one run: lease bounds, interactivity policy, process group,
@@ -1358,6 +1389,30 @@ type LedgerRepository interface {
 	// Idempotent on (ID, Client, digest): a replay returns the original
 	// run id; the same ask id with different content is ErrIDConflict.
 	SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentAskResult, error)
+	// OpenProse opens ONE run of assistant prose under a turn (ADR-0037): a
+	// `text` child at the turn's next free seat, with an artifact of its own
+	// for the deltas that follow. Both rows land in one transaction — a block
+	// with nowhere to put its text is not a block anyone can draw.
+	//
+	// THE SEAT IS THE STORE'S, taken as MAX(pos)+1 under the parent inside
+	// that transaction, exactly as AddCause takes it: two writers of one
+	// column, one rule for what free means, so a command a turn ran and a run
+	// of prose it wrote can never claim the same place.
+	//
+	// The BOUNDARY is the caller's, and that is the whole point of the method
+	// existing: the backend decides where one run of prose ends and the next
+	// begins (the first delta after a call opens one, the next call seals
+	// it), so the renderer never has to. ErrNoSuchEntry when nothing carries
+	// turnID — a body seated under a parent that is not there is the one
+	// answer worse than an error.
+	OpenProse(ctx context.Context, turnID string) (ProseBlock, error)
+	// SealProse seals one prose block's body: nothing may be appended to it
+	// again. Called when the boundary arrives — the tool call that ends this
+	// run of prose — and by the run's terminal close for whatever was still
+	// open. Idempotent, and a block that carries no body is a no-op rather
+	// than an error, because the caller's fact is "this block is finished",
+	// which is true either way.
+	SealProse(ctx context.Context, entryID string) error
 	// RunState returns the assistant run state of one execution: the
 	// durable state a reconnecting renderer reads (design §7 — it never
 	// infers liveness from notifications having stopped). Nil when the
@@ -1376,7 +1431,7 @@ type LedgerRepository interface {
 	// FinishAgentRun closes the run AND its turn in ONE transaction — the
 	// terminal state this slice's driver persists: the run's state, end and
 	// termination reason, the turn's entry and the interval it took, and
-	// the answer body (sealed).
+	// every prose block it wrote (sealed).
 	// A run is never reported terminal in the run vocabulary while its
 	// entry still says otherwise — both lifecycles close together, or
 	// neither does.

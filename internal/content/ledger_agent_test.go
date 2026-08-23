@@ -416,11 +416,16 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 		t.Errorf("region = %+v, want rows [0,2)", region)
 	}
 	// NOTHING CONTAINS THE TURN, because there is no second entry it could
-	// be the answer of: a turn is ONE entry whose body is the answer
-	// (nocx-4em1z). The tree is free for what actually needs it — an action
-	// is drawn inside its turn.
-	// The answer's body is an artifact on the turn's own RUN — open, empty,
-	// waiting for deltas. Not a container execution under a second entry.
+	// be the answer of: a turn is ONE entry whose body is its CHILDREN
+	// (nocx-4em1z as amended by ADR-0037). The tree is free for what actually
+	// needs it — an action, a command, a run of prose, each drawn inside its
+	// turn.
+	//
+	// AND THE ASK OPENS NO BODY. It used to open one text/plain artifact on
+	// the run, which made the stored unit the whole answer while the drawn
+	// unit was a run of prose; the run opens a `text` child per piece now, so
+	// a turn that has not streamed a word carries nothing at all. An empty
+	// artifact here would be the claim that something was printed.
 	turn, err := led.Entry(ctx, res.EntryID)
 	if err != nil || turn == nil {
 		t.Fatalf("turn entry: %v (err %v)", turn, err)
@@ -434,11 +439,22 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	if turn.Executions[0].State == nil {
 		t.Errorf("the turn's execution has no run state — it IS the run")
 	}
-	if len(turn.Executions[0].Artifacts) != 1 {
-		t.Fatalf("turn artifacts = %d, want the one answer body", len(turn.Executions[0].Artifacts))
+	if len(turn.Executions[0].Artifacts) != 0 {
+		t.Fatalf("the ask opened %d artifacts, want none — the answer's body is its `text` children (ADR-0037): %+v",
+			len(turn.Executions[0].Artifacts), turn.Executions[0].Artifacts)
 	}
-	if turn.Executions[0].Artifacts[0].ID != res.AnswerArtifactID {
-		t.Errorf("answer artifact id = %q, want %q", turn.Executions[0].Artifacts[0].ID, res.AnswerArtifactID)
+	// The paired success, so "none" is not passing because the read is
+	// broken: a run of prose opened under this turn IS there, with a body.
+	prose, err := led.OpenProse(ctx, res.EntryID)
+	if err != nil {
+		t.Fatalf("OpenProse under the fresh turn: %v", err)
+	}
+	body, err := led.Artifact(ctx, prose.ArtifactID)
+	if err != nil || body == nil {
+		t.Fatalf("the prose block's body: %v (nil=%v)", err, body == nil)
+	}
+	if body.EntryID != prose.EntryID {
+		t.Errorf("the prose body belongs to %q, want the block %q", body.EntryID, prose.EntryID)
 	}
 }
 
@@ -881,9 +897,10 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 		}
 	}
 	// The run still exists (the question is recorded and answerable): the
-	// turn carries a prepared run, and that run carries the artifact the
-	// streamed deltas will land in — the same shape as a referenced ask,
-	// minus the edges.
+	// turn carries a prepared run and no body at all — the same shape as a
+	// referenced ask, minus the edges. The deltas will land in the `text`
+	// children the run opens as it writes them (ADR-0037), so there is
+	// nothing to carry here yet.
 	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("turn entry: %v (err %v)", q, err)
@@ -891,8 +908,13 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 	if len(q.Executions) != 1 || q.Executions[0].State == nil || *q.Executions[0].State != content.RunPrepared {
 		t.Fatalf("turn run = %+v, want one prepared execution", q.Executions)
 	}
-	if len(q.Executions[0].Artifacts) != 1 {
-		t.Fatalf("turn artifacts = %+v, want the one answer body", q.Executions[0].Artifacts)
+	if len(q.Executions[0].Artifacts) != 0 {
+		t.Fatalf("turn artifacts = %+v, want none — the ask opens no body", q.Executions[0].Artifacts)
+	}
+	// The paired success on the same store: the run's first piece of prose
+	// opens under this turn perfectly well.
+	if _, err := led.OpenProse(ctx, res.EntryID); err != nil {
+		t.Fatalf("OpenProse under a general question: %v", err)
 	}
 }
 
@@ -960,7 +982,14 @@ func TestTransitionRun_SkipToApprovalRefused(t *testing.T) {
 //
 // §5's stated reason is untouched by this and is asserted below: the answer is
 // an ARTIFACT with provenance, not a string in a column (ADR-0019 §6).
-func TestAnAskIsOneEntryWhoseBodyIsTheAnswer(t *testing.T) {
+//
+// ADR-0037 amends the OTHER half. "One entry" stays true of the turn's
+// IDENTITY — one row routes the deltas, carries the grant and is what a
+// restore reads back — and what is dropped is "its own body is the answer".
+// The turn's body is its `text` CHILDREN now, one per run of prose, so the
+// ask writes one entry and NO artifact, and the bodies below are the ones the
+// run opened rather than one the ask handed it.
+func TestAnAskIsOneEntryWhoseBodyIsItsProseChildren(t *testing.T) {
 	ctx := context.Background()
 	db, led, _ := newLedgerAt(t)
 	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
@@ -989,30 +1018,54 @@ func TestAnAskIsOneEntryWhoseBodyIsTheAnswer(t *testing.T) {
 	if turn.Intent != "what does this screen mean?" {
 		t.Errorf("the turn's intent = %q, want the question", turn.Intent)
 	}
-	// And the answer's home is an artifact on the turn's run, open for the
-	// deltas that have not arrived yet. One artifact, not two: a turn has no
-	// terminal body, which is exactly what tells a restored block to render
-	// prose rather than a grid.
-	var bodies []content.Artifact
+	// The ask opened NO body. The run opens one per piece of prose; a turn
+	// that has not streamed a word has printed nothing, and an empty artifact
+	// would say otherwise.
+	var runBodies []content.Artifact
 	for _, ex := range turn.Executions {
-		bodies = append(bodies, ex.Artifacts...)
+		runBodies = append(runBodies, ex.Artifacts...)
 	}
-	if len(bodies) != 1 {
-		t.Fatalf("the turn carries %d artifacts, want the one answer body: %+v", len(bodies), bodies)
+	if len(runBodies) != 0 {
+		t.Fatalf("the ask left %d artifacts on the run, want none (ADR-0037): %+v", len(runBodies), runBodies)
 	}
-	if bodies[0].MediaType != content.MediaText {
-		t.Errorf("the answer body's media type = %q, want %q", bodies[0].MediaType, content.MediaText)
+
+	// The paired success, and it is the assertion §5's reason survives in: a
+	// run of prose is an ARTIFACT with provenance, text/plain and never
+	// application/vt, which is exactly what tells a restored block to render
+	// prose rather than a grid.
+	prose, err := led.OpenProse(ctx, ask.EntryID)
+	if err != nil {
+		t.Fatalf("OpenProse: %v", err)
 	}
-	if bodies[0].ID != ask.AnswerArtifactID {
-		t.Errorf("the ask result names artifact %q, the turn carries %q",
-			ask.AnswerArtifactID, bodies[0].ID)
+	body, err := led.Artifact(ctx, prose.ArtifactID)
+	if err != nil || body == nil {
+		t.Fatalf("Artifact(prose) = %+v, %v", body, err)
 	}
+	if body.MediaType != content.MediaText {
+		t.Errorf("the prose body's media type = %q, want %q", body.MediaType, content.MediaText)
+	}
+	if body.ExecutionID != nil {
+		t.Errorf("the prose body names execution %d — prose was printed, not attempted", *body.ExecutionID)
+	}
+	// And the block it belongs to is a `text` child of this turn, seated.
+	kids, err := led.Caused(ctx, ask.EntryID)
+	if err != nil || len(kids) != 1 {
+		t.Fatalf("the turn's children = %+v (%v), want the one run of prose", kids, err)
+	}
+	if kids[0].EntryID != prose.EntryID || kids[0].Kind != content.EntryText || kids[0].Position != 0 {
+		t.Fatalf("the prose child = %+v, want %s as text at seat 0", kids[0], prose.EntryID)
+	}
+	// Nothing anywhere under this turn carries a terminal body: a turn has no
+	// grid and never will.
 	for _, ex := range turn.Executions {
 		for _, a := range ex.Artifacts {
 			if a.MediaType == content.MediaVT {
 				t.Errorf("a turn carries a terminal body (%q) — nothing may write one", a.ID)
 			}
 		}
+	}
+	if body.MediaType == content.MediaVT {
+		t.Errorf("a run of prose carries a terminal body — nothing may write one")
 	}
 }
 

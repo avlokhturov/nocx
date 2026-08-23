@@ -156,16 +156,16 @@ type ledgerGetResponse struct {
 // facts and are null on every other kind, honestly — a command a turn ran is
 // not a tool call.
 type ledgerCausedWire struct {
-	EntryID  string `json:"entryId"`
-	Position int    `json:"position"`
-	// At was where in the turn's ANSWER this happened, in UTF-16 code units
-	// (nocx-9sqii) — the offset the renderer cut the prose at. ADR-0037
-	// deleted it from the store: prose is a `text` child with a seat of its
-	// own now, so the position IS the place and there is nothing left to
-	// cut. The field stays on the wire, sending 0, only because
-	// contracts/ledger.get.schema.json still requires it; taking it off the
-	// contract and out of the renderer is a task of its own.
-	At         int                 `json:"at"`
+	// There is no `at`, and the absence is the point (ADR-0037). It said
+	// where in the turn's ANSWER this cause happened, in UTF-16 code units
+	// (nocx-9sqii), so that the renderer could cut one stored answer back
+	// into the fragments it was drawn as. It existed only because the unit
+	// that was DRAWN and the unit that was STORED were different things;
+	// they are the same thing now — a run of prose is a `text` child with a
+	// seat of its own — so Position IS the place and there is nothing left
+	// to cut.
+	EntryID    string              `json:"entryId"`
+	Position   int                 `json:"position"`
 	Kind       string              `json:"kind"`
 	Intent     string              `json:"intent"`
 	Effect     *string             `json:"effect"`
@@ -178,12 +178,8 @@ type ledgerCausedWire struct {
 // enum on the wire is closed, and an empty string is not in it.
 func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
 	w := ledgerCausedWire{
-		EntryID:  c.EntryID,
-		Position: c.Position,
-		// 0, always: the store no longer holds a prose offset (ADR-0037) and
-		// this field is here to satisfy a contract that has not been changed
-		// yet. See ledgerCausedWire.At.
-		At:         0,
+		EntryID:    c.EntryID,
+		Position:   c.Position,
 		Kind:       string(c.Kind),
 		Intent:     c.Intent,
 		Resource:   c.Resource,

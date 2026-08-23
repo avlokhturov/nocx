@@ -218,6 +218,14 @@ type blockBodyResult struct {
 // artifact's chunks — is the one capability.agentService.FrameText already
 // uses: the recall read never hauls bytes, so the body is a second,
 // deliberate fetch.
+//
+// A TURN takes the second path, and it is not a special case so much as the
+// same read one level down: since ADR-0037 an assistant turn owns no body of
+// its own — its answer is the `text` children the run wrote, one per run of
+// prose — so a block that kept nothing on its own attempts is asked for its
+// prose before it is reported as a block that kept nothing at all. Without
+// this, `blocks.read` of an earlier answer would say the assistant had
+// printed nothing, which is a sentence about a turn that plainly did.
 func (s *WSServer) blockBody(ctx context.Context, ledger content.LedgerRepository, entryID string) (blockBodyResult, error) {
 	entry, err := ledger.Entry(ctx, entryID)
 	if err != nil {
@@ -252,7 +260,55 @@ func (s *WSServer) blockBody(ctx context.Context, ledger content.LedgerRepositor
 			return out, nil
 		}
 	}
-	return blockBodyResult{}, nil
+	return s.proseBody(ctx, ledger, entryID)
+}
+
+// proseBody is a turn's answer: its `text` children, in seat order, joined.
+// ONE answer however many pieces it took, because the pieces are a fact about
+// where the turn's calls fell and not about the prose — a reader asking for
+// the block's body is asking what the assistant said.
+//
+// A block with no prose children answers "nothing kept", which is the same
+// absence the loop above reports and reaches the model the same way. A child
+// whose body retention evicted is skipped rather than substituted, exactly as
+// above: ADR-0019 §7 leaves the entry and takes the body, and a hole is
+// reported as one.
+func (s *WSServer) proseBody(ctx context.Context, ledger content.LedgerRepository, entryID string) (blockBodyResult, error) {
+	kids, err := ledger.Caused(ctx, entryID)
+	if err != nil {
+		return blockBodyResult{}, err
+	}
+	var sb strings.Builder
+	kept := false
+	for _, k := range kids {
+		if k.Kind != content.EntryText {
+			continue
+		}
+		child, childErr := ledger.Entry(ctx, k.EntryID)
+		if childErr != nil {
+			return blockBodyResult{}, childErr
+		}
+		if child == nil {
+			continue
+		}
+		for _, a := range child.Artifacts {
+			art, artErr := ledger.Artifact(ctx, a.ID)
+			if artErr != nil {
+				return blockBodyResult{}, artErr
+			}
+			if art == nil {
+				continue
+			}
+			for _, c := range art.Chunks {
+				sb.Write(c)
+			}
+			kept = true
+		}
+	}
+	if !kept {
+		return blockBodyResult{}, nil
+	}
+	return blockBodyResult{text: sb.String(), kept: true}, nil
 }
 
 // splitBlockLines is the ONE derivation of a block's lines. The captured

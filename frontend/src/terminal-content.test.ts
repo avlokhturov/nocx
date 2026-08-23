@@ -5947,116 +5947,20 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
   // reaches restoredBody, arrangedByCause and restoredBlock, and the DOM it
   // produces is what a person sees. A unit that never runs here is a feature
   // that does not exist (AGENTS.md, "is the code reachable").
-  it('draws a restored turn with the calls it made and the command it ran beside it', async () => {
-    // The three rows in the order they were COMMITTED: the turn opens, a
-    // person types something in the same pane while the assistant works,
-    // and the assistant's own command lands last. ledger.query answers
-    // newest-first and the pane reverses it, so plain ledger order draws
-    // turn, typed, command — with the command two rows from the turn that
-    // ran it. That is the arrangement the relation exists to correct.
-    const turn = entry({ id: 'turn-1', seq: 1, kind: 'agent', intent: 'what went wrong?' })
-    const typed = entry({ id: 'typed-1', seq: 2, intent: 'git status' })
-    const ranByAgent = entry({ id: 'cmd-1', seq: 3, kind: 'agent', intent: 'cat -n a.txt' })
-    // The store's own answer per entry: the turn caused a tool call and the
-    // command, in that causal order; the two commands caused nothing.
-    const caused: Record<string, unknown[]> = {
-      'turn-1': [
-        {
-          entryId: 'act-1',
-          position: 0,
-          // Six characters of the answer had been written when the
-          // assistant reached for the shell (nocx-9sqii) — so the turn is
-          // drawn as two fragments with the command's block between them.
-          at: 6,
-          kind: 'action',
-          intent: 'run',
-          effect: 'mutate-destructive',
-          resource: null,
-          opensBlock: true,
-        },
-        {
-          entryId: 'cmd-1',
-          position: 1,
-          at: 6,
-          kind: 'shell',
-          intent: 'cat -n a.txt',
-          effect: null,
-          resource: null,
-          opensBlock: false,
-        },
-      ],
-    }
-    const client = makeClient()
-    client.call.mockImplementation((method: string, params?: unknown) => {
-      if (method === 'ledger.query') {
-        const p = params as { paneId?: string }
-        return Promise.resolve({
-          entries: p.paneId ? [ranByAgent, typed, turn] : [],
-          scope: 'everywhere',
-          exhausted: true,
-          hasRows: true,
-          coverage: null,
-        })
-      }
-      if (method === 'ledger.get') {
-        const id = (params as { id: string }).id
-        return Promise.resolve({
-          entry: {},
-          edges: [],
-          // A turn's body is a text/plain original and never a terminal
-          // one; a command's is the SGR grid (nocx-4em1z).
-          artifacts: [
-            { id: `art-${id}`, mediaType: id === 'turn-1' ? 'text/plain' : 'application/vt' },
-          ],
-          caused: caused[id] ?? [],
-        })
-      }
-      if (method === 'ledger.artifact') {
-        return Promise.resolve({
-          id: (params as { id: string }).id,
-          mediaType: 'text/plain',
-          body: 'line 3 is wrong',
-          truncated: null,
-          byteLen: 15,
-        })
-      }
-      return Promise.reject(new Error('no store wired (fake)'))
-    })
-
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
-    try {
-      content.setVisible(true)
-      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
-        .scrollbackInner
-      await vi.waitFor(() => {
-        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(4)
-      })
-      const restored = [...inner.querySelectorAll('[data-restored="true"]')] as HTMLElement[]
-      // Ledger order alone would leave the command a person typed BETWEEN
-      // the turn and the command the turn ran. The relation puts the caused
-      // command back INSIDE its turn — the answer stops where the command
-      // was run and continues below it — and leaves the typed one where it
-      // was: nothing is reordered that the relation does not name.
-      expect(restored.map((el) => el.querySelector('.cmd-header-text')?.textContent)).toEqual([
-        'what went wrong?',
-        'cat -n a.txt',
-        'what went wrong?',
-        'git status',
-      ])
-      const fragments = restored.filter((el) => el.dataset.turnFragment !== undefined)
-      expect(fragments.map((el) => el.dataset.turnFragment)).toEqual(['0', '1'])
-      expect(fragments.every((el) => el.dataset.blockKind === 'ask')).toBe(true)
-      // The prose is cut where the call happened: what the model had written
-      // stays above the block, what it wrote from the output is below.
-      expect(fragments[0].querySelector('[data-answer-body]')?.textContent).toBe('line 3')
-      expect(fragments[1].querySelector('[data-answer-body]')?.textContent).toBe(' is wrong')
-      // And the `run` call left NO line anywhere: the block IS the account
-      // of that call (nocx-9sqii, criterion 2).
-      expect(inner.querySelector('.ui-tool-call')).toBeNull()
-    } finally {
-      teardown()
-    }
-  })
+  // RETIRED WITH THE ARRANGEMENT IT ASSERTED (ADR-0037, nocx-dc2fr.2).
+  // 'draws a restored turn with the calls it made and the command it ran
+  // beside it' stood here and read the turn as FRAGMENTS: two `ask` blocks
+  // carrying data-turn-fragment 0 and 1, with the prose cut at the offset the
+  // call was anchored at. There is no offset and no cut now — a turn is one
+  // block carrying its children in stored order — so the test asserted a
+  // mechanism rather than a property.
+  //
+  // Its PROPERTY survives and is commissioned as nocx-dc2fr.4: the relation
+  // puts a command the turn RAN back inside that turn, and leaves a command
+  // the person TYPED where the ledger had it — nothing is reordered that the
+  // relation does not name. Read the retired test in git history before
+  // writing the replacement; it is the shape of the assertion, not the
+  // arrangement, that is worth keeping.
 
   it('falls back to plain ledger order when the relation is not there', async () => {
     // Criterion 4 in the product: no relation, an unreadable one and a

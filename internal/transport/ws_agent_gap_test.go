@@ -39,6 +39,18 @@ type fakeAgentService struct {
 	transitions []content.RunState
 	appended    []string
 	finish      *content.FinishAgentRun
+	// opened and sealed are the prose-block boundary the stream draws
+	// (ADR-0037): which `text` children it asked the store to open, and which
+	// it sealed. Recorded in order, because the order IS the assertion — a
+	// block opens on the first delta after a call and seals when the next
+	// call arrives.
+	opened []content.ProseBlock
+	sealed []string
+	// appendedArtifacts is the artifact each chunk in `appended` landed in,
+	// index for index.
+	appendedArtifacts []string
+	// prose numbers the blocks this fake hands out, so a test can name them.
+	prose int
 }
 
 func (f *fakeAgentService) CaptureFrame(context.Context, content.CaptureFrame) (content.CaptureFrameResult, error) {
@@ -63,12 +75,36 @@ func (f *fakeAgentService) FinishAgentRun(_ context.Context, _ int64, in content
 	return nil
 }
 
-func (f *fakeAgentService) AppendRunDelta(_ context.Context, _ string, _ int, body []byte) error {
+func (f *fakeAgentService) OpenProse(_ context.Context, turnID string) (content.ProseBlock, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prose++
+	b := content.ProseBlock{
+		EntryID:    fmt.Sprintf("%s/text-%d", turnID, f.prose),
+		ArtifactID: fmt.Sprintf("%s/artifact-%d", turnID, f.prose),
+	}
+	f.opened = append(f.opened, b)
+	return b, nil
+}
+
+func (f *fakeAgentService) SealProse(_ context.Context, entryID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sealed = append(f.sealed, entryID)
+	return nil
+}
+
+// appendedTo records the ARTIFACT each chunk landed in beside the chunk
+// itself: which block a delta was persisted into is the fact this bead moved,
+// and a recorder that dropped the id could not report it.
+func (f *fakeAgentService) AppendRunDelta(_ context.Context, artifactID string, _ int, body []byte) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.appended = append(f.appended, string(body))
+	f.appendedArtifacts = append(f.appendedArtifacts, artifactID)
 	return nil
 }
+
 func (f *fakeAgentService) FrameText(context.Context, string) (string, error) { return "", nil }
 
 func (f *fakeAgentService) appendedText() string {
@@ -168,10 +204,9 @@ func newGapHandlers(svc *fakeAgentService, client assistant.Client, approvals *a
 
 func gapRunContext() askRunContext {
 	return askRunContext{
-		runID:      7,
-		entryID:    "turn-1",
-		artifactID: "artifact-1",
-		question:   "q",
+		runID:    7,
+		entryID:  "turn-1",
+		question: "q",
 	}
 }
 
@@ -834,7 +869,8 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 		}
 	}
 
-	// And each run's durable artifact holds exactly its own text.
+	// And each run's own prose holds exactly its own text: two runs, two
+	// turns, two sets of `text` children, and nothing crossed over.
 	led := h.db.Ledger()
 	for run, want := range map[int64]string{resA.RunID: "aaa1aaa2aaa3", resB.RunID: "bbb1bbb2bbb3"} {
 		var entryID string
@@ -847,19 +883,12 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 		if err != nil || ans == nil {
 			t.Fatalf("run %d answer entry: %v (err %v)", run, ans, err)
 		}
-		if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
-			t.Fatalf("run %d executions/artifacts = %d/%d, want 1/1", run, len(ans.Executions), len(ans.Executions[0].Artifacts))
+		if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 0 {
+			t.Fatalf("run %d executions/artifacts = %d/%d, want 1/0 — the answer is its prose children",
+				run, len(ans.Executions), len(ans.Executions[0].Artifacts))
 		}
-		art, err := led.Artifact(context.Background(), ans.Executions[0].Artifacts[0].ID)
-		if err != nil {
-			t.Fatalf("run %d artifact: %v", run, err)
-		}
-		var body string
-		for _, chunk := range art.Chunks {
-			body += string(chunk)
-		}
-		if body != want {
-			t.Errorf("run %d artifact = %q, want %q", run, body, want)
+		if body := proseBodyOf(t, led, entryID); body != want {
+			t.Errorf("run %d prose = %q, want %q", run, body, want)
 		}
 	}
 }

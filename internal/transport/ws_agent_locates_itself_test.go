@@ -262,31 +262,24 @@ func TestAssistant_LooksAtThePaneTheQuestionWasAskedIn(t *testing.T) {
 			answer, marker, reqs, learned, bodies)
 	}
 
-	// The answer reaches the block: the durable artifact on the answer
-	// entry, sealed, carrying the same sentence the person watched stream.
+	// The answer reaches the block: the turn's prose, sealed, carrying the
+	// same sentence the person watched stream. Its home is a `text` child
+	// rather than a body on the turn since ADR-0037, and the claim being made
+	// is unchanged — what streamed is what was kept.
 	led := h.db.Ledger()
 	ctx := context.Background()
 	ans, entryErr := led.Entry(ctx, res.EntryID)
 	if entryErr != nil || ans == nil {
 		t.Fatalf("answer entry: %v (err %v)", ans, entryErr)
 	}
-	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer entry executions/artifacts = %d/%d, want 1/1", len(ans.Executions), len(ans.Executions[0].Artifacts))
+	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 0 {
+		t.Fatalf("answer entry executions/artifacts = %d/%d, want 1/0 — the answer is its prose children",
+			len(ans.Executions), len(ans.Executions[0].Artifacts))
 	}
-	art, artErr := led.Artifact(ctx, ans.Executions[0].Artifacts[0].ID)
-	if artErr != nil {
-		t.Fatalf("Artifact: %v", artErr)
+	if body := proseBodyOf(t, led, res.EntryID); !strings.Contains(body, marker) {
+		t.Fatalf("the stored answer = %q, want the answer the person watched stream", body)
 	}
-	var body strings.Builder
-	for _, chunk := range art.Chunks {
-		body.Write(chunk)
-	}
-	if !strings.Contains(body.String(), marker) {
-		t.Fatalf("the stored answer block = %q, want the answer the person watched stream", body.String())
-	}
-	if art.State != content.ArtifactSealed {
-		t.Errorf("answer artifact state = %q, want sealed", art.State)
-	}
+	assertProseSealed(t, led, res.EntryID)
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
 		t.Errorf("answer entry phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
 	}

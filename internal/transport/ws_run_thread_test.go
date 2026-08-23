@@ -482,29 +482,19 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	if len(ans.Executions) != 1 {
 		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
-	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("turn artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
+	// The turn opens NO body of its own (ADR-0037): the answer is its `text`
+	// children, one per run of prose, and the close sealed every one of them.
+	if len(ans.Executions[0].Artifacts) != 0 {
+		t.Fatalf("turn artifacts = %d, want none — the answer is its prose children",
+			len(ans.Executions[0].Artifacts))
 	}
-	a := ans.Executions[0].Artifacts[0]
-	if a.State != content.ArtifactSealed {
-		t.Errorf("answer artifact state = %q, want sealed — the close sealed the answer with the run", a.State)
-	}
-	if a.ByteLen == 0 {
-		t.Error("answer artifact byte_len = 0, want the streamed answer")
-	}
-	art, err := led.Artifact(ctx, a.ID)
-	if err != nil {
-		t.Fatalf("Artifact: %v", err)
-	}
-	body := ""
-	for _, c := range art.Chunks {
-		body += string(c)
+	assertProseSealed(t, led, res.EntryID)
+	body := proseBodyOf(t, led, res.EntryID)
+	if body == "" {
+		t.Error("the turn's prose is empty, want the streamed answer")
 	}
 	if body != answer {
-		t.Errorf("answer artifact body = %q, want %q — the durable answer is exactly what streamed", body, answer)
-	}
-	if art.ByteLen != int64(len(body)) {
-		t.Errorf("artifact byte_len = %d, want %d", art.ByteLen, len(body))
+		t.Errorf("answer body = %q, want %q — the durable answer is exactly what streamed", body, answer)
 	}
 	// The DURABLE end of nocx-bshm2: the stored answer is the model's prose
 	// and NOT the tool's return value. This assertion used to read the other
@@ -643,23 +633,13 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 	if len(ans.Executions) != 1 {
 		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
-	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("turn artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
+	if len(ans.Executions[0].Artifacts) != 0 {
+		t.Fatalf("turn artifacts = %d, want none — the answer is its prose children (ADR-0037)",
+			len(ans.Executions[0].Artifacts))
 	}
-	a := ans.Executions[0].Artifacts[0]
-	if a.State != content.ArtifactSealed {
-		t.Errorf("answer artifact state = %q, want sealed", a.State)
-	}
-	art, err := led.Artifact(ctx, a.ID)
-	if err != nil {
-		t.Fatalf("Artifact: %v", err)
-	}
-	body := ""
-	for _, c := range art.Chunks {
-		body += string(c)
-	}
-	if body != answer {
-		t.Errorf("answer artifact body = %q, want %q — the durable answer is exactly what streamed", body, answer)
+	assertProseSealed(t, led, res.EntryID)
+	if body := proseBodyOf(t, led, res.EntryID); body != answer {
+		t.Errorf("answer body = %q, want %q — the durable answer is exactly what streamed", body, answer)
 	}
 
 	// ── the order they happened in ──────────────────────────────────────
@@ -798,15 +778,15 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 	if len(ans.Executions) != 1 {
 		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
-	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("turn artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
+	if len(ans.Executions[0].Artifacts) != 0 {
+		t.Fatalf("turn artifacts = %d, want none — the answer is its prose children (ADR-0037)",
+			len(ans.Executions[0].Artifacts))
 	}
-	a := ans.Executions[0].Artifacts[0]
-	if a.State != content.ArtifactSealed {
-		t.Errorf("answer artifact state = %q, want sealed", a.State)
-	}
-	if a.ByteLen != 0 {
-		t.Errorf("answer artifact byte_len = %d, want 0 — nothing streamed", a.ByteLen)
+	// Nothing streamed, so NO prose block was opened at all — an empty one
+	// would be the claim that the assistant printed a blank paragraph before
+	// the refusal, which is a different thing from having said nothing.
+	if prose := proseUnder(t, led, res.EntryID); len(prose) != 0 {
+		t.Errorf("a refused exchange left %+v, want no prose at all", prose)
 	}
 
 	// The refusal precedes every submission: the ledger holds the TURN and
@@ -908,17 +888,27 @@ func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Caused: %v", err)
 	}
-	// Two things, in the order the turn caused them: the tool call's own
+	// Three things, in the order the turn did them: the tool call's own
 	// action entry — the line that says WHEN the assistant reached for run —
-	// and then the command that really opened a block.
-	if len(caused) != 2 {
-		t.Fatalf("the turn caused %+v, want the run call and the command it opened", caused)
+	// then the command that really opened a block, and then the run of prose
+	// the model wrote from its output (ADR-0037). The prose is a CHILD like
+	// the other two, at a seat of its own, which is the whole of what the
+	// anchor used to be needed for.
+	if got := childKinds(t, led, res.EntryID); len(got) != 3 ||
+		got[0] != content.EntryAction || got[1] != content.EntryShell || got[2] != content.EntryText {
+		t.Fatalf("the turn's children read %v, want the call, the command it opened, and the answer written after it", got)
 	}
 	if caused[0].Kind != content.EntryAction || caused[0].Intent != "run" || caused[0].Position != 0 {
 		t.Errorf("first cause = %+v, want the run action at position 0", caused[0])
 	}
 	if caused[1].EntryID != commandEntry || caused[1].Kind != content.EntryShell || caused[1].Position != 1 {
 		t.Errorf("second cause = %+v, want the shell entry at position 1", caused[1])
+	}
+	// The prose is seated AFTER the command it was written from, and nothing
+	// was opened before the call: the model reached for the tool first, so
+	// seat 0 is the call and not an empty paragraph.
+	if caused[2].Kind != content.EntryText || caused[2].Position != 2 || caused[2].Intent != "" {
+		t.Errorf("third cause = %+v, want the run of prose at position 2, naming no intent", caused[2])
 	}
 	// The command is a command, not a tool call: it has no effect class and
 	// names no resource, and the restore draws it as the block it is.
@@ -944,8 +934,21 @@ func TestRun_AResolutionNamingNoRowJoinsNothingAndDoesNotFailTheRun(t *testing.T
 		t.Fatalf("Caused: %v", err)
 	}
 	// The call the turn made is joined; the command that names no row is
-	// not, and nothing was invented in its place.
-	if len(caused) != 1 || caused[0].Intent != "run" {
-		t.Fatalf("the turn caused %+v, want only the call it made", caused)
+	// not, and nothing was invented in its place. Beside it sits the run of
+	// prose the model wrote after the call — a child of the turn like any
+	// other since ADR-0037, and the reason this list is two long rather than
+	// one.
+	if len(caused) != 2 || caused[0].Intent != "run" || caused[0].Kind != content.EntryAction {
+		t.Fatalf("the turn caused %+v, want the call it made and the prose it wrote after it", caused)
+	}
+	if caused[1].Kind != content.EntryText || caused[1].Position != 1 {
+		t.Fatalf("the second child = %+v, want the run of prose at seat 1", caused[1])
+	}
+	// And nothing shell-shaped is there: the resolution named no row, so no
+	// command was seated and none was invented.
+	for _, c := range caused {
+		if c.Kind == content.EntryShell {
+			t.Fatalf("a command was seated for a resolution that named no row: %+v", c)
+		}
 	}
 }

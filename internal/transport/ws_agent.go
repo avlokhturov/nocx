@@ -190,9 +190,21 @@ type agentAskResponse struct {
 // too: since nocx-igu4y the resume continues the answer rather than
 // re-rolling it, so its deltas are numbered after the ones the question
 // interrupted, never over them.
+//
+// BlockID is the piece this chunk appends to (ADR-0037): the `text` child of
+// the turn that the backend opened for this run of prose. EntryID still says
+// WHICH ANSWER — the routing key, unchanged — and BlockID says WHERE IN IT,
+// which is a place in the tree rather than an offset into a string.
+//
+// It is on the wire because the boundary between two runs of prose is the
+// BACKEND's and must reach the renderer as a fact. That is the whole lesson of
+// the anchor it replaces: while the renderer had to work out where one piece
+// ended, the live path and the restore each worked it out separately and could
+// drift. A block id cannot be re-derived and cannot drift.
 type agentRunDelta struct {
 	RunID   int64  `json:"runId"`
 	EntryID string `json:"entryId"`
+	BlockID string `json:"blockId"`
 	Seq     int    `json:"seq"`
 	Text    string `json:"text"`
 }
@@ -677,7 +689,6 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		headers:    headers,
 		runID:      askRes.RunID,
 		entryID:    askRes.EntryID,
-		artifactID: askRes.AnswerArtifactID,
 		question:   in.Question,
 		references: in.References,
 		endpoint:   endpoint,
@@ -778,11 +789,23 @@ type askRunContext struct {
 	// handleAsk): the stream is handed what it needs and never reaches for
 	// the vault itself, which is what keeps a sealed vault on the request
 	// path where the unlock seam lives.
-	secret     credential.Secret
-	headers    []assistant.Header
-	runID      int64
-	entryID    string
-	artifactID string
+	secret  credential.Secret
+	headers []assistant.Header
+	runID   int64
+	entryID string
+	// prose is the run of prose currently OPEN — the `text` child the next
+	// delta appends to, and the artifact its text lands in (ADR-0037). The
+	// zero value is "no block is open", which is the state a run starts in
+	// and the state a tool call leaves behind: a call that arrives before the
+	// model has said anything must open no empty block.
+	//
+	// It lives on the run context rather than only in runAskStream's frame
+	// because it has to CROSS A SUSPENSION, for the same reason nextSeq does:
+	// the resume continues the answer instead of re-rolling it (nocx-igu4y),
+	// so the prose it writes belongs to the block the question interrupted,
+	// not to a second one opened beside it. Written by suspendForApproval into
+	// the pendingRuns copy; never wire-facing as a struct.
+	prose      content.ProseBlock
 	question   string
 	references []content.AgentReference
 	endpoint   profile.Endpoint
@@ -924,6 +947,12 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// The deltas continue where the last drive of this run stopped: a
 	// resumed run is one answer, numbered once (see askRunContext.nextSeq).
 	seq := rc.nextSeq
+	// And so does the PIECE they are landing in. A resume writes the
+	// continuation of the prose the question interrupted, not a second run of
+	// prose beside it, so the open block crosses the suspension with the
+	// numbering (askRunContext.prose). Empty on a fresh run and after every
+	// tool call: the first delta then opens the next block.
+	prose := rc.prose
 	err := h.client.Ask(ctx, assistant.AskParams{
 		Key:           rc.secret,
 		BaseURL:       rc.endpoint.BaseURL,
@@ -951,14 +980,41 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// delivers what this callback emits in the order it emits it.
 		switch ev.Kind {
 		case assistant.AskToolCall:
-			// NOT PERSISTED, and that is not an omission: the durable
-			// account of a tool call is the LEDGER's action entry, which
-			// the middleware wrote before the call ran and whose id rides
-			// this notification. Appending it to the answer artifact would
-			// be a second record of one fact, disagreeing with the first
-			// the moment either changed.
+			// NOT PERSISTED AS PROSE, and that is not an omission: the
+			// durable account of a tool call is the LEDGER's action entry,
+			// which the middleware wrote before the call ran and whose id
+			// rides this notification. Writing it into the prose block would
+			// be a second record of one fact, disagreeing with the first the
+			// moment either changed.
 			if ev.Call == nil {
 				return nil
+			}
+			// THE BOUNDARY, and it is the backend's (ADR-0037). The prose
+			// that was streaming ends HERE, where the call arrived, because
+			// a sentence written before a command explains why the command
+			// was run and a sentence written after it is a conclusion drawn
+			// from its output. Sealing the block is how that boundary
+			// becomes a durable fact instead of an offset the renderer has
+			// to cut at — and the next delta opens the next block, so the
+			// live path and the restore read one list rather than two
+			// projections of one string.
+			//
+			// A call that arrives before any prose seals NOTHING and opens
+			// nothing: the zero block is "the model has not spoken yet", and
+			// an empty `text` child would draw as a paragraph that was never
+			// written.
+			//
+			// A seal that fails ABORTS the stream, exactly as a delta that
+			// cannot be persisted does: the alternative is a run that goes on
+			// appending to a block the flow has already moved past.
+			if prose.EntryID != "" {
+				sealed := prose
+				prose = content.ProseBlock{}
+				if sealErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+					return svc.SealProse(ctx, sealed.EntryID)
+				}); sealErr != nil {
+					return sealErr
+				}
 			}
 			if err := r.TryNotify("agent.runToolCall", mustMarshal(agentRunToolCall{
 				RunID:         rc.runID,
@@ -981,11 +1037,12 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			return nil
 		case assistant.AskReasoning:
 			// Also not persisted, and for the stronger reason: the durable
-			// answer is the ANSWER, and appending the thinking to the
-			// answer artifact would put it back inside the answer by
-			// another route — the defect this bead removed from the live
-			// path (nocx-s92so). A reasoning chunk the wire refuses is a
-			// live-view gap like any other.
+			// answer is the ANSWER, and appending the thinking to the open
+			// prose block would put it back inside the answer by another
+			// route — the defect this bead removed from the live path
+			// (nocx-s92so). It does not open a block either: a run whose
+			// only output was thinking printed nothing. A reasoning chunk the
+			// wire refuses is a live-view gap like any other.
 			if err := r.TryNotify("agent.runReasoning", mustMarshal(agentRunReasoning{
 				RunID:   rc.runID,
 				EntryID: rc.entryID,
@@ -996,6 +1053,27 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			return nil
 		}
 		text := ev.Text
+		// The other half of the boundary: the FIRST delta after a call opens
+		// the next run of prose — a `text` child of the turn at the next free
+		// seat, with a body of its own (ADR-0037). Opened lazily and never up
+		// front, which is what makes "a call before any prose opens no empty
+		// block" true by construction rather than by a later cleanup.
+		//
+		// A failure to open aborts the stream for the same reason a failed
+		// persist does: there is nowhere to put the text, and a delta the
+		// person sees but the ledger never held is the live view lying about
+		// what was recorded.
+		if prose.EntryID == "" {
+			if openErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+				opened, e := svc.OpenProse(ctx, rc.entryID)
+				if e == nil {
+					prose = opened
+				}
+				return e
+			}); openErr != nil {
+				return openErr
+			}
+		}
 		// Persist BEFORE emitting: a delta the renderer lost is still in
 		// the ledger, and a persist failure aborts the stream.
 		//
@@ -1005,8 +1083,15 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// retried delta a no-op, and the notification's seq is what the
 		// renderer routes on. Renumbering either to match the other would
 		// change a contract to save an addition.
+		//
+		// seq stays RUN-scoped now that the artifact is per block, so one
+		// block's chunk numbers ascend without being contiguous — 1,2,3 then
+		// 7,8 after a call. That is exactly what the key needs: the read
+		// orders by seq and the retry lands on the number it landed on
+		// before. Renumbering per artifact would give two blocks of one run
+		// the same numbers and buy nothing.
 		if persistErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-			return svc.AppendRunDelta(ctx, rc.artifactID, seq+1, []byte(text))
+			return svc.AppendRunDelta(ctx, prose.ArtifactID, seq+1, []byte(text))
 		}); persistErr != nil {
 			return persistErr
 		}
@@ -1024,6 +1109,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		if err := r.TryNotify("agent.runDelta", mustMarshal(agentRunDelta{
 			RunID:   rc.runID,
 			EntryID: rc.entryID,
+			BlockID: prose.EntryID,
 			Seq:     seq,
 			Text:    text,
 		})); err != nil {
@@ -1041,11 +1127,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		var apErr *assistant.ApprovalRequestedError
 		var egErr *assistant.EgressRequestedError
 		if errors.As(err, &apErr) && apErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, dropped, seq, apErr.Request, nil)
+			h.suspendForApproval(ctx, rc, r, dropped, seq, prose, apErr.Request, nil)
 			return
 		}
 		if errors.As(err, &egErr) && egErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, dropped, seq, nil, egErr.Request)
+			h.suspendForApproval(ctx, rc, r, dropped, seq, prose, nil, egErr.Request)
 			return
 		}
 		reason, sentence := classifyAskFailure(err)
@@ -1078,7 +1164,15 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // the same reason and is the stronger case: since nocx-igu4y the resume
 // CONTINUES the answer instead of re-rolling it, so its deltas must be
 // numbered after these, not over them.
-func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, dropped, nextSeq int, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
+//
+// prose crosses with it, and for the identical reason one step further in
+// (ADR-0037): a resume that continues the answer continues the PIECE of it
+// that was open, so the block the interrupted stream was writing into is
+// handed to the next drive rather than left behind for a second block to be
+// opened beside it. A run suspended before it said anything carries the zero
+// block, which is "nothing is open" — the resume's first delta then opens the
+// first one, exactly as a fresh run would.
+func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, dropped, nextSeq int, prose content.ProseBlock, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
 	}); err != nil {
@@ -1108,6 +1202,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if stored, ok := h.pendingRuns[rc.runID]; ok {
 		stored.droppedBefore = dropped
 		stored.nextSeq = nextSeq
+		stored.prose = prose
 		stored.pendingReason = n.Reason
 		h.pendingRuns[rc.runID] = stored
 	}

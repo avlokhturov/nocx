@@ -251,7 +251,7 @@ export interface Gap {
   reason: string
 }
 /**
- * One entry this turn caused, at its position inside the turn. A command the turn ran is a block the page already carries and is placed by this; a tool call is an action entry that has no block at all and is drawn as a line in the turn's flow.
+ * One CHILD of this entry, at its seat among its siblings (ADR-0037). There is deliberately no `at`: the offset said how much of one stored answer had been written when the cause happened, and it existed only while the unit that was DRAWN (a run of prose) and the unit that was STORED (the whole answer) were different things. They are the same thing now — prose is a `text` child with a seat of its own — so `position` IS the place and there is nothing left to cut. A command the turn ran is a block the page already carries and is placed by this; a tool call is an action entry that has no block at all and is drawn as a line in the turn's flow; a run of prose is a `text` child whose body is fetched like any other.
  */
 export interface Caused {
   /**
@@ -263,19 +263,15 @@ export interface Caused {
    */
   position: number
   /**
-   * Where in the turn's ANSWER this happened: how much of the answer text had been written when the cause was recorded, counted in UTF-16 code units — the unit a JavaScript string's own indices count in, so the renderer's cut is exact on the Cyrillic and CJK text a byte offset would split mid-character (nocx-9sqii). `position` orders the causes; this PLACES them, which is what a turn drawn as fragments around the blocks it caused needs and what nocx-h1l4o deliberately deferred. 0 is the ordinary turn that reaches for its tools before it has said anything, and it is also what a cause recorded before this field existed reads as: above the prose, which is where such a call belongs.
-   */
-  at: number
-  /**
    * Whether this cause's work became a TOP-LEVEL BLOCK of its own — the tool declaration's fact (internal/agenttools Declaration.OpensBlock), stored on the ACTION row with its attempt and read back here. True only for an action entry whose tool opens a block (`run`): the command's block, its output and its exit status are the account of that call, so the turn draws no line beside it, and a line would restate what the block already shows. False for every other action, whose line is the only trace it left, and false for a shell entry — a command a turn ran IS a block and does not also say it opened one. Read rather than matched on `intent`, so a reader is never a second copy of the tool table.
    */
   opensBlock: boolean
   /**
-   * What kind of entry it is. Closed set, mirroring the store's CHECK constraint.
+   * What kind of entry it is. Closed set, mirroring the store's CHECK constraint — `text` included, because a run of assistant prose is a child like any other since ADR-0037 and the read returns it.
    */
-  kind: 'shell' | 'agent' | 'action'
+  kind: 'shell' | 'agent' | 'action' | 'text'
   /**
-   * The caused entry's own intent: the command line for a shell entry, the declared tool name for an action.
+   * The child's own intent: the command line for a shell entry, the declared tool name for an action, and EMPTY for a `text` child — prose has no intent, which is a clause of its CHECK rather than a convention a reader has to know.
    */
   intent: string
   /**

@@ -316,7 +316,50 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 		return nil, err
 	}
 	e.Executions = execs
+	own, err := s.ownArtifactsFor(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	e.Artifacts = own
 	return e, nil
+}
+
+// ownArtifactsFor reads the bodies this ENTRY owns and no execution produced
+// (ADR-0037). The `execution_id IS NULL` is what keeps it disjoint from
+// artifactsFor: a command's output belongs to the attempt that produced it
+// and is listed there, so no body appears in both lists.
+func (s *sqliteContent) ownArtifactsFor(ctx context.Context, entryID string) ([]Artifact, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM artifacts WHERE entry_id = ? AND execution_id IS NULL ORDER BY id`, entryID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The row loop is CLOSED before the per-id reads: artifactByID goes back
+	// to the pool, and holding an open cursor across it is how a single-
+	// connection store deadlocks against itself.
+	out := make([]Artifact, 0, len(ids))
+	for _, id := range ids {
+		a, err := s.artifactByID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if a != nil {
+			out = append(out, *a)
+		}
+	}
+	return out, nil
 }
 
 // ── the recall read (nocx-rtg0.20) ───────────────────────────────────────

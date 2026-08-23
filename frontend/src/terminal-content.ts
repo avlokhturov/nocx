@@ -3292,22 +3292,39 @@ export class TerminalContent extends BasePaneContent {
       // A TURN is drawn as FRAGMENTS around the blocks it caused
       // (nocx-9sqii) — the same arrangement the live path draws, from the
       // same projection, so the two views of one turn agree. The causal
-      // facts are the ledger's, verbatim: the order, the anchor in the
-      // prose, the effect, the resource, and whether the call opened a block
-      // of its own.
+      // facts are the ledger's, verbatim: the order, the effect, the
+      // resource, and whether the call opened a block of its own.
+      //
+      // THE ANCHOR IS GONE AND ITS REPLACEMENT IS NOT DRAWN YET (ADR-0037).
+      // `at` left the wire with the store that stopped recording it, so
+      // every cause is placed at 0 here and the blocks a turn caused sit at
+      // the head of its prose. That is an honest intermediate state rather
+      // than a guess — there is no offset to lose — and the arrangement that
+      // replaces it, drawing the turn's children in seat order, is the task
+      // that owns this surface next.
+      //
+      // A `text` child is dropped rather than drawn for the same reason: the
+      // flow has no piece for a run of prose yet, so it would become a
+      // 'block' piece naming an entry this page does not hold and dangle.
       els.push(
         ...restoredTurn(
           {
             ...factsOf(b),
-            causes: (restored?.caused ?? []).map((c) => ({
-              entryId: c.entryId,
-              at: c.at,
-              kind: c.kind,
-              intent: c.intent,
-              effect: c.effect,
-              resource: c.resource,
-              opensBlock: c.opensBlock,
-            })),
+            causes: (restored?.caused ?? []).flatMap((c) =>
+              c.kind === 'text'
+                ? []
+                : [
+                    {
+                      entryId: c.entryId,
+                      at: 0,
+                      kind: c.kind,
+                      intent: c.intent,
+                      effect: c.effect,
+                      resource: c.resource,
+                      opensBlock: c.opensBlock,
+                    },
+                  ],
+            ),
           },
           snapshot,
           nextId,

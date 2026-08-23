@@ -273,8 +273,8 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 		t.Errorf("completed runState carries an error: %q", st.Error)
 	}
 
-	// The ledger is the record: the answer entry's artifact holds the
-	// streamed text, sealed, and the run is terminal.
+	// The ledger is the record: the turn's prose blocks hold the streamed
+	// text, sealed, and the run is terminal.
 	led := h.db.Ledger()
 	ctx := context.Background()
 	ans, err := led.Entry(ctx, res.EntryID)
@@ -290,22 +290,22 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	if ans.ParentID != nil {
 		t.Errorf("the turn is drawn inside %q — the answer is its own body", *ans.ParentID)
 	}
-	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer entry executions/artifacts = %d/%d, want 1/1", len(ans.Executions), len(ans.Executions[0].Artifacts))
+	// The turn opens no body of its own: the answer is its `text` children,
+	// and with no tool call in this run there is exactly one of them
+	// (ADR-0037).
+	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 0 {
+		t.Fatalf("answer entry executions/artifacts = %d/%d, want 1/0",
+			len(ans.Executions), len(ans.Executions[0].Artifacts))
 	}
-	art, err := led.Artifact(ctx, ans.Executions[0].Artifacts[0].ID)
-	if err != nil {
-		t.Fatalf("Artifact: %v", err)
+	prose := proseUnder(t, led, res.EntryID)
+	if len(prose) != 1 {
+		t.Fatalf("the run left %+v, want the one run of prose it wrote", prose)
 	}
-	body := ""
-	for _, chunk := range art.Chunks {
-		body += string(chunk)
+	if prose[0].text != "hello world" {
+		t.Errorf("the prose block = %q, want %q", prose[0].text, "hello world")
 	}
-	if body != "hello world" {
-		t.Errorf("answer artifact = %q, want %q", body, "hello world")
-	}
-	if art.State != content.ArtifactSealed {
-		t.Errorf("answer artifact state = %q, want sealed", art.State)
+	if prose[0].state != content.ArtifactSealed {
+		t.Errorf("the prose block's body = %q, want sealed", prose[0].state)
 	}
 	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {

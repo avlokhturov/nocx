@@ -197,6 +197,16 @@ func (s *ledgerStub) CaptureFrame(_ context.Context, in CaptureFrame) (CaptureFr
 	return CaptureFrameResult{}, ErrNotImplemented
 }
 
+func (s *ledgerStub) OpenProse(_ context.Context, turnID string) (ProseBlock, error) {
+	s.log.Info("content stub: LedgerRepository.OpenProse", "turn", turnID)
+	return ProseBlock{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) SealProse(_ context.Context, entryID string) error {
+	s.log.Info("content stub: LedgerRepository.SealProse", "entry", entryID)
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) SubmitAgentAsk(_ context.Context, in AgentAsk) (AgentAskResult, error) {
 	s.log.Info("content stub: LedgerRepository.SubmitAgentAsk", "id", in.ID)
 	return AgentAskResult{}, ErrNotImplemented
