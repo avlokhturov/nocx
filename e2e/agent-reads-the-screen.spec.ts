@@ -403,7 +403,14 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     const call = body.locator('.ui-tool-call')
     await expect(call).toHaveCount(1)
     await expect(call.locator('.ui-tool-call__tool')).toHaveText('readScreen')
-    await expect(call.locator('.ui-tool-call__resource')).toHaveText(sessionId)
+    // The resource is the PANE'S OWN NAME, never the session id (nocx-vnzek):
+    // a 32-hex handle says nothing to a person. Asserted against the tab
+    // strip's own text, because that is the point — one derivation for "what
+    // is this session called", read by both surfaces, so they cannot drift
+    // apart the way two copies would.
+    const resource = call.locator('.ui-tool-call__resource')
+    await expect(resource).not.toHaveText(sessionId)
+    await expect(resource).toHaveText(await page.locator(TITLE).first().innerText())
 
     // 3. AND THE FRAME WAS THE REAL RENDERER'S — the half the Go test
     //    (ws_agent_locates_itself_test.go) cannot report, because there the
