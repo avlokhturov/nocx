@@ -281,21 +281,21 @@ async function main() {
 
   let placement: unknown = 'horizontal'
   const [sandboxEnabledLive, setSandboxEnabledLive] = createSignal(false)
-  const [sandboxStatusAvailable, setSandboxStatusAvailable] = createSignal<boolean | null>(null)
+  const [sandboxStatus, setSandboxStatus] = createSignal<SandboxStatus | null>(null)
   const refreshSandboxAvailability = async (enabled: boolean): Promise<void> => {
     if (!enabled) {
-      setSandboxStatusAvailable(null)
+      setSandboxStatus(null)
       return
     }
     const sandboxClient = client
     if (!sandboxClient) {
-      setSandboxStatusAvailable(null)
+      setSandboxStatus(null)
       return
     }
     try {
-      setSandboxStatusAvailable((await sandboxClient.sandboxStatus())?.available ?? null)
+      setSandboxStatus(await sandboxClient.sandboxStatus())
     } catch {
-      setSandboxStatusAvailable(null)
+      setSandboxStatus(null)
     }
   }
   // The sidebar's remembered state, from the UI-state document rather than
@@ -463,7 +463,7 @@ async function main() {
   const currentShieldState = () =>
     shieldState({
       enabled: sandboxEnabledLive(),
-      statusAvailable: sandboxStatusAvailable(),
+      status: sandboxStatus(),
       origin: activeOrigin(),
       sandboxed: activeSandboxed(),
     })
@@ -1021,6 +1021,9 @@ async function main() {
   const reportSandboxOpenError = (message: string): void => {
     showToast({ level: 'danger', message: `Could not open a sandboxed shell: ${message}` })
   }
+  const reportSandboxConversionError = (): void => {
+    showToast({ level: 'danger', message: 'Could not convert this tab: replacement shell failed' })
+  }
 
   convertActiveTabToSandboxed = async (): Promise<void> => {
     if (sandboxConversionInFlight()) return
@@ -1045,7 +1048,10 @@ async function main() {
             'Sandbox removed — new shell',
           ))
         if (!installed) {
-          if (created) void tm.closePane(made.pane)
+          if (created) {
+            void tm.closePane(made.pane)
+            reportSandboxConversionError()
+          }
           return
         }
         tm.replaceTabPosition(oldPane.id, made.pane.id)
@@ -1087,7 +1093,10 @@ async function main() {
                     'Sandbox enabled — new shell',
                   ))
                 if (!installed) {
-                  if (created) void tm.closePane(made.pane)
+                  if (created) {
+                    void tm.closePane(made.pane)
+                    reportSandboxConversionError()
+                  }
                   return
                 }
                 tm.replaceTabPosition(oldPane.id, made.pane.id)

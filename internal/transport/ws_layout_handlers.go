@@ -127,6 +127,12 @@ func wirePane(p content.Pane) paneWire {
 	}
 }
 
+func wireGrantedPane(p content.Pane, granted map[string]struct{}) paneWire {
+	w := wirePane(p)
+	_, w.SandboxGranted = granted[p.ID]
+	return w
+}
+
 // wireWorkspaces, wireTabs and wirePanes force the slice to be non-nil: an
 // empty collection must marshal as [] and never null — the renderer's first
 // .map assumes it, and a null there is the nocx-25k9.14 class of defect.
@@ -149,9 +155,7 @@ func wireTabs(all []content.Tab) []tabWire {
 func wirePanes(all []content.Pane, granted map[string]struct{}) []paneWire {
 	out := make([]paneWire, 0, len(all))
 	for _, p := range all {
-		w := wirePane(p)
-		_, w.SandboxGranted = granted[p.ID]
-		out = append(out, w)
+		out = append(out, wireGrantedPane(p, granted))
 	}
 	return out
 }
@@ -921,14 +925,26 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				return nil
 			}
 			pane, err := svc.SetPaneCwd(ctx, p.ID, p.Cwd)
-			h.answer(req, err, func() any { return paneResponse{Pane: wirePane(pane)} })
+			var granted map[string]struct{}
+			if err == nil {
+				granted, err = svc.SandboxGrantedPaneIDs(ctx)
+			}
+			h.answer(req, err, func() any {
+				return paneResponse{Pane: wireGrantedPane(pane, granted)}
+			})
 		case "panes.move":
 			var p paneMoveParams
 			if !h.decode(req, &p) {
 				return nil
 			}
 			pane, err := svc.MovePane(ctx, p.ID, p.TabID)
-			h.answer(req, err, func() any { return paneResponse{Pane: wirePane(pane)} })
+			var granted map[string]struct{}
+			if err == nil {
+				granted, err = svc.SandboxGrantedPaneIDs(ctx)
+			}
+			h.answer(req, err, func() any {
+				return paneResponse{Pane: wireGrantedPane(pane, granted)}
+			})
 		case "panes.close":
 			var p layoutCloseParams
 			if !h.decode(req, &p) {
