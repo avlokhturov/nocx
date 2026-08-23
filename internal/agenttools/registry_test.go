@@ -556,3 +556,22 @@ func TestAssemble_RejectsDeclarationWithoutDescription(t *testing.T) {
 		t.Fatalf("assembled %v, want the undescribed tool absent from the set", toolNames(reg.tools))
 	}
 }
+
+// TestDeclarations_OpensBlockIsRunAlone pins the fact the renderer reads to
+// decide where a call is drawn (nocx-9sqii): `run` submits a command through
+// the ordinary path, so the command's own top-level block IS the account of
+// that call; every other tool produces no block and its occurrence is owned
+// by the line in the turn's flow.
+//
+// It is a DECLARED fact and not a name the renderer matches, for the same
+// reason the effect is declared (ADR-0028 decision 4): a renderer that knew
+// which tool names open blocks would be a second owner of the tool table,
+// disagreeing with it the day a tool is added.
+func TestDeclarations_OpensBlockIsRunAlone(t *testing.T) {
+	for _, d := range declarations {
+		want := d.Name == "run"
+		if d.OpensBlock != want {
+			t.Errorf("declaration %q: OpensBlock = %v, want %v", d.Name, d.OpensBlock, want)
+		}
+	}
+}

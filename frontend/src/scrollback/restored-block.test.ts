@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect } from 'vitest'
-import { restoredBlock, bodyToHTML } from './restored-block'
+import { restoredBlock, restoredTurn, bodyToHTML, type RestoredTurnFacts } from './restored-block'
+import type { TurnCause } from './turn-flow'
 import { DEFAULT_SNAPSHOT, serializeRange, serializeRangeSGR } from './serializer'
 import { BufferLine, lineWith, XTERM_CM_P16 } from './test-helpers'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -117,17 +118,23 @@ describe('a block built from the store', () => {
   })
 
   it("draws the answer as prose, through the answer body's own renderer", () => {
-    const el = restoredBlock(
+    // Through restoredTurn, which is the ONE builder of a turn's prose: the
+    // block builder draws the pieces it is handed, and the projection that
+    // produces them is the turn's (nocx-9sqii).
+    const [el] = restoredTurn(
       facts({
         kind: 'ask',
         author: 'agent',
         command: 'summarise',
         body: '## Findings\n- run `ls`\n',
+        id: undefined,
       }),
       S,
+      () => 1,
       container,
       () => {},
       store(),
+      () => null,
     )
     // The ask kind's body class — the wrap policy lives there, and a restored
     // answer must wrap exactly as a live one does.
@@ -140,12 +147,20 @@ describe('a block built from the store', () => {
   })
 
   it('keeps a fenced block in the command grammar, as the live answer does', () => {
-    const el = restoredBlock(
-      facts({ kind: 'ask', author: 'agent', command: 'show me', body: '```\nls -la\n```\n' }),
+    const [el] = restoredTurn(
+      facts({
+        kind: 'ask',
+        author: 'agent',
+        command: 'show me',
+        body: '```\nls -la\n```\n',
+        id: undefined,
+      }),
       S,
+      () => 1,
       container,
       () => {},
       store(),
+      () => null,
     )
     expect(el.querySelector('.cmd-output-code')).not.toBeNull()
   })
@@ -174,86 +189,114 @@ describe('a block built from the store', () => {
   })
 })
 
-// ── a restored turn comes back with the calls it made (nocx-h1l4o) ────────
+// ── a restored turn comes back as the turn it was (nocx-h1l4o, nocx-9sqii) ──
 //
 // ADR-0036's last sentence: an action was anchored to nothing at all, so a
 // restored turn came back without the calls it made. The `caused-by` relation
 // joins them, and this is the drawing half — the lines are built by the SAME
-// kit component the live flow places, from the facts the ledger stored.
-describe('a restored turn and the calls it made', () => {
-  const withCalls = (calls: Parameters<typeof restoredBlock>[0]['calls']) =>
-    restoredBlock(
-      facts({
-        kind: 'ask',
-        author: 'agent',
+// kit component the live flow places, from the facts the ledger stored, and
+// the turn is drawn as the same fragments the live path drew.
+describe('a restored turn and what it caused', () => {
+  const turn = (causes: TurnCause[], over: Partial<RestoredTurnFacts> = {}) => {
+    let n = 100
+    return restoredTurn(
+      {
         command: 'what went wrong?',
+        cwd: '/repo',
+        location: '',
+        durationMs: 1200,
+        exitCode: null,
+        status: 'success',
         body: 'line 3 is wrong',
-        calls,
-      }),
+        author: 'agent',
+        kind: 'ask',
+        entryId: 'turn-1',
+        causes,
+        ...over,
+      },
       S,
+      () => n++,
       container,
       () => {},
       store(),
+      (entryId) =>
+        entryId === 'gone'
+          ? null
+          : restoredBlock(
+              facts({ id: n++, command: `cmd ${entryId}`, author: 'agent', entryId }),
+              S,
+              container,
+              () => {},
+              store(),
+            ),
     )
+  }
+
+  const call = (over: Partial<TurnCause> = {}): TurnCause => ({
+    entryId: 'act-1',
+    at: 0,
+    kind: 'action',
+    intent: 'files.read',
+    effect: 'observe',
+    resource: null,
+    opensBlock: false,
+    ...over,
+  })
 
   it('draws one tool-call line per call, in the causal order the ledger gave', () => {
-    const el = withCalls([
-      { tool: 'files.read', effect: 'observe', resource: { kind: 'path', id: '/repo/a.txt' } },
-      { tool: 'run', effect: 'mutate-destructive' },
+    const [el] = turn([
+      call({ resource: { kind: 'path', id: '/repo/a.txt' } }),
+      call({ entryId: 'act-2', intent: 'git.status' }),
     ])
     const lines = Array.from(el.querySelectorAll('.ui-tool-call__tool')).map((n) => n.textContent)
-    expect(lines).toEqual(['files.read', 'run'])
+    expect(lines).toEqual(['files.read', 'git.status'])
   })
 
   it('paints the effect the backend decided, never one derived from the name', () => {
-    const el = withCalls([{ tool: 'run', effect: 'mutate-destructive' }])
+    const [el] = turn([call({ intent: 'rm', effect: 'mutate-destructive' })])
     expect(el.querySelector<HTMLElement>('.ui-tool-call')?.dataset.effect).toBe(
       'mutate-destructive',
     )
   })
 
   it('shows the resource the backend derived, and nothing when it derived none', () => {
-    const named = withCalls([
-      { tool: 'files.read', effect: 'observe', resource: { kind: 'path', id: '/repo/a.txt' } },
-    ])
+    const [named] = turn([call({ resource: { kind: 'path', id: '/repo/a.txt' } })])
     expect(named.querySelector('.ui-tool-call__resource')?.textContent).toBe('/repo/a.txt')
-    const bare = withCalls([{ tool: 'git.status', effect: 'observe' }])
+    const [bare] = turn([call({ intent: 'git.status' })])
     expect(bare.querySelector('.ui-tool-call__resource')).toBeNull()
   })
 
-  it('places the calls inside the turn’s own body, above the prose', () => {
-    const el = withCalls([{ tool: 'files.read', effect: 'observe' }])
+  it('places the calls inside the turn’s own body, above the prose it preceded', () => {
+    const [el] = turn([call()])
     const body = el.querySelector('[data-answer-body]')
     const kinds = Array.from(body?.children ?? []).map((c) =>
       c.classList.contains('ui-tool-call') ? 'call' : 'text',
     )
-    expect(kinds[0]).toBe('call')
-    expect(kinds).toContain('text')
+    expect(kinds).toEqual(['call', 'text'])
   })
 
-  it('a turn with no calls draws exactly what it drew before the relation existed', () => {
-    const el = withCalls([])
-    expect(el.querySelector('.ui-tool-call')).toBeNull()
-    expect(el.querySelector('[data-answer-body]')?.textContent).toContain('line 3 is wrong')
+  it('cuts the prose where the call happened, so a call mid-answer stays mid-answer', () => {
+    const [el] = turn([call({ at: 'line 3'.length })])
+    const body = el.querySelector('[data-answer-body]')
+    const flow = Array.from(body?.children ?? []).map((c) =>
+      c.classList.contains('ui-tool-call') ? 'call' : `text:${c.textContent ?? ''}`,
+    )
+    expect(flow).toEqual(['text:line 3', 'call', 'text: is wrong'])
+  })
+
+  it('a turn with no causes is ONE block, exactly what it drew before the relation existed', () => {
+    const els = turn([])
+    expect(els).toHaveLength(1)
+    expect(els[0].querySelector('.ui-tool-call')).toBeNull()
+    expect(els[0].querySelector('[data-answer-body]')?.textContent).toContain('line 3 is wrong')
+    expect(els[0].querySelector('[data-turn-continuation]')).toBeNull()
   })
 
   it('a turn whose answer is gone still says the calls it made happened', () => {
     // Retention takes bodies and leaves entries (ADR-0019 §7). The calls are
     // entries of their own, so they survive the loss of the prose — and the
     // block must not go silent about work that really happened.
-    const el = restoredBlock(
-      facts({
-        kind: 'ask',
-        author: 'agent',
-        command: 'q',
-        body: null,
-        calls: [{ tool: 'files.read', effect: 'observe' }],
-      }),
-      S,
-      container,
-      () => {},
-      store(),
-    )
+    const [el] = turn([call()], { body: null })
     expect(el.textContent).toContain('Output is no longer kept')
     expect(el.querySelector('.ui-tool-call__tool')?.textContent).toBe('files.read')
   })
@@ -262,12 +305,78 @@ describe('a restored turn and the calls it made', () => {
     // An action has no block and no command line; a call belongs to the turn
     // that made it, and a second owner of that fact is the defect.
     const el = restoredBlock(
-      facts({ calls: [{ tool: 'files.read', effect: 'observe' }] }),
+      facts({ pieces: [{ kind: 'call', call: { tool: 'files.read', effect: 'observe' } }] }),
       S,
       container,
       () => {},
       store(),
     )
     expect(el.querySelector('.ui-tool-call')).toBeNull()
+  })
+
+  // ── the fragments (nocx-9sqii) ───────────────────────────────────────────
+
+  it('puts the command the turn ran BETWEEN the prose before it and the prose from it', () => {
+    const els = turn([
+      call({ intent: 'run', effect: 'mutate-destructive', opensBlock: true, at: 'line 3'.length }),
+      call({
+        entryId: 'cmd-1',
+        kind: 'shell',
+        intent: 'cat -n a.txt',
+        effect: null,
+        at: 'line 3'.length,
+      }),
+    ])
+    expect(els).toHaveLength(3)
+    expect(els[0].querySelector('[data-answer-body]')?.textContent).toBe('line 3')
+    expect(els[1].querySelector('.cmd-header-text')?.textContent).toBe('cmd cmd-1')
+    expect(els[2].querySelector('[data-answer-body]')?.textContent).toBe(' is wrong')
+    // The run call left NO line: the block is the account of it.
+    expect(els[0].querySelector('.ui-tool-call')).toBeNull()
+    expect(els[2].querySelector('.ui-tool-call')).toBeNull()
+  })
+
+  it('every fragment carries the turn’s stored identity, and a continuation says so', () => {
+    const els = turn([call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
+    const fragments = els.filter((e) => e.dataset.turnFragment !== undefined)
+    expect(fragments.map((f) => f.dataset.entryId)).toEqual(['turn-1', 'turn-1'])
+    expect(fragments.map((f) => f.dataset.turnFragment)).toEqual(['0', '1'])
+    expect(fragments[0].querySelector('[data-turn-continuation]')).toBeNull()
+    expect(fragments[1].querySelector('[data-turn-continuation]')?.textContent).toBe('continued')
+  })
+
+  it('the turn’s outcome is on the fragment where the turn ENDED, not halfway down it', () => {
+    const els = turn([call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
+    const fragments = els.filter((e) => e.dataset.turnFragment !== undefined)
+    expect(fragments[0].querySelector('.cmd-header-duration')).toBeNull()
+    expect(fragments[1].querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
+  })
+
+  it('a turn whose last act was a command opens no empty fragment under it', () => {
+    const els = turn([
+      call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 99 }),
+    ])
+    expect(els).toHaveLength(2)
+    expect(els[1].dataset.turnFragment).toBeUndefined()
+  })
+
+  it('a DANGLING cause costs the turn that block and nothing else', () => {
+    // The command is older than the page limit, or retention took it. Every
+    // fragment the turn does have is still drawn, in order.
+    const els = turn([call({ entryId: 'gone', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
+    expect(els.map((e) => e.dataset.turnFragment)).toEqual(['0', '1'])
+    expect(els[0].querySelector('[data-answer-body]')?.textContent).toBe('line')
+    expect(els[1].querySelector('[data-answer-body]')?.textContent).toBe(' 3 is wrong')
+  })
+
+  it('five calls compact into one expandable line here too, as they do live', () => {
+    const [el] = turn(
+      ['readScreen', 'blocks.list', 'blocks.read', 'files.read', 'git.status'].map((intent, i) =>
+        call({ entryId: `act-${i}`, intent }),
+      ),
+    )
+    expect(el.querySelectorAll('[data-answer-body] > .ui-tool-call')).toHaveLength(0)
+    const group = el.querySelector('.ui-tool-calls')
+    expect(group?.querySelectorAll('.ui-tool-call')).toHaveLength(5)
   })
 })

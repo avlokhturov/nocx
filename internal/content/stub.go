@@ -182,8 +182,8 @@ func (s *ledgerStub) Edges(_ context.Context, entryID string) ([]Edge, error) {
 	return nil, ErrNotImplemented
 }
 
-func (s *ledgerStub) AddCause(_ context.Context, turnID, causedID string) (int, error) {
-	s.log.Info("content stub: LedgerRepository.AddCause", "turn", turnID, "caused", causedID)
+func (s *ledgerStub) AddCause(_ context.Context, turnID, causedID string, at int) (int, error) {
+	s.log.Info("content stub: LedgerRepository.AddCause", "turn", turnID, "caused", causedID, "at", at)
 	return 0, ErrNotImplemented
 }
 

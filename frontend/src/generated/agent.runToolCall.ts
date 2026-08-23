@@ -41,6 +41,10 @@ export interface AgentRunToolCall {
     | 'cross-boundary'
     | 'delegate'
   /**
+   * Whether this call's work becomes a TOP-LEVEL BLOCK of its own (nocx-9sqii) — true for `run` alone, which submits a command through the same orchestration a person's line takes. It decides where the call is drawn: a call that opens a block IS that block, at the point in the turn where it happened, so the flow seals the answer fragment it is writing and draws no line beside it — a line would restate the command, the output and the exit status the block already owns. A call that opens none keeps its line, which is then the only thing that says it occurred. Sent by the backend for the reason the effect is (ADR-0028 decision 4): it is a fact of the tool table (internal/agenttools Declaration.OpensBlock), and a renderer holding its own list of which tools open blocks would be a second copy of that table, disagreeing the day a tool is added.
+   */
+  opensBlock: boolean
+  /**
    * The LEDGER action entry the attempt was recorded under (design §6.4). The thread joining question, run, attempt and answer — and the handle a later 'show me what it returned' reaches through, rather than a second copy of the bytes.
    */
   actionEntryId: string

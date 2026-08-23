@@ -73,7 +73,7 @@ import {
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
 import { answerTextForEntry, arrangedByCause, blocksForPane, restoredBody } from './restore-client'
-import { restoredBlock } from './scrollback/restored-block'
+import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
@@ -3106,53 +3106,96 @@ export class TerminalContent extends BasePaneContent {
     // one place that decides it, and it never guesses a parent.
     const arranged = arrangedByCause(blocks, (id) => bodies.get(id)?.caused ?? [])
     const els: HTMLElement[] = []
+    const page = new Map(blocks.map((b) => [b.entryId, b]))
+    const deps = { sessionName: (id: string) => this.hooks.sessionName?.(id) ?? null }
+    const container = (): HTMLElement =>
+      this.scrollback?.scrollbackInner ?? document.createElement('div')
+    const nextId = (): number => this.scrollback!.blockManager.nextRestoredId()
+    const snapshotStore = this.scrollback.snapshotStore
+    /** One page row as the facts a restored block is built from. */
+    const factsOf = (b: (typeof blocks)[number]) => ({
+      command: b.command,
+      cwd: b.cwd,
+      // The host the command ran on, not the one the pane is on now: a
+      // block keeps saying where it ran (design §7).
+      location: b.host,
+      durationMs: b.durationMs,
+      exitCode: b.exitCode,
+      status: b.status,
+      body: bodies.get(b.entryId)?.body ?? null,
+      kind: bodies.get(b.entryId)?.kind ?? ('command' as const),
+      entryId: b.entryId,
+      // Who ran it, carried from the entry's own kind (nocx-4em1z). The
+      // block's badge is painted from this, so a command the assistant ran
+      // still says so after a restart.
+      author: b.author,
+    })
+    // A block a TURN placed is not also drawn at its own row: the turn
+    // consumed it, and drawing it twice would be the relation costing the
+    // page a duplicate instead of a placement.
+    const placed = new Set<string>()
     for (const b of arranged) {
+      if (placed.has(b.entryId)) continue
+      placed.add(b.entryId)
       const restored = bodies.get(b.entryId)
+      if ((restored?.kind ?? 'command') !== 'ask') {
+        els.push(
+          restoredBlock(
+            { ...factsOf(b), id: nextId() },
+            snapshot,
+            container,
+            () => {},
+            snapshotStore,
+            deps,
+          ),
+        )
+        continue
+      }
+      // A TURN is drawn as FRAGMENTS around the blocks it caused
+      // (nocx-9sqii) — the same arrangement the live path draws, from the
+      // same projection, so the two views of one turn agree. The causal
+      // facts are the ledger's, verbatim: the order, the anchor in the
+      // prose, the effect, the resource, and whether the call opened a block
+      // of its own.
       els.push(
-        restoredBlock(
+        ...restoredTurn(
           {
-            id: this.scrollback.blockManager.nextRestoredId(),
-            command: b.command,
-            cwd: b.cwd,
-            // The host the command ran on, not the one the pane is on now: a
-            // block keeps saying where it ran (design §7).
-            location: b.host,
-            durationMs: b.durationMs,
-            exitCode: b.exitCode,
-            status: b.status,
-            body: restored?.body ?? null,
-            kind: restored?.kind ?? 'command',
-            entryId: b.entryId,
-            // Who ran it, carried from the entry's own kind (nocx-4em1z).
-            // The block's badge is painted from this, so a command the
-            // assistant ran still says so after a restart.
-            author: b.author,
-            // The calls this turn made, drawn as the same kit line the live
-            // flow places. An ACTION has no block of its own — it is a line
-            // in the turn's flow — so it reaches the DOM here and nowhere
-            // else. A shell entry the turn caused is a block and was placed
-            // above; it is not also a line.
-            calls: (restored?.caused ?? [])
-              .filter((c) => c.kind === 'action')
-              .map((c) => ({
-                tool: c.intent,
-                // The effect the backend decided. A call whose row carries
-                // none is drawn as an observation rather than not at all:
-                // the line says a call happened, which is the fact, and the
-                // renderer may never derive an effect from a tool name
-                // (ADR-0028 decision 4).
-                effect: c.effect ?? 'observe',
-                resource: c.resource ?? undefined,
-              })),
+            ...factsOf(b),
+            causes: (restored?.caused ?? []).map((c) => ({
+              entryId: c.entryId,
+              at: c.at,
+              kind: c.kind,
+              intent: c.intent,
+              effect: c.effect,
+              resource: c.resource,
+              opensBlock: c.opensBlock,
+            })),
           },
           snapshot,
-          () => this.scrollback?.scrollbackInner ?? document.createElement('div'),
+          nextId,
+          container,
           () => {},
-          this.scrollback.snapshotStore,
-          // A session is NAMED, never numbered (nocx-vnzek): the same
-          // derivation the live flow injects, from the pane layer that owns
-          // it.
-          { sessionName: (id) => this.hooks.sessionName?.(id) ?? null },
+          snapshotStore,
+          (entryId) => {
+            const caused = page.get(entryId)
+            // A cause this page does not hold is DANGLING — older than the
+            // page limit, or evicted. The turn loses that fragment boundary
+            // and nothing else; nothing is invented to stand in for it.
+            if (!caused || placed.has(entryId)) return null
+            placed.add(entryId)
+            return restoredBlock(
+              { ...factsOf(caused), id: nextId() },
+              snapshot,
+              container,
+              () => {},
+              snapshotStore,
+              // A session is NAMED, never numbered (nocx-vnzek): the same
+              // derivation the live flow injects, from the pane layer that
+              // owns it.
+              deps,
+            )
+          },
+          deps,
         ),
       )
     }

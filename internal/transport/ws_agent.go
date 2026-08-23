@@ -222,6 +222,14 @@ type agentRunToolCall struct {
 	Effect        string              `json:"effect"`
 	ActionEntryID string              `json:"actionEntryId"`
 	Resource      *content.GrantScope `json:"resource,omitempty"`
+	// OpensBlock says the call's work becomes a TOP-LEVEL BLOCK of its own
+	// (nocx-9sqii) — the declaration's fact, sent so the renderer can seal
+	// the answer fragment it is writing and let the block take that
+	// position, rather than drawing a line that restates the command the
+	// block already shows. Never derived here from the tool name, and never
+	// derivable there: it is one more fact of the tool table, like the
+	// effect beside it (ADR-0028 decision 4).
+	OpensBlock bool `json:"opensBlock"`
 }
 
 // agentRunReasoning is the agent.runReasoning notification (nocx-s92so): one
@@ -960,6 +968,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				Effect:        string(ev.Call.Effect),
 				ActionEntryID: ev.Call.EntryID,
 				Resource:      ev.Call.Resource,
+				OpensBlock:    ev.Call.OpensBlock,
 			})); err != nil {
 				// Counted with the delta drops, and into the SAME counter,
 				// because it is the same fact about the live view: a call

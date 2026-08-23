@@ -206,7 +206,11 @@ type AttemptLedger interface {
 	// the next causal position inside it (nocx-h1l4o). The store assigns the
 	// position; see content.LedgerRepository.AddCause for why the caller may
 	// not.
-	AddCause(ctx context.Context, turnID, causedID string) (int, error)
+	// `at` is how much of the turn's ANSWER had been written when this
+	// happened (nocx-9sqii) — the anchor a reader cuts the prose at to draw
+	// the cause between the text before it and the text written from its
+	// result. The position stays the store's.
+	AddCause(ctx context.Context, turnID, causedID string, at int) (int, error)
 }
 
 // maxArgsBytes bounds the model's argument JSON — the ingress size bound of
@@ -273,6 +277,21 @@ type policyMiddleware struct {
 	//
 	// Nil is "nobody is listening", which is every non-transport caller.
 	onCall func(ToolCall) error
+	// answerLen reports how much of the run's ANSWER has been written so
+	// far, in UTF-16 code units (nocx-9sqii). It is the anchor every cause
+	// this middleware records is stored at, and it is asked for HERE, at the
+	// moment the attempt is written — before the tool runs and before the
+	// model writes a word from its result — which is the only moment at
+	// which the answer is exactly as long as it was when the call happened.
+	//
+	// Injected because the answer's text has an owner already: the engine's
+	// stream, which is accumulating it for the run's return value. A counter
+	// of our own would be a second tally of one string, disagreeing with the
+	// first on the first chunk either of them missed.
+	//
+	// Nil is "no answer is being written" — the un-bound caller shape — and
+	// reads as 0, which draws every cause above the prose.
+	answerLen func() int
 
 	validators map[string]*jsonschema.Schema
 }
@@ -295,14 +314,16 @@ type policyMiddleware struct {
 // exactly as they do without one.
 //
 // onCall is the seam the visible tool call leaves through (nocx-shxv0);
-// nil means nobody is listening and nothing is announced.
+// nil means nobody is listening and nothing is announced. answerLen is the
+// answer's length so far (nocx-9sqii), the anchor a cause is recorded at;
+// nil reads as 0.
 //
 // turnEntryID is the turn every entry this run causes is joined to
 // (nocx-h1l4o); empty is the un-bound caller shape and joins nothing.
 // logger may be nil for the same callers — the only thing it reports is a
 // relation that could not be written, which is a degrade the reader already
 // handles.
-func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
+func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, answerLen func() int, onCall func(ToolCall) error) (*policyMiddleware, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
@@ -318,6 +339,7 @@ func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agentt
 		turnEntryID: turnEntryID,
 		requester:   requester,
 		classifier:  classifier,
+		answerLen:   answerLen,
 		onCall:      onCall,
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
 	}
@@ -484,11 +506,12 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// renderer keys on it and renders one call.
 		if m.onCall != nil {
 			if err := m.onCall(ToolCall{
-				Tool:     decl.Name,
-				CallID:   tCtx.CallID,
-				EntryID:  entryID,
-				Effect:   decl.Effect,
-				Resource: matchedResource(decl, args),
+				Tool:       decl.Name,
+				CallID:     tCtx.CallID,
+				EntryID:    entryID,
+				Effect:     decl.Effect,
+				Resource:   matchedResource(decl, args),
+				OpensBlock: decl.OpensBlock,
 			}); err != nil {
 				// The caller refused the write, which is the one thing that
 				// stops a run: the same contract onEvent has for a delta.
@@ -1036,7 +1059,7 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 	// The proposal is a thing the turn caused, exactly as a granted call is:
 	// a person was asked something at this point in the answer, and a
 	// restored turn shows it where it happened.
-	m.noteCause(ctx, res.ID)
+	m.noteCause(ctx, res.ID, m.answerAt())
 	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
 		EntryID:  res.ID,
 		Attempt:  1, // the escalation itself: recorded, never run
@@ -1117,6 +1140,14 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		if resource != nil {
 			payloadBody["resource"] = resource
 		}
+		// Whether this call's work becomes a top-level BLOCK — the
+		// declaration's own fact (nocx-9sqii). Stored with the attempt so a
+		// restored turn knows the block is the account of this call and
+		// draws no line beside it; the reader must not match the tool name,
+		// which would be a second copy of the tool table.
+		if decl.OpensBlock {
+			payloadBody["opensBlock"] = true
+		}
 		// The classifier block (bead nocx-kpy23, criterion 6): when the
 		// classifier was consulted and cleared the call, the attempt's own
 		// record carries the verdict and the model, so the audit shows
@@ -1148,7 +1179,7 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		// again would move it to after everything that followed the
 		// question. (AddCause is idempotent on the pair, so this is belt
 		// and braces rather than the only guard.)
-		m.noteCause(ctx, entryID)
+		m.noteCause(ctx, entryID, m.answerAt())
 	}
 	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
 		EntryID:  entryID,
@@ -1182,7 +1213,9 @@ func (m *policyMiddleware) runWithRetained(decl agenttools.Tool, callID string, 
 // noteCause joins one entry this turn caused to the turn (nocx-h1l4o): the
 // command a `run` call opened, the action entry of any other call, the
 // proposal entry of an escalation. The position inside the turn is the
-// store's — see content.LedgerRepository.AddCause.
+// store's — see content.LedgerRepository.AddCause — and `at` is where in the
+// answer's prose it happened, which is the caller's (nocx-9sqii). Every call
+// site passes m.answerAt(), read at the moment the entry is written.
 //
 // A TURN THAT IS NOT THERE JOINS NOTHING. The un-bound caller shape has no
 // turn, and an entry with no cause is recorded with no relation rather than
@@ -1197,11 +1230,20 @@ func (m *policyMiddleware) runWithRetained(decl agenttools.Tool, callID string, 
 // a state the restore already handles. Failing a call to preserve a drawing
 // order would trade a real capability for a cosmetic one, and for the run
 // tool it would fail AFTER the command had already run.
-func (m *policyMiddleware) noteCause(ctx context.Context, causedEntryID string) {
+// answerAt is how much of the answer has been written right now, in UTF-16
+// code units — 0 when no answer is being written at all.
+func (m *policyMiddleware) answerAt() int {
+	if m.answerLen == nil {
+		return 0
+	}
+	return m.answerLen()
+}
+
+func (m *policyMiddleware) noteCause(ctx context.Context, causedEntryID string, at int) {
 	if m.ledger == nil || m.turnEntryID == "" || causedEntryID == "" {
 		return
 	}
-	if _, err := m.ledger.AddCause(ctx, m.turnEntryID, causedEntryID); err != nil && m.log != nil {
+	if _, err := m.ledger.AddCause(ctx, m.turnEntryID, causedEntryID, at); err != nil && m.log != nil {
 		m.log.Warn("agent run: the caused-by relation could not be recorded — this entry will restore in plain ledger order",
 			"turn", m.turnEntryID, "caused", causedEntryID, "error", err)
 	}
@@ -1281,8 +1323,14 @@ func (m *policyMiddleware) executeInRenderer(ctx context.Context, decl agenttool
 	case *agenttools.ScreenReader:
 		return executeReadScreen(ctx, cap, m.requester, rawArgs)
 	case *agenttools.Runner:
+		// The command's own entry is anchored where the CALL was, not where
+		// the answer has got to by the time the command finishes: the model
+		// writes nothing while it waits for a tool, but a concurrent ask on
+		// the same turn would make the two differ, and the honest anchor is
+		// the one the call itself took.
+		at := m.answerAt()
 		return executeRun(ctx, cap, m.requester, rawArgs, func(entryID string) {
-			m.noteCause(ctx, entryID)
+			m.noteCause(ctx, entryID, at)
 		})
 	default:
 		return "", fmt.Errorf("tool %q: capability is %T, not a renderer-executable capability", decl.Name, capability)

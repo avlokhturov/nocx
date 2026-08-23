@@ -5845,18 +5845,25 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         {
           entryId: 'act-1',
           position: 0,
+          // Six characters of the answer had been written when the
+          // assistant reached for the shell (nocx-9sqii) — so the turn is
+          // drawn as two fragments with the command's block between them.
+          at: 6,
           kind: 'action',
           intent: 'run',
           effect: 'mutate-destructive',
           resource: null,
+          opensBlock: true,
         },
         {
           entryId: 'cmd-1',
           position: 1,
+          at: 6,
           kind: 'shell',
           intent: 'cat -n a.txt',
           effect: null,
           resource: null,
+          opensBlock: false,
         },
       ],
     }
@@ -5903,25 +5910,30 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
         .scrollbackInner
       await vi.waitFor(() => {
-        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(3)
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(4)
       })
-      const restored = [...inner.querySelectorAll('[data-restored="true"]')]
+      const restored = [...inner.querySelectorAll('[data-restored="true"]')] as HTMLElement[]
       // Ledger order alone would leave the command a person typed BETWEEN
       // the turn and the command the turn ran. The relation puts the caused
-      // command back beside its turn and leaves the typed one where it was
-      // — nothing is reordered that the relation does not name.
+      // command back INSIDE its turn — the answer stops where the command
+      // was run and continues below it — and leaves the typed one where it
+      // was: nothing is reordered that the relation does not name.
       expect(restored.map((el) => el.querySelector('.cmd-header-text')?.textContent)).toEqual([
         'what went wrong?',
         'cat -n a.txt',
+        'what went wrong?',
         'git status',
       ])
-      const turnEl = restored.find(
-        (el) => el.querySelector('.cmd-header-text')?.textContent === 'what went wrong?',
-      ) as HTMLElement
-      // The call the turn made is a line inside the turn's own flow — an
-      // action has no block and never becomes one.
-      expect(turnEl.querySelector('.ui-tool-call__tool')?.textContent).toBe('run')
-      expect(turnEl.dataset.blockKind).toBe('ask')
+      const fragments = restored.filter((el) => el.dataset.turnFragment !== undefined)
+      expect(fragments.map((el) => el.dataset.turnFragment)).toEqual(['0', '1'])
+      expect(fragments.every((el) => el.dataset.blockKind === 'ask')).toBe(true)
+      // The prose is cut where the call happened: what the model had written
+      // stays above the block, what it wrote from the output is below.
+      expect(fragments[0].querySelector('[data-answer-body]')?.textContent).toBe('line 3')
+      expect(fragments[1].querySelector('[data-answer-body]')?.textContent).toBe(' is wrong')
+      // And the `run` call left NO line anywhere: the block IS the account
+      // of that call (nocx-9sqii, criterion 2).
+      expect(inner.querySelector('.ui-tool-call')).toBeNull()
     } finally {
       teardown()
     }

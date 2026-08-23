@@ -238,6 +238,13 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
  * The page's blocks in the order the RELATION puts them: each turn followed
  * by the blocks it caused, in the causal order it assigned (nocx-h1l4o).
  *
+ * WHAT IT DOES NOT DECIDE, and where that decision lives. This puts a turn's
+ * caused blocks next to it, in causal order. WHERE inside the turn each one
+ * goes — a turn is drawn as fragments with its blocks between them
+ * (nocx-9sqii) — is the flow's projection, off the anchor each cause carries,
+ * and it lives in scrollback/turn-flow.ts. The drawer consumes the blocks a
+ * turn placed rather than drawing them again at their own row.
+ *
  * THIS DECIDES NOTHING, which is the same promise the module header makes.
  * The causal order is the store's — `caused` arrives sorted by the position
  * the turn assigned — and everything else keeps the ledger order the page

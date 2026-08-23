@@ -5,7 +5,7 @@
   "description": "Params of the agent.runToolCall server-to-client notification (nocx-shxv0, design §7): the assistant is about to DO something, announced where it happens — an element of the answer's own flow, never a top-level block and never an inference from a stray blob in the answer text. Sent once per execution, immediately before the tool runs: a call that was refused, malformed or escalated has not happened, and an escalated one already has a surface of its own (agent.approvalRequested), which is why this is not sent for it. runId AND entryId are both here for the same reason they are on agent.runDelta — the renderer routes by entryId while two overlapping asks stream concurrently. There is no seq: unlike a delta this is not persisted and not replayed, so arrival order over the one socket is its only order. The tool's RESULT is deliberately absent — the attempt's outcome is in the ledger, the run tool's output is in the block the command really opened, and the egress gate (design §7.1) screens a result for the PROVIDER, so sending the same bytes to the renderer would be a second egress path. The raw arguments blob is absent for the same kind of reason: what a person reads is the derived resource, from the ONE derivation (internal/assistant/policy.go namedResource) the scope check and the approval ask already share.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["runId", "entryId", "callId", "tool", "effect", "actionEntryId"],
+  "required": ["runId", "entryId", "callId", "tool", "effect", "opensBlock", "actionEntryId"],
   "properties": {
     "runId": {
       "description": "The backend-minted run id the call belongs to.",
@@ -39,6 +39,10 @@
         "cross-boundary",
         "delegate"
       ]
+    },
+    "opensBlock": {
+      "description": "Whether this call's work becomes a TOP-LEVEL BLOCK of its own (nocx-9sqii) — true for `run` alone, which submits a command through the same orchestration a person's line takes. It decides where the call is drawn: a call that opens a block IS that block, at the point in the turn where it happened, so the flow seals the answer fragment it is writing and draws no line beside it — a line would restate the command, the output and the exit status the block already owns. A call that opens none keeps its line, which is then the only thing that says it occurred. Sent by the backend for the reason the effect is (ADR-0028 decision 4): it is a fact of the tool table (internal/agenttools Declaration.OpensBlock), and a renderer holding its own list of which tools open blocks would be a second copy of that table, disagreeing the day a tool is added.",
+      "type": "boolean"
     },
     "actionEntryId": {
       "description": "The LEDGER action entry the attempt was recorded under (design §6.4). The thread joining question, run, attempt and answer — and the handle a later 'show me what it returned' reaches through, rather than a second copy of the bytes.",

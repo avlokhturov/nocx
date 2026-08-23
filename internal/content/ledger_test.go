@@ -1452,7 +1452,7 @@ func TestLedgerRejectsAllWritesAfterClose(t *testing.T) {
 			return led.AddEdge(ctx, content.Edge{From: "i", To: "i", Rel: content.RelCites})
 		}},
 		{"AddCause", func() error {
-			_, err := led.AddCause(ctx, "i", "i")
+			_, err := led.AddCause(ctx, "i", "i", 0)
 			return err
 		}},
 	}
